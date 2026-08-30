@@ -8,7 +8,7 @@ function navEvent(seq) {
   API.get('/events/detail/' + seq).then(function(data) {
     // 仅更新标题栏 seq，不重置 pageContent
     var titleEl = document.getElementById('pageTitle');
-    if (titleEl) titleEl.textContent = 'Event Detail #' + seq;
+    if (titleEl) titleEl.textContent = I18N.t('events.page_title_prefix', {seq: seq});
     renderEventDetail(data);
   }).catch(function(e) {
     // 事件不存在 → 后端返回 max_seq，跳转到最后一个事件
@@ -21,6 +21,13 @@ function navEvent(seq) {
 }
 
 function renderEventDetail(data) {
+  // 切换事件时清理接收上下文全屏状态
+  if (_promptFs) {
+    const _fs = document.getElementById('promptFullscreen');
+    if (_fs) _fs.remove();
+    _promptFs = false;
+    _promptFsPlaceholder = null;
+  }
   const el = document.getElementById('pageContent');
   if (!el) return;
   const agent = data.agent_type || 'vod';
@@ -50,13 +57,18 @@ function renderEventDetail(data) {
   const arch = data.archive || null;
   if (arch && arch.output) {
     const o = arch.output;
-    const actions = (o.actions || []).map(a => `<div>• ${a}</div>`).join('');
-    const arts = (o.artifacts || []).map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('');
-    structuredHtml = `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>结论:</b> ${o.conclusion}</div>` : ''}
-      ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>动作:</b> ${actions}</div>` : ''}
-      ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>产出:</b> ${arts}</div>` : ''}
-      ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>下一步:</b> ${o.next_step}</div>` : ''}
-      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>Issue 摘要:</b> ${o.issue_summary}</div>` : ''}`;
+    const actions = Array.isArray(o.actions) ? o.actions.map(a => `<div>• ${a}</div>`).join('') : '';
+    const arts = Array.isArray(o.artifacts) ? o.artifacts.map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('') : '';
+    const _lblConclusion = I18N.t('events.label_conclusion');
+    const _lblActions = I18N.t('events.label_actions');
+    const _lblArtifacts = I18N.t('events.label_artifacts');
+    const _lblNextStep = I18N.t('events.label_next_step');
+    const _lblIssueSummary = I18N.t('events.label_issue_summary');
+    structuredHtml = `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblConclusion}</b> ${o.conclusion}</div>` : ''}
+      ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblActions}</b> ${actions}</div>` : ''}
+      ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblArtifacts}</b> ${arts}</div>` : ''}
+      ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblNextStep}</b> ${o.next_step}</div>` : ''}
+      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>${_lblIssueSummary}</b> ${o.issue_summary}</div>` : ''}`;
   }
 
   // 上下文折叠区块摘要（折叠时显示）
@@ -69,20 +81,20 @@ function renderEventDetail(data) {
     <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">
       <!-- 顶部导航栏 -->
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--b)">
-        <button class="bt bt-o bt-s" onclick="navEvent(${data.prev_seq || 0})" title="上一个 ${agentName} 事件" ${!data.prev_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>‹</button>
+        <button class="bt bt-o bt-s" onclick="navEvent(${data.prev_seq || 0})" title="${I18N.t('events.prev_event_title', {name: agentName})}" ${!data.prev_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>‹</button>
         <span class="ts t3" style="font-size:12px;font-weight:600">Event #${data.seq || '—'}</span>
-        <button class="bt bt-o bt-s" onclick="navEvent(${data.next_seq || 0})" title="下一个 ${agentName} 事件" ${!data.next_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>›</button>
+        <button class="bt bt-o bt-s" onclick="navEvent(${data.next_seq || 0})" title="${I18N.t('events.next_event_title', {name: agentName})}" ${!data.next_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>›</button>
       </div>
       <!-- 区块1：Event Context & Info（可折叠，默认展开） -->
       <div class="ev-section" style="flex-shrink:0;margin-bottom:8px">
         <div class="ev-section-header" onclick="_toggleEvSection('ctxInfo', this)" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:6px 0;user-select:none">
           <span class="ev-arrow" style="font-size:10px;transition:transform .2s;display:inline-block">▼</span>
-          <span style="font-size:12px;font-weight:600">Event Context & Info</span>
+          <span style="font-size:12px;font-weight:600">${I18N.t('events.section_context_info')}</span>
           <span class="ts t3" style="font-size:11px;margin-left:auto">${_ctxSummary} · ${_infoSummary}</span>
         </div>
         <div id="ctxInfo" class="ev-section-body" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;padding-bottom:10px;border-bottom:1px solid var(--b)">
           <div>
-            <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Context</h3>
+            <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">${I18N.t('events.section_context')}</h3>
             <div class="tx t2" style="line-height:1.6">
               <div>Trigger: ${data.event_type || '—'}</div>
               <div>Repository: ${data.repo_key || ''}</div>
@@ -92,16 +104,16 @@ function renderEventDetail(data) {
             </div>
           </div>
           <div>
-            <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">Event Info</h3>
+            <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">${I18N.t('events.section_info')}</h3>
             <div style="font-size:11px;color:var(--t2);line-height:1.8">
               <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
               <div><span style="color:var(--t3)">Engine:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>
               <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
               <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
-              <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? '✅ Success' : data.status === 'failed' ? '❌ Failed' : '⏳ ' + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">🔄 重新派发</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="强行终止正在运行的 Agent">⏹ 终止</button>` : ''}</div>
+              <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : I18N.t('events.status_running_prefix') + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}</div>
               ${data.task && data.task.task_id
-                ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看实时日志</a></div>`
-                : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">📜 查看日志</a></div>`}
+                ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_realtime_log')}</a></div>`
+                : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_log')}</a></div>`}
               <div id="convGate" style="display:none"></div>
             </div>
           </div>
@@ -111,28 +123,29 @@ function renderEventDetail(data) {
       <div class="ev-section" style="flex-shrink:0;margin-bottom:8px">
         <div class="ev-section-header" onclick="_toggleEvSection('promptBody', this);_loadEventPrompt(${data.task && data.task.task_id ? "'" + data.task.task_id + "'" : 'null'}, ${data.seq})" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:6px 0;user-select:none">
           <span class="ev-arrow" style="font-size:10px;transition:transform .2s;display:inline-block">▶</span>
-          <span style="font-size:12px;font-weight:600">📋 接收上下文</span>
+          <span style="font-size:12px;font-weight:600">${I18N.t('events.section_prompt')}</span>
           <span id="promptMeta" class="ts t3" style="font-size:11px;margin-left:auto"></span>
+          <button id="promptFsBtn" onclick="event.stopPropagation();_togglePromptFullscreen()" title="${I18N.t('events.fullscreen_title')}" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;display:none">${I18N.t('events.fullscreen_btn')}</button>
         </div>
         <div id="promptBody" class="ev-section-body" style="display:none;max-height:400px;overflow-y:auto;background:#000;color:#fff;border-radius:8px;padding:14px 18px 28px;font-size:14px;font-family:JetBrains Mono,Fira Code,Cascadia Code,Consolas,Menlo,monospace;line-height:1.75;letter-spacing:0.2px;white-space:pre-wrap;word-break:break-all">
-          <span style="color:#a0aac0">点击展开加载…</span>
+          <div id="promptContent"><span style="color:#a0aac0">${I18N.t('events.prompt_expand_hint')}</span></div>
         </div>
       </div>
       <!-- 区块3：Agent 处理记录与答复结论（统一标题，内置框+结论，整体滑动） -->
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">Agent 处理记录与答复结论</h3>
-      <div class="ev-result-panel" style="flex:1;overflow-y:auto;background:var(--s);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
-        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:rgba(128,128,128,0.08);border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
-        ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">（无结论）</div>'}
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">${I18N.t('events.section_processing')}</h3>
+      <div style="flex:1;overflow-y:auto;background:var(--bg);color:var(--t);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
+        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
+        ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">' + I18N.t('events.no_conclusion') + '</div>'}
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
     <!-- 右栏：对话面板 -->
     <div id="convPanel" class="cd" style="padding:14px;display:flex;flex-direction:column;gap:8px;height:100%;overflow:hidden">
-      <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">💬 与 ${agentName} 对话 <button class="bt bt-o bt-s" onclick="toggleConvFullscreen()" title="全屏/还原" style="padding:2px 10px">⛶ 全屏</button></h3>
+      <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">${I18N.t('events.section_conversation', {name: agentName})} <button onclick="toggleConvFullscreen()" title="${I18N.t('events.fullscreen_title')}" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">${I18N.t('events.fullscreen_btn')}</button></h3>
       <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
       <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
-        <input id="convInput" placeholder="问一问 agent…（Enter 发送）" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
-        <button class="bt bt-p bt-s" onclick="sendConversation()">发送</button>
+        <input id="convInput" placeholder="${I18N.t('events.conv_input_placeholder')}" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
+        <button class="bt bt-p bt-s" onclick="sendConversation()">${I18N.t('events.btn_send')}</button>
       </div>
     </div>
   </div>`;
@@ -159,40 +172,59 @@ function _toggleEvSection(bodyId, headerEl) {
     body.style.display = 'none';
     if (arrow) { arrow.textContent = '▶'; arrow.style.transform = 'rotate(0deg)'; }
   }
+  // 接收上下文展开/折叠时同步显隐全屏按钮
+  if (bodyId === 'promptBody') {
+    const fsBtn = document.getElementById('promptFsBtn');
+    if (fsBtn) {
+      if (isHidden) {
+        fsBtn.style.transition = 'none';
+        fsBtn.style.display = 'inline-flex';
+        void fsBtn.offsetHeight;  // 强制 reflush，让 transition:none 生效
+        fsBtn.style.transition = '';
+      } else {
+        fsBtn.style.display = 'none';
+      }
+    }
+  }
 }
 
 // ===== 异步加载 event 的接收上下文（prompt） =====
 let _promptLoadedSeq = 0;
 function _loadEventPrompt(taskId, seq) {
+  const meta = document.getElementById('promptMeta');
+  function _pc(html) {
+    const c = document.getElementById('promptContent');
+    if (c) c.innerHTML = html;
+  }
+  function _pctext(text) {
+    const c = document.getElementById('promptContent');
+    if (c) c.textContent = text;
+  }
   if (!taskId) {
-    const body = document.getElementById('promptBody');
-    const meta = document.getElementById('promptMeta');
-    if (body) body.innerHTML = '<span style="color:#a0aac0">无关联任务（direct 模式或尚未执行）</span>';
+    _pc('<span style="color:#a0aac0">' + I18N.t('events.no_task') + '</span>');
     if (meta) meta.textContent = '';
     return;
   }
   // 同一 event 只加载一次
   if (_promptLoadedSeq === seq) return;
   _promptLoadedSeq = seq;
-  const body = document.getElementById('promptBody');
-  const meta = document.getElementById('promptMeta');
-  if (body) body.innerHTML = '<span style="color:#a0aac0">加载中…</span>';
+  _pc('<span style="color:#a0aac0">' + I18N.t('events.loading_prompt') + '</span>');
   const token = localStorage.getItem('token') || '';
   fetch('/api/task-logs/' + encodeURIComponent(taskId) + '/info', {headers: {'Authorization': 'Bearer ' + token}})
     .then(r => r.ok ? r.json() : null)
     .then(info => {
-      if (!info) { if (body) body.innerHTML = '<span style="color:#ff5b5b">加载失败</span>'; return; }
+      if (!info) { _pc('<span style="color:#ff5b5b">' + I18N.t('events.load_failed') + '</span>'); return; }
       const prompt = info.prompt || '';
       const fullLen = info.prompt_full_length || 0;
-      if (meta) meta.textContent = fullLen > 0 ? fullLen + ' 字' : '';
+      if (meta) meta.textContent = fullLen > 0 ? I18N.t('events.char_count', {len: fullLen}) : '';
       if (!prompt) {
-        if (body) body.innerHTML = '<span style="color:#a0aac0">（prompt 为空 — 任务可能通过 queue 模式创建但尚未执行，或 direct 模式 prompt 回写前执行失败）</span>';
+        _pc('<span style="color:#a0aac0">' + I18N.t('events.prompt_empty') + '</span>');
       } else {
-        const truncated = fullLen > prompt.length ? '\n\n...(已截断，完整 ' + fullLen + ' 字)' : '';
-        if (body) body.textContent = prompt + truncated;
+        const truncated = fullLen > prompt.length ? '\n\n' + I18N.t('events.prompt_truncated', {len: fullLen}) : '';
+        _pctext(prompt + truncated);
       }
     })
-    .catch(() => { if (body) body.innerHTML = '<span style="color:#ff5b5b">加载失败</span>'; });
+    .catch(() => { _pc('<span style="color:#ff5b5b">' + I18N.t('events.load_failed') + '</span>'); });
 }
 
 function _convBubble(role, content, time, by) {
@@ -207,7 +239,7 @@ function _convBubble(role, content, time, by) {
       ? 'background:var(--a);color:#fff'
       : 'background:var(--bg);color:var(--t);border:1px solid var(--b)'}">
       ${rendered}
-      <div style="font-size:10px;opacity:.7;margin-top:3px">${mine ? (by || '我') : (by || 'agent')}${time ? ' · ' + fmtLocalTime(time).substring(11,16) : ''}</div>
+      <div style="font-size:10px;opacity:.7;margin-top:3px">${mine ? (by || I18N.t('events.bubble_me')) : (by || I18N.t('events.bubble_agent'))}${time ? ' · ' + fmtLocalTime(time).substring(11,16) : ''}</div>
     </div>
   </div>`;
 }
@@ -218,12 +250,12 @@ function loadConversation() {
     const gate = d.gate || {};
     const gateEl = document.getElementById('convGate');
     if (gateEl) gateEl.innerHTML = gate.open
-      ? `<span class="tgx">✔ 评论开放中</span>`
-      : `<span class="tr">✖ 评论已关闭</span>`;
+      ? `<span class="tgx">${I18N.t('events.gate_open')}</span>`
+      : `<span class="tr">${I18N.t('events.gate_closed')}</span>`;
     const messagesEl = document.getElementById('convMessages');
     if (messagesEl) {
       const msgs = (d.messages || []).map(m => _convBubble(m.role, m.content, m.created_at, m.created_by)).join('');
-      messagesEl.innerHTML = msgs || '<div style="color:var(--t3);font-size:11px">开始与 ' + _convAgent + ' 对话，了解这次处理。</div>';
+      messagesEl.innerHTML = msgs || '<div style="color:var(--t3);font-size:11px">' + I18N.t('events.conv_start_hint', {name: _convAgent}) + '</div>';
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
     const inputRow = document.getElementById('convInputRow');
@@ -232,7 +264,7 @@ function loadConversation() {
     renderOutcome(d.knowledge || {}, d.messages || []);
   }).catch(e => {
     const messagesEl = document.getElementById('convMessages');
-    if (messagesEl) messagesEl.innerHTML = '<div class="tr" style="font-size:11px">加载对话失败: ' + e.message + '</div>';
+    if (messagesEl) messagesEl.innerHTML = '<div class="tr" style="font-size:11px">' + I18N.t('events.conv_load_failed', {msg: e.message}) + '</div>';
   });
 }
 
@@ -240,15 +272,32 @@ function renderOutcome(knowledge, messages) {
   const el = document.getElementById('convOutcome');
   if (!el) return;
   const kRows = Object.keys(knowledge || {}).map(scope =>
-    `<div style="padding:3px 0;border-bottom:1px dashed var(--b)"><b>${scope === 'project' ? '仓库级' : scope === 'issue' ? 'Issue 级' : 'Agent 级'}</b> · ${knowledge[scope]}</div>`
+    `<div style="padding:3px 0;border-bottom:1px dashed var(--b)"><b>${scope === 'project' ? I18N.t('events.scope_project') : scope === 'issue' ? I18N.t('events.scope_issue') : I18N.t('events.scope_agent')}</b> · ${knowledge[scope]}</div>`
   ).join('');
   const flowRows = (messages || []).filter(m => m.role === 'system' && (m.content || '').indexOf('🔄') === 0)
     .map(m => `<div style="padding:3px 0;border-bottom:1px dashed var(--b)">${m.content}</div>`).join('');
   if (!kRows && !flowRows) { el.style.display = 'none'; return; }
   el.style.display = 'block';
-  el.innerHTML = `<h3 style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--a)">💬 对话产出</h3>`
-    + (kRows ? `<div style="margin-top:2px"><b>知识沉淀</b>${kRows}</div>` : '')
-    + (flowRows ? `<div style="margin-top:4px"><b>流程操作</b>${flowRows}</div>` : '');
+  el.innerHTML = `<h3 style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--a)">${I18N.t('events.outcome_title')}</h3>`
+    + (kRows ? `<div style="margin-top:2px"><b>${I18N.t('events.outcome_knowledge')}</b>${kRows}</div>` : '')
+    + (flowRows ? `<div style="margin-top:4px"><b>${I18N.t('events.outcome_flow')}</b>${flowRows}</div>` : '');
+}
+
+// ===== 事件对话持久化查询（对齐 Chat Agent v31）=====
+let _convStreamAbort = null;
+let _convTasks = {};
+
+function _setConvTask(seq, task) {
+  _convTasks[seq] = task;
+  try { sessionStorage.setItem('conv_task_' + seq, JSON.stringify(task)); } catch(e) {}
+}
+function _getConvTask(seq) {
+  if (_convTasks[seq]) return _convTasks[seq];
+  try { const s = sessionStorage.getItem('conv_task_' + seq); return s ? JSON.parse(s) : null; } catch(e) { return null; }
+}
+function _clearConvTask(seq) {
+  delete _convTasks[seq];
+  try { sessionStorage.removeItem('conv_task_' + seq); } catch(e) {}
 }
 
 function sendConversation() {
@@ -259,49 +308,117 @@ function sendConversation() {
   input.value = '';
   const messagesEl = document.getElementById('convMessages');
   if (messagesEl) messagesEl.insertAdjacentHTML('beforeend', _convBubble('user', msg));
-  const token = localStorage.getItem('token') || '';
   const replyId = 'convReply' + Date.now();
-  const holder = document.createElement('div');
-  holder.style.display = 'flex';
-  holder.style.justifyContent = 'flex-start';
-  holder.innerHTML = `<div id="${replyId}" style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;background:var(--bg);color:var(--t);border:1px solid var(--b)">⏳ 思考中…</div>`;
-  if (messagesEl) messagesEl.appendChild(holder);
-  const replyEl = document.getElementById(replyId);
-  if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
-  let acc = '';
-  fetch('/api/events/' + _convSeq + '/chat/stream', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
-    body: JSON.stringify({message: msg}),
-  }).then(resp => {
-    if (!resp.ok) {
-      resp.json().then(d => app.showToast(((d.detail && d.detail.message) || '发送失败'))).catch(() => app.showToast('发送失败'));
-      if (replyEl) replyEl.textContent = '（发送失败）';
+  if (messagesEl) {
+    messagesEl.insertAdjacentHTML('beforeend',
+      '<div style="display:flex;justify-content:flex-start"><div id="' + replyId +
+      '" style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;background:var(--bg);color:var(--t);border:1px solid var(--b)">' +
+      '<span class="chat-dots"><span></span><span></span><span></span></span></div></div>');
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  // 1. submit → 立即获取 task_id
+  API.post('/events/' + _convSeq + '/chat/submit', {message: msg}).then(r => {
+    if (r.status === 'error' || !r.task_id) {
+      const el = document.getElementById(replyId);
+      if (el) el.textContent = (r.error || I18N.t('events.send_failed_paren'));
       return;
     }
-    if (!resp.body) return loadConversation();
+    _setConvTask(_convSeq, {task_id: r.task_id, el_id: replyId, status: 'running'});
+    streamConvTask(r.task_id, replyId, _convSeq);
+  }).catch(e => {
+    const el = document.getElementById(replyId);
+    if (el) el.textContent = I18N.t('events.send_failed_paren');
+  });
+}
+
+async function streamConvTask(taskId, elId, seq) {
+  if (_convStreamAbort) { _convStreamAbort.abort(); _convStreamAbort = null; }
+  const ac = new AbortController();
+  _convStreamAbort = ac;
+  const el = document.getElementById(elId);
+  const messagesEl = document.getElementById('convMessages');
+  let finalText = '';
+  try {
+    const resp = await fetch('/api/events/chat/task/' + taskId + '/stream', {
+      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+      signal: ac.signal
+    });
+    if (!resp.ok || !resp.body) {
+      if (el) el.textContent = I18N.t('events.send_failed_paren');
+      _clearConvTask(seq);
+      return;
+    }
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
-    function read() {
-      return reader.read().then(({done, value}) => {
-        if (done) { loadConversation(); return; }
-        buf += dec.decode(value, {stream: true});
-        const parts = buf.split('\n\n');
-        buf = parts.pop();
-        for (const part of parts) {
-          if (!part.startsWith('data: ')) continue;
-          let evt;
-          try { evt = JSON.parse(part.slice(6)); } catch (e) { continue; }
-          if (evt.type === 'text') { acc += evt.text; if (replyEl) replyEl.innerHTML = renderMarkdown(acc); }
-          else if (evt.type === 'done') { if (replyEl) replyEl.innerHTML = renderMarkdown(evt.reply || acc); loadConversation(); return; }
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      lines.forEach(line => {
+        if (line.startsWith('data: ')) {
+          try {
+            const d = JSON.parse(line.substring(6));
+            if (d.type === 'done') {
+              finalText = d.text || finalText;
+              if (el) el.innerHTML = renderMarkdown(finalText) || '（无回复）';
+              _clearConvTask(seq);
+              loadConversation();
+            } else if (d.type === 'error') {
+              if (el) el.innerHTML = renderMarkdown(d.text || '') || '（错误）';
+              _clearConvTask(seq);
+            } else if (d.type === 'text' && d.text) {
+              finalText += d.text;
+              if (el) el.innerHTML = renderMarkdown(finalText);
+            } else if (d.type === 'thinking') {
+              if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
+            }
+          } catch(e) {}
         }
-        if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
-        return read();
       });
+      if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
     }
-    return read().catch(() => loadConversation());
-  }).catch(() => loadConversation());
+  } catch(e) {
+    if (e.name === 'AbortError') return;
+    if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
+  }
+}
+
+function resumeConvTask() {
+  if (!_convSeq) return;
+  const task = _getConvTask(_convSeq);
+  if (task && task.task_id) {
+    fetch('/api/events/chat/task/' + task.task_id + '/status', {
+      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+    }).then(r => r.json()).then(st => {
+      if (st.status === 'running') {
+        const messagesEl = document.getElementById('convMessages');
+        let el = document.getElementById(task.el_id);
+        if (!el && messagesEl) {
+          messagesEl.insertAdjacentHTML('beforeend',
+            '<div style="display:flex;justify-content:flex-start"><div id="' + task.el_id +
+            '" style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;background:var(--bg);border:1px solid var(--b)">' +
+            '<span class="chat-dots"><span></span><span></span><span></span></span></div></div>');
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+        streamConvTask(task.task_id, task.el_id, _convSeq);
+      } else {
+        _clearConvTask(_convSeq);
+        loadConversation();
+      }
+    }).catch(() => {});
+  } else {
+    API.get('/events/' + _convSeq + '/thread').then(d => {
+      const msgs = d.messages || [];
+      const lastMsg = msgs[msgs.length - 1];
+      if (lastMsg && lastMsg.role === 'user' && lastMsg.task_id) {
+        _setConvTask(_convSeq, {task_id: lastMsg.task_id, el_id: 'convReply' + Date.now(), status: 'running'});
+        resumeConvTask();
+      }
+    }).catch(() => {});
+  }
 }
 
 // ===== 对话窗口全屏/还原（按钮在 convPanel 标题栏）=====
@@ -322,11 +439,11 @@ function toggleConvFullscreen() {
     const title = document.createElement('h3');
     title.style.cssText = 'font-size:13px;font-weight:600';
     const agentName = (_AGENT_TYPES[_convAgent] && _AGENT_TYPES[_convAgent].display_name) || _convAgent || '';
-    title.textContent = '💬 与 ' + agentName + ' 对话';
+    title.textContent = I18N.t('events.section_conversation', {name: agentName});
     const btn = document.createElement('button');
-    btn.className = 'bt bt-o bt-s';
-    btn.textContent = '⛶ 还原';
-    btn.title = '退出全屏';
+    btn.textContent = I18N.t('events.fullscreen_restore_btn');
+    btn.title = I18N.t('events.exit_fullscreen_title');
+    btn.style.cssText = 'border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer';
     btn.onclick = toggleConvFullscreen;
     bar.appendChild(title);
     bar.appendChild(btn);
@@ -350,19 +467,126 @@ function toggleConvFullscreen() {
     messages.scrollTop = messages.scrollHeight;
   }
 }
+// ===== 接收上下文全屏/还原 =====
+let _promptFs = false;
+let _promptFsPlaceholder = null;
+
+function _togglePromptFullscreen() {
+  const body = document.getElementById('promptBody');
+  if (!body) return;
+  if (!_promptFs) {
+    if (body.style.display === 'none') return; // 折叠状态不响应
+    _promptFsPlaceholder = document.createElement('div');
+    body.parentElement.insertBefore(_promptFsPlaceholder, body);
+    const fs = document.createElement('div');
+    fs.id = 'promptFullscreen';
+    fs.style.cssText = 'position:fixed;inset:0;z-index:999;background:#000;display:flex;flex-direction:column;box-sizing:border-box';
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #2a3140;flex-shrink:0';
+    const title = document.createElement('span');
+    title.style.cssText = 'font-size:13px;font-weight:600;color:#fff;margin-right:auto';
+    title.textContent = I18N.t('events.section_prompt');
+    bar.appendChild(title);
+    const btn = document.createElement('button');
+    btn.textContent = I18N.t('events.fullscreen_restore_btn');
+    btn.title = I18N.t('events.exit_fullscreen_title');
+    btn.style.cssText = 'border:1px solid #3a4150;background:transparent;color:#c8d0e0;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer';
+    btn.onclick = _togglePromptFullscreen;
+    bar.appendChild(btn);
+    fs.appendChild(bar);
+    body.style.maxHeight = 'none';
+    body.style.flex = '1';
+    body.style.borderRadius = '0';
+    body.style.minHeight = '0';
+    fs.appendChild(body);
+    document.body.appendChild(fs);
+    _promptFs = true;
+  } else {
+    const fs = document.getElementById('promptFullscreen');
+    if (!fs) return;
+    if (_promptFsPlaceholder) {
+      _promptFsPlaceholder.parentElement.insertBefore(body, _promptFsPlaceholder);
+      _promptFsPlaceholder.remove();
+      _promptFsPlaceholder = null;
+    }
+    body.style.maxHeight = '400px';
+    body.style.flex = '';
+    body.style.borderRadius = '8px';
+    body.style.minHeight = '';
+    fs.remove();
+    _promptFs = false;
+  }
+}
+
 // ESC 键退出全屏
 document.addEventListener('keydown', function (e) {
-  if (e.key === 'Escape' && _convFs) toggleConvFullscreen();
+  if (e.key === 'Escape') {
+    if (_convFs) toggleConvFullscreen();
+    if (_promptFs) _togglePromptFullscreen();
+  }
 });
 
 function redispatchEvent(seq) {
-  if (!confirm('确认重新派发该事件任务？\n将把卡住的任务重新入队执行，可能产生重复执行。')) return;
+  _showRedispatchGlass(seq);
+}
+
+function _showRedispatchGlass(seq) {
+  // 移除已有弹窗
+  _closeRedispatchGlass();
+  // 遮罩（居中展示）
+  const overlay = document.createElement('div');
+  overlay.className = 'rdp-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
+  // 弹窗 — 居中
+  const modal = document.createElement('div');
+  modal.className = 'rdp-glass';
+  modal.style.cssText = 'width:340px;background:rgba(255,255,255,0.72);backdrop-filter:blur(28px) saturate(200%);-webkit-backdrop-filter:blur(28px) saturate(200%);border-radius:18px;border:1px solid rgba(255,255,255,0.6);box-shadow:0 12px 40px rgba(0,0,0,0.12),0 2px 8px rgba(0,0,0,0.06);overflow:hidden;animation:rdpPop .25s cubic-bezier(0.34,1.56,0.64,1)';
+  modal.innerHTML = `
+    <div style="padding:18px 20px 14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#ff9f0a,#ff6a00);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;box-shadow:0 4px 12px rgba(255,159,10,0.3)">🔄</div>
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--t,#1d1d1f);letter-spacing:-0.2px">${I18N.t('events.redispatch_title')}</div>
+          <div style="font-size:11px;color:var(--t3,#86868b)">Seq #${seq}</div>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--t2,#6e6e73);line-height:1.6;margin-bottom:14px">
+        ${I18N.t('events.redispatch_desc')}
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="bt bt-o bt-s" style="padding:8px 16px;font-size:12px" onclick="_closeRedispatchGlass()">${I18N.t('events.redispatch_cancel')}</button>
+        <button class="bt bt-s" style="padding:8px 16px;font-size:12px;background:linear-gradient(135deg,#ff9f0a,#ff6a00);color:#fff;border:none;box-shadow:0 4px 12px rgba(255,159,10,0.35)" onclick="_doRedispatch(${seq})">${I18N.t('events.redispatch_confirm')}</button>
+      </div>
+    </div>`;
+  overlay.appendChild(modal);
+  // 点击遮罩关闭（mousedown 判断，避免 click 透传）
+  overlay.addEventListener('mousedown', function(e) {
+    if (e.target === overlay) _closeRedispatchGlass();
+  });
+  // Escape 关闭
+  const _escHandler = function(e) {
+    if (e.key === 'Escape') {
+      _closeRedispatchGlass();
+      document.removeEventListener('keydown', _escHandler);
+    }
+  };
+  document.addEventListener('keydown', _escHandler);
+  document.body.appendChild(overlay);
+}
+
+function _closeRedispatchGlass() {
+  const ex = document.querySelector('.rdp-overlay');
+  if (ex) ex.remove();
+}
+
+function _doRedispatch(seq) {
+  _closeRedispatchGlass();
   API.post('/events/' + seq + '/redispatch').then(d => {
-    app.showToast('已重新派发，等待 worker 重新执行');
-    app.nav('event', seq);  // 刷新详情
+    app.showToast(I18N.t('events.redispatch_toast_success'));
+    app.nav('event', seq);
   }).catch(e => {
     const msg = (e.detail && e.detail.message) || e.message || e;
-    app.showToast('重派失败: ' + msg);
+    app.showToast(I18N.t('events.redispatch_toast_failed', {msg: msg}));
   });
 }
 
@@ -414,12 +638,12 @@ function openTaskLog(taskId, title) {
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(960px,94vw);height:min(720px,90vh);background:var(--bg,#11151c);border:1px solid var(--b,#2a3140);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.5)">
     <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">
-      <span style="font-size:13px;font-weight:600">📜 运行日志 <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
+      <span style="font-size:13px;font-weight:600">${I18N.t('events.log_title_realtime')} <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
       <span id="tlStatus" style="font-size:11px;margin-left:auto"></span>
-      <button id="tlCopyBtn" onclick="_copyTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;transition:all .2s" title="复制日志内容">📋 复制</button>
-      <button id="tlKillBtn" onclick="terminateCurrentTask()" style="border:1px solid var(--tr,#e74c3c);background:transparent;color:var(--tr,#e74c3c);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;display:none" title="强行终止正在运行的任务">⏹ 终止</button>
-      <button id="taskLogFullscreenBtn" onclick="_toggleTaskLogFullscreen()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="全屏/还原">⛶ 全屏</button>
-      <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>
+      <button id="tlCopyBtn" onclick="_copyTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;transition:all .2s" title="${I18N.t('events.log_copy_title')}">${I18N.t('events.log_copy')}</button>
+      <button id="tlKillBtn" onclick="terminateCurrentTask()" style="border:1px solid var(--tr,#e74c3c);background:transparent;color:var(--tr,#e74c3c);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;display:none" title="${I18N.t('events.log_kill_title')}">${I18N.t('events.log_kill')}</button>
+      <button id="taskLogFullscreenBtn" onclick="_toggleTaskLogFullscreen()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" title="${I18N.t('events.fullscreen_title')}">${I18N.t('events.fullscreen_btn')}</button>
+      <button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">${I18N.t('events.log_close')}</button>
     </div>
     <div id="tlInfo" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0;font-size:11px;color:var(--t2,#8a94a6)"></div>
     <div id="tlBody" style="flex:1;min-height:0;overflow-y:auto;background:#000;color:#fff;padding:14px 18px;font-size:15px;font-family:'JetBrains Mono','Fira Code','Cascadia Code','Source Code Pro','SF Mono',Consolas,'Liberation Mono',Menlo,monospace;line-height:1.75;letter-spacing:0.2px"></div>
@@ -427,7 +651,7 @@ function openTaskLog(taskId, title) {
   document.body.appendChild(ov);
   _taskLog.statusEl = document.getElementById('tlStatus');
   _taskLog.bodyEl = document.getElementById('tlBody');
-  _tlStatus('⏳ 连接中…');
+  _tlStatus(I18N.t('events.status_connecting'));
   // 自动跟随：用户向上滚 >120px 停止跟随，回到底部边缘恢复
   _taskLog.bodyEl.addEventListener('scroll', () => {
     const el = _taskLog.bodyEl;
@@ -466,8 +690,8 @@ function _tlArmWaitHint() {
     if (!_taskLog.taskId) return;
     if (_taskLog.bodyEl && !_taskLog.hasMsg && _taskLog.bodyEl.childElementCount === 0) {
       _taskLog.bodyEl.insertAdjacentHTML('beforeend',
-        '<div class="tl-waiting" style="color:#a0aac0;padding:10px 0;font-size:15px">⏳ 引擎执行中，等待输出…</div>');
-      _tlStatus('⏳ 引擎执行中，等待输出…', 'var(--ty, #f1c40f)');
+        '<div class="tl-waiting" style="color:#a0aac0;padding:10px 0;font-size:15px">' + I18N.t('events.status_engine_waiting') + '</div>');
+      _tlStatus(I18N.t('events.status_engine_waiting'), 'var(--ty, #f1c40f)');
     }
   }, 8000);
 }
@@ -481,7 +705,7 @@ function _taskLogStream() {
     signal: ac.signal,
   }).then(resp => {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    _tlStatus('🟢 已连接（实时）', 'var(--tgx, #2ecc71)');
+    _tlStatus(I18N.t('events.status_connected'), 'var(--tgx, #2ecc71)');
     _taskLog.hasMsg = false;
     _tlCheckTaskStatus();
     _tlArmWaitHint();
@@ -491,7 +715,7 @@ function _taskLogStream() {
     function read() {
       return reader.read().then(({done, value}) => {
         if (done) {
-          _tlStatus('🔚 日志流结束', 'var(--t3)');
+          _tlStatus(I18N.t('events.status_stream_end'), 'var(--t3)');
           _tlHideKillBtn();
           if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
           return;
@@ -510,7 +734,7 @@ function _taskLogStream() {
             if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
             const ph = _taskLog.bodyEl && _taskLog.bodyEl.querySelector('.tl-waiting');
             if (ph) ph.remove();
-            _tlStatus('🟢 已连接（实时）', 'var(--tgx, #2ecc71)');
+            _tlStatus(I18N.t('events.status_connected'), 'var(--tgx, #2ecc71)');
           }
           _taskLog.bodyEl.insertAdjacentHTML('beforeend', _tlLine(evt));
           if (_taskLog.following) _taskLog.bodyEl.scrollTop = _taskLog.bodyEl.scrollHeight;
@@ -522,7 +746,7 @@ function _taskLogStream() {
   }).catch(err => {
     if (err.name === 'AbortError') return;
     if (_taskLog.waitTimer) { clearTimeout(_taskLog.waitTimer); _taskLog.waitTimer = null; }
-    _tlStatus('⚠️ 连接断开，2s 后重连…', 'var(--tr, #e74c3c)');
+    _tlStatus(I18N.t('events.status_disconnected'), 'var(--tr, #e74c3c)');
     setTimeout(() => { if (_taskLog.taskId) _taskLogStream(); }, 2000);
   });
 }
@@ -536,7 +760,7 @@ function _copyTaskLog() {
   var origBg = btn.style.background;
   var origColor = btn.style.color;
   function _flashOk() {
-    btn.textContent = '✅ 已复制';
+    btn.textContent = I18N.t('events.log_copied');
     btn.style.background = 'var(--g,#1ca44c)';
     btn.style.color = '#fff';
     btn.style.borderColor = 'var(--g,#1ca44c)';
@@ -548,7 +772,7 @@ function _copyTaskLog() {
     }, 1500);
   }
   function _flashFail() {
-    btn.textContent = '❌ 复制失败';
+    btn.textContent = I18N.t('events.log_copy_failed');
     btn.style.background = 'var(--r,#dc2828)';
     btn.style.color = '#fff';
     btn.style.borderColor = 'var(--r,#dc2828)';
@@ -598,14 +822,14 @@ function _toggleTaskLogFullscreen() {
     box.style.borderRadius = '0';
     ov.style.padding = '0';
     const b = document.getElementById('taskLogFullscreenBtn');
-    if (b) { b.textContent = '⛶ 还原'; b.title = '退出全屏'; }
+    if (b) { b.textContent = I18N.t('events.fullscreen_restore_btn'); b.title = I18N.t('events.exit_fullscreen_title'); }
   } else {
     box.dataset.fs = '';
     box.style.width = 'min(960px,94vw)';
     box.style.height = 'min(720px,90vh)';
     box.style.borderRadius = '10px';
     const b = document.getElementById('taskLogFullscreenBtn');
-    if (b) { b.textContent = '⛶ 全屏'; b.title = '全屏/还原'; }
+    if (b) { b.textContent = I18N.t('events.fullscreen_btn'); b.title = I18N.t('events.fullscreen_title'); }
   }
 }
 
@@ -639,12 +863,12 @@ function terminateCurrentTask() {
   // 优先走 event terminate（同时更新 task + event 状态）
   if (_taskLog.seq) {
     _doTerminateEvent(_taskLog.seq, _taskLog.taskId, function() {
-      _tlStatus('⏹ 正在终止…', 'var(--tr, #e74c3c)');
+      _tlStatus(I18N.t('events.status_terminating'), 'var(--tr, #e74c3c)');
       _tlHideKillBtn();
     });
   } else {
     _doTerminateTask(_taskLog.taskId, function() {
-      _tlStatus('⏹ 正在终止…', 'var(--tr, #e74c3c)');
+      _tlStatus(I18N.t('events.status_terminating'), 'var(--tr, #e74c3c)');
       _tlHideKillBtn();
     });
   }
@@ -654,7 +878,7 @@ function _doTerminateTask(taskId, onSuccess) {
   API.post('/runtime/tasks/' + encodeURIComponent(taskId) + '/cancel').then(function(d) {
     if (onSuccess) onSuccess();
   }).catch(function(e) {
-    app.showToast('终止失败: ' + (e.message || e));
+    app.showToast(I18N.t('events.terminate_failed', {msg: (e.message || e)}));
   });
 }
 
@@ -663,7 +887,7 @@ function _doTerminateEvent(seq, taskId, onSuccess) {
   API.post('/events/' + seq + '/terminate').then(function(d) {
     if (onSuccess) onSuccess();
     else {
-      app.showToast('⏹ 任务终止请求已发送');
+      app.showToast(I18N.t('events.task_terminated_sent'));
       API.get('/events/detail/' + seq).then(renderEventDetail);
     }
   }).catch(function(e) {
@@ -672,12 +896,12 @@ function _doTerminateEvent(seq, taskId, onSuccess) {
       _doTerminateTask(taskId, function() {
         if (onSuccess) onSuccess();
         else {
-          app.showToast('⏹ 任务终止请求已发送');
+          app.showToast(I18N.t('events.task_terminated_sent'));
           API.get('/events/detail/' + seq).then(renderEventDetail);
         }
       });
     } else {
-      app.showToast('终止失败: ' + (e.message || e));
+      app.showToast(I18N.t('events.terminate_failed', {msg: (e.message || e)}));
     }
   });
 }
@@ -719,7 +943,7 @@ function openInlineLog(seq, title) {
         return '<div style="margin-bottom:8px">' + time + icon + ' <span style="color:' + color + ';white-space:pre-wrap;word-break:break-all">' + _tlEsc(msg) + '</span></div>';
       }).join('');
     } else {
-      var resultText = data.result || '(无执行日志 — agent 未实际运行)';
+      var resultText = data.result || I18N.t('events.no_inline_log');
       bodyHtml = '<div style="margin-bottom:8px">❌ <span style="color:#ff5b5b;white-space:pre-wrap;word-break:break-all">' + _tlEsc(resultText) + '</span></div>';
     }
     var ov = document.createElement('div');
@@ -727,15 +951,15 @@ function openInlineLog(seq, title) {
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
     ov.innerHTML = '<div style="width:min(960px,94vw);height:min(720px,90vh);background:var(--bg,#11151c);border:1px solid var(--b,#2a3140);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.5)">'
       + '<div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">'
-      + '<span style="font-size:13px;font-weight:600">📜 执行日志 <span style="color:var(--t3);font-weight:400">· ' + _tlEsc(title) + '</span></span>'
-      + '<span style="font-size:11px;margin-left:auto;color:var(--t3)">' + logs.length + ' 条记录</span>'
-      + '<button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕ 关闭</button>'
+      + '<span style="font-size:13px;font-weight:600">' + I18N.t('events.log_title_inline') + ' <span style="color:var(--t3);font-weight:400">· ' + _tlEsc(title) + '</span></span>'
+      + '<span style="font-size:11px;margin-left:auto;color:var(--t3)">' + logs.length + I18N.t('events.log_count_suffix') + '</span>'
+      + '<button onclick="closeTaskLog()" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">' + I18N.t('events.log_close') + '</button>'
       + '</div>'
       + '<div style="flex:1;min-height:0;overflow-y:auto;background:#000;color:#fff;padding:14px 18px;font-size:15px;font-family:JetBrains Mono,Fira Code,Cascadia Code,Source Code Pro,SF Mono,Consolas,Liberation Mono,Menlo,monospace;line-height:1.75;letter-spacing:0.2px">' + bodyHtml + '</div>'
       + '</div>';
     document.body.appendChild(ov);
     ov.addEventListener('click', function(e) { if (e.target === ov) closeTaskLog(); });
   }).catch(function(e) {
-    app.showToast('加载日志失败: ' + e.message);
+    app.showToast(I18N.t('events.load_log_failed', {msg: e.message}));
   });
 }

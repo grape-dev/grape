@@ -6,12 +6,34 @@ from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skil
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
 
 
-def _resolve_server_url() -> str:
-    """返回服务端可达地址（A2A/tasks 等对外调用用）。取 meta.server_base_url（仅基址），
-    无则从 webhook_url 剥后缀兜底；再兜底 localhost:8080。"""
+def _resolve_server_url(runtime_id: int = 0) -> str:
+    """返回服务端可达地址（A2A/tasks 等对外调用用）。
+
+    本地引擎走 localhost 直连，避免 NAT 回环不通
+    （服务端无法通过自己的公网 IP 访问自己）；
+    远程 worker 走 meta.server_base_url（公网地址）。
+
+    判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1（本机 worker）。
+    """
     try:
         from src.user.db import get_server_base_url
-        return get_server_base_url()
+        public_url = get_server_base_url()
+        if runtime_id and runtime_id > 0:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
+                row = c.fetchone()
+                if row:
+                    cid = row[0] or 0
+                    if cid == 0:
+                        return "http://127.0.0.1:3000"
+                    # 检查是否本机 worker（last_ip == 127.0.0.1）
+                    c.execute("SELECT last_ip FROM runtime_credentials WHERE id=?", (cid,))
+                    cred_row = c.fetchone()
+                    if cred_row and (cred_row[0] or "").startswith("127."):
+                        return "http://127.0.0.1:3000"
+        return public_url
     except Exception:
         pass
     return "http://localhost:8080"
@@ -45,6 +67,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
         if agent_type:
             lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
             lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
+        _inject_vod_scenes(lines, agent_type)
         return "\n".join(lines)
     _meta = meta or {}
     if _meta.get("degraded"):
@@ -64,10 +87,61 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
     if agent_type:
         lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
         lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
+    _inject_vod_scenes(lines, agent_type, repo_key)
     return "\n".join(lines)
 
 
-def build_role_definition(skills=None) -> str:
+def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
+    """VOD 专属：注入可用开发场景列表（内置场景 + 成员上传的自定义场景）。"""
+    if agent_type != "vod":
+        return
+    try:
+        from src.api.pipeline_config import get_scenes, get_pipeline_config
+        scenes = get_scenes()
+        if not scenes:
+            return
+        lines.append("\n## 可用开发场景（请根据需求特征选择最匹配的场景）")
+        lines.append("| scene_id | 名称 | 技能链 | 来源 |")
+        lines.append("|----------|------|--------|------|")
+        for s in scenes:
+            cfg = get_pipeline_config(s["id"])
+            if cfg:
+                chain = " → ".join(n.get("skill", "") for n in cfg.get("nodes", []))
+                lines.append(f"| {s['id']} | {s['name']} | {chain} | 内置 |")
+
+        # 加载成员上传的自定义场景（project-info/member/ 下的 pipelines-user.json）
+        if repo_key:
+            try:
+                from src.api.knowledge import member_files
+                _mf = member_files(repo_key)
+                for rel, content in _mf.items():
+                    if not rel.endswith("pipelines-user.json"):
+                        continue
+                    import json as _json
+                    try:
+                        _user_pipes = _json.loads(content)
+                    except Exception:
+                        continue
+                    _user_scenes = _user_pipes.get("scenes", {})
+                    for sid, scfg in _user_scenes.items():
+                        _name = scfg.get("name", sid)
+                        _nodes = scfg.get("nodes", [])
+                        _chain = " → ".join(n.get("skill", "") for n in _nodes) if _nodes else "—"
+                        lines.append(f"| {sid} | {_name} | {_chain} | 自定义 |")
+            except Exception:
+                pass
+
+        lines.append("")
+        lines.append("> 请根据项目知识基线 + 成员上传文档 + 需求特征，判定最匹配的 scene_id。")
+        lines.append("> 成员上传文档（project-info/member/）可能包含自定义场景定义（pipelines-user.json），")
+        lines.append("> 如有自定义场景且与需求匹配，优先推荐自定义场景。")
+        lines.append("> 在 JSON 产出中输出 `recommended_scene` 和 `scene_reason`。无法确定时留空（回退到仓库默认场景）。")
+    except Exception as _e:
+        from src.config import log as _log
+        _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")
+
+
+def build_role_definition(skills=None, agent_type="") -> str:
     rules = [
         "You are a DevOps operations assistant. Your domain:",
         "- Code review, build diagnosis, deployment guard, incident triage",
@@ -86,7 +160,7 @@ def build_role_definition(skills=None) -> str:
         "3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs admin/maintainer permission (configure it manually in GitCode). NEVER try other tokens or workarounds.",
         "4. NEVER write any token into files, logs, or comments.",
     ]
-    if skills and "implementation" in skills:
+    if agent_type == "coding":
         rules.append("3. You MAY write code, modify files, create branches, and execute git commands — within the scope of the current Issue")
     else:
         rules.append("3. Never write code, modify files, or execute git commands")
@@ -333,6 +407,30 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     parts.append(_build_history_file_guide(repo_key, account, runtime_id))
     parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else "")))
 
+    # 子任务/多任务模式上下文注入
+    _issue_id = evt.get("issue_id", "")
+    if _issue_id and repo_key:
+        try:
+            from src.api.session_store import get_parent_issue, is_subtask_mode_enabled
+            _parent = get_parent_issue(repo_key, _issue_id)
+            if _parent:
+                parts.append(
+                    f"\n## 子任务上下文\n"
+                    f"本 Issue 是父任务 {_parent} 的子任务。\n"
+                    f"父任务已完成需求澄清和方案设计，你不需要重复澄清。\n"
+                    f"{'VOD Agent：请直接 A2A 交办 Issue Agent（payload: is_subtask=true, parent_issue=' + _parent + '）。' if agent_type == 'vod' else ''}\n"
+                    f"{'Issue Agent：请跳过方案设计，直接从父 Issue body 中提取本子任务的目标和验收标准，生成精简 Spec 后 A2A 交办 coding。' if agent_type == 'issue' else ''}"
+                )
+            elif is_subtask_mode_enabled(repo_key, _issue_id):
+                parts.append(
+                    f"\n## 多任务模式\n"
+                    f"本任务启用了多任务模式（[multi-task-mode]）。\n"
+                    f"{'VOD Agent：正常澄清需求后 A2A 交办 Issue Agent，payload 中增加 is_subtask_mode=true。' if agent_type == 'vod' else ''}\n"
+                    f"{'Issue Agent：方案设计后评估可拆分性，创建子 Issue（每个 body 含父任务链接），更新父 Issue body 子任务列表。不 A2A coding——子 Issue 创建后 webhook 自动触发流水线。' if agent_type == 'issue' else ''}"
+                )
+        except Exception:
+            pass
+
     if skills:
         # 技能路径占位符：worker 替换为随任务下发的物化目录；direct 由 executor 替换为服务端 SKILLS_DIR
         _sp = f"{{{{SKILL_DIR}}}}/{skills[0]}/SKILL.md"
@@ -348,7 +446,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         repo_key = f"{evt['source']}:{evt['repository']}"
         parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 
-    parts.append(build_role_definition(skills))
+    parts.append(build_role_definition(skills, agent_type=agent_type))
 
     # A2A protocol instructions + available agents
     try:
@@ -457,7 +555,7 @@ context 是传给下一个 Agent 的接力说明，应包含：
 不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
 """)
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
-    return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
+    return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
 
 
 _AGENT_TAG_RE = None

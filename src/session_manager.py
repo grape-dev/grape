@@ -630,11 +630,15 @@ def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
 
 # ====== chat_messages CRUD ======
 
-def add_message(conversation_id: str, role: str, content: str) -> int:
+def add_message(conversation_id: str, role: str, content: str, task_id: str = "", generate_status: int = None) -> int:
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO chat_messages (conversation_id, role, content) VALUES (?,?,?)",
-                  (conversation_id, role, content))
+        if task_id:
+            c.execute("INSERT INTO chat_messages (conversation_id, role, content, task_id, generate_status) VALUES (?,?,?,?,?)",
+                      (conversation_id, role, content, task_id, generate_status))
+        else:
+            c.execute("INSERT INTO chat_messages (conversation_id, role, content) VALUES (?,?,?)",
+                      (conversation_id, role, content))
         db.commit()
         return c.lastrowid
 
@@ -643,14 +647,14 @@ def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> l
     with db_lock:
         c = db.cursor()
         if before_id > 0:
-            c.execute("SELECT id, conversation_id, role, content, created_at FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
+            c.execute("SELECT id, conversation_id, role, content, created_at, task_id, generate_status FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
                       (conversation_id, before_id, limit))
         else:
-            c.execute("SELECT id, conversation_id, role, content, created_at FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
+            c.execute("SELECT id, conversation_id, role, content, created_at, task_id, generate_status FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
                       (conversation_id, limit))
         rows = c.fetchall()
         rows.reverse()
-        return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": normalize_event_time(r[4])} for r in rows]
+        return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": normalize_event_time(r[4]), "task_id": r[5] or "", "generate_status": r[6]} for r in rows]
 
 
 def delete_messages_by_conv(conversation_id: str):
@@ -661,10 +665,22 @@ def delete_messages_by_conv(conversation_id: str):
 
 
 def delete_conversation(conv_id: str):
+    """删除会话 DB 记录 + 清理文件系统工作目录（防孤儿目录堆积）。"""
+    # 先查 user_id（目录路径需要），删 DB 后就查不到了
+    conv = get_conversation(conv_id)
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM chat_conversations WHERE id=?", (conv_id,))
         db.commit()
+    # 清理 chat 工作目录：{CHAT_CWD_BASE}/chat/{user_id}/{conv_id}/
+    if conv and conv.get("user_id"):
+        try:
+            from src.config import CHAT_CWD_BASE
+            wsd = os.path.join(CHAT_CWD_BASE, "chat", str(conv["user_id"]), conv_id)
+            if os.path.isdir(wsd):
+                shutil.rmtree(wsd, ignore_errors=True)
+        except Exception as e:
+            log.warning(f"delete_conversation cleanup wsd failed: {e}")
 
 
 # ====== chat_config CRUD（合并进 chat_agent_session）======
@@ -701,6 +717,10 @@ def get_chat_config(user_id: int) -> dict:
                 else:
                     # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
                     log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，按未配置处理")
+            else:
+                # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底
+                log.warning(f"get_chat_config: runtime_id={row[0]} 不存在（引擎行已删除），按未配置处理")
+                row = (0,) + row[1:]  # runtime_id 置零，使 _chat_config_with_local_backend 走兜底
         return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
                                                row[3] or "", row[4] or "", row[5] or "", "")
 

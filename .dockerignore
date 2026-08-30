@@ -1,0 +1,15 @@
+.git
+.venv
+data
+logs
+__pycache__
+*.pyc
+*.pyo
+.gitignore
+.env
+*.md
+docs/
+skills/tools/
+skills/huawei-cloud-ecs-servers/
+branches-backup-*.bundle
+configs/

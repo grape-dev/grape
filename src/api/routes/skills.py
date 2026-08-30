@@ -32,7 +32,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
     return buf.getvalue()
 
 
-@router.get("/")
+@router.get("")
 async def list_skills(user: dict = Depends(get_current_user), repo: str = "", scope: str = ""):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。

@@ -18,6 +18,47 @@ _DIRECT_FUTURES: dict[int, Future] = {}
 _DIRECT_FUTURES_LOCK = threading.Lock()
 
 
+def is_plugin_mode() -> bool:
+    """Check if pipeline is in plugin mode.
+
+    plugin mode: uses pipelines.json + tag-based enqueue/claim
+    legacy mode (default): uses agent-skill-mapping.json + runtime_id binding
+
+    Priority: meta table `pipeline_mode` > env var GRAPE_PIPELINE_MODE > default (legacy)
+    """
+    try:
+        from src.user.db import get_meta_value
+        _mode = (get_meta_value("pipeline_mode") or "").strip().lower()
+        if _mode:
+            return _mode == "plugin"
+    except Exception:
+        pass
+    return os.environ.get("GRAPE_PIPELINE_MODE", "").lower() == "plugin"
+
+
+def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "", user_id: int = 0) -> str:
+    """Look up skill name from DB (plugin mode).
+
+    scene_id 非空时优先使用（Issue 级场景），否则回退到仓库默认场景。
+    user_id > 0 时可查用户级场景。
+    Returns skill name or empty string.
+    """
+    try:
+        from src.api.pipeline_config import get_node_by_tag
+        if not scene_id:
+            try:
+                from src.user.db import get_repo_scene
+                scene_id = get_repo_scene(repo_key) or "default"
+            except Exception:
+                scene_id = "default"
+        node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
+        if node:
+            return node.get("skill", "")
+    except Exception as e:
+        log.warning(f"resolve_skill_from_pipeline failed: {e}")
+    return ""
+
+
 def start_direct_agent(fn, args, name=""):
     """提交一个本机 direct 执行任务到有界池（webhook / run_pipeline 共用）。"""
     future = _DIRECT_POOL.submit(fn, *args)
@@ -51,11 +92,29 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
         log.warning(f"create_direct_task: no agent_session_id for {repo_key}/{agent_type}")
         return ""
 
+    # 更新 session 的 runtime_id 为实际执行引擎（pick_engine 结果可能与创建时不同）
+    if engine_id:
+        try:
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute("UPDATE devops_agent_session SET runtime_id=? WHERE id=?", (engine_id, agent_session_id))
+                db.commit()
+        except Exception:
+            pass
+
     task_id = "t_" + uuid.uuid4().hex[:12]
     # issue_id 优先用传参，兜底从 evt 解析
     if not issue_id:
         issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
     from src.repo_key import from_repo_key
+
+    # 获取 bot token（统一走 get_gitcode_token：devops_agent_session → managed_repos → 全局）
+    repo_gitcode_token = ""
+    try:
+        from src.user.db import get_gitcode_token
+        repo_gitcode_token = get_gitcode_token(repo_key=repo_key) or ""
+    except Exception as e:
+        log.warning(f"create_direct_task: get_gitcode_token failed: {e}")
 
     try:
         with db_lock:
@@ -65,8 +124,8 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                 f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
                 (task_id, agent_session_id, engine_id, seq, issue_id, repo_key or "",
                  agent_type or "", skill_name or "", skill_id or 0,
-                 "", "", "", "", "", 0, "", "{}",
-                 "{}", "", "", "{}", "{}", "{}", 0, "", 0,
+                 "", "", "", "", "", 0, repo_gitcode_token or "", "{}",
+                 "{}", "", "", "{}", "{}", "{}", 0, "", 0, "", "",
                  "queued", None, "", "", "", "{}", now, None, now)
             )
             db.commit()
@@ -75,6 +134,83 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
         log.warning(f"create_direct_task failed for seq={seq}: {e}")
         return ""
     return task_id
+
+
+def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
+                        skill_path, skill_id, evt, issue_id="", runtime_id=0):
+    """引擎不可用时创建 failed 状态的 task 快照（供重派复用参数）。
+
+    重派逻辑查 agent_tasks WHERE event_seq=?，无记录则报"无关联任务"。
+    此函数确保引擎不可用时也有一条 failed task 记录，重派可走"终态→复用快照重建"路径。
+    """
+    from src.runtime.service import _TASK_COLUMNS_LIST
+    from src.api.session_store import get_or_create_agent_session
+    from datetime import datetime, timezone
+    import os
+
+    # 查 agent_session_id（重派需要）
+    session = get_or_create_agent_session(repo_key, agent_type, backend or "")
+    agent_session_id = session.get("id", "")
+    if not agent_session_id:
+        log.warning(f"create_failed_task: no agent_session_id for {repo_key}/{agent_type}")
+        return
+
+    task_id = "t_" + uuid.uuid4().hex[:12]
+    if not issue_id:
+        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+
+    # 构建 prompt（重派复用）
+    prompt = ""
+    try:
+        from src.prompt_builder import build_prompt
+        evt["_skill_path"] = skill_path
+        evt["_skill_id"] = skill_id
+        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+                              skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
+    except Exception as e:
+        log.warning(f"create_failed_task: prompt build failed: {e}")
+
+    # cwd
+    try:
+        cwd = get_agent_workdir(repo_key, agent_type, issue_id)
+        os.makedirs(cwd, exist_ok=True)
+    except Exception:
+        cwd = ""
+
+    # env_extra
+    repository = evt.get("repository", "")
+    env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
+    _inject_cloud_credentials(env_extra, repo_key)
+
+    # repo_gitcode_token
+    repo_gitcode_token = ""
+    try:
+        from src.user.db import get_gitcode_token
+        repo_gitcode_token = get_gitcode_token(repo_key=repo_key) or ""
+    except Exception:
+        pass
+
+    now = datetime.now(timezone.utc).isoformat()
+    _reason = json.dumps(["无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎"][:500])
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"INSERT INTO agent_tasks ({','.join(_TASK_COLUMNS_LIST)}) VALUES "
+                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
+                (task_id, agent_session_id, runtime_id, seq, issue_id, repo_key or "",
+                 agent_type or "", skill_name or "", skill_id or 0,
+                 prompt, cwd, "",
+                 evt.get("type", "") or "", repository or evt.get("account", "") or "", 0, repo_gitcode_token,
+                 json.dumps(env_extra), "{}", "",
+                 "", "{}", "{}", "{}", 0,
+                 agent_type or "" if is_plugin_mode() else "", 0, agent_type or "" if is_plugin_mode() else "",
+                 "failed", 1, "", _reason, "", "{}", now, now, now)
+            )
+            db.commit()
+        log.info(f"Failed task snapshot created: {task_id} seq={seq} agent={agent_type} (engine_unavailable)")
+    except Exception as e:
+        log.warning(f"create_failed_task failed for seq={seq}: {e}")
 
 
 def _update_direct_task(seq, status, exit_code=0, result_text=""):
@@ -399,9 +535,16 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                     if _br and _br[0]:
                         backend = _br[0]
         if not skill_name:
-            # 回退默认映射
-            import json as _json
-            _mapping_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
+            # Plugin mode: try pipelines.json first
+            if is_plugin_mode():
+                _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type)
+                if _pipe_skill:
+                    skill_name = _pipe_skill
+                    log.info(f"Pipeline subscription (plugin): skill for {agent_type}={_pipe_skill}")
+            if not skill_name:
+                # Legacy fallback: agent-skill-mapping.json
+                import json as _json
+                _mapping_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
             if os.path.exists(_mapping_path):
                 with open(_mapping_path, "r", encoding="utf-8") as _f:
                     _defaults = _json.load(_f)
@@ -426,9 +569,20 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         # 创建事件
         from src.api.event_store import append_event
         issue_id = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "") or "#0"
+        # 从 tasks 表获取 Issue 真实标题（避免 Pipeline 列表显示 "A2A (订阅): xxx"）
+        _sub_title = ""
+        _sub_iss_num = str(issue_id).lstrip("#")
+        if _sub_iss_num and _sub_iss_num.isdigit():
+            try:
+                from src.api.routes.tasks import _get_issue_title
+                _sub_title = _get_issue_title(repo_key, int(_sub_iss_num)) or ""
+            except Exception:
+                pass
+        if not _sub_title:
+            _sub_title = f"A2A (订阅): {agent_type}"
         seq = append_event(
             repo_key=repo_key, event_type="a2a_event",
-            title=f"A2A (订阅): {agent_type}", issue_id=issue_id, source="a2a",
+            title=_sub_title, issue_id=issue_id, source="a2a",
             agent_type=agent_type, actor=evt.get("actor", ""),
             summary=f"订阅触发: {event_type} → {agent_type}（主路由: {main_agent}）",
             payload=evt.get("payload", {}), status="running",
@@ -454,8 +608,10 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                 repo_key, seq, agent_type, _be, skill_name, evt, engine_id, _direct_tid,
             ), name=f"sub-{agent_type}-{seq}")
         else:
+            from src.runtime.engine_select import _repo_user_id
+            _sub_uid = _repo_user_id(repo_key)
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
-                                   skill_id, skill_path, engine_id, issue_id)
+                                   skill_id, skill_path, engine_id, issue_id, user_id=_sub_uid)
         log.info(f"Pipeline subscription: dispatched seq={seq} agent={agent_type} mode={kind}")
     except Exception as e:
         log.warning(f"Pipeline subscription dispatch failed: {e}")
@@ -493,8 +649,22 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         from src.user.db import get_all_bot_usernames
         bot_usernames = get_all_bot_usernames()
         if actor in bot_usernames:
-            log.info(f"Pipeline skip: self-comment from bot={actor}")
-            return result
+            # 多任务模式豁免：bot 创建的子任务 issue_opened（body 含「## 父任务」）不跳过
+            _allow_through = False
+            if event_type == "issue_opened":
+                try:
+                    _payload = evt.get("payload", {}) or {}
+                    _oa = _payload.get("object_attributes", {}) or {}
+                    _body = _oa.get("description", "") or ""
+                    if "## 父任务" in _body:
+                        _allow_through = True
+                except Exception:
+                    pass
+            if _allow_through:
+                log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
+            else:
+                log.info(f"Pipeline skip: self-comment from bot={actor}")
+                return result
         log.info(f"Pipeline: comment from {actor}, not a bot ({bot_usernames})")
 
     # 2.1 issue_updated 纯标签变更（changes.labels 有变化、其余内容未动）→ bot 打标签回声，跳过
@@ -562,6 +732,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _asg = _fetch_issue_assignee(repo_key, _rid)
             set_issue_stage(repo_key, _rid, "vod", "vod", assignee=_asg)
             log.info(f"Pipeline: issue_state init vod for {_rid} assignee={_asg or 'none'}")
+            # 子任务识别：Issue body 含 "## 父任务" + Issue 链接 → 标记 parent_issue_id
+            _parent = _parse_parent_issue_from_payload(evt.get("payload", {}) or {})
+            if _parent:
+                try:
+                    from src.api.session_store import set_parent_issue
+                    set_parent_issue(repo_key, _rid, _parent)
+                    log.info(f"Pipeline: subtask detected, issue={_rid} parent={_parent}")
+                except Exception:
+                    pass
     elif agent_type == "vod":
         from src.api.session_store import get_issue_stage
         _rid2 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
@@ -599,6 +778,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                         except Exception:
                             pass
                     _t3 = str(_o3.get("title", "") or "") if isinstance(_o3, dict) else ""
+                    if not _t3:
+                        _t3 = evt.get("title", "") or ""
                     ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3, event_type=event_type)
                     log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or '(owner)'}")
     except Exception as _e:
@@ -645,36 +826,58 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     except Exception as e:
         log.warning(f"Pipeline: agent session lookup failed: {e}")
 
-    if not backend or not skill_name:
-        # 从默认映射配置文件加载 skill（会话缺 skill 时回退默认映射，防事件卡 running）
+    # 提前解析 issue_id + 场景（所有路径都需要，pick_engine 用 _issue_scene 选引擎）
+    _issue_scene = "default"
+    _issue_scene_uid = 0
+    _early_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+    if not _early_issue_id and event_type in PR_EVENT_TYPES:
+        _early_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}) or ""
+    if _early_issue_id:
         try:
-            _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
-            if os.path.exists(_defaults_path):
-                with open(_defaults_path, "r", encoding="utf-8") as _f:
-                    _defaults = json.load(_f)
-                _scene = _defaults.get("scenes", {}).get("default", {})
-                # 读仓库开发场景（managed_repos.dev_scene），按场景读映射——skill-dev 仓库回退到 skill-creator 而非 implementation
-                try:
-                    from src.user.db import get_repo_scene
-                    _scene_id = get_repo_scene(repo_key) or "default"
-                    _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
-                except Exception:
-                    pass
-                _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
-                _default_skill = _mapping.get(agent_type, "")
-                if _default_skill:
-                    backend = ""
-                    skill_name = _default_skill
-                    log.info(f"Pipeline: using default skill for {agent_type}={_default_skill}")
+            from src.api.session_store import get_issue_scene
+            _issue_scene, _issue_scene_uid = get_issue_scene(repo_key, _early_issue_id)
+            _issue_scene = _issue_scene or "default"
+        except Exception:
+            pass
+    # scene_user_id=0 时兜底反查（旧数据 is_join=0 导致 scene_user_id 未写入）
+    if not _issue_scene_uid:
+        try:
+            from src.runtime.engine_select import _repo_user_id
+            _issue_scene_uid = _repo_user_id(repo_key)
+        except Exception:
+            pass
+    log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
+    if not backend or not skill_name:
+        # Plugin mode: try pipelines.json first（用 Issue 级场景）
+        if is_plugin_mode():
+            _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene, user_id=_issue_scene_uid)
+            if _pipe_skill:
+                skill_name = _pipe_skill
+                backend = backend or ""
+                log.info(f"Pipeline (plugin): skill for {agent_type}={_pipe_skill} (scene={_issue_scene})")
+        if not skill_name:
+            # Legacy fallback: agent-skill-mapping.json（用 Issue 级场景）
+            try:
+                _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
+                if os.path.exists(_defaults_path):
+                    with open(_defaults_path, "r", encoding="utf-8") as _f:
+                        _defaults = json.load(_f)
+                    _scene = _defaults.get("scenes", {}).get(_issue_scene, _defaults.get("scenes", {}).get("default", {}))
+                    _mapping = _scene.get("mapping", {}) if isinstance(_scene, dict) else {}
+                    _default_skill = _mapping.get(agent_type, "")
+                    if _default_skill:
+                        backend = ""
+                        skill_name = _default_skill
+                        log.info(f"Pipeline: using default skill for {agent_type}={_default_skill} (scene={_issue_scene})")
+                    else:
+                        log.info(f"Pipeline: no agent session and no default skill for {agent_type}, skip")
+                        return result
                 else:
-                    log.info(f"Pipeline: no agent session and no default skill for {agent_type}, skip")
+                    log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, skip")
                     return result
-            else:
-                log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, skip")
+            except Exception as e:
+                log.warning(f"Pipeline: failed to load default skill config: {e}")
                 return result
-        except Exception as e:
-            log.warning(f"Pipeline: failed to load default skill config: {e}")
-            return result
 
     # 5. 提取 Issue ID
     payload = evt.get("payload", {})
@@ -699,6 +902,31 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         issue_id = resolve_issue_id(payload) or evt.get("issue_id", "")
     title = evt.get("title", "") or event_type
     log.info(f"Pipeline: issue_id={issue_id or '(none)'}, title={title}")
+
+    # 5.1 去重检查（2026-08-29 修复）：同 issue + 同 agent_type 已有 queued/running 任务时跳过
+    # 原因：每次 issue_comment webhook 都会创建新 VOD 任务，导致同一 issue 产生大量重复任务。
+    # A2A 事件已有去重（webhook.py:296），但 issue_opened/issue_comment 没有。
+    # 豁免：issue_opened（新 Issue 应该总是创建）；a2a_event（已有自己的去重）
+    if issue_id and agent_type and event_type not in ("issue_opened", "a2a_event"):
+        try:
+            with db_lock:
+                _dc = db.cursor()
+                _dc.execute(
+                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                    "AND status IN ('running','dispatched') "
+                    "AND event_type != 'a2a_event' "
+                    "ORDER BY seq DESC LIMIT 1",
+                    (repo_key, issue_id, agent_type))
+                _existing_evt = _dc.fetchone()
+                if _existing_evt:
+                    log.info(f"Pipeline: dedup skip — issue={issue_id} agent={agent_type} "
+                             f"already has running event seq={_existing_evt[0]}")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, f"dedup:active_{agent_type}_for_{issue_id}")
+                    result["skipped"] = "duplicate_active_task"
+                    return result
+        except Exception as _de:
+            log.warning(f"Pipeline: dedup check failed: {_de}")
 
     # 5.5 构建摘要描述
     actor = evt.get("actor", "")
@@ -765,19 +993,42 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # 选中 remote → 入队该引擎（queue_remote）；选中本机 → direct 就地执行。
-    from src.runtime.engine_select import pick_engine, engine_name
-    from src.runtime.service import runtime_execution_kind, enqueue_task, EXEC_MODE_DIRECT
-    engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0)
-    if not engine_id:
+    from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
+    from src.runtime.service import runtime_execution_kind, enqueue_task, EXEC_MODE_DIRECT, get_execution_mode
+    engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0,
+                            scene_id=_issue_scene, user_id=_issue_scene_uid)
+    if engine_id is None:
         log.info(f"Pipeline: no available engine for repo={repo_key} agent={agent_type}, seq={seq}, skip")
+        # 创建 failed 状态的 task 快照（供重派复用参数，否则重派报"无关联任务"）
+        _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
         _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
+        return result
+    # Plugin 模式 + engine_id=0：无主池任务（广播），多个引擎通过 claim_by_tag 竞争认领。
+    # 但强制 direct 模式（DEVOPS_EXECUTION_MODE=direct）不走广播，走本机 direct。
+    # 场景 engine_runtime_ids 限定广播范围（写入 pool_engine_ids 字段）。
+    if engine_id == 0 and is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
+        _be = backend or "opencode"
+        _pool_engine_ids = get_scene_pool_engine_ids(_issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
+        log.info(f"Pipeline (plugin broadcast): engine_id=0 pool_tag={agent_type} pool_engine_ids={_pool_engine_ids} seq={seq}")
+        if _be and skill_name and seq > 0:
+            _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
+                                   skill_id, skill_path, engine_id, issue_id,
+                                   pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid)
         return result
     # backend 必须取已注册引擎的类型名（不沿用会话/字面默认），确保执行 CLI 与选中引擎一致
     _be = engine_name(engine_id) or backend
+    if not _be or not skill_name or seq <= 0:
+        return result
+    # engine_id=0 且无可用引擎（plugin direct 兜底 / legacy 无绑定）→ 跳过执行，不创建空任务
+    if not engine_id:
+        log.info(f"Pipeline: engine_id=0 no engine to execute, seq={seq}, skip")
+        _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
+        return result
     kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
         _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
-                               skill_id, skill_path, engine_id, issue_id)
+                               skill_id, skill_path, engine_id, issue_id, user_id=_issue_scene_uid)
     elif _be and skill_name and seq > 0:
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
         evt["_skill_id"] = skill_id
@@ -821,9 +1072,55 @@ def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
 
 
 def _issue_num_from(issue_id: str) -> str:
-    """"#5" / "5" → "5"；#0/空 → ''（无关联 Issue，按 repo 级兜底）。"""
     s = (issue_id or "").strip().lstrip("#")
     return s if s and s != "0" else ""
+
+
+def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
+    """调 GitCode API 获取 Issue 标题。失败返回空。
+
+    用于 pipeline 展示兜底：当 tasks/events 表中 title 均为占位符时，
+    通过 API 获取真实标题并回写。
+    """
+    num = _issue_num_from(issue_id)
+    if not num:
+        return ""
+    try:
+        from src.repo_key import split_owner_repo
+        owner, rname = split_owner_repo(repo_key)
+        import urllib.request
+        from src.user.db import get_gitcode_token
+        tok = get_gitcode_token(repo_key=repo_key) or ""
+        if not tok:
+            return ""
+        req = urllib.request.Request(
+            f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
+            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
+        import json as _json
+        d = _json.load(urllib.request.urlopen(req, timeout=15))
+        return d.get("title", "") or ""
+    except Exception:
+        return ""
+
+
+def _parse_parent_issue_from_payload(payload: dict) -> str:
+    """Parse parent issue ID from Issue body."""
+    import re
+    body = ""
+    obj = payload.get("object_attributes") or payload.get("issue") or {}
+    if isinstance(obj, dict):
+        body = obj.get("description") or obj.get("body") or ""
+    if not body and isinstance(payload, dict):
+        body = payload.get("description") or payload.get("body") or ""
+    if not body:
+        return ""
+    m = re.search(r'父任务.{0,30}?#?(\d+)', body, re.I | re.S)
+    if m:
+        return f"#{m.group(1)}"
+    m2 = re.search(r'parent.?issue.{0,30}?#?(\d+)', body, re.I | re.S)
+    if m2:
+        return f"#{m2.group(1)}"
+    return ""
 
 
 def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str:
@@ -845,6 +1142,7 @@ def _fail_event(seq: int, reason: str):
 
     事件在 append_event 时即为 running，若后续入队/启动失败而不更新，
     事件将永远 running（无任务支撑、无详细记录）。所有失败路径统一走这里收口。
+    同步更新 agent_tasks 表 status=failed（防止 events 已 failed 但 agent_tasks 仍 running）。
     """
     if not seq:
         return
@@ -854,15 +1152,33 @@ def _fail_event(seq: int, reason: str):
         update_event_complete(seq, "failed", exit_code=1,
                               completed_at=datetime.now(timezone.utc).isoformat(),
                               result=reason)
+        # 同步更新 agent_tasks 表（如果有关联的 task）
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE agent_tasks SET status='failed', completed_at=?, "
+                "exit_code=COALESCE(exit_code, 1), "
+                "errors=COALESCE(errors, ?) "
+                "WHERE event_seq=? AND status IN ('running','queued','dispatched')",
+                (datetime.now(timezone.utc).isoformat(),
+                 json.dumps([reason][:500]) if reason else None, seq)
+            )
+            db.commit()
+            if c.rowcount > 0:
+                log.info(f"Pipeline: synced agent_tasks event_seq={seq} -> failed")
         log.info(f"Pipeline: event {seq} -> failed ({reason[:80]})")
     except Exception as e:
         log.warning(f"Pipeline: _fail_event failed for seq={seq}: {e}")
 
 
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
-                           skill_id, skill_path, runtime_id, issue_id=""):
-    """触发点三连的入队侧（M2，见 agent-runtime-event-tech-impl.md §2.3）：
-    init_event_json → enqueue_task（确定路由 runtime_id）。本地 worker/远端 RuntimeAgent 消费。
+                           skill_id, skill_path, runtime_id, issue_id="", pool_engine_ids="", user_id=0):
+    """init_event_json -> enqueue_task (deterministic routing runtime_id).
+    Local worker / remote RuntimeAgent consume.
+
+    Plugin mode (GRAPE_PIPELINE_MODE=plugin): sets pool_tag on enqueue
+    so workers with matching engine tags can claim via claim_by_tag.
     """
     from src.api.event_archive import init_event_json
     from src.runtime.service import enqueue_task, get_execution_mode
@@ -871,11 +1187,18 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     import os as _os
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
-    # 1) 确定路由：派发已选定具体引擎（runtime_id>0）；为 0 说明派发失败，直接 fail
-    #    （不再走 agent_type 级引擎池 / opencode 兜底，见 engine-selection-design.md v2）
+    # 1) 路由判定：
+    #    runtime_id>0 → 确定性路由（指定引擎）
+    #    runtime_id=0 + plugin 模式 → 无主池任务（广播），设 pool_agent_type 让引擎竞争认领
+    #    runtime_id=0 + 传统模式 → 派发失败
+    _pool_agent_type = ""
     if not runtime_id:
-        _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
-        return
+        if is_plugin_mode():
+            _pool_agent_type = agent_type
+            log.info(f"Pipeline enqueue (broadcast): runtime_id=0 pool_agent_type={agent_type} seq={seq}")
+        else:
+            _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
+            return
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
     # 注意：engine_select v2 派发已选定具体引擎（runtime_id>0），无 pool_mode 路径；
     # 历史 pool 模式（runtime_id=0 + pool_agent_type）由 service.claim 兼容处理。
@@ -896,6 +1219,15 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     from src.api.event_store import update_event_config
     update_event_config(seq, inst_name, skill_name, datetime.now(timezone.utc).isoformat())
     session = get_or_create_agent_session(repo_key, agent_type, backend or "")
+    # 更新 session 的 runtime_id 为实际执行引擎
+    if runtime_id:
+        try:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute("UPDATE devops_agent_session SET runtime_id=? WHERE id=?", (runtime_id, session.get("id","")))
+                db.commit()
+        except Exception:
+            pass
     oc_session_id = session.get("runtime_session_id") or ""
     issue_session_id = ""
     if _issue_num_from(issue_id):
@@ -921,7 +1253,12 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
         return
 
-    env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
+    from src.prompt_builder import _resolve_server_url
+    env_extra = {
+        "REPO_FULL_NAME": repository,
+        "ACCOUNT": evt.get("account") or repository,
+        "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
+    }
     _inject_cloud_credentials(env_extra, repo_key)
     # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
     if agent_type == "sre":
@@ -965,6 +1302,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         pass
 
     try:
+        _pool_tag = agent_type if is_plugin_mode() else ""
         tid = enqueue_task(
             agent_session_id=session.get("id") or "",
             runtime_id=runtime_id,
@@ -975,16 +1313,21 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             issue_session_id=issue_session_id,
             event_type=evt.get("type", ""),
             account=evt.get("account") or "",
+            user_id=user_id,
             repo_gitcode_token=repo_gitcode_token,
             env_extra=env_extra,
             skill_path=skill_path,
             skill_id=skill_id,
+            pool_tag=_pool_tag,
+            pool_agent_type=_pool_agent_type,
+            pool_engine_ids=pool_engine_ids,
         )
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
-        _fail_event(seq, f"入队失败：enqueue_task 异常 {str(e)[:150]}")
+        _fail_event(seq, f"enqueue_task error {str(e)[:150]}")
         return
-    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()}")
+    _mode_tag = "plugin" if is_plugin_mode() else "legacy"
+    log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
 
 
 def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:
@@ -1095,6 +1438,15 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
 
     # 引擎实例名（`{type}-{device}`，与 UI 同源）；查不到回退类型名
     inst_name = runtime_instance_name(runtime_id) or backend or ""
+
+    # direct 执行开始 → 更新 task status 为 running（direct 路径无 worker task_start 调用）
+    if task_id:
+        try:
+            from src.runtime.service import update_task_status
+            update_task_status(task_id, "running")
+            log.info(f"direct exec: task {task_id} status -> running")
+        except Exception as e:
+            log.warning(f"direct exec: failed to update task {task_id} to running: {e}")
 
     from src.repo_key import from_repo_key
     repository = evt.get("repository", from_repo_key(repo_key))
@@ -1302,6 +1654,20 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 final_text = d.get("text", "")
                 new_oc_session_id = d.get("oc_session_id", "")
                 log.info(f"Agent done: [Agent:{agent_type}|repo:{repo_name}] exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
+                # VOD 场景推荐兜底：解析 JSON 中的 recommended_scene 并持久化
+                if agent_type == "vod" and final_text and issue_id:
+                    try:
+                        from src.api.event_store import parse_agent_output_json
+                        _scene_out = parse_agent_output_json(final_text)
+                        if _scene_out and _scene_out.get("recommended_scene"):
+                            _rec_scene = _scene_out["recommended_scene"]
+                            from src.api.session_store import set_issue_scene
+                            from src.runtime.engine_select import _repo_user_id
+                            _vod_uid = _repo_user_id(repo_key)
+                            set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
+                            log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id}")
+                    except Exception as _se:
+                        log.warning(f"VOD done: scene parse failed: {_se}")
             elif evt_type == "error":
                 log.warning(f"Agent error: [Agent:{agent_type}|repo:{repo_name}] {data}")
             elif evt_type == "step_start":
@@ -1358,18 +1724,54 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         return
 
     # 有产出 → 更新该 event（写入配置 + 结果 + 结论 + 执行日志）
-    new_status = "completed" if exit_code == 0 else "failed"
+    # exit_code < 0 表示进程被信号终止（如 -15=SIGTERM, -9=SIGKILL），
+    # 但 has_output=True 说明 Agent 已完成业务产出（PR/测试/评论/结构化 conclusion），
+    # 信号终止常发生在引擎完成输出后的进程清理阶段，不应判为失败。
+    if exit_code == 0 or (has_output and exit_code < 0):
+        new_status = "completed"
+        if exit_code < 0:
+            log.info(f"Exec agent: seq={seq} exit_code={exit_code} but has_output=True, mark completed (signal death after work done)")
+    else:
+        new_status = "failed"
     _update_direct_task(seq, new_status, exit_code=exit_code, result_text=result_text)
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")
 
+    # 多任务模式：父任务 Issue Agent 完成后 → stage=done（不 A2A coding，子任务由 webhook 自动触发）
+    if new_status == "completed" and agent_type == "issue" and issue_id:
+        try:
+            from src.api.session_store import is_subtask_mode_enabled, set_issue_stage
+            if is_subtask_mode_enabled(repo_key, issue_id):
+                set_issue_stage(repo_key, issue_id, "done", "issue")
+                log.info(f"Multi-task mode: parent issue {issue_id} stage=done (subtasks will trigger independently)")
+        except Exception as _e:
+            log.warning(f"Multi-task mode stage=done check failed: {_e}")
+
     # 执行完成 → 自动回帖到 Issue（仅 sre 等有实质产出的 Agent，且有关联 Issue）
     if new_status == "completed" and result_text and issue_id:
         _issue_num = _issue_num_from(issue_id)
         if _issue_num and repo_gitcode_token:
             _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type)
+
+    # 子任务 SRE 完成后 → 登记完成情况到父 Issue
+    if new_status == "completed" and agent_type == "sre" and issue_id:
+        try:
+            from src.api.session_store import get_parent_issue, get_subtask_issues
+            _parent = get_parent_issue(repo_key, issue_id)
+            if _parent and repo_gitcode_token:
+                _parent_num = _issue_num_from(_parent)
+                _sub_num = _issue_num_from(issue_id)
+                if _parent_num and _sub_num:
+                    _post_subtask_completion_to_parent(repository, _sub_num, _parent_num, result_text, repo_gitcode_token)
+                    # 检查所有子任务是否全部完成
+                    _subs = get_subtask_issues(repo_key, _parent)
+                    _all_done = all(s.get("stage") == "done" or s.get("issue_id") == issue_id for s in _subs)
+                    if _all_done and len(_subs) > 0:
+                        _post_all_subtasks_done(repository, _parent_num, _subs, repo_gitcode_token)
+        except Exception as _e:
+            log.warning(f"Subtask completion post failed: {_e}")
 
     # 执行完成 → 同步 agent 结果到任务会话（用户「去对话」可见 agent 澄清/报告）
     # 独立于 _post_result_to_issue：agent 可能自己用 curl 发了 Issue 评论，
@@ -1438,6 +1840,47 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
     except Exception as e:
         log.warning(f"Exec agent: sync to task conversation failed: {e}")
 
+
+
+def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, parent_issue_num: str,
+                                        result_text: str, bot_token: str):
+    """子任务完成后，在父 Issue 评论登记完成情况。"""
+    try:
+        import urllib.request, json as _json
+        from src.api.event_store import parse_agent_output_json
+        _out = parse_agent_output_json(result_text)
+        _summary = (_out.get("conclusion", "") if _out else "") or result_text[:200]
+        _comment = f"### \u5b50\u4efb\u52a1 #{sub_issue_num} \u5df2\u5b8c\u6210\n\n{_summary}\n\n---\n\u5b50\u4efb\u52a1\u6d41\u6c34\u7ebf\u5df2\u5168\u90e8\u5b8c\u6210\u3002"
+        _data = _json.dumps({"body": _comment}).encode("utf-8")
+        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
+        _req = urllib.request.Request(_url, data=_data,
+            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(_req, timeout=15)
+        log.info(f"Subtask #{sub_issue_num} completion posted to parent #{parent_issue_num}")
+    except Exception as e:
+        log.warning(f"Post subtask completion failed: {e}")
+
+
+def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: list, bot_token: str):
+    """所有子任务完成后，在父 Issue 发汇总报告。"""
+    try:
+        import urllib.request, json as _json
+        _lines = [f"### \u5168\u90e8\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\n"]
+        for s in subtasks:
+            _sid = s.get("issue_id", "?")
+            _stage = s.get("stage", "?")
+            _status = "\u2705" if _stage == "done" else "\u274c"
+            _lines.append(f"- {_status} {_sid} ({_stage})")
+        _lines.append(f"\n\u7236\u4efb\u52a1 #{parent_issue_num} \u7684\u6240\u6709\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\u3002")
+        _comment = "\n".join(_lines)
+        _data = _json.dumps({"body": _comment}).encode("utf-8")
+        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
+        _req = urllib.request.Request(_url, data=_data,
+            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(_req, timeout=15)
+        log.info(f"All subtasks done summary posted to parent #{parent_issue_num}")
+    except Exception as e:
+        log.warning(f"Post all subtasks done failed: {e}")
 
 def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token: str,
                                          agent_type: str = "", repository: str = ""):

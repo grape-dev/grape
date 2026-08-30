@@ -4,6 +4,8 @@ import com.grape.admin.config.AuthContext;
 import com.grape.admin.service.RuntimeCleanupService;
 import com.grape.admin.service.RuntimeCredentialService;
 import com.grape.admin.service.RuntimeDeviceService;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -14,6 +16,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.servlet.http.HttpServletRequest;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -27,13 +32,16 @@ public class RuntimeController {
     private final RuntimeDeviceService deviceService;
     private final RuntimeCredentialService credentialService;
     private final RuntimeCleanupService cleanupService;
+    private final JdbcTemplate grapeJdbc;
 
     public RuntimeController(RuntimeDeviceService deviceService,
                              RuntimeCredentialService credentialService,
-                             RuntimeCleanupService cleanupService) {
+                             RuntimeCleanupService cleanupService,
+                             @Qualifier("grapeJdbcTemplate") JdbcTemplate grapeJdbc) {
         this.deviceService = deviceService;
         this.credentialService = credentialService;
         this.cleanupService = cleanupService;
+        this.grapeJdbc = grapeJdbc;
     }
 
     @GetMapping("/devices")
@@ -150,5 +158,88 @@ public class RuntimeController {
         List<String> statuses = (List<String>) body.get("statuses");
         cleanupService.cleanupTasks(statuses, (String) body.get("before"), AuthContext.username(request));
         return Map.of("status", "ok");
+    }
+
+    // ===== 引擎详情任务列表：独立 API（不耦合健康中心）=====
+
+    /** 按 Issue 获取事件列表（用于时序图 + 事件列表） */
+    @GetMapping("/runtime/issues/{issueId}/events")
+    public Map<String, Object> issueEvents(@PathVariable String issueId) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("issueId", issueId);
+
+        List<Map<String, Object>> events = new ArrayList<>();
+        try {
+            // 查 agent_tasks 建立 (issue_id, event_seq) → task_id 映射
+            Map<Integer, String> seqToTaskId = new HashMap<>();
+            grapeJdbc.query("SELECT event_seq, id FROM agent_tasks WHERE issue_id=?",
+                    rs -> { seqToTaskId.put(rs.getInt("event_seq"), rs.getString("id")); }, issueId);
+
+            grapeJdbc.query("SELECT seq, event_type, issue_id, agent_type, skill, status, duration, created_at, actor, repo_key "
+                    + "FROM events WHERE issue_id=? ORDER BY created_at",
+                    rs -> {
+                        Map<String, Object> s = new LinkedHashMap<>();
+                        int seq = rs.getInt("seq");
+                        s.put("seq", seq);
+                        s.put("eventType", rs.getString("event_type"));
+                        s.put("agentType", rs.getString("agent_type"));
+                        s.put("skill", rs.getString("skill"));
+                        s.put("status", rs.getString("status"));
+                        s.put("duration", rs.getString("duration"));
+                        s.put("createdAt", rs.getString("created_at"));
+                        s.put("actor", rs.getString("actor"));
+                        s.put("repoKey", rs.getString("repo_key"));
+                        s.put("taskId", seqToTaskId.getOrDefault(seq, ""));
+                        events.add(s);
+                    }, issueId);
+        } catch (Exception e) { /* ignore */ }
+        result.put("events", events);
+        return result;
+    }
+
+    /** 任务日志消息 */
+    @GetMapping("/runtime/tasks/{taskId}/messages")
+    public List<Map<String, Object>> taskMessages(@PathVariable String taskId) {
+        List<Map<String, Object>> list = new ArrayList<>();
+        try {
+            grapeJdbc.query("SELECT seq, type, tool, content, input_json, output, created_at "
+                    + "FROM task_messages WHERE task_id=? ORDER BY seq",
+                    rs -> {
+                        Map<String, Object> m = new LinkedHashMap<>();
+                        m.put("seq", rs.getInt("seq"));
+                        m.put("type", rs.getString("type"));
+                        m.put("tool", rs.getString("tool"));
+                        m.put("content", rs.getString("content"));
+                        m.put("createdAt", rs.getString("created_at"));
+                        list.add(m);
+                    }, taskId);
+        } catch (Exception e) { /* ignore */ }
+        return list;
+    }
+
+    /** 任务详情（含时间线信息） */
+    @GetMapping("/runtime/tasks/{taskId}/info")
+    public Map<String, Object> taskInfo(@PathVariable String taskId) {
+        Map<String, Object> info = new LinkedHashMap<>();
+        try {
+            grapeJdbc.query("SELECT id, repo_key, agent_type, status, issue_id, created_at, completed_at, "
+                    + "started_at, exit_code, result_text, errors, event_seq, skill, runtime_id "
+                    + "FROM agent_tasks WHERE id=?", rs -> {
+                info.put("id", rs.getString("id"));
+                info.put("repoKey", rs.getString("repo_key"));
+                info.put("agentType", rs.getString("agent_type"));
+                info.put("status", rs.getString("status"));
+                info.put("issueId", rs.getString("issue_id"));
+                info.put("createdAt", rs.getString("created_at"));
+                info.put("completedAt", rs.getString("completed_at"));
+                info.put("startedAt", rs.getString("started_at"));
+                info.put("exitCode", rs.getObject("exit_code"));
+                info.put("resultText", rs.getString("result_text"));
+                info.put("errors", rs.getString("errors"));
+                info.put("eventSeq", rs.getObject("event_seq"));
+                info.put("skill", rs.getString("skill"));
+            }, taskId);
+        } catch (Exception e) { /* ignore */ }
+        return info;
     }
 }

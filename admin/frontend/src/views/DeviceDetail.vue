@@ -14,7 +14,7 @@
       <!-- 设备信息 -->
       <div class="card" style="padding:16px 20px">
         <div class="detail-grid">
-          <div class="detail-item" :style="{ borderLeftColor: detail.status === 'active' ? '#52c41a' : 'var(--text-tertiary)' }">
+          <div class="detail-item" :style="{ borderLeftColor: detail.status === 'active' ? '#34c759' : 'var(--text-tertiary)' }">
             <span class="t3">状态</span>
             <span :class="['status-tag', detail.status === 'active' ? 'success' : 'default']">{{ detail.status === 'active' ? '有效' : '已吊销' }}</span>
           </div>
@@ -23,8 +23,8 @@
           <div class="detail-item" style="border-left-color:#006eff"><span class="t3">最后心跳</span>{{ formatTime(detail.lastSeenAt) }}</div>
           <div class="detail-item"><span class="t3">IP</span>{{ detail.lastIp || '—' }}</div>
           <div class="detail-item"><span class="t3">创建时间</span>{{ formatTime(detail.createdAt) }}</div>
-          <div class="detail-item" style="border-left-color:#7222ed"><span class="t3">引擎数</span>{{ detail.engines?.length ?? 0 }}</div>
-          <div class="detail-item" style="border-left-color:#1890ff"><span class="t3">任务数</span>{{ detail.tasks?.totalElements ?? 0 }}</div>
+          <div class="detail-item" style="border-left-color:#5e5ce6"><span class="t3">引擎数</span>{{ detail.engines?.length ?? 0 }}</div>
+          <div class="detail-item" style="border-left-color:#006eff"><span class="t3">任务数</span>{{ detail.tasks?.totalElements ?? 0 }}</div>
         </div>
       </div>
 
@@ -59,116 +59,8 @@
       </div>
 
       <!-- 关联任务 -->
-      <div class="card" style="margin-top:16px;padding:0">
-        <div class="section-header">
-          <h5 class="sh-title">关联任务 <span class="sh-count">共 {{ detail.tasks?.totalElements ?? 0 }} 条<span v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></span></h5>
-          <div class="sh-actions">
-            <select v-model="selectedEngineId" class="page-size-select" style="max-width:260px" @change="onEngineChange">
-              <option :value="null">全部引擎</option>
-              <option v-for="e in detail.engines || []" :key="e.id" :value="e.id">{{ e.name }}</option>
-            </select>
-            <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
-          </div>
-        </div>
-        <div style="padding:14px 20px">
-
-        <!-- 任务状态统计卡（kpi 色带卡片，对齐 AgentManage/Overview 体系） -->
-        <div class="task-stat-cards">
-          <div class="task-stat-card kpi-primary">
-            <div class="task-stat-num primary">{{ taskTotal }}</div>
-            <div class="task-stat-label">任务总数</div>
-          </div>
-          <div v-for="s in taskStatList" :key="s.key" class="task-stat-card" :style="{ borderLeftColor: s.color }">
-            <div class="task-stat-num" :style="{ color: s.color }">{{ s.count }}</div>
-            <div class="task-stat-label">{{ s.label }}</div>
-          </div>
-        </div>
-
-        <!-- 任务状态分布图（对齐 VOD chart-row） -->
-        <div class="task-chart-row">
-          <div class="card chart-card">
-            <div class="section-header"><h5 class="sh-title">任务状态分布</h5></div>
-            <div ref="taskChartEl" style="height:220px;padding:14px 20px"></div>
-          </div>
-        </div>
-
-        <div class="table-loading-wrapper">
-          <div class="table-loading-overlay" v-if="taskLoading">
-            <span class="table-loading-text">加载中...</span>
-          </div>
-          <div style="overflow-x:auto">
-          <table class="vod-table">
-            <thead><tr>
-              <th style="width:70px">ID</th>
-              <th style="width:110px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('agentType')">
-                  类型 <span class="filter-arrow" :class="{ active: taskType }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'agentType'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskType }" @click="setFilter('agentType', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('agentType')" :key="v" :class="{ active: taskType === v }" @click="setFilter('agentType', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:180px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('skill')">
-                  技能 <span class="filter-arrow" :class="{ active: taskSkill }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'skill'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskSkill }" @click="setFilter('skill', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:90px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('status')">
-                  状态 <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'status'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskStatus }" @click="setFilter('status', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:150px" class="sortable-th" @click="toggleSort">
-                创建时间
-                <span class="sort-arrows">
-                  <span class="sort-dir" :class="{ active: sortOrder === 'asc' }">▲</span>
-                  <span class="sort-dir" :class="{ active: sortOrder === 'desc' }">▼</span>
-                </span>
-              </th>
-            </tr></thead>
-            <tbody>
-              <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="5" class="t2" style="padding:28px 0">
-                  <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
-                  <template v-else>
-                    无匹配任务
-                    <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6;margin-left:10px" @click="clearFilters">清除筛选</button>
-                  </template>
-                </td>
-              </tr>
-              <tr v-for="t in detail.tasks?.content || []" :key="t.id">
-                <td class="t3">{{ t.id }}</td>
-                <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
-                <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
-                <td><span class="status-tag default">{{ t.status }}</span></td>
-                <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
-              </tr>
-            </tbody>
-          </table>
-          </div>
-        </div>
-        <div v-if="detail.tasks?.totalElements > 0" class="pagination-bar" style="border-top:none">
-          <span class="page-info">第 <strong>{{ taskPage + 1 }}</strong> / {{ detail.tasks?.totalPages ?? 1 }} 页（共 {{ detail.tasks?.totalElements ?? 0 }} 条）</span>
-          <select v-model="taskSize" class="page-size-select" @change="taskPage = 0; load()">
-            <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
-          </select>
-          <button class="page-btn" :disabled="taskPage <= 0" @click="taskPage--; load()">上一页</button>
-          <button class="page-btn" :disabled="taskPage >= (detail.tasks?.totalPages ?? 1) - 1" @click="taskPage++; load()">下一页</button>
-        </div>
-        </div>
-      </div>
+      <TaskListSection :tasks="detail.tasks" :loading="taskLoading" :columns="{ engine: true }" :engines="detail.engines" @reload="onTaskReload" />
     </div>
-
-    <p v-else class="t2" style="padding:40px;text-align:center">加载中…</p>
   </div>
 </template>
 
@@ -177,6 +69,7 @@ import { computed, nextTick, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import http from '../api'
+import TaskListSection from '../components/TaskListSection.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -206,9 +99,9 @@ let taskChart = null
 const STATUS_META = {
   completed: { label: '完成', color: 'var(--success)' },
   success: { label: '完成', color: 'var(--success)' },
-  failed: { label: '失败', color: '#e5484d' },
-  running: { label: '运行中', color: '#1890ff' },
-  pending: { label: '等待', color: '#ea5a0c' }
+  failed: { label: '失败', color: '#ff3b30' },
+  running: { label: '运行中', color: '#006eff' },
+  pending: { label: '等待', color: '#ff9500' }
 }
 const taskTotal = computed(() => {
   const st = detail.value?.tasks?.filterOptions?.status || {}
@@ -224,7 +117,7 @@ const taskStatList = computed(() => {
 
 const BADGE = {
   online: { color: 'var(--success)', bg: '#dcfce7', label: '在线' },
-  recently_lost: { color: '#ea5a0c', bg: '#fef3c7', label: '刚失联' },
+  recently_lost: { color: '#ff9500', bg: 'rgba(255,149,0,0.1)', label: '刚失联' },
   offline: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '离线' },
   about_to_gc: { color: 'var(--danger)', bg: '#fee2e2', label: '待回收' },
   revoked: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '已吊销' }
@@ -258,12 +151,21 @@ async function load() {
   try {
     const { data } = await http.get(`/devices/${route.params.id}`, { params })
     detail.value = data
-    // 「已筛选 N 条」：有列头筛选时显示过滤后总数，无筛选不显示（对齐 VOD）
-    filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
     nextTick(renderTaskChart)
   } finally {
     taskLoading.value = false
   }
+}
+
+function onTaskReload(params) {
+  taskPage.value = params.taskPage ?? 0
+  taskSize.value = params.taskSize ?? 10
+  sortOrder.value = params.sortOrder ?? 'desc'
+  taskStatus.value = params.taskStatus ?? ''
+  taskSkill.value = params.taskSkill ?? ''
+  taskType.value = params.taskType ?? ''
+  selectedEngineId.value = params.engineId ?? null
+  load()
 }
 // 任务状态分布饼图（对齐 VOD chart-row）
 function renderTaskChart() {
@@ -288,7 +190,7 @@ function renderTaskChart() {
       label: { show: true, formatter: '{b}: {c}' },
       data
     }],
-    color: ['#52c41a', '#e5484d', '#1890ff', '#ea5a0c', '#8896a7', '#7222ed']
+    color: ['#34c759', '#ff3b30', '#006eff', '#ff9500', '#aeaeb2', '#5e5ce6']
   })
 }
 function onEngineChange() {
@@ -336,12 +238,12 @@ load()
   background: #fff;
   border: 1px solid var(--border-color);
   border-left: 3px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 14px;
   padding: 10px 14px;
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  transition: all 0.2s ease;
+  transition: all var(--transition);
 }
 .detail-item:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .detail-item .t3 { display: block; font-size: 11px; font-weight: 400; color: var(--text-tertiary); margin-bottom: 3px; }
@@ -359,11 +261,11 @@ load()
   color: var(--text-secondary);
   padding: 6px 14px;
   border-radius: 8px;
-  background: #f5f5f5;
+  background: rgba(0,0,0,0.04);
   border: 1px solid var(--border-color);
   cursor: pointer;
   user-select: none;
-  transition: all 0.2s ease;
+  transition: all var(--transition);
   line-height: 1;
 }
 .back-btn:hover { color: var(--primary); background: #e6f4ff; border-color: #91caff; transform: translateX(-2px); }
@@ -383,11 +285,11 @@ load()
   max-width: 160px;
   background: #fff;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 14px;
   border-left: 3px solid #006eff;
   padding: 12px 16px;
   text-align: center;
-  transition: all 0.2s ease;
+  transition: all var(--transition);
 }
 .task-stat-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .task-stat-card.kpi-primary { border-left-color: #006eff; }
@@ -445,10 +347,10 @@ load()
   padding: 6px 10px;
   font-size: 12px;
   color: var(--text-secondary);
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
   white-space: nowrap;
 }
-.col-filter-opt:hover { background: #f5f7fa; }
+.col-filter-opt:hover { background: rgba(0,0,0,0.04); }
 .col-filter-opt.active { background: var(--primary-bg); color: var(--primary); font-weight: 500; }
 </style>

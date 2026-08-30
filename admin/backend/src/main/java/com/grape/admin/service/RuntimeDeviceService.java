@@ -227,6 +227,13 @@ public class RuntimeDeviceService {
         taskFilterOptions.put("skill", countBy(engineTasks, AgentTaskRo::getSkill));
         taskFilterOptions.put("agentType", countBy(engineTasks, AgentTaskRo::getAgentType));
 
+        // runtimeId → 引擎名映射（设备详情任务列表显示引擎列）
+        Map<Integer, String> engineNameById = engines.stream()
+                .collect(Collectors.toMap(AgentRuntimeRo::getId,
+                        r -> r.getName() + (r.getDisplayName() != null && !r.getDisplayName().isBlank()
+                                ? "(" + r.getDisplayName() + ")" : ""),
+                        (a, b) -> a));
+
         List<AgentTaskRo> allTasks = engineTasks.stream()
                 .filter(t -> taskStatus == null || taskStatus.isBlank() || taskStatus.equals(t.getStatus()))
                 .filter(t -> taskType == null || taskType.isBlank() || taskType.equals(t.getAgentType()))
@@ -241,7 +248,8 @@ public class RuntimeDeviceService {
         int from = Math.min(taskPage * taskSize, total);
         int to = Math.min(from + taskSize, total);
         Map<String, Object> taskPageObj = new LinkedHashMap<>();
-        taskPageObj.put("content", allTasks.subList(from, to).stream().map(this::toTaskMap).collect(Collectors.toList()));
+        taskPageObj.put("content", allTasks.subList(from, to).stream()
+                .map(t -> toTaskMap(t, engineNameById)).collect(Collectors.toList()));
         taskPageObj.put("totalElements", total);
         taskPageObj.put("totalPages", taskSize > 0 ? (total + taskSize - 1) / taskSize : 0);
         taskPageObj.put("page", taskPage);
@@ -269,6 +277,9 @@ public class RuntimeDeviceService {
                 .collect(Collectors.toMap(Map.Entry::getKey,
                         e -> e.getValue().getDeviceName() == null || e.getValue().getDeviceName().isBlank()
                                 ? e.getValue().getName() : e.getValue().getDeviceName()));
+        Map<Integer, Long> taskCountByRuntime = taskRepository.findAll().stream()
+                .filter(t -> t.getRuntimeId() != null)
+                .collect(Collectors.groupingBy(AgentTaskRo::getRuntimeId, Collectors.counting()));
 
         List<Map<String, Object>> filtered = new ArrayList<>();
         // 全量健康分布统计（不随过滤/分页变化，供页头徽章行）
@@ -315,6 +326,8 @@ public class RuntimeDeviceService {
             m.put("ownerId", r.getOwnerId());
             // 引擎归属 = 凭据签发人（credential_id → runtime_credentials.owner_name）
             m.put("ownerName", cred == null ? null : cred.getOwnerName());
+            m.put("lastIp", cred == null ? null : cred.getLastIp());
+            m.put("taskCount", taskCountByRuntime.getOrDefault(r.getId(), 0L).intValue());
             filtered.add(m);
         }
         // 页头统计随过滤结果变化（与列表保持一致）
@@ -398,6 +411,7 @@ public class RuntimeDeviceService {
                 : (cred.getDeviceName() == null || cred.getDeviceName().isBlank() ? cred.getName() : cred.getDeviceName()));
         engine.put("deviceStatus", cred == null ? null : cred.getStatus());
         engine.put("ownerName", cred == null ? null : cred.getOwnerName());
+        engine.put("lastIp", cred == null ? null : cred.getLastIp());
 
         // 关联任务：按 runtime_id，筛选/排序/分页（对齐 deviceDetail 模式）
         List<AgentTaskRo> engineTasks = taskRepository.findAll().stream()
@@ -450,6 +464,10 @@ public class RuntimeDeviceService {
     }
 
     private Map<String, Object> toTaskMap(AgentTaskRo t) {
+        return toTaskMap(t, null);
+    }
+
+    private Map<String, Object> toTaskMap(AgentTaskRo t, Map<Integer, String> engineNameById) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", t.getId());
         m.put("runtimeId", t.getRuntimeId());
@@ -460,6 +478,11 @@ public class RuntimeDeviceService {
         m.put("createdAt", t.getCreatedAt());
         m.put("completedAt", t.getCompletedAt());
         m.put("repoKey", t.getRepoKey());
+        m.put("issueId", t.getIssueId());
+        m.put("eventSeq", t.getEventSeq());
+        if (engineNameById != null && t.getRuntimeId() != null) {
+            m.put("engineName", engineNameById.getOrDefault(t.getRuntimeId(), null));
+        }
         return m;
     }
 

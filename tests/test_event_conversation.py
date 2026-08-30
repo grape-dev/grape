@@ -14,6 +14,11 @@ from src.api.main import app
 from src.session_manager import db, db_lock
 from src.user import db as user_db
 from src.runtime import service
+# JWT access token helper（替代旧的 create_session_token）
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    from src.user.db import get_token_version
+    return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
 _uid = None
@@ -30,7 +35,7 @@ def setup_module():
     _uid = user_db.create_user("conv_user", "pwd")
     if not _uid:
         _uid = user_db.get_user_by_username("conv_user")
-    _headers = {"Authorization": "Bearer " + user_db.create_session_token(_uid["id"])}
+    _headers = {"Authorization": "Bearer " + _jwt_access_token(_uid["id"], _uid["username"])}
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token) VALUES (?,?,?,?,?,?)",
@@ -437,26 +442,27 @@ class TestRedispatchRuntimeZero:
     def test_redispatch_resolves_runtime_and_new_cwd(self):
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM agent_tasks WHERE event_seq=? OR repo_key=?", (999901, _REPO_KEY))
+            c.execute("DELETE FROM agent_tasks WHERE id LIKE 't_redispatch%'")
+            c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
             c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
                       (_REPO_KEY, "issue_comment", "vod", "re", "#5", "{}", "failed", "x"))
             seq = c.lastrowid
-            c.execute(
-                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, knowledge_files, affinity_runtime_id, pool_agent_type) "
-                "VALUES ('t_redispatch0', 'vod:'||?, 0, ?, '#5', ?, 'vod', 'repo-onboarding', 'p', '/old/vod/issues/5', 'ses_old', 'issue_comment', 'acct', 0, '', '{}', '{}', '', 'iss-redis', '{}', '{}', '{}', 0, '')",
-                (_REPO_KEY, seq, _REPO_KEY))
             c.execute("INSERT OR IGNORE INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, status) VALUES ('iss-redis',?, 'vod', '#5', '', 'idle')", (_REPO_KEY,))
-            # 新模型（engine-selection-design.md v2）：seed 远端引擎 + 绑定，供重派 pick_engine 解析
+            # 先创建引擎
             c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
             c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) VALUES ('hredis','redis-cred','redis-dev','global','tester','active')")
             _cid = c.lastrowid
             c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
                       "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
             _rid = c.lastrowid
-            from src.repo_key import from_repo_key
-            _repo_norm = from_repo_key(_REPO_KEY)
-            c.execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key=? AND agent_type='vod'", (_repo_norm,))
-            c.execute("INSERT INTO devops_agent_runtime_binding (repo_key, agent_type, runtime_id, priority, enabled, created_at) VALUES (?, 'vod', ?, 50, 1, datetime('now'))", (_repo_norm, _rid))
+            # 创建 session（含 runtime_id 供 redispatch fallback）
+            c.execute("INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status) VALUES ('redis-sess',?,?,?,'idle')",
+                      (_REPO_KEY, "vod", _rid))
+            # 创建旧 task（runtime_id=0，模拟 120s 超时回收产物）
+            c.execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, knowledge_files, affinity_runtime_id, pool_agent_type) "
+                "VALUES ('t_redispatch0', 'vod:'||?, 0, ?, '#5', ?, 'vod', 'repo-onboarding', 'p', '/old/vod/issues/5', 'ses_old', 'issue_comment', 'acct', 0, '', '{}', '{}', '', 'iss-redis', '{}', '{}', '{}', 0, '')",
+                (_REPO_KEY, seq, _REPO_KEY))
             db.commit()
 
         from src.api.event_pipeline import get_agent_workdir
@@ -485,7 +491,8 @@ class TestRedispatchRuntimeZero:
         with db_lock:
             db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
             db.cursor().execute("DELETE FROM agent_tasks WHERE event_seq=?", (seq,))
-            db.cursor().execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key='org/test' AND agent_type='vod'")
+            db.cursor().execute("DELETE FROM agent_tasks WHERE id LIKE 't_redispatch%'")
+            db.cursor().execute("DELETE FROM devops_agent_session WHERE id LIKE 'redis-sess%'")
             db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'redis-cred%')")
             db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
             db.commit()
@@ -496,25 +503,27 @@ class TestRedispatchRuntimeZero:
         """
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM agent_tasks WHERE event_seq=? OR repo_key=?", (999902, _REPO_KEY))
+            c.execute("DELETE FROM agent_tasks WHERE id LIKE 't_redispatch%'")
+            c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
             c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
                       (_REPO_KEY, "issue_comment", "vod", "re2", "#5", "{}", "failed", "x"))
             seq = c.lastrowid
-            c.execute(
-                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, knowledge_files, affinity_runtime_id, pool_agent_type) "
-                "VALUES ('t_redispatch_cancel0', 'vod:'||?, 1, ?, '#5', ?, 'vod', 'repo-onboarding', 'p', '/old/vod/issues/5', 'ses_old', 'issue_comment', 'acct', 0, '', '{}', '{}', '', 'iss-redis', '{}', '{}', '{}', 0, '')",
-                (_REPO_KEY, seq, _REPO_KEY))
             c.execute("INSERT OR IGNORE INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, status) VALUES ('iss-redis',?, 'vod', '#5', '', 'idle')", (_REPO_KEY,))
+            # 先创建引擎
             c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
             c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) VALUES ('hredis','redis-cred','redis-dev','global','tester','active')")
             _cid = c.lastrowid
             c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
                       "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
             _rid = c.lastrowid
-            from src.repo_key import from_repo_key
-            _repo_norm = from_repo_key(_REPO_KEY)
-            c.execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key=? AND agent_type='vod'", (_repo_norm,))
-            c.execute("INSERT INTO devops_agent_runtime_binding (repo_key, agent_type, runtime_id, priority, enabled, created_at) VALUES (?, 'vod', ?, 50, 1, datetime('now'))", (_repo_norm, _rid))
+            # 创建 session（含 runtime_id 供 redispatch fallback）
+            c.execute("INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status) VALUES ('redis-sess2',?,?,?,'idle')",
+                      (_REPO_KEY, "vod", _rid))
+            # 创建旧 task（runtime_id 设为实际引擎 id，status=queued 供 redispatch requeue）
+            c.execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, knowledge_files, affinity_runtime_id, pool_agent_type, status) "
+                "VALUES ('t_redispatch_cancel0', 'vod:'||?, ?, ?, '#5', ?, 'vod', 'repo-onboarding', 'p', '/old/vod/issues/5', 'ses_old', 'issue_comment', 'acct', 0, '', '{}', '{}', '', 'iss-redis', '{}', '{}', '{}', 0, '', 'queued')",
+                (_REPO_KEY, _rid, seq, _REPO_KEY))
             db.commit()
 
         from src.user.db import set_meta_value
@@ -536,7 +545,8 @@ class TestRedispatchRuntimeZero:
         with db_lock:
             db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
             db.cursor().execute("DELETE FROM agent_tasks WHERE event_seq=?", (seq,))
-            db.cursor().execute("DELETE FROM devops_agent_runtime_binding WHERE repo_key='org/test' AND agent_type='vod'")
+            db.cursor().execute("DELETE FROM agent_tasks WHERE id LIKE 't_redispatch%'")
+            db.cursor().execute("DELETE FROM devops_agent_session WHERE id LIKE 'redis-sess%'")
             db.cursor().execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'redis-cred%')")
             db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'redis-cred%'")
             db.commit()

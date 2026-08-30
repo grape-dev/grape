@@ -3,15 +3,18 @@
 - 仅清理 `issue_state.stage='done'`（终态）的 Issue workdir，进行中绝不清理；
 - 保留 event.json 档案（独立路径）与 issue_agent_session DB 行（审计）；
 - 跳过有 dispatched/running 任务的会话；
-- 对超 TTL 未活跃的僵尸 workdir 兜底清理。
+- 对超 TTL 未活跃的僵尸 workdir 兜底清理；
+- 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
 import asyncio, os, shutil, time
 from src import config
-from src.config import log
+from src.config import log, CHAT_CWD_BASE
 from src.session_manager import db, db_lock
 
 _SWEEP_INTERVAL = int(os.environ.get("SWEEPER_INTERVAL_SECONDS", "900"))  # 15min
-_ZOMBIE_TTL_DAYS = int(os.environ.get("SWEEPER_ZOMBIE_TTL_DAYS", "7"))
+_ZOMBIE_TTL_DAYS = int(os.environ.get("SWEEPER_ZOMBIE_TTL_DAYS", "3"))  # 非 done issue workdir 3 天不活跃清理
+# Chat / feishu / vod 目录 TTL（默认 3 天未活跃清理，比 issue 的 7 天更短——这些是临时会话目录）
+_SESSION_DIR_TTL_DAYS = int(os.environ.get("SWEEPER_SESSION_DIR_TTL_DAYS", "3"))
 
 _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")
 
@@ -88,6 +91,122 @@ def _zombie_issue_dirs(ttl: float) -> list[str]:
                         _check(os.path.join(issues, num))
     except Exception as e:
         log.warning(f"sweeper zombie scan failed: {e}")
+    return out
+
+
+def _active_chat_conv_ids() -> set[str]:
+    """有活跃任务的 chat conversation ID 集合（不清理）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM chat_conversations WHERE status='active'")
+            return {r[0] for r in c.fetchall()}
+    except Exception:
+        return set()
+
+
+def _stale_session_dirs(ttl: float) -> list[str]:
+    """超 TTL 未活跃的 chat / feishu / vod / history 目录。
+
+    chat: {CHAT_CWD_BASE}/chat/{user_id}/{conv_id}/  — 跳过 DB 中 status='active' 的会话
+    feishu: {WORKSPACE_DIR}/feishu/{repo}/{sess}/
+    vod: {WORKSPACE_DIR}/vod/{repo}/
+    history: {WORKSPACE_DIR}/history/{account}/{repo}/
+    """
+    out = []
+    now = time.time()
+
+    def _check_dir(p: str):
+        if not os.path.isdir(p):
+            return
+        try:
+            mtime = os.path.getmtime(p)
+        except Exception:
+            return
+        if now - mtime > ttl:
+            out.append(p)
+
+    # --- chat 目录 --- 
+    try:
+        active_convs = _active_chat_conv_ids()
+        chat_base = os.path.join(CHAT_CWD_BASE, "chat")
+        if os.path.isdir(chat_base):
+            for user_dir in os.listdir(chat_base):
+                user_path = os.path.join(chat_base, user_dir)
+                if not os.path.isdir(user_path):
+                    continue
+                for conv_dir in os.listdir(user_path):
+                    conv_path = os.path.join(user_path, conv_dir)
+                    if not os.path.isdir(conv_path):
+                        continue
+                    # 跳过活跃会话
+                    if conv_dir in active_convs:
+                        continue
+                    _check_dir(conv_path)
+    except Exception as e:
+        log.warning(f"sweeper chat dir scan failed: {e}")
+
+    # --- chat 旧残留目录（WORKSPACE_DIR/chat/）---
+    # 2026-08-27 修复前 chat.py/tasks.py 曾误用 WORKSPACE_DIR 而非 CHAT_CWD_BASE，
+    # 导致部分 chat 目录创建在 {WORKSPACE_DIR}/chat/ 下。新代码不再写入此路径，
+    # 但 sweeper 需扫描兜底清理，否则孤儿目录永久堆积。
+    try:
+        legacy_chat_base = os.path.join(config.WORKSPACE_DIR, "chat")
+        if os.path.isdir(legacy_chat_base):
+            for user_dir in os.listdir(legacy_chat_base):
+                user_path = os.path.join(legacy_chat_base, user_dir)
+                if not os.path.isdir(user_path):
+                    continue
+                for conv_dir in os.listdir(user_path):
+                    conv_path = os.path.join(user_path, conv_dir)
+                    if not os.path.isdir(conv_path):
+                        continue
+                    # 旧残留目录无需跳过 active——正确位置在 CHAT_CWD_BASE 下
+                    _check_dir(conv_path)
+            # 如果 legacy_chat_base 本身已空，也清理掉
+            try:
+                if not os.listdir(legacy_chat_base):
+                    os.rmdir(legacy_chat_base)
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning(f"sweeper legacy chat dir scan failed: {e}")
+
+    # --- feishu 目录 ---
+    try:
+        feishu_base = os.path.join(config.WORKSPACE_DIR, "feishu")
+        if os.path.isdir(feishu_base):
+            for repo_dir in os.listdir(feishu_base):
+                repo_path = os.path.join(feishu_base, repo_dir)
+                if not os.path.isdir(repo_path):
+                    continue
+                for sess_dir in os.listdir(repo_path):
+                    _check_dir(os.path.join(repo_path, sess_dir))
+    except Exception as e:
+        log.warning(f"sweeper feishu dir scan failed: {e}")
+
+    # --- vod 目录 ---
+    try:
+        vod_base = os.path.join(config.WORKSPACE_DIR, "vod")
+        if os.path.isdir(vod_base):
+            for repo_dir in os.listdir(vod_base):
+                _check_dir(os.path.join(vod_base, repo_dir))
+    except Exception as e:
+        log.warning(f"sweeper vod dir scan failed: {e}")
+
+    # --- history 目录 ---
+    try:
+        hist_base = os.path.join(config.WORKSPACE_DIR, "history")
+        if os.path.isdir(hist_base):
+            for account_dir in os.listdir(hist_base):
+                account_path = os.path.join(hist_base, account_dir)
+                if not os.path.isdir(account_path):
+                    continue
+                for repo_dir in os.listdir(account_path):
+                    _check_dir(os.path.join(account_path, repo_dir))
+    except Exception as e:
+        log.warning(f"sweeper history dir scan failed: {e}")
+
     return out
 
 
@@ -191,6 +310,33 @@ def sweep_once() -> int:
                 cleaned += 1
             except Exception as e:
                 log.warning(f"sweeper zombie cleanup failed {p}: {e}")
+        # chat / feishu / vod / history 目录 TTL 清理
+        session_ttl = _SESSION_DIR_TTL_DAYS * 86400
+        session_cleaned = 0
+        for p in _stale_session_dirs(session_ttl):
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+                session_cleaned += 1
+            except Exception as e:
+                log.warning(f"sweeper session dir cleanup failed {p}: {e}")
+        if session_cleaned:
+            log.info(f"sweeper cleaned {session_cleaned} stale session dir(s)")
+            cleaned += session_cleaned
+        # /tmp 全局兜底清理（2026-08-29 修复）：
+        # worker /tmp 是 tmpfs（3.7G），被 hermes-acp-*/hermes-results/hermes-iso-*/
+        # pytest-of-root/pip-unpack-* 等残留堆积撑满 → curl ENOSPC → 静默安装失败。
+        # _cleanup_task_tmp 在任务完成时清理已知的 agent 工作产物，但异常退出/进程被杀
+        # 时残留不被清理。这里在 sweeper 周期（15min）兜底扫描 /tmp 清理过期文件。
+        tmp_cleaned = _sweep_tmp_residuals()
+        if tmp_cleaned:
+            log.info(f"sweeper cleaned {tmp_cleaned} /tmp residual dir(s)/file(s)")
+            cleaned += tmp_cleaned
+        # workspace repo 级别清理：project-info/codebase 目录在不活跃 repo 上堆积严重
+        # （单个 project-info 可达 496M，多个 repo 合计 GB 级）
+        ws_cleaned = _sweep_stale_workspace_repos()
+        if ws_cleaned:
+            log.info(f"sweeper cleaned {ws_cleaned} stale workspace repo dir(s)")
+            cleaned += ws_cleaned
         if cleaned:
             log.info(f"sweeper cleaned {cleaned} issue workdir(s)")
         return cleaned
@@ -199,11 +345,285 @@ def sweep_once() -> int:
         return 0
 
 
+_POLL_INTERVAL = int(os.environ.get("GRAPE_POLL_INTERVAL_SECONDS", "60"))
+
+
+def _sweep_tmp_residuals() -> int:
+    """兜底清理 /tmp 下 agent 残留（sweeper 每 15min 调一次）。
+
+    清理目标：
+    - hermes-acp-* / hermes-iso-* / hermes-sandbox-* / hermes-snap-*：hermes 引擎隔离目录残留
+    - hermes-results：agent call 结果缓存（只增不删）
+    - pytest-of-root：测试残留
+    - pip-unpack-* / pip-metadata-*：pip 安装临时目录
+    - tf-deploy-* / blog-* / ptmpl_*：SRE/VOD agent 工作产物
+
+    安全策略：
+    - 只清理 /tmp 下已知前缀的文件/目录，不碰其他进程
+    - 目录按 mtime 判断：超过 1 小时未修改才清理（避免清到正在执行的任务）
+    - 单文件（如 hermes-results 内的文件）同样按 mtime 判断
+    """
+    import glob as _glob
+    import time as _time
+
+    _TMP_TTL_SECONDS = 3600  # 1 小时
+    _now = _time.time()
+    cleaned = 0
+
+    # 目录类清理（按前缀 glob + mtime 判断）
+    _dir_prefixes = [
+        "/tmp/hermes-acp-*",
+        "/tmp/hermes-iso-*",
+        "/tmp/hermes-sandbox-*",
+        "/tmp/hermes-snap-*",
+        "/tmp/tf-deploy-*",
+        "/tmp/tf-sys-xhy*",
+        "/tmp/blog-build-*",
+        "/tmp/blog-deploy*",
+        "/tmp/blog-gen*",
+        "/tmp/blog-publish-*",
+        "/tmp/pip-unpack-*",
+        "/tmp/pip-metadata-*",
+        "/tmp/pytest-of-root",
+        "/tmp/tirith-install-*",
+    ]
+    for pattern in _dir_prefixes:
+        for path in _glob.glob(pattern):
+            try:
+                mtime = os.path.getmtime(path)
+                if _now - mtime < _TMP_TTL_SECONDS:
+                    continue  # 仍在使用中
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                    cleaned += 1
+                elif os.path.isfile(path):
+                    os.remove(path)
+                    cleaned += 1
+            except Exception:
+                pass
+
+    # 文件类清理（hermes-results 目录内的文件 + 散落文件）
+    _file_targets = [
+        "/tmp/hermes-results",
+        "/tmp/tf-state-backup.json",
+        "/tmp/inventory_state.json",
+        "/tmp/inventory*.json",
+        "/tmp/blog-sys-*.tar.gz",
+        "/tmp/.*.so",
+    ]
+    for pattern in _file_targets:
+        for path in _glob.glob(pattern):
+            try:
+                if os.path.isdir(path):
+                    # 目录内逐文件清理（保留目录本身）
+                    for f in os.listdir(path):
+                        fp = os.path.join(path, f)
+                        try:
+                            mtime = os.path.getmtime(fp)
+                            if _now - mtime < _TMP_TTL_SECONDS:
+                                continue
+                            if os.path.isfile(fp):
+                                os.remove(fp)
+                                cleaned += 1
+                        except Exception:
+                            pass
+                elif os.path.isfile(path):
+                    mtime = os.path.getmtime(path)
+                    if _now - mtime < _TMP_TTL_SECONDS:
+                        continue
+                    os.remove(path)
+                    cleaned += 1
+            except Exception:
+                pass
+
+    return cleaned
+
+
+def _sweep_stale_workspace_repos() -> int:
+    """清理不活跃 repo 的 project-info / codebase 目录。
+
+    grape-workspaces/{owner}/{repo}/ 下有两个 repo 级别的大目录：
+    - project-info/：codegraph 基线数据（单个可达 496M）
+    - codebase/：代码克隆快照（单个可达 275M）
+
+    这些目录不属于单个 issue workdir，sweeper 的 issue 清理逻辑覆盖不到。
+    当 repo 没有任何活跃 issue（dispatched/running）且目录超过 TTL 未修改时清理。
+
+    安全策略：
+    - 只清理 project-info 和 codebase 两个子目录，不删整个 repo 目录
+    - 只清理非活跃 repo（无 dispatched/running 任务）
+    - 超过 3 天未修改才清理
+    """
+    import time as _time
+    _REPO_TTL = 3 * 86400  # 3 天
+    _now = _time.time()
+    cleaned = 0
+
+    # 获取有活跃任务的 repo_key 集合
+    active_repos = set()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT DISTINCT repo_key FROM agent_tasks WHERE status IN ('dispatched','running')")
+            active_repos = {r[0] for r in c.fetchall()}
+    except Exception:
+        pass
+
+    workspace = config.WORKSPACE_DIR
+    if not os.path.isdir(workspace):
+        return 0
+
+    try:
+        for owner in os.listdir(workspace):
+            owner_dir = os.path.join(workspace, owner)
+            if not os.path.isdir(owner_dir):
+                continue
+            for repo_name in os.listdir(owner_dir):
+                repo_dir = os.path.join(owner_dir, repo_name)
+                if not os.path.isdir(repo_dir):
+                    continue
+                # 构造 repo_key（workspace 用 owner/repo 结构，repo_key 是 gitcode:owner/repo）
+                repo_key = f"gitcode:{owner}/{repo_name}"
+                if repo_key in active_repos:
+                    continue  # 有活跃任务，跳过
+                # 检查 issue 目录是否有活跃任务
+                issues_root = os.path.join(repo_dir, "issues")
+                has_active_issue = False
+                if os.path.isdir(issues_root):
+                    for num in os.listdir(issues_root):
+                        issue_dir = os.path.join(issues_root, num)
+                        if not os.path.isdir(issue_dir):
+                            continue
+                        try:
+                            mtime = os.path.getmtime(issue_dir)
+                            if _now - mtime < _REPO_TTL:
+                                has_active_issue = True
+                                break
+                        except Exception:
+                            pass
+                if has_active_issue:
+                    continue
+                # 清理 project-info 和 codebase
+                for subdir in ("project-info", "codebase"):
+                    target = os.path.join(repo_dir, subdir)
+                    if not os.path.isdir(target):
+                        continue
+                    try:
+                        mtime = os.path.getmtime(target)
+                        if _now - mtime < _REPO_TTL:
+                            continue
+                        shutil.rmtree(target, ignore_errors=True)
+                        cleaned += 1
+                        log.info(f"sweeper cleaned stale workspace dir: {target}")
+                    except Exception as e:
+                        log.warning(f"sweeper workspace cleanup failed {target}: {e}")
+    except Exception as e:
+        log.warning(f"sweeper workspace repo scan failed: {e}")
+    return cleaned
+
+
+def _poll_gitcode_issues_once() -> int:
+    """Poll GitCode for new issues on managed repos (webhook fallback).
+    For each managed repo with a bot token, fetch recent open issues via GitCode API.
+    If an issue has no corresponding event in DB (no issue_opened event),
+    inject a synthetic webhook to trigger the pipeline.
+    """
+    import json as _json
+    import urllib.request as _urllib
+    try:
+        from src.session_manager import db, db_lock
+        from src.user.db import get_gitcode_token
+        from src.repo_key import to_repo_key
+    except Exception:
+        return 0
+
+    triggered = 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key, gitcode_webhook_token FROM managed_repos WHERE bot_gitcode_token != '' OR gitcode_webhook_token != ''")
+            repos = c.fetchall()
+        if not repos:
+            return 0
+
+        for repo_key, webhook_token in repos:
+            try:
+                owner, repo_name = repo_key.split(":")[-1].split("/")
+                tok = get_gitcode_token(repo_key=repo_key) or ""
+                if not tok:
+                    continue
+                # Fetch recent open issues (last 20)
+                req = _urllib.Request(
+                    f"https://api.gitcode.com/api/v5/repos/{owner}/{repo_name}/issues?state=open&per_page=20&direction=desc",
+                    headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
+                resp = _urllib.urlopen(req, timeout=15)
+                issues = _json.loads(resp.read())
+                if not issues:
+                    continue
+
+                for issue in issues:
+                    num = issue.get("number")
+                    if not num:
+                        continue
+                    issue_id = f"#{num}"
+
+                    # Check if this issue already has an event
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("SELECT 1 FROM events WHERE repo_key=? AND issue_id=? LIMIT 1", (repo_key, issue_id))
+                        if c.fetchone():
+                            continue  # already has events
+
+                    # New issue without events — inject synthetic webhook
+                    title = issue.get("title", "")
+                    body = issue.get("body", "")
+                    log.info(f"poll: new issue {issue_id} on {repo_key}: {title[:60]}, injecting webhook")
+
+                    # Call webhook endpoint internally
+                    payload = _json.dumps({
+                        "action": "open",
+                        "issue": {"number": num, "title": title, "body": body[:2000]},
+                        "repository": {"full_name": f"{owner}/{repo_name}", "name": repo_name}
+                    }).encode()
+
+                    webhook_req = _urllib.Request(
+                        f"http://127.0.0.1:38080/webhook/gitcode",
+                        data=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-GitCode-Token": webhook_token or "poll",
+                            "X-Gitcode-Event": "issue_opened",
+                        },
+                        method="POST")
+                    try:
+                        wh_resp = _urllib.urlopen(webhook_req, timeout=15)
+                        result = _json.loads(wh_resp.read())
+                        if result.get("seq"):
+                            triggered += 1
+                            log.info(f"poll: injected issue {issue_id} -> seq={result.get('seq')}")
+                    except Exception as e:
+                        log.warning(f"poll: inject failed for {issue_id}: {e}")
+
+            except Exception as e:
+                log.warning(f"poll: error checking {repo_key}: {e}")
+
+        if triggered:
+            log.info(f"poll: triggered {triggered} new issue(s)")
+    except Exception as e:
+        log.warning(f"poll_gitcode_issues failed: {e}")
+    return triggered
+
+
 async def sweep_loop():
-    """服务端后台周期清理（main.py lifespan 挂载）。"""
+    """服务端后台周期清理 + GitCode issue 轮询（main.py lifespan 挂载）。"""
+    import asyncio as _aio
     while True:
         try:
-            sweep_once()
+            await _aio.to_thread(sweep_once)
         except Exception as e:
             log.warning(f"sweeper loop error: {e}")
-        await asyncio.sleep(_SWEEP_INTERVAL)
+        try:
+            await _aio.to_thread(_poll_gitcode_issues_once)
+        except Exception as e:
+            log.warning(f"poll loop error: {e}")
+        await asyncio.sleep(min(_SWEEP_INTERVAL, _POLL_INTERVAL))

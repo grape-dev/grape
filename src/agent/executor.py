@@ -177,8 +177,17 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
         try:
             from src.user.db import get_credentials
             for c in get_credentials(user_id):
-                for k, v in c.get("config", {}).items():
-                    env[k.upper()] = str(v)
+                provider = c.get("provider", "")
+                cfg = c.get("config", {})
+                if provider == "huawei_cloud":
+                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
+                elif provider == "codearts":
+                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
+                else:
+                    for k, v in cfg.items():
+                        env[k.upper()] = str(v)
         except Exception as e:
             log.warning(f"Failed to inject user credentials: {e}")
 
@@ -291,8 +300,17 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         try:
             from src.user.db import get_credentials
             for c in get_credentials(user_id):
-                for k, v in c.get("config", {}).items():
-                    env[k.upper()] = str(v)
+                provider = c.get("provider", "")
+                cfg = c.get("config", {})
+                if provider == "huawei_cloud":
+                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
+                elif provider == "codearts":
+                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
+                else:
+                    for k, v in cfg.items():
+                        env[k.upper()] = str(v)
         except Exception as e:
             log.warning(f"Failed to inject user credentials: {e}")
 

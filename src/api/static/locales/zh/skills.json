@@ -1,0 +1,93 @@
+{
+  "loading": "加载中...",
+  "scope": {
+    "official": "官方技能",
+    "repo": "仓库技能",
+    "user": "个人技能"
+  },
+  "search": {
+    "placeholder": "搜索技能..."
+  },
+  "action": {
+    "add_skill": "＋ 新增技能",
+    "convert_to_repo": "转为仓库技能",
+    "view": "查看",
+    "delete": "删除",
+    "cancel": "取消",
+    "upload": "上传",
+    "close": "✕ 关闭",
+    "view_skill_md": "📖 查看 SKIL.md",
+    "download_skill": "⬇ 下载技能",
+    "download_template": "📄 下载技能模板 ZIP",
+    "back_to_library": "← 返回 Skills Library",
+    "back_to_huawei": "← 返回华为云技能包",
+    "download_skill_title": "下载技能包 zip"
+  },
+  "toast": {
+    "sync_found": "发现新增官方技能，已同步",
+    "upload_success": "上传成功",
+    "upload_failed": "上传失败: {{msg}}",
+    "validation_failed": "Skill 校验失败（{{count}} 项）：\n{{errors}}",
+    "select_zip": "请选择技能 ZIP 文件",
+    "select_agent_type": "请选择技能类型（所属 Agent）",
+    "deleted": "已删除",
+    "delete_failed": "删除失败: {{msg}}",
+    "select_repo_first": "请先选择当前仓库",
+    "convert_success": "转换成功",
+    "convert_failed": "转换失败: {{msg}}",
+    "download_failed": "下载技能失败，请稍后重试",
+    "load_failed": "加载失败"
+  },
+  "empty": {
+    "no_repo_selected": "未选择仓库，请先在仓库页面选择当前仓库。",
+    "no_skills": "当前页签暂无技能。",
+    "no_sub_skills": "（暂无子技能）",
+    "no_content": "(无内容)",
+    "no_detail": "(无详细内容)"
+  },
+  "error": {
+    "load_list_failed": "加载技能列表失败",
+    "load_detail_failed": "加载失败: {{msg}}",
+    "load_failed": "加载失败"
+  },
+  "confirm": {
+    "delete_skill": "确定删除技能 {{name}} 吗？",
+    "convert_skill": "将个人技能「{{name}}」复制到仓库 {{repo}}？\n\n原个人技能保留，复制后可在该仓库的 DevOps/Chat Agent 中配置。"
+  },
+  "upload": {
+    "title": "上传技能 (ZIP)",
+    "type": "类型",
+    "repo": "仓库",
+    "agent_type": "技能类型 *",
+    "select_agent": "-- 请选择技能所属 Agent --",
+    "file_label": "选择技能 ZIP 文件（目录名 = 技能名，内含 SKILL.md）",
+    "format_req": "格式要求：",
+    "uploading": "上传中..."
+  },
+  "agent_type": {
+    "vod": "VOD Agent (♫ 声音分析)",
+    "issue": "Issue Agent (⚠ 需求管理)",
+    "coding": "Coding Agent (⚙ 代码实现)",
+    "qa": "QA Agent (✔ 审查验证)",
+    "sre": "SRE Agent (♡ 构建部署)",
+    "chat": "Chat Agent (☎ 对话助手)"
+  },
+  "huawei": {
+    "package_name": "华为云技能包",
+    "loading_sub": "⏳ 加载子技能...",
+    "loading": "⏳ 加载中...",
+    "files_count": "{{count}} 个文件",
+    "back": "返回华为云技能包",
+    "no_detail": "(无详细内容)",
+    "no_sub_skill": "（无子技能）",
+    "no_content": "(无内容)",
+    "reference_docs": "参考文档"
+  },
+  "label": {
+    "reference_docs": "📎 参考文档"
+  },
+  "info_title": "技能信息",
+  "info_name": "名称",
+  "info_agent_type": "Agent 类型",
+  "info_type": "类型"
+}

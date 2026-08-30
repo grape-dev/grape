@@ -1,14 +1,19 @@
 # 工作目录按 Issue 统一隔离改造方案（workdir-issue-centric-design.md）
 
-> 版本：v0.2（设计稿，未实施）
-> 日期：2026-08-15
-> 状态：待评审
+> 版本：v0.3
+> 日期：2026-08-27（v0.3 更新）/ 2026-08-15（v0.2 原稿）
+> 状态：部分实施 — Issue 优先路径迁移已完成，onboarding 归并待实施
 > 前置：`multi-issue-isolation-design.md`（现结构来源）/ `event_archive` 去前缀改造（`5ee7716`）
 > 变更：v0.2 补充 onboarding 归并（废弃 `onboarding-agent`，落入 vod 的 `issues/#1/#2/vod/`），
 >       新增权限根因回归测试（§五），修正无关联 Issue 表述（§二，`#0`=无关联，不含 onboarding）
+> v0.3 变更：经代码核查，`repogit.py:50` 的 `issue_dir_for()` 已实施 issue 优先路径
+>       `issues/{n}/{agent_type}/`，§1.1 表中 event_pipeline.py/repogit.py 的旧 agent 优先
+>       路径已过时。§二目标结构中 cwd/worktree 迁移已完成，知识文件路径待对齐。
+>       本地工作空间已清理旧残留目录（chat 孤儿、history 冒号目录、测试占位符目录）。
 > 结论摘要：将任务工作目录从 `{owner}/{repo}/{agent_type}/issues/{n}/` 统一迁移到
 > `{owner}/{repo}/issues/{n}/{agent_type}/`，与事件归档 / issue 知识目录的 issue 优先
 > 结构完全对齐，消除三套路径并存；onboarding 归并后同时根治 #701/#702 权限卡死根因。
+> **实施进度**：✅ cwd/worktree 迁移（repogit.py） ✅ 目录清理  ⬜ knowledge 路径对齐  ⬜ onboarding 归并
 
 ---
 
@@ -18,12 +23,16 @@
 
 当前同一 repo 下存在三种工作区路径结构：
 
-| 用途 | 结构 | 位置 |
-|---|---|---|
-| 任务工作目录（cwd / git worktree） | `{owner}/{repo}/{agent_type}/issues/{n}/` | `event_pipeline.py:554`、`repogit.py:50` |
-| issue 级知识文件 | `{owner}/{repo}/issues/{n}/knowledge.md` | `knowledge.py:39` |
-| 事件归档 event.json | `{owner}/{repo}/issues/{n}/event.json` | `event_archive.py:58` |
-| issue_agent 级知识文件 | `{owner}/{repo}/{agent_type}/issues/{n}/knowledge.md` | `knowledge.py:41` |
+| 用途 | 结构 | 位置 | 状态 |
+|---|---|---|---|
+| ~~任务工作目录（cwd / git worktree）~~ | ~~`{owner}/{repo}/{agent_type}/issues/{n}/`~~ | ~~`event_pipeline.py:554`、`repogit.py:50`~~ | ✅ 已迁移到 issue 优先 |
+| issue 级知识文件 | `{owner}/{repo}/issues/{n}/knowledge.md` | `knowledge.py:39` | 不变 |
+| 事件归档 event.json | `{owner}/{repo}/issues/{n}/event.json` | `event_archive.py:58` | 不变 |
+| issue_agent 级知识文件 | `{owner}/{repo}/{agent_type}/issues/{n}/knowledge.md` | `knowledge.py:41` | ⬜ 待对齐 |
+
+> **v0.3 更新**：`repogit.py:50` 的 `issue_dir_for()` 已返回 `issues/{n}/{agent_type}/`（issue 优先），
+> cwd/worktree 迁移已完成。`knowledge.py:41` 的 issue_agent 级知识仍使用 `{agent_type}/issues/{n}/`
+> 旧路径，待后续对齐。
 
 `{agent_type}/issues/{n}`（agent 优先）与 `issues/{n}/event.json`、`issues/{n}/knowledge.md`（issue 优先）
 并存，且 `{agent_type}/issues/{n}` 这类 agent 名与 `issues` 子目录同名时（如 `issue/issues/2`）

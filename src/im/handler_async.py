@@ -6,7 +6,7 @@
   - 纯逻辑（bind/clean 意图、repo 解析、用户归属）内联本模块，无同步 HTTP；
     IO 型命令（/bind、/refresh 的群成员↔协作者映射同步）走 await api 异步方法。
 """
-import re, os, asyncio, time
+import re, os, asyncio, time, json
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -73,9 +73,47 @@ def _candidate_card(emoji: str, title: str, items: list[str], page: int, total_p
     return "\n".join(lines)
 
 
+async def _send_card_reply(ctx, api, msg_id, card):
+    """发送自定义卡片回复，返回是否成功
+
+    自动在卡片底部追加[帮助]按钮，与 reply_card 行为一致。
+    """
+    # 追加 [帮助] 按钮（如果卡片还没有）
+    elements = card.get("elements", [])
+    has_help = any(
+        any(btn.get("value", {}).get("cmd") == "/help" for btn in el.get("actions", []))
+        for el in elements if el.get("tag") == "action"
+    )
+    if not has_help:
+        elements.append({
+            "tag": "action",
+            "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]
+        })
+        card["elements"] = elements
+        log.info(f"[{ctx.name}] _send_card_reply: appended [帮助] button, elements={len(elements)}")
+    token = await api._ensure_token(ctx)
+    if not token:
+        return False
+    session = await api._get_session()
+    url = f"https://open.feishu.cn/open-apis/im/v1/messages/{msg_id}/reply"
+    payload = {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            data = await resp.json()
+            if data.get("code", -1) == 0:
+                ctx.metrics.messages_sent += 1
+                log.info(f"[{ctx.name}] _send_card_reply ok")
+                return True
+            log.warning(f"[{ctx.name}] _send_card_reply failed: code={data.get('code')} msg={data.get('msg','')[:50]}")
+            return False
+    except Exception as e:
+        log.warning(f"[{ctx.name}] _send_card_reply error: {e}")
+        return False
+
 async def _send_repo_card(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str,
                           uid: int, account: str, page: int = 1) -> bool:
-    """生成并发送 `/repo` 卡片（候选=该用户名下**已托管**仓库，未托管不显示），设置 pending。
+    """生成并发送 `/repo` 卡片（候选仓库显示为可点击按钮），设置 pending。
 
     供 `/repo` 命令与"未绑定仓库"兜底共用（自动触发卡片，feishu-repo-navigation-commands-design.md）。
     无候选返回 False（调用方给引导文案）。
@@ -95,8 +133,22 @@ async def _send_repo_card(ctx: "BotContext", api: "FeishuAsync", chat_id: str, m
         marker = "【绑定中】" if (r["repo_key"] == bound or full == bound) else ""
         items.append(f"{full}（{role}）{marker}")
     _set_pending_selection(chat_id, {"action": "repo", "repo_key": bound, "items": repos, "page": page})
-    await api.reply_card(ctx, msg_id, _candidate_card("📁", f"已托管仓库列表（共 {len(repos)} 个）", items, page, total_pages, "/repo"))
-    return True
+
+    # 文字列表 + 纯数字按钮
+    text = _candidate_card("📁", f"已托管仓库列表（共 {len(repos)} 个）", items, page, total_pages, "/repo")
+    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": text}}]
+    for i in range(0, len(items), 3):
+        row_btns = [{"tag": "button", "text": {"tag": "plain_text", "content": str(j+1)},
+                     "value": {"cmd": f"/bind {j+1}"}} for j in range(i, min(i+3, len(items)))]
+        elements.append({"tag": "action", "actions": row_btns})
+    elements.append({"tag": "action", "actions": [
+        {"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]})
+
+    ok = await _send_card_reply(ctx, api, msg_id, {
+        "header": {"title": {"tag": "plain_text", "content": "📁 选择仓库"}, "template": "blue"},
+        "elements": elements,
+    })
+    return ok
 
 
 # 确认/否认意图
@@ -176,7 +228,8 @@ def get_user_id_by_app_id(app_id: str) -> int | None:
 
 async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
                                 text: str, chat_id: str, sender_id: str, db,
-                                account: str = "", msg_id: str = "") -> str:
+                                account: str = "", msg_id: str = "",
+                                sender_open_id: str = "") -> str:
     """异步命令处理（卡片化导航 feishu-repo-navigation-commands-design.md）。
 
     新命令 /repo /chat /task /new /where /cancel /help 用 reply_card 回复并返回空串（调用方跳过文本回复）；
@@ -203,7 +256,7 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
         bound = _current_bound_repo(chat_id, account, db)
         if not bound:
-            await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。")
+            await _send_card_reply(ctx, api, msg_id, _NO_REPO_CARD)
             return ""
         from src.session_manager import get_user_conversations
         convs = get_user_conversations(uid, repo_key=bound, limit=20)
@@ -219,7 +272,20 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             cur = " 👈当前" if cv.get("im_channel_id") == chat_id else ""
             items.append(f"[{tag}] {cv.get('title') or '新对话'}{cur}")
         _set_pending_selection(chat_id, {"action": "chat", "repo_key": bound, "items": convs, "page": page})
-        await api.reply_card(ctx, msg_id, _candidate_card("📄", f"{bound} 会话列表", items, page, total_pages, "/chat"))
+        text = _candidate_card("📄", f"{bound} 会话列表", items, page, total_pages, "/chat")
+        elements = [{"tag": "div", "text": {"tag": "lark_md", "content": text}}]
+        for i in range(0, len(items), 3):
+            row_btns = [{"tag": "button", "text": {"tag": "plain_text", "content": str(j+1)},
+                         "value": {"cmd": f"/join {j+1}"}} for j in range(i, min(i+3, len(items)))]
+            elements.append({"tag": "action", "actions": row_btns})
+        elements.append({"tag": "action", "actions": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "🔄 新建会话"}, "value": {"cmd": "/new"}},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}},
+        ]})
+        await _send_card_reply(ctx, api, msg_id, {
+            "header": {"title": {"tag": "plain_text", "content": "📄 选择会话"}, "template": "blue"},
+            "elements": elements,
+        })
         return ""
 
     if cmd == "/task":
@@ -227,7 +293,7 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
         bound = _current_bound_repo(chat_id, account, db)
         if not bound:
-            await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。")
+            await _send_card_reply(ctx, api, msg_id, _NO_REPO_CARD)
             return ""
         c = db.cursor()
         c.execute("SELECT id, issue_number, title, status FROM tasks WHERE user_id=? AND repo_key=? ORDER BY id DESC LIMIT 20",
@@ -241,7 +307,19 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
         page = min(page, total_pages)
         items = [f"Issue #{t[1]} · {t[3]} · {t[2] or ''}" for t in tasks[(page - 1) * _PENDING_SELECT_PAGE_SIZE: page * _PENDING_SELECT_PAGE_SIZE]]
         _set_pending_selection(chat_id, {"action": "task", "repo_key": bound, "items": tasks, "page": page})
-        await api.reply_card(ctx, msg_id, _candidate_card("📋", f"{bound} 任务列表", items, page, total_pages, "/task"))
+        text = _candidate_card("📋", f"{bound} 任务列表", items, page, total_pages, "/task")
+        elements = [{"tag": "div", "text": {"tag": "lark_md", "content": text}}]
+        for i in range(0, len(items), 3):
+            row_btns = [{"tag": "button", "text": {"tag": "plain_text", "content": str(j+1)},
+                         "value": {"cmd": f"/join {j+1}"}} for j in range(i, min(i+3, len(items)))]
+            elements.append({"tag": "action", "actions": row_btns})
+        elements.append({"tag": "action", "actions": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}},
+        ]})
+        await _send_card_reply(ctx, api, msg_id, {
+            "header": {"title": {"tag": "plain_text", "content": "📋 任务列表"}, "template": "blue"},
+            "elements": elements,
+        })
         return ""
 
     if cmd == "/new":
@@ -249,7 +327,7 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
         bound = _current_bound_repo(chat_id, account, db)
         if not bound:
-            await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。")
+            await _send_card_reply(ctx, api, msg_id, _NO_REPO_CARD)
             return ""
         from src.session_manager import create_conversation, join_feishu_chat
         cid = create_conversation(uid, bound)
@@ -306,10 +384,77 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
         return ""
 
     if cmd in ("/help", "/start"):
-        await api.reply_card(ctx, msg_id, _HELP_CARD)
+        await api.send_quick_cmd_card(ctx, sender_open_id)
+        log.info(f"Command: /help -> send_quick_cmd_card to open_id={sender_open_id[:20]}")
+        return ""
+
+    # /bind N — 数字按钮直接绑定仓库
+    if cmd == "/bind" and len(parts) >= 2 and parts[1].isdigit():
+        num = int(parts[1])
+        pending = _get_pending_selection(chat_id)
+        log.info(f"[/bind] num={num} pending={'found' if pending else 'NONE'} chat={chat_id[:20]}")
+        if pending and pending.get("action") == "repo":
+            all_items = pending.get("items", [])
+            page = int(pending.get("page") or 1)
+            page_size = int(pending.get("page_size") or 20)
+            idx = (page - 1) * page_size + (num - 1)  # 页码 → 全局索引
+            log.info(f"[/bind] items_count={len(all_items)} page={page} idx={idx}")
+            if 0 <= idx < len(all_items):
+                r = all_items[idx]
+                repo_key = r["repo_key"]
+                log.info(f"[/bind] binding repo_key={repo_key}")
+                await _bind_repo(ctx, api, chat_id, msg_id, repo_key, account)
+            else:
+                await api.reply_card(ctx, msg_id, f"**⚠️ 无效编号 {num}**\n回复 `0` 取消。")
+        return ""
+
+    # /join N — 数字按钮选择会话/任务（chat/task 卡片按钮）
+    if cmd == "/join" and len(parts) >= 2 and parts[1].isdigit():
+        num = parts[1]
+        pending = _get_pending_selection(chat_id)
+        log.info(f"[/join] num={num} pending={'found' if pending else 'NONE'} chat={chat_id[:20]}")
+        if pending and pending.get("action") in ("chat", "task"):
+            await _handle_selection(ctx, api, chat_id, msg_id, num, pending)
+        elif pending and pending.get("action") == "repo":
+            # 兼容：/join 也能选仓库
+            await _handle_selection(ctx, api, chat_id, msg_id, num, pending)
+        else:
+            await api.reply_card(ctx, msg_id, "**⚠️ 请先使用 `/repo` 或 `/chat` 或 `/task` 选择列表。**")
         return ""
 
     return ""
+
+
+_BIND_SUCCESS_CARD_TPL = {
+    "header": {"title": {"tag": "plain_text", "content": "✅ 绑定成功"}, "template": "green"},
+    "elements": [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "**✅ 已绑定 `{repo_key}`**\n使用 /chat 选择会话，或直接开始提问。"}},
+        {"tag": "action", "actions": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "📋 选择会话"}, "value": {"cmd": "/chat"}},
+        ]},
+    ],
+}
+
+
+async def _send_bind_success_card(ctx, api, msg_id, repo_key):
+    """发送绑定成功卡片（含[选择会话]按钮）"""
+    import copy
+    card = copy.deepcopy(_BIND_SUCCESS_CARD_TPL)
+    card["elements"][0]["text"]["content"] = card["elements"][0]["text"]["content"].format(repo_key=repo_key)
+    await _send_card_reply(ctx, api, msg_id, card)
+
+
+async def _bind_repo(ctx, api, chat_id, msg_id, repo_key, uid_str):
+    """绑定仓库到当前聊天"""
+    from src.session_manager import db_lock
+    uid = get_user_id_by_app_id(ctx.app_id) or 0
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
+                  (chat_id, repo_key, "gitcode", str(uid), ctx.app_id))
+        c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
+        db.commit()
+    await _send_bind_success_card(ctx, api, msg_id, repo_key)
 
 
 def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_account: str,
@@ -351,7 +496,10 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
     try:
         if num == "0":
             _clear_pending_selection(chat_id)
-            await api.reply_card(ctx, msg_id, "**✅ 已取消选择**")
+            await _send_card_reply(ctx, api, msg_id, {
+                "header": {"title": {"tag": "plain_text", "content": "✅ 已取消"}, "template": "grey"},
+                "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**✅ 已取消选择**"}}],
+            })
             return
         action = pending.get("action")
         uid = get_user_id_by_app_id(ctx.app_id) or 0
@@ -360,7 +508,10 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
         page_size = int(pending.get("page_size") or _PENDING_SELECT_PAGE_SIZE)
         idx = (page - 1) * page_size + (int(num) - 1)
         if idx < 0 or idx >= len(items):
-            await api.reply_card(ctx, msg_id, f"**⚠️ 无效编号 {num}**\n回复 `0` 取消。")
+            await _send_card_reply(ctx, api, msg_id, {
+                "header": {"title": {"tag": "plain_text", "content": "⚠️ 无效编号"}, "template": "red"},
+                "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": f"**⚠️ 无效编号 {num}**\n回复 `0` 取消。"}}],
+            })
             return
         if action == "repo":
             repo = items[idx]
@@ -375,16 +526,22 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
                 c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
                 db.commit()
             _clear_pending_selection(chat_id)
-            await api.reply_card(ctx, msg_id, f"**✅ 已绑定 `{repo_key}`**\n使用 `/chat` 选择会话，或直接开始提问。")
+            await _send_bind_success_card(ctx, api, msg_id, repo_key)
         elif action == "chat":
             cv = items[idx]
             from src.session_manager import join_feishu_chat
             if join_feishu_chat(chat_id, cv["id"], uid):
                 tag = "任务" if cv.get("conv_type") == "task" else "一般"
                 _clear_pending_selection(chat_id)
-                await api.reply_card(ctx, msg_id, f"**✅ 已加入对话**\n[{tag}] {cv.get('title') or '新对话'}（{cv.get('repo_key') or ''}）")
+                await _send_card_reply(ctx, api, msg_id, {
+                    "header": {"title": {"tag": "plain_text", "content": "✅ 已加入对话"}, "template": "green"},
+                    "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": f"**✅ 已加入对话**\n[{tag}] {cv.get('title') or '新对话'}（{cv.get('repo_key') or ''}）"}}],
+                })
             else:
-                await api.reply_card(ctx, msg_id, "**❌ 加入失败**")
+                await _send_card_reply(ctx, api, msg_id, {
+                    "header": {"title": {"tag": "plain_text", "content": "❌ 加入失败"}, "template": "red"},
+                    "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**❌ 加入失败**"}}],
+                })
         elif action == "task":
             tid, issue_number, title, status = items[idx]
             cid = ""
@@ -407,9 +564,15 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
             from src.session_manager import join_feishu_chat
             if cid and join_feishu_chat(chat_id, cid, uid):
                 _clear_pending_selection(chat_id)
-                await api.reply_card(ctx, msg_id, f"**✅ 已进入任务会话**\nIssue #{issue_number} · {title or ''}")
+                await _send_card_reply(ctx, api, msg_id, {
+                    "header": {"title": {"tag": "plain_text", "content": "✅ 已进入任务会话"}, "template": "green"},
+                    "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": f"**✅ 已进入任务会话**\nIssue #{issue_number} · {title or ''}"}}],
+                })
             else:
-                await api.reply_card(ctx, msg_id, "**❌ 进入任务会话失败**")
+                await _send_card_reply(ctx, api, msg_id, {
+                    "header": {"title": {"tag": "plain_text", "content": "❌ 进入失败"}, "template": "red"},
+                    "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**❌ 进入任务会话失败**"}}],
+                })
     except Exception as e:
         log.warning(f"[Chat:{ctx.name}] selection error: {e}")
         try:
@@ -430,6 +593,18 @@ _HELP_CARD = (
     "/help — 本帮助\n\n"
     "回复数字选择 · `0` 取消"
 )
+
+# 未绑定仓库提示卡片（含 [选择仓库] + [帮助] 按钮）
+_NO_REPO_CARD = {
+    "header": {"title": {"tag": "plain_text", "content": "⚠️ 未绑定仓库"}, "template": "red"},
+    "elements": [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。"}},
+        {"tag": "action", "actions": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "📁 选择仓库"}, "value": {"cmd": "/repo"}},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}},
+        ]},
+    ],
+}
 
 
 async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict):
@@ -454,6 +629,23 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         text = parsed["text"]
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
+        # 快捷菜单/card action 没有真实 message_id，优先用 _reply_id（卡片 open_message_id）
+        if not msg_id or not msg_id.startswith("om_"):
+            _reply_id = parsed.get("_reply_id", "")
+            if _reply_id and _reply_id.startswith("om_"):
+                msg_id = _reply_id
+                parsed["message_id"] = msg_id
+            else:
+                sender_open_id = parsed.get("sender_open_id", "")
+                if not sender_open_id:
+                    log.info(f"[Chat:{ctx.name}] card action without open_id, skip")
+                    return
+                _first_msg_id = await api.send_text_to_user(ctx, sender_open_id, "⏳")
+                if not _first_msg_id:
+                    log.warning(f"[Chat:{ctx.name}] failed to get message_id for card action")
+                    return
+                msg_id = _first_msg_id
+                parsed["message_id"] = msg_id
         # account 用于 repo_im_group_binding 隔离（区分不同 Feishu bot app）
         account = ctx.app_id
 
@@ -527,13 +719,13 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
 
         if detect_clean_intent(text):
-            result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id)
+            result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""))
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return
 
         if text.startswith("/"):
-            result = await process_command_async(ctx, api, text, chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id)
+            result = await process_command_async(ctx, api, text, chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""))
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return
@@ -595,7 +787,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 db.commit()
             except Exception as e:
                 log.warning(f"Feishu: auto-bind failed: {e}")
-            await api.reply_card(ctx, msg_id, f"**✅ 已绑定 `{repo_key}`**\n使用 `/chat` 选择会话，或直接开始提问。")
+            await _send_bind_success_card(ctx, api, msg_id, repo_key)
             return
 
         from src.repo_key import to_repo_key, from_repo_key, parse_repo_key
@@ -603,6 +795,13 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         _provider, _owner, _repo = parse_repo_key(repo_key)
         source = _provider
         repository = _repo or from_repo_key(repo_key)
+
+        # 先发 ⏳ 确认消息收到——用户不可接受"没反应"（即使 AI 耗时 20 秒）
+        if msg_id and msg_id.startswith("om_"):
+            asyncio.create_task(
+                api.reply_text(ctx, msg_id, "⏳"),
+                name=f"ack-{ctx.name}",
+            )
 
         sess, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
@@ -831,7 +1030,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         if output == "SKIP":
             log.info("Agent decided to SKIP (no reply needed)")
         elif output:
-            await api.reply_card(ctx, msg_id, output[:2000])
+            await api.send_card_to_chat(ctx, chat_id, output[:2000], fallback_open_id=open_id)
             # 共享消息存储：agent 答复回写当前 conversation，Web Chat Agent 页可见
             #（feishu-web-chat-unified-design.md §3.2）
             if conv_id:

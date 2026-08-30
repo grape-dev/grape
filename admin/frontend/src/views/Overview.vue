@@ -13,17 +13,17 @@
 
       <!-- KPI 卡片行：用户 → 仓库 → 设备 → 任务 -->
       <div class="kpi-row">
-        <div class="kpi-card kpi-cyan" title="管理台用户数（admin_users）" @click="$router.push('/sys/users')">
-          <div class="kpi-icon" style="background:#e6fffb;color:#13c2c2;">👥</div>
+        <div class="kpi-card kpi-cyan" title="Grape 工作台用户数（user_accounts，即托管仓库登录用户）" @click="$router.push('/sys/console')">
+          <div class="kpi-icon" style="background:rgba(48,176,199,0.1);color:#30b0c7;">👥</div>
           <div class="kpi-body">
-            <div class="kpi-value">{{ vc.adminUserTotal || 0 }}</div>
-            <div class="kpi-label">用户</div>
-            <div class="kpi-sub">平台用户 {{ vc.platformUserTotal || 0 }}</div>
+            <div class="kpi-value">{{ vc.platformUserTotal || 0 }}</div>
+            <div class="kpi-label">工作台用户</div>
+            <div class="kpi-sub">已注册工作台账号</div>
           </div>
-          <div class="kpi-action">用户管理 →</div>
+          <div class="kpi-action">工作台用户 →</div>
         </div>
         <div class="kpi-card kpi-green" title="已托管仓库数（managed_repos）" @click="$router.push('/repos/manage')">
-          <div class="kpi-icon" style="background:#f6ffed;color:#52c41a;">📦</div>
+          <div class="kpi-icon" style="background:rgba(52,199,89,0.1);color:#34c759;">📦</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.repoTotal || 0 }}</div>
             <div class="kpi-label">托管仓库</div>
@@ -32,7 +32,7 @@
           <div class="kpi-action">代码仓管理 →</div>
         </div>
         <div class="kpi-card kpi-blue" title="在线设备数（status=online）" @click="$router.push('/runtime/devices')">
-          <div class="kpi-icon" style="background:#e8f0fe;color:#006eff;">🖥️</div>
+          <div class="kpi-icon" style="background:rgba(0,107,255,0.08);color:#006eff;">🖥️</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.onlineDevices || 0 }}<span class="kpi-unit">/{{ vc.totalDevices || 0 }}</span></div>
             <div class="kpi-label">在线设备</div>
@@ -41,7 +41,7 @@
           <div class="kpi-action">设备管理 →</div>
         </div>
         <div class="kpi-card kpi-orange" title="Agent 任务总数（agent_tasks）">
-          <div class="kpi-icon" style="background:#fff7e6;color:#fa8c16;">🤖</div>
+          <div class="kpi-icon" style="background:rgba(255,149,0,0.1);color:#ff9500;">🤖</div>
           <div class="kpi-body">
             <div class="kpi-value">{{ vc.taskTotal || 0 }}</div>
             <div class="kpi-label">Agent 任务</div>
@@ -61,7 +61,7 @@
               <tr><th>指标</th><th>计算规则</th></tr>
             </thead>
             <tbody>
-              <tr><td>用户</td><td>管理台用户 admin_users；平台用户 user_accounts</td></tr>
+              <tr><td>用户</td><td>工作台用户 user_accounts（grape 工作台登录用户）</td></tr>
               <tr><td>托管仓库</td><td>managed_repos 已托管仓库数</td></tr>
               <tr><td>在线设备</td><td>agent_runtimes 表中 status=online 的设备数（在线 / 总数）</td></tr>
               <tr><td>Agent 任务</td><td>agent_tasks 任务总数；今日新增按创建日期（UTC）统计</td></tr>
@@ -69,7 +69,7 @@
               <tr><td>设备状态图</td><td>agent_runtimes 按 status 分组（在线/离线等）</td></tr>
               <tr><td>任务状态图</td><td>agent_tasks 按 status 分组（completed/queued/dispatched 等）</td></tr>
               <tr><td>仓库事件图</td><td>events 表按 repo_key 聚合的事件量 Top 8（活跃仓库排行）</td></tr>
-              <tr><td>用户构成图</td><td>管理台用户（admin_users）与平台用户（user_accounts）数量对比</td></tr>
+              <tr><td>用户构成图</td><td>工作台用户（user_accounts）凭证配置分布</td></tr>
             </tbody>
           </table>
         </div>
@@ -78,11 +78,26 @@
       <!-- 图表区：4 卡对应 4 图（2×2，对齐 KPI 卡顺序：用户/仓库/设备/任务） -->
       <div class="chart-grid chart-grid-4">
         <div class="chart-card">
-          <div class="chart-title">用户 · 构成分布</div>
+          <div class="chart-title">
+            <div class="chart-tabs">
+              <button :class="{ on: statTab === 'registration' }" @click="switchStatTab('registration')">注册趋势</button>
+              <button :class="{ on: statTab === 'active' }" @click="switchStatTab('active')">活跃用户</button>
+            </div>
+            <div class="chart-tabs" v-if="statTab === 'registration'">
+              <button :class="{ on: regGranularity === 'year' }" @click="switchRegGranularity('year')">年</button>
+              <button :class="{ on: regGranularity === 'month' }" @click="switchRegGranularity('month')">月</button>
+              <button :class="{ on: regGranularity === 'day' }" @click="switchRegGranularity('day')">日</button>
+            </div>
+            <div class="chart-tabs" v-else>
+              <button :class="{ on: activeDays === 7 }" @click="switchActiveDays(7)">近7天</button>
+              <button :class="{ on: activeDays === 30 }" @click="switchActiveDays(30)">近30天</button>
+              <button :class="{ on: activeDays === 90 }" @click="switchActiveDays(90)">近90天</button>
+            </div>
+          </div>
           <div class="chart-body" ref="userCompositionRef"></div>
         </div>
         <div class="chart-card">
-          <div class="chart-title">托管仓库 · 事件 Top8</div>
+          <div class="chart-title">托管仓库 · 任务 Top10</div>
           <div class="chart-body" ref="repoEventRef"></div>
         </div>
         <div class="chart-card">
@@ -90,7 +105,7 @@
           <div class="chart-body" ref="deviceStatusRef"></div>
         </div>
         <div class="chart-card">
-          <div class="chart-title">Agent 任务 · 状态分布</div>
+          <div class="chart-title">任务状态分布</div>
           <div class="chart-body" ref="taskStatusRef"></div>
         </div>
       </div>
@@ -113,11 +128,16 @@ const taskStatusRef = ref(null)
 const deviceStatusRef = ref(null)
 const repoEventRef = ref(null)
 const userCompositionRef = ref(null)
+const regGranularity = ref('month')
+const regData = ref([])
+const statTab = ref('registration')
+const activeDays = ref(30)
+const activeData = ref([])
 
-const COLOR_POOL = ['#006eff', '#52c41a', '#faad14', '#f5222d', '#722ed1', '#13c2c2', '#eb2f96', '#fa8c16']
-const TASK_STATUS_COLORS = { completed: '#52c41a', queued: '#faad14', dispatched: '#006eff' }
-const DEVICE_STATUS_COLORS = { online: '#52c41a', offline: '#d9d9d9' }
-const USER_COMP_COLORS = { '管理台用户': '#006eff', '平台用户': '#13c2c2' }
+const COLOR_POOL = ['#006eff', '#34c759', '#ff9500', '#ff3b30', '#5e5ce6', '#30b0c7', '#ff2d92', '#ff9500']
+const TASK_STATUS_COLORS = { completed: '#34c759', queued: '#ff9500', dispatched: '#006eff' }
+const DEVICE_STATUS_COLORS = { online: '#34c759', offline: '#aeaeb2' }
+const USER_COMP_COLORS = { '工作台用户': '#30b0c7' }
 const STATUS_LABELS = { active: '有效', revoked: '已吊销', online: '在线', offline: '离线', completed: '已完成', queued: '排队中', dispatched: '已派发' }
 
 function formatAgo(val) {
@@ -152,6 +172,7 @@ async function load() {
     vc.value = {}
   }
   loading.value = false
+  await loadRegData()
   await new Promise(r => setTimeout(r, 50))
   renderCharts()
 }
@@ -178,7 +199,7 @@ function renderDeviceStatus() {
   const data = Object.keys(dist).filter(k => dist[k]).map(k => ({
     name: STATUS_LABELS[k] || k,
     value: dist[k],
-    itemStyle: { color: DEVICE_STATUS_COLORS[k] || '#d9d9d9' }
+    itemStyle: { color: DEVICE_STATUS_COLORS[k] || '#aeaeb2' }
   }))
   chart.setOption({
     tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
@@ -186,7 +207,7 @@ function renderDeviceStatus() {
     series: [{
       type: 'pie', radius: ['40%', '70%'], center: ['50%', '45%'],
       label: { show: true, formatter: '{b}\n{d}%', fontSize: 11 },
-      data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: '#f0f0f0' } }],
+      data: data.length ? data : [{ name: '暂无数据', value: 0, itemStyle: { color: 'rgba(0,0,0,0.04)' } }],
       emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.2)' } }
     }]
   })
@@ -201,7 +222,7 @@ function renderTaskStatus() {
   const data = Object.keys(dist).map(k => ({
     name: STATUS_LABELS[k] || k,
     value: dist[k],
-    itemStyle: { color: TASK_STATUS_COLORS[k] || '#d9d9d9' }
+    itemStyle: { color: TASK_STATUS_COLORS[k] || '#aeaeb2' }
   }))
   chart.setOption({
     tooltip: { trigger: 'axis' },
@@ -216,7 +237,7 @@ function renderTaskStatus() {
   })
 }
 
-// 仓库事件 Top8 - 横向条形图（对应"托管仓库"卡片）
+// 仓库任务 Top10 - 横向条形图（对应"托管仓库"卡片）
 function renderRepoEvent() {
   if (!repoEventRef.value) return
   const chart = echarts.init(repoEventRef.value)
@@ -233,7 +254,7 @@ function renderRepoEvent() {
       formatter: params => {
         const p = params[0]
         const full = entries[p.dataIndex] ? entries[p.dataIndex][0] : ''
-        return (p.name === '' ? p.name : p.name + (full ? '<br/>' + full : '')) + '<br/>事件数: ' + p.value
+        return (p.name === '' ? p.name : p.name + (full ? '<br/>' + full : '')) + '<br/>任务数: ' + p.value
       }
     },
     grid: { left: 8, right: 40, top: 16, bottom: 8, containLabel: true },
@@ -245,31 +266,73 @@ function renderRepoEvent() {
     series: [{
       type: 'bar', data: entries.map(([, v]) => v), barMaxWidth: 18,
       label: { show: true, position: 'right', fontSize: 11 },
-      itemStyle: { color: '#52c41a', borderRadius: [0, 4, 4, 0] }
+      itemStyle: { color: '#34c759', borderRadius: [0, 4, 4, 0] }
     }]
   })
 }
 
-// 用户构成分布 - 柱状图（对应"用户"卡片）
+// 用户注册趋势 - 柱状图（按年/月/日维度）
+async function loadRegData() {
+  try {
+    const { data } = await http.get('/stats/user-registration', { params: { granularity: regGranularity.value } })
+    regData.value = data.data || []
+  } catch (e) {
+    console.error('[Overview] loadRegData failed', e)
+    regData.value = []
+  }
+}
+
+async function switchRegGranularity(g) {
+  regGranularity.value = g
+  await loadRegData()
+  renderUserComposition()
+}
+
+async function loadActiveData() {
+  try {
+    const { data } = await http.get('/stats/active-users', { params: { days: activeDays.value } })
+    activeData.value = data.data || []
+  } catch (e) {
+    console.error('[Overview] loadActiveData failed', e)
+    activeData.value = []
+  }
+}
+
+async function switchActiveDays(d) {
+  activeDays.value = d
+  await loadActiveData()
+  renderUserComposition()
+}
+
+async function switchStatTab(tab) {
+  statTab.value = tab
+  if (tab === 'active') {
+    await loadActiveData()
+  } else {
+    await loadRegData()
+  }
+  renderUserComposition()
+}
+
 function renderUserComposition() {
   if (!userCompositionRef.value) return
   const chart = echarts.init(userCompositionRef.value)
   charts.push(chart)
-  const dist = d.value.userCompositionDistribution || {}
-  const data = Object.keys(dist).map(k => ({
-    name: k,
-    value: dist[k],
-    itemStyle: { color: USER_COMP_COLORS[k] || '#006eff' }
-  }))
+  const isReg = statTab.value === 'registration'
+  const source = isReg ? regData.value : activeData.value
+  const data = source.map(x => x.count)
+  const labels = source.map(x => x.label)
   chart.setOption({
-    tooltip: { trigger: 'axis' },
+    tooltip: { trigger: 'axis', formatter: p => `${p[0].name}<br/>${isReg ? '注册' : '活跃'} ${p[0].value} 人` },
     grid: { left: 40, right: 16, top: 24, bottom: 32 },
-    xAxis: { type: 'category', data: data.map(x => x.name), axisLabel: { fontSize: 11 } },
+    xAxis: { type: 'category', data: labels, axisLabel: { fontSize: 11, rotate: labels.length > 6 ? 30 : 0 } },
     yAxis: { type: 'value', minInterval: 1 },
     series: [{
-      type: 'bar', data, barMaxWidth: 60,
-      label: { show: true, position: 'top', fontSize: 11 },
-      itemStyle: { borderRadius: [4, 4, 0, 0] }
+      type: 'line', data, smooth: true, symbol: 'circle', symbolSize: 6,
+      lineStyle: { width: 2, color: isReg ? '#30b0c7' : '#006eff' },
+      itemStyle: { color: isReg ? '#30b0c7' : '#006eff' },
+      areaStyle: { color: isReg ? 'rgba(48,176,199,0.12)' : 'rgba(0,110,255,0.12)' },
+      label: { show: true, position: 'top', fontSize: 11 }
     }]
   })
 }
@@ -291,21 +354,21 @@ onBeforeUnmount(() => {
 .dashboard { display: flex; flex-direction: column; gap: 20px; padding: 20px 28px; }
 
 /* ---- KPI 卡片 ---- */
-.kpi-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.kpi-row { display: flex; gap: 20px; flex-wrap: wrap; }
 .kpi-card {
   flex: 1; min-width: 150px;
-  background: #fff; border-radius: 10px; border: 1px solid var(--border-color);
-  padding: 16px 18px; cursor: pointer; transition: all 0.2s;
+  background: #fff; border-radius: 14px; border: 1px solid var(--border-soft);
+  padding: 20px; cursor: pointer; transition: all var(--transition);
   box-shadow: var(--card-shadow);
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 14px;
 }
-.kpi-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
+.kpi-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-2px); }
 .kpi-blue { border-left: 3px solid #006eff; }
-.kpi-purple { border-left: 3px solid #7222ed; }
-.kpi-pink { border-left: 3px solid #eb2f96; }
-.kpi-orange { border-left: 3px solid #fa8c16; }
-.kpi-green { border-left: 3px solid #52c41a; }
-.kpi-cyan { border-left: 3px solid #13c2c2; }
+.kpi-purple { border-left: 3px solid #5e5ce6; }
+.kpi-pink { border-left: 3px solid #ff2d92; }
+.kpi-orange { border-left: 3px solid #ff9500; }
+.kpi-green { border-left: 3px solid #34c759; }
+.kpi-cyan { border-left: 3px solid #30b0c7; }
 .kpi-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
 .kpi-body { flex: 1; min-width: 0; }
 .kpi-value { font-size: 26px; font-weight: 700; color: var(--text-primary); line-height: 1.2; }
@@ -316,7 +379,7 @@ onBeforeUnmount(() => {
 
 /* ---- 数据口径说明 ---- */
 .glossary-wrap {
-  background: #fff; border-radius: 10px; border: 1px solid var(--border-color);
+  background: #fff; border-radius: 14px; border: 1px solid var(--border-soft);
   box-shadow: var(--card-shadow);
 }
 .glossary-toggle {
@@ -334,7 +397,7 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border-color); color: var(--text-primary);
 }
 .glossary-table td {
-  padding: 6px 12px; border-bottom: 1px solid #f0f0f0;
+  padding: 6px 12px; border-bottom: 1px solid var(--border-soft);
 }
 .glossary-table tr:last-child td { border-bottom: none; }
 .glossary-table td:first-child { width: 120px; color: var(--text-primary); font-weight: 500; }
@@ -343,10 +406,13 @@ onBeforeUnmount(() => {
 .chart-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 .chart-grid-4 { grid-template-columns: repeat(2, 1fr); }
 .chart-card {
-  background: #fff; border-radius: 10px; border: 1px solid var(--border-color);
+  background: #fff; border-radius: 14px; border: 1px solid var(--border-soft);
   box-shadow: var(--card-shadow); overflow: hidden;
 }
-.chart-title { font-size: 14px; font-weight: 600; padding: 14px 18px 0; color: var(--text-primary); }
+.chart-title { font-size: 14px; font-weight: 600; padding: 14px 18px 0; color: var(--text-primary); display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.chart-tabs { display: flex; gap: 2px; }
+.chart-tabs button { font-size: 11px; padding: 2px 8px; border: 1px solid var(--border-color); border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; transition: all var(--transition); }
+.chart-tabs button.on { background: var(--primary); color: #fff; border-color: var(--primary); }
 .chart-body { width: 100%; height: 260px; padding: 8px; }
 
 @media (max-width: 1024px) {

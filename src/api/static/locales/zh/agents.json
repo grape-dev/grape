@@ -1,0 +1,98 @@
+{
+  "scope": {
+    "global": "全局",
+    "repo": "仓库",
+    "personal": "个人",
+    "local_direct": "本机直连"
+  },
+  "scope_short": {
+    "global": "全局",
+    "repo": "项目",
+    "user": "个人"
+  },
+  "tag": {
+    "all": "全能"
+  },
+  "engine": {
+    "none_available": "无可选引擎（仓库级/全局/本机直连）",
+    "load_failed": "引擎列表加载失败",
+    "label": "引擎: {{text}}",
+    "no_engine": "无 engine，不可用",
+    "select_placeholder": "选择引擎...",
+    "backend_engines_hint": "下拉多选，任务将分配到空闲引擎"
+  },
+  "skill": {
+    "default_official": "默认官方技能（自动）",
+    "no_repo_skill": "该仓库暂无项目技能",
+    "no_personal_skill": "暂无个人技能",
+    "select_required": "请选择技能"
+  },
+  "event": {
+    "table_time": "时间",
+    "table_content": "内容",
+    "table_duration": "耗时",
+    "table_engine": "引擎",
+    "table_status": "状态",
+    "none": "暂无事件",
+    "total": "事件总量",
+    "completed": "已完成",
+    "running": "进行中",
+    "recent_n": "最近 {{n}} 条",
+    "history_title": "事件历史"
+  },
+  "config": {
+    "im_title": "IM 配置",
+    "im_configured": "🟢 已配置",
+    "bot_secret_placeholder": "留空不修改",
+    "scan_config": "扫码配置",
+    "bound_chats": "已绑定的群 ({{n}})",
+    "clean_session_hint": "清空会话后，下一次事件将创建全新的 Agent 上下文（不延续历史对话）。",
+    "clean_session_btn": "🧹 清理会话",
+    "saved": "配置已保存",
+    "save_failed": "保存失败: {{msg}}",
+    "title": "Agent 配置",
+    "bot_app_id": "Bot App ID",
+    "bot_secret": "Bot Secret"
+  },
+  "subscription": {
+    "title": "事件订阅",
+    "hint": "默认不配置；勾选后触发即收到任务",
+    "pr_merged": "PR 合入（pull_request_merged）",
+    "merge_branch": "合入分支",
+    "merge_branch_placeholder": "main, dev…（留空=不限分支）",
+    "branch_hint": "当 PR 合入到上述分支时，{{name}} 自动收到任务；留空则任意分支合入都触发。"
+  },
+  "session": {
+    "clean_confirm": "确认清理 {{name}} Agent 的会话？\n\n将清除 backend_session_id，下一次事件到来时会创建全新会话上下文（不延续历史对话）。",
+    "cleaned": "会话已清理",
+    "clean_failed": "清理失败: {{msg}}"
+  },
+  "toast": {
+    "select_repo_first": "请先选择仓库"
+  },
+  "type": {
+    "vod": {
+      "name": "VOD Agent",
+      "desc": "从开发者声音中收集反馈、聚类分析共性、提炼价值、自动创建 Issue"
+    },
+    "issue": {
+      "name": "Issue Agent",
+      "desc": "Issue 分类、标签、指派、A2A 触发 Coding Agent"
+    },
+    "coding": {
+      "name": "Coding Agent",
+      "desc": "代码实现、PR 创建、自我审查（通过 A2A 由 Issue/QA Agent 触发，不直接感知 PR 事件）"
+    },
+    "qa": {
+      "name": "QA Agent",
+      "desc": "代码审查、自动化测试、功能验证、安全检查（由 Coding Agent 通过 A2A 事件触发审查，不直接监听 PR 事件）"
+    },
+    "sre": {
+      "name": "SRE Agent",
+      "desc": "构建部署、发布管理、监控运维、故障排查"
+    }
+  },
+  "btn_configure": "配置",
+  "btn_events": "事件",
+  "skill_label": "技能"
+}

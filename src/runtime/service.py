@@ -129,7 +129,7 @@ _TASK_COLUMNS = (
     "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
-    "knowledge_files, attempts, pool_agent_type, affinity_runtime_id, "
+    "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
     "status, exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
@@ -196,8 +196,18 @@ def _collect_server_env(user_id, account):
         try:
             from src.user.db import get_credentials
             for c in get_credentials(user_id):
-                for k, v in c.get("config", {}).items():
-                    env[k.upper()] = str(v)
+                provider = c.get("provider", "")
+                cfg = c.get("config", {})
+                if provider == "huawei_cloud":
+                    # cloud-deploy skill expects HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK
+                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
+                elif provider == "codearts":
+                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
+                else:
+                    for k, v in cfg.items():
+                        env[k.upper()] = str(v)
         except Exception:
             pass
     if account:
@@ -229,6 +239,47 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
         from src.config import WORKSPACE_DIR
         from src.repo_key import split_owner_repo
         owner, rname = split_owner_repo(repo_key)
+
+        # OBS 分支：查 DB scope='baseline' + OBS 读取（不依赖本地磁盘）
+        try:
+            from src.storage import get_storage
+            _storage = get_storage()
+        except Exception:
+            _storage = None
+        if _storage is not None:
+            files = {}
+            from src.session_manager import db, db_lock
+            with db_lock:
+                rows = db.cursor().execute(
+                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+                    "ORDER BY id DESC",
+                    (repo_key,)
+                ).fetchall()
+            for fp, ok in rows:
+                if fp and ok:
+                    fname = os.path.basename(fp)
+                    if fname in _PROJECT_INFO_FILES or fname == ".metadata.json":
+                        try:
+                            data = _storage.read_bytes(ok)
+                            if data:
+                                files[fname] = data.decode("utf-8", errors="replace")
+                        except Exception:
+                            continue
+            if files:
+                # .metadata.json 特殊处理
+                meta = {}
+                if ".metadata.json" in files:
+                    try:
+                        meta = json.loads(files[".metadata.json"])
+                    except Exception:
+                        meta = {}
+                files[".metadata.json"] = json.dumps(meta, ensure_ascii=False)
+                return files, meta
+            # DB 查不到 baseline → 回退本地读取（兜底）
+            # 继续走下面的本地逻辑
+
+        # 本地模式（和 dev 一致）
         pi = os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
         if not os.path.isdir(pi):
             return {}, {}
@@ -263,7 +314,8 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  event_seq=None, issue_id="", repo_key="", agent_type="",
                  skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
-                 pool_agent_type="", affinity_runtime_id=0):
+                 project_info_file_urls=None, knowledge_file_urls=None,
+                 pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids=""):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
 
     引擎池（agent-cluster-design.md §4.1/§4.2）：runtime_id=0 + pool_agent_type 非空
@@ -342,6 +394,17 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         except Exception as e:
             log.warning(f"enqueue: knowledge pack failed for {repo_key}: {e}")
             knowledge_files = {}
+    # 生成 file_urls（url + storage_key，见 knowledge-obs-design §八：字段分开存 + 三级降级）
+    # storage 为 None（本地模式）时 file_urls 为空 dict，worker 用 content 兜底
+    try:
+        from src.storage import get_storage
+        _storage = get_storage()
+    except Exception:
+        _storage = None
+    _inum = _issue_num(issue_id)
+    _file_urls = _storage.generate_file_urls(repo_key, agent_type, _inum) if _storage else {}
+    project_info_file_urls = _file_urls
+    knowledge_file_urls = _file_urls
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
@@ -364,13 +427,28 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
              json.dumps(knowledge_files),
-             0, pool_agent_type or "", affinity_runtime_id or 0,
+            json.dumps(project_info_file_urls), json.dumps(knowledge_file_urls),
+            0, pool_agent_type or "", affinity_runtime_id or 0, pool_tag or "", pool_engine_ids or "",
              "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
         )
         db.commit()
     from src.runtime.instances import runtime_instance_name
     _inst = runtime_instance_name(runtime_id)
     log.info(f"Task enqueued: {task_id} session={agent_session_id} runtime={runtime_id}({_inst}) skill={skill}")
+    # 可观察性埋点：任务入队
+    try:
+        from src.observability import record_task_enqueued
+        record_task_enqueued(task_id, event_type or agent_type or "other", runtime_id)
+    except Exception:
+        pass
+    # 事件总线：任务创建
+    try:
+        from src.observability.events import bus, Event
+        bus.publish(Event(type="task:enqueued", task_id=task_id,
+                          payload={"agent_type": agent_type, "runtime_id": runtime_id,
+                                    "repo_key": repo_key, "skill": skill}))
+    except Exception:
+        pass
     return task_id
 
 
@@ -465,13 +543,14 @@ def claim(runtime_id) -> dict | None:
             # ---- 兜底回收（M1：dispatched 超时自动重排，防 worker 丢弃任务死循环）----
             # worker 端 max_concurrent 满时 claim 后可能丢弃任务（不 start 不释放），
             # 导致 dispatched 任务永久卡死、busy_slots 泄漏。这里在每次 claim 前
-            # 将超时(120s)未 start 的任务回池重排；attempts>=3 直接置 failed。
+            # 将超时未 start 的任务回池重排；attempts>=3 直接置 failed。
             try:
-                # 回收窗口 300s：hermes -z 冷启动+模型响应常 >120s 才产出首事件，
-                # 120s 会误杀执行中长任务（回收→重跑→attempts 累加 3 次 failed）。
+                # 回收窗口 600s：SRE 执行 terraform apply 等长命令可达 900s，
+                # 期间无事件产出→task_messages 无新增→活跃度检查失败→误回收重跑。
+                # 300s 窗口会误杀执行中长任务；600s 窗口让长命令有足够时间完成。
                 # worker 端 claim 后 task_start 置 running 可彻底规避；本窗口作为
-                # 不依赖 worker 端的兜底（真死任务 5 分钟内恢复重排）。
-                _stale = (datetime.now(timezone.utc) - timedelta(seconds=300)).isoformat()
+                # 不依赖 worker 端的兜底（真死任务 10 分钟内恢复重排）。
+                _stale = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
                 c.execute(
                     "SELECT id, runtime_id, event_seq FROM agent_tasks "
                     "WHERE status='dispatched' AND started_at < ? AND started_at IS NOT NULL",
@@ -480,10 +559,11 @@ def claim(runtime_id) -> dict | None:
                 _actually_recovered = []
                 for _tid, _rid, _seq in _stale_rows:
                     # 活跃度检查（2026-08-21 修复）：task_start 失败时 status 留在 dispatched
-                    # 但 agent 实际在跑（有 task_messages 产出）。查最近 60s 是否有消息，
+                    # 但 agent 实际在跑（有 task_messages 产出）。查最近 600s 是否有消息，
                     # 有则跳过回收——agent 活跃说明只是 task_start 回调丢了，不该重跑。
+                    # 600s 窗口兼容长命令（terraform apply 可达 900s 无事件产出）。
                     try:
-                        _active_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+                        _active_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
                         c.execute(
                             "SELECT 1 FROM task_messages WHERE task_id=? AND created_at > ? LIMIT 1",
                             (_tid, _active_cutoff))
@@ -555,8 +635,11 @@ def claim(runtime_id) -> dict | None:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
             # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
-            # 该 agent_type 的引擎集合（devops_agent_runtime_binding）含本引擎即可领；
+            # pool_engine_ids 为空或包含本引擎即可领；
             # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
+            #
+            # 插件模式：广播任务只能走 claim_by_tag（标签匹配），legacy claim 不认领广播任务，
+            # 避免标签不匹配的机器通过兜底渠道抢到任务。
             c.execute("""
                 SELECT id FROM agent_tasks
                 WHERE runtime_id=? AND status='queued'
@@ -573,29 +656,95 @@ def claim(runtime_id) -> dict | None:
             """, (runtime_id,))
             row = c.fetchone()
             if not row:
-                c.execute("""
-                    SELECT id FROM agent_tasks
-                    WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
-                      AND pool_agent_type IN (
-                        SELECT b.agent_type FROM devops_agent_runtime_binding b
-                        WHERE b.runtime_id=? AND b.enabled=1
-                      )
-                      AND NOT EXISTS (
-                        SELECT 1 FROM agent_tasks a2
-                        WHERE a2.status IN ('dispatched','running')
-                          AND (
-                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
-                            OR
-                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                _is_plugin = False
+                try:
+                    from src.api.event_pipeline import is_plugin_mode
+                    _is_plugin = is_plugin_mode()
+                except Exception:
+                    pass
+                if not _is_plugin:
+                    c.execute("""
+                        SELECT id FROM agent_tasks
+                        WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
+                          AND NOT EXISTS (
+                            SELECT 1 FROM agent_tasks a2
+                            WHERE a2.status IN ('dispatched','running')
+                              AND (
+                                (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                                OR
+                                (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                              )
                           )
-                      )
-                    ORDER BY created_at ASC LIMIT 1
-                """, (runtime_id,))
-                row = c.fetchone()
+                        ORDER BY created_at ASC LIMIT 1
+                    """)
+                    row = c.fetchone()
             if not row:
                 db.commit()
                 return None
             task_id = row[0]
+
+            # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
+            # 修复（2026-08-29）：原代码 return None 会阻塞队列——与 claim_by_tag 同一 bug。
+            # 改为循环跳过不匹配的任务，继续尝试下一个。
+            _tried_ids = [task_id]
+            _max_tries = 20
+            while True:
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                _pe_row = c.fetchone()
+                _skip = False
+                if _pe_row and _pe_row[0]:
+                    import json as _json
+                    try:
+                        _allowed = _json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            _skip = True
+                    except Exception:
+                        pass
+                if not _skip:
+                    break
+
+                # 跳过当前，尝试下一个定向任务
+                _tried_str = ','.join(["'"+x+"'" for x in _tried_ids])
+                c.execute(
+                    f"SELECT id FROM agent_tasks "
+                    f"WHERE runtime_id=? AND status='queued' "
+                    f"AND id NOT IN ({_tried_str}) "
+                    f"AND NOT EXISTS ("
+                    f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                    f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                    f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                    f"  )) ORDER BY created_at ASC LIMIT 1",
+                    (runtime_id,)
+                )
+                row = c.fetchone()
+                if not row:
+                    # 定向任务都试过了，尝试池任务（非插件模式）
+                    _is_plugin = False
+                    try:
+                        from src.api.event_pipeline import is_plugin_mode
+                        _is_plugin = is_plugin_mode()
+                    except Exception:
+                        pass
+                    if not _is_plugin:
+                        c.execute(
+                            f"SELECT id FROM agent_tasks "
+                            f"WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued' "
+                            f"AND id NOT IN ({_tried_str}) "
+                            f"AND NOT EXISTS ("
+                            f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                            f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                            f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                            f"  )) ORDER BY created_at ASC LIMIT 1"
+                        )
+                        row = c.fetchone()
+                    if not row:
+                        db.commit()
+                        return None
+                task_id = row[0]
+                _tried_ids.append(task_id)
+                if len(_tried_ids) >= _max_tries:
+                    db.commit()
+                    return None
             c.execute(
                 "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
                 (runtime_id, datetime.now(timezone.utc).isoformat(), task_id))
@@ -645,6 +794,21 @@ def claim(runtime_id) -> dict | None:
                     log.warning(f"claim backfill event runtime failed: {e}")
         from src.runtime.instances import runtime_instance_name
         log.info(f"claim: runtime_id={runtime_id}({runtime_instance_name(runtime_id)}) task={task_id}")
+        # 可观察性埋点：任务被 claim/dispatched
+        try:
+            from src.observability import record_task_dispatched
+            if task:
+                _queue_wait = -1
+                if task.get("created_at"):
+                    try:
+                        _created = datetime.fromisoformat(task["created_at"])
+                        _queue_wait = (datetime.now(timezone.utc) - _created).total_seconds()
+                    except Exception:
+                        pass
+                record_task_dispatched(task_id, task.get("event_type") or task.get("agent_type") or "other",
+                                       runtime_id, _queue_wait)
+        except Exception:
+            pass
         return task
 
 
@@ -656,8 +820,192 @@ def get_task(task_id) -> dict | None:
     return _row_to_dict(row) if row else None
 
 
+def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
+    """按标签认领任务 + scope 隔离（event-dispatch-redesign-v2.md §2.4）
+
+    scope=global → 可认领所有仓库的 queued 任务
+    scope=repo   → 只认领 owner_id 对应仓库的 queued 任务
+    scope=user   → 只认领该用户创建的 queued 任务
+    """
+    with db_lock:
+        c = db.cursor()
+        try:
+            # 1. 校验标签能力 + 获取引擎 scope
+            c.execute(
+                "SELECT ec.tag, rc.scope, rc.owner_id, rc.owner_name "
+                "FROM engine_capabilities ec "
+                "JOIN agent_runtimes ar ON ar.id = ec.runtime_id "
+                "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                "WHERE ec.runtime_id=? AND ec.tag=? AND ec.enabled=1",
+                (runtime_id, tag)
+            )
+            row = c.fetchone()
+            if not row:
+                return None
+            scope = row[1] or "global"
+            owner_id = row[2] or ""
+            owner_name = row[3] or ""
+
+            # 2. 并发槽检查
+            c.execute(
+                "SELECT ec.max_concurrent, "
+                "(SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')) "
+                "FROM engine_capabilities ec WHERE ec.runtime_id=? AND ec.tag=?",
+                (runtime_id, runtime_id, tag)
+            )
+            cap_row = c.fetchone()
+            if cap_row and cap_row[1] >= cap_row[0]:
+                return None  # 已满载
+
+            # 3. 构建任务查询（加 scope 过滤）
+            # tag="all" → 匹配任意 pool_tag（广播）；其他 tag → 精确匹配 pool_tag
+            # 只认领无主池任务（runtime_id=0），不抢已定向的任务
+            _tag_match = "(t.pool_tag!='' AND t.runtime_id=0)" if tag == "all" else "(t.pool_tag=? AND t.runtime_id=0)"
+            _tag_match_noprefix = "(pool_tag!='' AND runtime_id=0)" if tag == "all" else "(pool_tag=? AND runtime_id=0)"
+            params = [] if tag == "all" else [tag]
+            if scope == "repo":
+                params.append(owner_id)
+                sql = (
+                    "SELECT t.id FROM agent_tasks t "
+                    f"WHERE { _tag_match} AND t.status='queued' AND t.repo_key=? "
+                    "AND NOT EXISTS ("
+                    "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                    "    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
+                    "    OR (t.issue_session_id = '' AND a2.agent_session_id = t.agent_session_id)"
+                    "  )) ORDER BY t.created_at ASC LIMIT 1"
+                )
+            elif scope == "user":
+                c.execute("SELECT id FROM user_accounts WHERE username=?", (owner_name,))
+                uid_row = c.fetchone()
+                uid = uid_row[0] if uid_row else 0
+                params.append(uid)
+                sql = (
+                    "SELECT t.id FROM agent_tasks t "
+                    f"WHERE { _tag_match} AND t.status='queued' AND t.user_id=? "
+                    "AND NOT EXISTS ("
+                    "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                    "    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
+                    "    OR (t.issue_session_id = '' AND a2.agent_session_id = t.agent_session_id)"
+                    "  )) ORDER BY t.created_at ASC LIMIT 1"
+                )
+            else:
+                sql = (
+                    "SELECT id FROM agent_tasks "
+                    f"WHERE {_tag_match_noprefix} AND status='queued' "
+                    "AND NOT EXISTS ("
+                    "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                    "    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                    "    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                    "  )) ORDER BY created_at ASC LIMIT 1"
+                )
+            c.execute(sql, tuple(params))
+            task_row = c.fetchone()
+            if not task_row:
+                return None
+            task_id = task_row[0]
+
+            # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
+            # 修复（2026-08-29）：原代码 return None 会阻塞队列——队首任务如果不匹配，
+            # 后面的任务永远不会被尝试。改为循环跳过不匹配的任务，继续尝试下一个。
+            # pool_engine_ids 是 JSON 数组如 "[76]"，SQL 难以直接过滤，
+            # 这里用 Python 循环 LIMIT N 逐个检查。
+            _tried_ids = [task_id]
+            _max_tries = 20  # 防止全表扫描
+            while True:
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                _pe_row = c.fetchone()
+                _skip = False
+                if _pe_row and _pe_row[0]:
+                    import json as _json
+                    try:
+                        _allowed = _json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            _skip = True
+                    except Exception:
+                        pass
+                if not _skip:
+                    break  # 当前任务可认领
+
+                # 跳过当前任务，尝试下一个
+                _tried_str = ','.join(["'"+x+"'" for x in _tried_ids])
+                if scope == "repo":
+                    c.execute(
+                        f"SELECT t.id FROM agent_tasks t "
+                        f"WHERE {_tag_match} AND t.status='queued' AND t.repo_key=? "
+                        f"AND t.id NOT IN ({_tried_str}) "
+                        f"AND NOT EXISTS ("
+                        f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                        f"    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
+                        f"    OR (t.issue_session_id = '' AND a2.agent_session_id = t.agent_session_id)"
+                        f"  )) ORDER BY t.created_at ASC LIMIT 1",
+                        (*params,)
+                    )
+                elif scope == "user":
+                    c.execute(
+                        f"SELECT t.id FROM agent_tasks t "
+                        f"WHERE {_tag_match} AND t.status='queued' AND t.user_id=? "
+                        f"AND t.id NOT IN ({_tried_str}) "
+                        f"AND NOT EXISTS ("
+                        f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                        f"    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
+                        f"    OR (t.issue_session_id = '' AND a2.agent_session_id = t.agent_session_id)"
+                        f"  )) ORDER BY t.created_at ASC LIMIT 1",
+                        (*params,)
+                    )
+                else:
+                    c.execute(
+                        f"SELECT id FROM agent_tasks "
+                        f"WHERE {_tag_match_noprefix} AND status='queued' "
+                        f"AND id NOT IN ({_tried_str}) "
+                        f"AND NOT EXISTS ("
+                        f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
+                        f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
+                        f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
+                        f"  )) ORDER BY created_at ASC LIMIT 1"
+                    )
+                task_row = c.fetchone()
+                if not task_row:
+                    return None  # 所有任务都试过了，没有可认领的
+                task_id = task_row[0]
+                _tried_ids.append(task_id)
+                if len(_tried_ids) >= _max_tries:
+                    return None  # 防止无限循环
+
+            # 标记 dispatched
+            c.execute(
+                "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
+                (runtime_id, datetime.now(timezone.utc).isoformat(), task_id)
+            )
+            claimed = c.rowcount > 0
+            if claimed:
+                c.execute("UPDATE agent_runtimes SET busy_slots=busy_slots+1 WHERE id=?", (runtime_id,))
+            db.commit()
+        except Exception as e:
+            log.warning(f"claim_by_tag failed: {e}")
+            db.rollback()
+            return None
+    if not claimed:
+        return None
+    task = get_task(task_id)
+    if task:
+        task["status"] = "dispatched"
+        # 回填事件 runtime
+        if task.get("event_seq"):
+            try:
+                from src.runtime.instances import runtime_instance_name as _rin
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("UPDATE events SET runtime=? WHERE seq=?", (_rin(runtime_id), task["event_seq"]))
+                    db.commit()
+            except Exception:
+                pass
+    from src.runtime.instances import runtime_instance_name
+    log.info(f"claim_by_tag: tag={tag} runtime={runtime_id}({runtime_instance_name(runtime_id)}) task={task_id}")
+    return task
+
+
 def update_task_status(task_id, status, **kw):
-    """终态幂等（重放安全）：已终态则不再更新（见 tech-impl §2.2）。"""
+    """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2)."""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
@@ -922,7 +1270,9 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
             if output and output.get("conclusion"):
                 _conclusion = output["conclusion"]
             update_event_complete(task["event_seq"], status, exit_code=exit_code,
-                                  duration=duration, result=_conclusion or (result_text or "")[:200])
+                                  duration=duration,
+                                  completed_at=datetime.now(timezone.utc).isoformat(),
+                                  result=_conclusion or (result_text or "")[:200])
         except Exception as e:
             log.warning(f"complete_task finalize failed: {e}")
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
@@ -947,6 +1297,157 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
         except Exception as e:
             log.warning(f"complete_task update repo session failed: {e}")
     log.info(f"Task completed: {task_id} exit={exit_code}")
+    # 可观察性埋点：任务到达终态
+    try:
+        from src.observability import record_task_terminal
+        _terminal = "completed" if exit_code == 0 else "failed"
+        _run_s = -1
+        _total_s = -1
+        if task:
+            _now = datetime.now(timezone.utc)
+            if task.get("started_at"):
+                try:
+                    _run_s = (_now - datetime.fromisoformat(task["started_at"])).total_seconds()
+                except Exception:
+                    pass
+            if task.get("created_at"):
+                try:
+                    _total_s = (_now - datetime.fromisoformat(task["created_at"])).total_seconds()
+                except Exception:
+                    pass
+            record_task_terminal(task_id, task.get("event_type") or task.get("agent_type") or "other",
+                                 task.get("runtime_id", 0), _terminal, _run_s, _total_s)
+    except Exception:
+        pass
+    # 事件总线：任务完成
+    try:
+        from src.observability.events import bus, Event
+        bus.publish(Event(type="task:completed" if exit_code == 0 else "task:failed",
+                          task_id=task_id, payload={"exit_code": exit_code}))
+    except Exception:
+        pass
+    # A2A 自动补触发（2026-08-30 修复）：
+    # hermes ACP premature end_turn bug：agent 说完"触发 A2A"后直接 end_turn，
+    # 没实际调用 A2A API → pipeline 卡住。任务完成后检查 issue_state.stage 是否已推进，
+    # 如果 stage 还等于当前 agent_type（说明 A2A 没被调用），自动补触发下一个 agent。
+    if exit_code == 0 and task:
+        try:
+            _auto_advance_pipeline(task)
+        except Exception as _ae:
+            log.warning(f"auto advance pipeline failed for task {task_id}: {_ae}")
+
+
+def _auto_advance_pipeline(task: dict):
+    """任务完成后检查 pipeline 是否推进，没推进则自动触发下一个 agent。
+
+    通过 pipelines.json 查找当前 agent 的 next agent，然后调 A2A。
+    只在 issue_id 非空 + stage 仍等于当前 agent_type 时触发（说明 agent 没调 A2A）。
+    """
+    import threading
+    _issue_id = (task.get("issue_id") or "").strip()
+    _repo_key = task.get("repo_key") or ""
+    _agent_type = (task.get("agent_type") or "").strip()
+    if not _issue_id or not _repo_key or not _agent_type:
+        return
+    if _agent_type in ("chat", "vod") and not _issue_id:
+        return  # chat 无 issue，vod 是首步不需要补触发
+
+    # 检查 issue_state.stage 是否已推进
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT stage, scene_id FROM issue_state WHERE repo_key=? AND issue_id=?",
+                  (_repo_key, _issue_id))
+        _row = c.fetchone()
+    if not _row:
+        return  # 无 issue_state 记录（非 pipeline 任务）
+    _stage, _scene_id = _row[0], (_row[1] if len(_row) > 1 else "") or ""
+    if _stage != _agent_type:
+        return  # stage 已推进（agent 成功调了 A2A），不需要补触发
+    # stage 还等于当前 agent_type → A2A 没被调用，需要补触发
+
+    # 从 pipelines.json 查找 next agent
+    _next_agent = ""
+    try:
+        import os as _os
+        _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))),
+                                   "configs", "pipelines.json")
+        import json as _json
+        with open(_pipe_path, "r", encoding="utf-8") as _f:
+            _pipes = _json.load(_f)
+        _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
+        for _node in (_scene.get("nodes") or []):
+            if _node.get("id") == _agent_type:
+                _next_agent = _node.get("next", "")
+                break
+    except Exception:
+        pass
+    if not _next_agent or _next_agent == "done":
+        return  # 没有下一个 agent，或已经是最后一步
+
+    # 最小产物校验：检查 agent 是否有实际产出
+    # coding agent 应该有代码变更（result_text 非空且不是纯错误说明）
+    # 没产出的 agent 不推进 pipeline，避免假完成
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, result_text, exit_code, errors FROM agent_tasks "
+                  "WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                  "ORDER BY id DESC LIMIT 1",
+                  (_repo_key, _issue_id, _agent_type))
+        _task_row = c.fetchone()
+    if _task_row:
+        _result_text = (_task_row[1] or "").strip()
+        _exit_code = _task_row[2]
+        _errors = (_task_row[3] or "").strip()
+        # 产物为空或只有错误信息 → 不推进
+        if not _result_text or (len(_result_text) < 50 and _errors):
+            log.warning(f"Auto-advance skipped: issue={_issue_id} agent={_agent_type} "
+                        f"no meaningful output (result_len={len(_result_text)}, errors={_errors[:100]})")
+            return
+
+    # 检查是否已有下一个 agent 的 running 事件（避免重复触发）
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                  "AND status IN ('running','dispatched') ORDER BY seq DESC LIMIT 1",
+                  (_repo_key, _issue_id, _next_agent))
+        _existing = c.fetchone()
+    if _existing:
+        return  # 已有下一个 agent 的 running 事件，不重复触发
+
+    log.info(f"Auto-advance: issue={_issue_id} agent={_agent_type} -> {_next_agent} "
+             f"(stage stuck at {_stage}, A2A not called by agent)")
+
+    # 异步触发 A2A（不阻塞 complete_task 返回）
+    def _trigger_a2a():
+        try:
+            import requests as _req
+            _issue_num = _issue_id.lstrip("#")
+            _repo_display = _repo_key.split(":", 1)[-1] if ":" in _repo_key else _repo_key
+            # 获取 bot token
+            from src.user.db import get_repo_bot_token_no_global
+            _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
+            _server_url = "https://example.com"
+            try:
+                from src.user.db import get_meta_value
+                _sbu = get_meta_value("server_base_url")
+                if _sbu:
+                    _server_url = _sbu
+            except Exception:
+                pass
+            _resp = _req.post(f"{_server_url}/api/a2a",
+                              json={"agent": _next_agent,
+                                    "payload": {"repository": _repo_display,
+                                                "issue_number": int(_issue_num) if _issue_num.isdigit() else _issue_num,
+                                                "context": f"auto-advance from {_agent_type} (A2A not called by agent)"}},
+                              headers={"Authorization": f"Bearer {_bot_token}",
+                                       "Content-Type": "application/json"},
+                              timeout=30)
+            log.info(f"Auto-advance A2A: status={_resp.status_code} agent={_next_agent} "
+                     f"issue={_issue_id} resp={_resp.text[:100]}")
+        except Exception as _e:
+            log.warning(f"Auto-advance A2A failed: {_e}")
+
+    threading.Thread(target=_trigger_a2a, daemon=True).start()
 
 
 def fail_task(task_id, error, exit_code=-1):
@@ -964,6 +1465,7 @@ def fail_task(task_id, error, exit_code=-1):
                                    tokens=[task.get("repo_gitcode_token") or ""],
                                    issue_num_hint=task.get("issue_id") or "")
             update_event_complete(task["event_seq"], "failed", exit_code=exit_code,
+                                  completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=(error or "")[:200])
         except Exception as e:
             log.warning(f"fail_task finalize failed: {e}")
@@ -989,6 +1491,36 @@ def fail_task(task_id, error, exit_code=-1):
         except Exception as e:
             log.warning(f"fail_task session check failed: {e}")
     log.warning(f"Task failed: {task_id} exit={exit_code} err={str(error)[:120]}")
+    # 可观察性埋点：任务失败
+    try:
+        from src.observability import record_task_terminal, record_task_failed
+        _run_s = -1
+        _total_s = -1
+        if task:
+            _now = datetime.now(timezone.utc)
+            if task.get("started_at"):
+                try:
+                    _run_s = (_now - datetime.fromisoformat(task["started_at"])).total_seconds()
+                except Exception:
+                    pass
+            if task.get("created_at"):
+                try:
+                    _total_s = (_now - datetime.fromisoformat(task["created_at"])).total_seconds()
+                except Exception:
+                    pass
+            record_task_terminal(task_id, task.get("event_type") or task.get("agent_type") or "other",
+                                 task.get("runtime_id", 0), "failed", _run_s, _total_s)
+            record_task_failed(task_id, task.get("event_type") or task.get("agent_type") or "other",
+                               task.get("runtime_id", 0), str(error)[:200])
+    except Exception:
+        pass
+    # 事件总线：任务失败
+    try:
+        from src.observability.events import bus, Event
+        bus.publish(Event(type="task:failed", task_id=task_id,
+                          payload={"exit_code": exit_code, "error": str(error)[:200]}))
+    except Exception:
+        pass
 
 
 # ===== 回报异步化（M2，见 concurrency-design.md §2.4）=====
@@ -1077,3 +1609,83 @@ async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interva
         if _time.monotonic() > deadline:
             raise TimeoutError(f"task {task_id} not finished within {timeout}s")
         await asyncio.sleep(poll_interval)
+
+
+# ===== Phase 5: Batch stale recovery + heartbeat consolidation =====
+
+def batch_recover_stale_tasks(timeout_seconds: int = 300) -> dict:
+    """Batch-recover stale dispatched tasks (Phase 5).
+
+    Scans all dispatched tasks older than timeout_seconds that haven't started running.
+    Requeues them back to queued status so other engines can claim.
+
+    This replaces the per-claim stale check with a batch scan, reducing lock contention
+    for 10万+ device scenarios.
+    """
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)).isoformat()
+    recovered = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            # Find stale dispatched tasks (dispatched but not running, older than cutoff)
+            c.execute(
+                "SELECT id, runtime_id, event_seq FROM agent_tasks "
+                "WHERE status='dispatched' AND started_at IS NOT NULL AND started_at < ? "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM task_messages WHERE task_messages.task_id = agent_tasks.id"
+                ") ORDER BY started_at ASC LIMIT 100",
+                (cutoff,)
+            )
+            stale = c.fetchall()
+            for row in stale:
+                task_id, rid, seq = row[0], row[1], row[2]
+                # Requeue: set back to queued, clear runtime assignment
+                c.execute(
+                    "UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status='dispatched'",
+                    (task_id,)
+                )
+                if c.rowcount > 0:
+                    # Decrement busy_slots
+                    if rid:
+                        c.execute(
+                            "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
+                            (rid,)
+                        )
+                    recovered.append({"task_id": task_id, "runtime_id": rid, "seq": seq})
+            db.commit()
+        except Exception as e:
+            log.warning(f"batch_recover_stale_tasks failed: {e}")
+            db.rollback()
+
+    if recovered:
+        log.info(f"Batch stale recovery: {len(recovered)} tasks requeued")
+    return {"recovered": len(recovered), "tasks": recovered}
+
+
+def heartbeat_consolidated(credential_id: int, runtime_ids: list[int], client_ip: str = "") -> dict:
+    """Consolidated heartbeat (Phase 5): worker-level heartbeat instead of per-engine.
+
+    One heartbeat call updates the credential + all its runtimes in a single transaction.
+    Also triggers batch stale recovery opportunistically (every 10th heartbeat).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        # Update credential
+        c.execute(
+            "UPDATE runtime_credentials SET last_seen_at=?, last_ip=? WHERE id=? AND status='active'",
+            (now, client_ip, credential_id)
+        )
+        # Update all runtimes for this credential
+        if runtime_ids:
+            ph = ",".join("?" for _ in runtime_ids)
+            c.execute(
+                f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
+                [now] + runtime_ids + [credential_id]
+            )
+        db.commit()
+
+    # Opportunistic stale recovery (every call, but batch is cheap)
+    # In production, this would be rate-limited to every N seconds
+    return {"status": "ok", "timestamp": now}

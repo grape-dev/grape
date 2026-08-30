@@ -17,8 +17,217 @@ import asyncio, json, os, random, time
 import base64 as _b64
 import zipfile as _zf
 import urllib.request as _urllib
+import shutil as _shutil
 
-from src.config import log
+from src.config import log, CHAT_CWD_BASE
+
+# Worker 日志内存缓冲区——收集最近 ERROR/WARNING 日志，心跳时上报给主控
+import collections as _collections
+import time as _time_mod
+import threading as _threading
+import subprocess as _subprocess
+import datetime as _datetime
+
+
+# ===== 引擎探测（worker 端，每 10 分钟对本机引擎发起 CLI 测试对话）=====
+
+_PROBE_COMMANDS = {
+    "opencode": ["opencode", "run", "hello"],
+    "hermes": ["hermes", "chat", "-q", "hello", "--yolo"],
+    "codearts": ["codearts", "run", "hello"],
+    "cursor": ["cursor", "run", "hello"],
+}
+_PROBE_TIMEOUT = 30
+_PROBE_INTERVAL = 600  # 10 分钟
+
+_worker_probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
+_worker_probe_lock = _threading.Lock()
+_worker_probe_thread = None
+_worker_probe_started = False
+
+
+def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
+    """对本机引擎发起 CLI 测试对话，返回探测结果。"""
+    cmd = _PROBE_COMMANDS.get(engine_name)
+    if not cmd:
+        return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
+    if cli_path:
+        cmd = [cli_path] + cmd[1:]
+    start = _time_mod.time()
+    try:
+        result = _subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=_PROBE_TIMEOUT, stdin=_subprocess.DEVNULL,
+        )
+        latency = round(_time_mod.time() - start, 1)
+        if result.returncode == 0:
+            return {"status": "ok", "latency": latency, "error": ""}
+        else:
+            err = (result.stderr or result.stdout or "").strip()[:200]
+            return {"status": "fail", "latency": latency, "error": f"exit={result.returncode}: {err}"}
+    except _subprocess.TimeoutExpired:
+        latency = round(_time_mod.time() - start, 1)
+        return {"status": "fail", "latency": latency, "error": f"timeout ({_PROBE_TIMEOUT}s)"}
+    except FileNotFoundError:
+        return {"status": "fail", "latency": 0, "error": "CLI not found"}
+    except Exception as e:
+        latency = round(_time_mod.time() - start, 1)
+        return {"status": "fail", "latency": latency, "error": str(e)[:200]}
+
+
+def _worker_probe_loop():
+    """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。"""
+    global _worker_probe_started
+    while True:
+        try:
+            engines = _discover_local_runtimes()
+            for eng in engines:
+                if not eng.get("installed"):
+                    with _worker_probe_lock:
+                        _worker_probe_results[eng["name"]] = {
+                            "status": "skip", "latency": 0,
+                            "last_probe": _datetime.datetime.utcnow().isoformat() + "Z",
+                            "error": "not installed",
+                        }
+                    continue
+                log.info(f"worker engine probe: testing {eng['name']}...")
+                result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
+                result["last_probe"] = _datetime.datetime.utcnow().isoformat() + "Z"
+                with _worker_probe_lock:
+                    _worker_probe_results[eng["name"]] = result
+                log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
+        except Exception as e:
+            log.warning(f"worker engine probe loop error: {e}")
+        _time_mod.sleep(_PROBE_INTERVAL)
+
+
+def _start_worker_probe():
+    """启动后台探测线程。"""
+    global _worker_probe_thread, _worker_probe_started
+    if _worker_probe_started:
+        return
+    _worker_probe_started = True
+    _worker_probe_thread = _threading.Thread(target=_worker_probe_loop, daemon=True, name="worker-engine-probe")
+    _worker_probe_thread.start()
+    log.info("Worker engine probe thread started (10min interval)")
+
+
+def _collect_worker_probe_results() -> dict:
+    """返回当前探测结果快照（供心跳上报）。"""
+    with _worker_probe_lock:
+        return dict(_worker_probe_results)
+
+
+def _collect_worker_metrics() -> dict:
+    """采集 worker 机器的系统资源指标（用标准库，不依赖 psutil）。
+
+    返回 {cpu_percent, memory_percent, disk_percent, load_avg}。
+    采集失败的字段保持 0.0 / 空字符串。
+    CPU 使用两次调用的差值计算，首次调用返回 0.0（无基准）。
+    """
+    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "load_avg": ""}
+
+    # CPU: 读 /proc/stat，用上次缓存值计算差值（无 sleep，非阻塞）
+    try:
+        with open("/proc/stat") as f:
+            parts = f.readline().split()[1:]
+        total = sum(int(x) for x in parts)
+        idle = int(parts[3])
+        if hasattr(_collect_worker_metrics, "_prev"):
+            pt, pi = _collect_worker_metrics._prev
+            dt = total - pt
+            di = idle - pi
+            if dt > 0:
+                metrics["cpu_percent"] = round((1 - di / dt) * 100, 1)
+        _collect_worker_metrics._prev = (total, idle)
+    except Exception:
+        pass
+
+    # MEM: 读 /proc/meminfo（匹配 top 口径，不含 buff/cache）
+    try:
+        mi = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                p = line.split(":")
+                if len(p) == 2:
+                    mi[p[0]] = int(p[1].strip().split()[0]) * 1024
+        total_mem = mi.get("MemTotal", 0)
+        if total_mem > 0:
+            free = mi.get("MemFree", 0)
+            buffers = mi.get("Buffers", 0)
+            cached = mi.get("Cached", 0)
+            sreclaimable = mi.get("SReclaimable", 0)
+            used = total_mem - free - buffers - cached - sreclaimable
+            metrics["memory_percent"] = round(used / total_mem * 100, 1)
+    except Exception:
+        pass
+
+    # DISK: shutil.disk_usage
+    try:
+        du = _shutil.disk_usage("/")
+        if du.total > 0:
+            metrics["disk_percent"] = round(du.used / du.total * 100, 1)
+    except Exception:
+        pass
+
+    # TMP: /tmp 目录使用率（tmpfs 内存文件系统，独立于根分区）
+    try:
+        tu = _shutil.disk_usage("/tmp")
+        if tu.total > 0:
+            metrics["tmp_percent"] = round(tu.used / tu.total * 100, 1)
+    except Exception:
+        pass
+
+    # load_avg: 读 /proc/loadavg
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().split()
+            metrics["load_avg"] = ",".join(parts[:3])
+    except Exception:
+        pass
+
+    return metrics
+import logging as _logging_mod
+_worker_log_buffer = _collections.deque(maxlen=50)  # 最近 50 条 ERROR/WARNING
+_last_sent_log_ts = 0.0  # 上次上报的时间戳，避免重复发送
+
+# 注册一个 logging Handler 把 ERROR/WARNING 写入内存缓冲区
+class _WorkerLogHandler(_logging_mod.Handler):
+    def emit(self, record):
+        try:
+            if record.levelno >= _logging_mod.WARNING:
+                _worker_log_buffer.append({
+                    "ts": _time_mod.strftime("%Y-%m-%d %H:%M:%S", _time_mod.localtime(record.created)),
+                    "level": record.levelname,
+                    "message": self.format(record)[:500],
+                })
+        except Exception:
+            pass
+
+try:
+    _h = _WorkerLogHandler()
+    _h.setLevel(_logging_mod.WARNING)
+    log.addHandler(_h)
+except Exception:
+    pass
+
+
+def _collect_recent_logs():
+    """收集自上次上报以来的新日志条目（去重），最多 20 条。"""
+    global _last_sent_log_ts
+    if not _worker_log_buffer:
+        return []
+    # 取所有未发送的条目（按时间戳过滤）
+    result = []
+    max_ts = 0.0
+    for ll in _worker_log_buffer:
+        # 简单策略：取最近 20 条
+        result.append(ll)
+    # 取最后 20 条
+    result = result[-20:]
+    # 清空缓冲区（已发送）
+    _worker_log_buffer.clear()
+    return result
 
 # v3.0：OBS 直连能力 + 自适应降级状态（运行时能力反馈 C）
 _OBS_SUPPORT = False      # 启动探测结果（supports_obs_url）
@@ -67,21 +276,31 @@ def _discover_local_runtimes() -> list[dict]:
 def _remap_cwd(path: str) -> str:
     """将服务端下发的 cwd 路径映射到本地用户 home 目录。
 
-    服务端以 /home/grape 为基准生成 workspaces 路径，但各接入机器的用户不同
-    （lvjuntao、zhangsan 等）。通过 RUNTIME_CWD_PREFIX_MAP 环境变量配置映射：
+    服务端以 CHAT_CWD_BASE（默认 /home/grape）为基准生成 chat 工作路径，但各接入
+    机器的用户不同（lvjuntao、zhangsan 等）。通过 RUNTIME_CWD_PREFIX_MAP 环境变量配置映射：
       RUNTIME_CWD_PREFIX_MAP=/home/grape=/home/lvjuntao
     支持多组映射，用逗号分隔：
       RUNTIME_CWD_PREFIX_MAP=/home/grape=/home/lvjuntao,/opt/data=/data
-    未配置时默认将 /home/grape 映射到当前用户的 home 目录。
+    未配置时默认将 CHAT_CWD_BASE 映射到当前用户的 home 目录。
     """
     if not path:
         return path
     import os as _os
     mapping = _os.environ.get("RUNTIME_CWD_PREFIX_MAP", "")
     if not mapping:
-        # 默认映射：/home/grape → 当前用户 home
-        default_src = "/home/grape"
         local_home = _os.path.expanduser("~")
+        if path.startswith(local_home):
+            # 已是本机路径（服务端和 worker 同用户，或本地 direct 执行）
+            return path
+        # 1. grape-workspaces 标记段匹配（event pipeline 路径）
+        #    /home/{任意用户}/grape-workspaces → local_home/grape-workspaces
+        marker = "/grape-workspaces"
+        idx = path.find(marker)
+        if idx > 0:
+            return local_home + path[idx:]
+        # 2. /home/grape 前缀匹配（chat 逻辑路径，chat.py CHAT_CWD_BASE）
+        #    /home/grape/chat/... → local_home/chat/...
+        default_src = "/home/grape"
         if path.startswith(default_src) and local_home != default_src:
             return local_home + path[len(default_src):]
         return path
@@ -106,6 +325,149 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
     return "opencode"
 
 
+def _scan_local_skills() -> list[dict]:
+    """扫描 worker 上各 engine 本地物理存在的 skill，返回 per-engine skill 列表。
+
+    每个 engine 扫描其标准 skill 目录。
+    每个含 SKILL.md 的子目录视为一个 skill（支持一级和二级目录结构）。
+    不扫描 ~/grape/skills（grape 项目自带 skill，Web 端已纳管可见）。
+    不扫描 grape-workspaces 下的临时 .skills 目录（task 物化的，非持久）。
+    """
+    import os as _os
+
+    home = _os.path.expanduser("~")
+
+    # per-engine 专属 skill 目录
+    engine_dirs = {
+        "hermes": [_os.path.join(home, ".hermes", "skills")],
+        "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
+        "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
+    }
+
+    # 用户自建 skill 目录（通过环境变量配置，可选）
+    extra_dirs = []
+    extra = _os.environ.get("RUNTIME_EXTRA_SKILL_DIRS", "")
+    if extra:
+        for d in extra.split(":"):
+            d = d.strip()
+            if d and _os.path.isdir(d):
+                extra_dirs.append(d)
+
+    def _scan_dir(base_dir: str) -> list[str]:
+        """扫描目录下含 SKILL.md 的子目录，返回 skill_name 列表。
+        支持一级（base/skill/SKILL.md）和二级（base/category/skill/SKILL.md）结构。"""
+        skills = []
+        if not _os.path.isdir(base_dir):
+            return skills
+        try:
+            for entry in _os.listdir(base_dir):
+                entry_path = _os.path.join(base_dir, entry)
+                if not _os.path.isdir(entry_path):
+                    continue
+                # 一级：base/entry/SKILL.md
+                if _os.path.isfile(_os.path.join(entry_path, "SKILL.md")):
+                    skills.append(entry)
+                else:
+                    # 二级：base/entry/sub/SKILL.md
+                    try:
+                        for sub in _os.listdir(entry_path):
+                            sub_path = _os.path.join(entry_path, sub)
+                            if _os.path.isdir(sub_path) and _os.path.isfile(_os.path.join(sub_path, "SKILL.md")):
+                                skills.append(sub)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return skills
+
+    # 扫描用户自建目录（合并到所有 engine）
+    common_skills: set[str] = set()
+    for d in extra_dirs:
+        common_skills.update(_scan_dir(d))
+
+    # 扫描 per-engine 目录 + 合用用户自建
+    result = []
+    for engine, dirs in engine_dirs.items():
+        engine_skills: set[str] = set()
+        for d in dirs:
+            engine_skills.update(_scan_dir(d))
+        engine_skills |= common_skills
+        if engine_skills:
+            result.append({"engine": engine, "skills": sorted(engine_skills)})
+
+    return result
+
+
+def _scan_local_skills_with_detail(engine_type: str) -> list[dict]:
+    """扫描指定 engine 的 skill 详情（name/description/path/file_count/provider）。
+
+    worker 端执行，扫描结果通过 skills-report API 回报给服务端。
+    """
+    import os as _os
+
+    all_skills = _scan_local_skills()
+    engine_key = (engine_type or "").strip().lower()
+    skill_names = []
+    for entry in all_skills:
+        if (entry.get("engine") or "").strip().lower() == engine_key:
+            skill_names = entry.get("skills") or []
+            break
+
+    home = _os.path.expanduser("~")
+    engine_dirs = {
+        "hermes": [_os.path.join(home, ".hermes", "skills")],
+        "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
+        "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
+    }
+    extra = _os.environ.get("RUNTIME_EXTRA_SKILL_DIRS", "")
+    scan_dirs = list(engine_dirs.get(engine_key, []))
+    if extra:
+        for d in extra.split(":"):
+            d = d.strip()
+            if d and _os.path.isdir(d):
+                scan_dirs.append(d)
+
+    skill_details = []
+    for sname in skill_names:
+        detail = {"name": sname, "description": "", "path": "", "file_count": 0, "provider": engine_type}
+        for base_dir in scan_dirs:
+            p1 = _os.path.join(base_dir, sname)
+            if _os.path.isfile(_os.path.join(p1, "SKILL.md")):
+                detail["path"] = p1
+                break
+            if _os.path.isdir(base_dir):
+                for cat in _os.listdir(base_dir):
+                    p2 = _os.path.join(base_dir, cat, sname)
+                    if _os.path.isfile(_os.path.join(p2, "SKILL.md")):
+                        detail["path"] = p2
+                        break
+                if detail["path"]:
+                    break
+        if detail["path"]:
+            try:
+                with open(_os.path.join(detail["path"], "SKILL.md"), "r", encoding="utf-8") as f:
+                    content = f.read()
+                if content.startswith("---"):
+                    end = content.find("---", 3)
+                    if end > 0:
+                        fm = content[3:end]
+                        for line in fm.split("\n"):
+                            if line.strip().startswith("description:"):
+                                desc = line.split("description:", 1)[1].strip()
+                                desc = desc.strip("\"'")
+                                if desc:
+                                    detail["description"] = desc[:200]
+                                break
+            except Exception:
+                pass
+            try:
+                detail["file_count"] = sum(1 for _ in _os.walk(detail["path"]))
+            except Exception:
+                pass
+        skill_details.append(detail)
+    return skill_details
+
+
 def _cleanup_task_tmp(task: dict):
     """task 完成后清理 agent 在 /tmp 下产生的工作残留。
     agent 执行过程中会在 /tmp 创建临时目录（tf-deploy-*/blog-build-*/blog-deploy.*
@@ -125,9 +487,20 @@ def _cleanup_task_tmp(task: dict):
         "/tmp/tf-state-backup.json",
         "/tmp/inventory_state.json",
         "/tmp/inventory*.json",
-        # bun/opencode 的 libopentui JIT .so 缓存——按 cwd 生成不同 hash，
-        # JSC_diskCachePath 重定向大部分但 FFI 层仍有少量写入 /tmp，需兜底清理。
-        "/tmp/.39ee*.so",
+        # bun/opencode 的 JIT .so 缓存——按 cwd 生成不同 hash，
+        # 前缀会变化（.39ee*/.3cdc*/.3cdf*/.dccf* 等），必须用通配 /tmp/.*.so 全清。
+        "/tmp/.*.so",
+        # hermes ACP 隔离目录（ACP 协议自行创建的 hermes-acp-* 前缀，
+        # executor.py 只清理 hermes-iso-*，ACP 模式的残留在此兜底）
+        "/tmp/hermes-acp-*",
+        "/tmp/hermes-iso-*",
+        # hermes results 缓存（agent 执行后的 call 结果文件，堆积不清理）
+        "/tmp/hermes-results",
+        # hermes sandbox 临时目录
+        "/tmp/hermes-sandbox-*",
+        "/tmp/hermes-snap-*",
+        # tirith 安全扫描安装残留
+        "/tmp/tirith-install-*",
     ]
     cleaned = 0
     for pattern in tmp_patterns:
@@ -312,6 +685,121 @@ async def _stream_runtime_async(*args, **kwargs):
         yield evt
 
 
+async def _materialize_files(client, tid, files_dict, file_urls, dest_dir, tag="files"):
+    """三级降级物化文件到 dest_dir（project-info / knowledge 共用）。
+
+    降级顺序：① file_urls 优先 URL 下载（urllib HTTP GET）
+              ② URL 失败/无 URL → content（服务端兜底打包的内联内容）
+              ③ content 为空 → storage_key 直连 storage.read_batch 并发读取
+    file_urls 为空（老任务 / OBS 未启用）→ 纯走 content 老逻辑不变。
+
+    files_dict: {rel_path: content_str}
+    file_urls:  {rel_path: {"url": "https://...", "storage_key": "knowledge/..."}}
+    """
+    import os as _os
+    if not files_dict and not file_urls:
+        return
+
+    # file_urls 为空 → 走 content 老逻辑（直接写）
+    if not file_urls:
+        for rel, content in (files_dict or {}).items():
+            if rel == ".metadata.json":
+                continue
+            dest = _os.path.join(dest_dir, rel)
+            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(content)
+        return
+
+    stats = {"url_fail": 0, "storage_fail": 0, "empty": 0}
+    # 收集需要 storage_key 直连的文件：{storage_key: rel_path}
+    need_storage = {}
+
+    for rel, content in (files_dict or {}).items():
+        if rel == ".metadata.json":
+            continue
+        meta = file_urls.get(rel, {})
+        url = meta.get("url", "")
+        got_content = None  # 最终拿到的内容
+
+        # ① 优先 URL 下载
+        if url:
+            try:
+                with _urllib.urlopen(url, timeout=10) as resp:
+                    raw = resp.read()
+                got_content = raw.decode("utf-8") if isinstance(raw, bytes) else (raw or "")
+                if not got_content:
+                    raise ValueError("empty response")
+            except Exception as e:
+                log.warning(f"[{tag}] url download failed: rel={rel}, err={type(e).__name__}")
+                stats["url_fail"] += 1
+                got_content = None  # 降级
+
+        # ② URL 失败/无 URL → content
+        if got_content is None and content:
+            got_content = content
+
+        # ③ content 为空 → 收集到 need_storage，稍后批量读取
+        if got_content is None:
+            storage_key = meta.get("storage_key", "")
+            if storage_key:
+                need_storage[storage_key] = rel
+            else:
+                # 无 url 无 content 无 storage_key → 空内容
+                stats["empty"] += 1
+                log.error(f"[{tag}] all fallback failed, empty content: rel={rel}")
+            continue
+
+        # 写入文件
+        dest = _os.path.join(dest_dir, rel)
+        _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(got_content)
+
+    # 批量并发读取存储直连文件
+    if need_storage:
+        try:
+            from src.storage import get_storage
+            storage = get_storage()
+        except Exception as e:
+            storage = None
+            log.error(f"[{tag}] get_storage failed: {e}")
+
+        if storage is not None:
+            keys = list(need_storage.keys())
+            results = await storage.read_batch(keys)
+            log.info(f"[{tag}] batch read: {sum(1 for v in results.values() if v)}/{len(keys)} succeeded")
+            for key, rel in need_storage.items():
+                content = results.get(key, "")
+                if content:
+                    dest = _os.path.join(dest_dir, rel)
+                    _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+                    with open(dest, "w", encoding="utf-8") as f:
+                        f.write(content)
+                else:
+                    stats["storage_fail"] += 1
+                    log.error(f"[{tag}] storage read failed: rel={rel}, key={key}")
+        else:
+            # storage 不可用，全部记 storage_fail
+            for key, rel in need_storage.items():
+                stats["storage_fail"] += 1
+                log.error(f"[{tag}] storage unavailable, read failed: rel={rel}, key={key}")
+
+    # 降级统计上报
+    total_degraded = stats["url_fail"] + stats["storage_fail"] + stats["empty"]
+    if total_degraded > 0:
+        log.warning(f"[{tag}] degraded: url_fail={stats['url_fail']}, "
+                    f"storage_fail={stats['storage_fail']}, empty={stats['empty']}")
+        try:
+            await client.report_messages(tid, [{
+                "type": "text",
+                "data": f"⚠️ {tag} 文件降级：URL下载失败 {stats['url_fail']} 个，"
+                        f"存储直连失败 {stats['storage_fail']} 个，空内容 {stats['empty']} 个"
+            }])
+        except Exception:
+            pass
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -320,14 +808,51 @@ async def _execute_task(client, task, engine_name: str = ""):
     import os as _os
     tid = task.get("id", "")
     cwd = _remap_cwd(task.get("cwd") or _os.getcwd())
+    task["cwd"] = cwd
     _engine_tag = f"|engine:{engine_name}" if engine_name else ""
+
+    # TaskResourceStack: unified resource lifecycle for this task
+    from src.runtime.resource_stack import TaskResourceStack
+    _res = TaskResourceStack(task_id=tid, cwd=cwd)
+    # Register known tmp patterns for cleanup on any exit path
+    for pat in [
+        "/tmp/tf-deploy-*", "/tmp/tf-sys-xhy*", "/tmp/blog-build-*",
+        "/tmp/blog-deploy*", "/tmp/blog-gen*", "/tmp/blog-publish-*",
+        "/tmp/blog-sys-*.tar.gz", "/tmp/ptmpl_*", "/tmp/tf-state-backup.json",
+        "/tmp/inventory_state.json", "/tmp/inventory*.json", "/tmp/.*.so",
+        "/tmp/hermes-acp-*", "/tmp/hermes-iso-*", "/tmp/hermes-results",
+        "/tmp/hermes-sandbox-*", "/tmp/hermes-snap-*", "/tmp/tirith-install-*",
+    ]:
+        _res.track_tmp_pattern(pat)
+
+    # Ensure cwd exists before dependency check (remote worker: server creates
+    # the dir on its side, but worker needs its own local copy after _remap_cwd)
     try:
         _os.makedirs(cwd, exist_ok=True)
     except Exception:
         pass
+
+    # Pre-execution dependency validation (Cordis inject pattern)
+    from src.runtime.dependency_check import validate_task_dependencies, DependencyError
+    try:
+        validate_task_dependencies(task, engine_name)
+    except DependencyError as _de:
+        _res.dispose()
+        return {"_error": str(_de), "_started": False}
+
+    # Context compaction: will check batch size before flush
+    from src.runtime.context_compaction import should_compact, compact_messages
+
     env = {}
     try:
         env = json.loads(task.get("env_extra") or "{}")
+    except Exception:
+        pass
+    # Fetch latest env (AK/SK) from server DB — overrides stale snapshot
+    try:
+        _fresh_env = await client.get_task_env(tid)
+        if _fresh_env:
+            env.update(_fresh_env)
     except Exception:
         pass
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
@@ -414,13 +939,9 @@ async def _execute_task(client, task, engine_name: str = ""):
     proj_dir = _os.path.join(cwd, ".project-info")
     try:
         proj_files = json.loads(task.get("project_info_files") or "{}")
-        for rel, content in (proj_files or {}).items():
-            if rel == ".metadata.json":
-                continue
-            dest = _os.path.join(proj_dir, rel)
-            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(content)
+        proj_file_urls = json.loads(task.get("project_info_file_urls") or "{}")
+        await _materialize_files(client, tid, proj_files, proj_file_urls, proj_dir,
+                                 tag="project-info")
         prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
     except Exception as e:
         log.warning(f"project-info materialize failed: {e}")
@@ -428,11 +949,9 @@ async def _execute_task(client, task, engine_name: str = ""):
     know_dir = _os.path.join(cwd, ".knowledge")
     try:
         know_files = json.loads(task.get("knowledge_files") or "{}")
-        for rel, content in (know_files or {}).items():
-            dest = _os.path.join(know_dir, rel)
-            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(content)
+        know_file_urls = json.loads(task.get("knowledge_file_urls") or "{}")
+        await _materialize_files(client, tid, know_files, know_file_urls, know_dir,
+                                 tag="knowledge")
         prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
     except Exception as e:
         log.warning(f"knowledge materialize failed: {e}")
@@ -500,6 +1019,9 @@ async def _execute_task(client, task, engine_name: str = ""):
             elif evt_type == "step_finish":
                 log.info(f"  [{_esq}] ✅ {data}")
             batch.append({"type": evt_type, "data": data if not isinstance(data, str) else data})
+            # Context compaction: compact batch if it grows too large (prevents context overflow)
+            if should_compact(batch):
+                batch = compact_messages(batch)
             # 双触发批量上报（实时日志实时性关键）：50 条或 500ms 时间窗任一满足即 flush
             _now = time.monotonic()
             if len(batch) >= 50 or (_last_flush and _now - _last_flush >= 0.5):
@@ -508,6 +1030,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                     # task 已被服务端标终态（410 Gone / 网络错误）→ 中断执行，杀引擎进程
                     log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
                     _kill_stale_engine(task, _backend_for_engine(engine_name))
+                    _res.dispose()
                     return {"_error": "task terminated by server (aborted during execution)", "_started": started}
                 batch = []
                 _last_flush = _now
@@ -516,20 +1039,24 @@ async def _execute_task(client, task, engine_name: str = ""):
             if _resp is None:
                 log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
                 _kill_stale_engine(task, _backend_for_engine(engine_name))
+                _res.dispose()
                 return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
         # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
+        _res.dispose()
         return done
     except Exception as e:
         log.warning(f"task {tid} stream failed: {e}")
+        _res.dispose()
         return {"_error": str(e), "_started": started}
 
 
-async def _reregister(client, installed, device_name) -> list[int] | None:
+async def _reregister(client, installed, device_name, cli_version: str = "") -> list[int] | None:
     """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。"""
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
-        ids, _probe = await client.register(installed, device_name=device_name)
+        _ls = _scan_local_skills()
+        ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version, local_skills=_ls)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
@@ -559,6 +1086,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
     hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
     last_heartbeat = 0.0
+
+    # 启动 worker 引擎探测线程（每 10 分钟对本机引擎发起 CLI 测试对话）
+    _start_worker_probe()
     heartbeat_fail_streak = 0
     HEARTBEAT_FAIL_THRESHOLD = 3
     RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
@@ -569,20 +1099,59 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
         if now - last_reregister >= RE_REGISTER_INTERVAL:
-            new_ids = await _reregister(client, installed, device_name)
+            new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
             if new_ids:
                 runtime_ids = new_ids
                 heartbeat_fail_streak = 0
             last_reregister = asyncio.get_running_loop().time()
 
-        for rid in runtime_ids:
+        # 同 worker 多引擎：随机打乱 rid 顺序，避免固定轮询导致排前面的引擎吃满、后面的引擎闲置
+        _shuffled_rids = list(runtime_ids)
+        random.shuffle(_shuffled_rids)
+        for rid in _shuffled_rids:
             try:
-                task = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
-                                          prefer_fallback=_OBS_FALLBACK)
+                # Tags from server DB (single source of truth, managed via console)
+                # claim_by_tag 和 claim 都返回完整 dict {task, scan_request}
+                _claim_resp = None
+                _db_tags = []
+                try:
+                    _db_tags = await client.get_tags(rid)
+                except Exception:
+                    _db_tags = []
+                if _db_tags:
+                    for _tag in _db_tags:
+                        _resp = await client.claim_by_tag(rid, _tag,
+                                                          supports_obs_url=_OBS_SUPPORT,
+                                                          prefer_fallback=_OBS_FALLBACK)
+                        if _resp and _resp.get("task"):
+                            _claim_resp = _resp
+                            break
+                        # 无 task 但有 scan_request → 也要处理（空闲扫描）
+                        if _resp and _resp.get("scan_request") and not _claim_resp:
+                            _claim_resp = _resp
+                if not _claim_resp or not _claim_resp.get("task"):
+                    # Legacy claim (fallback: no tags or no tagged task)
+                    _legacy_resp = await client.claim(rid, supports_obs_url=_OBS_SUPPORT,
+                                              prefer_fallback=_OBS_FALLBACK)
+                    if _legacy_resp and _legacy_resp.get("task"):
+                        _claim_resp = _legacy_resp
+                    elif _legacy_resp and _legacy_resp.get("scan_request") and not _claim_resp:
+                        _claim_resp = _legacy_resp
             except Exception as e:
                 log.warning(f"claim rid={rid} failed: {e}")
                 heartbeat_fail_streak += 1
                 continue
+            # 处理 scan_request 指令（服务端通过 claim 响应下发）
+            if _claim_resp and _claim_resp.get("scan_request"):
+                try:
+                    _engine_name = engine_by_rid.get(rid, "")
+                    _engine_type = _backend_for_engine(_engine_name)
+                    _skill_details = _scan_local_skills_with_detail(_engine_type)
+                    await client.report_skills(rid, _skill_details)
+                    log.info(f"skill scan completed for rid={rid}, reported {len(_skill_details)} skills")
+                except Exception as _se:
+                    log.warning(f"skill scan failed for rid={rid}: {_se}")
+            task = (_claim_resp or {}).get("task") if _claim_resp else None
             if not task:
                 continue
             tid = task.get("id", "")
@@ -628,7 +1197,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 nonlocal hermes_active
-                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 1200)
+                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 1800)
                 # 立即标记 running（不等引擎首个事件）：hermes chat -q 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
                 # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。
@@ -677,10 +1246,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             await client.fail(_tid, "no done event")
                     except Exception as _ce:
                         log.warning(f"task {_tid} complete/fail callback error: {_ce}")
-                    # 清理 agent 在 /tmp 下的工作残留（tf-deploy/blog-build/ptmpl 等），
-                    # 避免多 task 叠加撑满 tmpfs 导致后续 git clone/template push 失败。
-                    # 按 cwd 的 owner/repo 前缀匹配，只清当前 task 产生的，不误删其他 task 的。
-                    _cleanup_task_tmp(t)
+                    # tmp cleanup handled by TaskResourceStack.dispose() in _execute_task
                 active_sessions.discard(s)
                 active_tasks.pop(_tid, None)
                 active_task_objs.pop(_tid, None)
@@ -692,10 +1258,29 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # ---- 心跳 + 失败检测 ----
         now = asyncio.get_running_loop().time()
         if now - last_heartbeat >= heartbeat_interval:
-            ok = await client.heartbeat(runtime_ids)
-            if ok:
+            # 收集最近的 ERROR/WARNING 日志（从内存日志缓冲区）
+            _recent_logs = _collect_recent_logs()
+            _metrics = _collect_worker_metrics()
+            _probe_results = _collect_worker_probe_results()
+            ok = await client.heartbeat(runtime_ids, log_lines=_recent_logs, metrics=_metrics, probe_results=_probe_results)
+            # ⚠️ heartbeat 返回值从 bool 改为 dict——判断逻辑调整
+            # dict: None=网络错误 / {"status":"ok",...}=成功 / 其他=异常
+            if ok is not None and ok.get("status") == "ok":
                 heartbeat_fail_streak = 0
                 log.debug(f"heartbeat ok, ids={runtime_ids}")
+                # 检查取消信号——发现 cancelled 立即杀引擎进程
+                cancelled_tasks = ok.get("cancelled_tasks", [])
+                if cancelled_tasks:
+                    for _tid in cancelled_tasks:
+                        if _tid in active_tasks:
+                            _sid = active_tasks[_tid]
+                            _task = active_task_objs.get(_tid)
+                            log.warning(f"heartbeat: task {_tid} cancelled, killing engine")
+                            if _task:
+                                _kill_stale_engine(_task, _backend_for_engine(_task.get("_engine_name", "")))
+                            active_sessions.discard(_sid)
+                            active_tasks.pop(_tid, None)
+                            active_task_objs.pop(_tid, None)
             else:
                 heartbeat_fail_streak += 1
                 log.warning(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), resetting session")
@@ -704,7 +1289,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                new_ids = await _reregister(client, installed, device_name)
+                new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
                 if new_ids:
                     runtime_ids = new_ids
                     heartbeat_fail_streak = 0
@@ -761,6 +1346,54 @@ def _read_local_worker_version() -> str:
         return ""
 
 
+def _check_opencode_api_keys():
+    """启动时检测 opencode.json 中的 {env:XXX} 引用，若环境变量缺失则告警。
+
+    opencode provider 配置 apiKey 为 "{env:VAR_NAME}" 时，opencode 运行时
+    从子进程环境变量解析 VAR_NAME。worker 以 systemd/nohup 运行时环境变量
+    只来自 /etc/grape/runtime.env，若该文件缺少对应 key → 每个模型调用返回
+    "Unauthorized: API key is required"，任务 3 秒即 failed 且无 stderr。
+
+    本函数在 main() 启动早期运行，发现缺失时输出醒目告警和修复指引，
+    让运维在任务失败前发现问题（2026-08-28 事故：5 台 worker 全缺 OPENGW key）。
+    """
+    import re as _re
+    oc_path = os.path.expanduser("~/.config/opencode/opencode.json")
+    if not os.path.isfile(oc_path):
+        return
+    try:
+        with open(oc_path, encoding="utf-8") as f:
+            raw = f.read()
+    except Exception:
+        return
+    # 匹配 {env:VAR_NAME} 模式
+    env_refs = set(_re.findall(r'\{env:([A-Z_][A-Z0-9_]*)\}', raw))
+    if not env_refs:
+        return  # opencode.json 用的是明文 key，不需要环境变量
+    missing = [name for name in env_refs if not os.environ.get(name)]
+    if not missing:
+        log.info(f"opencode.json API key 环境变量检查通过: {', '.join(sorted(env_refs))}")
+        return
+    log.warning(
+        f"⚠ opencode.json 引用了 {len(missing)} 个环境变量但 runtime.env 中缺失: "
+        f"{', '.join(sorted(missing))}"
+    )
+    log.warning(
+        "  所有模型调用将返回 'Unauthorized: API key is required'，任务会秒级失败。"
+    )
+    log.warning(
+        "  修复方法（任选一）:"
+    )
+    log.warning(
+        "  ① 追加 key 到 runtime.env: "
+        f"echo '{missing[0]}=<your-key>' >> /etc/grape/runtime.env && systemctl restart runtime-agent"
+    )
+    log.warning(
+        "  ② 重装时传入 key: export " + "=xxx ".join(missing) +
+        "=xxx && curl -sSL <server>/api/runtime/install | bash -s -- --token <token>"
+    )
+
+
 def main():
     token = os.environ.get("RUNTIME_TOKEN", "")
     server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
@@ -771,6 +1404,9 @@ def main():
     if not token:
         print("RUNTIME_TOKEN not set", file=sys.stderr)
         sys.exit(1)
+
+    # 启动早期检测 opencode API key 环境变量缺失（2026-08-28 事故预防）
+    _check_opencode_api_keys()
 
     from src.runtime.client import RuntimeClient
 
@@ -792,7 +1428,10 @@ def main():
         if not installed:
             log.warning("No runtimes installed locally, registering empty")
         device = os.environ.get("RUNTIME_DEVICE_NAME", os.uname().nodename if hasattr(os, "uname") else "host")
-        ids, probe_url = await client.register(installed, device_name=device)
+        _local_skills = _scan_local_skills()
+        ids, probe_url = await client.register(installed, device_name=device,
+                                               cli_version=_read_local_worker_version(),
+                                               local_skills=_local_skills)
         if not ids:
             log.error("Register failed (check RUNTIME_TOKEN / server URL)")
             return

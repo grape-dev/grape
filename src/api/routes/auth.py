@@ -1,13 +1,42 @@
-"""认证路由：OAuth 登录、密码登录、用户信息、登出"""
-from fastapi import APIRouter, HTTPException, Depends, Request
+"""认证路由：OAuth 登录、密码登录、用户信息、登出
+
+JWT 双 token 机制：
+  - access_token（15分钟）——存 localStorage，JS 读取加到 header
+  - refresh_token（7天滚动续期）——存 HttpOnly cookie，JS 不可读
+  - token_version——改密码/logout 时 +1，旧 token 失效
+"""
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user
-from src.config import log
+from src.config import log, COOKIE_SECURE
 import hashlib, os, time
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# HttpOnly cookie 配置
+_COOKIE_NAME = "refresh_token"
+_COOKIE_PATH = "/api/auth"
+_COOKIE_MAX_AGE = 7 * 24 * 3600  # 7 天
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str):
+    """设置 refresh_token HttpOnly cookie——JS 不可读，防 XSS。"""
+    response.set_cookie(
+        key=_COOKIE_NAME,
+        value=refresh_token,
+        httponly=True,
+        secure=COOKIE_SECURE,  # 环境变量控制：生产 HTTPS true / 开发 HTTP false
+        samesite="strict",
+        path=_COOKIE_PATH,
+        max_age=_COOKIE_MAX_AGE,
+    )
+
+
+def _clear_refresh_cookie(response: Response):
+    """清除 refresh_token cookie——logout 时调用。"""
+    response.delete_cookie(key=_COOKIE_NAME, path=_COOKIE_PATH)
 
 
 class PasswordLogin(BaseModel):
@@ -16,15 +45,60 @@ class PasswordLogin(BaseModel):
 
 
 @router.post("/login")
-async def password_login(body: PasswordLogin):
+async def password_login(body: PasswordLogin, response: Response):
     user = user_db.verify_user(body.username, body.password)
     if not user:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "用户名或密码错误"})
-    token = user_db.create_session_token(user["id"])
+    # JWT 双 token——access（15分钟）+ refresh（7天滚动续期）
+    from src.api.jwt_utils import create_access_token, create_refresh_token
+    token_version = user.get("token_version", 0)
+    access_token = create_access_token(user["id"], user["username"], token_version)
+    refresh_token = create_refresh_token(user["id"], user["username"], token_version)
+    # refresh_token 存 HttpOnly cookie——防 XSS
+    _set_refresh_cookie(response, refresh_token)
     return {
-        "token": token,
+        "token": access_token,
         "user": {"id": user["id"], "username": user["username"]}
     }
+
+
+@router.post("/refresh")
+async def refresh_token(request: Request, response: Response):
+    """用 refresh_token 换新的 access_token + refresh_token（滚动续期）。
+
+    refresh_token 从 HttpOnly cookie 读取（不从 body 读——防 XSS）。
+    CSRF 保护：要求 X-Requested-With header（同源 JS 自动加，跨站伪造无法加）。
+    前端 access_token 过期（401）时自动调这个接口。
+    refresh_token 也过期则返回 401——前端跳登录页。
+    """
+    # CSRF 保护——跨站请求伪造不会带自定义 header
+    xrw = request.headers.get("X-Requested-With", "")
+    if xrw != "XMLHttpRequest":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "缺少 CSRF header"})
+    # refresh_token 从 HttpOnly cookie 读
+    refresh = request.cookies.get(_COOKIE_NAME, "")
+    if not refresh:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "缺少 refresh_token"})
+    from src.api.jwt_utils import verify_refresh_token, create_access_token, create_refresh_token
+    payload = verify_refresh_token(refresh)
+    if not payload:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "refresh_token 过期或无效"})
+    uid = int(payload.get("sub", 0))
+    username = payload.get("username", "")
+    token_ver = int(payload.get("ver", 0))
+    if not uid:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "用户不存在"})
+    # token_version 校验——改密码/logout 后 +1，旧 refresh_token 失效
+    db_ver = user_db.get_token_version(uid)
+    if token_ver != db_ver:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "会话已失效"})
+    # 滚动续期——新 access_token + 新 refresh_token
+    # 新 refresh_token 继承旧 max_exp（不重新生成——30 天绝对上限）
+    old_max_exp = int(payload.get("max_exp", 0))
+    new_access_token = create_access_token(uid, username, db_ver)
+    new_refresh_token = create_refresh_token(uid, username, db_ver, max_exp=old_max_exp)
+    _set_refresh_cookie(response, new_refresh_token)
+    return {"token": new_access_token}
 
 
 @router.get("/login/gitcode")
@@ -54,7 +128,7 @@ async def gitcode_oauth_login(request: Request):
 
 
 @router.get("/callback/gitcode")
-async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = ""):
+async def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     if error:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"GitCode 授权失败: {error}"})
 
@@ -142,12 +216,21 @@ async def gitcode_oauth_callback(code: str = "", state: str = "", error: str = "
     except Exception as e:
         log.warning(f"OAuth login: write user mapping failed: {e}")
 
-    token = user_db.create_session_token(local_user["id"])
+    # JWT 双 token——OAuth 也签发 refresh_token
+    from src.api.jwt_utils import create_access_token, create_refresh_token
+    token_version = user_db.get_token_version(local_user["id"])
+    jwt_access_token = create_access_token(local_user["id"], local_user["username"], token_version)
+    jwt_refresh_token = create_refresh_token(local_user["id"], local_user["username"], token_version)
     # 仅真正首次登录（无任何托管仓库）才 first_login=1（前端清 currentRepo 进仓库选择页）；
     # 已有托管仓库则保留上次选择的仓库（first_login=0），恢复上次的 repo
-    from fastapi.responses import RedirectResponse
     has_repos = bool(user_db.get_managed_repos(local_user["id"]))
-    return RedirectResponse(url=f"/?token={token}&first_login={'1' if not has_repos else '0'}", status_code=302)
+    # 从 cookie 读语言偏好（i18n.js setLang 时双写 localStorage + cookie）
+    lang = request.cookies.get("grapeLang", "zh")
+    prefix = f"/{lang}" if lang != "zh" else ""
+    # refresh_token 通过 cookie 传递（HttpOnly）——URL 只带 access_token
+    resp = RedirectResponse(url=f"{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}", status_code=302)
+    _set_refresh_cookie(resp, jwt_refresh_token)
+    return resp
 
 
 @router.get("/profile")
@@ -166,6 +249,9 @@ async def get_profile(user: dict = Depends(get_current_user)):
 
 
 @router.post("/logout")
-async def logout(user: dict = Depends(get_current_user)):
-    user_db.clear_token(user["token"])
+async def logout(user: dict = Depends(get_current_user), response: Response = None):
+    """登出——token_version+1 撤销所有 token + 清 cookie。"""
+    user_db.increment_token_version(user["id"])
+    if response:
+        _clear_refresh_cookie(response)
     return {"message": "已登出"}

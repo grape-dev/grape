@@ -46,6 +46,22 @@ function renderMarkdown(text) {
 
 const API = (() => {
   const BASE = '/api';
+  let _refreshPromise = null;  // 并发 refresh 时所有请求等待同一个 Promise
+
+  // 多 Tab 同步——监听 localStorage token 变化，其他 Tab 刷新 token 后自动同步
+  // 体验优化，不是安全屏障——同步失败有 401 + Promise 队列兜底
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', (e) => {
+      if (e.key === 'token') {
+        // token 被其他 Tab 更新了——当前 Tab 的下次请求会自动用新 token（从 localStorage 读）
+        // 如果新值为 null（其他 Tab logout 了）——跳登录页
+        if (!e.newValue) {
+          localStorage.removeItem('user');
+          if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+        }
+      }
+    });
+  }
 
   function headers() {
     const h = {'Content-Type': 'application/json'};
@@ -54,15 +70,61 @@ const API = (() => {
     return h;
   }
 
-  function handleResp(r) {
+  // 用 refresh_token 换新的 access_token（滚动续期）
+  // refresh_token 从 HttpOnly cookie 自动发送——JS 不需要读
+  // 并发 401 时所有请求等待同一个 Promise——避免重复 refresh
+  function doRefresh() {
+    if (_refreshPromise) return _refreshPromise;
+    _refreshPromise = fetch(BASE + '/auth/refresh', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',  // CSRF 保护——跨站伪造无法加自定义 header
+      },
+      credentials: 'same-origin',  // 自动带 HttpOnly cookie 里的 refresh_token
+    }).then(r => {
+      if (!r.ok) throw new Error('refresh failed');
+      return r.json();
+    }).then(d => {
+      if (d.token) {
+        localStorage.setItem('token', d.token);
+        // refresh_token 在 HttpOnly cookie 里自动更新——JS 不需要接触
+        return d.token;
+      }
+      throw new Error('no token in refresh response');
+    }).catch(e => {
+      throw e;
+    }).finally(() => {
+      _refreshPromise = null;
+    });
+    return _refreshPromise;
+  }
+
+  // 401 时尝试 refresh，成功后重发原请求
+  function handle401(retryFn) {
+    return doRefresh().then(() => retryFn()).catch(() => {
+      // refresh 也失败——清 token 跳登录（refresh_token cookie 由服务端清除）
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+      throw new Error(I18N.t('common.session_expired'));
+    });
+  }
+
+  function handleResp(r, retryFn) {
     if (!r.ok) {
+      if (r.status === 401 && retryFn) {
+        // 尝试 refresh（refresh_token 在 HttpOnly cookie 里自动带）
+        return handle401(retryFn);
+      }
       if (r.status === 401) {
+        // 没有 retryFn——直接跳登录
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
       }
       return r.json().then(err => {
-        const e = new Error(err?.detail?.message || `请求失败 (${r.status})`);
+        const e = new Error(err?.detail?.message || I18N.t('common.request_failed', {status: r.status}));
         e.status = r.status;
         e.errors = err?.detail?.errors || null;
         throw e;
@@ -71,11 +133,24 @@ const API = (() => {
     return r.json();
   }
 
+  function _get(path) {
+    return fetch(BASE + path, {headers: headers()}).then(r => handleResp(r, () => _get(path)));
+  }
+  function _post(path, body) {
+    return fetch(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}).then(r => handleResp(r, () => _post(path, body)));
+  }
+  function _put(path, body) {
+    return fetch(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}).then(r => handleResp(r, () => _put(path, body)));
+  }
+  function _del(path) {
+    return fetch(BASE + path, {method: 'DELETE', headers: headers()}).then(r => handleResp(r, () => _del(path)));
+  }
+
   return {
-    get: (path) => fetch(BASE + path, {headers: headers()}).then(handleResp),
-    post: (path, body) => fetch(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}).then(handleResp),
-    put: (path, body) => fetch(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}).then(handleResp),
-    del: (path) => fetch(BASE + path, {method: 'DELETE', headers: headers()}).then(handleResp),
+    get: _get,
+    post: _post,
+    put: _put,
+    del: _del,
     upload: (path, formData, onUploadProgress) => {
       const token = localStorage.getItem('token');
       return new Promise((resolve, reject) => {
@@ -83,7 +158,7 @@ const API = (() => {
         xhr.open('POST', BASE + path);
         if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
         xhr.upload.onprogress = (e) => {
-          if (onUploadProgress && e.lengthComputable) {
+          if (onUploadProgress && e.lengthcomputable) {
             onUploadProgress(Math.round((e.loaded / e.total) * 100));
           }
         };
@@ -95,16 +170,17 @@ const API = (() => {
             resolve(json || {message: resp});
           } else {
             if (xhr.status === 401) {
+              // upload 401 不自动 refresh——直接跳登录
               localStorage.removeItem('token');
               localStorage.removeItem('user');
               if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
             }
-            const err = new Error(json?.detail?.message || `请求失败 (${xhr.status})`);
+            const err = new Error(json?.detail?.message || I18N.t('common.request_failed', {status: xhr.status}));
             err.errors = json?.detail?.errors || null;
             reject(err);
           }
         };
-        xhr.onerror = () => reject(new Error('网络错误，上传失败'));
+        xhr.onerror = () => reject(new Error(I18N.t('common.network_upload_error')));
         xhr.send(formData);
       });
     },

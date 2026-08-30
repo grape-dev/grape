@@ -1,0 +1,83 @@
+# Grape Prometheus Alerting Rules
+#
+# 参考 multica deploy/helm/multica/templates/prometheusrule.yaml
+# 使用方式：在 Prometheus / Grafana 中加载此规则文件
+#   promtool check rules alerts.yml  # 验证
+#   在 prometheus.yml 中 rule_files: - alerts.yml
+#
+groups:
+  - name: grape-business
+    rules:
+      # 任务卡住：running 超 30 分钟
+      - alert: GrapeTaskStuck
+        expr: grape_task_stuck > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent task stuck (>15min running)"
+          description: "{{ $value }} task(s) have been running for over 15 minutes."
+
+      # 任务失败率：5 分钟内失败率 > 50%
+      - alert: GrapeTaskFailureRateHigh
+        expr: |
+          sum(rate(grape_agent_task_failed_total[5m])) /
+          clamp_min(sum(rate(grape_agent_task_terminal_total[5m])), 1) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Task failure rate > 50%"
+          description: "More than half of terminal tasks are failing in the last 5 minutes."
+
+      # 全部 runtime 离线
+      - alert: GrapeAllRuntimesOffline
+        expr: grape_runtime_online{mode="local"} + grape_runtime_online{mode="remote"} == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "All runtimes offline"
+          description: "No runtimes (local or remote) are online. New tasks cannot execute."
+
+      # MySQL 连接池使用率 > 80%
+      - alert: GrapeDBPoolUsageHigh
+        expr: grape_db_threads_connected / clamp_min(grape_db_max_used_connections, 1) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL connection pool usage > 80%"
+          description: "{{ $value | humanizePercentage }} of max used connections are active."
+
+      # MySQL 连接中止
+      - alert: GrapeDBAbortedConnects
+        expr: increase(grape_db_aborted_connects_total[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL aborted connections"
+          description: "{{ $value }} connections aborted in the last 10 minutes."
+
+      # HTTP 5xx 错误率
+      - alert: GrapeHTTPErrorRateHigh
+        expr: |
+          sum(rate(grape_http_requests_total{status=~"5.."}[5m])) /
+          clamp_min(sum(rate(grape_http_requests_total[5m])), 1) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTP 5xx error rate > 10%"
+          description: "More than 10% of HTTP requests are returning 5xx errors."
+
+      # 队列积压
+      - alert: GrapeTaskQueueBacklog
+        expr: grape_task_queued > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Task queue backlog"
+          description: "{{ $value }} tasks queued for more than 10 minutes."

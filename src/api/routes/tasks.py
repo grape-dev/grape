@@ -10,7 +10,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user, get_user_token
-from src.config import WORKSPACE_DIR, log
+from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (
     db, db_lock, get_chat_config, create_conversation, add_message,
@@ -161,6 +161,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         if row:
             task_id = row[0]
             linked = row[1]
+            # 标题更新：webhook 带了真实标题 → 覆盖旧标题（可能为 issue_opened 等类型名）
+            if title:
+                c.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
+                db.commit()
         else:
             if not title:
                 title = _get_issue_title(repo_key, issue_number)
@@ -232,7 +236,20 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
 
 
 def _get_issue_title(repo_key: str, issue_number: int) -> str:
-    """从 events 表取该 issue 最新事件的标题（零 API 调用）"""
+    """从 events 表取该 issue 最新事件的标题（零 API 调用）。
+    
+    跳过 title 为事件类型名（如 issue_opened/issue_updated）或 A2A 占位标题的行，
+    这些不是 Issue 真实标题。回退到 issue_opened 事件的 payload 中提取标题。
+    """
+    _EVENT_TYPE_NAMES = {
+        "issue_opened", "issue_updated", "issue_comment", "issue_labeled",
+        "issue_closed", "push", "tag_created", "release_created",
+        "pull_request_opened", "pull_request_updated", "pull_request_merged",
+        "note_hook_pr", "vod_signal", "a2a_event", "build_start", "build_failure",
+        "deploy_start", "deploy_failure", "deploy_finish",
+    }
+    def _is_placeholder(t):
+        return not t or t in _EVENT_TYPE_NAMES or t.startswith("A2A:") or t.startswith("A2A (订阅):")
     with db_lock:
         c = db.cursor()
         try:
@@ -242,7 +259,33 @@ def _get_issue_title(repo_key: str, issue_number: int) -> str:
                 (repo_key, f"#{issue_number}")
             )
             row = c.fetchone()
-            return row[0] if row else ""
+            if row:
+                t = row[0] or ""
+                if not _is_placeholder(t):
+                    return t
+            # payload 兜底：从 issue_opened 事件的 payload 中提取真实标题
+            c.execute(
+                "SELECT payload FROM events WHERE repo_key=? AND issue_id=? AND event_type='issue_opened' "
+                "ORDER BY seq ASC LIMIT 1",
+                (repo_key, f"#{issue_number}")
+            )
+            prow = c.fetchone()
+            if prow:
+                import json as _json
+                try:
+                    _pl = _json.loads(prow[0] or "{}")
+                except Exception:
+                    _pl = {}
+                _obj = _pl.get("object_attributes", {})
+                _iss = _pl.get("issue", {})
+                _pt = ""
+                if isinstance(_obj, dict):
+                    _pt = _obj.get("title", "") or ""
+                if not _pt and isinstance(_iss, dict):
+                    _pt = _iss.get("title", "") or ""
+                if _pt and not _is_placeholder(_pt):
+                    return _pt
+            return ""
         except Exception:
             return ""
 
@@ -295,7 +338,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
         except Exception:
             pass
         prompt = _build_task_prompt(task_description, repo_key, issue_number, user_id)
-        cwd = os.path.join(WORKSPACE_DIR, "chat", str(user_id), conv_id)
+        cwd = os.path.join(CHAT_CWD_BASE, "chat", str(user_id), conv_id)
         os.makedirs(cwd, exist_ok=True)
 
         final_text = ""
@@ -450,6 +493,8 @@ class TaskCreateBody(BaseModel):
     title: str = ""
     description: str = ""
     assignee: str = ""
+    scene_id: str = ""
+    is_subtask_mode: int = 0
 
 
 class TaskStatusBody(BaseModel):
@@ -522,6 +567,19 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
 
+def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
+    """PATCH Issue body（追加多任务模式标记）。"""
+    import urllib.request as _ur, urllib.error as _uerr, json as _json
+    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
+    data = _json.dumps({"body": body_text}).encode()
+    req = _ur.Request(url, data=data, headers={"Content-Type": "application/json", "Accept": "application/json"}, method="PATCH")
+    try:
+        with _ur.urlopen(req, timeout=15) as resp:
+            return _json.loads(resp.read().decode()) if resp.read else {}
+    except Exception:
+        raise
+
+
 @router.post("/create")
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
@@ -534,16 +592,22 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     """
     from src.repo_key import to_repo_key, split_owner_repo
     if not body.repo_key or not body.title.strip():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key / title 必填"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库和标题必填"})
+    if not (body.description or "").strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "任务描述必填"})
     repo_key = to_repo_key(body.repo_key)
     owner, rname = split_owner_repo(repo_key)
     api_token = get_user_token(user["username"])
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
     assignee = (body.assignee or "").strip() or user["username"]  # General Settings Account：登录用户 gitcode 账号
-    # 1) 幂等：同 title open issue 复用
+    # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
     issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip())
     created = False
+    if issue_num is not None:
+        raise HTTPException(status_code=409, detail={"code": 409,
+                                                     "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
+                                                     "issue_number": issue_num})
     if issue_num is None:
         resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
                                    (body.description or "").strip(), assignee=assignee)
@@ -559,6 +623,38 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
+    # 3) 如指定了开发场景 → 写入 issue_state.scene_id + scene_user_id（后续 VOD/流水线按此场景执行）
+    if body.scene_id:
+        try:
+            from src.api.session_store import set_issue_scene
+            # 查场景的 scope 和 user_id（用户级场景需要记录 user_id 供后续流水线查询）
+            scene_uid = 0
+            try:
+                from src.api.pipeline_config import _query_scene_by_id
+                scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key, user_id=user.get("id", 0))
+                if scene_obj and scene_obj.get("scope") == "user":
+                    scene_uid = user.get("id", 0)
+            except Exception:
+                pass
+            set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
+        except Exception as _e:
+            from src.config import log
+            log.warning(f"create_task: set_issue_scene failed: {_e}")
+    # 4) 多任务模式 → Issue body 追加标记 + issue_state 标记
+    if body.is_subtask_mode:
+        try:
+            from src.api.session_store import set_subtask_mode
+            set_subtask_mode(repo_key, f"#{issue_num}", True)
+        except Exception as _e:
+            from src.config import log
+            log.warning(f"create_task: set_subtask_mode failed: {_e}")
+        # 追加标记到 Issue body（让 VOD 识别）
+        try:
+            _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 拆分为子任务执行。"
+            _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
+        except Exception as _e:
+            from src.config import log
+            log.warning(f"create_task: patch issue body for multi-task-mode failed: {_e}")
     return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
             "assignee": assignee, "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 
@@ -758,16 +854,48 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
         try:
             c.execute(
                 f"SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
-                f"status, completed_reason, created_at, completed_at FROM tasks WHERE {where} "
+                f"status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number "
+                f"FROM tasks WHERE {where} "
                 f"ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, created_at DESC",
                 params
             )
             rows = c.fetchall()
         except Exception:
             rows = []
-    return {"tasks": [{
-        "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
-        "title": r[4] or "", "task_description": r[5] or "",
-        "conversation_id": r[6] or "", "status": r[7],
-        "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
-    } for r in rows]}
+    # 查 issue_state 中的 scene_id（按 repo_key + issue_number 批量查询）
+    from src.api.session_store import get_issue_scene
+    from src.api.pipeline_config import get_pipeline_config
+    from src.api.session_store import get_issue_stage
+    tasks_out = []
+    for r in rows:
+        _rk = to_repo_key(from_repo_key(r[2]))
+        _issue_id = f"#{r[3]}"
+        # 区分场景来源：issue_state.scene_id（VOD 识别）vs 仓库默认场景
+        _st = get_issue_stage(_rk, _issue_id)
+        _issue_scene_id = (_st.get("scene_id") or "") if _st else ""
+        if _issue_scene_id:
+            _scene_id = _issue_scene_id
+            _scene_source = "vod"  # VOD 识别
+        else:
+            # 回退到仓库默认场景
+            _scene_id = (get_issue_scene(_rk, _issue_id) or ("default", 0))[0]
+            _scene_source = "repo_default"
+        _scene_name = ""
+        try:
+            _cfg = get_pipeline_config(_scene_id, repo_key=_rk)
+            if _cfg:
+                _scene_name = _cfg.get("name", _scene_id)
+        except Exception:
+            pass
+        tasks_out.append({
+            "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
+            "title": r[4] or "", "task_description": r[5] or "",
+            "conversation_id": r[6] or "", "status": r[7],
+            "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
+            "is_subtask_mode": r[11] or 0,
+            "parent_issue_number": r[12] or 0,
+            "scene_id": _scene_id,
+            "scene_name": _scene_name,
+            "scene_source": _scene_source,
+        })
+    return {"tasks": tasks_out}

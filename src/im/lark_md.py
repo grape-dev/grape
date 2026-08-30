@@ -39,7 +39,9 @@ def _table_fallback_lines(block: list[str]) -> list[str]:
 
 def to_lark_md(text: str, max_len: int = 2000) -> str:
     """标准 Markdown → 飞书 lark_md 子集，按行边界截断到 max_len。"""
-    lines = (text or "").split("\n")
+    # 清洗无效 <at> 标签：飞书卡片校验 ou_xxx 等占位符不是有效用户 → code=230099 卡片发送失败
+    text = re.sub(r"<at\s+id=[^>]+>\s*</at>\s*", "", text or "")
+    lines = text.split("\n")
     out: list[str] = []
     i, n = 0, len(lines)
     in_code = False
@@ -128,7 +130,10 @@ def _flush_text(buf: list[str], elements: list, max_len: int):
 
 def to_lark_elements(text: str, max_len: int = 2000) -> list[dict]:
     """文本 → 飞书卡片元素列表。表格(≤5列) → column_set；否则 → div 文本。"""
-    lines = (text or "").split("\n")
+    # 清理无效的空 <at> 标签（agent 输出中可能包含 <at id=></at>，
+    # 飞书卡片解析空 at 标签会出错，丢弃后续 elements 包括按钮）
+    text = re.sub(r'<at\s+id=\s*></at>', '', text or '')
+    lines = text.split("\n")
     elements: list[dict] = []
     buf: list[str] = []
     buf_len = 0

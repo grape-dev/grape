@@ -1,0 +1,74 @@
+{
+  "no_reply": "⚠️ No reply received. The connection may have been interrupted. Please try again.",
+  "header": {
+    "title": "Chat Agent · Personal Assistant",
+    "config_btn": "⚙ Settings",
+    "title_prefix": "Chat Agent · "
+  },
+  "loading": "Loading...",
+  "scope_short": {
+    "global": "Global",
+    "repo": "Project",
+    "user": "Personal"
+  },
+  "skill": {
+    "default_official": "Default official skill (auto)",
+    "no_repo_skill": "No project skills for this repo",
+    "no_personal_skill": "No personal skills",
+    "select_required": "Please select a skill"
+  },
+  "scan_config": "Scan to Configure",
+  "conversation": {
+    "new": "＋ New Chat",
+    "default_title": "New Chat",
+    "empty_hint": "No conversations yet. Start typing to create one.",
+    "start_hint": "Type a message to start a new conversation",
+    "create_failed": "Create failed: {{msg}}",
+    "delete_confirm": "Delete this conversation and all its messages?",
+    "deleted": "Conversation deleted",
+    "delete_failed": "Delete failed: {{msg}}",
+    "start_new": "Start a new conversation",
+    "create_conv_failed": "Create conversation failed: {{msg}}"
+  },
+  "load_failed": "Load failed",
+  "config": {
+    "saved": "Configuration saved",
+    "save_failed": "Save failed: {{msg}}"
+  },
+  "task": {
+    "running": "⏳ Task running…",
+    "running_with_time": "⏳ Task running… ({{sec}}s)",
+    "status_prefix": "Task {{status}}",
+    "timeout": "⏱ Wait timeout"
+  },
+  "onboard": {
+    "in_progress": "A scan configuration is already in progress. Please wait.",
+    "start_failed": "Failed to start scan configuration: {{msg}}",
+    "modal_title": "🔗 Feishu Scan Configuration",
+    "generating_qr": "Generating QR code…",
+    "step1_scan": "1. Open the Feishu app and scan the QR code above",
+    "step2_confirm": "2. Confirm the \"Create App / Authorize\" page in Feishu",
+    "waiting_confirm": "Waiting for confirmation…",
+    "success_title": "Configuration Successful",
+    "secret_saved": "App Secret saved (displayed as ******)",
+    "bot_connected": "Bot connected · 🟢 Online",
+    "close": "Close",
+    "failed_title": "Configuration Failed",
+    "rescan": "Rescan",
+    "cancel": "Cancel",
+    "qr_expired": "QR code expired. Please rescan.",
+    "waiting_countdown": "Waiting for confirmation… QR code will expire in {{time}}",
+    "error_access_denied": "The user denied the authorization request",
+    "error_unknown": "Unknown error"
+  },
+  "local_direct": "Local Direct",
+  "skill_label": "Skill",
+  "app_id": "App ID",
+  "app_secret": "App Secret",
+  "agents": "Agents",
+  "thinking": "Thinking...",
+  "querying": "Querying",
+  "backend": "Backend",
+  "placeholder": "Ask me anything...",
+  "send": "Send"
+}

@@ -12,6 +12,50 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 AGENT_TYPES = ["vod", "issue", "coding", "qa", "sre"]
 
 
+def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[int], user_id: int = 0):
+    """更新当前场景 node 的 engine_runtime_ids。
+
+    查找仓库当前应用的场景（managed_repos.dev_scene），在 user scope 副本中
+    更对应 node 的 engine_runtime_ids。如果当前场景是 official 且用户没有 fork，
+    先 fork 再更新。
+    """
+    from src.session_manager import db, db_lock
+    from src.api.pipeline_config import _query_scene_by_id, fork_official_scene, update_custom_scene
+    # 查当前场景
+    scene_id = "default"
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            if row and row[0]:
+                scene_id = row[0]
+    except Exception:
+        pass
+    # 查场景 scope
+    scene_info = _query_scene_by_id(scene_id, repo_key=repo_key, user_id=user_id)
+    if not scene_info:
+        return
+    # official 场景先 fork
+    if scene_info["scope"] == "official":
+        fork_official_scene(scene_id, user_id, repo_key=repo_key)
+        scene_info = _query_scene_by_id(scene_id, repo_key=repo_key, user_id=user_id)
+        if not scene_info or scene_info["scope"] != "user":
+            return  # fork 失败，跳过
+    # 更新 node 的 engine_runtime_ids
+    nodes = scene_info.get("nodes", [])
+    updated = False
+    for node in nodes:
+        if (node.get("tag") or node.get("id", "")) == agent_type:
+            node["engine_runtime_ids"] = engine_ids
+            updated = True
+            break
+    if updated:
+        update_custom_scene(
+            scene_id=scene_id, scope="user", repo_key=repo_key,
+            user_id=user_id, nodes=nodes)
+
+
 def _get_agent_type_meta(agent_type: str) -> dict | None:
     """从 agent_type 表读取 Agent 元数据"""
     from src.session_manager import db, db_lock
@@ -177,14 +221,32 @@ async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depend
         except Exception:
             pass
 
-    # 当前引擎集合（engine-selection-design.md v2，前端回显多选）
+    # 当前引擎集合（从场景 node 的 engine_runtime_ids 读取，前端回显多选）
     pool = []
     try:
-        from src.runtime.engine_select import get_binding
         from src.runtime.instances import instance_name
-        pool = get_binding(repo_key, name)
-        for _p in pool:
-            _p["instance_name"] = instance_name(_p.get("name") or "engine", _p.get("device_name") or "", _p.get("credential_id") or 0)
+        from src.api.pipeline_config import get_scene_engine_ids
+        from src.session_manager import db, db_lock
+        # 查当前场景
+        _scene_id = "default"
+        _uid = user.get("id", 0) if isinstance(user, dict) else 0
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+                _row = c.fetchone()
+                if _row and _row[0]:
+                    _scene_id = _row[0]
+        except Exception:
+            pass
+        _eids = get_scene_engine_ids(_scene_id, name, repo_key=repo_key, user_id=_uid)
+        if _eids:
+            from src.runtime.engine_select import _engines_by_ids, load_engine_selection, _norm_repo
+            _cfg = load_engine_selection()
+            _repo = _norm_repo(repo_key)
+            pool = _engines_by_ids(_eids, _repo, _cfg)
+            for _p in pool:
+                _p["instance_name"] = instance_name(_p.get("name") or "engine", _p.get("device_name") or "", _p.get("credential_id") or 0)
     except Exception:
         pass
 
@@ -308,55 +370,66 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     log.info(f"VOD IM: cleaned conversations for {repo_key}")
 
                 c.execute(
-                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?,?)",
+                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, bot_name) VALUES (?, ?, '')",
                     (body.im_app_id, "vod_bot")
                 )
                 db.commit()
 
-    # ---- 引擎集合（多引擎选择，engine-selection-design.md v2）----
-    # backends 显式提供（含空数组=清空集合）→ 替换该 (repo, agent) 的引擎集合；
-    # runtime_id 置为集合主引擎（最低 priority，供展示/legacy 兜底）；集合为空则 runtime_id=0。
-    # 解析在 db_lock 外执行（set_binding 内部自行加锁，避免嵌套死锁）。
-    pool_mode = False
+    # ---- 引擎配置：写入场景 node 的 engine_runtime_ids ----
+    # backends 显式提供 → 解析为 runtime_id 列表，更新当前场景 node；
+    # 无场景则为空（全广播/兜底）。
     if body.backends is not None:
         from src.runtime.instances import resolve_instance_id, scope_of_runtime
         from src.user.db import get_runtime_id_by_name
-        from src.runtime import engine_select as _es
         rids = []
         for bn in body.backends:
-            _rid = resolve_instance_id(bn)
+            # 优先按数字 ID 解析（前端传 runtime_id）；非数字才按名字解析
+            _rid = None
+            try:
+                _rid = int(bn)
+                # 校验 ID 存在
+                with db_lock:
+                    c2 = db.cursor()
+                    c2.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (_rid,))
+                    if not c2.fetchone():
+                        _rid = None
+            except (ValueError, TypeError):
+                pass
+            if _rid is None:
+                _rid = resolve_instance_id(bn)
             if _rid is None:
                 _rid = get_runtime_id_by_name(bn)
             if not _rid:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"未知引擎: {bn}"})
-            _scope = scope_of_runtime(_rid)
-            if _scope == "user":
-                raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {bn}"})
             rids.append(_rid)
-        _es.set_binding(repo_key, name, rids)
-        pool_mode = True
-        log.info(f"Agent binding configured: {repo_key}:{name} -> {rids}")
+        # 更新场景 node 的 engine_runtime_ids
+        try:
+            _update_scene_engine_ids(repo_key, name, rids, user.get("id", 0))
+        except Exception as e:
+            log.warning(f"Agent engine config: update scene node failed: {e}")
+        log.info(f"Agent engine configured: {repo_key}:{name} -> {rids}")
 
     with db_lock:
         c = db.cursor()
         try:
             from src.user.db import ensure_default_backend, get_runtime_id_by_name
             from src.runtime.instances import resolve_instance_id, scope_of_runtime
-            if pool_mode:
-                # 集合模式：runtime_id 取集合主引擎（最低 priority）；集合为空则 0（agent 标识不可用）
-                from src.runtime.engine_select import get_binding
-                _b = get_binding(repo_key, name)
-                runtime_id = _b[0]["runtime_id"] if _b else 0
+            # runtime_id：优先按 backends 集合首项解析；其次 body.backend；否则按类型名兜底
+            _backend_for_rid = body.backend
+            if not _backend_for_rid and body.backends:
+                _backend_for_rid = body.backends[0]
+            runtime_id = resolve_instance_id(_backend_for_rid) if _backend_for_rid else None
+            if runtime_id is not None:
+                _scope = scope_of_runtime(runtime_id)
+                if _scope == "user":
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {_backend_for_rid}"})
             else:
                 # 优先按唯一引擎名（engine name / instance_name）解析；否则按类型名（S2 健康选择）兜底
-                runtime_id = resolve_instance_id(body.backend)
+                runtime_id = resolve_instance_id(_backend_for_rid)
                 if runtime_id is not None:
-                    _scope = scope_of_runtime(runtime_id)
-                    # DevOps Agent 只能绑定 仓库/全局 引擎（个人引擎仅 Chat 可用，见 runtime-admin-two-view-design §5.1）
-                    if _scope == "user":
-                        raise HTTPException(status_code=400, detail={"code": 400, "message": f"DevOps Agent 只能绑定仓库/全局引擎，所选为个人引擎: {body.backend}"})
+                    pass  # 个人引擎（scope=user）也允许绑定 DevOps Agent
                 else:
-                    runtime_id = get_runtime_id_by_name(body.backend) or ensure_default_backend(body.backend or "opencode") or 0
+                    runtime_id = get_runtime_id_by_name(_backend_for_rid) or ensure_default_backend(_backend_for_rid or "opencode") or 0
             # 精确解析 skill_id：
             # 新方式：body.skill_id 有值 → 直接用，同步查出 skill_name 写入 skill 字段（兜底）
             # 旧方式兼容：body.skill 有值且无 skill_id → 按 skill_scope 查 id

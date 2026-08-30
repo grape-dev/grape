@@ -69,10 +69,23 @@ class GitCodeBackend(VcsBackend):
         ref = payload.get("ref", "")
         if isinstance(ref, str) and ref.startswith("refs/heads/"):
             branch = ref[11:]
+        # 提取 Issue/PR 标题（webhook payload），供 event_pipeline 写入 events.title
+        title = ""
+        _obj = payload.get("object_attributes", {})
+        if isinstance(_obj, dict):
+            title = _obj.get("title", "") or ""
+        if not title:
+            _issue = payload.get("issue", {})
+            if isinstance(_issue, dict):
+                title = _issue.get("title", "") or ""
+        if not title:
+            _pr = payload.get("pull_request", {}) or payload.get("merge_request", {})
+            if isinstance(_pr, dict):
+                title = _pr.get("title", "") or ""
         return {
             "source": "gitcode", "type": evt_type,
             "repository": repo, "branch": branch,
-            "actor": actor, "payload": payload,
+            "actor": actor, "payload": payload, "title": title,
         }
 
     def get_collaborators_url(self, owner: str, repo: str) -> str:

@@ -1,11 +1,10 @@
 """用户系统数据库：users/credentials/vms/skills 表管理"""
-import json, hashlib, time, os, threading
+import json, hashlib, time, os
 from src.session_manager import db, db_lock
 from src.config import log
 
 # OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
-_oauth_store = {}
-_oauth_lock = threading.Lock()
+# OAuth state 已改为 DB 共享存储（oauth_states 表），不再用进程内存
 
 
 # ====== 用户账户表（合并 users + bot_accounts） ======
@@ -26,8 +25,14 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     gitcode_publish_repo TEXT DEFAULT '',
     github_publish_repo TEXT DEFAULT '',
     password TEXT DEFAULT '',
+    token_version INTEGER DEFAULT 0,  -- JWT 撤销版本号——改密码/logout 时 +1
     created_by INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    hw_iam_domain TEXT DEFAULT '',
+    hw_iam_user TEXT DEFAULT '',
+    hw_iam_password TEXT DEFAULT '',
+    hw_iam_account_type TEXT DEFAULT 'iam',
+    last_active_at TEXT DEFAULT NULL  -- 最后活跃时间（用户在线状态判定）
 )
 """
 
@@ -42,7 +47,7 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by) VALUES (?,?,?,?)",
+            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by, created_at) VALUES (?,?,?,?,datetime('now'))",
                       (username, pw_hash, password, created_by))
             db.commit()
             uid = c.lastrowid
@@ -106,13 +111,50 @@ def update_password(user_id: int, new_password: str) -> bool:
 
 
 def verify_user(username: str, password: str) -> dict | None:
-    """验证用户名密码，成功返回用户信息，失败返回 None"""
+    """验证用户名密码，成功返回用户信息（含 token_version），失败返回 None"""
     user = get_user_by_username(username)
     if not user:
         return None
     if user["password_hash"] != _hash_password(password):
         return None
-    return {"id": user["id"], "username": user["username"], "created_by": user["created_by"], "created_at": user["created_at"]}
+    token_version = get_token_version(user["id"])
+    return {"id": user["id"], "username": user["username"], "created_by": user["created_by"], "created_at": user["created_at"], "token_version": token_version}
+
+
+# ====== JWT token_version 管理 ======
+
+def get_token_version(user_id: int) -> int:
+    """获取用户的 token_version——JWT verify 时对比，不匹配则 token 失效"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT token_version FROM user_accounts WHERE id=?", (user_id,))
+        row = c.fetchone()
+    return (row[0] if row and row[0] is not None else 0)
+
+
+def increment_token_version(user_id: int) -> None:
+    """token_version+1——改密码/logout 时调用，使所有旧 token 失效"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE user_accounts SET token_version=token_version+1 WHERE id=?", (user_id,))
+        db.commit()
+
+
+def batch_update_last_active(uids: list) -> None:
+    """批量更新用户最后活跃时间——定时任务调用，分批每 1000 个"""
+    if not uids:
+        return
+    with db_lock:
+        c = db.cursor()
+        # 分批，每批 1000
+        for i in range(0, len(uids), 1000):
+            batch = uids[i:i+1000]
+            placeholders = ",".join(["?"] * len(batch))
+            c.execute(
+                f"UPDATE user_accounts SET last_active_at=datetime('now') WHERE id IN ({placeholders})",
+                batch,
+            )
+        db.commit()
 
 
 # ====== Token 管理 ======
@@ -154,27 +196,46 @@ def _cleanup_expired_oauth_states():
 
 
 def save_oauth_state(state: str, provider: str, data: dict | None = None):
-    """保存 OAuth state（防 CSRF，10 分钟过期，内存存储）"""
+    """保存 OAuth state（防 CSRF，10 分钟过期，DB 共享存储——集群多实例可用）。"""
+    import json as _json
     expires = time.time() + 600
-    with _oauth_lock:
-        _oauth_store[state] = {"provider": provider, "data": data or {}, "expires": expires}
-    log.info(f"save_oauth_state: state={state[:20]}... saved OK, total={len(_oauth_store)}")
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO oauth_states (state, provider, data_json, expires) VALUES (?,?,?,?)",
+                (state, provider, _json.dumps(data or {}), expires),
+            )
+            db.commit()
+        log.info(f"save_oauth_state: state={state[:20]}... saved OK")
+    except Exception as e:
+        log.warning(f"save_oauth_state failed: {e}")
 
 
 def validate_oauth_state(state: str, provider: str) -> dict | None:
-    """验证并消耗 OAuth state（查 + 删），返回 data 或 None"""
-    with _oauth_lock:
-        entry = _oauth_store.pop(state, None)
-    if entry is None:
-        log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
+    """验证并消耗 OAuth state（查 + 删），返回 data 或 None。"""
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT provider, data_json, expires FROM oauth_states WHERE state=?", (state,))
+            row = c.fetchone()
+            if row:
+                c.execute("DELETE FROM oauth_states WHERE state=?", (state,))
+                db.commit()
+        if not row:
+            log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
+            return None
+        if row[0] != provider:
+            log.warning(f"validate_oauth_state: provider mismatch")
+            return None
+        if time.time() > row[2]:
+            log.warning(f"validate_oauth_state: state expired")
+            return None
+        return _json.loads(row[1] or "{}")
+    except Exception as e:
+        log.warning(f"validate_oauth_state failed: {e}")
         return None
-    if entry["provider"] != provider:
-        log.warning(f"validate_oauth_state: provider mismatch")
-        return None
-    if time.time() > entry["expires"]:
-        log.warning(f"validate_oauth_state: state expired")
-        return None
-    return entry["data"]
 
 
 
@@ -231,6 +292,11 @@ def init_db():
         for col in ["created_by"]:
             try:
                 db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            except Exception:
+                pass
+        for col in ["hw_iam_domain", "hw_iam_user", "hw_iam_password", "hw_iam_account_type"]:
+            try:
+                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
             except Exception:
                 pass
         db.commit()
@@ -525,6 +591,11 @@ def init_db():
                 db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
             except Exception:
                 pass
+        # 兼容旧列迁移（幂等）：last_active_at（用户在线状态判定）
+        try:
+            db.execute("ALTER TABLE user_accounts ADD COLUMN last_active_at TEXT DEFAULT NULL")
+        except Exception:
+            pass
         db.execute(_CREDENTIALS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
@@ -1179,6 +1250,8 @@ USER_ACCOUNT_FIELDS = [
     "gitcode_publish_repo", "github_publish_repo",
     "password",
     "created_by", "created_at",
+    "hw_iam_domain", "hw_iam_user", "hw_iam_password",
+    "hw_iam_account_type",
 ]
 
 
@@ -1413,7 +1486,7 @@ def save_user_repos(user_id: int, repos: list[dict]):
         for r in repos:
             full_name = r.get("full_name", "") or r.get("repo_key", "")
             c.execute(
-                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join) VALUES (?,?,?,?,?,?,?,0)",
+                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join) VALUES (?,?,?,?,?,?,?,1)",
                 (user_id, to_repo_key(full_name), r.get("owner", ""), r.get("name", ""),
                  r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0)
             )
@@ -1477,16 +1550,17 @@ init_user_repos_table()
 
 # ====== Agent Runtimes 缓存表 ======
 
-def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = ""):
+def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """[兼容别名] 见 save_agent_runtimes"""
-    return save_agent_runtimes(agents, scope, owner_id)
+    return save_agent_runtimes(agents, scope, owner_id, host_name)
 
 
-def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = ""):
+def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """批量写入 agent runtimes 缓存（scope: global/repo/user）
 
-    幂等 upsert：按 name+scope+owner_id 匹配，存在则更新（保留 id），不存在才插入。
+    幂等 upsert：按 name+scope+owner_id+host_name 匹配，存在则更新（保留 id），不存在才插入。
     保证跨刷新 id 稳定，供各表 runtime_id 引用。
+    host_name：本机直连引擎（credential_id=0）归属的主控机 hostname，区分多台主控机。
     """
     with db_lock:
         c = db.cursor()
@@ -1494,16 +1568,20 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             name = (a.get("name", "") or "").strip().lower()
             if not name:
                 continue
+            # 本机直连 engine 的 local_skills + skill 详情
+            _ls_json = json.dumps(a.get("local_skills", []), ensure_ascii=False)
+            _detail = a.get("local_skills_detail")
+            _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
             # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
-            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0", (name, scope, owner_id))
+            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 AND host_name=?", (name, scope, owner_id, host_name))
             row = c.fetchone()
             if row:
                 c.execute(
-                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=datetime('now') WHERE id=?",
+                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
                     (a.get("display_name", name),
                      1 if a.get("installed") else 0, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
-                     a.get("pip_package", ""), row[0])
+                     a.get("pip_package", ""), _ls_json, _detail_json, row[0])
                 )
             else:
                 # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
@@ -1513,19 +1591,31 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                 if not a.get("installed"):
                     continue
                 c.execute(
-                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (name, a.get("display_name", name),
                      1, a.get("cli_path", ""),
                      a.get("version", ""), 1 if a.get("healthy") else 0,
-                     a.get("pip_package", ""), scope, owner_id)
+                     a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json, host_name)
                 )
+                # 本机引擎首次创建时补写默认 "all" 标签到 engine_capabilities
+                _new_rid = c.lastrowid
+                try:
+                    c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (_new_rid,))
+                    if not c.fetchone():
+                        from datetime import datetime, timezone
+                        _now = datetime.now(timezone.utc).isoformat()
+                        c.execute(
+                            "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
+                            (_new_rid, "all", _now, _now))
+                except Exception:
+                    pass
         # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
         # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
         #（见 multi-runtime-instance-design §5.1 防误删）。
         current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
         if current_names:
             placeholders = ",".join("?" for _ in current_names)
-            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND lower(name) NOT IN ({placeholders})", (scope, owner_id, *current_names))
+            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
         db.commit()
 
 
@@ -1543,14 +1633,18 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     with db_lock:
         c = db.cursor()
         if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at FROM agent_runtimes ORDER BY name")
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name FROM agent_runtimes ORDER BY name")
         else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
              "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
-             "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13]}
+             "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
+             "local_skills": json.loads(r[14] or "[]") if r[14] else [],
+             "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
+             "agent_tags": json.loads(r[16] or '["all"]') if r[16] else ["all"],
+             "host_name": r[17] or ""}
             for r in c.fetchall()
         ]
 

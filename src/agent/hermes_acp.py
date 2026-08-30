@@ -112,16 +112,22 @@ class HermesACPBackend:
             _track_proc = _untrack_proc = lambda p: None
             _terminate_proc = lambda p, l: None
 
+        # TaskResourceStack: unified resource lifecycle (effect/dispose pattern)
+        from src.runtime.resource_stack import TaskResourceStack
+        _res = TaskResourceStack(task_id="", cwd=cwd)
+        _res.track_overlay(iso_home)
+        _res.track_proc(proc)
+
         collected_text = []
         new_session_id = session_id
         error_events = []
 
-        # chat 任务完成检测参数（根因1修复）：
-        # chat 任务不输出 JSON 记录块，用 text 输出稳定检测替代。
+        # chat 任务完成检测参数（优化：降低 idle 超时，加快响应）：
         # _CHAT_STABLE_SECONDS: 首次有 text 后至少等 N 秒（给 hermes 时间输出完整回复）
         # _CHAT_IDLE_SECONDS: 最后一条 text 后连续 N 秒无新 text → 认为输出完
-        _CHAT_STABLE_SECONDS = 15
-        _CHAT_IDLE_SECONDS = 10
+        # 优化前：15+10=25s 总延迟；优化后：3+5=8s 总延迟
+        _CHAT_STABLE_SECONDS = 3
+        _CHAT_IDLE_SECONDS = 5
         _chat_first_text_time = 0.0
         _chat_last_text_time = 0.0
         # 判断是否 chat 任务：env 里有 DEVOPS_EVENT_TYPE=chat 或 AGENT_NAME 含 chat
@@ -291,8 +297,6 @@ class HermesACPBackend:
             if init_err:
                 error_events.append(f"initialize failed: {init_err}")
                 yield ("done", _done_result(-1, "", session_id, error_events, ""))
-                _untrack_proc(proc)
-                _cleanup_overlay(iso_home)
                 return
 
             log.info(f"{label}hermes ACP initialized")
@@ -302,12 +306,24 @@ class HermesACPBackend:
             cwd_arg = cwd if cwd else "."
 
             if session_id:
-                # 尝试 resume
-                result, err = client.request("session/resume", {
-                    "cwd": cwd_arg,
-                    "sessionId": session_id,
-                    "mcpServers": [],
-                }, timeout=30)
+                # Context compaction: check state.db size before resume
+                # If state.db is too large (context bloat), skip resume and create new session
+                from src.runtime.context_compaction import check_state_db_size
+                _skip_resume = check_state_db_size(iso_home, threshold_mb=50.0)
+                if _skip_resume:
+                    log.warning(f"{label}hermes ACP state.db too large, skipping resume to avoid context overflow")
+                    session_id = ""  # Force new session
+                    result, err = client.request("session/new", {
+                        "cwd": cwd_arg,
+                        "mcpServers": [],
+                    }, timeout=30)
+                else:
+                    # 尝试 resume
+                    result, err = client.request("session/resume", {
+                        "cwd": cwd_arg,
+                        "sessionId": session_id,
+                        "mcpServers": [],
+                    }, timeout=30)
                 if err:
                     log.warning(f"{label}hermes ACP resume {session_id[:12]}... failed: {err}, creating new")
                     result, err = client.request("session/new", {
@@ -317,8 +333,6 @@ class HermesACPBackend:
                     if err:
                         error_events.append(f"session/new failed: {err}")
                         yield ("done", _done_result(-1, "", session_id, error_events, ""))
-                        _untrack_proc(proc)
-                        _cleanup_overlay(iso_home)
                         return
                     new_session_id = _extract_session_id(result) or ""
                 else:
@@ -331,8 +345,6 @@ class HermesACPBackend:
                 if err:
                     error_events.append(f"session/new failed: {err}")
                     yield ("done", _done_result(-1, "", session_id, error_events, ""))
-                    _untrack_proc(proc)
-                    _cleanup_overlay(iso_home)
                     return
                 new_session_id = _extract_session_id(result) or ""
 
@@ -354,6 +366,8 @@ class HermesACPBackend:
                 msg = {"jsonrpc": "2.0", "id": _prompt_id, "method": "session/prompt",
                        "params": {"sessionId": new_session_id,
                                   "prompt": [{"type": "text", "text": prompt}]}}
+                # 记录 prompt 的 req_id（只有它才触发 prompt_done）
+                client._prompt_req_id = _prompt_id
                 try:
                     client.write_line((json.dumps(msg) + "\n").encode("utf-8"))
                 except Exception as e:
@@ -391,6 +405,13 @@ class HermesACPBackend:
                     break
 
                 elapsed_silent = time.time() - _last_activity
+                # 收到过文本输出后，15s 无新事件 → prompt 已完成但 turn_end/response 丢失
+                # （hermes 在 LLM 返回后做 title_generation 等后续操作，可能不发 turn_end）
+                if collected_text and elapsed_silent > 15:
+                    log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s with {len(collected_text)} text chunks, assuming done")
+                    prompt_result["stopReason"] = "end_turn"
+                    break
+
                 if elapsed_silent > max_exec_seconds:
                     if proc.poll() is None and elapsed_silent < max_exec_seconds * 2:
                         # 进程还活着，可能是长命令/长思考
@@ -449,7 +470,12 @@ class HermesACPBackend:
             except Exception:
                 pass
 
-            exit_code = proc.returncode if proc.returncode is not None else -1
+            # 任务已完成（stopReason=end_turn）时，进程被 SIGTERM 清理不影响 exit_code
+            # 2026-08-25 seq#2632 实例：任务成功完成但进程 5s 内未退出 → SIGTERM → returncode=-15 → 误标 failed
+            if stop_reason == "end_turn" and not error_events:
+                exit_code = 0
+            else:
+                exit_code = proc.returncode if proc.returncode is not None else -1
             full_text = "\n".join(collected_text)
 
             yield ("step_finish", f"Step 1 done (stopReason={stop_reason})")
@@ -471,14 +497,14 @@ class HermesACPBackend:
                 "errors": error_events, "stderr": "",
             })
         finally:
-            _untrack_proc(proc)
+            # Unified cleanup via TaskResourceStack (replaces scattered _untrack_proc + _cleanup_overlay)
             try:
                 proc.stdin.close()
             except Exception:
                 pass
             if proc.poll() is None:
                 _terminate_proc(proc, f"{label}hermes ACP")
-            _cleanup_overlay(iso_home)
+            _res.dispose(kill_procs=False)  # proc already terminated above
 
 
 # ══════════════════════════════════════════════════════════════
@@ -503,6 +529,7 @@ class _ACPSimpleClient:
         self._pending: dict[int, threading.Event] = {}
         self._pending_results: dict[int, any] = {}
         self._pending_errors: dict[int, str] = {}
+        self._prompt_req_id: int = 0  # session/prompt 的 req_id（只有它才触发 prompt_done）
         self._lock = threading.Lock()
 
     def write_line(self, data: bytes):
@@ -569,6 +596,8 @@ class _ACPSimpleClient:
             # 未匹配的 response，记录但不处理
             return
 
+        is_prompt_response = (req_id == self._prompt_req_id)
+
         if "error" in raw:
             err = raw["error"]
             err_msg = err.get("message", str(err))
@@ -576,26 +605,24 @@ class _ACPSimpleClient:
                 err_msg += f" (data={err['data']})"
             with self._lock:
                 self._pending_errors[req_id] = err_msg
-            # error response 也意味着 prompt 结束
-            self._on_prompt_done({"stopReason": "error", "result": raw})
+            # 只有 session/prompt 的 error 才触发 prompt_done
+            if is_prompt_response:
+                self._on_prompt_done({"stopReason": "error", "result": raw})
         else:
             result = raw.get("result")
-            # 如果是 session/prompt 响应，提取 stopReason 并触发回调
-            if isinstance(result, dict):
-                stop_reason = result.get("stopReason", "")
-                if stop_reason:
-                    # prompt 完成，触发回调
-                    self._on_prompt_done({"stopReason": stop_reason, "result": result})
-                else:
-                    # response 没有 stopReason 字段——可能是 hermes ACP 实现差异
-                    # 仍然视为 prompt 完成（response 到了说明 hermes 已处理完）
-                    log.info(f"{self.label}hermes ACP response without stopReason, treating as done (id={req_id})")
-                    self._on_prompt_done({"stopReason": "end_turn", "result": result})
-            else:
-                # result 不是 dict（可能是 None 或其他类型），也视为完成
-                self._on_prompt_done({"stopReason": "end_turn", "result": result or {}})
             with self._lock:
                 self._pending_results[req_id] = result
+            # 只有 session/prompt 的 response 才触发 prompt_done
+            if is_prompt_response:
+                if isinstance(result, dict):
+                    stop_reason = result.get("stopReason", "")
+                    if stop_reason:
+                        self._on_prompt_done({"stopReason": stop_reason, "result": result})
+                    else:
+                        log.info(f"{self.label}hermes ACP prompt response without stopReason, treating as done (id={req_id})")
+                        self._on_prompt_done({"stopReason": "end_turn", "result": result})
+                else:
+                    self._on_prompt_done({"stopReason": "end_turn", "result": result or {}})
 
         evt.set()
 

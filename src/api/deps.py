@@ -6,19 +6,47 @@ TOKEN_TYPE_DEVOPS = "devops_bot"
 TOKEN_TYPE_USER = "user"
 TOKEN_TYPE_WEBHOOK = "webhook"
 
+# 用户活跃状态追踪——内存缓冲，定时批量 flush
+_pending_active: set = set()
+
+def mark_user_active(uid: int):
+    """将用户 id 加入待更新集合——O(1)，不阻塞 API"""
+    _pending_active.add(uid)
+
+def get_pending_active() -> set:
+    """获取并清空待更新集合（供定时任务调用）"""
+    uids = set(_pending_active)
+    _pending_active.clear()
+    return uids
+
 
 def get_current_user(authorization: str = Header(None)) -> dict:
-    """从 Authorization: Bearer <token> 提取并验证用户"""
+    """从 Authorization: Bearer *** 提取并验证 JWT access token。
+
+    JWT 无状态验证——签名+过期在 jwt_utils 验证。
+    token_version 对比数据库——改密码/logout 后旧 token 失效。
+    任何实例都能验证（集群会话共享）。
+    """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail={"code": 401, "message": "未登录"})
     token = authorization.replace("Bearer ", "").strip()
-    uid = user_db.validate_token(token)
-    if not uid:
+    # JWT access token 验证——签名+过期
+    from src.api.jwt_utils import verify_access_token
+    payload = verify_access_token(token)
+    if not payload:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "会话过期"})
-    user = user_db.get_user(uid)
-    if not user:
+    uid = int(payload.get("sub", 0))
+    username = payload.get("username", "")
+    token_ver = int(payload.get("ver", 0))
+    if not uid:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "用户不存在"})
-    return {"id": uid, "username": user["username"], "token": token, "token_type": TOKEN_TYPE_USER}
+    # token_version 校验——改密码/logout 后 +1，旧 token 失效
+    db_ver = user_db.get_token_version(uid)
+    if token_ver != db_ver:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "会话已失效"})
+    # 记录活跃状态——O(1)，不阻塞
+    mark_user_active(uid)
+    return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_USER}
 
 
 def get_user_token(username: str) -> str:

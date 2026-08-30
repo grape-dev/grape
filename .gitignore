@@ -20,6 +20,7 @@ configs/login-whitelist.json
 configs/db-backend.json
 configs/db-backend.json.bak-*
 configs/server-config.json
+configs/SETUP-GUIDE.md
 skills/custom/
 skills/repo/
 # 官方技能由独立仓库供给（scripts/sync_skills.sh 铺入，不入 git）
@@ -55,3 +56,9 @@ temp/
 .codeartsdoer/skills/
 # MCP installed marker (regenerated on use)
 .codeartsdoer/.installed
+python/
+wheels/
+SHA256SUMS
+VERSION
+*.swp
+*.swo

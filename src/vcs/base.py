@@ -13,7 +13,7 @@ class VcsBackend:
 
         返回:
             {"source": str, "type": str, "repository": str,
-             "branch": str, "actor": str, "payload": dict}
+             "branch": str, "actor": str, "payload": dict, "title": str}
         """
         raise NotImplementedError
 

@@ -45,6 +45,7 @@ class RuntimeRegBody(BaseModel):
     device_name: str = ""
     cli_version: str = ""
     runtimes: list[dict] = []
+    local_skills: list[dict] = []
 
 
 class RuntimeInfo(BaseModel):
@@ -53,8 +54,21 @@ class RuntimeInfo(BaseModel):
     healthy: bool = True
 
 
+class LogLineBody(BaseModel):
+    ts: str = ""
+    level: str = ""
+    message: str = ""
+
+
 class HeartbeatBody(BaseModel):
     runtime_ids: list[int] = []
+    cpu_percent: float = 0.0
+    memory_percent: float = 0.0
+    disk_percent: float = 0.0
+    tmp_percent: float = 0.0
+    load_avg: str = ""
+    log_lines: list[LogLineBody] = []
+    probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 
 
 class TaskStartBody(BaseModel):
@@ -116,10 +130,11 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
         # 凭据作用域决定 runtime 归属：user scope 的个人 worker 注册为 user scope + owner_id；
         # repo scope 用凭据行 owner_id（仓库全名），否则 set_chat_config / Engines 视图的
         # scope 判定失效（个人/仓库级引擎永远选不中，见 engine-selection §7.1）
-        c.execute("SELECT scope, owner_name, owner_id FROM runtime_credentials WHERE id=?", (credential_id,))
+        c.execute("SELECT scope, owner_name, owner_id, repo_key FROM runtime_credentials WHERE id=?", (credential_id,))
         cred_row = c.fetchone()
         cred_scope = (cred_row[0] if cred_row and cred_row[0] else "global").strip().lower()
         owner_id = (cred_row[2] or "") if cred_row else ""
+        cred_repo_key = (cred_row[3] or "") if cred_row else ""
         if cred_scope == "user" and cred_row and cred_row[1]:
             # owner_id 与 user_accounts.id 对齐（按用户名），找不到保持空
             try:
@@ -129,25 +144,43 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                     owner_id = str(urow[0])
             except Exception:
                 pass
+        # local_skills：per-engine skill 列表，按 engine name 匹配 runtime 行
+        skills_by_name = {}
+        for ls in body.local_skills or []:
+            eng = (ls.get("engine") or "").strip().lower()
+            if eng:
+                skills_by_name[eng] = json.dumps(ls.get("skills") or [], ensure_ascii=False)
         for rt in body.runtimes or []:
             name = (rt.get("name") or "").strip().lower()
             if not name:
                 continue
+            _ls_json = skills_by_name.get(name, "[]")
             c.execute("SELECT id FROM agent_runtimes WHERE credential_id=? AND lower(name)=? AND scope=? AND owner_id=? LIMIT 1",
                       (credential_id, name, cred_scope, owner_id))
             row = c.fetchone()
             if row:
                 rid = row[0]
-                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=? WHERE id=?",
+                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=? WHERE id=?",
                           (rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
-                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), rid))
+                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key))
                 rid = c.lastrowid
+            # 服务端默认写入 "all" 标签到 engine_capabilities（worker 不需要传 tags）
+            # 后续标签增删改全部来自 WebUI 操作
+            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
+            if not c.fetchone():
+                _now = datetime.now(timezone.utc).isoformat()
+                try:
+                    c.execute(
+                        "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
+                        (rid, "all", _now, _now))
+                except Exception:
+                    pass
             registered.append({"id": rid, "name": name})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
@@ -175,18 +208,106 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
     归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
     防止已吊销设备的旧 runtime id 被其它 active 凭据的心跳刷回 online
     （revoke 只置 offline，不删行；无校验则吊销的设备行会被残留 agent 复活）。
+
+    响应携带 cancelled_tasks 列表——worker 收到后立即杀引擎进程，
+    实现任务取消实时感知（延迟 15 秒，覆盖 step 很长时 report_messages 410 不触发的场景）。
     """
     now = datetime.now(timezone.utc).isoformat()
     client_ip = _client_ip(request)
+    cancelled_tasks = []
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=? WHERE id=?", (now, client_ip, credential_id))
+        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
+                  (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
                       [now] + body.runtime_ids + [credential_id])
+            # worker 上报的引擎探测结果：agent_runtimes 无 probe_* 列，
+            # 仅在内存中保留（下次 /api/runtime/heartbeat 由 _probe_results 汇总）
+            # if body.probe_results:
+            #     ... (DB 写入已移除，probe_* 列不存在)
+            # 查该 worker 的已取消任务——通知 worker 立即杀进程
+            ph2 = ",".join("?" for _ in body.runtime_ids)
+            rows = c.execute(
+                f"SELECT id FROM agent_tasks WHERE runtime_id IN ({ph2}) AND status='cancelled'",
+                body.runtime_ids
+            ).fetchall()
+            cancelled_tasks = [r[0] for r in rows]
+
+            # busy_slots 对账（2026-08-29 修复）：
+            # 原代码只在 claim 成功时对账，但 claim 不到任务时永远不对账 → 泄漏永久不修复。
+            # 在心跳中定期对账：busy_slots 与实际 running/dispatched 任务数不一致时重置。
+            try:
+                for _rid in body.runtime_ids:
+                    c.execute(
+                        "SELECT COUNT(*) FROM agent_tasks "
+                        "WHERE runtime_id=? AND status IN ('dispatched','running')",
+                        (_rid,))
+                    _actual = c.fetchone()[0] or 0
+                    c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=?", (_rid,))
+                    _busy = c.fetchone()[0] or 0
+                    if _busy != _actual:
+                        log.info(f"heartbeat busy_slots reconcile: runtime={_rid} "
+                                 f"busy={_busy} actual={_actual} -> reset")
+                        c.execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?",
+                                  (_actual, _rid))
+            except Exception as _bre:
+                log.warning(f"heartbeat busy_slots reconcile failed: {_bre}")
         db.commit()
-    return {"status": "ok"}
+
+    # 写入 worker 上报的日志到 data/logs/workers/{credential_id}.log
+    if body.log_lines:
+        import os as _os, json as _json
+        from src.config import LOG_DIR
+        _worker_log_dir = _os.path.join(LOG_DIR, "workers")
+        _os.makedirs(_worker_log_dir, exist_ok=True)
+        # 查 worker 名称
+        _wname = ""
+        try:
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (credential_id,))
+                row = c2.fetchone()
+                if row:
+                    _wname = row[1] or row[0] or f"worker-{credential_id}"
+        except Exception:
+            _wname = f"worker-{credential_id}"
+        _wf = _os.path.join(_worker_log_dir, f"{credential_id}.log")
+        with open(_wf, "a") as _wf_fp:
+            for ll in body.log_lines:
+                _entry = {
+                    "ts": ll.ts or now,
+                    "level": ll.level,
+                    "component": "worker",
+                    "request_id": "-",
+                    "message": ll.message,
+                    "worker_id": credential_id,
+                    "worker_name": _wname,
+                }
+                _wf_fp.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
+
+    return {"status": "ok", "cancelled_tasks": cancelled_tasks}
+
+
+@router.get("/admin/event-bus")
+async def event_bus_debug(user: dict = Depends(get_current_user)):
+    """Debug endpoint: show event bus history and listeners."""
+    from src.api.event_bus import get_event_bus
+    bus = get_event_bus()
+    return {
+        "history": bus.get_history(),
+        "listeners": {k: len(v) for k, v in bus._listeners.items()},
+        "total_events": len(bus.get_history()),
+    }
+
+
+@router.post("/admin/batch-recover")
+async def batch_recover_stale_tasks_api(user: dict = Depends(get_current_user)):
+    """Manually trigger batch stale task recovery (Phase 5)."""
+    from src.runtime.service import batch_recover_stale_tasks
+    result = batch_recover_stale_tasks()
+    return result
 
 
 class RuntimeClaimBody(BaseModel):
@@ -243,12 +364,98 @@ async def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
     worker 直接给 mode=server-fetch（跳过 URL 直连尝试）。
     """
     task = service.claim(runtime_id)
+    # 检查是否有 pending skill scan 指令
+    scan_request = False
+    if not task:
+        # 空闲时检查 scan 指令（有 task 时不打扰执行流程，下次空闲 claim 再带）
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT pending_skill_scan FROM agent_runtimes WHERE id=? AND credential_id=?",
+                          (runtime_id, credential_id))
+                _row = c.fetchone()
+                if _row and _row[0]:
+                    scan_request = True
+        except Exception:
+            pass
     if task:
         if body and body.prefer_fallback:
-            task["mode"] = "server-fetch"   # 直连不稳 → worker 直接代拉
+            task["mode"] = "server-fetch"
         else:
             _attach_skill_obs(task)
-    return {"task": task}
+    return {"task": task, "scan_request": scan_request}
+
+
+@router.get("/runtimes/{runtime_id}/tags")
+async def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_credential)):
+    """Return this engine's claimable tags from DB (worker polls this instead of ENGINE_TAGS env).
+
+    Tags are managed by users via the console (settings.py CRUD endpoints).
+    Workers call this endpoint to get their current tag list, enabling real-time
+    tag updates without restart.
+    """
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
+                (runtime_id,)
+            )
+            tags = [r[0] for r in c.fetchall()]
+        except Exception:
+            tags = []
+    return {"tags": tags}
+
+
+@router.get("/tasks/{task_id}/env")
+async def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credential)):
+    """Return latest env (AK/SK + credentials) for a task from DB.
+
+    Workers call this before executing to get fresh credentials,
+    instead of relying on the env_extra snapshot from task creation time.
+    """
+    from src.session_manager import db, db_lock
+    from src.runtime.service import _collect_server_env
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT user_id, account FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        return {"env": {}}
+    user_id, account = row[0] or 0, row[1] or ""
+    env = _collect_server_env(user_id, account)
+    return {"env": env}
+
+
+@router.post("/runtimes/{runtime_id}/tasks/claim-by-tag/{tag}")
+async def runtime_claim_by_tag(runtime_id: int, tag: str,
+                               body: RuntimeClaimBody | None = None,
+                               credential_id: int = Depends(_require_credential)):
+    """Claim task by tag + scope isolation (event-dispatch-redesign-v2.md 2.4).
+
+    Workers with engine tags can claim tasks matching their tag and scope.
+    """
+    task = service.claim_by_tag(tag, runtime_id)
+    # 检查是否有 pending skill scan 指令（与 claim 端点一致）
+    scan_request = False
+    if not task:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT pending_skill_scan FROM agent_runtimes WHERE id=? AND credential_id=?",
+                          (runtime_id, credential_id))
+                _row = c.fetchone()
+                if _row and _row[0]:
+                    scan_request = True
+        except Exception:
+            pass
+    if task:
+        if body and body.prefer_fallback:
+            task["mode"] = "server-fetch"
+        else:
+            _attach_skill_obs(task)
+    return {"task": task, "scan_request": scan_request}
 
 
 @router.post("/tasks/{task_id}/skill-zip")
@@ -314,6 +521,14 @@ async def runtime_task_messages(task_id: str, body: MessagesBody, credential_id:
     task = service.get_task(task_id)
     if task and task.get("status") in ("failed", "cancelled", "completed"):
         raise HTTPException(status_code=410, detail={"code": 410, "message": f"task already {task.get('status')}"})
+    # 自动修复：worker 上报了消息说明已在执行，但 task_start 可能调用失败
+    # 导致 status 仍为 queued/dispatched → 自动更新为 running
+    if task and task.get("status") in ("queued", "dispatched"):
+        try:
+            service.update_task_status(task_id, "running")
+            log.info(f"auto-fix: task {task_id} status {task.get('status')} -> running (messages reported)")
+        except Exception as e:
+            log.warning(f"auto-fix: failed to update task {task_id} to running: {e}")
     service.enqueue_async_report("messages", task_id, body.messages)
     return {"status": "ok"}
 
@@ -325,6 +540,12 @@ async def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int =
         c.execute("UPDATE agent_tasks SET usage_json=? WHERE id=?",
                   (json.dumps(body.model_dump()), task_id))
         db.commit()
+    # 可观察性埋点：LLM token 用量
+    try:
+        from src.observability import record_llm_usage
+        record_llm_usage(body.provider, body.model, body.input, body.output, body.cache)
+    except Exception:
+        pass
     return {"status": "ok"}
 
 
@@ -416,7 +637,7 @@ async def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
 
 @router.get("/runtimes/{runtime_id}/tasks")
 async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
-                             status: str = "", limit: int = 50):
+                             status: str = "", limit: int = 50, repo: str = ""):
     """设备任务列表（M4 前端设备 [查看任务]）。"""
     from src.session_manager import db, db_lock
     clauses = ["runtime_id=?"]
@@ -424,16 +645,104 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
     if status:
         clauses.append("status=?")
         params.append(status)
+    if repo:
+        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+        clauses.append("repo_key=?")
+        params.append(repo_key)
     with db_lock:
         c = db.cursor()
-        c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
+        c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at, issue_id, event_seq FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
                   params + [limit])
         return {"tasks": [
             {"id": r[0], "repo_key": r[1], "agent_type": r[2], "skill": r[3],
              "status": r[4], "exit_code": r[5], "result_text": (r[6] or "")[:200],
-             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9])}
+             "created_at": normalize_event_time(r[7]), "started_at": normalize_event_time(r[8]), "completed_at": normalize_event_time(r[9]),
+             "issue_id": r[10] or "", "event_seq": r[11] or 0}
             for r in c.fetchall()
         ]}
+
+
+@router.get("/runtimes/{runtime_id}/sessions")
+async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user),
+                                repo: str = ""):
+    """引擎 session 列表。
+
+    按 agent_tasks.runtime_id 过滤——同一个 session（repo+agent_type）的
+    不同 task 可能在不同引擎上执行，因此不按 session.runtime_id 过滤，
+    而是查所有 session 后按 task 的 runtime_id 过滤 tasks。
+    只返回有匹配 task 的 session。
+    """
+    from src.session_manager import db, db_lock
+
+    repo_clause = ""
+    params: list = []
+    if repo:
+        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+        repo_clause = " AND repo_key=?"
+        params.append(repo_key)
+
+    with db_lock:
+        c = db.cursor()
+        # 查所有 session（按 repo 过滤），不按 session.runtime_id 过滤
+        c.execute(
+            f"SELECT id, agent_type, repo_key, status, skill, created_at, last_active_at, "
+            f"runtime_session_id "
+            f"FROM devops_agent_session WHERE 1=1{repo_clause} ORDER BY last_active_at DESC",
+            params
+        )
+        sessions = []
+        for r in c.fetchall():
+            sid = r[0]
+            agent_type = r[1] or ""
+            repo_key_raw = r[2] or ""
+            # 查该 session 当前正在运行的 task（按 runtime_id 过滤）
+            c.execute(
+                "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, started_at "
+                "FROM agent_tasks WHERE agent_session_id=? AND runtime_id=? "
+                "AND status IN ('running','queued','dispatched') ORDER BY created_at DESC LIMIT 1",
+                (sid, runtime_id)
+            )
+            current = None
+            cr = c.fetchone()
+            if cr:
+                current = {
+                    "id": cr[0], "issue_id": cr[1] or "", "event_seq": cr[2] or 0,
+                    "agent_type": cr[3] or "", "status": cr[4] or "",
+                    "created_at": normalize_event_time(cr[5]),
+                    "started_at": normalize_event_time(cr[6]),
+                }
+            # 查该 session 最近已完成的任务（按 runtime_id 过滤）
+            c.execute(
+                "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, started_at, completed_at "
+                "FROM agent_tasks WHERE agent_session_id=? AND runtime_id=? "
+                "AND status IN ('completed','failed','cancelled') ORDER BY event_seq DESC LIMIT 20",
+                (sid, runtime_id)
+            )
+            tasks = []
+            for tr in c.fetchall():
+                tasks.append({
+                    "id": tr[0], "issue_id": tr[1] or "", "event_seq": tr[2] or 0,
+                    "agent_type": tr[3] or "", "status": tr[4] or "",
+                    "exit_code": tr[5], "created_at": normalize_event_time(tr[6]),
+                    "started_at": normalize_event_time(tr[7]),
+                    "completed_at": normalize_event_time(tr[8]),
+                })
+            # 只返回有匹配 task 的 session（current_task 或 tasks 非空）
+            if not current and not tasks:
+                continue
+            sessions.append({
+                "id": sid,
+                "agent_type": agent_type,
+                "repo_key": repo_key_raw.replace("gitcode:", ""),
+                "status": "running" if current else "idle",
+                "skill": r[4] or "",
+                "created_at": normalize_event_time(r[5]),
+                "last_active_at": normalize_event_time(r[6]),
+                "runtime_session_id": r[7] or "",
+                "current_task": current,
+                "tasks": tasks,
+            })
+        return {"sessions": sessions, "total": len(sessions)}
 
 
 @router.get("/credentials/{cid}/tasks")
@@ -541,3 +850,222 @@ async def runtime_install_package(credential_id: int = Depends(_require_credenti
     if not pkg or not os.path.isfile(pkg):
         raise HTTPException(status_code=500, detail={"code": 500, "message": "worker package not found"})
     return FileResponse(pkg, media_type="application/gzip", filename="grape-worker.tar.gz")
+
+
+# ===== Engine local_skills 刷新 =====
+
+def _scan_engine_skills_detail(engine_name: str) -> list[dict]:
+    """本机扫描指定 engine 的 skill 详情（description / 路径 / 文件数）。"""
+    from src.runtime.agent import _scan_local_skills
+    import os as _os
+
+    all_skills = _scan_local_skills()
+    engine_key = (engine_name or "").strip().lower()
+    skill_names = []
+    for entry in all_skills:
+        if (entry.get("engine") or "").strip().lower() == engine_key:
+            skill_names = entry.get("skills") or []
+            break
+
+    home = _os.path.expanduser("~")
+    engine_dirs = {
+        "hermes": [_os.path.join(home, ".hermes", "skills")],
+        "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
+        "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
+    }
+    extra = _os.environ.get("RUNTIME_EXTRA_SKILL_DIRS", "")
+    scan_dirs = list(engine_dirs.get(engine_key, []))
+    if extra:
+        for d in extra.split(":"):
+            d = d.strip()
+            if d and _os.path.isdir(d):
+                scan_dirs.append(d)
+
+    skill_details = []
+    for sname in skill_names:
+        detail = {"name": sname, "description": "", "path": "", "file_count": 0, "provider": engine_name}
+        for base_dir in scan_dirs:
+            p1 = _os.path.join(base_dir, sname)
+            if _os.path.isfile(_os.path.join(p1, "SKILL.md")):
+                detail["path"] = p1
+                break
+            if _os.path.isdir(base_dir):
+                for cat in _os.listdir(base_dir):
+                    p2 = _os.path.join(base_dir, cat, sname)
+                    if _os.path.isfile(_os.path.join(p2, "SKILL.md")):
+                        detail["path"] = p2
+                        break
+                if detail["path"]:
+                    break
+        if detail["path"]:
+            try:
+                with open(_os.path.join(detail["path"], "SKILL.md"), "r", encoding="utf-8") as f:
+                    content = f.read()
+                if content.startswith("---"):
+                    end = content.find("---", 3)
+                    if end > 0:
+                        fm = content[3:end]
+                        for line in fm.split("\n"):
+                            if line.strip().startswith("description:"):
+                                desc = line.split("description:", 1)[1].strip()
+                                desc = desc.strip("\"'")
+                                if desc:
+                                    detail["description"] = desc[:200]
+                                break
+            except Exception:
+                pass
+            try:
+                detail["file_count"] = sum(1 for _ in _os.walk(detail["path"]))
+            except Exception:
+                pass
+        skill_details.append(detail)
+    return skill_details
+
+
+@router.post("/runtimes/{runtime_id}/refresh-skills")
+async def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dict = Depends(get_current_user)):
+    """重新扫描指定 engine 的本地 skill 并返回详情列表。
+
+    本机直连引擎（credential_id=0）：直接扫描本机目录，立即返回结果。
+    远端 worker 引擎（credential_id>0）：标记 pending_skill_scan=1，
+    worker 下次 claim 时收到 scan_request 指令，执行扫描后回报。
+    前端需轮询本接口获取结果（返回 status=pending 时继续轮询）。
+    """
+    from src.session_manager import db, db_lock
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT name, credential_id, pending_skill_scan, skill_scan_result FROM agent_runtimes WHERE id=?", (runtime_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+    engine_name, cred_id, pending, scan_result = row[0], row[1], row[2], row[3]
+
+    # 本机直连：直接扫描
+    if cred_id == 0:
+        skill_details = _scan_engine_skills_detail(engine_name)
+        _ls_json = json.dumps([s["name"] for s in skill_details], ensure_ascii=False)
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE agent_runtimes SET local_skills=?, skill_scan_result=?, pending_skill_scan=0 WHERE id=?",
+                      (_ls_json, json.dumps(skill_details, ensure_ascii=False), runtime_id))
+            db.commit()
+        return {"skills": skill_details, "count": len(skill_details), "status": "done"}
+
+    # 远端 worker：标记扫描指令，等待 worker 回报
+    if pending:
+        # 已有 pending 标记 — 检查是否已有结果
+        if scan_result:
+            return {"skills": json.loads(scan_result), "count": len(json.loads(scan_result)),
+                    "status": "done", "cached": True}
+        return {"status": "pending", "skills": [], "count": 0}
+
+    # pending=0：如果已有缓存结果且非 force，直接返回（轮询场景下 worker 已回报）
+    if scan_result and not force:
+        _cached = json.loads(scan_result)
+        return {"skills": _cached, "count": len(_cached), "status": "done", "cached": True}
+
+    # 首次扫描或 force 重新扫描：标记 pending
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_runtimes SET pending_skill_scan=1, skill_scan_result='' WHERE id=?", (runtime_id,))
+        db.commit()
+    return {"status": "pending", "skills": [], "count": 0}
+
+
+@router.post("/runtimes/{runtime_id}/skills-report")
+async def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depends(_require_credential)):
+    """worker 回报 skill 扫描结果。
+
+    worker claim 时收到 scan_request → 执行扫描 → 调本接口回报。
+    """
+    from src.session_manager import db, db_lock
+
+    # 校验 runtime 归属
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
+        row = c.fetchone()
+    if not row or row[0] != credential_id:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "runtime not owned by credential"})
+
+    skills = body.get("skills") or []
+    skill_names = [s.get("name", "") for s in skills if s.get("name")]
+    _ls_json = json.dumps(skill_names, ensure_ascii=False)
+    _result_json = json.dumps(skills, ensure_ascii=False)
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_runtimes SET local_skills=?, skill_scan_result=?, pending_skill_scan=0 WHERE id=?",
+                  (_ls_json, _result_json, runtime_id))
+        db.commit()
+    return {"status": "ok"}
+
+
+# ===== Engine 角色标签 =====
+
+def _apply_tag_rules(tags: list[str]) -> list[str]:
+    """应用标签互斥规则。
+    - 全能与其他互斥：有其他标签时去掉全能。
+    - 5 个角色全选时自动替换为全能。
+    - 允许空标签（不自动回全能）。
+    """
+    AGENT_TAGS = {"vod", "issue", "coding", "qa", "sre"}
+    tag_set = set(tags)
+    has_all = "all" in tag_set
+    has_others = tag_set & AGENT_TAGS
+
+    if has_all and has_others:
+        tag_set.discard("all")
+    elif has_others and len(has_others) == len(AGENT_TAGS):
+        tag_set = {"all"}
+
+    return sorted(tag_set)
+
+
+@router.get("/runtimes/{runtime_id}/tags")
+async def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_user)):
+    """返回 engine 的角色标签列表。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT agent_tags FROM agent_runtimes WHERE id=?", (runtime_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+    return {"tags": json.loads(row[0] or '["all"]') if row[0] else ["all"]}
+
+
+@router.put("/runtimes/{runtime_id}/tags")
+async def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_current_user)):
+    """设置 engine 的角色标签。应用互斥规则后写入。
+
+    以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
+    写入顺序：先写 engine_capabilities，再 _sync_agent_tags 回写 agent_tags。
+    """
+    from src.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    from src.api.routes.settings import _sync_agent_tags
+    tags = _apply_tag_rules(body.get("tags") or [])
+    now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        # 先写 engine_capabilities：先删旧标签，再插新标签
+        c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (runtime_id,))
+        for tag in (tags or ["all"]):
+            try:
+                c.execute(
+                    "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,1,50,1,?,?)",
+                    (runtime_id, tag, now, now)
+                )
+            except Exception:
+                pass
+        # 再回写 agent_tags（派生缓存，保持与 engine_capabilities 一致）
+        _sync_agent_tags(runtime_id, c)
+        db.commit()
+    log.info(f"Runtime tags set: rid={runtime_id} tags={tags} (engine_capabilities → agent_tags synced)")
+    return {"tags": tags}

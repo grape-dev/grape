@@ -1,4 +1,5 @@
 """Settings 路由：凭据、通知偏好、GitCode Repo、Backend Runtimes"""
+import json
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -273,10 +274,23 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
         if cid == 0:
             rt["owner"] = cred["owner_name"]
             rt["scope"] = rt.get("scope", cred["scope"]) or "global"
+            # 本机直连引擎的 worker_name/device_name 用 host_name（区分多台主控机）
+            _hn = rt.get("host_name") or ""
+            if _hn:
+                rt["worker_name"] = _hn
+                rt["worker_ip"] = "127.0.0.1"
         else:
             rt["owner"] = cred["owner_name"]
             rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
+        # 引擎标签（event-dispatch-redesign-v2.md §2.5）
+        try:
+            with db_lock:
+                _tc = db.cursor()
+                _tc.execute("SELECT tag, max_concurrent, priority, enabled FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rt["id"],))
+                rt["tags"] = [{"tag": r[0], "max_concurrent": r[1], "priority": r[2], "enabled": bool(r[3])} for r in _tc.fetchall()]
+        except Exception:
+            rt["tags"] = []
         visible_runtimes.append(rt)
 
     # 设备级视图（按 credential_id 分组：worker_name + 承载 CLI + 心跳）
@@ -288,36 +302,73 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
             cred = cred_map.get(cid) or {}
             if not _visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
                 continue
-            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at FROM agent_runtimes WHERE credential_id=?", (cid,))
+            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
             runtimes = [
                 {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
                  "installed": bool(x[4]),
                  "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
-                 "health": derive_runtime_health(x[5], x[6], now)}
+                 "health": derive_runtime_health(x[5], x[6], now),
+                 "local_skills": json.loads(x[7] or "[]") if x[7] else [],
+                 "skill_scan_result": json.loads(x[8] or "[]") if x[8] else []}
                 for x in c.fetchall()
             ]
+            # tags from engine_capabilities
+            for rt in runtimes:
+                _tc2 = db.cursor()
+                _tc2.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
+                rt["agent_tags"] = [r[0] for r in _tc2.fetchall()] or ["all"]
             devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
                             "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
                             "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
                             "owner": cred.get("owner_name", ""),
                             "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
                             "runtimes": runtimes})
-    # 本机直连引擎（credential_id=0，本地 runtime）：始终追加到设备列表。
-    # 旧逻辑用 `if not devices:` 哨兵，但存在远端 worker credential 时
-    # 本机引擎会被整体隐藏（mlc 反馈 2026-08-19）。
+    # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备，
+    # 不再单独创建"本机"设备行（主控机已在 runtime_credentials 中，如 ecs-grape-dev-build-0005）。
+    # 通过 host_name 匹配 runtime_credentials.device_name 找到对应设备。
+    import socket as _sock
+    _local_hostname = ""
+    try:
+        _local_hostname = _sock.gethostname()
+    except Exception:
+        pass
+    # 构建 device_name -> device 索引（已在 devices 列表中的设备）
+    _device_by_name = {d.get("device_name", ""): d for d in devices}
     for rt in visible_runtimes:
         if (rt.get("credential_id") or 0) != 0:
             continue
-        devices.append({"credential_id": 0, "name": "本机 Runtime", "device_name": "本机",
-                        "credential_status": "active", "last_seen_at": None,
-                        "worker_ip": "", "scope": rt.get("scope") or "global", "owner": "",
-                        "owner_id": rt.get("owner_id", ""),  # 引擎所属用户 id，区分全局/个人
-                        "health": rt.get("health", "offline"),
-                        "runtimes": [{"id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
-                                      "healthy": rt.get("healthy", False),
-                                      "installed": rt.get("installed", False),
-                                      "instance_name": rt.get("instance_name", rt.get("name", "")),
-                                      "health": rt.get("health", "offline")}]})
+        # 本机引擎的 host_name 匹配 runtime_credentials 中的 device_name
+        _hn = rt.get("host_name") or _local_hostname or ""
+        target_device = _device_by_name.get(_hn)
+        if target_device:
+            # 关联到已有设备
+            target_device["runtimes"].append({
+                "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
+                "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
+                "instance_name": rt.get("instance_name", rt.get("name", "")),
+                "health": rt.get("health", "offline"),
+                "local_skills": rt.get("local_skills", []),
+                "skill_scan_result": rt.get("skill_scan_result", []),
+                "agent_tags": rt.get("agent_tags", ["all"])})
+        # 如果没匹配到设备，跳过（不创建单独的"本机"行）
+    # AI Devspace 创建的凭据：worker 尚未上线注册时没有 agent_runtimes 行，
+    # 但用户需要在 Workers 列表看到这个待接入设备（凭据已生成，环境正在启动）。
+    # 保留没有承载引擎但凭据 active 的设备，health=offline 让用户知道还没接入。
+    # 主控机在 runtime_credentials 中的心跳记录（credential_id=130/131 但无 agent_runtimes 行绑定）
+    # 也保留，但 health 派生会正确反映其离线状态。
+    # 本机直连设备（credential_id=0）如果无引擎则过滤（本机探测应该有引擎才显示）。
+    devices = [d for d in devices if d.get("runtimes") or (d.get("credential_id", 0) > 0 and d.get("credential_status") == "active")]
+    # 本机设备的 health：主控机本身不会掉线，直接根据引擎 online 状态判断
+    # （不用心跳时间判断——主控机的 runtime_credentials 心跳可能未定期更新）
+    import socket as _sock2
+    _local_hn = ""
+    try:
+        _local_hn = _sock2.gethostname()
+    except Exception:
+        pass
+    for d in devices:
+        if d.get("device_name") == _local_hn:
+            d["health"] = "online" if any(rt.get("health") == "online" for rt in d.get("runtimes", [])) else "offline"
     return {"runtimes": visible_runtimes, "devices": devices}
 
 
@@ -373,14 +424,23 @@ async def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
     """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）"""
     from src.runtime.registry import discover_runtimes
     from src.runtime.local_probe import probe_local_engines
+    from src.runtime.agent import _scan_local_skills
     from src.user import db as user_db
-
+    import socket as _sock
+    _hostname = _sock.gethostname()
     discovered = discover_runtimes()
     results = probe_local_engines(discovered)
 
+    # 扫描本机 local_skills 详情并注入
+    from src.runtime.agent import _scan_local_skills_with_detail
+    for r in results:
+        _name = (r.get("name") or "").strip().lower()
+        r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
+        r["local_skills"] = [s["name"] for s in r["local_skills_detail"]]
+
     # Only persist runtimes that are actually installed
     results = [r for r in results if r["installed"]]
-    user_db.save_agent_runtimes(results)
+    user_db.save_agent_runtimes(results, host_name=_hostname)
     return {"runtimes": results}
 
 # 兼容别名：旧路径 /backend-agents/refresh
@@ -418,16 +478,17 @@ async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(
     scope = _normalize_scope(body.scope)
     owner = user.get("username") or ""
     repo_key = ""
-    if scope == "repo":
+    if scope in ("repo", "user"):
         repo_key = (body.repo_key or "").strip()
-        if not repo_key:
+        if scope == "repo" and not repo_key:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库范围凭据必须指定 repo_key"})
     token = "rta_" + secrets.token_urlsafe(32)
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name) VALUES (?,?,?,?,?)",
-                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key, owner))
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key) VALUES (?,?,?,?,?,?)",
+                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key))
+            cred_id = c.lastrowid
             db.commit()
         except Exception as e:
             msg = str(e)
@@ -443,7 +504,7 @@ async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(
         ensure_package_ready()
     except Exception as _e:
         log.warning(f"预构建 worker 安装包失败: {_e}")
-    return {"token": token, "name": name, "scope": scope, "owner": owner, "message": "token 仅展示一次，请立即保存"}
+    return {"token": token, "id": cred_id, "name": name, "scope": scope, "owner": owner, "message": "token 仅展示一次，请立即保存"}
 
 
 @router.put("/runtime-credentials/{cid}")
@@ -497,7 +558,6 @@ async def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_u
     查不到 → 401）、凭据名释放可复用（全局唯一键不再被 revoked 行占用）。
     级联清理：
     - agent_runtimes：该凭据注册的引擎行一并删除
-    - devops_agent_runtime_binding：指向被删行的绑定删除（配置页不出现悬空 id）
     - devops_agent_session.runtime_id：置 0（dashboard 红字「无 engine」，如实反映）
     历史 agent_tasks 绑定旧 runtime_id 的任务恢复走 /api/events/{seq}/redispatch
     （pick_engine 重新绑定后 requeue，见 engine-selection-claim-pool-2026-08.md）。
@@ -512,10 +572,6 @@ async def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_u
         rid_list = [r[0] for r in c.fetchall()]
         if rid_list:
             ph = ",".join("?" for _ in rid_list)
-            try:
-                c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", rid_list)
-            except Exception as _e:
-                log.warning(f"revoke {cid}: 清理 binding 失败: {_e}")
             try:
                 c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
             except Exception as _e:
@@ -536,6 +592,22 @@ async def get_execution_mode_api(user: dict = Depends(get_current_user)):
     return {"mode": get_execution_mode()}
 
 
+@router.get("/pipeline-mode")
+async def get_pipeline_mode_api(user: dict = Depends(get_current_user)):
+    from src.api.event_pipeline import is_plugin_mode
+    return {"mode": "plugin" if is_plugin_mode() else "legacy"}
+
+
+@router.put("/pipeline-mode")
+async def set_pipeline_mode_api(body: dict, user: dict = Depends(get_current_user)):
+    from src.user.db import set_meta_value
+    mode = (body.get("mode") or "").strip().lower()
+    if mode not in ("plugin", "legacy"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 plugin 或 legacy"})
+    set_meta_value("pipeline_mode", mode)
+    return {"message": f"管线模式已切换为 {'插件模式' if mode == 'plugin' else '传统模式'}", "mode": mode}
+
+
 @router.put("/execution-mode")
 async def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_user)):
     from src.runtime.service import set_execution_mode
@@ -543,3 +615,143 @@ async def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_cu
         raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 auto/direct/queue_remote（queue_local 已废除）"})
     set_execution_mode(body.mode)
     return {"message": f"执行模式已切换为 {body.mode}", "mode": body.mode}
+
+
+# ===== 引擎标签管理（event-dispatch-redesign-v2.md §2.4）=====
+
+class EngineTagBody(BaseModel):
+    tag: str
+    max_concurrent: int = 1
+    priority: int = 50
+
+
+class EngineTagUpdateBody(BaseModel):
+    max_concurrent: int = 1
+    priority: int = 50
+    enabled: int = 1
+
+
+def _sync_agent_tags(rid: int, cursor):
+    """engine_capabilities 变更后，回写 agent_runtimes.agent_tags（JSON 快照）。
+
+    agent_tags 是 engine_capabilities 中 enabled=1 的 tag 列表的 JSON 表示，
+    供前端展示用。此函数确保两表一致。
+    """
+    cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
+    tags = [r[0] for r in cursor.fetchall()] or ["all"]
+    cursor.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), rid))
+
+
+@router.get("/agent-runtimes/{rid}/tags")
+async def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
+    """获取引擎的标签列表"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT id, tag, max_concurrent, priority, enabled, created_at, updated_at "
+                "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
+                (rid,)
+            )
+            rows = c.fetchall()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    return {"tags": [
+        {"id": r[0], "tag": r[1], "max_concurrent": r[2], "priority": r[3],
+         "enabled": bool(r[4]), "created_at": r[5], "updated_at": r[6]}
+        for r in rows
+    ]}
+
+
+@router.post("/agent-runtimes/{rid}/tags")
+async def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_current_user)):
+    """为引擎添加标签（幂等：已有则更新）"""
+    from src.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    tag = (body.tag or "").strip().lower()
+    if tag not in ("vod", "issue", "coding", "qa", "sre", "chat"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"无效标签: {tag}，可选: vod/issue/coding/qa/sre/chat"})
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (rid,))
+            if not c.fetchone():
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在"})
+            c.execute(
+                "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                "VALUES (?,?,?,?,1,?,?) "
+                "ON DUPLICATE KEY UPDATE max_concurrent=VALUES(max_concurrent), priority=VALUES(priority), updated_at=VALUES(updated_at)",
+                (rid, tag, body.max_concurrent, body.priority, now, now)
+            )
+            _sync_agent_tags(rid, c)
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            # MySQL ON DUPLICATE KEY may not work with SQLite syntax; fallback
+            try:
+                c.execute(
+                    "REPLACE INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,?,?,1,?,?)",
+                    (rid, tag, body.max_concurrent, body.priority, now, now)
+                )
+                _sync_agent_tags(rid, c)
+                db.commit()
+            except Exception as e2:
+                db.rollback()
+                raise HTTPException(status_code=500, detail={"code": 500, "message": str(e2)})
+    log.info(f"Engine tag added: runtime={rid} tag={tag} concurrent={body.max_concurrent} priority={body.priority}")
+    return {"message": f"标签 {tag} 已添加", "tag": tag}
+
+
+@router.put("/agent-runtimes/{rid}/tags/{tag}")
+async def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
+                            user: dict = Depends(get_current_user)):
+    """修改引擎标签配置"""
+    from src.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    tag = tag.strip().lower()
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "UPDATE engine_capabilities SET max_concurrent=?, priority=?, enabled=?, updated_at=? "
+                "WHERE runtime_id=? AND tag=?",
+                (body.max_concurrent, body.priority, body.enabled, now, rid, tag)
+            )
+            if c.rowcount == 0:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
+            _sync_agent_tags(rid, c)
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    return {"message": f"标签 {tag} 已更新"}
+
+
+@router.delete("/agent-runtimes/{rid}/tags/{tag}")
+async def delete_engine_tag(rid: int, tag: str, user: dict = Depends(get_current_user)):
+    """删除引擎标签"""
+    from src.session_manager import db, db_lock
+    tag = tag.strip().lower()
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?", (rid, tag))
+            if c.rowcount == 0:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
+            _sync_agent_tags(rid, c)
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    log.info(f"Engine tag deleted: runtime={rid} tag={tag}")
+    return {"message": f"标签 {tag} 已删除"}

@@ -44,12 +44,16 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee FROM issue_state WHERE repo_key=? AND issue_id=?",
+            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode FROM issue_state WHERE repo_key=? AND issue_id=?",
                       (repo_key, issue_id))
             row = c.fetchone()
             if row:
                 return {"id": row[0], "stage": row[1], "owner_agent": row[2],
-                        "a2a_seq": row[3], "updated_at": row[4], "assignee": row[5] or ""}
+                        "a2a_seq": row[3], "updated_at": row[4], "assignee": row[5] or "",
+                        "scene_id": row[6] or "",
+                        "scene_user_id": row[7] or 0,
+                        "parent_issue_id": row[8] or "",
+                        "is_subtask_mode": row[9] or 0}
     except Exception:
         pass
     return None
@@ -61,7 +65,9 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
 
     原实现 INSERT OR REPLACE ... VALUES ((SELECT id FROM issue_state ...)) 在
     MySQL 下报 1093（自引用子查询），改为先查后改/插。
+    新建记录时从 managed_repos.dev_scene 带入 scene_id（确保场景引擎配置生效）。
     """
+    _init_scene = ""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
@@ -72,14 +78,21 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                 (stage, owner_agent, assignee, a2a_seq, row[0]),
             )
         else:
+            # 新建：从 managed_repos.dev_scene 带入 scene_id
+            try:
+                from src.user.db import get_repo_scene
+                _init_scene = get_repo_scene(repo_key) or ""
+            except Exception:
+                pass
             c.execute(
-                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-                (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq),
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, scene_id, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, _init_scene),
             )
         db.commit()
     from src.config import log
-    log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee}")
+    _scene_log = _init_scene if not row else '(existing)'
+    log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee} scene={_scene_log}")
 
 
 def get_issue_owner(repo_key: str, issue_id: str) -> str:
@@ -98,6 +111,112 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
     """返回 Issue 责任人（GitCode assignee 用户名；无记录空）。"""
     st = get_issue_stage(repo_key, issue_id)
     return (st["assignee"] if st else "") or ""
+
+
+def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
+    """读取 Issue 级开发场景。空则回退到仓库默认场景。
+
+    返回 (scene_id, scene_user_id)：
+    - issue_state.scene_id 非空 → 用该值 + scene_user_id
+    - 否则回退 managed_repos.dev_scene（scene_user_id=0，但 _query_scene_by_id
+      会自动用 _repo_user_id 匹配 user 级场景）
+    """
+    st = get_issue_stage(repo_key, issue_id)
+    if st and st.get("scene_id"):
+        return st["scene_id"], st.get("scene_user_id", 0) or 0
+    try:
+        from src.user.db import get_repo_scene
+        return get_repo_scene(repo_key) or "default", 0
+    except Exception:
+        return "default", 0
+
+
+def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int = 0):
+    """写入 Issue 级开发场景（VOD 判定后调用，幂等）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        row = c.fetchone()
+        if row:
+            c.execute("UPDATE issue_state SET scene_id=?, scene_user_id=? WHERE id=?", (scene_id or "", scene_user_id, row[0]))
+        else:
+            # 无记录时插入一行（stage 默认 vod），后续 set_issue_stage 会 UPDATE
+            c.execute(
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, scene_id, scene_user_id, updated_at) "
+                "VALUES (?, ?, 'vod', 'vod', ?, ?, datetime('now'))",
+                (repo_key, issue_id, scene_id or "", scene_user_id),
+            )
+        db.commit()
+    from src.config import log
+    log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
+
+
+def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):
+    """标记 Issue 为子任务（设置 parent_issue_id）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        row = c.fetchone()
+        if row:
+            c.execute("UPDATE issue_state SET parent_issue_id=? WHERE id=?", (parent_issue_id or "", row[0]))
+        else:
+            c.execute(
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, parent_issue_id, updated_at) "
+                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
+                (repo_key, issue_id, parent_issue_id or ""),
+            )
+        db.commit()
+    from src.config import log
+    log.info(f"ParentIssue: repo={repo_key} issue={issue_id} parent={parent_issue_id}")
+
+
+def get_parent_issue(repo_key: str, issue_id: str) -> str:
+    """返回 Issue 的 parent_issue_id（空=普通任务）。"""
+    st = get_issue_stage(repo_key, issue_id)
+    return (st or {}).get("parent_issue_id", "")
+
+
+def set_subtask_mode(repo_key: str, issue_id: str, enabled: bool = True):
+    """标记 Issue 为多任务模式（父任务）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        row = c.fetchone()
+        val = 1 if enabled else 0
+        if row:
+            c.execute("UPDATE issue_state SET is_subtask_mode=? WHERE id=?", (val, row[0]))
+        else:
+            c.execute(
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, is_subtask_mode, updated_at) "
+                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
+                (repo_key, issue_id, val),
+            )
+        db.commit()
+    from src.config import log
+    log.info(f"SubtaskMode: repo={repo_key} issue={issue_id} enabled={enabled}")
+
+
+def is_subtask(repo_key: str, issue_id: str) -> bool:
+    """判断 Issue 是否为子任务（parent_issue_id 非空）。"""
+    return bool(get_parent_issue(repo_key, issue_id))
+
+
+def is_subtask_mode_enabled(repo_key: str, issue_id: str) -> bool:
+    """判断 Issue 是否启用了多任务模式（父任务标记）。"""
+    st = get_issue_stage(repo_key, issue_id)
+    return bool((st or {}).get("is_subtask_mode", 0))
+
+
+def get_subtask_issues(repo_key: str, parent_issue_id: str) -> list[dict]:
+    """查询父任务的所有子任务 issue_state 记录。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT issue_id, stage, owner_agent FROM issue_state "
+            "WHERE repo_key=? AND parent_issue_id=? ORDER BY issue_id",
+            (repo_key, parent_issue_id),
+        )
+        return [{"issue_id": r[0], "stage": r[1], "owner_agent": r[2]} for r in c.fetchall()]
 
 
 def get_or_create_agent_session(repo_key: str, agent_type: str,
@@ -297,15 +416,14 @@ def ensure_default_agent_sessions(repo_key: str):
 
     with db_lock:
         c = db.cursor()
-        from src.runtime.engine_select import resolve_default_engine, set_binding
+        from src.runtime.engine_select import resolve_default_engine
         for _at, _sk in _mapping.items():
             try:
                 from src.user.db import resolve_skill_id
                 _skill_id = resolve_skill_id(_sk)
-                # 默认引擎：按 专属→全局→本机 选择，写入该 (仓库, agent) 引擎集合；
-                # 无候选则集合留空（agent 标识"无 engine，不可用"，见 engine-selection-design.md v2）
+                # 默认引擎：按 专属→全局→本机 选择，写入 session 主引擎；
+                # 无候选则 runtime_id=0（agent 标识"无 engine，不可用"）
                 _rid = resolve_default_engine(repo_key, _at) or 0
-                set_binding(repo_key, _at, [_rid] if _rid else [])
                 # 保留既有主键 id 与用户配置（enable/订阅/飞书绑定），不因重建换 uuid
                 #（见 upsert_agent_session 背景注释：INSERT OR REPLACE 新 uuid 会悬空 vod_conversations）
                 upsert_agent_session(

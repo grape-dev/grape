@@ -1,7 +1,7 @@
-version: '3.8'
 services:
-  api:
+  backend:
     build: .
+    container_name: grape-backend
     ports:
       - "80:80"
       - "8080:8080"
@@ -11,5 +11,22 @@ services:
       # 官方技能由独立技能仓库构建期铺入宿主 ./skills（scripts/sync_skills.sh），卷挂载免重建镜像
       - ./skills:/app/skills
     environment:
-      - OAUTH_REDIRECT_URI=https://your-domain.com/api/auth/callback/gitcode
+      - TZ=Asia/Shanghai
+    volumes:
+      - grape-data:/app/data
+      - ./configs:/app/configs   # 挂载整个 configs 目录（运行时可改配置）
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  grape-data:

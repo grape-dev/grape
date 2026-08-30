@@ -56,7 +56,7 @@
       <div class="card" v-if="view === 'list'">
         <table class="vod-table">
           <thead>
-            <tr><th>实例名</th><th>类型</th><th>版本</th><th>提供方</th><th>设备</th><th>范围</th><th>归属人</th><th>健康</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
+            <tr><th>实例名</th><th>类型</th><th>版本</th><th>提供方</th><th>设备</th><th>范围</th><th>归属人</th><th>IP</th><th>任务</th><th>健康</th><th>最后心跳</th><th style="width:90px">操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="e in engines" :key="e.id">
@@ -67,11 +67,13 @@
               <td>{{ e.device || '-' }}</td>
               <td><span class="status-tag info">{{ scopeText(e.scope) }}</span></td>
               <td>{{ e.ownerName || '—' }}</td>
+              <td class="t3">{{ e.lastIp || '—' }}</td>
+              <td class="t3">{{ e.taskCount ?? 0 }}</td>
               <td><span :class="['status-tag', healthClass(e.health)]">{{ healthText(e.health) }}</span></td>
               <td class="t3">{{ formatTime(e.lastSeenAt) }}</td>
               <td>
-                <button class="btn btn-sm" @click="openDetail(e)">详情</button>
-                <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
+                <button class="act-icon-btn" @click="openDetail(e)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+                <button v-if="e.status === 'offline'" class="act-icon-btn" style="color:#ff3b30" @click="openDelete(e)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
               </td>
             </tr>
           </tbody>
@@ -95,10 +97,12 @@
             <div class="ellipsis-cell" :title="e.version || '-'"><span class="t3" style="display:inline-block;min-width:46px">版本</span> {{ e.version || '-' }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">心跳</span> {{ formatTime(e.lastSeenAt) }}</div>
             <div><span class="t3" style="display:inline-block;min-width:46px">归属</span> {{ e.ownerName || '—' }}</div>
+            <div class="ellipsis-cell" :title="e.lastIp || '—'"><span class="t3" style="display:inline-block;min-width:46px">IP</span> {{ e.lastIp || '—' }}</div>
+            <div><span class="t3" style="display:inline-block;min-width:46px">任务</span> {{ e.taskCount ?? 0 }}</div>
           </div>
           <div class="dc-actions" style="justify-content:flex-end">
-            <button class="btn btn-sm" @click="openDetail(e)">详情</button>
-            <button v-if="e.status === 'offline'" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="openDelete(e)">删除</button>
+            <button class="act-icon-btn" @click="openDetail(e)" title="详情"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5C7 5 3 12 3 12s4 7 9 7 9-7 9-7-4-7-9-7zm0 11a4 4 0 110-8 4 4 0 010 8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+            <button v-if="e.status === 'offline'" class="act-icon-btn" style="color:#ff3b30" @click="openDelete(e)" title="删除"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           </div>
         </div>
       </div>
@@ -163,7 +167,7 @@ const deleteTarget = ref(null)
 
 const BADGE = {
   online: { color: 'var(--success)', bg: '#dcfce7', label: '在线' },
-  recently_lost: { color: '#ea5a0c', bg: '#fef3c7', label: '刚失联' },
+  recently_lost: { color: '#ff9500', bg: 'rgba(255,149,0,0.1)', label: '刚失联' },
   offline: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '离线' },
   about_to_gc: { color: 'var(--danger)', bg: '#fee2e2', label: '待回收' }
 }
@@ -248,7 +252,7 @@ onMounted(() => { load(); loadDevices() })
 .search-input {
   padding: 7px 12px;
   border: 1px solid var(--border, #e2e6ea);
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 13px;
   min-width: 240px;
   background: #fff;
@@ -258,12 +262,15 @@ onMounted(() => { load(); loadDevices() })
 .em-stat {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; padding: 3px 10px; border-radius: 12px;
-  background: #f5f7fa; color: var(--text-secondary); border: 1px solid transparent;
-  cursor: pointer; transition: all 0.15s;
+  background: rgba(0,0,0,0.04); color: var(--text-secondary); border: 1px solid transparent;
+  cursor: pointer; transition: all var(--transition);
 }
 .em-stat strong { font-weight: 600; color: var(--text-primary); }
 .em-stat:hover { border-color: var(--border-color); }
 .em-stat.on { background: var(--primary-bg); color: var(--primary); border-color: var(--primary); }
 .em-stat.on strong { color: var(--primary); }
 .em-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.act-icon-btn { background: none; border: none; cursor: pointer; padding: 4px; border-radius: 8px; color: var(--text-secondary, #666); display: inline-flex; align-items: center; transition: background var(--transition); }
+.act-icon-btn:hover { background: rgba(0, 107, 255, 0.08); color: var(--primary, #006eff); }
+.act-icon-btn + .act-icon-btn { margin-left: 2px; }
 </style>

@@ -1,0 +1,74 @@
+{
+  "no_reply": "⚠️ 未收到回复，连接可能中断，请重试。",
+  "header": {
+    "title": "Chat Agent · 个人助手",
+    "config_btn": "⚙ 配置",
+    "title_prefix": "Chat Agent · "
+  },
+  "loading": "加载中...",
+  "scope_short": {
+    "global": "全局",
+    "repo": "项目",
+    "user": "个人"
+  },
+  "skill": {
+    "default_official": "默认官方技能（自动）",
+    "no_repo_skill": "该仓库暂无项目技能",
+    "no_personal_skill": "暂无个人技能",
+    "select_required": "请选择技能"
+  },
+  "scan_config": "扫码配置",
+  "conversation": {
+    "new": "＋ 新对话",
+    "default_title": "新对话",
+    "empty_hint": "暂无对话，开始输入即可自动创建",
+    "start_hint": "输入消息即可开始新对话",
+    "create_failed": "创建失败: {{msg}}",
+    "delete_confirm": "确定删除此对话及其所有消息？",
+    "deleted": "对话已删除",
+    "delete_failed": "删除失败: {{msg}}",
+    "start_new": "开始新对话",
+    "create_conv_failed": "创建对话失败: {{msg}}"
+  },
+  "load_failed": "加载失败",
+  "config": {
+    "saved": "配置已保存",
+    "save_failed": "保存失败: {{msg}}"
+  },
+  "task": {
+    "running": "⏳ 任务执行中…",
+    "running_with_time": "⏳ 任务执行中… ({{sec}}s)",
+    "status_prefix": "任务{{status}}",
+    "timeout": "⏱ 等待超时"
+  },
+  "onboard": {
+    "in_progress": "已有扫码配置正在进行，请稍候",
+    "start_failed": "启动扫码配置失败: {{msg}}",
+    "modal_title": "🔗 飞书扫码配置",
+    "generating_qr": "正在生成二维码…",
+    "step1_scan": "1. 打开飞书 App，扫描上方二维码",
+    "step2_confirm": "2. 在飞书内确认「创建应用/授权」页面",
+    "waiting_confirm": "等待确认…",
+    "success_title": "配置成功",
+    "secret_saved": "App Secret 已保存（回显为 ******）",
+    "bot_connected": "Bot 已连接 · 🟢 在线",
+    "close": "关闭",
+    "failed_title": "配置失败",
+    "rescan": "重新扫码",
+    "cancel": "取消",
+    "qr_expired": "二维码已过期，请重新扫码",
+    "waiting_countdown": "等待确认… 二维码将在 {{time}} 后过期",
+    "error_access_denied": "用户拒绝了授权请求",
+    "error_unknown": "未知错误"
+  },
+  "local_direct": "本机直连",
+  "skill_label": "技能",
+  "app_id": "App ID",
+  "app_secret": "App Secret",
+  "agents": "Agent",
+  "thinking": "思考中...",
+  "querying": "查询中",
+  "backend": "后端",
+  "placeholder": "问我任何问题...",
+  "send": "发送"
+}

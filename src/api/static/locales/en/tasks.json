@@ -1,0 +1,77 @@
+{
+  "page_title": "Task Center",
+  "loading": "Loading...",
+  "load_failed": "Failed to load: {{msg}}",
+  "tab": {
+    "all": "All",
+    "active": "Pending",
+    "completed": "Completed"
+  },
+  "status": {
+    "pending": "Pending",
+    "processing": "Processing",
+    "completed": "Completed",
+    "tag_pending": "<b></b>Pending",
+    "tag_processing": "<b></b>Processing",
+    "tag_completed": "<b></b>Completed",
+    "detail_completed": "✓ Completed · ",
+    "detail_processing": "⏳ Processing",
+    "detail_pending": "● Pending",
+    "reason_issue_closed": "Issue closed",
+    "reason_reassigned": "Reassigned",
+    "reason_bot_takeover": "Bot takeover"
+  },
+  "section": {
+    "pending": "Pending",
+    "processing": "Processing",
+    "completed": "Completed"
+  },
+  "empty": {
+    "no_tasks_title": "No tasks",
+    "no_tasks_desc": "No matching tasks under current filters.",
+    "select_task_title": "Select a task",
+    "select_task_desc": "Select a task from the list to view details."
+  },
+  "pager": {
+    "summary": "{{total}} items · {{page}}/{{pages}} pages"
+  },
+  "create": {
+    "btn_new": "+ New Task",
+    "modal_title": "+ New Task",
+    "repo_label": "Repository: ",
+    "repo_empty": "— (Please open a repository page first)",
+    "title_label": "Title",
+    "title_hint": "Will be used as the GitCode Issue title (same-name open Issue in the repo is reused automatically, no duplicates created)",
+    "title_placeholder": "Task title (required)",
+    "desc_label": "Description",
+    "desc_hint": "Will be used as the GitCode Issue body, for VOD/Issue/Coding Agent to understand the task requirements",
+    "desc_placeholder": "Task description (required)",
+    "scene_label": "Dev Scenario",
+    "scene_hint": "If not selected, VOD will auto-detect during review",
+    "scene_none": "Not specified (auto-detected by VOD)",
+    "assignee_hint": "Issue assignee = Account in General Settings (current logged-in account)",
+    "subtask_mode_label": "Multi-Task Mode",
+    "subtask_mode_hint": "When enabled, Issue Agent will split the task into multiple subtasks for separate execution",
+    "btn_cancel": "Cancel",
+    "btn_create": "Create Task",
+    "btn_creating": "Creating…",
+    "err_no_repo": "Please select a repository on the repository page before creating a task",
+    "err_no_title": "Please fill in the task title",
+    "err_no_desc": "Please fill in the task description",
+    "err_dup_title": "Task already exists (Issue {{issue}}), please enter a new task title",
+    "err_create_failed": "Create failed: {{msg}}",
+    "success_prefix": "✅ "
+  },
+  "detail": {
+    "status": "Status",
+    "task_id": "Task ID",
+    "repo": "Repository",
+    "created_at": "Created",
+    "completed_at": "Completed",
+    "no_description": "No task description.",
+    "view_issue": "View Issue ↗",
+    "go_conversation": "Go to Conversation ↗"
+  },
+  "search_placeholder": "Search tasks...",
+  "change_status_failed": "Status update failed: {{msg}}"
+}

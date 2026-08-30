@@ -7,7 +7,7 @@
       </span>
       <h1>引擎详情</h1>
       <span class="badge" :style="badgeStyle(detail?.health)">{{ healthText(detail?.health) }}</span>
-      <span class="t3" style="font-size:12px">{{ detail?.displayName || detail?.name || '' }} · {{ detail?.device || '' }}</span>
+      <span class="t3" style="font-size:12px">{{ detail?.displayName || detail?.name || '' }} · {{ detail?.device || '' }} · {{ detail?.lastIp || '' }}</span>
     </div>
 
     <div class="dashboard" style="padding:20px 28px" v-if="detail">
@@ -58,112 +58,8 @@
       </div>
 
       <!-- 关联任务 -->
-      <div class="card" style="margin-top:16px;padding:0">
-        <div class="section-header">
-          <h5 class="sh-title">关联任务 <span class="sh-count">共 {{ detail.tasks?.totalElements ?? 0 }} 条<span v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></span></h5>
-          <div class="sh-actions">
-            <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6" @click="clearFilters">清除筛选</button>
-          </div>
-        </div>
-        <div style="padding:14px 20px">
-
-        <!-- 任务状态统计卡（kpi 色带卡片，对齐 AgentManage/Overview 体系） -->
-        <div class="task-stat-cards">
-          <div class="task-stat-card kpi-primary">
-            <div class="task-stat-num primary">{{ taskTotal }}</div>
-            <div class="task-stat-label">任务总数</div>
-          </div>
-          <div v-for="s in taskStatList" :key="s.key" class="task-stat-card" :style="{ borderLeftColor: s.color }">
-            <div class="task-stat-num" :style="{ color: s.color }">{{ s.count }}</div>
-            <div class="task-stat-label">{{ s.label }}</div>
-          </div>
-        </div>
-
-        <!-- 任务状态分布图（对齐 VOD chart-row） -->
-        <div class="task-chart-row">
-          <div class="card chart-card">
-            <div class="section-header"><h5 class="sh-title">任务状态分布</h5></div>
-            <div ref="taskChartEl" style="height:220px;padding:14px 20px"></div>
-          </div>
-        </div>
-
-        <div class="table-loading-wrapper">
-          <div class="table-loading-overlay" v-if="taskLoading">
-            <span class="table-loading-text">加载中...</span>
-          </div>
-          <div style="overflow-x:auto">
-          <table class="vod-table">
-            <thead><tr>
-              <th style="width:70px">ID</th>
-              <th style="width:110px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('agentType')">
-                  类型 <span class="filter-arrow" :class="{ active: taskType }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'agentType'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskType }" @click="setFilter('agentType', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('agentType')" :key="v" :class="{ active: taskType === v }" @click="setFilter('agentType', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:180px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('skill')">
-                  技能 <span class="filter-arrow" :class="{ active: taskSkill }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'skill'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskSkill }" @click="setFilter('skill', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('skill')" :key="v" :class="{ active: taskSkill === v }" @click="setFilter('skill', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:90px" class="filterable-th">
-                <span class="th-content" @click="toggleFilter('status')">
-                  状态 <span class="filter-arrow" :class="{ active: taskStatus }">▼</span>
-                </span>
-                <div class="col-filter-drop" v-if="filterDropdown === 'status'" @click.stop>
-                  <div class="col-filter-opt" :class="{ active: !taskStatus }" @click="setFilter('status', '')">全部</div>
-                  <div class="col-filter-opt" v-for="(cnt, v) in filterOptions('status')" :key="v" :class="{ active: taskStatus === v }" @click="setFilter('status', v)">{{ v || '(空)' }} ({{ cnt }})</div>
-                </div>
-              </th>
-              <th style="width:150px" class="sortable-th" @click="toggleSort">
-                创建时间
-                <span class="sort-arrows">
-                  <span class="sort-dir" :class="{ active: sortOrder === 'asc' }">▲</span>
-                  <span class="sort-dir" :class="{ active: sortOrder === 'desc' }">▼</span>
-                </span>
-              </th>
-            </tr></thead>
-            <tbody>
-              <tr v-if="!(detail.tasks?.content || []).length" style="text-align:center">
-                <td :colspan="5" class="t2" style="padding:28px 0">
-                  <template v-if="(detail.tasks?.totalElements ?? 0) === 0">暂无关联任务</template>
-                  <template v-else>
-                    无匹配任务
-                    <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#e5484d;border-color:#f3b4b6;margin-left:10px" @click="clearFilters">清除筛选</button>
-                  </template>
-                </td>
-              </tr>
-              <tr v-for="t in detail.tasks?.content || []" :key="t.id">
-                <td class="t3">{{ t.id }}</td>
-                <td class="ellipsis-cell" :title="t.agentType">{{ t.agentType }}</td>
-                <td class="ellipsis-cell" :title="t.skill">{{ t.skill }}</td>
-                <td><span class="status-tag default">{{ t.status }}</span></td>
-                <td class="t3" :title="t.createdAt">{{ formatTime(t.createdAt) }}</td>
-              </tr>
-            </tbody>
-          </table>
-          </div>
-        </div>
-        <div v-if="detail.tasks?.totalElements > 0" class="pagination-bar" style="border-top:none">
-          <span class="page-info">第 <strong>{{ taskPage + 1 }}</strong> / {{ detail.tasks?.totalPages ?? 1 }} 页（共 {{ detail.tasks?.totalElements ?? 0 }} 条）</span>
-          <select v-model="taskSize" class="page-size-select" @change="taskPage = 0; load()">
-            <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }}条/页</option>
-          </select>
-          <button class="page-btn" :disabled="taskPage <= 0" @click="taskPage--; load()">上一页</button>
-          <button class="page-btn" :disabled="taskPage >= (detail.tasks?.totalPages ?? 1) - 1" @click="taskPage++; load()">下一页</button>
-        </div>
-        </div>
-      </div>
+      <TaskListSection :tasks="detail.tasks" :loading="taskLoading" @reload="onTaskReload" />
     </div>
-
-    <p v-else class="t2" style="padding:40px;text-align:center">加载中…</p>
   </div>
 </template>
 
@@ -172,6 +68,7 @@ import { computed, nextTick, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import http from '../api'
+import TaskListSection from '../components/TaskListSection.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -202,9 +99,9 @@ let taskChart = null
 const STATUS_META = {
   completed: { label: '完成', color: 'var(--success)' },
   success: { label: '完成', color: 'var(--success)' },
-  failed: { label: '失败', color: '#e5484d' },
-  running: { label: '运行中', color: '#1890ff' },
-  pending: { label: '等待', color: '#ea5a0c' }
+  failed: { label: '失败', color: '#ff3b30' },
+  running: { label: '运行中', color: '#006eff' },
+  pending: { label: '等待', color: '#ff9500' }
 }
 const taskTotal = computed(() => {
   const st = detail.value?.tasks?.filterOptions?.status || {}
@@ -220,7 +117,7 @@ const taskStatList = computed(() => {
 
 const BADGE = {
   online: { color: 'var(--success)', bg: '#dcfce7', label: '在线' },
-  recently_lost: { color: '#ea5a0c', bg: '#fef3c7', label: '刚失联' },
+  recently_lost: { color: '#ff9500', bg: 'rgba(255,149,0,0.1)', label: '刚失联' },
   offline: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '离线' },
   about_to_gc: { color: 'var(--danger)', bg: '#fee2e2', label: '待回收' },
   revoked: { color: 'var(--text-tertiary)', bg: '#eef0f3', label: '已吊销' }
@@ -246,14 +143,169 @@ function installedText(v) { return v == null ? '—' : v === 1 ? '已安装' : '
 function healthyText(v) { return v == null ? '—' : v === 1 ? '正常' : '异常' }
 function deviceStatusText(s) { return s === 'active' ? '有效' : s === 'revoked' ? '已吊销' : (s || '—') }
 
-const STATUS_COLOR = { queued: '#fa8c16', running: '#006eff', completed: '#52c41a', failed: '#eb2f96' }
+function formatDuration(start, end) {
+  if (!start || !end) return '—'
+  const ms = new Date(end.replace(' ', 'T')) - new Date(start.replace(' ', 'T'))
+  if (isNaN(ms)) return '—'
+  const s = Math.round(ms / 1000)
+  if (s < 60) return s + 's'
+  return Math.floor(s / 60) + 'm' + (s % 60) + 's'
+}
+
+function issueGitCodeUrl(t) {
+  const full = (t.repoKey || '').replace(/^gitcode:/, '')
+  if (!full) return '#'
+  return 'https://gitcode.com/' + full + '/issues/' + (t.issueId || '').replace('#', '')
+}
+
+// ===== Issue 详情弹窗（时序图 + 事件列表）=====
+const issueModal = ref({ show: false, loading: false, issueId: '', repoName: '', eventCount: 0, events: [], view: 'diagram', svg: '', svgRendered: false })
+
+async function openIssueDetail(issueId) {
+  issueModal.value = { show: true, loading: true, issueId, repoName: '', eventCount: 0, events: [], view: 'diagram', svg: '', svgRendered: false }
+  try {
+    const { data } = await http.get(`/runtime/issues/${encodeURIComponent(issueId)}/events`)
+    const events = data.events || []
+    const repoKey = events.length > 0 ? (events[0].repoKey || '') : ''
+    issueModal.value = {
+      show: true, loading: false, issueId,
+      repoName: repoKey.replace(/^gitcode:/, ''),
+      eventCount: events.length, events,
+      view: 'diagram', svg: '', svgRendered: false
+    }
+    setTimeout(() => renderIssueMermaid(), 50)
+  } catch (e) {
+    issueModal.value = { show: true, loading: false, issueId, events: [], view: 'events', svg: '', svgRendered: false }
+  }
+}
+function closeIssueModal() {
+  issueModal.value = { show: false, loading: false, issueId: '', repoName: '', eventCount: 0, events: [], view: 'diagram', svg: '', svgRendered: false }
+}
+
+function eventTypeText(t) {
+  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号', issue_closed: 'Issue关闭' }
+  return map[t] || t || '事件'
+}
+function eventTypeClass(t) {
+  if (t === 'a2a_event') return 'info'
+  if (t === 'pull_request_merged') return 'success'
+  if (t === 'issue_opened') return 'info'
+  return 'default'
+}
+
+// ===== Mermaid 时序图渲染 =====
+let mermaidEngine = null
+async function getMermaid() {
+  if (!mermaidEngine) {
+    const mod = await import('mermaid')
+    mermaidEngine = mod.default
+    mermaidEngine.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'base', fontFamily: 'inherit', sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8 } })
+  }
+  return mermaidEngine
+}
+function mermaidId(agent) { return (agent || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_') }
+function actionText(t) {
+  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号', issue_closed: 'Issue关闭' }
+  return map[t] || t || '事件'
+}
+function buildSequence(events) {
+  const agents = []
+  for (const ev of events) {
+    const a = ev.agentType || '—'
+    if (!agents.includes(a)) agents.push(a)
+  }
+  const lines = ['sequenceDiagram', 'autonumber']
+  for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
+  const statuses = []
+  let prev = null
+  for (const ev of events) {
+    const a = mermaidId(ev.agentType || '—')
+    const t = ev.createdAt ? String(ev.createdAt).slice(11, 19) : ''
+    const label = (t ? t + ' ' : '') + actionText(ev.eventType)
+    if (prev && a !== prev) {
+      lines.push(`    ${prev}->>${a}: ${label}`)
+      statuses.push(ev.status || '')
+    } else {
+      lines.push(`    Note over ${a}: ${label}`)
+      statuses.push(ev.status || '')
+    }
+    prev = a
+  }
+  return { text: lines.join('\n'), statuses }
+}
+function applySequenceColors(svg, statuses) {
+  try {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    const root = doc.documentElement
+    const defs = root.querySelector('defs')
+    if (!defs) return svg
+    const colorOf = s => (s === 'failed' ? '#ff3b30' : s === 'completed' ? '#34c759' : '#aeaeb2')
+    const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
+    lines.forEach((line, i) => {
+      const markerId = root.id + '-seqnum-' + i
+      const marker = doc.createElementNS('http://www.w3.org/2000/svg', 'marker')
+      marker.setAttribute('id', markerId)
+      marker.setAttribute('refX', '15'); marker.setAttribute('refY', '15')
+      marker.setAttribute('markerWidth', '60'); marker.setAttribute('markerHeight', '40')
+      marker.setAttribute('orient', 'auto')
+      const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle')
+      circle.setAttribute('cx', '15'); circle.setAttribute('cy', '15'); circle.setAttribute('r', '6')
+      circle.setAttribute('fill', colorOf(statuses[i] || ''))
+      marker.appendChild(circle)
+      defs.appendChild(marker)
+      line.setAttribute('marker-start', 'url(#' + markerId + ')')
+    })
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) { return svg }
+}
+async function renderIssueMermaid() {
+  if (issueModal.value.svgRendered || issueModal.value.loading) return
+  const events = issueModal.value.events
+  if (!events || events.length === 0) return
+  try {
+    const mmd = await getMermaid()
+    const { text, statuses } = buildSequence(events)
+    const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
+    try { await mmd.parse(text) } catch (e) { }
+    const result = await mmd.render(uid, text)
+    const svg = result.svg || result
+    issueModal.value = { ...issueModal.value, svg: applySequenceColors(svg, statuses), svgRendered: true }
+  } catch (err) {
+    issueModal.value = { ...issueModal.value, svg: `<div style="padding:12px;color:var(--danger);font-size:12px">时序图渲染失败: ${err.message || err}</div>`, svgRendered: true }
+  }
+}
+
+// ===== 日志弹窗 =====
+const logModal = ref({ show: false, loading: false, messages: [], info: {} })
+
+async function openLogModal(taskId, task) {
+  logModal.value = { show: true, loading: true, messages: [], info: { issueId: task?.issueId, repoKey: task?.repoKey, eventSeq: task?.eventSeq, createdAt: task?.createdAt } }
+  try {
+    const [msgsResp, infoResp] = await Promise.all([
+      http.get(`/health-center/tasks/${taskId}/messages`),
+      http.get(`/health-center/tasks/${taskId}/info`),
+    ])
+    const info = infoResp.data || {}
+    if (!info.repoKey && task?.repoKey) info.repoKey = task.repoKey
+    logModal.value = { show: true, loading: false, messages: msgsResp.data || [], info }
+  } catch (e) {
+    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message } }
+  }
+}
+function closeLogModal() { logModal.value = { show: false, loading: false, messages: [], info: {} } }
+function logTypeIcon(t) {
+  const map = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' }
+  return map[t] || '•'
+}
+
+const STATUS_COLOR = { queued: '#ff9500', running: '#006eff', completed: '#34c759', failed: '#ff2d92' }
 const accents = ['kpi-blue', 'kpi-purple', 'kpi-pink', 'kpi-orange', 'kpi-green']
 const iconPalette = [
-  { background: '#e8f0fe', color: '#006eff' },
-  { background: '#f0e6ff', color: '#7222ed' },
-  { background: '#fff0f6', color: '#eb2f96' },
-  { background: '#fff7e6', color: '#fa8c16' },
-  { background: '#f6ffed', color: '#52c41a' }
+  { background: 'rgba(0,107,255,0.08)', color: '#006eff' },
+  { background: 'rgba(94,92,230,0.1)', color: '#5e5ce6' },
+  { background: 'rgba(255,45,146,0.08)', color: '#ff2d92' },
+  { background: 'rgba(255,149,0,0.1)', color: '#ff9500' },
+  { background: 'rgba(52,199,89,0.1)', color: '#34c759' }
 ]
 function iconStyle(i) { return iconPalette[i % iconPalette.length] }
 function hasBreakdown(a) { return a.statusBreakdown && Object.keys(a.statusBreakdown).length }
@@ -264,7 +316,7 @@ function fmtLoad(a) {
 }
 function loadColor(a) {
   if (a.loadRate == null) return 'var(--text-primary)'
-  return a.loadLevel === 'over' ? '#eb2f96' : '#52c41a'
+  return a.loadLevel === 'over' ? '#ff2d92' : '#34c759'
 }
 
 async function refresh() {
@@ -286,12 +338,20 @@ async function load() {
     const { data } = await http.get(`/engines/${route.params.id}`, { params })
     detail.value = data
     agents.value = data.agents || []
-    // 「已筛选 N 条」：有列头筛选时显示过滤后总数，无筛选不显示（对齐 VOD）
-    filterCount.value = (taskStatus.value || taskSkill.value || taskType.value) ? (data.tasks?.totalElements ?? 0) : 0
     nextTick(renderTaskChart)
   } finally {
     taskLoading.value = false
   }
+}
+
+function onTaskReload(params) {
+  taskPage.value = params.taskPage ?? 0
+  taskSize.value = params.taskSize ?? 10
+  sortOrder.value = params.sortOrder ?? 'desc'
+  taskStatus.value = params.taskStatus ?? ''
+  taskSkill.value = params.taskSkill ?? ''
+  taskType.value = params.taskType ?? ''
+  load()
 }
 // 任务状态分布饼图（对齐 VOD chart-row）
 function renderTaskChart() {
@@ -316,7 +376,7 @@ function renderTaskChart() {
       label: { show: true, formatter: '{b}: {c}' },
       data
     }],
-    color: ['#52c41a', '#e5484d', '#1890ff', '#ea5a0c', '#8896a7', '#7222ed']
+    color: ['#34c759', '#ff3b30', '#006eff', '#ff9500', '#aeaeb2', '#5e5ce6']
   })
 }
 // 列头筛选（对齐 VOD）：展开下拉/切换筛选/清空
@@ -360,12 +420,12 @@ load()
   background: #fff;
   border: 1px solid var(--border-color);
   border-left: 3px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 14px;
   padding: 10px 14px;
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  transition: all 0.2s ease;
+  transition: all var(--transition);
   overflow: hidden;
 }
 .detail-item:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
@@ -384,11 +444,11 @@ load()
   color: var(--text-secondary);
   padding: 6px 14px;
   border-radius: 8px;
-  background: #f5f5f5;
+  background: rgba(0,0,0,0.04);
   border: 1px solid var(--border-color);
   cursor: pointer;
   user-select: none;
-  transition: all 0.2s ease;
+  transition: all var(--transition);
   line-height: 1;
 }
 .back-btn:hover { color: var(--primary); background: #e6f4ff; border-color: #91caff; transform: translateX(-2px); }
@@ -408,11 +468,11 @@ load()
   max-width: 160px;
   background: #fff;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 14px;
   border-left: 3px solid #006eff;
   padding: 12px 16px;
   text-align: center;
-  transition: all 0.2s ease;
+  transition: all var(--transition);
 }
 .task-stat-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .task-stat-card.kpi-primary { border-left-color: #006eff; }
@@ -470,11 +530,11 @@ load()
   padding: 6px 10px;
   font-size: 12px;
   color: var(--text-secondary);
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
   white-space: nowrap;
 }
-.col-filter-opt:hover { background: #f5f7fa; }
+.col-filter-opt:hover { background: rgba(0,0,0,0.04); }
 .col-filter-opt.active { background: var(--primary-bg); color: var(--primary); font-weight: 500; }
 .ellipsis-cell {
   overflow: hidden;
@@ -487,21 +547,21 @@ load()
 /* ===== 关联智能体卡片墙（对齐智能体管理页面 AgentManage） ===== */
 .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; margin-bottom: 18px; }
 .agent-card {
-  background: #fff; border: 1px solid var(--border-color); border-radius: 10px;
+  background: #fff; border: 1px solid var(--border-color); border-radius: 14px;
   box-shadow: var(--card-shadow); padding: 14px 16px; border-left: 3px solid #006eff;
   display: flex; flex-direction: column; gap: 10px; cursor: pointer;
 }
 .agent-card:hover { box-shadow: var(--card-shadow-hover); transform: translateY(-1px); }
 .agent-card.kpi-blue { border-left-color: #006eff; }
-.agent-card.kpi-purple { border-left-color: #7222ed; }
-.agent-card.kpi-pink { border-left-color: #eb2f96; }
-.agent-card.kpi-orange { border-left-color: #fa8c16; }
-.agent-card.kpi-green { border-left-color: #52c41a; }
+.agent-card.kpi-purple { border-left-color: #5e5ce6; }
+.agent-card.kpi-pink { border-left-color: #ff2d92; }
+.agent-card.kpi-orange { border-left-color: #ff9500; }
+.agent-card.kpi-green { border-left-color: #34c759; }
 .agent-head { display: flex; align-items: center; gap: 10px; }
 .agent-icon { width: 38px; height: 38px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 19px; flex-shrink: 0; }
 .agent-meta { flex: 1; min-width: 0; }
 .agent-name { font-size: 15px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
-.code-tag { font-size: 11px; font-weight: 500; color: var(--text-tertiary); background: #f5f7fa; border-radius: 4px; padding: 1px 6px; }
+.code-tag { font-size: 11px; font-weight: 500; color: var(--text-tertiary); background: rgba(0,0,0,0.04); border-radius: 8px; padding: 1px 6px; }
 .agent-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
 .agent-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.6; min-height: 38px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .agent-stats { display: flex; gap: 18px; border-top: 1px dashed var(--border-color); padding-top: 10px; }
@@ -509,9 +569,9 @@ load()
 .as-item strong { font-size: 16px; font-weight: 700; color: var(--text-primary); }
 .as-item span { font-size: 11px; color: var(--text-tertiary); }
 .sb-row { display: flex; gap: 6px; flex-wrap: wrap; }
-.sb-seg { font-size: 11px; color: #fff; border-radius: 4px; padding: 1px 7px; }
-.agent-foot { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #f0f0f0; padding-top: 8px; }
-.cat-tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+.sb-seg { font-size: 11px; color: #fff; border-radius: 8px; padding: 1px 7px; }
+.agent-foot { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--border-soft); padding-top: 8px; }
+.cat-tag { font-size: 11px; padding: 1px 8px; border-radius: 14px; }
 .cat-official { background: #e6f4ff; color: #006eff; }
 .detail-link { font-size: 12px; color: var(--primary); }
 /* 刷新按钮加载动画 */
@@ -527,4 +587,20 @@ load()
   margin-right: 4px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===== 日志弹窗 ===== */
+.tl-row-clickable { cursor: pointer; }
+.tl-row-clickable:hover { background: rgba(0, 107, 255, 0.04); }
+.tl-row-fail { background: rgba(229, 72, 77, 0.03); }
+.tl-row-ok { background: rgba(46, 158, 91, 0.03); }
+.log-tl-dot.ok { background: #34c759; }
+.log-tl-dot.fail { background: #ff2d92; }
+.log-tl-dot.run { background: #006eff; }
+span.ok { color: #34c759; }
+span.fail { color: #ff2d92; }
+span.run { color: #006eff; }
+.tl-diagram-container { overflow-x: auto; }
+.tl-diagram-svg svg { max-width: 100%; height: auto; }
+.tl-diagram-loading { padding: 20px; text-align: center; color: var(--text-tertiary, #999); }
+.btn-primary { background: var(--primary, #006eff); color: #fff; border-color: var(--primary, #006eff); }
 </style>

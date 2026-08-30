@@ -9,6 +9,11 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.session_manager import db, db_lock
 from src.user import db as user_db
+# JWT access token helper（替代旧的 create_session_token）
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    from src.user.db import get_token_version
+    return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
 
@@ -31,7 +36,7 @@ def setup_module():
         u = user_db.get_user_by_username("tc_clarify_user")
     assert u, "测试用户创建失败"
     _uid = u["id"]
-    _token = user_db.create_session_token(_uid)
+    _token = _jwt_access_token(_uid, u["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
     with db_lock:
         c = db.cursor()

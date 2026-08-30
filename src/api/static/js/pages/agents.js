@@ -100,15 +100,23 @@ function loadCfgOptions() {
   const skillSelect = document.querySelector('.cfg-skill');
 
   // Runtime 下拉多选（引擎集合）：仅未加载时加载；DevOps Agent 可选 仓库级/全局/本机直连（个人引擎不出现）
-  if (backendBox && !backendBox.dataset.loaded) {
-    backendBox.dataset.loaded = '1';
+  if (backendBox) {
+    // 每次打开都重新加载（标签可能已变更，不复用缓存）
+    backendBox.dataset.loaded = '';
     const panel = backendBox.querySelector('.cfg-backends-panel');
     const current = (backendBox.dataset.backends || '').split(',').map(s => s.trim()).filter(Boolean);
     API.get('/settings/agent-runtimes').then(d => {
       const runtimes = d.runtimes || [];
-      const scopeLabel = sc => sc === 'global' ? '全局' : sc === 'repo' ? '仓库' : '个人';
-      const localLabel = r => r.is_local ? '本机直连' : scopeLabel(r.scope);
-      const ok = runtimes.filter(r => r.scope === 'repo' || r.scope === 'global');
+      const scopeLabel = sc => sc === 'global' ? I18N.t('agents.scope.global') : sc === 'repo' ? I18N.t('agents.scope.repo') : I18N.t('agents.scope.personal');
+      const localLabel = r => r.is_local ? I18N.t('agents.scope.local_direct') : scopeLabel(r.scope);
+      const agentType = backendBox.dataset.agent || '';
+      // 按标签过滤：展示仓库级/全局/个人引擎（个人引擎仅 owner 自己可见，后端已过滤）
+      const ok = runtimes.filter(r => {
+        if (r.scope !== 'repo' && r.scope !== 'global' && r.scope !== 'user') return false;
+        const tags = r.agent_tags || ['all'];
+        return tags.includes('all') || tags.includes(agentType);
+      });
+      const tagLabels = {all: I18N.t('agents.tag.all'), vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE'};
       const val = r => r.instance_name || r.name;
       const cb = (r, i) => {
         const v = val(r);
@@ -116,21 +124,22 @@ function loadCfgOptions() {
         const color = _beColor(i);
         const checked = current.includes(v) || current.includes(r.name) ? 'checked' : '';
         const rgb = _beRgb(color);
+        const tagStr = (r.agent_tags || ['all']).map(t => tagLabels[t]||t).join('/');
         return `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap;width:100%;flex-shrink:1;background:${checked ? `rgba(${rgb},.12)` : 'transparent'};${checked ? `box-shadow:inset 2px 0 0 ${color}` : ''};transition:background .12s">
           <input type="checkbox" class="cfg-backend-cb" value="${v}" data-color="${color}" ${checked} style="accent-color:${color};flex:0 0 auto;width:14px;height:14px;margin:0">
           <span style="width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0"></span>
           <span style="font-weight:600;color:${checked ? color : 'var(--t2)'};min-width:110px">${v}</span>
-          <span class="ts t3" style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${localLabel(r)}${online ? ' ✓' : ' ✗'}</span>
+          <span class="ts t3" style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${localLabel(r)}${online ? ' ✓' : ' ✗'} · ${tagStr}</span>
         </label>`;
       };
-      panel.innerHTML = ok.map(cb).join('') || '<span class="ts t2">无可选引擎（仓库级/全局/本机直连）</span>';
+      panel.innerHTML = ok.map(cb).join('') || '<span class="ts t2">' + I18N.t('agents.engine.none_available') + '</span>';
       // 面板内点击不冒泡到 document（避免勾选时触发外部关闭）
       panel.addEventListener('click', e => e.stopPropagation());
       // 初始回显 + 勾选/取消 → 同步触发区彩色标签 + 面板行高亮
       refreshBackendsPanel();
       panel.addEventListener('change', refreshBackendsPanel);
     }).catch(() => {
-      panel.innerHTML = '<span class="ts t2">引擎列表加载失败</span>';
+      panel.innerHTML = '<span class="ts t2">' + I18N.t('agents.engine.load_failed') + '</span>';
     });
   }
 
@@ -152,7 +161,7 @@ function loadCfgOptions() {
       // 当前配置的 skill 在当前 scope 里 → 选中它；否则默认选第一个
       const matchCurrent = filtered.find(s => String(s.id) === currentSkillId);
       // "默认官方技能（自动）"仅在全局 scope 下显示
-      const defaultOpt = scope === 'official' ? '<option value="0">默认官方技能（自动）</option>' : '';
+      const defaultOpt = scope === 'official' ? '<option value="0">' + I18N.t('agents.skill.default_official') + '</option>' : '';
       let html = defaultOpt +
         filtered.map((s, i) => {
           const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
@@ -160,11 +169,22 @@ function loadCfgOptions() {
         }).join('');
       // 项目/个人 scope 下无 skill → 显示空提示
       if (filtered.length === 0) {
-        html = `<option value="0" disabled>${scope === 'repo' ? '该仓库暂无项目技能' : '暂无个人技能'}</option>`;
+        html = `<option value="0" disabled>${scope === 'repo' ? I18N.t('agents.skill.no_repo_skill') : I18N.t('agents.skill.no_personal_skill')}</option>`;
       }
       skillSelect.innerHTML = html;
     }).catch(() => {});
   }
+}
+
+function _agentTypeDisplay(type, meta) {
+  var tKey = 'agents.type.' + type + '.name';
+  var tVal = I18N.t(tKey);
+  return tVal !== tKey ? tVal : (meta.display_name || type);
+}
+function _agentTypeDesc(type, meta) {
+  var tKey = 'agents.type.' + type + '.desc';
+  var tVal = I18N.t(tKey);
+  return tVal !== tKey ? tVal : (meta.description || '');
 }
 
 function renderAgent(name, data) {
@@ -178,13 +198,13 @@ function renderAgent(name, data) {
     <table style="width:100%;font-size:12px;table-layout:fixed">
       <thead><tr>
         <th style="width:60px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Seq</th>
-        <th style="width:130px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">时间</th>
-        <th style="width:auto;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">内容</th>
+        <th style="width:130px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_time')}</th>
+        <th style="width:auto;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_content')}</th>
         <th style="width:75px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Issue</th>
         <th style="width:85px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Actor</th>
-        <th style="width:60px;text-align:center;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">耗时</th>
-        <th style="width:160px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">引擎</th>
-        <th style="width:70px;text-align:right;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">状态</th>
+        <th style="width:60px;text-align:center;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_duration')}</th>
+        <th style="width:160px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_engine')}</th>
+        <th style="width:70px;text-align:right;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_status')}</th>
       </tr></thead>
       <tbody>
         ${events.map(ev => {
@@ -202,11 +222,11 @@ function renderAgent(name, data) {
           <td style="padding:8px 10px;font-size:10px;color:var(--t2)">${ev.actor ? '@'+ev.actor : '—'}</td>
           <td style="padding:8px 10px;text-align:center;font-size:10px;color:var(--t3)">${ev.duration ? ev.duration + 's' : '—'}</td>
           <td style="padding:8px 10px;font-size:10px;color:var(--t3);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-clamp:2;word-break:break-all">${ev.backend || '—'}</td>
-          <td style="padding:8px 10px;text-align:right"><span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}" style="font-size:10px;font-weight:600">${ev.status}</span></td>
+          <td style="padding:8px 10px;text-align:right"><span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}" style="font-size:10px;font-weight:600">${I18N.t('common.status.' + ev.status) !== ('common.status.' + ev.status) ? I18N.t('common.status.' + ev.status) : ev.status}</span></td>
         </tr>`;
         }).join('')}
       </tbody>
-    </table>` : '<div class="tx t2" style="padding:12px 0">暂无事件</div>';
+    </table>` : '<div class="tx t2" style="padding:12px 0">' + I18N.t('agents.event.none') + '</div>';
 
   const ef = es.completed || 0;
   const er = es.running || 0;
@@ -214,38 +234,38 @@ function renderAgent(name, data) {
 
   const engineText = data.backend || (data.backends && data.backends.length ? data.backends.join(', ') : '');
   const engineBadge = engineText
-    ? `<span class="ts t3" style="font-weight:600">引擎: ${engineText}</span>`
-    : `<span class="ts t3" style="color:var(--r);font-weight:700">无 engine，不可用</span>`;
+    ? `<span class="ts t3" style="font-weight:600">${I18N.t('agents.engine.label', {text: engineText})}</span>`
+    : `<span class="ts t3" style="color:var(--r);font-weight:700">${I18N.t('agents.engine.no_engine')}</span>`;
 
   let html = `
 <div class="cd" style="background:${meta.bg || 'var(--bg)'};border-color:${meta.color || 'var(--b)'}33">
   <div class="flex fc gap12">
     <div style="width:44px;height:44px;border-radius:10px;background:${meta.color || 'var(--b)'}22;display:flex;align-items:center;justify-content:center;font-size:20px">${meta.icon || '?'}</div>
-    <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${meta.display_name || name}</h2><div class="ts t2">${meta.description || ''}</div>${engineBadge}</div>
-    <div class="flex gap6"><button id="btnConfigure" class="bt bt-o bt-s" onclick="toggleAgentCfg(true)">Configure</button><button id="btnEvents" class="bt bt-p bt-s" onclick="toggleAgentCfg(false)">Events</button></div>
+    <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${_agentTypeDisplay(name, meta)}</h2><div class="ts t2">${_agentTypeDesc(name, meta)}</div>${engineBadge}</div>
+    <div class="flex gap6"><button id="btnConfigure" class="bt bt-o bt-s" onclick="toggleAgentCfg(true)">${I18N.t('agents.btn_configure')}</button><button id="btnEvents" class="bt bt-p bt-s" onclick="toggleAgentCfg(false)">${I18N.t('agents.btn_events')}</button></div>
   </div>
 </div>
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
-  <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">Agent Configuration</h3>
-  <div class="srow" style="align-items:flex-start"><label>Backend Engines<br><span class="ts t3" style="font-weight:400">下拉多选，任务将分配到空闲引擎</span></label>
-    <div class="cfg-backends" data-backends="${(data.backends || []).join(',')}" style="flex:1;position:relative">
+  <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('agents.config.title')}</h3>
+  <div class="srow" style="align-items:flex-start"><label>Backend Engines<br><span class="ts t3" style="font-weight:400">${I18N.t('agents.engine.backend_engines_hint')}</span></label>
+    <div class="cfg-backends" data-backends="${(data.backends || []).join(',')}" data-agent="${name}" style="flex:1;position:relative">
       <div class="cfg-backends-trigger" onclick="toggleBackendsDropdown(event)" style="min-height:34px;padding:5px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);cursor:pointer;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
-        <span class="cfg-backends-ph ts t2" style="color:var(--t2)">选择引擎...</span>
+        <span class="cfg-backends-ph ts t2" style="color:var(--t2)">${I18N.t('agents.engine.select_placeholder')}</span>
       </div>
       <div class="cfg-backends-panel hidden" style="position:absolute;left:0;top:calc(100% + 4px);width:max(100%,360px);max-width:calc(100vw - 24px);background:var(--bg);border:1px solid var(--b);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.18);z-index:50;max-height:240px;overflow:auto;padding:6px">
-        <span class="ts t2">加载中...</span>
+        <span class="ts t2">${I18N.t('common.loading')}</span>
       </div>
     </div>
   </div>
-    <div class="srow" style="align-items:flex-start"><label>Skill</label>
+    <div class="srow" style="align-items:flex-start"><label>${I18N.t('agents.skill_label')}</label>
     <div style="flex:1;display:flex;gap:8px">
       <select class="cfg-skill-scope" onchange="_switchSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:7px 6px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg);outline:none">
-        <option value="official">全局</option>
-        <option value="repo">项目</option>
-        <option value="user">个人</option>
+        <option value="official">${I18N.t('agents.scope_short.global')}</option>
+        <option value="repo">${I18N.t('agents.scope_short.repo')}</option>
+        <option value="user">${I18N.t('agents.scope_short.user')}</option>
       </select>
       <select class="cfg-skill" data-agent="${name}" data-skill-id="${(data.skill_id || 0)}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
-      <option value="0" ${!data.skill_id ? 'selected' : ''}>${data.skill ? '加载中...' : '默认官方技能（自动）'}</option>
+      <option value="0" ${!data.skill_id ? 'selected' : ''}>${data.skill ? I18N.t('common.loading') : I18N.t('agents.skill.default_official')}</option>
     </select>
     </div>
   </div>
@@ -253,30 +273,30 @@ function renderAgent(name, data) {
   ${name === 'vod' ? `
   <div style="margin:16px 0 12px;border-top:1px solid var(--b);padding-top:12px">
     <div class="flex fc jbtw" style="margin-bottom:8px">
-      <h3 style="font-size:13px;font-weight:600">IM 配置</h3>
-      <span class="ts t3">${data.im && data.im.connected ? '🟢 已配置' : ''}</span>
+      <h3 style="font-size:13px;font-weight:600">${I18N.t('agents.config.im_title')}</h3>
+      <span class="ts t3">${data.im && data.im.connected ? I18N.t('agents.config.im_configured') : ''}</span>
     </div>
-    <div class="srow"><label>Bot App ID</label><input id="vodImAppId" value="${(data.im && data.im.im_app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
-    <div class="srow"><label>Bot Secret</label><input id="vodImSecret" type="password" value="${data.im && data.im.connected ? '********' : ''}" placeholder="留空不修改" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
-    <div class="srow"><label></label><button class="bt bt-o bt-s" onclick="startVodOnboard()" style="padding:7px 14px">扫码配置</button></div>
+    <div class="srow"><label>${I18N.t('agents.config.bot_app_id')}</label><input id="vodImAppId" value="${(data.im && data.im.im_app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+    <div class="srow"><label>${I18N.t('agents.config.bot_secret')}</label><input id="vodImSecret" type="password" value="${data.im && data.im.connected ? '********' : ''}" placeholder="${I18N.t('agents.config.bot_secret_placeholder')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+    <div class="srow"><label></label><button class="bt bt-o bt-s" onclick="startVodOnboard()" style="padding:7px 14px">${I18N.t('agents.config.scan_config')}</button></div>
     ${data.im && data.im.conversations && data.im.conversations.length > 0 ? `
     <div style="margin-top:8px">
-      <span class="ts t3">已绑定的群 (${data.im.conversations.length})</span>
-      ${data.im.conversations.map(c => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--b)">${c.chat_name || c.chat_id} <span class="ts t3">${c.status}</span></div>`).join('')}
+      <span class="ts t3">${I18N.t('agents.config.bound_chats', {n: data.im.conversations.length})}</span>
+      ${data.im.conversations.map(c => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--b)">${c.chat_name || c.chat_id} <span class="ts t3">${I18N.t('common.status.' + c.status) !== ('common.status.' + c.status) ? I18N.t('common.status.' + c.status) : c.status}</span></div>`).join('')}
     </div>` : ''}
   </div>` : ''}
-  <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">Save</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg(false)">Cancel</button></div>
+  <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">${I18N.t('common.save')}</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg(false)">${I18N.t('common.cancel')}</button></div>
   <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
-    <div class="ts t3" style="margin-bottom:6px">清空会话后，下一次事件将创建全新的 Agent 上下文（不延续历史对话）。</div>
-    <button class="bt bt-r bt-s" onclick="cleanAgentSession('${name}')">🧹 Clean Session</button>
+    <div class="ts t3" style="margin-bottom:6px">${I18N.t('agents.config.clean_session_hint')}</div>
+    <button class="bt bt-r bt-s" onclick="cleanAgentSession('${name}')">${I18N.t('agents.config.clean_session_btn')}</button>
   </div>
 </div>
 <div class="stats mt16 mb16">
-  <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${et}</div><div class="l">事件总量</div></div>
-  <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${ef}</div><div class="l">已完成</div></div>
-  <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${er}</div><div class="l">进行中</div></div>
+  <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${et}</div><div class="l">${I18N.t('agents.event.total')}</div></div>
+  <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${ef}</div><div class="l">${I18N.t('agents.event.completed')}</div></div>
+  <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${er}</div><div class="l">${I18N.t('agents.event.running')}</div></div>
 </div>
-<div class="cd"><div class="cd-h"><h2>Event History</h2><span class="ts t3">最近 ${events.length} 条</span></div>${evtHtml}</div>`;
+<div class="cd"><div class="cd-h"><h2>${I18N.t('agents.event.history_title')}</h2><span class="ts t3">${I18N.t('agents.event.recent_n', {n: events.length})}</span></div>${evtHtml}</div>`;
 
   el.innerHTML = html;
   // 根据已配置 skill 的 scope 设置初始页签（避免回显时看不到已配置的 skill）
@@ -300,16 +320,16 @@ function _agentSubsSection(name, data) {
   const displayName = (_AGENT_TYPES[name] && _AGENT_TYPES[name].display_name) || name;
   return `<div style="margin:16px 0 12px;border-top:1px solid var(--b);padding-top:12px">
     <div class="flex fc jbtw" style="margin-bottom:8px">
-      <h3 style="font-size:13px;font-weight:600">事件订阅</h3>
-      <span class="ts t3">默认不配置；勾选后触发即收到任务</span>
+      <h3 style="font-size:13px;font-weight:600">${I18N.t('agents.subscription.title')}</h3>
+      <span class="ts t3">${I18N.t('agents.subscription.hint')}</span>
     </div>
     <div style="font-size:12px;margin-bottom:6px">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-        <input id="subPrMerged" type="checkbox" ${prChecked} style="accent-color:var(--a)"> PR 合入（pull_request_merged）
+        <input id="subPrMerged" type="checkbox" ${prChecked} style="accent-color:var(--a)"> ${I18N.t('agents.subscription.pr_merged')}
       </label>
     </div>
-    <div class="srow"><label>合入分支</label><input id="subPrBranches" value="${prBranches}" placeholder="main, dev…（留空=不限分支）" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
-    <div class="ts t3" style="margin-top:6px">当 PR 合入到上述分支时，${displayName} 自动收到任务；留空则任意分支合入都触发。</div>
+    <div class="srow"><label>${I18N.t('agents.subscription.merge_branch')}</label><input id="subPrBranches" value="${prBranches}" placeholder="${I18N.t('agents.subscription.merge_branch_placeholder')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
+    <div class="ts t3" style="margin-top:6px">${I18N.t('agents.subscription.branch_hint', {name: displayName})}</div>
   </div>`;
 }
 
@@ -319,7 +339,7 @@ function saveAgentConfig(name) {
   const skillId = parseInt(skillVal) || 0;
   // 项目/个人 scope 下不允许保存空值（无"默认技能"选项）
   if (_skillScope !== 'official' && !skillId) {
-    if (app && app.showToast) app.showToast('请选择技能');
+    if (app && app.showToast) app.showToast(I18N.t('agents.skill.select_required'));
     return;
   }
   const repo = app.currentRepo();
@@ -342,23 +362,23 @@ function saveAgentConfig(name) {
     body.im_app_secret = rawSecret === '********' ? '' : rawSecret;
   }
   API.put('/agents/' + name + '/' + repo.owner + '/' + repo.name, body).then(r => {
-    app.showToast('配置已保存');
+    app.showToast(I18N.t('agents.config.saved'));
     toggleAgentCfg(false);
-  }).catch(e => app.showToast('保存失败: ' + e.message));
+  }).catch(e => app.showToast(I18N.t('agents.config.save_failed', {msg: e.message})));
 }
 
 function cleanAgentSession(name) {
-  if (!confirm(`确认清理 ${name} Agent 的会话？\n\n将清除 backend_session_id，下一次事件到来时会创建全新会话上下文（不延续历史对话）。`)) return;
+  if (!confirm(I18N.t('agents.session.clean_confirm', {name: name}))) return;
   const repo = app.currentRepo();
   if (!repo) return;
   API.post('/agents/' + name + '/' + repo.owner + '/' + repo.name + '/clean').then(r => {
-    app.showToast(r.message || '会话已清理');
-  }).catch(e => app.showToast('清理失败: ' + e.message));
+    app.showToast(r.message || I18N.t('agents.session.cleaned'));
+  }).catch(e => app.showToast(I18N.t('agents.session.clean_failed', {msg: e.message})));
 }
 
 function startVodOnboard() {
   const repo = app.currentRepo();
-  if (!repo) { app.showToast('请先选择仓库'); return; }
+  if (!repo) { app.showToast(I18N.t('agents.toast.select_repo_first')); return; }
   startFeishuOnboard('vod_bot', repo.fullName);
 }
 
