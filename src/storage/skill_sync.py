@@ -104,7 +104,7 @@ async def sync_official_skills_to_obs() -> dict:
         # 查 DB 的 content_hash（按 skill_name + scope 查主键 id + hash）
         skill_id, db_hash = get_skill_content_hash(skill_name)
 
-        if db_hash == current_hash and skill_id:
+        if db_hash == current_hash:
             result["skipped"] += 1
             continue
 
@@ -124,11 +124,6 @@ async def sync_official_skills_to_obs() -> dict:
                 continue
 
         # 按主键 id 更新 DB
-        if not skill_id:
-            # DB 里没有这个技能记录，db_setup.py 的 _sync_official_skills 会负责 INSERT
-            result["skipped"] += 1
-            continue
-
         updated = update_skill_content_hash(skill_id, current_hash, object_key)
         if updated:
             if db_hash:
