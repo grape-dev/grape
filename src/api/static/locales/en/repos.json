@@ -42,7 +42,6 @@
   "card": {
     "enter_project": "Enter Project",
     "join_and_host": "Join & Host",
-    "join": "Join",
     "status_hosted": "Hosted",
     "status_joined": "Joined",
     "status_not_joined": "Not Joined",
@@ -57,9 +56,7 @@
     "th_description": "Description"
   },
   "available_btn": {
-    "hosted": "Hosted",
-    "join_and_host": "Join & Host",
-    "join": "Join"
+    "join_and_host": "Join & Host"
   },
   "sync": {
     "syncing": "↻ Syncing…",
@@ -68,10 +65,8 @@
     "sync_failed": "Sync failed: {{msg}}",
     "refresh_success": "Refreshed successfully",
     "refresh_failed": "Refresh failed: {{msg}}",
-    "host_success": "Joined and hosted successfully",
-    "host_failed": "Host failed: {{msg}}",
-    "join_success": "Successfully joined repository",
-    "join_failed": "Join failed: {{msg}}"
+    "host_success": "Hosted successfully",
+    "host_failed": "Host failed: {{msg}}"
   },
   "unhost": {
     "confirm": "⚠️ Are you sure you want to unhost {{name}}?\n\nAfter unhosting, all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files) will be deleted and cannot be recovered.",

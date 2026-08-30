@@ -153,18 +153,16 @@ function goRepoPage(dir) {
 }
 
 function _buildProjectCard(r) {
-  const isAdmin = r.role === 'Admin' || r.role === 'Maintainer';
   const repoUrl = 'https://gitcode.com/' + (r.full_name || '');
   const initials = (r.name || '?').substring(0, 2).toUpperCase();
   const statusTxt = r.is_hosted ? I18N.t('repos.card.status_hosted') : r.is_joined ? I18N.t('repos.card.status_joined') : I18N.t('repos.card.status_not_joined');
   const statusCls = r.is_hosted ? 'project-card-status-hosted' : r.is_joined ? 'project-card-status-joined' : 'project-card-status-none';
 
   var actionHtml;
-  if (r.is_hosted) {
+  if (r.is_hosted || r.is_joined) {
     actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();selectRepo(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">' + I18N.t('repos.card.enter_project') + '→</button>';
   } else {
-    var joinAction = isAdmin ? 'hostAndSelect' : 'joinAndSelect';
-    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();' + joinAction + '(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">' + (isAdmin ? I18N.t('repos.card.join_and_host') : I18N.t('repos.card.join')) + '→</button>';
+    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();hostAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">' + I18N.t('repos.card.join_and_host') + '→</button>';
   }
 
   return '<div class="project-card" onclick="window.open(\'' + repoUrl + '\',\'_blank\')">' +
@@ -239,19 +237,16 @@ function renderRepos() {
     }
     html += `</div>`;
 
-    html += `<div class="cd"><div class="cd-h"><h2>Available to Join <span class="c">${availableRepos.length}</span></h2></div>`;
+    html += `<div class="cd"><div class="cd-h"><h2>未托管仓库 <span class="c">${availableRepos.length}</span></h2></div>`;
     if (availableRepos.length === 0) {
       html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_available') + '</div>';
     } else {
       html += `<div class="tw"><table>
         <tr><th>${I18N.t('repos.managed.th_repository')}</th><th>${I18N.t('repos.managed.th_role')}</th><th>${I18N.t('repos.managed.th_description')}</th><th></th></tr>`;
       availableRepos.forEach(r => {
-        const isAdmin = r.role === 'Admin' || r.role === 'Maintainer';
         const roleTag = r.role === 'Admin' ? `<span class="tg tg-s">${r.role}</span>` :
                         r.role === 'Maintainer' ? `<span class="tg tg-i">${r.role}</span>` : r.role;
-        const btnHtml = isAdmin
-          ? `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}')">${r.is_hosted ? I18N.t('repos.available_btn.hosted') : I18N.t('repos.available_btn.join_and_host')}</button>`
-          : `<button class="bt bt-o bt-s" onclick="event.stopPropagation();joinAndSelect('${r.full_name}','${r.owner}','${r.name}')">${I18N.t('repos.available_btn.join')}</button>`;
+        const btnHtml = `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}')">${I18N.t('repos.available_btn.join_and_host')}</button>`;
         html += `<tr><td><b>${r.full_name}</b></td><td>${roleTag}</td><td>${r.description || ''}</td><td>${btnHtml}</td></tr>`;
       });
       html += `</table></div>`;
@@ -293,13 +288,6 @@ function hostAndSelect(fullName, owner, name) {
     app.showToast(I18N.t('repos.sync.host_success'));
     app.loadProfile().then(() => selectRepo(fullName, owner, name));
   }).catch(e => app.showToast(I18N.t('repos.sync.host_failed', {msg: e.message})));
-}
-
-function joinAndSelect(fullName, owner, name) {
-  API.post('/repos/join', {full_name: fullName}).then(r => {
-    app.showToast(I18N.t('repos.sync.join_success'));
-    app.loadProfile().then(() => selectRepo(fullName, owner, name));
-  }).catch(e => app.showToast(I18N.t('repos.sync.join_failed', {msg: e.message})));
 }
 
 function selectRepo(fullName, owner, name) {
