@@ -792,7 +792,7 @@ def get_skill_content_hash(skill_name: str, scope: str = "official") -> str:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT content_hash FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1", (skill_name, scope))
+            c.execute("SELECT content_hash FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
             row = c.fetchone()
             return row[0] if row else ""
     except Exception as e:
@@ -806,9 +806,9 @@ def update_skill_content_hash(skill_name: str, scope: str, content_hash: str, fi
         with db_lock:
             c = db.cursor()
             if file_path:
-                c.execute("UPDATE skill SET content_hash=?, file_path=? WHERE skill_name=? AND scope=? AND is_active=1", (content_hash, file_path, skill_name, scope))
+                c.execute("UPDATE skill SET content_hash=?, file_path=? WHERE skill_name=? AND scope=?", (content_hash, file_path, skill_name, scope))
             else:
-                c.execute("UPDATE skill SET content_hash=? WHERE skill_name=? AND scope=? AND is_active=1", (content_hash, skill_name, scope))
+                c.execute("UPDATE skill SET content_hash=? WHERE skill_name=? AND scope=?", (content_hash, skill_name, scope))
             db.commit()
             return c.rowcount > 0
     except Exception as e:
