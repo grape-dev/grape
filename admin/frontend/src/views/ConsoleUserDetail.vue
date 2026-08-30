@@ -538,6 +538,14 @@ const credentialConfigured = computed(() => {
 
 async function loadRepoIssues(p) {
   if (p !== undefined) repoIssuesPage.value = p
+  // 清空展开状态和缓存——分页/刷新/切仓库后 DOM 已销毁，残留状态会导致切回时序图空白
+  expandedIssues.value = new Set()
+  renderedIssues.value = new Set()
+  renderingIssues.value = new Set()
+  issueEvents.value = {}
+  issueEventsLoading.value = {}
+  issueSvgs.value = {}
+  issueViewModes.value = {}
   repoIssuesLoading.value = true
   try {
     const params = { page: repoIssuesPage.value, size: repoIssuesSize.value }
@@ -577,13 +585,6 @@ async function load() {
 }
 
 function onRepoChange() {
-  expandedIssues.value = new Set()
-  renderedIssues.value = new Set()
-  renderingIssues.value = new Set()
-  issueEvents.value = {}
-  issueEventsLoading.value = {}
-  issueSvgs.value = {}
-  issueViewModes.value = {}
   loadRepoIssues(0)
 }
 
