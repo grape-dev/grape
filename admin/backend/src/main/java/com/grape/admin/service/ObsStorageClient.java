@@ -1,6 +1,7 @@
 package com.grape.admin.service;
 
 import com.obs.services.ObsClient;
+import com.obs.services.exception.ObsException;
 import com.obs.services.model.DeleteObjectsRequest;
 import com.obs.services.model.DeleteObjectsResult;
 import com.obs.services.model.KeyAndVersion;
@@ -17,7 +18,11 @@ import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
+
+import com.grape.admin.common.BizException;
+import com.grape.admin.common.NotFoundException;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
@@ -137,17 +142,31 @@ public class ObsStorageClient {
     // ---- 写入 ----
 
     public void saveBytes(String key, byte[] data) {
-        PutObjectRequest req = new PutObjectRequest(bucket, full(key), new ByteArrayInputStream(data));
-        ObjectMetadata meta = new ObjectMetadata();
-        meta.setContentLength((long) data.length);
-        req.setMetadata(meta);
-        client.putObject(req);
+        try {
+            PutObjectRequest req = new PutObjectRequest(bucket, full(key), new ByteArrayInputStream(data));
+            ObjectMetadata meta = new ObjectMetadata();
+            meta.setContentLength((long) data.length);
+            req.setMetadata(meta);
+            client.putObject(req);
+        } catch (ObsException e) {
+            log.warn("OBS saveBytes failed: {}: {} (statusCode={})", key, e.getMessage(), e.getResponseCode());
+            throw new BizException("OBS 写入失败：" + key, HttpStatus.BAD_GATEWAY);
+        }
     }
 
     // ---- 读取 ----
 
     public byte[] readBytes(String key) {
-        ObsObject obj = client.getObject(bucket, full(key));
+        ObsObject obj;
+        try {
+            obj = client.getObject(bucket, full(key));
+        } catch (ObsException e) {
+            if (e.getResponseCode() == 404) {
+                throw new NotFoundException("技能文件不存在（OBS 对象缺失）：" + key);
+            }
+            log.warn("OBS readBytes failed: {}: {} (statusCode={})", key, e.getMessage(), e.getResponseCode());
+            throw new BizException("OBS 读取失败：" + key, HttpStatus.BAD_GATEWAY);
+        }
         try (InputStream in = obj.getObjectContent();
              ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
             byte[] buf = new byte[8192];
@@ -157,7 +176,7 @@ public class ObsStorageClient {
             }
             return bos.toByteArray();
         } catch (IOException e) {
-            throw new RuntimeException("OBS 读取失败: " + key + " -> " + e.getMessage(), e);
+            throw new BizException("OBS 读取失败：" + key + " -> " + e.getMessage(), HttpStatus.BAD_GATEWAY);
         }
     }
 
@@ -219,7 +238,8 @@ public class ObsStorageClient {
             TemporarySignatureResponse resp = client.createTemporarySignature(req);
             return resp.getSignedUrl();
         } catch (Exception e) {
-            throw new RuntimeException("OBS 临时 URL 签发失败: " + key, e);
+            log.warn("OBS temporaryUrl failed: {}: {}", key, e.getMessage());
+            throw new BizException("OBS 临时 URL 签发失败：" + key, HttpStatus.BAD_GATEWAY);
         }
     }
 

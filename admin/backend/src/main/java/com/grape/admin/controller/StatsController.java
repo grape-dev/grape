@@ -167,12 +167,11 @@ public class StatsController {
         List<Map<String, Object>> list = new ArrayList<>();
         try {
             grapeJdbc.query(
-                "SELECT DATE(t.started_at) as label, COUNT(DISTINCT u.id) as cnt " +
-                "FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
-                "WHERE t.started_at IS NOT NULL " +
-                "AND t.started_at >= DATE_SUB(NOW(), INTERVAL ? DAY) " +
+                "SELECT DATE(created_at) as label, COUNT(DISTINCT actor) as cnt " +
+                "FROM events " +
+                "WHERE created_at IS NOT NULL " +
+                "AND created_at >= DATE_SUB(NOW(), INTERVAL ? DAY) " +
+                "AND actor<>'' AND actor NOT LIKE '%bot%' " +
                 "GROUP BY label ORDER BY label",
                 rs -> {
                     Map<String, Object> r = new LinkedHashMap<>();

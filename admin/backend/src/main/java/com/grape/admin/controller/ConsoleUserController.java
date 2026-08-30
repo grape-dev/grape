@@ -33,35 +33,37 @@ public class ConsoleUserController {
         StringBuilder where = new StringBuilder(" WHERE 1=1");
         List<Object> params = new ArrayList<>();
         if (keyword != null && !keyword.isBlank()) {
-            where.append(" AND (username LIKE ? OR nickname LIKE ?)");
+            where.append(" AND (u.username LIKE ? OR u.nickname LIKE ?)");
             params.add("%" + keyword + "%");
             params.add("%" + keyword + "%");
         }
         if (source != null && !source.isBlank()) {
             if ("gitcode".equals(source)) {
-                where.append(" AND gitcode_id IS NOT NULL AND gitcode_id<>''");
+                where.append(" AND u.gitcode_id IS NOT NULL AND u.gitcode_id<>''");
             } else if ("other".equals(source)) {
-                where.append(" AND (gitcode_id IS NULL OR gitcode_id='')");
+                where.append(" AND (u.gitcode_id IS NULL OR u.gitcode_id='')");
             } else if ("online".equals(source)) {
-                where.append(" AND last_active_at IS NOT NULL AND last_active_at >= NOW() - INTERVAL 30 MINUTE");
+                where.append(" AND u.last_active_at IS NOT NULL AND u.last_active_at >= NOW() - INTERVAL 30 MINUTE");
             } else if ("offline".equals(source)) {
-                where.append(" AND (last_active_at IS NULL OR last_active_at < NOW() - INTERVAL 30 MINUTE)");
+                where.append(" AND (u.last_active_at IS NULL OR u.last_active_at < NOW() - INTERVAL 30 MINUTE)");
             }
         }
 
         long total = 0;
         try {
-            total = grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts" + where, Long.class, params.toArray());
+            total = grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts u" + where, Long.class, params.toArray());
         } catch (Exception e) { log.warn("console-users count failed: {}", e.getMessage()); }
 
         List<Map<String, Object>> list = new ArrayList<>();
         try {
-            String sql = "SELECT id, username, nickname, gitcode_id, created_at, last_active_at, "
-                    + "huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>'' as has_huawei_ak, "
-                    + "feishu_app_id IS NOT NULL AND feishu_app_id<>'' as has_feishu, "
-                    + "gitcode_api_token IS NOT NULL AND gitcode_api_token<>'' as has_gitcode_token, "
-                    + "(last_active_at IS NOT NULL AND last_active_at >= NOW() - INTERVAL 30 MINUTE) as is_online "
-                    + "FROM user_accounts" + where + " ORDER BY last_active_at DESC, id DESC LIMIT ? OFFSET ?";
+            String sql = "SELECT u.id, u.username, u.nickname, u.gitcode_id, u.created_at, u.last_active_at, "
+                    + "u.huawei_cloud_ak IS NOT NULL AND u.huawei_cloud_ak<>'' as has_huawei_ak, "
+                    + "cas.im_app_id IS NOT NULL AND cas.im_app_id<>'' as has_feishu, "
+                    + "u.gitcode_api_token IS NOT NULL AND u.gitcode_api_token<>'' as has_gitcode_token, "
+                    + "(u.last_active_at IS NOT NULL AND u.last_active_at >= NOW() - INTERVAL 30 MINUTE) as is_online "
+                    + "FROM user_accounts u "
+                    + "LEFT JOIN chat_agent_session cas ON cas.user_id=u.id AND cas.repo_key='' AND cas.im_provider='feishu'"
+                    + where + " ORDER BY u.last_active_at DESC, u.id DESC LIMIT ? OFFSET ?";
             params.add(size);
             params.add(page * size);
             grapeJdbc.query(sql, rs -> {
@@ -104,17 +106,19 @@ public class ConsoleUserController {
     public Map<String, Object> detail(@PathVariable int id) {
         Map<String, Object> info = new LinkedHashMap<>();
         try {
-            grapeJdbc.query("SELECT id, username, nickname, gitcode_id, created_at, last_active_at, "
-                    + "huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>'' as has_huawei_ak, "
-                    + "huawei_cloud_sk IS NOT NULL AND huawei_cloud_sk<>'' as has_huawei_sk, "
-                    + "feishu_app_id IS NOT NULL AND feishu_app_id<>'' as has_feishu, "
-                    + "feishu_app_secret IS NOT NULL AND feishu_app_secret<>'' as has_feishu_secret, "
-                    + "gitcode_api_token IS NOT NULL AND gitcode_api_token<>'' as has_gitcode_token, "
-                    + "CODEARTS_CLI_AK IS NOT NULL AND CODEARTS_CLI_AK<>'' as has_codearts_ak, "
-                    + "CODEARTS_CLI_SK IS NOT NULL AND CODEARTS_CLI_SK<>'' as has_codearts_sk, "
-                    + "gitcode_publish_repo, github_publish_repo, last_scene, "
-                    + "(last_active_at IS NOT NULL AND last_active_at >= NOW() - INTERVAL 30 MINUTE) as is_online "
-                    + "FROM user_accounts WHERE id=?", rs -> {
+            grapeJdbc.query("SELECT u.id, u.username, u.nickname, u.gitcode_id, u.created_at, u.last_active_at, "
+                    + "u.huawei_cloud_ak IS NOT NULL AND u.huawei_cloud_ak<>'' as has_huawei_ak, "
+                    + "u.huawei_cloud_sk IS NOT NULL AND u.huawei_cloud_sk<>'' as has_huawei_sk, "
+                    + "cas.im_app_id IS NOT NULL AND cas.im_app_id<>'' as has_feishu, "
+                    + "cas.im_app_secret IS NOT NULL AND cas.im_app_secret<>'' as has_feishu_secret, "
+                    + "u.gitcode_api_token IS NOT NULL AND u.gitcode_api_token<>'' as has_gitcode_token, "
+                    + "u.CODEARTS_CLI_AK IS NOT NULL AND u.CODEARTS_CLI_AK<>'' as has_codearts_ak, "
+                    + "u.CODEARTS_CLI_SK IS NOT NULL AND u.CODEARTS_CLI_SK<>'' as has_codearts_sk, "
+                    + "u.gitcode_publish_repo, u.github_publish_repo, u.last_scene, "
+                    + "(u.last_active_at IS NOT NULL AND u.last_active_at >= NOW() - INTERVAL 30 MINUTE) as is_online "
+                    + "FROM user_accounts u "
+                    + "LEFT JOIN chat_agent_session cas ON cas.user_id=u.id AND cas.repo_key='' AND cas.im_provider='feishu' "
+                    + "WHERE u.id=?", rs -> {
                 info.put("id", rs.getInt("id"));
                 info.put("username", rs.getString("username"));
                 info.put("nickname", rs.getString("nickname"));
@@ -141,7 +145,8 @@ public class ConsoleUserController {
             List<Map<String, Object>> repoMatrix = grapeJdbc.query(
                 "SELECT m.full_name, m.repo_key " +
                 "FROM managed_repos m " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
+                "INNER JOIN user_repos ur ON ur.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.id = ur.user_id WHERE u.id=? " +
                 "ORDER BY m.full_name",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -169,7 +174,8 @@ public class ConsoleUserController {
             userRepoKeys = grapeJdbc.queryForList(
                 "SELECT DISTINCT t.repo_key FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "INNER JOIN user_repos ur ON ur.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.id = ur.user_id " +
                 "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''", String.class, id);
         } catch (Exception e) { /* ignore */ }
 
@@ -319,7 +325,8 @@ public class ConsoleUserController {
             // 1. 限制到当前用户关联的仓库（安全：admin 不能查非自己用户的 issue）
             List<String> userRepoKeys = grapeJdbc.queryForList(
                 "SELECT DISTINCT m.repo_key FROM managed_repos m " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?", String.class, id);
+                "INNER JOIN user_repos ur ON ur.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.id = ur.user_id WHERE u.id=?", String.class, id);
             if (userRepoKeys.isEmpty()) {
                 result.put("issueId", issueId);
                 result.put("events", events);

@@ -223,10 +223,18 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
                       [now] + body.runtime_ids + [credential_id])
-            # worker 上报的引擎探测结果：agent_runtimes 无 probe_* 列，
-            # 仅在内存中保留（下次 /api/runtime/heartbeat 由 _probe_results 汇总）
-            # if body.probe_results:
-            #     ... (DB 写入已移除，probe_* 列不存在)
+            # worker 上报的引擎探测结果写入 DB（probe_* 列已由 db_setup.py 自动迁移添加）
+            if body.probe_results:
+                for _pname, _pdata in body.probe_results.items():
+                    _pstatus = (_pdata.get("status") or "pending") if isinstance(_pdata, dict) else "pending"
+                    _platency = (_pdata.get("latency") or 0) if isinstance(_pdata, dict) else 0
+                    _plast = (_pdata.get("last_probe") or now) if isinstance(_pdata, dict) else now
+                    _perror = (_pdata.get("error") or "") if isinstance(_pdata, dict) else ""
+                    c.execute(
+                        "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=? "
+                        "WHERE name=? AND credential_id=?",
+                        (_pstatus, _platency, _plast, _perror, _pname, credential_id)
+                    )
             # 查该 worker 的已取消任务——通知 worker 立即杀进程
             ph2 = ",".join("?" for _ in body.runtime_ids)
             rows = c.execute(

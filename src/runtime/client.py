@@ -30,7 +30,8 @@ class RuntimeClient:
         if self._session is None or self._session.closed:
             import aiohttp
             # force_close=True: 服务端用短连接，不复用避免 CLOSE-WAIT 僵尸连接
-            self._connector = aiohttp.TCPConnector(limit=self._max_connections, force_close=True)
+            # ssl=False: 内网 IP 访问时 SSL 证书 SAN 不包含 IP 地址，跳过验证
+            self._connector = aiohttp.TCPConnector(limit=self._max_connections, force_close=True, ssl=False)
             self._session = aiohttp.ClientSession(connector=self._connector)
 
     async def reset_session(self):
