@@ -144,8 +144,9 @@
           <h3 class="log-modal-title">
             <span class="t3" v-if="logModal.info.repoKey">{{ logModal.info.repoKey.replace('gitcode:', '') }}</span>
             <b v-if="logModal.info.issueId">{{ logModal.info.issueId }}</b>
-            <span v-if="logModal.info.agentType" class="status-tag info" style="font-size:11px">{{ logModal.info.agentType }}</span>
+            <span class="t3" v-if="logModal.info.eventSeq">#{{ logModal.info.eventSeq }}</span>
             <span class="t3" v-if="logModal.info.engine" style="color:var(--primary)">🔧 {{ logModal.info.engine }}</span>
+            <span class="t3" v-if="logModal.info.createdAt">{{ formatTime(logModal.info.createdAt) }}</span>
           </h3>
           <button class="btn btn-sm" @click="closeLogModal">✕ 关闭</button>
         </div>
@@ -213,7 +214,7 @@ function issueSvg(issueId) {
 
 
 async function openLogModal(taskId, t) {
-  logModal.value = { show: true, loading: true, messages: [], info: { issueId: t.issueId, repoKey: t.repoKey || '', agentType: t.agentType, skill: t.skill, engine: t.engine, status: t.status } }
+  logModal.value = { show: true, loading: true, messages: [], info: { issueId: t.issueId, repoKey: t.repoKey || '', eventSeq: t.seq, agentType: t.agentType, skill: t.skill, engine: t.engine, status: t.status, createdAt: t.createdAt } }
   try {
     const [msgsResp, infoResp] = await Promise.all([
       http.get(`/runtime/tasks/${taskId}/messages`),
@@ -222,13 +223,15 @@ async function openLogModal(taskId, t) {
     const info = infoResp.data || {}
     if (!info.repoKey && t.repoKey) info.repoKey = t.repoKey
     if (!info.issueId) info.issueId = t.issueId
+    if (!info.eventSeq) info.eventSeq = t.seq
     if (!info.agentType) info.agentType = t.agentType
     if (!info.skill) info.skill = t.skill
     if (!info.engine) info.engine = t.engine
     if (!info.status) info.status = t.status
+    if (!info.createdAt) info.createdAt = t.createdAt
     logModal.value = { show: true, loading: false, messages: msgsResp.data || [], info }
   } catch (e) {
-    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message, issueId: t.issueId, repoKey: t.repoKey || '' } }
+    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message, issueId: t.issueId, repoKey: t.repoKey || '', eventSeq: t.seq, createdAt: t.createdAt } }
   }
 }
 function closeLogModal() {
