@@ -44,6 +44,7 @@
     "title_hint": "Will be used as the GitCode Issue title (same-name open Issue in the repo is reused automatically, no duplicates created)",
     "title_placeholder": "Task title (required)",
     "desc_label": "Description",
+    "desc_hint": "Will be used as the GitCode Issue body, for VOD/Issue/Coding Agent to understand the task requirements",
     "desc_placeholder": "Task description (required)",
     "scene_label": "Dev Scenario",
     "scene_hint": "If not selected, VOD will auto-detect during review",

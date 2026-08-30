@@ -592,9 +592,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     """
     from src.repo_key import to_repo_key, split_owner_repo
     if not body.repo_key or not body.title.strip():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key / title 必填"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库和标题必填"})
     if not (body.description or "").strip():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "description 必填"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "任务描述必填"})
     repo_key = to_repo_key(body.repo_key)
     owner, rname = split_owner_repo(repo_key)
     api_token = get_user_token(user["username"])
