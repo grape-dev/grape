@@ -256,18 +256,13 @@ body {
 
 /* Page Header */
 .page-header {
-  background: rgba(255,255,255,0.72);
-  backdrop-filter: saturate(180%) blur(20px);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  background: #fff;
   border-bottom: 1px solid var(--border-soft);
   padding: 16px 40px;
   display: flex;
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
-  position: sticky;
-  top: 0;
-  z-index: 100;
 }
 .page-header h1 { font-size: 20px; font-weight: 600; }
 .page-header .badge {
