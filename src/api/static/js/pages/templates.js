@@ -446,9 +446,12 @@ function renderTop1000Tab(c, cat) {
         id: t.id,
         name: t.name || t.display_name || '',
         description: t.description || '',
+        recommend_reason: t.recommend_reason || '',
         icon: t.icon || '#' + (t.rank || ''),
         tags: t.tags || [],
         source_repo: t.source_repo || '',
+        html_url: t.html_url || '',
+        source_platform: t.source_platform || '',
         default_repo_name: t.default_repo_name || t.id,
         _cat_name: cat.name,
       };
