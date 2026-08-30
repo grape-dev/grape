@@ -196,7 +196,25 @@ async def stop_skill_sync_scheduler():
 - OBS 未启用时（storage=None）直接 return 不启动调度
 - shutdown 时 `stop_skill_sync_scheduler()` 统一 cancel + await 等待退出
 
-### 4.8 改动点清单
+### 4.8 CPU/IO 操作不阻塞事件循环
+
+`_compute_skill_hash`（遍历目录读取所有文件算 SHA-256）和 `_pack_skill_zip`（读取所有文件打包 zip）是同步 CPU/IO 操作，在 async 函数里直接调用会阻塞事件循环。用 `run_in_executor` 包装：
+
+```python
+# hash 计算放线程池，不阻塞事件循环
+loop = asyncio.get_running_loop()
+current_hash = await loop.run_in_executor(None, _compute_skill_hash, skill_dir)
+
+# zip 打包放线程池
+zip_data = await loop.run_in_executor(None, _pack_skill_zip, skill_dir)
+
+# OBS 上传放线程池
+await loop.run_in_executor(None, storage.save_bytes, object_key, zip_data)
+```
+
+三个同步操作都用 `run_in_executor(None, fn, args)` 放到默认线程池执行，不阻塞 asyncio 事件循环。37 个技能串行执行，每个约 30ms，总约 1-2 秒，期间 HTTP 请求正常处理不被阻塞。
+
+### 4.9 改动点清单
 
 | # | 文件 | 改动 | 说明 |
 |---|------|------|------|
@@ -211,7 +229,7 @@ async def stop_skill_sync_scheduler():
 | 9 | src/api/main.py | 启动时调用 start_skill_sync_scheduler，shutdown 时调用 stop_skill_sync_scheduler | 注册定时任务 + 优雅关闭 |
 | 10 | src/api/routes/skills.py | sync_official_skills API 改为调用新逻辑 | 手动触发也走 OBS 同步 |
 
-### 4.9 非 OBS 模式兼容
+### 4.10 非 OBS 模式兼容
 
 - `storage = get_storage()` 为 None 时：
   - 定时调度不启动（start_skill_sync_scheduler 直接 return）

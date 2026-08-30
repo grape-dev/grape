@@ -95,8 +95,9 @@ async def sync_official_skills_to_obs() -> dict:
                 logger.debug(f"skill dir not found: {skill_name}, skip")
                 continue
 
-        # 计算当前 content_hash
-        current_hash = _compute_skill_hash(skill_dir)
+        # 计算当前 content_hash（放线程池，不阻塞事件循环）
+        loop = asyncio.get_running_loop()
+        current_hash = await loop.run_in_executor(None, _compute_skill_hash, skill_dir)
         if not current_hash:
             continue
 
@@ -114,12 +115,10 @@ async def sync_official_skills_to_obs() -> dict:
         # hash 不同或技能不存在 → 需要同步
         object_key = ""
         if storage is not None:
-            # OBS 模式：打包 zip → 上传 OBS
+            # OBS 模式：打包 zip → 上传 OBS（都放线程池，不阻塞事件循环）
             object_key = skill_key(scope="official", owner="", skill_name=skill_name)
             try:
-                zip_data = _pack_skill_zip(skill_dir)
-                # 上传是同步 IO 操作，用 run_in_executor 避免阻塞事件循环
-                loop = asyncio.get_running_loop()
+                zip_data = await loop.run_in_executor(None, _pack_skill_zip, skill_dir)
                 await loop.run_in_executor(None, storage.save_bytes, object_key, zip_data)
                 logger.info(f"uploaded skill to OBS: {skill_name} -> {object_key}")
             except Exception as e:
