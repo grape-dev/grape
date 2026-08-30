@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     hw_iam_domain TEXT DEFAULT '',
     hw_iam_user TEXT DEFAULT '',
     hw_iam_password TEXT DEFAULT '',
-    hw_iam_account_type TEXT DEFAULT 'iam'
+    hw_iam_account_type TEXT DEFAULT 'iam',
+    last_active_at TEXT DEFAULT NULL  -- 最后活跃时间（用户在线状态判定）
 )
 """
 
@@ -590,6 +591,11 @@ def init_db():
                 db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
             except Exception:
                 pass
+        # 兼容旧列迁移（幂等）：last_active_at（用户在线状态判定）
+        try:
+            db.execute("ALTER TABLE user_accounts ADD COLUMN last_active_at TEXT DEFAULT NULL")
+        except Exception:
+            pass
         db.execute(_CREDENTIALS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
