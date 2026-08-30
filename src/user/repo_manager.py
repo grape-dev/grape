@@ -353,14 +353,21 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
                 _run_git(["init"], workdir)
         else:
             source_repo = template.get("source_repo", "")
-            if not source_repo:
-                raise RuntimeError("git 模板缺少 source_repo 配置")
-            clone_token = bot_token or user_token
-            if not clone_token:
-                raise RuntimeError("git 模板需要全局 Bot token 拉取")
-            url = f"https://oauth2:{clone_token}@gitcode.com/{source_repo}.git"
+            clone_url = template.get("clone_url", "")
+            source_platform = template.get("source_platform", "gitcode")
+            if not source_repo and not clone_url:
+                raise RuntimeError("git 模板缺少 source_repo / clone_url 配置")
             workdir = os.path.join(tmp, "repo")
-            _run_git(["clone", "--quiet", url, workdir], tmp)
+            if clone_url and source_platform == "github":
+                # GitHub 优选模板：用 clone_url（公开仓库，无需 token）
+                _run_git(["clone", "--quiet", "--depth", "1", clone_url, workdir], tmp)
+            else:
+                # GitCode 模板：用 source_repo + token
+                clone_token = bot_token or user_token
+                if not clone_token:
+                    raise RuntimeError("git 模板需要全局 Bot token 拉取")
+                url = f"https://oauth2:{clone_token}@gitcode.com/{source_repo}.git"
+                _run_git(["clone", "--quiet", "--depth", "1", url, workdir], tmp)
 
         target_url = f"https://oauth2:{user_token}@gitcode.com/{gitcode_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):

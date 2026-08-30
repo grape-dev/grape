@@ -573,6 +573,266 @@
           "scene_id": "iac"
         }
       ]
+    },
+    {
+      "id": "gitcode-featured",
+      "name": "GitCode 优选项目模板",
+      "icon": "🟢",
+      "description": "GitCode 云原生热门项目，每日自动同步",
+      "scene_id": "default",
+      "page_size": 12,
+      "templates": [
+        {
+          "id": "gitcode-boostkit-cloud-native",
+          "name": "cloud-native",
+          "description": "基于上游社区源码进行鲲鹏优化适配的补丁仓",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "boostkit/cloud-native",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/boostkit/cloud-native.git",
+          "html_url": "https://gitcode.com/boostkit/cloud-native",
+          "default_repo_name": "cloud-native",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 15,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-aw-awesome-cloud-native",
+          "name": "awesome-cloud-native",
+          "description": "A curated list for awesome cloud native tools, software and tutorials.",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/aw/awesome-cloud-native",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/aw/awesome-cloud-native.git",
+          "html_url": "https://gitcode.com/gh_mirrors/aw/awesome-cloud-native",
+          "default_repo_name": "awesome-cloud-native",
+          "tags": [
+            "HTML"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "HTML",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-cl-cloud-native-starter",
+          "name": "cloud-native-starter",
+          "description": "Cloud Native Starter for Java/Jakarta EE based Microservices on Kubernetes and Istio",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/cl/cloud-native-starter",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/cl/cloud-native-starter.git",
+          "html_url": "https://gitcode.com/gh_mirrors/cl/cloud-native-starter",
+          "default_repo_name": "cloud-native-starter",
+          "tags": [
+            "Shell"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Shell",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-cl-cloud-native-spring-in-action",
+          "name": "cloud-native-spring-in-action",
+          "description": "🍃 Code samples and projects from the book \"Cloud Native Spring in Action - With Spring Boot and Kubernetes\" (Manning) ",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/cl/cloud-native-spring-in-action",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/cl/cloud-native-spring-in-action.git",
+          "html_url": "https://gitcode.com/gh_mirrors/cl/cloud-native-spring-in-action",
+          "default_repo_name": "cloud-native-spring-in-action",
+          "tags": [
+            "Java"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Java",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-CPF-Flutter-fluttertpc_native_exif",
+          "name": "fluttertpc_native_exif",
+          "description": "以帮助开发者在Flutter项目中方便地读取和写入图片的Exif信息",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "CPF-Flutter/fluttertpc_native_exif",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/CPF-Flutter/fluttertpc_native_exif.git",
+          "html_url": "https://gitcode.com/CPF-Flutter/fluttertpc_native_exif",
+          "default_repo_name": "fluttertpc_native_exif",
+          "tags": [
+            "ArkTS"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 4,
+            "language": "ArkTS",
+            "platform": "gitcode"
+          }
+        }
+      ]
+    },
+    {
+      "id": "github-featured",
+      "name": "GitHub 优选项目模板",
+      "icon": "⚫",
+      "description": "GitHub 云原生热门项目，每日自动同步",
+      "scene_id": "default",
+      "page_size": 12,
+      "templates": [
+        {
+          "id": "github-n8n-io-n8n",
+          "name": "n8n",
+          "description": "Fair-code workflow automation platform with native AI capabilities. Combine visual building with custom code, self-host ",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "n8n-io/n8n",
+          "source_platform": "github",
+          "clone_url": "https://github.com/n8n-io/n8n.git",
+          "html_url": "https://github.com/n8n-io/n8n",
+          "default_repo_name": "n8n",
+          "tags": [
+            "ai",
+            "apis",
+            "automation",
+            "cli",
+            "data-flow"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 202852,
+            "language": "TypeScript",
+            "platform": "github"
+          }
+        },
+        {
+          "id": "github-traefik-traefik",
+          "name": "traefik",
+          "description": "The Cloud Native Application Proxy",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "traefik/traefik",
+          "source_platform": "github",
+          "clone_url": "https://github.com/traefik/traefik.git",
+          "html_url": "https://github.com/traefik/traefik",
+          "default_repo_name": "traefik",
+          "tags": [
+            "consul",
+            "docker",
+            "etcd",
+            "go",
+            "golang"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 64665,
+            "language": "Go",
+            "platform": "github"
+          }
+        },
+        {
+          "id": "github-milvus-io-milvus",
+          "name": "milvus",
+          "description": "Milvus is a high-performance, cloud-native vector database built for scalable vector ANN search",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "milvus-io/milvus",
+          "source_platform": "github",
+          "clone_url": "https://github.com/milvus-io/milvus.git",
+          "html_url": "https://github.com/milvus-io/milvus",
+          "default_repo_name": "milvus",
+          "tags": [
+            "anns",
+            "cloud-native",
+            "diskann",
+            "distributed",
+            "embedding-database"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 45880,
+            "language": "Go",
+            "platform": "github"
+          }
+        },
+        {
+          "id": "github-alibaba-nacos",
+          "name": "nacos",
+          "description": "an easy-to-use dynamic service discovery, configuration and service management platform for building AI cloud native app",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "alibaba/nacos",
+          "source_platform": "github",
+          "clone_url": "https://github.com/alibaba/nacos.git",
+          "html_url": "https://github.com/alibaba/nacos",
+          "default_repo_name": "nacos",
+          "tags": [
+            "a2a-registry",
+            "agent",
+            "ai-registry",
+            "configuration-management",
+            "distributed-configuration"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 33322,
+            "language": "Java",
+            "platform": "github"
+          }
+        },
+        {
+          "id": "github-zeromicro-go-zero",
+          "name": "go-zero",
+          "description": "A cloud-native Go microservices framework with cli tool for productivity.",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "zeromicro/go-zero",
+          "source_platform": "github",
+          "clone_url": "https://github.com/zeromicro/go-zero.git",
+          "html_url": "https://github.com/zeromicro/go-zero",
+          "default_repo_name": "go-zero",
+          "tags": [
+            "ai-native",
+            "ai-native-development",
+            "cloud-native",
+            "code-generation",
+            "framework"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 33289,
+            "language": "Go",
+            "platform": "github"
+          }
+        }
+      ]
     }
   ]
 }
