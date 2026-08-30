@@ -665,28 +665,29 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
 @router.get("/runtimes/{runtime_id}/sessions")
 async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user),
                                 repo: str = ""):
-    """引擎 session 列表（devops_agent_session 表）。
+    """引擎 session 列表。
 
-    返回该引擎下的所有 session，按 repo 过滤。
-    每个 session 携带:
-    - current_task: 当前正在运行的 task（status=running/queued/dispatched），无则 null
-    - tasks: 最近已完成的 task 列表（按 event_seq 倒序，最多 20 条）
+    按 agent_tasks.runtime_id 过滤——同一个 session（repo+agent_type）的
+    不同 task 可能在不同引擎上执行，因此不按 session.runtime_id 过滤，
+    而是查所有 session 后按 task 的 runtime_id 过滤 tasks。
+    只返回有匹配 task 的 session。
     """
     from src.session_manager import db, db_lock
 
-    clauses = ["runtime_id=?"]
-    params: list = [runtime_id]
+    repo_clause = ""
+    params: list = []
     if repo:
         repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
-        clauses.append("repo_key=?")
+        repo_clause = " AND repo_key=?"
         params.append(repo_key)
 
     with db_lock:
         c = db.cursor()
+        # 查所有 session（按 repo 过滤），不按 session.runtime_id 过滤
         c.execute(
             f"SELECT id, agent_type, repo_key, status, skill, created_at, last_active_at, "
             f"runtime_session_id "
-            f"FROM devops_agent_session WHERE {' AND '.join(clauses)} ORDER BY last_active_at DESC",
+            f"FROM devops_agent_session WHERE 1=1{repo_clause} ORDER BY last_active_at DESC",
             params
         )
         sessions = []
@@ -694,12 +695,12 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
             sid = r[0]
             agent_type = r[1] or ""
             repo_key_raw = r[2] or ""
-            # 查该 session 当前正在运行的 task
+            # 查该 session 当前正在运行的 task（按 runtime_id 过滤）
             c.execute(
                 "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, started_at "
-                "FROM agent_tasks WHERE agent_session_id=? "
+                "FROM agent_tasks WHERE agent_session_id=? AND runtime_id=? "
                 "AND status IN ('running','queued','dispatched') ORDER BY created_at DESC LIMIT 1",
-                (sid,)
+                (sid, runtime_id)
             )
             current = None
             cr = c.fetchone()
@@ -710,12 +711,12 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
                     "created_at": normalize_event_time(cr[5]),
                     "started_at": normalize_event_time(cr[6]),
                 }
-            # 查该 session 最近已完成的任务
+            # 查该 session 最近已完成的任务（按 runtime_id 过滤）
             c.execute(
                 "SELECT id, issue_id, event_seq, agent_type, status, exit_code, created_at, started_at, completed_at "
-                "FROM agent_tasks WHERE agent_session_id=? "
+                "FROM agent_tasks WHERE agent_session_id=? AND runtime_id=? "
                 "AND status IN ('completed','failed','cancelled') ORDER BY event_seq DESC LIMIT 20",
-                (sid,)
+                (sid, runtime_id)
             )
             tasks = []
             for tr in c.fetchall():
@@ -726,6 +727,9 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
                     "started_at": normalize_event_time(tr[7]),
                     "completed_at": normalize_event_time(tr[8]),
                 })
+            # 只返回有匹配 task 的 session（current_task 或 tasks 非空）
+            if not current and not tasks:
+                continue
             sessions.append({
                 "id": sid,
                 "agent_type": agent_type,
