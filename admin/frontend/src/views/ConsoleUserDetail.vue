@@ -14,7 +14,7 @@
       </div>
     </div>
 
-    <div v-if="loading" class="loading-state">加载中...</div>
+    <div v-if="loading" style="display:flex;align-items:center;justify-content:center;height:60vh;color:var(--text-tertiary);font-size:14px">加载中...</div>
 
     <div v-else style="padding:24px 40px">
       <!-- 基本信息（紧凑横排）+ 凭证配置 -->

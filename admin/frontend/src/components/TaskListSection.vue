@@ -1,7 +1,7 @@
 <template>
   <div>
       <!-- 关联任务 -->
-      <div class="card" style="margin-top:24px;padding:0">
+      <div class="card" style="margin-top:16px;padding:0">
         <div class="section-header">
           <h5 class="sh-title">关联任务 <span class="sh-count">共 {{ tasks?.totalElements ?? 0 }} 条<span v-if="filterCount">（已筛选 {{ filterCount }} 条）</span></span></h5>
           <div class="sh-actions">
@@ -12,7 +12,7 @@
             <button v-if="hasAnyFilter" class="btn btn-sm" style="color:#ff3b30;border-color:rgba(255,59,48,0.2)" @click="clearFilters">清除筛选</button>
           </div>
         </div>
-        <div style="padding:16px 24px">
+        <div style="padding:14px 20px">
 
         <!-- 任务状态统计卡（kpi 色带卡片，对齐 AgentManage/Overview 体系） -->
         <div class="task-stat-cards">
@@ -123,7 +123,7 @@
 
     <!-- Issue 详情弹窗（时序图 + 事件列表） -->
     <div v-if="issueModal.show" class="log-modal-overlay" @click.self="closeIssueModal">
-      <div class="log-modal-dialog" style="max-width:1000px">
+      <div class="log-modal-dialog" style="width:1000px">
         <div class="log-modal-head">
           <h3 class="log-modal-title">
             <b>Issue {{ issueModal.issueId }}</b>

@@ -250,15 +250,15 @@ body {
   transition: transform var(--transition), box-shadow var(--transition);
 }
 .card:hover {
-  transform: translateY(-2px);
+  transform: translateY(-1px);
   box-shadow: var(--card-shadow-hover);
 }
 
 /* Page Header */
 .page-header {
   background: #fff;
-  border-bottom: 1px solid var(--border-soft);
-  padding: 16px 40px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+  padding: 20px 40px;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -369,8 +369,8 @@ body {
 /* ===== 标签 ===== */
 .status-tag {
   display: inline-block;
-  padding: 2px 10px;
-  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  border-radius: 6px;
   font-size: 11px;
   font-weight: 500;
 }
@@ -396,7 +396,7 @@ body {
   transition: all var(--transition);
   text-decoration: none;
 }
-.btn:hover { border-color: var(--primary); color: var(--primary); transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,107,255,0.12); }
+.btn:hover { border-color: var(--primary); color: var(--primary); transform: translateY(-1px); }
 .btn-primary {
   background: var(--primary);
   color: #fff;
@@ -452,10 +452,6 @@ body {
 .page-btn:disabled { color: var(--text-tertiary); cursor: not-allowed; background: transparent; }
 
 /* ===== 加载 ===== */
-.loading-spinner {
-
-.loading-state { display: flex; align-items: center; justify-content: center; height: 60vh; color: var(--text-tertiary); font-size: 14px; }
-
 .loading-spinner {
   display: flex;
   align-items: center;
