@@ -119,7 +119,7 @@
                               <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}</td>
                               <td class="t3">{{ ev.skill || '—' }}</td>
                               <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']">{{ ev.status || '—' }}</span></td>
-                              <td class="t3">{{ formatDuration(ev.duration ? Math.round(ev.duration) + 's' : null) }}</td>
+                              <td class="t3">{{ formatDuration(ev.duration) }}</td>
                               <td class="t3">{{ formatTime(ev.createdAt) }}</td>
                             </tr>
                           </tbody>
@@ -241,7 +241,7 @@ function formatTaskDur(t) {
   if (!t.startedAt || !t.completedAt) return '—'
   const s = (new Date(t.completedAt) - new Date(t.startedAt)) / 1000
   if (isNaN(s) || s <= 0) return '—'
-  return formatDuration(Math.round(s) + 's')
+  return formatDuration(s)
 }
 function logTypeIcon(t) {
   const map = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' }
@@ -509,9 +509,8 @@ function eventTypeClass(t) {
 }
 function formatDuration(d) {
   if (!d) return '—'
-  const m = d.match(/^(\d+)s$/)
-  if (!m) return d
-  const s = parseInt(m[1])
+  const s = Math.round(Number(d))
+  if (isNaN(s) || s <= 0) return '—'
   if (s < 60) return s + 's'
   if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60) + 's'
   return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm'
@@ -565,10 +564,9 @@ async function loadRepoIssues(p) {
 
 function formatTime(val) {
   if (!val || val === '—') return '—'
-  try {
-    let ts = val.length > 19 ? val.substring(0, 16) : val
-    return ts.replace('T', ' ')
-  } catch { return val }
+  const s = String(val)
+  if (s.startsWith('20') && s.length >= 16) return s.slice(0, 19).replace('T', ' ')
+  return s
 }
 
 async function load() {
