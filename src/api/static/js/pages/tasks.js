@@ -178,7 +178,7 @@ function _detailHtml(t) {
   const icon = isDone ? '✓' : isProc ? '⏳' : '#';
   // 场景名称
   var _sceneLabels = {default:'默认','cloud-native':'云原生','iac':'IaC','agent-dev':'Agent 开发','skill-dev':'技能开发','api-skill-dev':'API 技能开发','blog-publish':'博客发布'};
-  var sceneName = t.scene_id ? (_sceneLabels[t.scene_id] || t.scene_id) : '—';
+  var sceneName = t.scene_id ? (t.scene_name || _sceneLabels[t.scene_id] || t.scene_id) : '—';
   // 多任务模式
   var subtaskBadge = t.is_subtask_mode ? '<span class="tg tg-q" style="font-size:10px">多任务模式</span>' : '<span class="ts t3" style="font-size:10px">单任务</span>';
   var parentIssue = t.parent_issue_number ? ' · 父任务 #' + t.parent_issue_number : '';

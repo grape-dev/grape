@@ -864,12 +864,26 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
             rows = []
     # 查 issue_state 中的 scene_id（按 repo_key + issue_number 批量查询）
     from src.api.session_store import get_issue_scene
-    return {"tasks": [{
-        "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
-        "title": r[4] or "", "task_description": r[5] or "",
-        "conversation_id": r[6] or "", "status": r[7],
-        "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
-        "is_subtask_mode": r[11] or 0,
-        "parent_issue_number": r[12] or 0,
-        "scene_id": (get_issue_scene(to_repo_key(from_repo_key(r[2])), f"#{r[3]}") or ("default", 0))[0],
-    } for r in rows]}
+    from src.api.pipeline_config import get_pipeline_config
+    tasks_out = []
+    for r in rows:
+        _rk = to_repo_key(from_repo_key(r[2]))
+        _scene_id = (get_issue_scene(_rk, f"#{r[3]}") or ("default", 0))[0]
+        _scene_name = ""
+        try:
+            _cfg = get_pipeline_config(_scene_id, repo_key=_rk)
+            if _cfg:
+                _scene_name = _cfg.get("name", _scene_id)
+        except Exception:
+            pass
+        tasks_out.append({
+            "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
+            "title": r[4] or "", "task_description": r[5] or "",
+            "conversation_id": r[6] or "", "status": r[7],
+            "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
+            "is_subtask_mode": r[11] or 0,
+            "parent_issue_number": r[12] or 0,
+            "scene_id": _scene_id,
+            "scene_name": _scene_name,
+        })
+    return {"tasks": tasks_out}
