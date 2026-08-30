@@ -452,14 +452,9 @@
 .chat-dots span:nth-child(3){animation-delay:0.4s}
 @keyframes chatDotBounce{0%,60%,100%{transform:translateY(0);opacity:0.4}30%{transform:translateY(-6px);opacity:1}}
 
-/* ===== Chat 步骤区（思考/执行步骤）— 单行折叠 + 滚动展开 ===== */
-.chat-steps{font-size:11px;color:var(--t3);border-left:2px solid var(--b);padding:6px 12px;margin-bottom:8px;background:var(--bg);border-radius:0 6px 6px 0;line-height:1.6;max-height:26px;overflow:hidden;transition:max-height .3s ease;cursor:pointer;position:relative}
-.chat-steps:hover,.chat-steps.expanded{max-height:200px;overflow-y:auto}
-.chat-steps p{margin:2px 0}
-.chat-steps code{font-size:10px;background:var(--c);padding:1px 4px;border-radius:3px}
-.chat-steps::after{content:'展开 ⌄';position:absolute;right:8px;top:4px;font-size:10px;color:var(--t3);opacity:.6;pointer-events:none}
-.chat-steps.expanded::after{content:'收起 ⌃'}
-.chat-steps.collapsed{max-height:0;padding-top:0;padding-bottom:0;margin-bottom:0;border-left-width:0;overflow:hidden;transition:all .3s ease}
+/* ===== Chat 单行滚动步骤区（思考/执行过程实时滚动显示）===== */
+.chat-ticker{font-size:12px;color:var(--t3);line-height:1.5;padding:4px 0 6px;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;animation:chatTickerFade .3s ease}
+@keyframes chatTickerFade{from{opacity:.5}to{opacity:1}}
 
 /* ===== Chat 删除确认弹窗（苹果风格）===== */
 .chat-del-overlay{position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.12);opacity:1;transition:opacity .2s}
