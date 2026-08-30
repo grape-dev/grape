@@ -407,7 +407,9 @@ CREATE TABLE IF NOT EXISTS event_thread (
     role        TEXT NOT NULL,              -- user / agent
     content     MEDIUMTEXT NOT NULL,
     created_by  TEXT DEFAULT '',
-    created_at  TEXT DEFAULT (datetime('now'))
+    created_at  TEXT DEFAULT (datetime('now')),
+    task_id     TEXT DEFAULT '',            -- 对话任务 ID（持久化查询，对齐 Chat Agent）
+    generate_status INTEGER DEFAULT NULL    -- 1=生成中 2=成功 3=失败 4=中断
 )
 """
 
@@ -1736,6 +1738,16 @@ def _migrate_tables():
         log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + tasks + task_id/generate_status to chat_messages")
     except Exception as e:
         log.warning(f"Add multi-task columns failed: {e}")
+    # ===== event_thread: task_id + generate_status（对齐 Chat Agent 持久化查询）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "event_thread", "task_id", "TEXT DEFAULT ''")
+            _ensure_column(c, "event_thread", "generate_status", "INTEGER DEFAULT NULL")
+            db.commit()
+        log.info("Added task_id/generate_status columns to event_thread")
+    except Exception as e:
+        log.warning(f"Add event_thread task_id/generate_status columns failed: {e}")
     # ===== Scene Center: issue_state.scene_user_id =====
     try:
         with db_lock:

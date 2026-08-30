@@ -643,13 +643,23 @@ def _thread_gate(repo_key: str, issue_id: str) -> dict:
 
 
 def _add_thread_message(anchor_seq: int, repo_key: str, issue_id: str, agent_type: str,
-                        role: str, content: str, created_by: str = ""):
+                        role: str, content: str, created_by: str = "",
+                        task_id: str = "", generate_status: int = 0):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "INSERT INTO event_thread (anchor_seq, repo_key, issue_id, agent_type, role, content, created_by) VALUES (?,?,?,?,?,?,?)",
-            (anchor_seq, repo_key, issue_id, agent_type, role, content, created_by))
+        if task_id:
+            c.execute(
+                "INSERT INTO event_thread (anchor_seq, repo_key, issue_id, agent_type, "
+                "role, content, created_by, task_id, generate_status) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (anchor_seq, repo_key, issue_id, agent_type, role, content, created_by,
+                 task_id, generate_status))
+        else:
+            c.execute(
+                "INSERT INTO event_thread (anchor_seq, repo_key, issue_id, agent_type, "
+                "role, content, created_by) VALUES (?,?,?,?,?,?,?)",
+                (anchor_seq, repo_key, issue_id, agent_type, role, content, created_by))
         db.commit()
         mid = c.lastrowid
     return mid
@@ -717,14 +727,14 @@ async def _iter_with_timeout(aiter, timeout: float):
         yield item
 
 
-async def _direct_attempt(prompt, ws, session_id, repository, bot_token, anchor_seq, repo_key, agent_type):
+async def _direct_attempt(prompt, ws, session_id, repository, bot_token, anchor_seq, repo_key, agent_type, backend_name="hermes"):
     """直接模式单次执行：yield (text/thinking) 事件；以 sentinel 结束（_stuck / _done）。"""
     from src.runtime.executor import consume_stream_async
     acc = ""
     new_oc = ""
     gen = consume_stream_async(
         prompt, ws, session_id=session_id, event_type="event_conversation",
-        backend_name="opencode", account=repository, bot_token=bot_token,
+        backend_name=backend_name, account=repository, bot_token=bot_token,
         agent_name="Event Dialogue Agent",
         agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",
     )
@@ -747,7 +757,7 @@ async def _direct_attempt(prompt, ws, session_id, repository, bot_token, anchor_
     yield ("_done", {"final_text": acc, "new_oc": new_oc})
 
 
-async def _run_conversation(evt: dict, user_message: str, username: str):
+async def _run_conversation(evt: dict, user_message: str, username: str, conv_task_id: str = ""):
     """门禁已通过：写用户消息 → 复用 issue 会话运行 agent → 回写 agent 回复。
 
     生成器事件：(thinking, text) / (text, 增量) / (done, {reply, messages})。
@@ -759,7 +769,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
     from src.api.knowledge import _issue_num_from
     repo_key, agent_type, issue_id, anchor_seq = evt["repo_key"], evt["agent_type"], evt["issue_id"], evt["seq"]
 
-    _add_thread_message(anchor_seq, repo_key, issue_id, agent_type, "user", user_message, username)
+    _add_thread_message(anchor_seq, repo_key, issue_id, agent_type, "user", user_message, username,
+                        task_id=conv_task_id, generate_status=1 if conv_task_id else None)
     yield ("thinking", "正在连接 agent...")
 
     # 会话复用：issue 级会话（无 issue 回退 repo 级），见 event-conversation-design.md §3.2.1
@@ -787,25 +798,30 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
     bot_token = get_gitcode_token(repo_key=repo_key) or ""
     repository = from_repo_key(repo_key)
 
-    from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task
+    from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task, runtime_execution_kind
     final_text = ""
     new_oc = oc_session_id
 
-    if get_execution_mode() != EXEC_MODE_DIRECT:
+    # 引擎选择：按 issue 会话的 runtime_id 判断（credential_id=0 强制 direct）
+    _conv_agent_sid = ""
+    _conv_rid = 0
+    from src.session_manager import db as _conv_db, db_lock as _conv_db_lock
+    with _conv_db_lock:
+        c = _conv_db.cursor()
+        c.execute("SELECT id, runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                  (repo_key, agent_type))
+        _conv_row = c.fetchone()
+    if _conv_row:
+        _conv_agent_sid = _conv_row[0] or ""
+        _conv_rid = _conv_row[1] or 0
+    _conv_kind = runtime_execution_kind(_conv_rid) if _conv_rid else EXEC_MODE_DIRECT
+
+    if _conv_kind != EXEC_MODE_DIRECT:
         # 队列模式：入队 + 轮询（打字机效果降级，任务终态一次返回）
         # 技能随任务下发（Fix A）：event-dialogue 打包进 skill_files → worker 物化到 DEVOPS_SKILLS_DIR
         yield ("thinking", "任务已入队，等待 worker 执行...")
-        runtime_id = 0
-        agent_sid = ""
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                      (repo_key, agent_type))
-            row = c.fetchone()
-        if row:
-            agent_sid = row[0] or ""
-            runtime_id = row[1] or 0
+        runtime_id = _conv_rid
+        agent_sid = _conv_agent_sid
         if agent_sid:
             from src.config import SKILLS_DIR, resolve_official_skill_path
             event_dialogue_path = resolve_official_skill_path("event-dialogue") \
@@ -898,7 +914,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str):
 
     if not final_text:
         final_text = "（agent 未返回回复，请稍后重试）"
-    _add_thread_message(anchor_seq, repo_key, issue_id, agent_type, "agent", final_text, agent_type)
+    _add_thread_message(anchor_seq, repo_key, issue_id, agent_type, "agent", final_text, agent_type,
+                        task_id=conv_task_id, generate_status=2 if conv_task_id else None)
     yield ("done", {"reply": final_text, "messages": _list_thread(anchor_seq)})
 
 
@@ -954,6 +971,269 @@ async def stream_conversation(seq: int, body: ConversationMessage, user: dict = 
                 yield f"data: {_json.dumps({'type': 'text', 'text': data})}\n\n"
             elif evt_type == "done":
                 yield f"data: {_json.dumps({'type': 'done', 'reply': data['reply'], 'messages': data['messages']})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
+
+
+# ===== 事件对话持久化查询（对齐 Chat Agent v31）=====
+import threading as _conv_threading
+import time as _conv_time
+import uuid as _conv_uuid
+
+_conv_tasks: dict = {}
+_conv_tasks_lock = _conv_threading.Lock()
+
+# 清理过期任务（>30 分钟）
+def _cleanup_conv_tasks():
+    with _conv_tasks_lock:
+        now = _conv_time.time()
+        expired = [tid for tid, t in _conv_tasks.items()
+                   if t.get("finished_at") and now - t["finished_at"] > 1800]
+        for tid in expired:
+            _conv_tasks.pop(tid, None)
+
+
+@router.post("/{seq}/chat/submit")
+async def submit_conversation(seq: int, body: ConversationMessage, user: dict = Depends(get_current_user)):
+    """提交对话查询 → 立即返回 task_id。后台异步执行 agent。"""
+    _cleanup_conv_tasks()
+    evt = _load_event(seq)
+    gate = _thread_gate(evt["repo_key"], evt["issue_id"])
+    if not gate["open"]:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": gate["reason"] or "该 Issue 流程已结束，评论已关闭"})
+    if not (body.message or "").strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "消息不能为空"})
+
+    conv_task_id = "conv_" + _conv_uuid.uuid4().hex[:12]
+    username = user.get("username") or ""
+
+    # 写 user 消息（带 task_id + generate_status=1）
+    _add_thread_message(seq, evt["repo_key"], evt["issue_id"], evt["agent_type"],
+                        "user", body.message.strip(), username,
+                        task_id=conv_task_id, generate_status=1)
+
+    # 写入内存任务缓冲
+    with _conv_tasks_lock:
+        _conv_tasks[conv_task_id] = {
+            "status": "running", "events": [], "result": "", "error": "",
+            "seq": seq, "repo_key": evt["repo_key"], "agent_type": evt["agent_type"],
+            "issue_id": evt["issue_id"], "username": username,
+            "message": body.message.strip(),
+            "created_at": _conv_time.time(), "finished_at": 0,
+        }
+
+    # 启动后台执行（run_in_executor）
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _execute_conv_task, conv_task_id, loop)
+
+    return {"task_id": conv_task_id, "seq": seq, "status": "running"}
+
+
+def _execute_conv_task(task_id: str, loop):
+    """后台执行对话任务（线程池中运行，call_soon_threadsafe 投递事件到 event loop）。"""
+    import json as _json
+    _worker_final_text = ""
+    with _conv_tasks_lock:
+        task = _conv_tasks.get(task_id)
+        if not task:
+            return
+        task["status"] = "running"
+        seq = task["seq"]
+        repo_key = task["repo_key"]
+        agent_type = task["agent_type"]
+        issue_id = task["issue_id"]
+        username = task["username"]
+        message = task["message"]
+
+    try:
+        evt = _load_event(seq)
+        # 直接用同步 stream_agent（在线程中运行，不阻塞主 loop）
+        from src.runtime.executor import stream_agent
+        _worker_final_text = ""
+        repo_key = evt["repo_key"]
+        agent_type = evt["agent_type"]
+        issue_id = evt["issue_id"]
+        anchor_seq = evt["seq"]
+        from src.config import WORKSPACE_DIR
+        from src.repo_key import from_repo_key
+        from src.api.knowledge import _issue_num_from
+        from src.api.event_pipeline import get_agent_workdir
+        from src.prompt_builder import build_conversation_prompt
+        from src.user.db import get_gitcode_token
+        from src.api.session_store import get_or_create_issue_session
+        issue_num = _issue_num_from(issue_id)
+        # 会话复用
+        issue_sess_id = ""
+        oc_session_id = ""
+        if issue_num:
+            isess = get_or_create_issue_session(repo_key, agent_type, f"#{issue_num}")
+            issue_sess_id = isess.get("id") or ""
+            oc_session_id = isess.get("runtime_session_id") or ""
+        if not oc_session_id:
+            from src.session_manager import db as _sdb, db_lock as _sdbl
+            with _sdbl:
+                c = _sdb.cursor()
+                c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_type))
+                row = c.fetchone()
+            oc_session_id = row[0] or "" if row else ""
+        ws = get_agent_workdir(repo_key, agent_type, issue_id)
+        import os
+        os.makedirs(ws, exist_ok=True)
+        prompt = build_conversation_prompt(evt, message, _list_thread(anchor_seq), agent_type, issue_num)
+        bot_token = get_gitcode_token(repo_key=repo_key) or ""
+        repository = from_repo_key(repo_key)
+        # 用 hermes 引擎（对齐 Chat Agent）
+        for evt_type, data in stream_agent(
+            prompt, cwd=ws, session_id=oc_session_id,
+            backend_name="hermes", account=repository, bot_token=bot_token,
+            agent_name="Event Dialogue Agent",
+            agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",
+        ):
+            if evt_type == "text" or evt_type == "token":
+                t = data if isinstance(data, str) else str(data)
+                _worker_final_text += t
+                loop.call_soon_threadsafe(_push_conv_event, task_id, "text", t)
+            elif evt_type == "done" or evt_type == "complete":
+                if isinstance(data, dict):
+                    _worker_final_text = data.get("text", "") or _worker_final_text
+                elif data:
+                    _worker_final_text = data if isinstance(data, str) else str(data)
+                break
+            elif evt_type == "error":
+                loop.call_soon_threadsafe(_push_conv_event, task_id, "error", str(data)[:500])
+                break
+    except Exception as e:
+        _worker_final_text = f"（对话执行失败：{e}）"
+        loop.call_soon_threadsafe(_push_conv_event, task_id, "error", _worker_final_text)
+
+    # finally 写 DB（带 task_id + generate_status）
+    if _worker_final_text:
+        _add_thread_message(seq, repo_key, issue_id, agent_type, "agent", _worker_final_text, agent_type,
+                            task_id=task_id, generate_status=2)
+    else:
+        _add_thread_message(seq, repo_key, issue_id, agent_type, "agent", "（无返回内容）", agent_type,
+                            task_id=task_id, generate_status=3)
+        _worker_final_text = "（无返回内容）"
+
+    with _conv_tasks_lock:
+        t = _conv_tasks.get(task_id)
+        if t:
+            t["status"] = "done"
+            t["result"] = _worker_final_text
+            t["finished_at"] = _conv_time.time()
+            t["events"].append({"type": "done", "data": _worker_final_text})
+    loop.call_soon_threadsafe(_push_conv_event, task_id, "done", _worker_final_text)
+
+
+async def _collect_conv_events(gen, task_id: str, loop):
+    """消费 async generator，投递事件到主 loop。"""
+    final_text = ""
+    async for evt_type, data in gen:
+        if evt_type == "text":
+            t = data if isinstance(data, str) else str(data)
+            final_text += t
+            loop.call_soon_threadsafe(_push_conv_event, task_id, "text", t)
+        elif evt_type == "thinking":
+            loop.call_soon_threadsafe(_push_conv_event, task_id, "thinking", data)
+        elif evt_type == "done":
+            if isinstance(data, dict):
+                final_text = data.get("reply", "") or final_text
+            loop.call_soon_threadsafe(_push_conv_event, task_id, "done", final_text)
+    return {"final_text": final_text}
+
+
+def _push_conv_event(task_id: str, evt_type: str, data):
+    """向内存任务缓冲追加事件（在主 event loop 中调用）。"""
+    with _conv_tasks_lock:
+        t = _conv_tasks.get(task_id)
+        if t:
+            t["events"].append({"type": evt_type, "data": data})
+            if evt_type == "text":
+                t["result"] = (t.get("result", "") or "") + (data if isinstance(data, str) else str(data))
+
+
+@router.get("/chat/task/{task_id}/status")
+async def conv_task_status(task_id: str, user: dict = Depends(get_current_user)):
+    """查询对话任务状态（内存优先 → DB 兜底）。"""
+    # 1. 内存
+    with _conv_tasks_lock:
+        task = _conv_tasks.get(task_id)
+        if task:
+            return {"task_id": task_id, "status": task["status"],
+                    "result": task.get("result", ""), "seq": task.get("seq", 0)}
+
+    # 2. DB 兜底（event_thread by task_id）
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT role, generate_status, content FROM event_thread WHERE task_id=? ORDER BY id", (task_id,))
+        rows = c.fetchall()
+    has_user = any(r[0] == "user" for r in rows)
+    has_agent = any(r[0] == "agent" for r in rows)
+    if has_agent:
+        for r in rows:
+            if r[0] == "agent":
+                gen = r[1]
+                return {"task_id": task_id, "status": "done" if gen == 2 else "error",
+                        "result": r[2] or ""}
+    if has_user and not has_agent:
+        return {"task_id": task_id, "status": "error",
+                "result": "", "error": "查询已中断（服务重启），请重新发送消息"}
+    return {"task_id": task_id, "status": "not_found"}
+
+
+@router.get("/chat/task/{task_id}/stream")
+async def conv_task_stream(task_id: str, user: dict = Depends(get_current_user)):
+    """订阅对话任务 SSE 输出（重放缓冲 + 实时追加）。"""
+    from fastapi.responses import StreamingResponse
+
+    async def event_stream():
+        import json as _json
+        sent = 0
+        # 重放已有事件
+        with _conv_tasks_lock:
+            task = _conv_tasks.get(task_id)
+            if task:
+                events = list(task["events"])
+            else:
+                events = []
+        for evt in events:
+            yield f"data: {_json.dumps({'type': evt['type'], 'text': evt['data']})}\n\n"
+            sent += 1
+        # 如果任务已完成，直接结束
+        with _conv_tasks_lock:
+            task = _conv_tasks.get(task_id)
+            if task and task["status"] in ("done", "error"):
+                return
+            if not task:
+                # 查 DB 看是否有结果
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT role, generate_status, content FROM event_thread WHERE task_id=? AND role='agent' ORDER BY id DESC LIMIT 1", (task_id,))
+                    row = c.fetchone()
+                if row:
+                    yield f"data: {_json.dumps({'type': 'done', 'text': row[2] or ''})}\n\n"
+                else:
+                    yield f"data: {_json.dumps({'type': 'error', 'text': '任务不存在'})}\n\n"
+                return
+        # 实时追加新事件
+        import time as _wt
+        timeout = _wt.time() + 300  # 5 分钟超时
+        while _wt.time() < timeout:
+            await asyncio.sleep(0.5)
+            with _conv_tasks_lock:
+                task = _conv_tasks.get(task_id)
+                if not task:
+                    break
+                new_events = task["events"][sent:]
+                sent = len(task["events"])
+                done = task["status"] in ("done", "error")
+            for evt in new_events:
+                yield f"data: {_json.dumps({'type': evt['type'], 'text': evt['data']})}\n\n"
+            if done:
+                break
 
     return StreamingResponse(event_stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})

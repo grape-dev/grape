@@ -283,6 +283,23 @@ function renderOutcome(knowledge, messages) {
     + (flowRows ? `<div style="margin-top:4px"><b>${I18N.t('events.outcome_flow')}</b>${flowRows}</div>` : '');
 }
 
+// ===== 事件对话持久化查询（对齐 Chat Agent v31）=====
+let _convStreamAbort = null;
+let _convTasks = {};
+
+function _setConvTask(seq, task) {
+  _convTasks[seq] = task;
+  try { sessionStorage.setItem('conv_task_' + seq, JSON.stringify(task)); } catch(e) {}
+}
+function _getConvTask(seq) {
+  if (_convTasks[seq]) return _convTasks[seq];
+  try { const s = sessionStorage.getItem('conv_task_' + seq); return s ? JSON.parse(s) : null; } catch(e) { return null; }
+}
+function _clearConvTask(seq) {
+  delete _convTasks[seq];
+  try { sessionStorage.removeItem('conv_task_' + seq); } catch(e) {}
+}
+
 function sendConversation() {
   const input = document.getElementById('convInput');
   if (!input || !_convSeq) return;
@@ -291,49 +308,117 @@ function sendConversation() {
   input.value = '';
   const messagesEl = document.getElementById('convMessages');
   if (messagesEl) messagesEl.insertAdjacentHTML('beforeend', _convBubble('user', msg));
-  const token = localStorage.getItem('token') || '';
   const replyId = 'convReply' + Date.now();
-  const holder = document.createElement('div');
-  holder.style.display = 'flex';
-  holder.style.justifyContent = 'flex-start';
-  holder.innerHTML = `<div id="${replyId}" style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;background:var(--bg);color:var(--t);border:1px solid var(--b)">${I18N.t('events.thinking')}</div>`;
-  if (messagesEl) messagesEl.appendChild(holder);
-  const replyEl = document.getElementById(replyId);
-  if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
-  let acc = '';
-  fetch('/api/events/' + _convSeq + '/chat/stream', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
-    body: JSON.stringify({message: msg}),
-  }).then(resp => {
-    if (!resp.ok) {
-      resp.json().then(d => app.showToast((d.detail && d.detail.message) || I18N.t('events.send_failed'))).catch(() => app.showToast(I18N.t('events.send_failed')));
-      if (replyEl) replyEl.textContent = I18N.t('events.send_failed_paren');
+  if (messagesEl) {
+    messagesEl.insertAdjacentHTML('beforeend',
+      '<div style="display:flex;justify-content:flex-start"><div id="' + replyId +
+      '" style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre-wrap;background:var(--bg);color:var(--t);border:1px solid var(--b)">' +
+      '<span class="chat-dots"><span></span><span></span><span></span></span></div></div>');
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  // 1. submit → 立即获取 task_id
+  API.post('/events/' + _convSeq + '/chat/submit', {message: msg}).then(r => {
+    if (r.status === 'error' || !r.task_id) {
+      const el = document.getElementById(replyId);
+      if (el) el.textContent = (r.error || I18N.t('events.send_failed_paren'));
       return;
     }
-    if (!resp.body) return loadConversation();
+    _setConvTask(_convSeq, {task_id: r.task_id, el_id: replyId, status: 'running'});
+    streamConvTask(r.task_id, replyId, _convSeq);
+  }).catch(e => {
+    const el = document.getElementById(replyId);
+    if (el) el.textContent = I18N.t('events.send_failed_paren');
+  });
+}
+
+async function streamConvTask(taskId, elId, seq) {
+  if (_convStreamAbort) { _convStreamAbort.abort(); _convStreamAbort = null; }
+  const ac = new AbortController();
+  _convStreamAbort = ac;
+  const el = document.getElementById(elId);
+  const messagesEl = document.getElementById('convMessages');
+  let finalText = '';
+  try {
+    const resp = await fetch('/api/events/chat/task/' + taskId + '/stream', {
+      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+      signal: ac.signal
+    });
+    if (!resp.ok || !resp.body) {
+      if (el) el.textContent = I18N.t('events.send_failed_paren');
+      _clearConvTask(seq);
+      return;
+    }
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
-    function read() {
-      return reader.read().then(({done, value}) => {
-        if (done) { loadConversation(); return; }
-        buf += dec.decode(value, {stream: true});
-        const parts = buf.split('\n\n');
-        buf = parts.pop();
-        for (const part of parts) {
-          if (!part.startsWith('data: ')) continue;
-          let evt;
-          try { evt = JSON.parse(part.slice(6)); } catch (e) { continue; }
-          if (evt.type === 'text') { acc += evt.text; if (replyEl) replyEl.innerHTML = renderMarkdown(acc); }
-          else if (evt.type === 'done') { if (replyEl) replyEl.innerHTML = renderMarkdown(evt.reply || acc); loadConversation(); return; }
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      lines.forEach(line => {
+        if (line.startsWith('data: ')) {
+          try {
+            const d = JSON.parse(line.substring(6));
+            if (d.type === 'done') {
+              finalText = d.text || finalText;
+              if (el) el.innerHTML = renderMarkdown(finalText) || '（无回复）';
+              _clearConvTask(seq);
+              loadConversation();
+            } else if (d.type === 'error') {
+              if (el) el.innerHTML = renderMarkdown(d.text || '') || '（错误）';
+              _clearConvTask(seq);
+            } else if (d.type === 'text' && d.text) {
+              finalText += d.text;
+              if (el) el.innerHTML = renderMarkdown(finalText);
+            } else if (d.type === 'thinking') {
+              if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
+            }
+          } catch(e) {}
         }
-        if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
-        return read();
       });
+      if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
     }
-    return read().catch(() => loadConversation());
-  }).catch(() => loadConversation());
+  } catch(e) {
+    if (e.name === 'AbortError') return;
+    if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
+  }
+}
+
+function resumeConvTask() {
+  if (!_convSeq) return;
+  const task = _getConvTask(_convSeq);
+  if (task && task.task_id) {
+    fetch('/api/events/chat/task/' + task.task_id + '/status', {
+      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+    }).then(r => r.json()).then(st => {
+      if (st.status === 'running') {
+        const messagesEl = document.getElementById('convMessages');
+        let el = document.getElementById(task.el_id);
+        if (!el && messagesEl) {
+          messagesEl.insertAdjacentHTML('beforeend',
+            '<div style="display:flex;justify-content:flex-start"><div id="' + task.el_id +
+            '" style="max-width:85%;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;background:var(--bg);border:1px solid var(--b)">' +
+            '<span class="chat-dots"><span></span><span></span><span></span></span></div></div>');
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+        streamConvTask(task.task_id, task.el_id, _convSeq);
+      } else {
+        _clearConvTask(_convSeq);
+        loadConversation();
+      }
+    }).catch(() => {});
+  } else {
+    API.get('/events/' + _convSeq + '/thread').then(d => {
+      const msgs = d.messages || [];
+      const lastMsg = msgs[msgs.length - 1];
+      if (lastMsg && lastMsg.role === 'user' && lastMsg.task_id) {
+        _setConvTask(_convSeq, {task_id: lastMsg.task_id, el_id: 'convReply' + Date.now(), status: 'running'});
+        resumeConvTask();
+      }
+    }).catch(() => {});
+  }
 }
 
 // ===== 对话窗口全屏/还原（按钮在 convPanel 标题栏）=====

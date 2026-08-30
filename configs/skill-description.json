@@ -29,6 +29,12 @@
     "path": "issue/issue-advance",
     "description": "Issue 高级运营（增强版）：项目知识基线（codegraph）→ 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发"
   },
+  "issue-multitask": {
+    "name": "多任务模式处理",
+    "agent_type": "issue",
+    "path": "issue/issue-multitask",
+    "description": "多任务模式子任务拆分与快速通道：复杂需求拆分为子 Issue 并行/串行执行；子任务跳过分析直接提取父任务目标 A2A 交办 coding"
+  },
   "implementation": {
     "name": "代码实现",
     "agent_type": "coding",

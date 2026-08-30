@@ -235,6 +235,11 @@ function loadAgentTypes() {
       _chatStreamAbort.abort();
       _chatStreamAbort = null;
     }
+    // 离开事件详情时中断对话 SSE（后台任务继续跑）
+    if (view !== 'event' && typeof _convStreamAbort !== 'undefined' && _convStreamAbort) {
+      _convStreamAbort.abort();
+      _convStreamAbort = null;
+    }
 
     _pushHistory(view, param);
 
@@ -284,6 +289,8 @@ function loadAgentTypes() {
     } else if (view === 'event') {
       title.textContent = I18N.t('app.nav.event_detail');
       API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      // 切换回事件详情时恢复活跃对话查询
+      if (typeof resumeConvTask === 'function') setTimeout(resumeConvTask, 500);
     } else if (view === 'chat') {
       title.textContent = I18N.t('app.nav.chat');
       renderChat(param || null);
