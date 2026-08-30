@@ -109,20 +109,17 @@
                       <div v-show="issueViewModes[iss.repoKey + '|' + iss.issueId] === 'events' && issueEvents[iss.repoKey + '|' + iss.issueId] && issueEvents[iss.repoKey + '|' + iss.issueId].length">
                         <table class="vod-table">
                           <thead>
-                            <tr><th>Seq</th><th>事件</th><th>运行时</th><th>耗时</th><th>状态</th><th>时间</th></tr>
+                            <tr><th>Seq</th><th>事件</th><th>Agent</th><th>Engine</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr>
                           </thead>
                           <tbody>
-                            <tr v-for="(ev, eidx) in issueEvents[iss.repoKey + '|' + iss.issueId]" :key="eidx" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
-                              <td class="t3">#{{ eidx + 1 }}</td>
+                            <tr v-for="ev in issueEvents[iss.repoKey + '|' + iss.issueId]" :key="ev.seq" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
+                              <td class="t3">#{{ ev.seq }}</td>
                               <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
-                              <td class="t3" style="font-size:11px">
-                                <span v-if="ev.agentType" class="status-tag info" style="font-size:10px;margin-right:6px">{{ ev.agentType }}</span>
-                                <span v-if="ev.engine">{{ ev.engine }}</span>
-                                <span v-if="ev.skill" style="color:var(--text-secondary);margin-left:6px">· {{ ev.skill }}</span>
-                                <span v-if="ev.engineIp" style="color:var(--text-tertiary);display:block;font-size:10px;margin-top:2px">{{ ev.engineIp }}</span>
-                              </td>
-                              <td class="t3">{{ ev.duration ? Math.round(ev.duration) + 's' : '—' }}</td>
-                              <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']" style="font-size:10px">{{ ev.status || '—' }}</span></td>
+                              <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
+                              <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}</td>
+                              <td class="t3">{{ ev.skill || '—' }}</td>
+                              <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']">{{ ev.status || '—' }}</span></td>
+                              <td class="t3">{{ formatDuration(ev.duration ? Math.round(ev.duration) + 's' : null) }}</td>
                               <td class="t3">{{ formatTime(ev.createdAt) }}</td>
                             </tr>
                           </tbody>
