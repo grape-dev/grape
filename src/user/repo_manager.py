@@ -1,5 +1,6 @@
 """GitCode 仓库托管管理：获取管理员仓库、创建/删除 webhook"""
-import json, urllib.request, urllib.error, urllib.parse
+import json, urllib.request, urllib.error, urllib.parse, os, shutil, tempfile
+import requests as _requests
 from src.config import log
 
 API_BASE = "https://api.gitcode.com/api/v5"
@@ -314,6 +315,46 @@ def _run_git(args: list[str], cwd: str) -> str:
     return (p.stdout or "").strip()
 
 
+def _download_and_extract_tarball(url, workdir, tmp, headers=None, token=None):
+    """下载 tarball 并解压到 workdir，然后 git init（统一用于 GitHub/GitCode）。"""
+    import tarfile
+    if token and not headers:
+        headers = {"PRIVATE-TOKEN": token}
+    resp = _requests.get(url, headers=headers or {}, timeout=60, stream=True, allow_redirects=True)
+    if resp.status_code != 200:
+        raise RuntimeError(f"tarball 下载失败: HTTP {resp.status_code}")
+    tarball_path = os.path.join(tmp, "source.tar.gz")
+    with open(tarball_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            f.write(chunk)
+    os.makedirs(workdir, exist_ok=True)
+    with tarfile.open(tarball_path, "r:gz") as tar:
+        members = tar.getmembers()
+        if not members:
+            raise RuntimeError("tarball 为空")
+        for m in members:
+            # 去掉第一层目录（owner-repo-hash/ 或 repo-branch/）
+            parts = m.name.split("/", 1)
+            if len(parts) < 2 or not parts[1]:
+                continue
+            m.name = parts[1]
+            try:
+                tar.extract(m, workdir)
+            except Exception:
+                pass
+    _run_git(["init"], workdir)
+
+
+def _download_gitcode_tarball(source_repo, workdir, tmp, token):
+    """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。"""
+    if not token:
+        raise RuntimeError("GitCode 模板需要 Bot token 拉取")
+    url = f"https://oauth2:{token}@gitcode.com/{source_repo}.git"
+    _run_git(["clone", "--quiet", "--depth", "1", url, workdir], tmp)
+    shutil.rmtree(os.path.join(workdir, ".git"), ignore_errors=True)
+    _run_git(["init"], workdir)
+
+
 def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
                           user_token: str, bot_token: str = "") -> bool:
     """将模板内容推送到新仓库。
@@ -359,15 +400,18 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
                 raise RuntimeError("git 模板缺少 source_repo / clone_url 配置")
             workdir = os.path.join(tmp, "repo")
             if clone_url and source_platform == "github":
-                # GitHub 优选模板：用 clone_url（公开仓库，无需 token）
-                _run_git(["clone", "--quiet", "--depth", "1", clone_url, workdir], tmp)
+                # GitHub 优选模板：下载 tarball（比 clone 快 10 倍），解压后 init 新仓库
+                _download_and_extract_tarball(
+                    f"https://api.github.com/repos/{source_repo}/tarball",
+                    workdir, tmp,
+                    headers={"Authorization": f"token {os.environ.get('GITHUB_TOKEN', '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')}"},
+                )
+            elif clone_url and source_platform == "gitcode" and not source_repo:
+                # GitCode 优选模板（有 clone_url 但无 source_repo）：tarball 下载
+                _download_gitcode_tarball(source_repo, workdir, tmp, bot_token or user_token)
             else:
-                # GitCode 模板：用 source_repo + token
-                clone_token = bot_token or user_token
-                if not clone_token:
-                    raise RuntimeError("git 模板需要全局 Bot token 拉取")
-                url = f"https://oauth2:{clone_token}@gitcode.com/{source_repo}.git"
-                _run_git(["clone", "--quiet", "--depth", "1", url, workdir], tmp)
+                # GitCode 模板：用 source_repo + token，tarball 下载
+                _download_gitcode_tarball(source_repo, workdir, tmp, bot_token or user_token)
 
         target_url = f"https://oauth2:{user_token}@gitcode.com/{gitcode_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):
@@ -379,7 +423,16 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
         if _git_has_changes(workdir):
             _run_git(["commit", "-m", "Init from project template"], workdir)
         _run_git(["branch", "-M", "main"], workdir)
-        _run_git(["push", "--force", "-u", "origin", "HEAD:main"], workdir)
+        # push 单独设 180s 超时（大仓库 push 到 GitCode 可能较慢）
+        import subprocess
+        try:
+            p = subprocess.run(["git", "push", "--force", "-u", "origin", "HEAD:main"],
+                cwd=workdir, capture_output=True, text=True, timeout=180)
+            if p.returncode != 0:
+                err = (p.stderr or p.stdout or "").strip()[:500]
+                raise RuntimeError(f"git push --force 失败: {err}")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("git push 超时（180s），仓库可能过大")
         return True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

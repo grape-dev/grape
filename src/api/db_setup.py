@@ -482,6 +482,7 @@ CREATE TABLE IF NOT EXISTS featured_templates (
     html_url    TEXT DEFAULT '',
     clone_url   TEXT DEFAULT '',
     category    TEXT DEFAULT 'cloud-native',
+    recommend_reason TEXT DEFAULT '',
     fetched_at  TEXT DEFAULT '',
     UNIQUE(platform, repo_full_name)
 )

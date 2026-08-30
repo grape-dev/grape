@@ -24,6 +24,60 @@ GITCODE_PAT = os.environ.get("GITCODE_PAT", "yXgZq-rf19PW2cmMoyXF_xbK")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
 
 
+def _build_reason(item, search_kw):
+    """根据项目信息生成简短推荐理由。"""
+    name = item.get("repo_name", "")
+    lang = item.get("language", "")
+    stars = item.get("stars", 0)
+    desc = item.get("description", "")
+    topics = item.get("topics", [])
+    if isinstance(topics, str):
+        try:
+            topics = json.loads(topics)
+        except Exception:
+            topics = []
+
+    parts = []
+    # 星数描述
+    if stars >= 50000:
+        parts.append(f"热门项目（{stars:,} ⭐）")
+    elif stars >= 10000:
+        parts.append(f"高星项目（{stars:,} ⭐）")
+    elif stars >= 1000:
+        parts.append(f"社区活跃（{stars:,} ⭐）")
+    elif stars > 0:
+        parts.append(f"值得关注（{stars} ⭐）")
+
+    # 语言/技术栈
+    if lang:
+        lang_map = {"Go": "Go 语言", "Python": "Python", "Java": "Java", "TypeScript": "TypeScript",
+                    "Rust": "Rust", "C++": "C++", "Shell": "Shell 脚本", "HTML": "前端"}
+        parts.append(lang_map.get(lang, lang))
+
+    # 关键词匹配
+    kw_desc = {
+        "kubernetes": "Kubernetes 生态", "k8s": "K8s 编排",
+        "terraform": "基础设施即代码", "docker": "容器化",
+        "helm": "Helm 包管理", "istio": "服务网格",
+        "prometheus": "监控告警", "grafana": "可视化仪表盘",
+        "serverless": "Serverless 架构", "microservice": "微服务架构",
+        "cloud native": "云原生核心", "containerd": "容器运行时",
+    }
+    kw_tags = []
+    for kw in [search_kw] + (topics if isinstance(topics, list) else []):
+        for k, v in kw_desc.items():
+            if k.lower() in str(kw).lower() and v not in kw_tags:
+                kw_tags.append(v)
+    if kw_tags:
+        parts.append(" / ".join(kw_tags[:3]))
+
+    # 描述摘要
+    if desc and len(desc) > 20:
+        parts.append(desc[:60])
+
+    return " · ".join(parts[:3]) if parts else "云原生优选项目"
+
+
 def search_gitcode(keywords, limit=5):
     """搜索 GitCode 云原生项目"""
     results = []
@@ -62,8 +116,11 @@ def search_gitcode(keywords, limit=5):
                     "html_url": r.get("web_url") or "",
                     "clone_url": r.get("http_url_to_repo") or "",
                     "category": "cloud-native",
+                    "recommend_reason": "",
                     "fetched_at": datetime.datetime.now().isoformat(),
                 })
+                # 生成推荐理由
+                results[-1]["recommend_reason"] = _build_reason(results[-1], kw)
                 if len(results) >= limit:
                     break
             time.sleep(1)
@@ -115,8 +172,11 @@ def search_github(keywords, limit=5):
                     "html_url": r.get("html_url") or "",
                     "clone_url": r.get("clone_url") or "",
                     "category": "cloud-native",
+                    "recommend_reason": "",
                     "fetched_at": datetime.datetime.now().isoformat(),
                 })
+                # 生成推荐理由
+                results[-1]["recommend_reason"] = _build_reason(results[-1], kw)
                 if len(results) >= limit:
                     break
             time.sleep(2)  # GitHub search rate limit: 10/min
@@ -137,12 +197,13 @@ def save_to_db(items):
             c.execute(
                 "INSERT OR REPLACE INTO featured_templates "
                 "(platform, repo_full_name, repo_name, description, language, "
-                "stars, forks, topics, html_url, clone_url, category, fetched_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "stars, forks, topics, html_url, clone_url, category, recommend_reason, fetched_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (item["platform"], item["repo_full_name"], item["repo_name"],
                  item["description"], item["language"], item["stars"],
                  item["forks"], json.dumps(item["topics"]), item["html_url"],
-                 item["clone_url"], item["category"], item["fetched_at"])
+                 item["clone_url"], item["category"], item.get("recommend_reason", ""),
+                 item["fetched_at"])
             )
         db.commit()
     print(f"Saved {len(items)} items to DB")
@@ -161,6 +222,7 @@ def _to_template(r, platform):
         "id": f"{platform}-{r['repo_full_name'].replace('/', '-')}",
         "name": r["repo_name"],
         "description": r.get("description", "")[:120],
+        "recommend_reason": r.get("recommend_reason", ""),
         "icon": "📦",
         "source": "git",
         "source_repo": r["repo_full_name"],
@@ -180,7 +242,9 @@ def _to_template(r, platform):
 
 
 def update_templates_json(gitcode_items, github_items):
-    """更新 configs/project-templates.json，在 iac 后面新增两个分类"""
+    """更新 configs/project-templates.json，在 iac 后面新增两个分类。
+    去重：同名项目优先保留 GitCode，从 GitHub 中移除重复项。
+    """
     config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "project-templates.json")
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -190,6 +254,12 @@ def update_templates_json(gitcode_items, github_items):
     cats = [c for c in cats if c.get("id") not in ("gitcode-featured", "github-featured")]
     # 找到 iac 的位置
     iac_idx = next((i for i, c in enumerate(cats) if c.get("id") == "iac"), len(cats) - 1)
+
+    # 去重：GitCode 优先，GitHub 移除同名项目
+    gc_names = set(r["repo_name"] for r in gitcode_items)
+    github_items_dedup = [r for r in github_items if r["repo_name"] not in gc_names]
+    if len(github_items_dedup) < len(github_items):
+        print(f"Dedup: removed {len(github_items) - len(github_items_dedup)} GitHub duplicates (kept GitCode)")
 
     gitcode_cat = {
         "id": "gitcode-featured",
@@ -207,7 +277,7 @@ def update_templates_json(gitcode_items, github_items):
         "description": "GitHub 云原生热门项目，每日自动同步",
         "scene_id": "default",
         "page_size": 12,
-        "templates": [_to_template(r, "github") for r in github_items],
+        "templates": [_to_template(r, "github") for r in github_items_dedup],
     }
 
     cats.insert(iac_idx + 1, gitcode_cat)
@@ -239,9 +309,14 @@ if __name__ == "__main__":
         github_items = search_github(CN_KEYWORDS, limit=args.limit)
         print(f"  Got {len(github_items)} items")
 
-    all_items = gitcode_items + github_items
+    # 去重：GitCode 优先，GitHub 移除同名项目
+    gc_name_set = set(r["repo_name"] for r in gitcode_items)
+    github_items_dedup = [r for r in github_items if r["repo_name"] not in gc_name_set]
+    if github_items_dedup and len(github_items_dedup) < len(github_items):
+        print(f"Dedup: removed {len(github_items) - len(github_items_dedup)} GitHub duplicates (kept GitCode)")
+    all_items = gitcode_items + github_items_dedup
     if all_items:
         save_to_db(all_items)
-        update_templates_json(gitcode_items, github_items)
+        update_templates_json(gitcode_items, github_items_dedup if github_items_dedup else github_items)
     else:
         print("No items found, skipping DB/JSON update")
