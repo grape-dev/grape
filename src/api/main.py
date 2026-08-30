@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Knowledge sync loop start failed: {e}")
 
-    # 官方技能 OBS 自动同步：定时扫描本地技能变更，上传 OBS + 软删除检测（每 30 分钟）
+    # 官方技能 OBS 自动同步：定时扫描本地技能变更，上传 OBS（每 30 分钟）
     try:
         from src.storage.skill_sync import start_skill_sync_scheduler
         start_skill_sync_scheduler()
