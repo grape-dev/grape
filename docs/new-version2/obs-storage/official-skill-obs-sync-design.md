@@ -6,15 +6,14 @@
 - 远端 worker claim 任务后拿不到 skill_obs_url，无法直连 OBS 下载技能
 - 多实例部署时各实例本地技能版本不一致
 - 本地技能更新后无自动发现机制，需手动触发同步
-- 本地技能被删除后 DB 记录仍为 is_active=1，用户看到空技能
 
 ## 2. 目标
 
-1. 本地官方技能变更后自动发现（新增/修改/删除）
+1. 本地官方技能内容变更后自动发现
 2. 变更后自动上传到 OBS，DB 的 file_path 写入对象键
 3. 远端 worker claim 任务时能拿到预签名 URL
 4. 不破坏现有非 OBS 模式（storage=None 时走本地磁盘）
-5. 检测被删除的技能，标记 is_active=0（软删除）
+5. 保持原有 DB 同步逻辑不变（只加不删，以 skill-description.json 为权威）
 
 ## 3. 现状分析
 
@@ -34,35 +33,16 @@ OBS: 无官方技能对象
 | 读取技能内容 | get_skill_detail_by_id (skills.py:288) | file_path 为空走 local 分支读本地磁盘 |
 | 下载技能包 | download_skill_zip_by_id (skills.py:219) | 官方技能返回 400 "不提供下载" |
 | claim 附 OBS URL | _attach_skill_obs (runtime.py:319) | get_skill_object_key 返回空串，不附 URL |
-| 本地技能扫描 | _scan_local_skills (agent.py:328) | 扫描 worker 本地目录，不是服务端 skills/ |
 | 变更检测 | 无 | 无文件监听、无 hash/mtime 对比 |
-| 删除检测 | 无 | 只加不删，DB 记录永久 is_active=1 |
 
-### 3.3 skill 表结构（相关字段）
+### 3.3 原有 DB 同步逻辑
 
-```sql
-CREATE TABLE skill (
-    id INTEGER PRIMARY KEY,
-    skill_name TEXT,
-    display_name TEXT DEFAULT '',
-    description TEXT DEFAULT '',
-    agent_type TEXT DEFAULT '',
-    skill_path TEXT DEFAULT '',      -- 本地目录路径（如 coding/my-skill）
-    file_path TEXT DEFAULT '',       -- OBS 对象键（OBS 模式才有值）
-    scope TEXT DEFAULT '',           -- official/repo/user
-    owner_id TEXT DEFAULT '',
-    is_active INTEGER DEFAULT 1
-    -- 无 content_hash 字段
-);
-```
-
-### 3.4 原有同步逻辑缺陷
-
-`_sync_official_skills`（db_setup.py 第 780-821 行）遍历 skill-description.json：
-- 存在的 → UPDATE 更新元信息
-- 不存在的 → INSERT 新增
-- **不处理 json 里没有但 DB 里有的技能**——不会删除、不会标记 is_active=0
-- **不上传 OBS**——file_path 始终为空
+`_sync_official_skills`（db_setup.py 启动时执行）：
+1. 读 configs/skill-description.json
+2. 遍历 json 里每个技能
+3. DB 有 → UPDATE（display_name/description/agent_type/skill_path）
+4. DB 没有 → INSERT
+5. json 里没有但 DB 有的技能 → 不管（只加不删，以 json 为权威）
 
 ## 4. 设计方案
 
@@ -71,15 +51,15 @@ CREATE TABLE skill (
 ```
 服务启动
     ↓
-db_setup.py 同步 DB（skill_path + content_hash）——逻辑不变，加 content_hash
+db_setup.py 同步 DB（skill_path + content_hash）——原有逻辑不变，加 content_hash
     ↓
-OBS 模式？→ 启动 asyncio 定时任务（上传 OBS + 软删除检测）
-非 OBS 模式？→ 不启动定时任务（手动触发时仍执行软删除检测）
+OBS 模式？→ 启动 asyncio 定时任务（hash 检测 + 上传 OBS）
+非 OBS 模式？→ 不启动定时任务
     ↓
 定时扫描（每 30 分钟）：
-  1. 遍历本地技能目录，计算 content_hash
+  1. 遍历 skill-description.json 的技能，计算 content_hash
   2. hash 变了 → 打包 zip → 上传 OBS → 更新 DB file_path + content_hash
-  3. 本地目录不存在但 DB 有 is_active=1 → 标记 is_active=0（软删除）
+  3. hash 没变 → 跳过
     ↓
 远端 worker claim 任务 → _attach_skill_obs 拿到 file_path → 签发预签名 URL
 ```
@@ -140,14 +120,14 @@ ALTER TABLE skill ADD COLUMN content_hash VARCHAR(256) DEFAULT '';
    c. 查 DB 该技能的 content_hash
    d. hash 相同 → 跳过（无变更）
    e. hash 不同或技能不存在 → 打包 zip → 上传 OBS（OBS 模式）→ 更新 DB
-3. 软删除检测：遍历 DB 中 scope=official 且 is_active=1 的记录，
-   检查对应本地目录是否存在。不存在 → 标记 is_active=0
-4. 返回同步结果（新增/更新/删除数量）
+3. 返回同步结果（新增/更新/跳过数量）
 ```
 
 OBS 模式判断：
-- `storage = get_storage()` 为 None → 只更新 DB skill_path + content_hash + 软删除检测（非 OBS 模式行为不变）
-- `storage` 不为 None → 打包 zip 上传 OBS + 更新 DB file_path=对象键 + content_hash + 软删除检测
+- `storage = get_storage()` 为 None → 只更新 DB content_hash（非 OBS 模式行为不变）
+- `storage` 不为 None → 打包 zip 上传 OBS + 更新 DB file_path=对象键 + content_hash
+
+不处理删除——保持和原有 DB 同步逻辑一致（只加不删，以 json 为权威）。
 
 ### 4.6 OBS 对象键
 
@@ -194,7 +174,8 @@ def start_skill_sync_scheduler():
     from src.storage import get_storage
     if get_storage() is None:
         return
-    t = asyncio.create_task(_skill_sync_worker(), name="skill-sync")
+    interval = float(os.environ.get("SKILL_SYNC_INTERVAL", "1800"))
+    t = asyncio.create_task(_skill_sync_worker(interval), name="skill-sync")
     _bg_tasks.add(t)  # 持有强引用，防止 GC 回收导致任务静默消失
     t.add_done_callback(_bg_tasks.discard)
 
@@ -219,29 +200,30 @@ async def stop_skill_sync_scheduler():
 
 | # | 文件 | 改动 | 说明 |
 |---|------|------|------|
-| 1 | src/user/db.py | 新增 content_hash 字段 DDL + 迁移 | ALTER TABLE 幂等，VARCHAR(256) |
-| 2 | src/user/db.py | upsert 时写 content_hash | 同步时记录 hash |
-| 3 | src/user/db.py | 新增 get_skill_content_hash(skill_id) | 读取 hash |
-| 4 | src/storage/skill_sync.py（新增） | _compute_skill_hash | 计算 hash（完整 SHA-256 64 字符） |
-| 5 | src/storage/skill_sync.py（新增） | sync_official_skills_to_obs | 全量同步逻辑 + 软删除检测 |
-| 6 | src/storage/skill_sync.py（新增） | start_skill_sync_scheduler + stop_skill_sync_scheduler | asyncio 定时调度 + GC 防护 + 优雅关闭 |
-| 7 | src/api/main.py | 启动时调用 start_skill_sync_scheduler，shutdown 时调用 stop_skill_sync_scheduler | 注册定时任务 + 优雅关闭 |
-| 8 | src/api/db_setup.py | _sync_official_skills 加 content_hash | 启动时 seed 也写 hash |
-| 9 | src/api/routes/skills.py | sync_official_skills API 改为调用新逻辑 | 手动触发也走 OBS 同步 + 软删除检测 |
+| 1 | src/api/db_setup.py | 新增 content_hash 字段 DDL 迁移 | ALTER TABLE 幂等，VARCHAR(256) |
+| 2 | src/api/db_setup.py | _sync_official_skills INSERT 加 content_hash | 启动时 seed 写空 hash |
+| 3 | src/user/db.py | get_skill_by_id 返回 content_hash | SELECT 加 content_hash 列 |
+| 4 | src/user/db.py | 新增 get_skill_content_hash + update_skill_content_hash | 读取/更新 hash |
+| 5 | src/storage/skill_sync.py（新增） | _compute_skill_hash | 计算 hash（完整 SHA-256 64 字符） |
+| 6 | src/storage/skill_sync.py（新增） | _pack_skill_zip | 打包技能目录为 zip |
+| 7 | src/storage/skill_sync.py（新增） | sync_official_skills_to_obs | 同步逻辑（hash 检测 + 上传 OBS） |
+| 8 | src/storage/skill_sync.py（新增） | start_skill_sync_scheduler + stop_skill_sync_scheduler | asyncio 定时调度 + GC 防护 + 优雅关闭 |
+| 9 | src/api/main.py | 启动时调用 start_skill_sync_scheduler，shutdown 时调用 stop_skill_sync_scheduler | 注册定时任务 + 优雅关闭 |
+| 10 | src/api/routes/skills.py | sync_official_skills API 改为调用新逻辑 | 手动触发也走 OBS 同步 |
 
 ### 4.9 非 OBS 模式兼容
 
 - `storage = get_storage()` 为 None 时：
   - 定时调度不启动（start_skill_sync_scheduler 直接 return）
-  - 手动触发 sync_official_skills API 时仍执行：更新 DB skill_path + content_hash + 软删除检测
+  - 手动触发 sync_official_skills API 时仍执行：更新 DB content_hash
   - file_path 保持为空
   - get_skill_detail_by_id 走 local 分支读本地磁盘
   - _attach_skill_obs 返回空（不附 URL）
-  - 行为与改造前基本一致，新增了 content_hash 记录和软删除检测
+  - 行为与改造前基本一致，新增了 content_hash 记录
 
 - `storage` 不为 None 时：
   - 定时调度启动，每 30 分钟增量扫描
-  - 同步逻辑上传 zip 到 OBS + 更新 DB file_path + content_hash + 软删除检测
+  - 同步逻辑上传 zip 到 OBS + 更新 DB file_path + content_hash
   - get_skill_detail_by_id 走 OBS 分支
   - _attach_skill_obs 签发预签名 URL
   - 远端 worker 直连 OBS 下载
@@ -254,19 +236,19 @@ async def stop_skill_sync_scheduler():
 |------|------|
 | 用户技能（scope=user） | 不在同步范围，走原有上传/存储流程 |
 | 仓库技能（scope=repo） | 不在同步范围 |
-| 非 OBS 模式 | storage=None 时调度不启动，行为基本不变（新增 content_hash + 软删除检测） |
+| 非 OBS 模式 | storage=None 时调度不启动，行为基本不变（新增 content_hash 记录） |
 | worker 本地技能扫描 | _scan_local_skills 扫描 worker 目录，不受影响 |
 | skill_path 字段 | 保持不变（本地目录路径），新增 file_path 和 content_hash |
+| DB 删除逻辑 | 保持原有逻辑（只加不删），不新增软删除/重新激活 |
 
 ### 5.2 受影响
 
 | 组件 | 影响 | 风险 |
 |------|------|------|
 | skill 表 | 新增 content_hash 列 | 低（ALTER TABLE 幂等迁移） |
-| sync_official_skills API | 增加上传 OBS 逻辑 + 软删除检测 | 中（首次同步可能上传较多技能，耗时较长） |
+| sync_official_skills API | 增加上传 OBS 逻辑 | 中（首次同步可能上传较多技能，耗时较长） |
 | 服务启动 | 启动即执行首次同步 | 低（asyncio task 不阻塞启动和请求） |
 | OBS 存储 | 新增 official 技能对象 | 低（按现有 skill_key 规则存对象） |
-| 已删除技能 | is_active 标记为 0 | 低（原逻辑不处理删除，现在补上） |
 
 ### 5.3 集群多实例并发分析
 
@@ -304,8 +286,6 @@ async def stop_skill_sync_scheduler():
 ## 6. 验证方式
 
 1. 非 OBS 模式：启动后手动修改 skills/ 下某技能 → 触发同步 → DB content_hash 更新 → file_path 仍为空
-2. 非 OBS 模式删除检测：删除 skills/ 下某技能目录 → 手动触发同步 → DB is_active 变为 0 → 技能列表不再显示
-3. OBS 模式：启动后自动同步 → DB file_path 有值 → get_skill_detail_by_id 返回 is_obs=true → download_skill_zip_by_id 返回预签名 URL
-4. OBS 模式变更检测：修改某技能 SKILL.md → 等 30 分钟 → DB content_hash 变化 → OBS 对象更新
-5. OBS 模式删除检测：删除 skills/ 下某技能目录 → 等 30 分钟 → DB is_active 变为 0 → OBS 对象保留不删
-6. 远端 worker：claim 任务 → skill_obs_url 有值 → worker 下载到最新技能
+2. OBS 模式：启动后自动同步 → DB file_path 有值 → get_skill_detail_by_id 返回 is_obs=true → download_skill_zip_by_id 返回预签名 URL
+3. 变更检测：修改某技能 SKILL.md → 等 30 分钟 → DB content_hash 变化 → OBS 对象更新
+4. 远端 worker：claim 任务 → skill_obs_url 有值 → worker 下载到最新技能

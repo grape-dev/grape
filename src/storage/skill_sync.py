@@ -3,13 +3,14 @@
 职责：
 1. 扫描本地 skills/<agent_type>/<skill>/ 目录，计算 content_hash
 2. hash 变了 → 打包 zip → 上传 OBS → 更新 DB file_path + content_hash
-3. 本地目录不存在但 DB 有 is_active=1 → 标记 is_active=0（软删除）
 
 触发方式：
 - asyncio 定时任务（OBS 模式，每 30 分钟）
 - 手动触发（admin 页面"同步官方技能"按钮 → sync_official_skills API）
 
-非 OBS 模式（storage=None）：定时调度不启动，手动触发时只更新 DB content_hash + 软删除检测。
+非 OBS 模式（storage=None）：定时调度不启动，手动触发时只更新 DB content_hash。
+
+不处理删除——保持和原有 DB 同步逻辑一致（只加不删，以 skill-description.json 为权威）。
 """
 import asyncio
 import hashlib
@@ -63,29 +64,24 @@ def _pack_skill_zip(skill_dir: str) -> bytes:
 async def sync_official_skills_to_obs() -> dict:
     """全量同步官方技能到 OBS（增量：hash 不变的跳过）。
 
-    返回 {"added": N, "updated": N, "deleted": N, "skipped": N}。
+    返回 {"added": N, "updated": N, "skipped": N}。
     """
     from src.storage import get_storage, skill_key
-    from src.user.db import (
-        update_skill_content_hash,
-        deactivate_skill, list_active_official_skills,
-    )
+    from src.user.db import get_skill_content_hash, update_skill_content_hash
 
     # 读 skill-description.json 获取官方技能清单
     json_path = os.path.join(CONFIG_DIR, "skill-description.json")
     if not os.path.exists(json_path):
         logger.warning("skill-description.json not found, skip sync")
-        return {"added": 0, "updated": 0, "deleted": 0, "skipped": 0}
+        return {"added": 0, "updated": 0, "skipped": 0}
 
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     storage = get_storage()
-    result = {"added": 0, "updated": 0, "deleted": 0, "skipped": 0}
-    seen_skills: set[str] = set()
+    result = {"added": 0, "updated": 0, "skipped": 0}
 
     for skill_name, info in data.items():
-        seen_skills.add(skill_name)
         agent_type = info.get("agent_type", "")
         skill_path = info.get("path", skill_name)
 
@@ -105,13 +101,10 @@ async def sync_official_skills_to_obs() -> dict:
         if not current_hash:
             continue
 
-        # 查 DB 的 content_hash（包括 is_active=0 的，用于检测是否需要重新激活）
-        from src.user.db import get_skill_by_name
-        db_skill = get_skill_by_name(skill_name, "official")
-        db_hash = db_skill.get("content_hash", "") if db_skill else ""
-        db_is_active = db_skill.get("is_active", 0) if db_skill else 0
+        # 查 DB 的 content_hash
+        db_hash = get_skill_content_hash(skill_name)
 
-        if db_hash == current_hash and db_is_active:
+        if db_hash == current_hash:
             result["skipped"] += 1
             continue
 
@@ -131,12 +124,6 @@ async def sync_official_skills_to_obs() -> dict:
                 continue
 
         # 更新 DB
-        # 如果技能 is_active=0 但本地目录存在，重新激活
-        if db_skill and not db_is_active:
-            from src.user.db import reactivate_skill
-            reactivate_skill(skill_name, "official")
-            logger.info(f"skill reactivated: {skill_name}")
-
         updated = update_skill_content_hash(skill_name, "official", current_hash, object_key)
         if updated:
             if db_hash:
@@ -147,33 +134,9 @@ async def sync_official_skills_to_obs() -> dict:
                 logger.info(f"skill added: {skill_name} (hash: {current_hash[:8]}...)")
         else:
             # DB 里没有这个技能记录，db_setup.py 的 _sync_official_skills 会负责 INSERT
-            # 这里只更新已有记录的 hash
             result["skipped"] += 1
 
-    # 软删除检测：DB 有 is_active=1 但本地目录不存在且不在 json 里的技能
-    active_skills = list_active_official_skills()
-    for sk in active_skills:
-        sk_name = sk["skill_name"]
-        if sk_name in seen_skills:
-            # json 里有但前面可能因为目录不存在跳过了，再检查一次
-            skill_path = sk.get("skill_path") or sk_name
-            skill_dir = os.path.join(SKILLS_DIR, skill_path)
-            resolved = resolve_official_skill_path(sk_name)
-            if resolved:
-                skill_dir = os.path.dirname(resolved)
-            if os.path.isdir(skill_dir):
-                continue
-            # 目录不存在 → 软删除
-            if deactivate_skill(sk_name, "official"):
-                result["deleted"] += 1
-                logger.info(f"skill deactivated (dir not found): {sk_name}")
-        else:
-            # json 里没有这个技能 → 软删除
-            if deactivate_skill(sk_name, "official"):
-                result["deleted"] += 1
-                logger.info(f"skill deactivated (not in skill-description.json): {sk_name}")
-
-    logger.info(f"sync done: +{result['added']} ~{result['updated']} -{result['deleted']} skipped={result['skipped']}")
+    logger.info(f"sync done: +{result['added']} ~{result['updated']} skipped={result['skipped']}")
     return result
 
 
