@@ -58,6 +58,7 @@
     "err_no_repo": "Please select a repository on the repository page before creating a task",
     "err_no_title": "Please fill in the task title",
     "err_no_desc": "Please fill in the task description",
+    "err_dup_title": "Task already exists (Issue {{issue}}), please enter a new task title",
     "err_create_failed": "Create failed: {{msg}}",
     "success_prefix": "✅ "
   },

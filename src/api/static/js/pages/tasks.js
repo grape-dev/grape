@@ -294,6 +294,12 @@ function createTaskSubmit() {
   if (!repoKey.trim()) { showErr(I18N.t('tasks.create.err_no_repo')); return; }
   if (!title.trim()) { showErr(I18N.t('tasks.create.err_no_title')); return; }
   if (!desc.trim()) { showErr(I18N.t('tasks.create.err_no_desc')); return; }
+  // 本地查重：同仓库同标题已存在 → 提示用户
+  var _dup = _tasksAll.filter(function(t) { return (t.title || '').trim() === title.trim(); });
+  if (_dup.length > 0) {
+    showErr(I18N.t('tasks.create.err_dup_title', {issue: '#' + (_dup[0].issue_number || _dup[0].id)}));
+    return;
+  }
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.create.btn_creating'); }
   API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId, is_subtask_mode: subtaskMode})

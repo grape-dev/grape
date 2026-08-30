@@ -58,6 +58,7 @@
     "err_no_repo": "请先在仓库页选择仓库，再创建任务",
     "err_no_title": "请填写任务标题",
     "err_no_desc": "请填写任务描述",
+    "err_dup_title": "任务已存在（Issue {{issue}}），请输入新的任务标题",
     "err_create_failed": "创建失败: {{msg}}",
     "success_prefix": "✅ "
   },

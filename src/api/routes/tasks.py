@@ -601,9 +601,13 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
     assignee = (body.assignee or "").strip() or user["username"]  # General Settings Account：登录用户 gitcode 账号
-    # 1) 幂等：同 title open issue 复用
+    # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
     issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip())
     created = False
+    if issue_num is not None:
+        raise HTTPException(status_code=409, detail={"code": 409,
+                                                     "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
+                                                     "issue_number": issue_num})
     if issue_num is None:
         resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
                                    (body.description or "").strip(), assignee=assignee)
