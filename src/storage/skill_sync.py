@@ -132,6 +132,9 @@ async def sync_official_skills_to_obs() -> dict:
             if db_hash:
                 result["updated"] += 1
                 logger.info(f"skill updated: {skill_name} (hash: {db_hash[:8]}... -> {current_hash[:8]}...)")
+            else:
+                result["added"] += 1
+                logger.info(f"skill added: {skill_name} (hash: {current_hash[:8]}...)")
 
     logger.info(f"sync done: +{result['added']} ~{result['updated']} skipped={result['skipped']}")
     return result
