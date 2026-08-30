@@ -141,7 +141,8 @@ public class ConsoleUserController {
             List<Map<String, Object>> repoMatrix = grapeJdbc.query(
                 "SELECT m.full_name, m.repo_key " +
                 "FROM managed_repos m " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
+                "INNER JOIN user_repos ur ON ur.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.id = ur.user_id WHERE u.id=? " +
                 "ORDER BY m.full_name",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
@@ -169,7 +170,8 @@ public class ConsoleUserController {
             userRepoKeys = grapeJdbc.queryForList(
                 "SELECT DISTINCT t.repo_key FROM agent_tasks t " +
                 "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner " +
+                "INNER JOIN user_repos ur ON ur.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.id = ur.user_id " +
                 "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''", String.class, id);
         } catch (Exception e) { /* ignore */ }
 
@@ -319,7 +321,8 @@ public class ConsoleUserController {
             // 1. 限制到当前用户关联的仓库（安全：admin 不能查非自己用户的 issue）
             List<String> userRepoKeys = grapeJdbc.queryForList(
                 "SELECT DISTINCT m.repo_key FROM managed_repos m " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?", String.class, id);
+                "INNER JOIN user_repos ur ON ur.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.id = ur.user_id WHERE u.id=?", String.class, id);
             if (userRepoKeys.isEmpty()) {
                 result.put("issueId", issueId);
                 result.put("events", events);
