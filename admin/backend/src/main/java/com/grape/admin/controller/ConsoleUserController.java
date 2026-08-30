@@ -203,7 +203,7 @@ public class ConsoleUserController {
         List<Map<String, Object>> rows;
         try {
             rows = grapeJdbc.queryForList(
-                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, repo_key"
+                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, repo_key"
                 + " FROM events" + where + " ORDER BY created_at", params.toArray());
         } catch (Exception e) {
             rows = List.of();
@@ -216,8 +216,36 @@ public class ConsoleUserController {
             group.computeIfAbsent(groupKey, k -> new ArrayList<>()).add(row);
         }
 
-        // 4. 构建结果（对齐健康中心）
+        // 3.5 批量查 issue_opened 事件的 payload 提取标题（避免每行带 payload TEXT 大字段）
         com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+        Map<String, String> titleByKey = new java.util.HashMap<>();
+        if (!group.isEmpty()) {
+            try {
+                StringBuilder titleSql = new StringBuilder(
+                    "SELECT issue_id, repo_key, payload FROM events WHERE event_type='issue_opened' AND (");
+                List<Object> titleParams = new ArrayList<>();
+                boolean first = true;
+                for (String gk : group.keySet()) {
+                    String[] parts = gk.split("\\|", 2);
+                    if (parts.length < 2) continue;
+                    if (!first) titleSql.append(" OR ");
+                    titleSql.append("(issue_id=? AND repo_key=?)");
+                    titleParams.add(parts[1]);
+                    titleParams.add(parts[0]);
+                    first = false;
+                }
+                titleSql.append(")");
+                grapeJdbc.query(titleSql.toString(), rs -> {
+                    String key = rs.getString("repo_key") + "|" + rs.getString("issue_id");
+                    if (!titleByKey.containsKey(key)) {
+                        String t = extractIssueTitle(rs.getString("payload"), om);
+                        if (!t.isEmpty()) titleByKey.put(key, t);
+                    }
+                }, titleParams.toArray());
+            } catch (Exception e) { /* ignore */ }
+        }
+
+        // 4. 构建结果（对齐健康中心）
         List<Map<String, Object>> allIssues = new ArrayList<>();
         for (Map.Entry<String, List<Map<String, Object>>> e : group.entrySet()) {
             List<Map<String, Object>> evs = e.getValue();
@@ -228,14 +256,8 @@ public class ConsoleUserController {
             String repoName = rk != null ? rk.replaceFirst("^gitcode:", "") : "";
             g.put("repoName", repoName);
             g.put("repoKey", rk);
-            // 从 payload 提取 title
-            String issueTitle = "";
-            for (Map<String, Object> ev : evs) {
-                if (issueTitle.isEmpty()) {
-                    issueTitle = extractIssueTitle(ev.get("payload"), om);
-                }
-            }
-            g.put("issueTitle", issueTitle);
+            // 从批量查的 title 缓存取标题
+            g.put("issueTitle", titleByKey.getOrDefault(e.getKey(), ""));
             g.put("eventCount", evs.size());
             g.put("lastTaskAt", evs.get(evs.size() - 1).get("created_at"));
             // 统计失败数
