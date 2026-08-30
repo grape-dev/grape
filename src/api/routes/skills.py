@@ -96,7 +96,7 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
     """从 configs/skill-description.json 同步官方技能到 skill 表，并触发 OBS 同步。
 
     1. DB 同步：新增 INSERT + 已有 UPDATE 元信息（display_name/description/agent_type）
-    2. OBS 同步：计算 content_hash，变更的技能打包 zip 上传 OBS + 软删除检测
+    2. OBS 同步：计算 content_hash，变更的技能打包 zip 上传 OBS
     返回同步结果。
     """
     from src.session_manager import db, db_lock
@@ -140,7 +140,7 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
                 added += 1
         db.commit()
 
-    # 2. OBS 同步（hash 检测 + 上传 + 软删除检测）
+    # 2. OBS 同步（hash 检测 + 上传）
     from src.storage.skill_sync import sync_official_skills_to_obs
     obs_result = await sync_official_skills_to_obs()
 

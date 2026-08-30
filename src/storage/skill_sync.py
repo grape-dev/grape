@@ -129,9 +129,12 @@ async def sync_official_skills_to_obs() -> dict:
         # 按主键 id 更新 DB
         updated = update_skill_content_hash(skill_id, current_hash, object_key)
         if updated:
-            if db_hash:
+            if db_hash and db_hash != current_hash:
                 result["updated"] += 1
                 logger.info(f"skill updated: {skill_name} (hash: {db_hash[:8]}... -> {current_hash[:8]}...)")
+            elif db_hash == current_hash and not db_file_path and object_key:
+                result["updated"] += 1
+                logger.info(f"skill file_path synced: {skill_name} (hash unchanged, file_path was empty)")
             else:
                 result["added"] += 1
                 logger.info(f"skill added: {skill_name} (hash: {current_hash[:8]}...)")
