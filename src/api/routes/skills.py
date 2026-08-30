@@ -145,7 +145,7 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
     obs_result = await sync_official_skills_to_obs()
 
     return {
-        "message": f"官方技能同步完成，新增 {added} 个，OBS 同步: +{obs_result['added']} ~{obs_result['updated']} -{obs_result['deleted']} 跳过{obs_result['skipped']}",
+        "message": f"官方技能同步完成，新增 {added} 个，OBS 同步: +{obs_result['added']} ~{obs_result['updated']} 跳过{obs_result['skipped']}",
         "added": added,
         "obs_result": obs_result,
     }
