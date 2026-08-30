@@ -67,7 +67,7 @@ async def sync_official_skills_to_obs() -> dict:
     """
     from src.storage import get_storage, skill_key
     from src.user.db import (
-        get_skill_content_hash, update_skill_content_hash,
+        update_skill_content_hash,
         deactivate_skill, list_active_official_skills,
     )
 
@@ -123,7 +123,7 @@ async def sync_official_skills_to_obs() -> dict:
             try:
                 zip_data = _pack_skill_zip(skill_dir)
                 # 上传是同步 IO 操作，用 run_in_executor 避免阻塞事件循环
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, storage.save_bytes, object_key, zip_data)
                 logger.info(f"uploaded skill to OBS: {skill_name} -> {object_key}")
             except Exception as e:
