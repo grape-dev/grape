@@ -100,12 +100,16 @@ async def sync_official_skills_to_obs() -> dict:
         if not current_hash:
             continue
 
-        # 查 DB 的 content_hash（按 skill_name + scope 查主键 id + hash）
-        skill_id, db_hash = get_skill_content_hash(skill_name)
+        # 查 DB 的 content_hash 和 file_path（按 skill_name + scope 查主键 id + hash + file_path）
+        skill_id, db_hash, db_file_path = get_skill_content_hash(skill_name)
 
+        # skip 条件：hash 相同且（非OBS模式 或 file_path非空）
+        # 非OBS模式：hash匹配就skip（不需要file_path）
+        # OBS模式：hash匹配但file_path为空时不skip（需要上传OBS补file_path）
         if db_hash == current_hash:
-            result["skipped"] += 1
-            continue
+            if storage is None or db_file_path:
+                result["skipped"] += 1
+                continue
 
         # hash 不同或技能不存在 → 需要同步
         object_key = ""
@@ -128,9 +132,6 @@ async def sync_official_skills_to_obs() -> dict:
             if db_hash:
                 result["updated"] += 1
                 logger.info(f"skill updated: {skill_name} (hash: {db_hash[:8]}... -> {current_hash[:8]}...)")
-            else:
-                result["added"] += 1
-                logger.info(f"skill added: {skill_name} (hash: {current_hash[:8]}...)")
 
     logger.info(f"sync done: +{result['added']} ~{result['updated']} skipped={result['skipped']}")
     return result

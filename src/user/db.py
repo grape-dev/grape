@@ -787,21 +787,21 @@ def get_skill_by_id(skill_id) -> dict | None:
         return None
 
 
-def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str]:
-    """读取技能的主键 id 和 content_hash（变更检测用）。
-    返回 (id, content_hash)，id=0 表示不存在。
+def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str, str]:
+    """读取技能的主键 id、content_hash 和 file_path（变更检测用）。
+    返回 (id, content_hash, file_path)，id=0 表示不存在。
     """
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, content_hash FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
+            c.execute("SELECT id, content_hash, file_path FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
             row = c.fetchone()
             if not row:
-                return (0, "")
-            return (row[0], row[1] or "")
+                return (0, "", "")
+            return (row[0], row[1] or "", row[2] or "")
     except Exception as e:
         log.warning(f"get_skill_content_hash failed: {e}")
-        return (0, "")
+        return (0, "", "")
 
 
 def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = "") -> bool:

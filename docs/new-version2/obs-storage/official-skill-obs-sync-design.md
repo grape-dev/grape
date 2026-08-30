@@ -118,8 +118,8 @@ ALTER TABLE skill ADD COLUMN content_hash VARCHAR(256) DEFAULT '';
    a. 解析本地目录路径：skills/<agent_type>/<skill>/
    b. 计算当前 content_hash
    c. 查 DB 该技能的 content_hash（按 skill_name + scope 查主键 id，再读 content_hash）
-   d. hash 相同 → 跳过（无变更）
-   e. hash 不同或技能不存在 → 打包 zip → 上传 OBS（OBS 模式）→ 按主键 id 更新 DB
+   d. hash 相同且（非OBS模式 或 file_path非空）→ 跳过（无变更）
+   e. hash 不同，或 OBS模式下file_path为空 → 打包 zip → 上传 OBS（OBS 模式）→ 按主键 id 更新 DB
 3. 返回同步结果（新增/更新/跳过数量）
 ```
 
