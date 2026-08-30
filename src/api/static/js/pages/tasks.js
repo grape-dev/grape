@@ -238,10 +238,10 @@ function openTaskCreateModal() {
     <h3 style="margin:0 0 14px;font-size:15px;color:#111">${I18N.t('tasks.create.modal_title')}</h3>
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
-      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.title_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</span>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span> <span style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</span>
         <input id="tcCreateTitle" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="${I18N.t('tasks.create.title_placeholder')}">
       </label>
-      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.desc_label')}
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span>
         <textarea id="tcCreateDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="${I18N.t('tasks.create.desc_placeholder')}"></textarea>
       </label>
       <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.scene_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.scene_hint')}</span>
@@ -293,6 +293,7 @@ function createTaskSubmit() {
   const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
   if (!repoKey.trim()) { showErr(I18N.t('tasks.create.err_no_repo')); return; }
   if (!title.trim()) { showErr(I18N.t('tasks.create.err_no_title')); return; }
+  if (!desc.trim()) { showErr(I18N.t('tasks.create.err_no_desc')); return; }
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.create.btn_creating'); }
   API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId, is_subtask_mode: subtaskMode})

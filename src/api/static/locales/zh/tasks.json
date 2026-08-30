@@ -44,7 +44,7 @@
     "title_hint": "将作为 GitCode Issue 标题（同仓库同名 open Issue 自动复用，不重复创建）",
     "title_placeholder": "任务标题（必填）",
     "desc_label": "描述",
-    "desc_placeholder": "任务描述",
+    "desc_placeholder": "任务描述（必填）",
     "scene_label": "开发场景",
     "scene_hint": "不选则由 VOD 审视时自动识别",
     "scene_none": "不指定（由 VOD 自动识别）",
@@ -56,6 +56,7 @@
     "btn_creating": "创建中…",
     "err_no_repo": "请先在仓库页选择仓库，再创建任务",
     "err_no_title": "请填写任务标题",
+    "err_no_desc": "请填写任务描述",
     "err_create_failed": "创建失败: {{msg}}",
     "success_prefix": "✅ "
   },

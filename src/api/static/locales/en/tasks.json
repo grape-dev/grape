@@ -44,7 +44,7 @@
     "title_hint": "Will be used as the GitCode Issue title (same-name open Issue in the repo is reused automatically, no duplicates created)",
     "title_placeholder": "Task title (required)",
     "desc_label": "Description",
-    "desc_placeholder": "Task description",
+    "desc_placeholder": "Task description (required)",
     "scene_label": "Dev Scenario",
     "scene_hint": "If not selected, VOD will auto-detect during review",
     "scene_none": "Not specified (auto-detected by VOD)",
@@ -56,6 +56,7 @@
     "btn_creating": "Creating…",
     "err_no_repo": "Please select a repository on the repository page before creating a task",
     "err_no_title": "Please fill in the task title",
+    "err_no_desc": "Please fill in the task description",
     "err_create_failed": "Create failed: {{msg}}",
     "success_prefix": "✅ "
   },
