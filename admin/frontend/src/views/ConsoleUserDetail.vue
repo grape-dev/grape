@@ -577,6 +577,13 @@ async function load() {
 }
 
 function onRepoChange() {
+  expandedIssues.value = new Set()
+  renderedIssues.value = new Set()
+  renderingIssues.value = new Set()
+  issueEvents.value = {}
+  issueEventsLoading.value = {}
+  issueSvgs.value = {}
+  issueViewModes.value = {}
   loadRepoIssues(0)
 }
 
