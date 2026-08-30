@@ -865,10 +865,21 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
     # 查 issue_state 中的 scene_id（按 repo_key + issue_number 批量查询）
     from src.api.session_store import get_issue_scene
     from src.api.pipeline_config import get_pipeline_config
+    from src.api.session_store import get_issue_stage
     tasks_out = []
     for r in rows:
         _rk = to_repo_key(from_repo_key(r[2]))
-        _scene_id = (get_issue_scene(_rk, f"#{r[3]}") or ("default", 0))[0]
+        _issue_id = f"#{r[3]}"
+        # 区分场景来源：issue_state.scene_id（VOD 识别）vs 仓库默认场景
+        _st = get_issue_stage(_rk, _issue_id)
+        _issue_scene_id = (_st.get("scene_id") or "") if _st else ""
+        if _issue_scene_id:
+            _scene_id = _issue_scene_id
+            _scene_source = "vod"  # VOD 识别
+        else:
+            # 回退到仓库默认场景
+            _scene_id = (get_issue_scene(_rk, _issue_id) or ("default", 0))[0]
+            _scene_source = "repo_default"
         _scene_name = ""
         try:
             _cfg = get_pipeline_config(_scene_id, repo_key=_rk)
@@ -885,5 +896,6 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
             "parent_issue_number": r[12] or 0,
             "scene_id": _scene_id,
             "scene_name": _scene_name,
+            "scene_source": _scene_source,
         })
     return {"tasks": tasks_out}
