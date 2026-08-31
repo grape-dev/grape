@@ -106,15 +106,49 @@ def parse_agent_output_json(final_text: str) -> dict | None:
     if not final_text:
         return None
     import re as _re, json as _json
-    m = _re.search(r"\{.*\}", final_text or "", _re.S)
+
+    # 去掉 markdown code fence（```json ... ```）
+    _clean = final_text
+    _clean = _clean.replace("```json", "").replace("```", "")
+
+    m = _re.search(r"\{.*\}", _clean, _re.S)
     if not m:
         return None
+    raw = m.group(0)
+
+    # 第一次：直接解析
     try:
-        obj = _json.loads(m.group(0))
+        obj = _json.loads(raw)
         if isinstance(obj, dict) and any(k in obj for k in ("actions", "conclusion", "artifacts", "next_step", "issue_summary")):
             return obj
     except Exception:
-        return None
+        pass
+
+    # 第二次：修复 ACP chunk 拆分导致的字段名断裂
+    # chunk 边界可能切在字段名中间，如 "actions" 被切成 "acti" + "ons"
+    # 或在 key 和 value 之间插入换行，如 "actions\n": [...]
+    # 策略：去掉所有空白后重新解析（与 hermes_acp._detect_structured_output 一致）
+    try:
+        compact = _re.sub(r'\s+', '', raw)
+        # 去空白后键名可能粘连，尝试用正则修复 {"key":"value"} 格式
+        # compact 中形如 {"actions":["..."],"conclusion":"..."} 是合法 JSON
+        obj = _json.loads(compact)
+        if isinstance(obj, dict) and any(k in obj for k in ("actions", "conclusion", "artifacts", "next_step", "issue_summary")):
+            return obj
+    except Exception:
+        pass
+
+    # 第三次：更激进的修复——去掉所有非 JSON 字符后尝试
+    # 只保留 { } [ ] " : , 以及字母数字和中文
+    try:
+        _stripped = _re.sub(r'[^\{\}\[\]":,\u4e00-\u9fff\w\s\\/-]', '', raw)
+        _compact2 = _re.sub(r'\s+', '', _stripped)
+        obj = _json.loads(_compact2)
+        if isinstance(obj, dict) and any(k in obj for k in ("actions", "conclusion", "artifacts", "next_step", "issue_summary")):
+            return obj
+    except Exception:
+        pass
+
     return None
 
 
