@@ -33,35 +33,37 @@ public class ConsoleUserController {
         StringBuilder where = new StringBuilder(" WHERE 1=1");
         List<Object> params = new ArrayList<>();
         if (keyword != null && !keyword.isBlank()) {
-            where.append(" AND (username LIKE ? OR nickname LIKE ?)");
+            where.append(" AND (u.username LIKE ? OR u.nickname LIKE ?)");
             params.add("%" + keyword + "%");
             params.add("%" + keyword + "%");
         }
         if (source != null && !source.isBlank()) {
             if ("gitcode".equals(source)) {
-                where.append(" AND gitcode_id IS NOT NULL AND gitcode_id<>''");
+                where.append(" AND u.gitcode_id IS NOT NULL AND u.gitcode_id<>''");
             } else if ("other".equals(source)) {
-                where.append(" AND (gitcode_id IS NULL OR gitcode_id='')");
+                where.append(" AND (u.gitcode_id IS NULL OR u.gitcode_id='')");
             } else if ("online".equals(source)) {
-                where.append(" AND last_active_at IS NOT NULL AND last_active_at >= NOW() - INTERVAL 30 MINUTE");
+                where.append(" AND u.last_active_at IS NOT NULL AND u.last_active_at >= NOW() - INTERVAL 30 MINUTE");
             } else if ("offline".equals(source)) {
-                where.append(" AND (last_active_at IS NULL OR last_active_at < NOW() - INTERVAL 30 MINUTE)");
+                where.append(" AND (u.last_active_at IS NULL OR u.last_active_at < NOW() - INTERVAL 30 MINUTE)");
             }
         }
 
         long total = 0;
         try {
-            total = grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts" + where, Long.class, params.toArray());
+            total = grapeJdbc.queryForObject("SELECT COUNT(*) FROM user_accounts u" + where, Long.class, params.toArray());
         } catch (Exception e) { log.warn("console-users count failed: {}", e.getMessage()); }
 
         List<Map<String, Object>> list = new ArrayList<>();
         try {
-            String sql = "SELECT id, username, nickname, gitcode_id, created_at, last_active_at, "
-                    + "huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>'' as has_huawei_ak, "
-                    + "feishu_app_id IS NOT NULL AND feishu_app_id<>'' as has_feishu, "
-                    + "gitcode_api_token IS NOT NULL AND gitcode_api_token<>'' as has_gitcode_token, "
-                    + "(last_active_at IS NOT NULL AND last_active_at >= NOW() - INTERVAL 30 MINUTE) as is_online "
-                    + "FROM user_accounts" + where + " ORDER BY last_active_at DESC, id DESC LIMIT ? OFFSET ?";
+            String sql = "SELECT u.id, u.username, u.nickname, u.gitcode_id, u.created_at, u.last_active_at, "
+                    + "u.huawei_cloud_ak IS NOT NULL AND u.huawei_cloud_ak<>'' as has_huawei_ak, "
+                    + "cas.im_app_id IS NOT NULL AND cas.im_app_id<>'' as has_feishu, "
+                    + "u.gitcode_api_token IS NOT NULL AND u.gitcode_api_token<>'' as has_gitcode_token, "
+                    + "(u.last_active_at IS NOT NULL AND u.last_active_at >= NOW() - INTERVAL 30 MINUTE) as is_online "
+                    + "FROM user_accounts u "
+                    + "LEFT JOIN chat_agent_session cas ON cas.user_id=u.id AND cas.repo_key='' AND cas.im_provider='feishu'"
+                    + where + " ORDER BY u.last_active_at DESC, u.id DESC LIMIT ? OFFSET ?";
             params.add(size);
             params.add(page * size);
             grapeJdbc.query(sql, rs -> {
@@ -104,17 +106,19 @@ public class ConsoleUserController {
     public Map<String, Object> detail(@PathVariable int id) {
         Map<String, Object> info = new LinkedHashMap<>();
         try {
-            grapeJdbc.query("SELECT id, username, nickname, gitcode_id, created_at, last_active_at, "
-                    + "huawei_cloud_ak IS NOT NULL AND huawei_cloud_ak<>'' as has_huawei_ak, "
-                    + "huawei_cloud_sk IS NOT NULL AND huawei_cloud_sk<>'' as has_huawei_sk, "
-                    + "feishu_app_id IS NOT NULL AND feishu_app_id<>'' as has_feishu, "
-                    + "feishu_app_secret IS NOT NULL AND feishu_app_secret<>'' as has_feishu_secret, "
-                    + "gitcode_api_token IS NOT NULL AND gitcode_api_token<>'' as has_gitcode_token, "
-                    + "CODEARTS_CLI_AK IS NOT NULL AND CODEARTS_CLI_AK<>'' as has_codearts_ak, "
-                    + "CODEARTS_CLI_SK IS NOT NULL AND CODEARTS_CLI_SK<>'' as has_codearts_sk, "
-                    + "gitcode_publish_repo, github_publish_repo, last_scene, "
-                    + "(last_active_at IS NOT NULL AND last_active_at >= NOW() - INTERVAL 30 MINUTE) as is_online "
-                    + "FROM user_accounts WHERE id=?", rs -> {
+            grapeJdbc.query("SELECT u.id, u.username, u.nickname, u.gitcode_id, u.created_at, u.last_active_at, "
+                    + "u.huawei_cloud_ak IS NOT NULL AND u.huawei_cloud_ak<>'' as has_huawei_ak, "
+                    + "u.huawei_cloud_sk IS NOT NULL AND u.huawei_cloud_sk<>'' as has_huawei_sk, "
+                    + "cas.im_app_id IS NOT NULL AND cas.im_app_id<>'' as has_feishu, "
+                    + "cas.im_app_secret IS NOT NULL AND cas.im_app_secret<>'' as has_feishu_secret, "
+                    + "u.gitcode_api_token IS NOT NULL AND u.gitcode_api_token<>'' as has_gitcode_token, "
+                    + "u.CODEARTS_CLI_AK IS NOT NULL AND u.CODEARTS_CLI_AK<>'' as has_codearts_ak, "
+                    + "u.CODEARTS_CLI_SK IS NOT NULL AND u.CODEARTS_CLI_SK<>'' as has_codearts_sk, "
+                    + "u.gitcode_publish_repo, u.github_publish_repo, u.last_scene, "
+                    + "(u.last_active_at IS NOT NULL AND u.last_active_at >= NOW() - INTERVAL 30 MINUTE) as is_online "
+                    + "FROM user_accounts u "
+                    + "LEFT JOIN chat_agent_session cas ON cas.user_id=u.id AND cas.repo_key='' AND cas.im_provider='feishu' "
+                    + "WHERE u.id=?", rs -> {
                 info.put("id", rs.getInt("id"));
                 info.put("username", rs.getString("username"));
                 info.put("nickname", rs.getString("nickname"));
@@ -136,219 +140,159 @@ public class ConsoleUserController {
             }, id);
         } catch (Exception e) { /* ignore */ }
 
-        // 用户活动统计（通过 repo_owner 关联仓库再关联任务，只统计 Issue 任务，排除对话任务）
-        try {
-            String issueFilter = " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
-            String notCancelled = " AND (t.status IS NULL OR t.status<>'cancelled')";
-            String baseJoin = " FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=?";
-            Long taskCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter, Long.class, id);
-            info.put("taskCount", taskCount != null ? taskCount : 0);
-            Long issueTaskCount = taskCount;
-            info.put("issueTaskCount", issueTaskCount != null ? issueTaskCount : 0);
-            Long chatTaskCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + " AND (t.issue_id IS NULL OR t.issue_id='')", Long.class, id);
-            info.put("chatTaskCount", chatTaskCount != null ? chatTaskCount : 0);
-            Long issueCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(DISTINCT t.issue_id)" + baseJoin + issueFilter, Long.class, id);
-            info.put("issueCount", issueCount != null ? issueCount : 0);
-            Long completedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND t.exit_code=0 AND t.completed_at IS NOT NULL", Long.class, id);
-            info.put("completedCount", completedCount != null ? completedCount : 0);
-            Long failedCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND t.exit_code<>0 AND t.exit_code IS NOT NULL", Long.class, id);
-            info.put("failedCount", failedCount != null ? failedCount : 0);
-            Long pendingCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + notCancelled + " AND (t.exit_code IS NULL OR t.completed_at IS NULL)", Long.class, id);
-            info.put("pendingCount", pendingCount != null ? pendingCount : 0);
-            Long cancelledCount = grapeJdbc.queryForObject(
-                "SELECT COUNT(*)" + baseJoin + issueFilter + " AND t.status='cancelled'", Long.class, id);
-            info.put("cancelledCount", cancelledCount != null ? cancelledCount : 0);
-            if (taskCount != null && taskCount > 0 && completedCount != null) {
-                info.put("successRate", Math.round(completedCount * 1000.0 / taskCount) / 10.0 + "%");
-            } else {
-                info.put("successRate", "—");
-            }
-        } catch (Exception e) { /* ignore */ }
-
         // 仓库 × Issue 矩阵（Issue 分析 tab 用）
         try {
             List<Map<String, Object>> repoMatrix = grapeJdbc.query(
-                "SELECT m.full_name, m.repo_key, " +
-                "COUNT(CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 END) as task_count, " +
-                "COUNT(DISTINCT CASE WHEN t.issue_id IS NOT NULL AND t.issue_id<>'' THEN t.issue_id END) as issue_count, " +
-                "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as completed, " +
-                "SUM(CASE WHEN t.exit_code<>0 AND t.exit_code IS NOT NULL AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as failed, " +
-                "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND t.issue_id IS NOT NULL AND t.issue_id<>'' AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as pending, " +
-                "SUM(CASE WHEN t.status='cancelled' AND t.issue_id IS NOT NULL AND t.issue_id<>'' THEN 1 ELSE 0 END) as cancelled " +
-                "FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "GROUP BY m.full_name, m.repo_key ORDER BY task_count DESC",
+                "SELECT m.full_name, m.repo_key " +
+                "FROM managed_repos m " +
+                "INNER JOIN user_repos ur ON ur.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.id = ur.user_id WHERE u.id=? " +
+                "ORDER BY m.full_name",
                 (rs2, rowNum) -> {
                     Map<String, Object> r = new LinkedHashMap<>();
                     r.put("fullName", rs2.getString("full_name"));
                     r.put("repoKey", rs2.getString("repo_key"));
-                    r.put("taskCount", rs2.getInt("task_count"));
-                    r.put("issueCount", rs2.getInt("issue_count"));
-                    r.put("completed", rs2.getInt("completed"));
-                    r.put("failed", rs2.getInt("failed"));
-                    r.put("pending", rs2.getInt("pending"));
-                    r.put("cancelled", rs2.getInt("cancelled"));
                     return r;
                 }, id);
             info.put("repoMatrix", repoMatrix);
-            info.put("repoCount", repoMatrix.size());
         } catch (Exception e) { /* ignore */ }
 
-        // 最近活动（最近 5 条任务）
-        try {
-            List<Map<String, Object>> recentTasks = grapeJdbc.query(
-                "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at " +
-                "FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
-                "ORDER BY t.started_at DESC LIMIT 5",
-                (rs2, rowNum) -> {
-                    Map<String, Object> r = new LinkedHashMap<>();
-                    r.put("id", rs2.getString("id"));
-                    String fullName = rs2.getString("full_name");
-                    r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
-                    r.put("issueId", rs2.getString("issue_id"));
-                    r.put("exitCode", rs2.getObject("exit_code"));
-                    r.put("agentType", rs2.getString("agent_type"));
-                    r.put("skill", rs2.getString("skill"));
-                    r.put("startedAt", rs2.getString("started_at"));
-                    r.put("completedAt", rs2.getString("completed_at"));
-                    // 状态判断
-                    Object exitCode = rs2.getObject("exit_code");
-                    String completedAt = rs2.getString("completed_at");
-                    if (exitCode != null && ((Integer) exitCode) == 0 && completedAt != null) {
-                        r.put("status", "completed");
-                    } else if (exitCode != null && ((Integer) exitCode) != 0) {
-                        r.put("status", "failed");
-                    } else {
-                        r.put("status", "pending");
-                    }
-                    return r;
-                }, id);
-            info.put("recentTasks", recentTasks);
-        } catch (Exception e) { /* ignore */ }
-
-        // 进行中任务（最近 5 条）
-        try {
-            List<Map<String, Object>> recentPending = grapeJdbc.query(
-                "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at " +
-                "FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND (t.exit_code IS NULL OR t.completed_at IS NULL) " +
-                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
-                "AND (t.status IS NULL OR t.status<>'cancelled') " +
-                "ORDER BY t.started_at DESC LIMIT 5",
-                (rs2, rowNum) -> {
-                    Map<String, Object> r = new LinkedHashMap<>();
-                    r.put("id", rs2.getString("id"));
-                    String fullName = rs2.getString("full_name");
-                    r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
-                    r.put("issueId", rs2.getString("issue_id"));
-                    r.put("exitCode", rs2.getObject("exit_code"));
-                    r.put("agentType", rs2.getString("agent_type"));
-                    r.put("skill", rs2.getString("skill"));
-                    r.put("startedAt", rs2.getString("started_at"));
-                    r.put("completedAt", rs2.getString("completed_at"));
-                    r.put("status", "pending");
-                    return r;
-                }, id);
-            info.put("recentPendingTasks", recentPending);
-        } catch (Exception e) { /* ignore */ }
-
-        // 最近失败任务（最近 5 条）
-        try {
-            List<Map<String, Object>> recentFailed = grapeJdbc.query(
-                "SELECT t.id, t.repo_key, m.full_name, t.issue_id, t.status, t.exit_code, " +
-                "t.agent_type, t.skill, t.started_at, t.completed_at " +
-                "FROM agent_tasks t " +
-                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
-                "INNER JOIN user_accounts u ON u.username = m.repo_owner WHERE u.id=? " +
-                "AND t.exit_code<>0 AND t.exit_code IS NOT NULL " +
-                "AND t.issue_id IS NOT NULL AND t.issue_id<>'' " +
-                "ORDER BY t.started_at DESC LIMIT 5",
-                (rs2, rowNum) -> {
-                    Map<String, Object> r = new LinkedHashMap<>();
-                    r.put("id", rs2.getString("id"));
-                    String fullName = rs2.getString("full_name");
-                    r.put("repoName", fullName != null ? fullName : rs2.getString("repo_key"));
-                    r.put("issueId", rs2.getString("issue_id"));
-                    r.put("exitCode", rs2.getObject("exit_code"));
-                    r.put("agentType", rs2.getString("agent_type"));
-                    r.put("skill", rs2.getString("skill"));
-                    r.put("startedAt", rs2.getString("started_at"));
-                    r.put("completedAt", rs2.getString("completed_at"));
-                    r.put("status", "failed");
-                    return r;
-                }, id);
-            info.put("recentFailedTasks", recentFailed);
-        } catch (Exception e) { /* ignore */ }
 
         return info;
     }
 
     @GetMapping("/{id}/repo-issues")
     public Map<String, Object> repoIssues(@PathVariable int id,
-                                          @RequestParam String repoKey,
+                                          @RequestParam(required = false) String repoKey,
                                           @RequestParam(defaultValue = "0") int page,
                                           @RequestParam(defaultValue = "5") int size) {
         Map<String, Object> result = new LinkedHashMap<>();
 
-        String joinSql = " FROM agent_tasks t" +
-                " INNER JOIN managed_repos m ON t.repo_key = m.repo_key" +
-                " INNER JOIN user_accounts u ON u.username = m.repo_owner" +
-                " WHERE u.id=?" +
-                " AND m.repo_key=?" +
-                " AND t.issue_id IS NOT NULL AND t.issue_id<>''";
-        Object[] baseParams = {id, repoKey};
-
-        // Issue 总数
-        long total = 0;
+        // 1. 查该用户关联的所有仓库 repo_key（对齐健康中心，加用户限制）
+        List<String> userRepoKeys = new ArrayList<>();
         try {
-            total = grapeJdbc.queryForObject(
-                "SELECT COUNT(DISTINCT t.issue_id)" + joinSql, Long.class, baseParams);
+            userRepoKeys = grapeJdbc.queryForList(
+                "SELECT DISTINCT t.repo_key FROM agent_tasks t " +
+                "INNER JOIN managed_repos m ON t.repo_key = m.repo_key " +
+                "INNER JOIN user_repos ur ON ur.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.id = ur.user_id " +
+                "WHERE u.id=? AND t.issue_id IS NOT NULL AND t.issue_id<>''", String.class, id);
         } catch (Exception e) { /* ignore */ }
 
-        // Issue 分页列表（GROUP BY issue_id，按最近活动时间倒序）
-        List<Map<String, Object>> list = new ArrayList<>();
-        try {
-            String sql = "SELECT t.issue_id, " +
-                    "COUNT(*) as task_count, " +
-                    "SUM(CASE WHEN t.exit_code=0 AND t.completed_at IS NOT NULL THEN 1 ELSE 0 END) as completed, " +
-                    "SUM(CASE WHEN t.exit_code<>0 AND t.exit_code IS NOT NULL THEN 1 ELSE 0 END) as failed, " +
-                    "SUM(CASE WHEN (t.exit_code IS NULL OR t.completed_at IS NULL) AND (t.status IS NULL OR t.status<>'cancelled') THEN 1 ELSE 0 END) as pending, " +
-                    "SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END) as cancelled, " +
-                    "MAX(t.started_at) as last_task_at " +
-                    joinSql +
-                    " GROUP BY t.issue_id" +
-                    " ORDER BY last_task_at DESC LIMIT ? OFFSET ?";
-            Object[] params = new Object[]{id, repoKey, size, page * size};
-            grapeJdbc.query(sql, rs -> {
-                Map<String, Object> r = new LinkedHashMap<>();
-                r.put("issueId", rs.getString("issue_id"));
-                r.put("taskCount", rs.getInt("task_count"));
-                r.put("completed", rs.getInt("completed"));
-                r.put("failed", rs.getInt("failed"));
-                r.put("pending", rs.getInt("pending"));
-                r.put("cancelled", rs.getInt("cancelled"));
-                r.put("lastTaskAt", rs.getString("last_task_at"));
-                list.add(r);
-            }, params);
-        } catch (Exception e) { /* ignore */ }
+        if (userRepoKeys.isEmpty()) {
+            result.put("content", List.of());
+            result.put("totalElements", 0);
+            result.put("totalPages", 0);
+            result.put("page", page);
+            result.put("size", size);
+            return result;
+        }
 
-        result.put("content", list);
+        // 2. 查 events（对齐健康中心：直接查 events 表，Java 里分组）
+        StringBuilder where = new StringBuilder(" WHERE issue_id IS NOT NULL AND issue_id<>''");
+        List<Object> params = new ArrayList<>();
+        // 限制用户关联的仓库
+        if (userRepoKeys.size() == 1) {
+            where.append(" AND repo_key=?");
+            params.add(userRepoKeys.get(0));
+        } else {
+            where.append(" AND repo_key IN (");
+            for (int i = 0; i < userRepoKeys.size(); i++) {
+                if (i > 0) where.append(",");
+                where.append("?");
+                params.add(userRepoKeys.get(i));
+            }
+            where.append(")");
+        }
+        // 仓库筛选
+        if (repoKey != null && !repoKey.isEmpty()) {
+            where.append(" AND repo_key=?");
+            params.add(repoKey);
+        }
+
+        List<Map<String, Object>> rows;
+        try {
+            rows = grapeJdbc.queryForList(
+                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, repo_key"
+                + " FROM events" + where + " ORDER BY created_at", params.toArray());
+        } catch (Exception e) {
+            rows = List.of();
+        }
+
+        // 3. 按 repo_key + issue_id 组合分组（issue_id不唯一，不同仓库有相同编号）
+        Map<String, List<Map<String, Object>>> group = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String groupKey = row.get("repo_key") + "|" + row.get("issue_id");
+            group.computeIfAbsent(groupKey, k -> new ArrayList<>()).add(row);
+        }
+
+        // 3.5 批量查 issue_opened 事件的 payload 提取标题（避免每行带 payload TEXT 大字段）
+        com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+        Map<String, String> titleByKey = new java.util.HashMap<>();
+        if (!group.isEmpty()) {
+            try {
+                StringBuilder titleSql = new StringBuilder(
+                    "SELECT issue_id, repo_key, payload FROM events WHERE event_type='issue_opened' AND (");
+                List<Object> titleParams = new ArrayList<>();
+                boolean first = true;
+                for (String gk : group.keySet()) {
+                    String[] parts = gk.split("\\|", 2);
+                    if (parts.length < 2) continue;
+                    if (!first) titleSql.append(" OR ");
+                    titleSql.append("(issue_id=? AND repo_key=?)");
+                    titleParams.add(parts[1]);
+                    titleParams.add(parts[0]);
+                    first = false;
+                }
+                titleSql.append(")");
+                grapeJdbc.query(titleSql.toString(), rs -> {
+                    String key = rs.getString("repo_key") + "|" + rs.getString("issue_id");
+                    if (!titleByKey.containsKey(key)) {
+                        String t = extractIssueTitle(rs.getString("payload"), om);
+                        if (!t.isEmpty()) titleByKey.put(key, t);
+                    }
+                }, titleParams.toArray());
+            } catch (Exception e) { /* ignore */ }
+        }
+
+        // 4. 构建结果（对齐健康中心）
+        List<Map<String, Object>> allIssues = new ArrayList<>();
+        for (Map.Entry<String, List<Map<String, Object>>> e : group.entrySet()) {
+            List<Map<String, Object>> evs = e.getValue();
+            Map<String, Object> g = new LinkedHashMap<>();
+            g.put("issueId", evs.get(0).get("issue_id"));
+            // repoName 从 repo_key 提取
+            String rk = (String) evs.get(0).get("repo_key");
+            String repoName = rk != null ? rk.replaceFirst("^gitcode:", "") : "";
+            g.put("repoName", repoName);
+            g.put("repoKey", rk);
+            // 从批量查的 title 缓存取标题
+            g.put("issueTitle", titleByKey.getOrDefault(e.getKey(), ""));
+            g.put("eventCount", evs.size());
+            g.put("lastTaskAt", evs.get(evs.size() - 1).get("created_at"));
+            // 统计失败数
+            int failed = 0;
+            for (Map<String, Object> ev : evs) {
+                if ("failed".equals(ev.get("status"))) failed++;
+            }
+            g.put("failed", failed);
+            allIssues.add(g);
+        }
+
+        // 5. 分页（按 lastTaskAt 倒序后分页）
+        allIssues.sort((a, b) -> {
+            String aT = (String) a.get("lastTaskAt");
+            String bT = (String) b.get("lastTaskAt");
+            if (aT == null) aT = "";
+            if (bT == null) bT = "";
+            return bT.compareTo(aT);
+        });
+        int total = allIssues.size();
+        int from = Math.min(page * size, total);
+        int to = Math.min(from + size, total);
+        List<Map<String, Object>> pagedIssues = allIssues.subList(from, to);
+
+        result.put("content", pagedIssues);
         result.put("totalElements", total);
         result.put("totalPages", (total + size - 1) / size);
         result.put("page", page);
@@ -369,5 +313,103 @@ public class ConsoleUserController {
             result.put("message", "操作失败: " + e.getMessage());
         }
         return result;
+    }
+
+    @GetMapping("/{id}/issue-timeline")
+    public Map<String, Object> issueTimeline(@PathVariable int id,
+                                             @RequestParam(required = false) String repoKey,
+                                             @RequestParam String issueId) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<Map<String, Object>> events = new ArrayList<>();
+        try {
+            // 1. 限制到当前用户关联的仓库（安全：admin 不能查非自己用户的 issue）
+            List<String> userRepoKeys = grapeJdbc.queryForList(
+                "SELECT DISTINCT m.repo_key FROM managed_repos m " +
+                "INNER JOIN user_repos ur ON ur.repo_key = m.repo_key " +
+                "INNER JOIN user_accounts u ON u.id = ur.user_id WHERE u.id=?", String.class, id);
+            if (userRepoKeys.isEmpty()) {
+                result.put("issueId", issueId);
+                result.put("events", events);
+                return result;
+            }
+
+            // 2. 构建 WHERE：issueId + 用户仓库限制 + 可选 repoKey 筛选
+            StringBuilder where = new StringBuilder(" WHERE e.issue_id=?");
+            List<Object> params = new ArrayList<>();
+            params.add(issueId);
+            if (userRepoKeys.size() == 1) {
+                where.append(" AND e.repo_key=?");
+                params.add(userRepoKeys.get(0));
+            } else {
+                where.append(" AND e.repo_key IN (");
+                for (int i = 0; i < userRepoKeys.size(); i++) {
+                    if (i > 0) where.append(",");
+                    where.append("?");
+                    params.add(userRepoKeys.get(i));
+                }
+                where.append(")");
+            }
+            if (repoKey != null && !repoKey.isEmpty()) {
+                where.append(" AND e.repo_key=?");
+                params.add(repoKey);
+            }
+
+            // 3. LEFT JOIN 一次性查出 events + task_id + engine 信息（对齐 RuntimeController.issueEvents）
+            events = grapeJdbc.query(
+                "SELECT e.seq, e.event_type, e.agent_type, e.skill, e.status, e.duration, e.created_at, " +
+                "e.repo_key, " +
+                "t.id as task_id, " +
+                "ar.name as engine_name, " +
+                "COALESCE(rc.device_name, '本机直连') as engine_device, " +
+                "COALESCE(rc.last_ip, '127.0.0.1') as last_ip " +
+                "FROM events e " +
+                "LEFT JOIN agent_tasks t ON t.event_seq = e.seq AND t.repo_key = e.repo_key " +
+                "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id " +
+                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id " +
+                where + " ORDER BY e.created_at",
+                (rs, rowNum) -> {
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("seq", rs.getInt("seq"));
+                    r.put("eventType", rs.getString("event_type"));
+                    r.put("agentType", rs.getString("agent_type"));
+                    r.put("skill", rs.getString("skill"));
+                    r.put("status", rs.getString("status"));
+                    r.put("duration", rs.getObject("duration"));
+                    r.put("createdAt", rs.getString("created_at"));
+                    r.put("repoKey", rs.getString("repo_key"));
+                    r.put("taskId", rs.getString("task_id"));
+                    r.put("engine", buildEngineName(rs));
+                    r.put("engineIp", rs.getString("last_ip"));
+                    return r;
+                }, params.toArray());
+        } catch (Exception e) { /* ignore */ }
+        result.put("issueId", issueId);
+        result.put("events", events);
+        return result;
+    }
+
+    private String extractIssueTitle(Object payload, com.fasterxml.jackson.databind.ObjectMapper om) {
+        if (payload == null) return "";
+        try {
+            String json = payload.toString();
+            com.fasterxml.jackson.databind.JsonNode root = om.readTree(json);
+            com.fasterxml.jackson.databind.JsonNode attrs = root.path("object_attributes");
+            if (!attrs.isMissingNode()) {
+                String t = attrs.path("title").asText("");
+                if (!t.isEmpty()) return t;
+            }
+        } catch (Exception e) { /* ignore */ }
+        return "";
+    }
+
+    /** 引擎实例名（对齐健康中心格式: name-device(ip)） */
+    private String buildEngineName(java.sql.ResultSet rs) throws java.sql.SQLException {
+        String engineName = rs.getString("engine_name");
+        if (engineName == null || engineName.isEmpty()) return null;
+        String device = rs.getString("engine_device");
+        String ip = rs.getString("last_ip");
+        if (device == null || device.isEmpty()) device = "本机直连";
+        if (ip == null || ip.isEmpty()) ip = "127.0.0.1";
+        return engineName + "-" + device + "(" + ip + ")";
     }
 }

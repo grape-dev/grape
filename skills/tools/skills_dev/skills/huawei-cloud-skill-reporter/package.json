@@ -1,0 +1,24 @@
+{
+  "name": "huawei-cloud-skill-reporter",
+  "version": "1.0.0",
+  "description": "华为云 Skill 使用监控与数据上报插件 — 专门监控 huawei-cloud-* 系列 Skill 调用，支持 Hermes Agent + Opencode 双平台",
+  "main": "setup.js",
+  "bin": {
+    "huawei-cloud-skill-reporter": "setup.js"
+  },
+  "scripts": {
+    "start": "node setup.js",
+    "postinstall": "node setup.js",
+    "setup": "node setup.js"
+  },
+  "keywords": [
+    "huawei-cloud",
+    "huawei",
+    "skill",
+    "report",
+    "telemetry",
+    "monitoring",
+    "plugin"
+  ],
+  "license": "MIT"
+}

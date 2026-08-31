@@ -17,7 +17,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import javax.servlet.http.HttpServletRequest;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -164,23 +163,35 @@ public class RuntimeController {
 
     /** 按 Issue 获取事件列表（用于时序图 + 事件列表） */
     @GetMapping("/runtime/issues/{issueId}/events")
-    public Map<String, Object> issueEvents(@PathVariable String issueId) {
+    public Map<String, Object> issueEvents(@PathVariable String issueId,
+                                           @RequestParam(required = false) String repoKey) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("issueId", issueId);
 
         List<Map<String, Object>> events = new ArrayList<>();
         try {
-            // 查 agent_tasks 建立 (issue_id, event_seq) → task_id 映射
-            Map<Integer, String> seqToTaskId = new HashMap<>();
-            grapeJdbc.query("SELECT event_seq, id FROM agent_tasks WHERE issue_id=?",
-                    rs -> { seqToTaskId.put(rs.getInt("event_seq"), rs.getString("id")); }, issueId);
+            // LEFT JOIN 一次性查出 events + task_id + engine 信息（无需单独查 agent_tasks）
+            StringBuilder eventSql = new StringBuilder(
+                "SELECT e.seq, e.event_type, e.issue_id, e.agent_type, e.skill, e.status, e.duration, e.created_at, e.actor, e.repo_key, "
+                + "t.id as task_id, ar.name as engine_name, "
+                + "COALESCE(rc.device_name, '本机直连') as engine_device, COALESCE(rc.last_ip, '127.0.0.1') as engine_ip "
+                + "FROM events e "
+                + "LEFT JOIN agent_tasks t ON t.event_seq = e.seq AND t.repo_key = e.repo_key "
+                + "LEFT JOIN agent_runtimes ar ON t.runtime_id = ar.id "
+                + "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id "
+                + "WHERE e.issue_id=?");
+            List<Object> params = new ArrayList<>();
+            params.add(issueId);
+            if (repoKey != null && !repoKey.isEmpty()) {
+                eventSql.append(" AND e.repo_key=?");
+                params.add(repoKey);
+            }
+            eventSql.append(" ORDER BY e.created_at");
 
-            grapeJdbc.query("SELECT seq, event_type, issue_id, agent_type, skill, status, duration, created_at, actor, repo_key "
-                    + "FROM events WHERE issue_id=? ORDER BY created_at",
+            grapeJdbc.query(eventSql.toString(),
                     rs -> {
                         Map<String, Object> s = new LinkedHashMap<>();
-                        int seq = rs.getInt("seq");
-                        s.put("seq", seq);
+                        s.put("seq", rs.getInt("seq"));
                         s.put("eventType", rs.getString("event_type"));
                         s.put("agentType", rs.getString("agent_type"));
                         s.put("skill", rs.getString("skill"));
@@ -189,9 +200,15 @@ public class RuntimeController {
                         s.put("createdAt", rs.getString("created_at"));
                         s.put("actor", rs.getString("actor"));
                         s.put("repoKey", rs.getString("repo_key"));
-                        s.put("taskId", seqToTaskId.getOrDefault(seq, ""));
+                        s.put("taskId", rs.getString("task_id") != null ? rs.getString("task_id") : "");
+                        // 引擎名（格式: engine-device(ip)，对齐健康中心）
+                        String engineName = rs.getString("engine_name");
+                        String engineDevice = rs.getString("engine_device");
+                        String engineIp = rs.getString("engine_ip");
+                        s.put("engine", engineName != null ? engineName + "-" + engineDevice + "(" + engineIp + ")" : "");
+                        s.put("engineIp", engineIp);
                         events.add(s);
-                    }, issueId);
+                    }, params.toArray());
         } catch (Exception e) { /* ignore */ }
         result.put("events", events);
         return result;

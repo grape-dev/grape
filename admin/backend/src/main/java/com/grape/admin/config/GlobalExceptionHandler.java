@@ -27,7 +27,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(BizException.class)
     public ResponseEntity<Map<String, Object>> handleBiz(BizException e) {
-        return ResponseEntity.badRequest().body(Map.of("code", 400, "message", e.getMessage()));
+        return ResponseEntity.status(e.getStatus()).body(Map.of("code", e.getStatus().value(), "message", e.getMessage()));
     }
 
     @ExceptionHandler(NotFoundException.class)

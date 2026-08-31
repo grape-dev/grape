@@ -1,0 +1,59 @@
+# gitsync example configuration
+identity:
+  name: "GitHub Mirror Bot"
+  email: "mirror-bot@example.com"
+
+remotes:
+  gitcode: "git@gitcode.com:org/repo.git"
+  github: "git@github.com:org/repo.git"
+  gitcode_ai_shell: "git@gitcode.com:org/ai_shell_repo.git"
+  gitcode_downstream: "git@gitcode.com:org/downstream_repo.git"
+
+branches:
+  source_master: "master"
+  source_branch: "github"
+
+targets:
+  - name: github_master
+    remote: github
+    branch: master
+    rewrite_identity: true
+    match_strategy: content
+    enabled: true          # 需求2: false 则禁用该同步目标(不参与 sync/发布/DB 回写)
+  - name: ai_shell
+    remote: gitcode_ai_shell
+    branch: ai_shell
+    rewrite_identity: false
+    match_strategy: sha
+    enabled: true
+  - name: downstream
+    remote: gitcode_downstream
+    branch: master
+    rewrite_identity: true
+    match_strategy: sha
+    verify_against: github_master
+    enabled: true
+
+map_file: "/var/lib/gitsync/map.txt"
+acknowledged_commits: []
+backup_ref: "refs/heads/backup/pre-sync-"
+tmpdir: ""
+
+clawhub:
+  base_url: "https://clawhub.ai"
+  organization: "changhui123456"
+  config_path: "/var/lib/clawhub/config.json"
+  skills_dir: "skills"
+  manifest_file: "/var/lib/gitsync/clawhub-manifest.json"
+  manifest_backup_file: "/var/lib/gitsync/clawhub-manifest.backup.json"
+  name_dir_mismatch: "warn"
+  # 需求3: 发布黑名单(精确名或 glob 通配), 命中不进行 ClawHub 上报
+  exclude_skills:
+    - "huawei-cloud-terraform-generator"
+
+db:
+  host: "192.168.1.18"
+  user: "root"
+  password: "***"
+  database: "rds-hd-skillsopr-db"
+  product_dir: "/var/lib/gitsync/products"

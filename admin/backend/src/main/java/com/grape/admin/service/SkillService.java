@@ -273,8 +273,12 @@ public class SkillService {
         String newFilePath = "";
         if (obs.enabled() && warning == null) {
             String objectKey = obs.skillKey("official", "", skillName, 1);
-            byte[] zipBytes = obs.normalizeSkillZip(targetDir, skillName);
-            obs.saveBytes(objectKey, zipBytes);
+            try {
+                byte[] zipBytes = obs.normalizeSkillZip(targetDir, skillName);
+                obs.saveBytes(objectKey, zipBytes);
+            } catch (java.io.IOException e) {
+                throw new BizException("技能打包失败：" + skillName + " -> " + e.getMessage());
+            }
             newFilePath = objectKey;
         }
         jdbcTemplate.update("UPDATE skill SET scope = 'official', owner_id = '', file_path = ?, updated_by = ? WHERE id = ?",
@@ -313,8 +317,12 @@ public class SkillService {
             throw new NotFoundException("官方技能目录不存在: " + skillDir);
         }
         String objectKey = obs.skillKey("official", "", skill.getSkillName(), 1);
-        byte[] zipBytes = obs.normalizeSkillZip(skillDir, skill.getSkillName());
-        obs.saveBytes(objectKey, zipBytes);
+        try {
+            byte[] zipBytes = obs.normalizeSkillZip(skillDir, skill.getSkillName());
+            obs.saveBytes(objectKey, zipBytes);
+        } catch (java.io.IOException e) {
+            throw new BizException("技能打包失败：" + skill.getSkillName() + " -> " + e.getMessage());
+        }
         // v2.5：file_path=对象键（真实存储路径）；updated_by=操作者（created_by 保留）
         jdbcTemplate.update("UPDATE skill SET file_path = ?, updated_by = ? WHERE id = ?",
                 objectKey, username, id);
@@ -434,8 +442,12 @@ public class SkillService {
             if (obs.enabled()) {
                 String objectKey = obs.isObjectKey(filePath) ? filePath
                         : obs.skillKey("official", "", skillName, 1);
-                byte[] zipBytes = obs.normalizeSkillZip(skillDir, skillName);
-                obs.saveBytes(objectKey, zipBytes);
+                try {
+                    byte[] zipBytes = obs.normalizeSkillZip(skillDir, skillName);
+                    obs.saveBytes(objectKey, zipBytes);
+                } catch (java.io.IOException e) {
+                    throw new BizException("技能打包失败：" + skillName + " -> " + e.getMessage());
+                }
                 if (!obs.isObjectKey(filePath)) {
                     newFilePath = objectKey;  // 未转存 → 自动转存
                 }
@@ -661,8 +673,12 @@ public class SkillService {
                 // v2.4 固定 key 覆盖模型：无版本概念，putObject 同 key 原子覆盖
                 // v2.5：file_path=对象键（真实存储路径）+ created_by/updated_by=当前用户
                 String objectKey = obs.skillKey(scope, ownerId, skillName, 1);
-                byte[] zipBytes = obs.normalizeSkillZip(skillDir, skillName);
-                obs.saveBytes(objectKey, zipBytes);
+                try {
+                    byte[] zipBytes = obs.normalizeSkillZip(skillDir, skillName);
+                    obs.saveBytes(objectKey, zipBytes);
+                } catch (java.io.IOException e) {
+                    throw new BizException("技能打包失败：" + skillName + " -> " + e.getMessage());
+                }
                 skillRepository.deleteBySkillNameAndScopeAndOwnerId(skillName, scope, ownerId);
                 skillRepository.flush();
                 jdbcTemplate.update(

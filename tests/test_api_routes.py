@@ -179,9 +179,9 @@ class TestRepos:
         assert r.json()["repos"] == [], f"Expected empty, got {len(r.json()['repos'])} repos"
         print("  [OK] managed repos empty after cleanup")
 
-        # 加入一个仓库
-        r = client.post("/api/repos/join", json={"full_name": "org/test-managed"}, headers=_headers)
-        assert r.status_code == 200
+        # 加入一个仓库（「加入」已下线，改用 DB 直插的托管登记等价物）
+        user_db.add_managed_repo("gitcode:org/test-managed", "org", "test-managed", webhook_id=0)
+        user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test-managed", is_join=True)
 
         # 加入后应出现
         r = client.get("/api/repos/managed", headers=_headers)
@@ -202,20 +202,16 @@ class TestRepos:
         assert not found, "org/test-managed still in managed list after remove"
         print("  [OK] removed repo disappears from managed list")
 
-    def test_join_invalid(self):
-        r = client.post("/api/repos/join", json={"full_name": "bad"}, headers=_headers)
-        assert r.status_code == 400
-
     def test_remove_nonexistent(self):
         r = client.post("/api/repos/remove", json={"full_name": "org/nonexistent"}, headers=_headers)
         assert r.status_code == 404
 
-    def test_join_then_remove(self):
-        r = client.post("/api/repos/join", json={"full_name": "org/test-repo"}, headers=_headers)
-        assert r.status_code == 200
+    def test_db_add_then_remove(self):
+        """DB 直插托管登记后：remove 一次成功、再 remove 报 404（等价原 join→remove 链路）"""
+        user_db.add_managed_repo("gitcode:org/test-repo", "org", "test-repo", webhook_id=0)
+        user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test-repo", is_join=True)
         r = client.post("/api/repos/remove", json={"full_name": "org/test-repo"}, headers=_headers)
         assert r.status_code == 200
-        # Verify removed
         r = client.post("/api/repos/remove", json={"full_name": "org/test-repo"}, headers=_headers)
         assert r.status_code == 404
 

@@ -14,9 +14,9 @@
       </div>
     </div>
 
-    <div v-if="loading" class="loading-spinner">加载中...</div>
+    <div v-if="loading" style="display:flex;align-items:center;justify-content:center;height:60vh;color:var(--text-tertiary);font-size:14px">加载中...</div>
 
-    <div v-else style="padding:20px 40px">
+    <div v-else style="padding:24px 40px">
       <!-- 基本信息（紧凑横排）+ 凭证配置 -->
       <div class="card" style="padding:0;margin-bottom:20px">
         <div class="section-header">
@@ -56,148 +56,126 @@
         </div>
       </div>
 
-      <!-- 活动统计 + 最近活动 -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
-        <!-- 活动统计 -->
-        <div class="card" style="padding:0">
+      <!-- 仓库与 Issue + 最近活动 -->
+      <div style="margin-bottom:20px">
+      <!-- 仓库与 Issue -->
+      <div class="card" style="padding:0">
           <div class="section-header">
-            <h3 class="sh-title">活动统计</h3>
+            <h3 class="sh-title">Issue 任务列表</h3>
             <div class="sh-actions">
-              <button class="btn btn-sm" :style="activityTab === 'task' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityTab = 'task'">任务统计</button>
-              <button class="btn btn-sm" :style="activityTab === 'issue' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityTab = 'issue'">仓库与 Issue</button>
+              <button class="btn btn-sm" @click="loadRepoIssues()">刷新</button>
             </div>
           </div>
           <div style="padding:20px 24px">
-            <!-- 任务统计 tab -->
-            <div v-if="activityTab === 'task'" class="activity-grid">
-              <div class="activity-card">
-                <div class="activity-value">{{ info.taskCount ?? 0 }}</div>
-                <div class="activity-label">任务总数</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#34c759">{{ info.completedCount ?? 0 }}</div>
-                <div class="activity-label">已完成</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#ff9500">{{ info.pendingCount ?? 0 }}</div>
-                <div class="activity-label">进行中</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#aeaeb2">{{ info.cancelledCount ?? 0 }}</div>
-                <div class="activity-label">已取消</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#ff3b30">{{ info.failedCount ?? 0 }}</div>
-                <div class="activity-label">失败</div>
-              </div>
-              <div class="activity-card">
-                <div class="activity-value" style="color:#006eff">{{ info.successRate || '—' }}</div>
-                <div class="activity-label">成功率</div>
-              </div>
-            </div>
-            <!-- 仓库与 Issue tab -->
-            <div v-else>
-              <!-- 仓库选择下拉 -->
+              <!-- 仓库选择下拉（可选筛选） -->
               <div style="margin-bottom:16px">
-                <select v-model="selectedRepo" class="page-size-select" style="width:100%;max-width:400px;padding:8px 12px" @change="loadRepoIssues(0)">
-                  <option value="">请选择仓库</option>
+                <select v-model="selectedRepo" class="page-size-select" style="width:100%;max-width:400px;padding:8px 12px" @change="onRepoChange">
+                  <option value="">全部仓库</option>
                   <option v-for="r in info.repoMatrix" :key="r.repoKey" :value="r.repoKey">{{ r.fullName }}</option>
                 </select>
               </div>
 
-              <!-- 仓库总体统计 -->
-              <div v-if="selectedRepoData" class="repo-summary-grid">
-                <div class="activity-card">
-                  <div class="activity-value">{{ selectedRepoData.taskCount }}</div>
-                  <div class="activity-label">任务总数</div>
-                </div>
-                <div class="activity-card">
-                  <div class="activity-value" style="color:#006eff">{{ selectedRepoData.issueCount }}</div>
-                  <div class="activity-label">Issue 总数</div>
-                </div>
-                <div class="activity-card">
-                  <div class="activity-value" style="color:#34c759">{{ selectedRepoData.completed }}</div>
-                  <div class="activity-label">已完成</div>
-                </div>
-                <div class="activity-card">
-                  <div class="activity-value" style="color:#ff9500">{{ selectedRepoData.pending ?? 0 }}</div>
-                  <div class="activity-label">进行中</div>
-                </div>
-                <div class="activity-card">
-                  <div class="activity-value" style="color:#aeaeb2">{{ selectedRepoData.cancelled ?? 0 }}</div>
-                  <div class="activity-label">已取消</div>
-                </div>
-                <div class="activity-card">
-                  <div class="activity-value" style="color:#ff3b30">{{ selectedRepoData.failed }}</div>
-                  <div class="activity-label">失败</div>
-                </div>
-                <div class="activity-card">
-                  <div class="activity-value" style="color:#5e5ce6">{{ selectedRepoData.taskCount > 0 ? Math.round(selectedRepoData.completed * 1000 / selectedRepoData.taskCount) / 10 + '%' : '—' }}</div>
-                  <div class="activity-label">成功率</div>
+              <!-- Issue 列表 -->
+              <div style="margin-top:16px">
+                <div v-if="repoIssuesLoading" style="text-align:center;padding:32px;color:var(--text-tertiary)">加载中...</div>
+                <div v-else-if="repoIssues.length === 0" style="text-align:center;padding:32px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</div>
+                <div v-else>
+                  <p class="t3" style="font-size:12px;margin-bottom:8px">{{ repoIssuesTotal }} 个 Issue — 点击展开</p>
+                  <!-- Issue 卡片列表 -->
+                  <div v-for="iss in repoIssues" :key="iss.repoKey + '|' + iss.issueId" class="tl-issue">
+                    <div class="tl-issue-head" @click="toggleIssueTimeline(iss)">
+                      <span class="tl-arrow">{{ expandedIssues.has(iss.repoKey + '|' + iss.issueId) ? '▾' : '▸' }}</span>
+                      <b class="tl-issue-id">
+                        <a :href="`https://gitcode.com/${iss.repoName}/issues/${iss.issueId.replace('#','')}`" target="_blank" @click.stop class="tl-issue-link">
+                          <span class="t3" style="font-size:11px">{{ iss.repoName }}</span> {{ iss.issueId }}
+                        </a>
+                      </b>
+                      <span class="tl-issue-title t3" v-if="iss.issueTitle" :title="iss.issueTitle">{{ iss.issueTitle }}</span>
+                      <span class="tl-issue-count t3">{{ iss.eventCount ?? 0 }} 事件</span>
+                      <span class="tl-issue-status" :class="iss.failed > 0 ? 'fail' : 'ok'">{{ iss.failed > 0 ? '✗ 有失败' : '✓ 正常' }}</span>
+                      <span class="t3 tl-issue-time">{{ (iss.lastTaskAt || '').substring(0, 16).replace('T', ' ') }}</span>
+                    </div>
+                    <!-- 展开详情 -->
+                    <div v-if="expandedIssues.has(iss.repoKey + '|' + iss.issueId)" class="tl-issue-body">
+                      <div class="tl-view-tabs">
+                        <button class="tl-view-btn" :class="{ active: issueViewModes[iss.repoKey + '|' + iss.issueId] !== 'events' }" @click="switchIssueView(iss, 'diagram')">📊 时序图</button>
+                        <button class="tl-view-btn" :class="{ active: issueViewModes[iss.repoKey + '|' + iss.issueId] === 'events' }" @click="switchIssueView(iss, 'events')">📋 事件列表</button>
+                      </div>
+                      <div v-show="issueEventsLoading[iss.repoKey + '|' + iss.issueId]" class="tl-diagram-loading">加载中...</div>
+                      <div v-show="!issueEventsLoading[iss.repoKey + '|' + iss.issueId] && issueViewModes[iss.repoKey + '|' + iss.issueId] !== 'events' && issueEvents[iss.repoKey + '|' + iss.issueId] && issueEvents[iss.repoKey + '|' + iss.issueId].length" class="tl-diagram-container" :ref="el => diagramRefs[iss.repoKey + '|' + iss.issueId] = el">
+                        <div v-if="!renderedIssues.has(iss.repoKey + '|' + iss.issueId)" class="tl-diagram-loading">渲染中...</div>
+                        <div v-else v-html="issueSvg(iss.repoKey + '|' + iss.issueId)" class="tl-diagram-svg"></div>
+                      </div>
+                      <div v-show="issueViewModes[iss.repoKey + '|' + iss.issueId] === 'events' && issueEvents[iss.repoKey + '|' + iss.issueId] && issueEvents[iss.repoKey + '|' + iss.issueId].length">
+                        <table class="vod-table">
+                          <thead>
+                            <tr><th>Seq</th><th>事件</th><th>Agent</th><th>Engine</th><th>Skill</th><th>状态</th><th>耗时</th><th>时间</th></tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="ev in issueEvents[iss.repoKey + '|' + iss.issueId]" :key="ev.seq" :class="{ 'tl-row-fail': ev.status === 'failed', 'tl-row-ok': ev.status === 'completed', 'tl-row-clickable': ev.taskId }" @click="ev.taskId ? openLogModal(ev.taskId, ev) : null">
+                              <td class="t3">#{{ ev.seq }}</td>
+                              <td><span :class="['status-tag', eventTypeClass(ev.eventType)]" style="font-size:11px">{{ eventTypeText(ev.eventType) }}</span></td>
+                              <td><span class="status-tag info" style="font-size:11px">{{ ev.agentType || '—' }}</span></td>
+                              <td class="t3" style="font-size:11px">{{ ev.engine || '—' }}</td>
+                              <td class="t3">{{ ev.skill || '—' }}</td>
+                              <td><span :class="['status-tag', ev.status === 'completed' ? 'success' : ev.status === 'failed' ? 'danger' : ev.status === 'running' ? 'warning' : 'default']">{{ ev.status || '—' }}</span></td>
+                              <td class="t3">{{ formatDuration(ev.duration) }}</td>
+                              <td class="t3">{{ formatTime(ev.createdAt) }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <div v-show="!issueEventsLoading[iss.repoKey + '|' + iss.issueId] && (!issueEvents[iss.repoKey + '|' + iss.issueId] || !issueEvents[iss.repoKey + '|' + iss.issueId].length)" class="tl-diagram-loading">暂无事件记录</div>
+                    </div>
+                  </div>
+                  <!-- 分页 -->
+                  <PaginationBar v-if="repoIssuesTotal > 0" v-model:page="repoIssuesPage" v-model:size="repoIssuesSize" :total="repoIssuesTotal" :total-pages="repoIssuesTotalPages" :size-options="[5, 10]" @change="loadRepoIssues()" />
                 </div>
               </div>
-
-              <!-- Issue 分页列表 -->
-              <div v-if="selectedRepo" style="margin-top:16px">
-                <table class="vod-table" v-if="repoIssues.length">
-                  <thead>
-                    <tr><th>Issue</th><th style="width:45px">任务</th><th style="width:45px">完成</th><th style="width:45px">进行中</th><th style="width:45px">已取消</th><th style="width:45px">失败</th><th style="width:55px">成功率</th><th style="width:130px">最近活动</th></tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="iss in repoIssues" :key="iss.issueId">
-                      <td>
-                        <a :href="`https://gitcode.com/${selectedRepoData?.fullName}/issues/${iss.issueId.replace('#','')}`" target="_blank" style="color:var(--primary);text-decoration:none">{{ iss.issueId }}</a>
-                      </td>
-                      <td class="t3">{{ iss.taskCount }}</td>
-                      <td class="t3" style="color:#34c759">{{ iss.completed }}</td>
-                      <td class="t3" style="color:#ff9500">{{ iss.pending ?? 0 }}</td>
-                      <td class="t3" style="color:#aeaeb2">{{ iss.cancelled ?? 0 }}</td>
-                      <td class="t3" style="color:#ff3b30">{{ iss.failed }}</td>
-                      <td class="t3">{{ iss.taskCount > 0 ? Math.round(iss.completed * 1000 / iss.taskCount) / 10 + '%' : '—' }}</td>
-                      <td class="t3">{{ formatTime(iss.lastTaskAt) }}</td>
-                    </tr>
-                    <tr v-if="!repoIssues.length">
-                      <td colspan="8" style="text-align:center;padding:20px;color:var(--text-tertiary)">该仓库暂无 Issue 数据</td>
-                    </tr>
-                  </tbody>
-                </table>
-                <PaginationBar v-if="repoIssuesTotal > 0" v-model:page="repoIssuesPage" v-model:size="repoIssuesSize" :total="repoIssuesTotal" :total-pages="repoIssuesTotalPages" :size-options="[5, 10]" @change="loadRepoIssues()" />
-                <p v-else-if="!repoIssuesLoading" class="t2" style="padding:20px;text-align:center">该仓库暂无 Issue 数据</p>
-              </div>
-              <p v-else-if="!selectedRepo" class="t2" style="padding:20px;text-align:center">请选择仓库查看 Issue 列表</p>
-            </div>
           </div>
+      </div>
+
+
+      </div>
+    <!-- 任务日志弹窗 -->
+    <div v-if="logModal.show" class="log-modal-overlay log-layer" @click.self="closeLogModal">
+      <div class="log-modal-dialog">
+        <div class="log-modal-head">
+          <h3 class="log-modal-title">
+            <span class="t3" v-if="logModal.info.repoKey">{{ logModal.info.repoKey.replace('gitcode:', '') }}</span>
+            <b v-if="logModal.info.issueId">{{ logModal.info.issueId }}</b>
+            <span class="t3" v-if="logModal.info.eventSeq">#{{ logModal.info.eventSeq }}</span>
+            <span class="t3" v-if="logModal.info.engine" style="color:var(--primary)">🔧 {{ logModal.info.engine }}</span>
+            <span class="t3" v-if="logModal.info.createdAt">{{ formatTime(logModal.info.createdAt) }}</span>
+          </h3>
+          <button class="btn btn-sm" @click="closeLogModal">✕ 关闭</button>
         </div>
-
-        <!-- 最近活动 -->
-        <div class="card" style="padding:0">
-          <div class="section-header">
-            <h3 class="sh-title">最近活动</h3>
-            <div class="sh-actions">
-              <button class="btn btn-sm" :style="activityFilter === 'recent' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'recent'">最近执行</button>
-              <button class="btn btn-sm" :style="activityFilter === 'pending' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'pending'">进行中</button>
-              <button class="btn btn-sm" :style="activityFilter === 'failed' ? 'background:var(--primary);color:#fff;border-color:var(--primary)' : ''" @click="activityFilter = 'failed'">最近失败</button>
+        <div class="log-timeline" v-if="logModal.info.status">
+          <span class="log-tl-dot" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'"></span>
+          <span class="log-tl-text" v-if="logModal.info.createdAt">入队 {{ formatTime(logModal.info.createdAt).slice(11, 19) }}</span>
+          <span class="log-tl-arrow" v-if="logModal.info.startedAt">→</span>
+          <span class="log-tl-text" v-if="logModal.info.startedAt">开始 {{ formatTime(logModal.info.startedAt).slice(11, 19) }}</span>
+          <span class="log-tl-arrow" v-if="logModal.info.completedAt">→</span>
+          <span class="log-tl-text" v-if="logModal.info.completedAt">完成 {{ formatTime(logModal.info.completedAt).slice(11, 19) }}</span>
+          <span class="log-tl-dur" v-if="logModal.info.startedAt && logModal.info.completedAt">⏱ {{ formatTaskDur(logModal.info) }}</span>
+          <span class="log-tl-status" :class="logModal.info.status === 'completed' ? 'ok' : logModal.info.status === 'failed' ? 'fail' : 'run'">{{ logModal.info.status.toUpperCase() }}</span>
+        </div>
+        <div class="log-modal-body">
+          <div v-if="logModal.loading" class="tl-diagram-loading">加载日志...</div>
+          <div v-else-if="logModal.messages.length === 0" class="log-empty">
+            <div v-if="logModal.info.resultText || logModal.info.errors" class="log-error-info">
+              <div v-if="logModal.info.resultText" class="log-error-row">结果: {{ logModal.info.resultText }}</div>
+              <div v-if="logModal.info.exitCode != null" class="log-error-row" :style="{ color: logModal.info.exitCode !== 0 ? 'var(--danger)' : 'var(--success)' }">Exit Code: {{ logModal.info.exitCode }}</div>
+              <div v-if="logModal.info.errors" class="log-error-row" style="color:var(--danger)">{{ logModal.info.errors }}</div>
             </div>
+            <div v-else>暂无日志记录</div>
           </div>
-          <div style="padding:20px 24px">
-            <p class="t3" style="margin-bottom:12px">最多查询 5 条，当前 {{ filteredActivity.length }} 条</p>
-            <div v-if="filteredActivity.length" class="timeline">
-              <div v-for="t in filteredActivity" :key="t.id" class="timeline-item">
-                <div class="timeline-dot" :class="t.status"></div>
-                <div class="timeline-content">
-                  <div class="timeline-header">
-                    <span class="timeline-repo">{{ t.repoName }}</span>
-                    <a v-if="t.issueId" :href="`https://gitcode.com/${t.repoName}/issues/${t.issueId.replace('#','')}`" target="_blank" class="timeline-issue" @click.stop>{{ t.issueId }}</a>
-                    <span :class="['status-tag', t.status === 'completed' ? 'success' : t.status === 'failed' ? 'danger' : 'warning']" style="font-size:10px">{{ t.status === 'completed' ? '完成' : t.status === 'failed' ? '失败' : '进行中' }}</span>
-                  </div>
-                  <div class="timeline-meta">
-                    <span class="t3">{{ t.agentType }} · {{ t.skill || '—' }}</span>
-                    <span class="t3">{{ formatTime(t.startedAt) }}</span>
-                  </div>
-                </div>
-              </div>
+          <div v-else class="log-terminal">
+            <div v-for="msg in logModal.messages" :key="msg.seq" :class="['log-line', 'log-type-' + msg.type]">
+              <span class="log-time t3">{{ (msg.createdAt || '').slice(11, 19) }}</span>
+              <span class="log-icon">{{ logTypeIcon(msg.type) }}</span>
+              <span class="log-content">{{ msg.content || msg.tool || '' }}</span>
             </div>
-            <p v-else class="t2" style="padding:20px;text-align:center">暂无记录</p>
           </div>
         </div>
       </div>
@@ -205,11 +183,12 @@
 
     <!-- Toast -->
     <div v-if="toast.show" class="toast-message" :class="toast.type">{{ toast.msg }}</div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { onMounted, ref, computed, watch } from 'vue'
+import { onMounted, ref, computed, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../api'
 import PaginationBar from '../components/PaginationBar.vue'
@@ -218,9 +197,324 @@ const route = useRoute()
 const info = ref({})
 const loading = ref(true)
 const resetting = ref(false)
-const activityTab = ref('task')
-const activityFilter = ref('recent')
 const selectedRepo = ref('')
+const logModal = ref({ show: false, loading: false, messages: [], info: {} })
+const diagramRefs = {}
+const renderedIssues = ref(new Set())
+const renderingIssues = ref(new Set())
+const expandedIssues = ref(new Set())
+const issueViewModes = ref({})
+const issueEvents = ref({})  // {issueId: events[]}
+const issueEventsLoading = ref({})  // {issueId: true/false}
+const issueSvgs = ref({})  // {issueId: svgHtml}
+
+function issueSvg(issueId) {
+  return issueSvgs.value[issueId] || ''
+}
+
+
+async function openLogModal(taskId, t) {
+  logModal.value = { show: true, loading: true, messages: [], info: { issueId: t.issueId, repoKey: t.repoKey || '', eventSeq: t.seq, agentType: t.agentType, skill: t.skill, engine: t.engine, status: t.status, createdAt: t.createdAt } }
+  try {
+    const [msgsResp, infoResp] = await Promise.all([
+      http.get(`/runtime/tasks/${taskId}/messages`),
+      http.get(`/runtime/tasks/${taskId}/info`)
+    ])
+    const info = infoResp.data || {}
+    if (!info.repoKey && t.repoKey) info.repoKey = t.repoKey
+    if (!info.issueId) info.issueId = t.issueId
+    if (!info.eventSeq) info.eventSeq = t.seq
+    if (!info.agentType) info.agentType = t.agentType
+    if (!info.skill) info.skill = t.skill
+    if (!info.engine) info.engine = t.engine
+    if (!info.status) info.status = t.status
+    if (!info.createdAt) info.createdAt = t.createdAt
+    logModal.value = { show: true, loading: false, messages: msgsResp.data || [], info }
+  } catch (e) {
+    logModal.value = { show: true, loading: false, messages: [], info: { error: e.message, issueId: t.issueId, repoKey: t.repoKey || '', eventSeq: t.seq, createdAt: t.createdAt } }
+  }
+}
+function closeLogModal() {
+  logModal.value = { show: false, loading: false, messages: [], info: {} }
+}
+function formatTaskDur(t) {
+  if (!t.startedAt || !t.completedAt) return '—'
+  const s = (new Date(t.completedAt) - new Date(t.startedAt)) / 1000
+  if (isNaN(s) || s <= 0) return '—'
+  return formatDuration(s)
+}
+function logTypeIcon(t) {
+  const map = { step_start: '▶', step_finish: '✓', text: '💬', reasoning: '🤔', tool_use: '🔧', error: '❌', done: '✅' }
+  return map[t] || '•'
+}
+async function toggleIssueTimeline(iss) {
+  const id = iss.repoKey + '|' + iss.issueId
+  const s = new Set(expandedIssues.value)
+  if (s.has(id)) {
+    s.delete(id)
+  } else {
+    s.add(id)
+    if (!issueViewModes.value[id]) {
+      issueViewModes.value = { ...issueViewModes.value, [id]: 'diagram' }
+    }
+  }
+  expandedIssues.value = s
+  // 展开时渲染
+  if (s.has(id) && issueViewModes.value[id] !== 'events') {
+    if (!issueEvents.value[id]) {
+      // 首次展开：加载事件数据
+      issueEventsLoading.value = { ...issueEventsLoading.value, [id]: true }
+      try {
+        const { data } = await http.get(`/console-users/${route.params.id}/issue-timeline`, {
+          params: { repoKey: iss.repoKey, issueId: iss.issueId }
+        })
+        issueEvents.value = { ...issueEvents.value, [id]: data.events || [] }
+        issueEventsLoading.value = { ...issueEventsLoading.value, [id]: false }
+        // 渲染时序图（setTimeout 等 Vue 渲染完 DOM）
+        if (data.events && data.events.length) {
+          setTimeout(() => renderMermaidForIssue(id, iss), 50)
+        }
+      } catch (e) {
+        issueEvents.value = { ...issueEvents.value, [id]: [] }
+        issueEventsLoading.value = { ...issueEventsLoading.value, [id]: false }
+      }
+    } else if (issueEvents.value[id] && issueEvents.value[id].length) {
+      // 已有数据：重新渲染（v-html 重新渲染会丢失 data-task-id 和 onclick）
+      if (renderedIssues.value.has(id)) {
+        const { evTypes } = buildSequence(issueEvents.value[id])
+        nextTick(() => bindMermaidClicks(id, iss, evTypes))
+      } else {
+        setTimeout(() => renderMermaidForIssue(id, iss), 50)
+      }
+    }
+  }
+}
+
+function switchIssueView(iss, mode) {
+  const id = iss.repoKey + '|' + iss.issueId
+  issueViewModes.value = { ...issueViewModes.value, [id]: mode }
+  if (mode === 'diagram' && issueEvents.value[id] && issueEvents.value[id].length) {
+    if (renderedIssues.value.has(id)) {
+      const { evTypes } = buildSequence(issueEvents.value[id])
+      nextTick(() => bindMermaidClicks(id, iss, evTypes))
+    } else {
+      setTimeout(() => renderMermaidForIssue(id, iss), 50)
+    }
+  }
+}
+
+// ===== Mermaid 时序图 =====
+let mermaidEngine = null
+
+async function getMermaid() {
+  if (!mermaidEngine) {
+    const mod = await import('mermaid')
+    mermaidEngine = mod.default
+    mermaidEngine.initialize({
+      startOnLoad: false, securityLevel: 'loose', theme: 'base', fontFamily: 'inherit',
+      sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 40, noteMargin: 10, boxMargin: 8, wrap: true, width: 160 }
+    })
+  }
+  return mermaidEngine
+}
+
+function mermaidId(agent) {
+  return (agent || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_')
+}
+
+function buildSequence(events) {
+  const agents = []
+  for (const ev of events) {
+    const a = ev.agentType || '—'
+    if (!agents.includes(a)) agents.push(a)
+  }
+  const lines = ['sequenceDiagram', 'autonumber']
+  for (const a of agents) lines.push(`    participant ${mermaidId(a)} as ${a}`)
+  const statuses = []
+  const evTypes = []
+  let prev = null
+  for (const ev of events) {
+    const a = mermaidId(ev.agentType || '—')
+    const t = ev.createdAt ? ev.createdAt.slice(11, 19) : ''
+    const label = (t ? t + ' ' : '') + eventTypeText(ev.eventType)
+    if (prev && a !== prev) {
+      lines.push(`    ${prev}->>${a}: ${label}`)
+      statuses.push(ev.status || '')
+      evTypes.push('msg')
+    } else {
+      lines.push(`    Note over ${a}: ${label}`)
+      statuses.push(ev.status || '')
+      evTypes.push('note')
+    }
+    prev = a
+  }
+  return { text: lines.join('\n'), statuses, evTypes }
+}
+
+function applySequenceColors(svg, statuses) {
+  try {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    const root = doc.documentElement
+    const defs = root.querySelector('defs')
+    if (!defs) return svg
+    const colorOf = s => (s === 'failed' ? '#e5484d' : s === 'completed' ? '#2e9e5b' : '#94a3b8')
+    const lines = Array.from(root.querySelectorAll('line[marker-start*="sequencenumber"]'))
+    lines.forEach((line, i) => {
+      const markerId = root.id + '-seqnum-' + i
+      const marker = doc.createElementNS('http://www.w3.org/2000/svg', 'marker')
+      marker.setAttribute('id', markerId)
+      marker.setAttribute('refX', '15'); marker.setAttribute('refY', '15')
+      marker.setAttribute('markerWidth', '60'); marker.setAttribute('markerHeight', '40')
+      marker.setAttribute('orient', 'auto')
+      const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle')
+      circle.setAttribute('cx', '15'); circle.setAttribute('cy', '15'); circle.setAttribute('r', '6')
+      circle.setAttribute('fill', colorOf(statuses[i] || ''))
+      marker.appendChild(circle)
+      defs.appendChild(marker)
+      line.setAttribute('marker-start', 'url(#' + markerId + ')')
+    })
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) {
+    return svg
+  }
+}
+
+function fixLifelineHeight(svgStr, eventCount) {
+  try {
+    const doc = new DOMParser().parseFromString(svgStr, 'image/svg+xml')
+    const root = doc.documentElement
+    const heightAttr = root.getAttribute('height')
+    const viewBox = root.getAttribute('viewBox')
+    let svgHeight = 0
+    if (viewBox) {
+      const parts = viewBox.split(' ')
+      svgHeight = parseFloat(parts[3]) || 0
+    }
+    if (!svgHeight && heightAttr) {
+      svgHeight = parseFloat(heightAttr) || 0
+    }
+    if (svgHeight <= 0) return svgStr
+    const minHeight = eventCount > 8 ? eventCount * 45 + 100 : 0
+    if (minHeight <= 0 || svgHeight >= minHeight) return svgStr
+    const allLines = Array.from(root.querySelectorAll('line'))
+    const vLines = allLines.filter(l => {
+      const x1 = parseFloat(l.getAttribute('x1') || 0)
+      const x2 = parseFloat(l.getAttribute('x2') || 0)
+      return Math.abs(x1 - x2) < 2
+    })
+    vLines.forEach(l => {
+      const y2 = parseFloat(l.getAttribute('y2') || 0)
+      if (y2 < minHeight - 20) {
+        l.setAttribute('y2', String(minHeight - 10))
+      }
+    })
+    root.setAttribute('height', String(minHeight))
+    if (viewBox) {
+      const parts = viewBox.split(' ')
+      parts[3] = String(minHeight)
+      root.setAttribute('viewBox', parts.join(' '))
+    }
+    return new XMLSerializer().serializeToString(doc)
+  } catch (e) {
+    return svgStr
+  }
+}
+
+function bindMermaidClicks(issueId, iss, evTypes) {
+  const el = diagramRefs[issueId]
+  if (!el) return
+  const svg = el.querySelector('svg')
+  if (!svg) return
+  const events = issueEvents.value[issueId] || []
+  if (!events.length) return
+  const msgTexts = Array.from(svg.querySelectorAll('text.messageText'))
+  const noteTexts = Array.from(svg.querySelectorAll('text.noteText'))
+  const taskEventMap = {}
+  let msgIdx = 0, noteIdx = 0
+  events.forEach((ev, i) => {
+    const type = evTypes[i] || 'msg'
+    let txt = null
+    if (type === 'msg') {
+      txt = msgTexts[msgIdx]
+      msgIdx++
+    } else {
+      txt = noteTexts[noteIdx]
+      noteIdx++
+    }
+    if (!txt) return
+    if (ev.taskId) {
+      txt.setAttribute('data-task-id', ev.taskId)
+      txt.setAttribute('data-issue-id', iss.issueId)
+      txt.style.cursor = 'pointer'
+      txt.style.textDecoration = 'underline'
+      txt.style.fill = 'var(--primary)'
+      taskEventMap[ev.taskId] = ev
+      // tooltip：引擎名
+      const _eng = ev.engine || ''
+      if (_eng) {
+        const _t = document.createElementNS('http://www.w3.org/2000/svg', 'title')
+        _t.textContent = _eng
+        txt.appendChild(_t)
+      }
+    }
+  })
+  // 事件委托：避免 Vue v-html 重新渲染导致事件绑定丢失
+  svg.onclick = function(e) {
+    const target = e.target.closest('[data-task-id]')
+    if (!target) return
+    const taskId = target.getAttribute('data-task-id')
+    if (taskId && taskEventMap[taskId]) {
+      e.stopPropagation()
+      openLogModal(taskId, iss)
+    }
+  }
+}
+
+async function renderMermaidForIssue(issueId, iss) {
+  if (renderingIssues.value.has(issueId)) return
+  const events = issueEvents.value[issueId] || []
+  if (!events.length) return
+  renderingIssues.value = new Set([...renderingIssues.value, issueId])
+  try {
+    const mmd = await getMermaid()
+    const { text, statuses, evTypes } = buildSequence(events)
+    const uid = 'mmd-' + Math.random().toString(36).slice(2, 10)
+    try { await mmd.parse(text) } catch (e) { /* parse 失败也尝试 render */ }
+    const result = await mmd.render(uid, text)
+    const svg = result.svg || result
+    const coloredSvg = applySequenceColors(svg, statuses)
+    const fixedSvg = fixLifelineHeight(coloredSvg, events.length)
+    issueSvgs.value = { ...issueSvgs.value, [issueId]: fixedSvg }
+    renderedIssues.value = new Set([...renderedIssues.value, issueId])
+    nextTick(() => bindMermaidClicks(issueId, iss, evTypes))
+  } catch (err) {
+    const { text } = buildSequence(events)
+    issueSvgs.value = { ...issueSvgs.value, [issueId]: `<div style="padding:12px;color:var(--danger);font-size:12px">时序渲染失败: ${err.message || err}</div><pre style="padding:8px;background:#0c1222;color:#e0e6f0;font-size:10px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">${text.replace(/</g, '&lt;')}</pre>` }
+    renderedIssues.value = new Set([...renderedIssues.value, issueId])
+  } finally {
+    const s = new Set(renderingIssues.value)
+    s.delete(issueId)
+    renderingIssues.value = s
+  }
+}
+function eventTypeText(t) {
+  const map = { issue_opened: 'Issue创建', issue_comment: '评论', issue_updated: '更新', a2a_event: 'A2A交办', pull_request_opened: 'PR创建', pull_request_merged: 'PR合并', push: '推送', vod_signal: 'VOD信号', issue_closed: 'Issue关闭', onboarding_exp: 'VOD接入' }
+  return map[t] || t || '—'
+}
+function eventTypeClass(t) {
+  if (t === 'a2a_event') return 'info'
+  if (t === 'pull_request_merged') return 'success'
+  if (t === 'issue_opened') return 'info'
+  return 'default'
+}
+function formatDuration(d) {
+  if (!d) return '—'
+  const s = Math.round(Number(d))
+  if (isNaN(s) || s <= 0) return '—'
+  if (s < 60) return s + 's'
+  if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60) + 's'
+  return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm'
+}
 const repoIssues = ref([])
 const repoIssuesPage = ref(0)
 const repoIssuesSize = ref(5)
@@ -229,16 +523,8 @@ const repoIssuesTotalPages = ref(0)
 const repoIssuesLoading = ref(false)
 const toast = ref({ show: false, msg: '', type: 'success' })
 
-const selectedRepoData = computed(() => {
-  if (!selectedRepo.value) return null
-  return (info.value.repoMatrix || []).find(r => r.repoKey === selectedRepo.value)
-})
 
-const filteredActivity = computed(() => {
-  if (activityFilter.value === 'pending') return info.value.recentPendingTasks || []
-  if (activityFilter.value === 'failed') return info.value.recentFailedTasks || []
-  return info.value.recentTasks || []
-})
+
 
 const credentialConfigured = computed(() => {
   let count = 0
@@ -251,12 +537,19 @@ const credentialConfigured = computed(() => {
 
 async function loadRepoIssues(p) {
   if (p !== undefined) repoIssuesPage.value = p
-  if (!selectedRepo.value) return
+  // 清空展开状态和缓存——分页/刷新/切仓库后 DOM 已销毁，残留状态会导致切回时序图空白
+  expandedIssues.value = new Set()
+  renderedIssues.value = new Set()
+  renderingIssues.value = new Set()
+  issueEvents.value = {}
+  issueEventsLoading.value = {}
+  issueSvgs.value = {}
+  issueViewModes.value = {}
   repoIssuesLoading.value = true
   try {
-    const { data } = await http.get(`/console-users/${route.params.id}/repo-issues`, {
-      params: { repoKey: selectedRepo.value, page: repoIssuesPage.value, size: repoIssuesSize.value }
-    })
+    const params = { page: repoIssuesPage.value, size: repoIssuesSize.value }
+    if (selectedRepo.value) params.repoKey = selectedRepo.value
+    const { data } = await http.get(`/console-users/${route.params.id}/repo-issues`, { params })
     repoIssues.value = data.content || []
     repoIssuesTotal.value = data.totalElements || 0
     repoIssuesTotalPages.value = data.totalPages || 0
@@ -271,10 +564,9 @@ async function loadRepoIssues(p) {
 
 function formatTime(val) {
   if (!val || val === '—') return '—'
-  try {
-    let ts = val.length > 19 ? val.substring(0, 16) : val
-    return ts.replace('T', ' ')
-  } catch { return val }
+  const s = String(val)
+  if (s.startsWith('20') && s.length >= 16) return s.slice(0, 19).replace('T', ' ')
+  return s
 }
 
 async function load() {
@@ -282,11 +574,16 @@ async function load() {
   try {
     const { data } = await http.get(`/console-users/${route.params.id}`)
     info.value = data
+    await loadRepoIssues(0)
   } catch (e) {
     console.error('[ConsoleUserDetail] load failed', e)
   } finally {
     loading.value = false
   }
+}
+
+function onRepoChange() {
+  loadRepoIssues(0)
 }
 
 async function resetToken() {
@@ -311,47 +608,77 @@ async function resetToken() {
 }
 
 onMounted(() => load())
-
-watch(activityTab, (val) => {
-  if (val === 'issue' && !selectedRepo.value && info.value.repoMatrix && info.value.repoMatrix.length) {
-    selectedRepo.value = info.value.repoMatrix[0].repoKey
-    loadRepoIssues(0)
-  }
-})
 </script>
 
 <style scoped>
-.back-btn { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--text-secondary); font-size: 13px; transition: color var(--transition); }
-.back-btn:hover { color: var(--primary); }
+.back-btn { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--text-secondary); font-size: 13px; transition: color var(--transition); padding: 4px 8px; border-radius: var(--radius-sm); }
+.back-btn:hover { color: var(--primary); background: rgba(0,107,255,0.04); }
 
-.info-row { display: flex; flex-wrap: wrap; gap: 20px 32px; margin-bottom: 16px; }
-.info-item { display: flex; flex-direction: column; gap: 2px; }
-.info-label { font-size: 11px; color: var(--text-tertiary); }
+.info-row { display: flex; flex-wrap: wrap; gap: 24px 40px; margin-bottom: 20px; }
+.info-item { display: flex; flex-direction: column; gap: 4px; }
+.info-label { font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.3px; }
 
-.cred-row { display: flex; gap: 10px; flex-wrap: wrap; padding-top: 16px; border-top: 1px solid var(--border-soft); }
-.cred-chip { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 16px; border-radius: 10px; background: rgba(0,0,0,0.04); min-width: 80px; }
-.cred-chip.on { background: rgba(52,199,89,0.08); }
+.cred-row { display: flex; gap: 12px; flex-wrap: wrap; padding-top: 20px; border-top: 1px solid var(--border-soft); }
+.cred-chip { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 20px; border-radius: var(--radius); background: rgba(0,0,0,0.03); min-width: 90px; transition: var(--transition); }
+.cred-chip:hover { background: rgba(0,0,0,0.05); }
+.cred-chip.on { background: rgba(52,199,89,0.06); }
 .cred-chip-name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
 .cred-chip-status { font-size: 10px; color: var(--text-tertiary); }
-.cred-chip.on .cred-chip-status { color: #34c759; }
+.cred-chip.on .cred-chip-status { color: var(--success); }
 
-.activity-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
-.repo-summary-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
-.activity-card { text-align: center; padding: 14px 6px; background: rgba(0,0,0,0.02); border-radius: 10px; }
-.activity-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
-.activity-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+/* Issue 卡片列表（对齐健康中心 tl-* 样式 + 苹果风格优化） */
+.tl-issue { border: 1px solid var(--border-color); border-radius: var(--radius); overflow: hidden; margin-bottom: 10px; transition: var(--transition); }
+.tl-issue:hover { box-shadow: var(--card-shadow); transform: translateY(-1px); }
+.tl-issue-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; background: transparent; transition: var(--transition); }
+.tl-issue-head:hover { background: rgba(0,107,255,0.02); }
+.tl-arrow { font-size: 12px; color: var(--text-tertiary); width: 14px; }
+.tl-issue-id { font-size: 13px; min-width: 40px; }
+.tl-issue-link { color: var(--primary); text-decoration: none; }
+.tl-issue-link:hover { text-decoration: underline; }
+.tl-issue-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.tl-issue-count { font-size: 11px; white-space: nowrap; }
+.tl-issue-status { font-size: 10px; font-weight: 600; white-space: nowrap; }
+.tl-issue-status.fail { color: var(--danger); }
+.tl-issue-status.ok { color: var(--success); }
+.tl-issue-time { font-size: 11px; white-space: nowrap; }
+.tl-issue-body { border-top: 1px solid var(--border-soft); padding: 12px 16px; }
+.tl-view-tabs { display: flex; gap: 0; margin-bottom: 10px; }
+.tl-view-btn { padding: 6px 14px; font-size: 12px; border: 1px solid var(--border-color); background: transparent; color: var(--text-secondary); cursor: pointer; transition: var(--transition); }
+.tl-view-btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.tl-view-btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; border-left: none; }
+.tl-view-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+.tl-diagram-container { overflow-x: auto; padding: 8px 0; min-height: 60px; }
+.tl-diagram-loading { padding: 20px; text-align: center; color: var(--text-tertiary); font-size: 12px; }
+.tl-diagram-svg svg { max-width: 100%; }
+.tl-row-fail td { background: rgba(255,59,48,0.03) !important; }
+.tl-row-ok td { background: rgba(52,199,89,0.03) !important; }
+.tl-row-clickable { cursor: pointer; transition: var(--transition); }
+.tl-row-clickable:hover td { background: rgba(0,107,255,0.03) !important; }
+/* 任务日志弹窗（对齐健康中心 log-* 样式） */
+.log-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.log-modal-overlay.log-layer { z-index: 1200; }
+.log-modal-dialog { width: 860px; max-width: 94vw; max-height: 85vh; background: #fff; border-radius: var(--radius-lg); display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.2); }
+.log-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border-color); }
+.log-modal-title { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.log-timeline { display: flex; align-items: center; gap: 6px; padding: 8px 18px; border-bottom: 1px solid var(--border-soft); font-size: 11px; }
+.log-tl-dot { width: 8px; height: 8px; border-radius: 50%; }
+.log-tl-dot.ok { background: var(--success); } .log-tl-dot.fail { background: var(--danger); } .log-tl-dot.run { background: var(--warning); }
+.log-tl-arrow { color: var(--text-tertiary); }
+.log-tl-status { margin-left: auto; font-weight: 600; }
+.log-tl-dur { color: var(--primary); font-weight: 600; }
+.log-tl-status.ok { color: var(--success); } .log-tl-status.fail { color: var(--danger); } .log-tl-status.run { color: var(--warning); }
+.log-modal-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
+.log-empty { text-align: center; padding: 32px; color: var(--text-tertiary); }
+.log-error-info { text-align: left; background: #fff1f0; border: 1px solid #ffa39e; border-radius: 8px; padding: 12px; }
+.log-error-row { font-size: 12px; margin-bottom: 4px; font-family: monospace; }
+.log-terminal { background: #0c1222; border-radius: 8px; padding: 12px; max-height: 60vh; overflow-y: auto; }
+.log-line { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; font-size: 12px; line-height: 1.6; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: Menlo, Monaco, Consolas, monospace; }
+.log-time { color: #5b667b; font-size: 10px; min-width: 55px; flex-shrink: 0; }
+.log-icon { min-width: 16px; flex-shrink: 0; }
+.log-content { color: #e0e6f0; word-break: break-all; white-space: pre-wrap; }
+.log-type-step_start .log-content { color: #5b9eff; } .log-type-step_finish .log-content { color: #1ca44c; }
+.log-type-text .log-content { color: #e0e6f0; } .log-type-reasoning .log-content { color: #b388ff; }
+.log-type-tool_use .log-content { color: #ea5a0c; } .log-type-error .log-content { color: #dc2828; }
+.log-type-done .log-content { color: #1ca44c; }
 
-.timeline { display: flex; flex-direction: column; gap: 0; }
-.timeline-item { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border-soft); }
-.timeline-item:last-child { border-bottom: none; }
-.timeline-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
-.timeline-dot.completed { background: #34c759; }
-.timeline-dot.failed { background: #ff3b30; }
-.timeline-dot.pending { background: #ff9500; }
-.timeline-content { flex: 1; min-width: 0; }
-.timeline-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.timeline-repo { font-size: 13px; font-weight: 500; color: var(--text-primary); }
-.timeline-issue { font-size: 11px; color: var(--primary); background: rgba(0,107,255,0.06); padding: 1px 6px; border-radius: 6px; text-decoration: none; cursor: pointer; }
-.timeline-issue:hover { background: rgba(0,107,255,0.12); }
-.timeline-meta { display: flex; gap: 12px; margin-top: 2px; font-size: 11px; }
 </style>

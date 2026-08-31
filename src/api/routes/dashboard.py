@@ -44,7 +44,7 @@ async def get_ops_overview(repo: str = ""):
     with db_lock:
         c = db.cursor()
 
-        # --- 任务队列状态分布 ---
+        # --- 任务队列状态分布（task 级别）---
         task_status_counts = {"queued": 0, "dispatched": 0, "running": 0,
                               "completed": 0, "failed": 0, "cancelled": 0}
         try:
@@ -52,6 +52,30 @@ async def get_ops_overview(repo: str = ""):
             for status, count in c.fetchall():
                 if status in task_status_counts:
                     task_status_counts[status] = count
+        except Exception:
+            pass
+
+        # --- Issue 级别统计（一个 issue = 一个任务）---
+        issue_stats = {"total": 0, "completed": 0, "in_progress": 0, "failed": 0}
+        try:
+            # 每个 issue 取最新 task 的状态作为该 issue 的状态
+            c.execute(f"""
+                SELECT t.status, COUNT(*) FROM (
+                    SELECT issue_id, MAX(id) as max_id FROM agent_tasks
+                    WHERE issue_id IS NOT NULL AND issue_id <> '' {(_repo_filter.replace('WHERE', 'AND') if _repo_filter else '')}
+                    GROUP BY issue_id
+                ) latest JOIN agent_tasks t ON t.id = latest.max_id
+                GROUP BY t.status
+            """, tuple(_repo_params))
+            _issue_status_map = {}
+            for status, count in c.fetchall():
+                _issue_status_map[status] = count
+            issue_stats["total"] = sum(_issue_status_map.values())
+            issue_stats["completed"] = _issue_status_map.get("completed", 0)
+            issue_stats["failed"] = _issue_status_map.get("failed", 0)
+            issue_stats["in_progress"] = (_issue_status_map.get("running", 0) +
+                                          _issue_status_map.get("dispatched", 0) +
+                                          _issue_status_map.get("queued", 0))
         except Exception:
             pass
 
@@ -358,6 +382,7 @@ async def get_ops_overview(repo: str = ""):
         "timestamp": now_iso,
         "tasks": {
             "status_counts": task_status_counts,
+            "issue_stats": issue_stats,
             "in_progress": in_progress,
             "stuck_count": len(stuck_tasks),
             "stuck_tasks": stuck_tasks,

@@ -97,12 +97,46 @@ function _sceneClass(sceneId) {
 }
 
 // ====== 精选模板竖排卡片 ======
+const _MAX_FEATURED = 5;
+
 function _renderFeaturedCarousel() {
   var cats = _tmplState.categories.filter(function(x) { return x.id !== 'all' && x.id !== '_fav'; });
   if (cats.length === 0) return '';
 
-  var itemsHtml = '';
+  // 新规则：按「创建过该模板的不同用户数 create_count」降序取前 N
+  var ranked = [];
+  cats.forEach(function(cat) {
+    (cat.templates || []).forEach(function(t) {
+      var cnt = t.create_count || 0;
+      if (cnt > 0) ranked.push({cnt: cnt, cat: cat.name, t: t});
+    });
+  });
+  ranked.sort(function(a, b) {
+    if (b.cnt !== a.cnt) return b.cnt - a.cnt;
+    return (a.t.name || '').localeCompare(b.t.name || '');
+  });
 
+  var itemsHtml = '';
+  if (ranked.length > 0) {
+    ranked.slice(0, _MAX_FEATURED).forEach(function(it) {
+      var t = it.t;
+      var nm = t.name || t.display_name || t.id || '';
+      var ic = t.icon || '📄';
+      itemsHtml += '<div class="feat-item" onclick="createFromTemplate(\'' + t.id + '\',\'' + (t.default_repo_name || t.id) + '\')">' +
+        '<span class="feat-item-ic">' + ic + '</span>' +
+        '<div class="feat-item-info">' +
+          '<span class="feat-item-name">' + nm + '</span>' +
+          '<span class="feat-item-cat">' + it.cat + '</span>' +
+        '</div>' +
+      '</div>';
+    });
+    return '<div class="feat-single">' +
+      '<div class="feat-single-h">精选推荐</div>' +
+      '<div class="feat-single-body">' + itemsHtml + '</div>' +
+    '</div>';
+  }
+
+  // 回退：暂无使用数据 → 每分类取第一个（不空白）
   for (var si = 0; si < cats.length; si++) {
     var x = cats[si];
     var tmplItem = null;
@@ -118,12 +152,12 @@ function _renderFeaturedCarousel() {
     }
 
     if (tmplItem) {
-      var nm = tmplItem.name || tmplItem.display_name || tmplItem.id || '';
-      var ic = tmplItem.icon || '📄';
+      var nm2 = tmplItem.name || tmplItem.display_name || tmplItem.id || '';
+      var ic2 = tmplItem.icon || '📄';
       itemsHtml += '<div class="feat-item" onclick="createFromTemplate(\'' + tmplItem.id + '\',\'' + (tmplItem.default_repo_name || tmplItem.id) + '\')">' +
-        '<span class="feat-item-ic">' + ic + '</span>' +
+        '<span class="feat-item-ic">' + ic2 + '</span>' +
         '<div class="feat-item-info">' +
-          '<span class="feat-item-name">' + nm + '</span>' +
+          '<span class="feat-item-name">' + nm2 + '</span>' +
           '<span class="feat-item-cat">' + x.name + '</span>' +
         '</div>' +
       '</div>';
@@ -163,7 +197,7 @@ function _renderHorizontalCards(templates, cat, skipPager) {
 
   var cards = pageT.map(function(t) {
     var catName = t._cat_name || cat.name || '';
-    var tplUrl = t.source_repo ? 'https://gitcode.com/' + t.source_repo : '';
+    var tplUrl = t.html_url || (t.source_repo ? (t.source_platform === 'github' ? 'https://github.com/' + t.source_repo : 'https://gitcode.com/' + t.source_repo) : '');
     var cardClick = tplUrl
       ? "window.open('" + tplUrl + "','_blank')"
       : "createFromTemplate('" + t.id + "','" + (t.default_repo_name || t.id) + "')";
@@ -177,6 +211,7 @@ function _renderHorizontalCards(templates, cat, skipPager) {
         '<div class="template-card-item-name" title="' + (t.name || '').replace(/"/g, '&quot;') + '">' + (t.name || t.id || '') + '</div>' +
         '<div class="template-card-item-cat">' + catName + '</div>' +
         '<div class="template-card-item-desc">' + (t.description || '暂无描述') + '</div>' +
+        (t.recommend_reason ? '<div class="template-card-item-reason" title="' + t.recommend_reason.replace(/"/g, '&quot;') + '">💡 ' + t.recommend_reason + '</div>' : '') +
       '</div>' +
       '<span class="' + favCls + '" style="font-size:16px;cursor:pointer;flex-shrink:0;padding:0 2px;line-height:1" onclick="event.stopPropagation();toggleFav(\'' + t.id + '\')">' + favStar + '</span>' +
       '<button class="template-card-item-btn" onclick="event.stopPropagation();createFromTemplate(\'' + t.id + "','" + (t.default_repo_name || t.id) + '\')">一键创建→</button>' +
@@ -411,9 +446,12 @@ function renderTop1000Tab(c, cat) {
         id: t.id,
         name: t.name || t.display_name || '',
         description: t.description || '',
+        recommend_reason: t.recommend_reason || '',
         icon: t.icon || '#' + (t.rank || ''),
         tags: t.tags || [],
         source_repo: t.source_repo || '',
+        html_url: t.html_url || '',
+        source_platform: t.source_platform || '',
         default_repo_name: t.default_repo_name || t.id,
         _cat_name: cat.name,
       };
@@ -476,31 +514,83 @@ function doCreateFromTemplate(templateId) {
   var btn = document.getElementById('ptCreateBtn');
   btn.disabled = true;
   btn.textContent = '创建中...';
+
+  // 进度条 UI
+  var progressEl = document.getElementById('ptProgress');
+  if (!progressEl) {
+    progressEl = document.createElement('div');
+    progressEl.id = 'ptProgress';
+    progressEl.style.cssText = 'margin-top:14px';
+    var modalBody = btn.closest('.cd');
+    if (modalBody) modalBody.appendChild(progressEl);
+  }
+  var _step = 0;
+  var _steps = [
+    {pct: 10, text: '正在检查仓库名...'},
+    {pct: 25, text: '正在创建 GitCode 仓库...'},
+    {pct: 45, text: '正在下载模板代码...'},
+    {pct: 65, text: '正在推送代码到仓库...'},
+    {pct: 80, text: '正在配置仓库托管...'},
+    {pct: 95, text: '正在应用开发场景...'},
+  ];
+  function setProgress(pct, text) {
+    var bar = pct + '%';
+    progressEl.innerHTML =
+      '<div style="font-size:11px;color:var(--t2);margin-bottom:6px">' + text + '</div>' +
+      '<div style="height:6px;background:var(--bg);border-radius:3px;overflow:hidden">' +
+        '<div style="height:100%;width:' + bar + ';background:var(--a);border-radius:3px;transition:width .4s ease"></div>' +
+      '</div>' +
+      '<div style="text-align:right;font-size:10px;color:var(--t3);margin-top:3px">' + pct + '%</div>';
+  }
+  function nextStep() {
+    if (_step < _steps.length) {
+      setProgress(_steps[_step].pct, _steps[_step].text);
+      _step++;
+    }
+  }
+  // 模拟进度推进（实际 API 是同步的，用定时器推进）
+  var _timer = setInterval(nextStep, 3000);
+  // 第一步立即显示
+  setProgress(10, '正在检查仓库名...');
+
   API.get('/repos/check-name?name=' + encodeURIComponent(repoName))
     .then(function(check) {
       if (check.exists) {
+        clearInterval(_timer);
         btn.disabled = false;
         btn.textContent = '创建';
+        progressEl.innerHTML = '';
         app.showToast('⚠️ 仓库 ' + check.full_name + ' 已存在，请更换仓库名');
         var input = document.getElementById('ptRepoName');
         if (input) { input.focus(); input.select(); }
         return;
       }
+      setProgress(25, '正在创建 GitCode 仓库...');
       API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}).then(function(r) {
+        clearInterval(_timer);
+        setProgress(100, '✅ 创建成功！');
         var modal = document.getElementById('ptCreateModal');
-        if (modal) modal.remove();
-        app.showToast('✅ ' + (r.message || '创建成功'));
+        if (modal) setTimeout(function() { modal.remove(); }, 800);
+        if (r.host_warning) {
+          app.showToast('⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（grace_bot）添加为维护者，然后手动托管仓库以完成自动化配置。', 10000);
+        } else {
+          app.showToast('✅ ' + (r.message || '创建成功'));
+        }
         var parts = (r.full_name || '').split('/');
-        selectRepo(r.full_name, parts[0], parts[1]);
+        setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1]); }, 900);
       }).catch(function(e) {
+        clearInterval(_timer);
         btn.disabled = false;
         btn.textContent = '创建';
+        setProgress(0, '❌ ' + (e.message || '创建失败'));
         app.showToast('创建失败: ' + e.message);
       });
     })
     .catch(function(err) {
+      clearInterval(_timer);
       btn.disabled = false;
       btn.textContent = '创建';
+      progressEl.innerHTML = '';
       app.showToast('检查失败: ' + (err.message || err));
     });
 }

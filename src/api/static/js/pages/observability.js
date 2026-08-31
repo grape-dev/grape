@@ -461,22 +461,15 @@ function updateOverview(ops, rt, mt) {
 // 返回 true=成功局部更新, false=需回退到完整渲染
 function updateTasks(ops, rt, mt) {
   const t = ops.tasks || {};
-  const sc = t.status_counts || {};
+  const _is = t.issue_stats || {};
 
-  _setText('kpi-t-queued', sc.queued || 0);
-  _setText('kpi-t-dispatched', sc.dispatched || 0);
-  _setText('kpi-t-running', sc.running || 0);
-  _setText('kpi-t-completed', sc.completed || 0);
-  _setText('kpi-t-failed', sc.failed || 0);
-  _setText('kpi-t-cancelled', sc.cancelled || 0);
-  _setText('kpi-t-inprogress', t.in_progress || 0);
-  _setText('kpi-t-stuck', t.stuck_count || 0);
+  _setText('kpi-t-total', _is.total || 0);
+  _setText('kpi-t-completed', _is.completed || 0);
+  _setText('kpi-t-inprogress', _is.in_progress || 0);
+  _setText('kpi-t-failed', _is.failed || 0);
 
-  // 更新 Failed/Stuck 颜色（根据计数动态变色）
   const failedEl = document.getElementById('kpi-t-failed');
-  if (failedEl) failedEl.style.color = (sc.failed || 0) > 0 ? 'var(--r)' : 'var(--t3)';
-  const stuckEl = document.getElementById('kpi-t-stuck');
-  if (stuckEl) stuckEl.style.color = (t.stuck_count || 0) > 0 ? 'var(--r)' : 'var(--g)';
+  if (failedEl) failedEl.style.color = (_is.failed || 0) > 0 ? 'var(--r)' : 'var(--t3)';
 
   return true;
 }
@@ -665,15 +658,12 @@ function renderTasksTab(ops, rt, mt) {
   const sc = t.status_counts || {};
   let html = '';
   html += section(I18N.t('observability.task_status_dist'));
+  const _is = t.issue_stats || {};
   html += _kpiRowHTML([
-    { label: I18N.t('observability.queued'), value: sc.queued || 0, color: 'var(--y)', id: 'kpi-t-queued' },
-    { label: I18N.t('observability.dispatched'), value: sc.dispatched || 0, color: 'var(--a)', id: 'kpi-t-dispatched' },
-    { label: I18N.t('observability.running'), value: sc.running || 0, color: 'var(--sk)', id: 'kpi-t-running' },
-    { label: I18N.t('observability.completed'), value: sc.completed || 0, color: 'var(--g)', id: 'kpi-t-completed' },
-    { label: I18N.t('observability.failed'), value: sc.failed || 0, color: (sc.failed||0) > 0 ? 'var(--r)' : 'var(--t3)', id: 'kpi-t-failed' },
-    { label: I18N.t('observability.cancelled'), value: sc.cancelled || 0, color: 'var(--t3)', id: 'kpi-t-cancelled' },
-    { label: I18N.t('observability.in_progress'), value: t.in_progress || 0, color: 'var(--pu)', id: 'kpi-t-inprogress' },
-    { label: I18N.t('observability.stuck'), value: t.stuck_count || 0, color: (t.stuck_count||0) > 0 ? 'var(--r)' : 'var(--g)', id: 'kpi-t-stuck' },
+    { label: I18N.t('observability.task_total'), value: _is.total || 0, color: 'var(--a)', id: 'kpi-t-total' },
+    { label: I18N.t('observability.completed'), value: _is.completed || 0, color: 'var(--g)', id: 'kpi-t-completed' },
+    { label: I18N.t('observability.in_progress'), value: _is.in_progress || 0, color: 'var(--pu)', id: 'kpi-t-inprogress' },
+    { label: I18N.t('observability.failed'), value: _is.failed || 0, color: (_is.failed||0) > 0 ? 'var(--r)' : 'var(--t3)', id: 'kpi-t-failed' },
   ]);
   html += '<div id="obs-timeline-container"><div class="loading">' + I18N.t('observability.loading_tasks') + '</div></div>';
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;

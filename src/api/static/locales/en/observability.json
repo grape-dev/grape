@@ -130,5 +130,6 @@
   "probe_skip": "Skip",
   "probe_fail": "Fail",
   "search_engine_placeholder": "Search engine/device/version...",
-  "all_devices": "All devices"
+  "all_devices": "All devices",
+  "task_total": "Total Tasks"
 }

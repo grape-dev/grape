@@ -1,0 +1,108 @@
+# Skill实现原理分析报告 - {{ skill_name }}
+
+## 0. Skill基本信息
+
+| 属性 | 值 |
+| --- | --- |
+| Skill名称 | {{ skill_name }} |
+| 实现方式 | {{ implementation_type }} |
+| 业务目标 | {{ business_goal }} |
+| 分析状态 | {{ analysis_status }} |
+| 分析时间 | {{ generation_time }} |
+
+## Skill依赖工具
+
+| 依赖项 | 版本/说明 | 功能描述 | 是否必须 |
+| --- | --- | --- | --- |
+{%- for dep in dependencies %}
+| {{ dep.name }} | {{ dep.version }} | {{ dep.description }} | {{ dep.is_mandatory }} |
+{%- endfor %}
+
+## 第一阶段：目标Skill使用的华为云Open API接口
+
+### 阶段结论
+
+{{ stage_1_result.summary if stage_1_result else '未生成第一阶段结果。' }}
+
+{% if openapi_usages -%}
+| 序号 | 服务 | Open API接口 | HTTP方法 | API路径 | 来源SDK调用 | 实际使用参数 | 业务作用 | 是否必须 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+{%- for usage in openapi_usages %}
+| {{ loop.index }} | {{ usage.service_name }} | {{ usage.api_name }} | {{ usage.http_method.value if usage.http_method.value else usage.http_method }} | {{ usage.api_path }} | {{ usage.source_sdk_call.client_class }}.{{ usage.source_sdk_call.method_name }} ({{ usage.source_sdk_call.source_file }}:{{ usage.source_sdk_call.line_number }}) | {{ usage.actual_params.keys() | list | join(', ') if usage.actual_params else '-' }} | {{ usage.business_role.business_role if usage.business_role else '-' }} | {{ usage.business_role.is_mandatory.value if usage.business_role else '-' }} |
+{%- endfor %}
+{%- else %}
+未识别到可映射的Open API接口。
+{%- endif %}
+
+## 第二阶段：KooCLI命令一一对应关系与效果完全一致判定
+
+### 阶段结论
+
+{{ stage_2_result.summary if stage_2_result else '未生成第二阶段结果。' }}
+
+{% if koocli_correspondences -%}
+| 序号 | Open API接口 | 对应KooCLI命令 | 判定状态 | 差异说明 | 是否可接受 | 信息来源 |
+| --- | --- | --- | --- | --- | --- | --- |
+{%- for corr in koocli_correspondences %}
+| {{ loop.index }} | {{ corr.api_name }} | {{ corr.selected_command.command if corr.selected_command else '-' }} | {{ corr.status.value if corr.status.value else corr.status }} | {{ corr.difference_description or '-' }} | {{ corr.acceptable.value if corr.acceptable.value else corr.acceptable }} | {{ corr.info_source.value if corr.info_source.value else corr.info_source }} |
+{%- endfor %}
+{%- else %}
+无KooCLI一一对应分析结果。
+{%- endif %}
+
+{% if incomplete_correspondence_apis %}
+### 不完全一致或无对应命令接口清单
+
+{%- for corr in koocli_correspondences %}
+{%- if not corr.selected_command %}
+- {{ corr.api_name }}{% if corr.api_explorer_url %}（[API Explorer查询]({{ corr.api_explorer_url }})）{% endif %}
+{%- endif %}
+{%- endfor %}
+
+{{ incomplete_explanation }}
+{% endif %}
+
+## 第三阶段：全部改用KooCLI后的业务效果等价性结论
+
+{% if replacement_feasibility -%}
+| 项目 | 内容 |
+| --- | --- |
+| 替换结论 | {{ replacement_feasibility.conclusion.value if replacement_feasibility.conclusion.value else replacement_feasibility.conclusion }} |
+| 结论原因 | {{ replacement_feasibility.reason }} |
+
+### 关键阻塞点
+
+{% if replacement_feasibility.blocking_points -%}
+| 序号 | 关联接口 | 阻塞原因 | 业务影响 | 建议处理方式 |
+| --- | --- | --- | --- | --- |
+{%- for point in replacement_feasibility.blocking_points %}
+| {{ loop.index }} | {{ point.api_name }} | {{ point.reason }} | {{ point.business_impact }} | {{ point.recommendation }} |
+{%- endfor %}
+{%- else %}
+无关键阻塞点。
+{%- endif %}
+{%- else %}
+未生成KooCLI替换可行性结论。
+{%- endif %}
+
+## 第四阶段：KooCLI本地验证结论
+
+{{ stage_4_description }}
+
+## 最终结论
+
+{% if replacement_feasibility %}
+该Skill是否能够全部改用KooCLI并达到与Huawei Cloud SDK实现一致的业务效果：**{{ replacement_feasibility.conclusion.value if replacement_feasibility.conclusion.value else replacement_feasibility.conclusion }}**。
+
+原因：{{ replacement_feasibility.reason }}
+{% else %}
+当前信息不足，无法形成最终替换结论。
+{% endif %}
+
+{% if errors %}
+## 分析错误与降级说明
+
+{%- for error in errors %}
+- {{ error }}
+{%- endfor %}
+{% endif %}

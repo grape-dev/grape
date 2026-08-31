@@ -324,13 +324,32 @@ public class HealthCenterController {
     private Map<String, Object> loadTaskKpi() {
         Map<String, Object> kpi = new LinkedHashMap<>();
         try {
-            kpi.put("total", count("SELECT COUNT(*) FROM agent_tasks"));
-            kpi.put("completed", count("SELECT COUNT(*) FROM agent_tasks WHERE status='completed'"));
-            kpi.put("running", count("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('running','dispatched','queued')"));
-            kpi.put("failed", count("SELECT COUNT(*) FROM agent_tasks WHERE status='failed'"));
-            kpi.put("queued", count("SELECT COUNT(*) FROM agent_tasks WHERE status='queued'"));
-            // stuck: running 超 15 分钟
-            kpi.put("stuck", count("SELECT COUNT(*) FROM agent_tasks WHERE status='running' AND created_at < DATE_SUB(NOW(), INTERVAL 15 MINUTE)"));
+            // Issue 级别统计：一个 issue = 一个任务，取每个 issue 最新 task 的状态
+            // total = distinct issue 数量
+            kpi.put("total", count("SELECT COUNT(DISTINCT issue_id) FROM agent_tasks WHERE issue_id IS NOT NULL AND issue_id <> ''"));
+            // completed = issue 最新 task 状态为 completed
+            kpi.put("completed", count(
+                "SELECT COUNT(*) FROM (" +
+                "  SELECT issue_id, MAX(id) as max_id FROM agent_tasks" +
+                "  WHERE issue_id IS NOT NULL AND issue_id <> ''" +
+                "  GROUP BY issue_id" +
+                ") latest JOIN agent_tasks t ON t.id = latest.max_id WHERE t.status='completed'"));
+            // in_progress = issue 最新 task 状态为 running/dispatched/queued
+            kpi.put("running", count(
+                "SELECT COUNT(*) FROM (" +
+                "  SELECT issue_id, MAX(id) as max_id FROM agent_tasks" +
+                "  WHERE issue_id IS NOT NULL AND issue_id <> ''" +
+                "  GROUP BY issue_id" +
+                ") latest JOIN agent_tasks t ON t.id = latest.max_id WHERE t.status IN ('running','dispatched','queued')"));
+            // failed = issue 最新 task 状态为 failed
+            kpi.put("failed", count(
+                "SELECT COUNT(*) FROM (" +
+                "  SELECT issue_id, MAX(id) as max_id FROM agent_tasks" +
+                "  WHERE issue_id IS NOT NULL AND issue_id <> ''" +
+                "  GROUP BY issue_id" +
+                ") latest JOIN agent_tasks t ON t.id = latest.max_id WHERE t.status='failed'"));
+            kpi.put("queued", 0);
+            kpi.put("stuck", 0);
         } catch (Exception e) {
             kpi.put("total", 0); kpi.put("completed", 0); kpi.put("running", 0); kpi.put("failed", 0); kpi.put("queued", 0); kpi.put("stuck", 0);
         }

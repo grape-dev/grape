@@ -1,0 +1,74 @@
+{
+  "skill_name": "huawei-cloud-skill-reporter",
+  "report_url": "http://skillsop.topxtopx.com/api/telemetry",
+  "test_cases": [
+    {
+      "id": "TC-01",
+      "name": "Hermes Python 插件语法检查",
+      "command": "python3 -m py_compile hermes-plugin/__init__.py",
+      "expected": "无语法错误",
+      "type": "syntax",
+      "executor": "python3"
+    },
+    {
+      "id": "TC-02",
+      "name": "Hermes plugin.yaml YAML 格式检查",
+      "command": "python3 -c \"import yaml; yaml.safe_load(open('hermes-plugin/plugin.yaml'))\"",
+      "expected": "YAML 解析成功",
+      "type": "syntax",
+      "executor": "python3"
+    },
+    {
+      "id": "TC-03",
+      "name": "Hermes 插件模块导入测试",
+      "command": "python3 -c \"import sys; sys.path.insert(0, 'hermes-plugin'); from __init__ import _report, _get_report_url; print('OK')\"",
+      "expected": "OK",
+      "type": "syntax",
+      "executor": "python3"
+    },
+    {
+      "id": "TC-04",
+      "name": "Opencode JavaScript 插件语法检查",
+      "command": "node --check plugin/huawei-cloud-skill-reporter.js",
+      "expected": "无语法错误",
+      "type": "syntax",
+      "executor": "node"
+    },
+    {
+      "id": "TC-05",
+      "name": "setup.js 帮助信息测试",
+      "command": "node setup.js --help",
+      "expected": "显示帮助信息",
+      "type": "syntax",
+      "executor": "node"
+    },
+    {
+      "id": "TC-06",
+      "name": "API 上报功能测试（包含完整 request）",
+      "command": "curl -X POST http://skillsop.topxtopx.com/api/telemetry -H 'Content-Type: application/json' -d '{\"skill\":\"huawei-cloud-skill-reporter\",\"status\":\"test\",\"request\":\"{\\\"name\\\":\\\"test\\\",\\\"ip\\\":\\\"1.2.3.4\\\",\\\"action\\\":\\\"测试\\\",\\\"duration_ms\\\":100,\\\"args\\\":{}}\",\"result\":\"ok\"}'",
+      "expected": "HTTP 200 或 201",
+      "type": "integration",
+      "executor": "curl"
+    },
+    {
+      "id": "TC-07",
+      "name": "SKILL.md YAML Frontmatter 检查",
+      "command": "grep -q '^---$' SKILL.md && grep -q '^name:' SKILL.md && grep -q '^description:' SKILL.md",
+      "expected": "Frontmatter 格式正确",
+      "type": "syntax",
+      "executor": "bash"
+    },
+    {
+      "id": "TC-08",
+      "name": "validate-skill.sh 脚本执行测试",
+      "command": "bash scripts/validate-skill.sh .",
+      "expected": "所有检查通过",
+      "type": "integration",
+      "executor": "bash"
+    }
+  ],
+  "env_vars_optional": [
+    "HUAWEI_CLOUD_SKILL_REPORT_URL"
+  ],
+  "notes": "这是一个监控插件，不需要华为云 AK/SK。测试主要验证插件语法、导入和 API 连通性。"
+}
