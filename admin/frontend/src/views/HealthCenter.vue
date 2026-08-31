@@ -124,6 +124,7 @@
                 <span class="tl-issue-title t3" v-if="iss.title">{{ iss.title }}</span>
                 <span class="tl-issue-count t3">{{ iss.eventCount }} 事件</span>
                 <span class="tl-issue-status" :class="issueHasFailed(iss) ? 'fail' : 'ok'">{{ issueHasFailed(iss) ? '✗ 有失败' : '✓ 正常' }}</span>
+                <span class="t3 tl-issue-duration" style="color:var(--primary)">总耗时 {{ issueTotalDuration(iss) }}</span>
                 <span class="t3 tl-issue-time">{{ (iss.lastAt || '').substring(0, 16) }}</span>
               </div>
               <!-- 展开的详情：时序图 + 事件列表 -->
@@ -781,6 +782,11 @@ function bindMermaidClicks(issueId, iss, evTypes) {
   }
 }
 function issueHasFailed(iss) { return iss.events.some(e => e.status === 'failed') }
+
+function issueTotalDuration(iss) {
+  const total = (iss.events || []).reduce((s, e) => s + (Number(e.duration) || 0), 0)
+  return formatDuration2(total)
+}
 
 function issueUrl(iss) {
   const num = (iss.issueId || '').replace('#', '')
