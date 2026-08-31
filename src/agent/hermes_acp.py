@@ -300,7 +300,7 @@ class HermesACPBackend:
             # "Redirected the active turn" 然后不干活）。所以检查到没做完时，
             # 关掉旧进程，开新进程新 session，把"你上次说了要做什么但没做"作为
             # 新 prompt 发过去，agent 会当作新任务指令执行。
-            MAX_ATTEMPTS = 3
+            MAX_ATTEMPTS = 50
             _global_start = time.time()
             _global_timeout = max_exec_seconds * 2
             _final_stop_reason = ""
