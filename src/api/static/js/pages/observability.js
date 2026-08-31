@@ -603,7 +603,7 @@ function loadErrorLogs(container) {
       </select>
       <span class="ts t3" id="errorLogCount"></span>
     </div>
-    <div id="errorLogBody"><div class="loading">' + I18N.t('observability.loading') + '</div></div>
+    <div id="errorLogBody"><div class="loading">${I18N.t('observability.loading')}</div></div>
   `;
   // 加载来源列表
   fetch('/api/dashboard/ops/error-logs/sources').then(r => r.json()).then(d => {
