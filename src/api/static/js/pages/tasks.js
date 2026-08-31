@@ -201,7 +201,7 @@ function _detailHtml(t) {
   const detIc = isDone ? 'tsk-det-ic-d' : isProc ? 'tsk-det-ic-pr' : 'tsk-det-ic-p';
   const icon = isDone ? '✓' : isProc ? '⏳' : '#';
   // 场景名称
-  var sceneName = t.scene_id ? (t.scene_name || I18N.t('dashboard.scene_' + t.scene_id) || t.scene_id) : '—';
+  var sceneName = t.scene_id ? (t.scene_name || t.scene_id) : '—';
   var sceneBadge = t.scene_source === 'vod' ? '' : (t.scene_id && t.scene_source === 'repo_default' ? ` <span style="font-size:10px;color:var(--t3)">${I18N.t('tasks.scene_default_badge')}</span>` : '');
   // 多任务模式
   var subtaskBadge = t.is_subtask_mode ? `<span class="tg tg-q" style="font-size:10px">${I18N.t('tasks.multi_task_badge')}</span>` : `<span class="ts t3" style="font-size:10px">${I18N.t('tasks.single_task_badge')}</span>`;
