@@ -470,7 +470,7 @@ async function load() {
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     // 刷新当前 tab 的详细数据
     if (activeTab.value === 'tasks') loadTimeline()
-    loadOverview()
+    else if (activeTab.value === 'devices') loadOverview()
   } catch (e) {
     console.error('[HealthCenter] load failed', e)
     lastUpdate.value = '加载失败'
