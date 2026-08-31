@@ -13,7 +13,7 @@
 
 | 组件 | 现状 |
 |---|---|
-| Web 服务 | 单进程 uvicorn（`src.api.main:app`，0.0.0.0:38080） |
+| Web 服务 | 主 API `src.api.main:app` 内网 3000 + webhook `src.api.run_webhook:app` 8080，nginx 反代对外 80/443 |
 | 数据库 | MySQL RDS（生产；`DEVOPS_DB_BACKEND` 可切 sqlite 测试） |
 | 锁 | 进程内 `threading.RLock`（`src/session_manager.py: db_lock`） |
 | 队列 | `agent_tasks` 表 + worker 轮询 claim（DB 驱动） |

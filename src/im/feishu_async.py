@@ -1184,6 +1184,10 @@ class BotManager:
 
     async def start(self):
         """初始化共享 aiohttp 会话"""
+        import asyncio
+        # 记下主事件循环：web→飞书推送等后台线程需要把 aiohttp 调用投递回主 loop，
+        # 避免跨事件循环复用共享 session（Timeout context manager should be used inside a task）
+        self.loop = asyncio.get_running_loop()
         session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=15, connect=5),
             connector=aiohttp.TCPConnector(limit=300, limit_per_host=30, keepalive_timeout=30),

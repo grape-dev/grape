@@ -586,8 +586,16 @@ def _poll_gitcode_issues_once() -> int:
                         "repository": {"full_name": f"{owner}/{repo_name}", "name": repo_name}
                     }).encode()
 
+                    # 权威 webhook 地址：读 configs/server-config.json 的 webhook_url
+                    # （get_webhook_url 优先级 server-config > meta；注入走 HTTPS→nginx→8080 与真实回调同链路）
+                    from src.user.db import get_webhook_url
+                    _wh = get_webhook_url()
+                    if not _wh:
+                        log.warning(f"poll: webhook_url 未配置，跳过注入 {issue_id}")
+                        continue
+
                     webhook_req = _urllib.Request(
-                        f"http://127.0.0.1:38080/webhook/gitcode",
+                        _wh,
                         data=payload,
                         headers={
                             "Content-Type": "application/json",

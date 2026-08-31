@@ -1,6 +1,8 @@
-"""Chat 工作目录下发逻辑基准测试（2026-08-13 修复：非 root worker Permission denied）。"""
+"""web chat 工作区路径测试（web-chat-no-response-cwd-fix.md §7.1）"""
 import os
-import sys
+from unittest import mock
+
+from src.api.routes.chat import _get_chat_cwd
 
 
 class TestChatCwd:
