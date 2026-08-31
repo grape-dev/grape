@@ -1,4 +1,11 @@
 // ====== 项目模板页 ======
+// 翻译后端返回的分类名：语言包优先，无则 fallback 原名
+function _tmplCatName(name) {
+  if (!name) return '';
+  var t = I18N.t('templates.cat.' + name);
+  return t !== ('templates.cat.' + name) ? t : name;
+}
+
 let _tmplState = {
   categories: [],
   activeCat: 0,
@@ -124,7 +131,7 @@ function _renderFeaturedCarousel() {
         '<span class="feat-item-ic">' + ic + '</span>' +
         '<div class="feat-item-info">' +
           '<span class="feat-item-name">' + nm + '</span>' +
-          '<span class="feat-item-cat">' + x.name + '</span>' +
+          '<span class="feat-item-cat">' + _tmplCatName(x.name) + '</span>' +
         '</div>' +
       '</div>';
     } else {
@@ -132,7 +139,7 @@ function _renderFeaturedCarousel() {
         '<span class="feat-item-ic">⏳</span>' +
         '<div class="feat-item-info">' +
           '<span class="feat-item-name" style="color:var(--t3);font-size:12px">' + I18N.t('templates.loading') + '</span>' +
-          '<span class="feat-item-cat">' + x.name + '</span>' +
+          '<span class="feat-item-cat">' + _tmplCatName(x.name) + '</span>' +
         '</div>' +
       '</div>';
     }
@@ -162,7 +169,7 @@ function _renderHorizontalCards(templates, cat, skipPager) {
   var pageT = templates.slice(_tmplState.page * 12, (_tmplState.page + 1) * 12);
 
   var cards = pageT.map(function(t) {
-    var catName = t._cat_name || cat.name || '';
+    var catName = _tmplCatName(t._cat_name || cat.name || '');
     var tplUrl = t.source_repo ? 'https://gitcode.com/' + t.source_repo : '';
     var cardClick = tplUrl
       ? "window.open('" + tplUrl + "','_blank')"
@@ -274,7 +281,7 @@ function renderTemplateCategory() {
     var cnt = (x.templates || []).length;
     var act = i === _tmplState.activeCat ? ' tmpl-tab-act' : '';
     var favCls = x.id === '_fav' ? ' tmpl-tab-fav' : '';
-    return '<button class="tmpl-tab' + act + favCls + '" onclick="switchTemplateCat(' + i + ')"><span class="tmpl-tab-ic">' + (x.icon || '📦') + '</span><span class="tmpl-tab-name">' + x.name + '</span><span class="tmpl-tab-cnt">' + cnt + '</span></button>';
+    return '<button class="tmpl-tab' + act + favCls + '" onclick="switchTemplateCat(' + i + ')"><span class="tmpl-tab-ic">' + (x.icon || '📦') + '</span><span class="tmpl-tab-name">' + _tmplCatName(x.name) + '</span><span class="tmpl-tab-cnt">' + cnt + '</span></button>';
   }).join('');
 
   var allT = cat.templates || [];
@@ -389,7 +396,7 @@ function renderTop1000Tab(c, cat) {
     var cnt = x.id === '_fav' ? Object.keys(_tmplState._favState).length : (x.top1000 ? (x.total || 0) : (x.templates || []).length);
     var act = i === _tmplState.activeCat ? ' tmpl-tab-act' : '';
     var favCls = x.id === '_fav' ? ' tmpl-tab-fav' : '';
-    return '<button class="tmpl-tab' + act + favCls + '" onclick="switchTemplateCat(' + i + ')"><span class="tmpl-tab-ic">' + (x.icon || '📦') + '</span><span class="tmpl-tab-name">' + x.name + '</span><span class="tmpl-tab-cnt">' + cnt + '</span></button>';
+    return '<button class="tmpl-tab' + act + favCls + '" onclick="switchTemplateCat(' + i + ')"><span class="tmpl-tab-ic">' + (x.icon || '📦') + '</span><span class="tmpl-tab-name">' + _tmplCatName(x.name) + '</span><span class="tmpl-tab-cnt">' + cnt + '</span></button>';
   }).join('');
 
   var cache = _tmplState.top1000Cache[cat.id] || {
@@ -415,7 +422,7 @@ function renderTop1000Tab(c, cat) {
         tags: t.tags || [],
         source_repo: t.source_repo || '',
         default_repo_name: t.default_repo_name || t.id,
-        _cat_name: cat.name,
+        _cat_name: _tmplCatName(cat.name),
       };
     });
     contentHtml = _renderHorizontalCards(top1000Tmpls, cat, true);
