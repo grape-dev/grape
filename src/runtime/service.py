@@ -1240,14 +1240,26 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
     task = get_task(task_id)
     # 幂等保护：如果 task 已经是终态（failed/cancelled），不覆盖（防止 worker 终止后残留进程
     # 跑完调 complete 把 failed 状态覆盖成 completed，2026-08-24 seq#2488 实例）。
+    # 例外：如果 result_text 包含完整结构化输出（actions+conclusion），说明任务实际已完成，
+    # 即使 exit_code 非 0（如 hermes ACP 进程被 SIGTERM 清理后 proc.returncode=-15）也应覆盖为 completed。
     if task and task.get("status") in ("failed", "cancelled"):
-        log.info(f"Task {task_id} already {task.get('status')}, skip complete_task (result={result_text[:60]})")
-        return
+        from src.api.event_store import parse_agent_output_json
+        _output = parse_agent_output_json(result_text or "")
+        if _output and _output.get("actions") and _output.get("conclusion"):
+            log.info(f"Task {task_id} was {task.get('status')} but has structured output, overriding to completed")
+        else:
+            log.info(f"Task {task_id} already {task.get('status')}, skip complete_task (result={result_text[:60]})")
+            return
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import parse_agent_output_json, update_event_complete
             from src.api.event_archive import finalize_event_archive
             output = parse_agent_output_json(result_text or "")
+            # 结构化产出修复：exit_code 非 0 但有完整结构化输出（actions+conclusion）
+            # → hermes ACP 进程被 SIGTERM 清理后 proc.returncode=-15，任务实际已完成
+            if exit_code != 0 and output and output.get("actions") and output.get("conclusion"):
+                log.info(f"Task {task_id}: exit_code {exit_code} but has structured output, overriding to 0")
+                exit_code = 0
             # 业务失败检测：进程退出码=0 但业务实际失败 → 覆盖 exit_code
             if exit_code == 0 and _detect_business_failure(
                     task.get("agent_type") or "", output, result_text):

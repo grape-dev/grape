@@ -87,8 +87,10 @@ def _create_task(user_id: int, assignee: str, repo_key: str, issue_number: int,
         if row:
             return row[0]
         c.execute(
-            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status) VALUES (?,?,?,?,?,?,'active')",
-            (user_id, assignee, repo_key, issue_number, title, task_description)
+            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number) "
+            "VALUES (?,?,?,?,?,?,'active',?,?)",
+            (user_id, assignee, repo_key, issue_number, title, task_description,
+             _get_issue_subtask_mode(repo_key, issue_number), _get_issue_parent(repo_key, issue_number))
         )
         db.commit()
         return c.lastrowid
@@ -171,8 +173,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             if not description:
                 description = f"{event_type or 'Issue'}：请在任务中心查看并处理。"
             c.execute(
-                "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status) VALUES (?,?,?,?,?,?,'active')",
-                (user_id, target, repo_key, issue_number, title, description)
+                "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number) "
+                "VALUES (?,?,?,?,?,?,'active',?,?)",
+                (user_id, target, repo_key, issue_number, title, description,
+                 _get_issue_subtask_mode(repo_key, issue_number), _get_issue_parent(repo_key, issue_number))
             )
             db.commit()
             task_id = c.lastrowid
@@ -233,6 +237,31 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
             (repo_key, issue_number))
         db.commit()
         return c.rowcount
+
+
+def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:
+    """从 issue_state 读取 is_subtask_mode（任务创建时同步）。
+    子任务（有 parent_issue_id）也算多任务模式。"""
+    from src.api.session_store import get_issue_stage
+    issue_id = f"#{issue_number}"
+    state = get_issue_stage(repo_key, issue_id) or {}
+    if state.get("is_subtask_mode"):
+        return 1
+    # 有 parent_issue_id 的子任务也算多任务模式
+    parent = state.get("parent_issue_id", "") or ""
+    if parent and str(parent).replace("#", "").strip():
+        return 1
+    return 0
+
+
+def _get_issue_parent(repo_key: str, issue_number: int) -> int:
+    """从 issue_state 读取 parent_issue_number"""
+    from src.api.session_store import get_issue_stage
+    issue_id = f"#{issue_number}"
+    state = get_issue_stage(repo_key, issue_id) or {}
+    parent = state.get("parent_issue_id", "") or ""
+    parent_num = str(parent).replace("#", "").strip()
+    return int(parent_num) if parent_num.isdigit() else 0
 
 
 def _get_issue_title(repo_key: str, issue_number: int) -> str:
