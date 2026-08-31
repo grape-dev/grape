@@ -414,12 +414,32 @@ function loadAgentTypes() {
     showLogin();
   }
 
-  function showToast(msg) {
+  function showToast(msg, duration) {
     const t = document.createElement('div');
     t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#101724;color:#fff;padding:10px 20px;border-radius:8px;font-size:12px;z-index:10000;box-shadow:0 4px 16px rgba(0,0,0,.2);white-space:pre-line;max-width:80vw';
     t.textContent = msg;
     document.body.appendChild(t);
-    setTimeout(() => t.remove(), 3000);
+    setTimeout(() => t.remove(), duration || 3000);
+  }
+
+  // ── 帮助抽屉 ──
+  function openHelp() {
+    const overlay = document.getElementById('helpOverlay');
+    const drawer = document.getElementById('helpDrawer');
+    if (!overlay || !drawer) return;
+    overlay.classList.add('show');
+    drawer.classList.add('show');
+    // 动态加载 help.html 到 iframe（避免跨域，用同路径）
+    const body = drawer.querySelector('.help-drawer-body');
+    if (body && !body.querySelector('iframe')) {
+      body.innerHTML = '<iframe src="/static/help.html" title="Grape 使用帮助"></iframe>';
+    }
+  }
+  function closeHelp() {
+    const overlay = document.getElementById('helpOverlay');
+    const drawer = document.getElementById('helpDrawer');
+    if (overlay) overlay.classList.remove('show');
+    if (drawer) drawer.classList.remove('show');
   }
 
   function init() {
@@ -521,6 +541,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });

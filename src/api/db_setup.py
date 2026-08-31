@@ -467,6 +467,27 @@ CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
 )
 """
 
+# ===== 优选项目模板（GitCode/GitHub 云原生热门项目）=====
+_FEATURED_TEMPLATES_DDL = """
+CREATE TABLE IF NOT EXISTS featured_templates (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform    TEXT NOT NULL,
+    repo_full_name TEXT NOT NULL,
+    repo_name   TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    language    TEXT DEFAULT '',
+    stars       INTEGER DEFAULT 0,
+    forks       INTEGER DEFAULT 0,
+    topics      TEXT DEFAULT '[]',
+    html_url    TEXT DEFAULT '',
+    clone_url   TEXT DEFAULT '',
+    category    TEXT DEFAULT 'cloud-native',
+    recommend_reason TEXT DEFAULT '',
+    fetched_at  TEXT DEFAULT '',
+    UNIQUE(platform, repo_full_name)
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
@@ -499,6 +520,7 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     PRIMARY KEY (app_id, message_id)
 )"""),
     ("devops_pipeline_scene", _PIPELINE_SCENE_DDL),
+    ("featured_templates", _FEATURED_TEMPLATES_DDL),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")

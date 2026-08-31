@@ -1244,3 +1244,88 @@
 [data-theme="apple"] .top1000-pager button { border-radius: 50% !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .top1000-pager button:hover:not(:disabled) { border-color: var(--a) !important; color: var(--a) !important; transform: scale(1.05) !important; }
 }
+
+/* ── Help Button & Drawer — Apple Liquid Glass Style ── */
+[data-theme="apple"] .help-btn {
+  border-radius: 50%;
+  background: rgba(0,0,0,0.04);
+  backdrop-filter: blur(10px) saturate(180%);
+  -webkit-backdrop-filter: blur(10px) saturate(180%);
+  border: 0.5px solid rgba(0,0,0,0.06);
+  transition: all var(--apple-transition);
+}
+[data-theme="apple"] .help-btn:hover {
+  background: rgba(0,113,227,0.1);
+  color: var(--a);
+  transform: scale(1.08);
+  box-shadow: 0 2px 12px rgba(0,113,227,0.2);
+}
+[data-theme="apple"] .help-btn:active {
+  transform: scale(0.92);
+}
+[data-theme="apple"] .help-overlay {
+  background: rgba(0,0,0,0.25);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
+}
+[data-theme="apple"] .help-drawer {
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: blur(40px) saturate(200%);
+  -webkit-backdrop-filter: blur(40px) saturate(200%);
+  border-left: 0.5px solid rgba(0,0,0,0.08);
+  box-shadow: -12px 0 48px rgba(0,0,0,0.12);
+  border-radius: 24px 0 0 24px;
+}
+[data-theme="apple"] .help-drawer-hdr {
+  background: rgba(255,255,255,0.6);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 0.5px solid rgba(0,0,0,0.08);
+}
+[data-theme="apple"] .help-drawer-hdr h2 {
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+[data-theme="apple"] .help-drawer-close {
+  background: rgba(0,0,0,0.05);
+  border: 0.5px solid rgba(0,0,0,0.06);
+  border-radius: 50%;
+  transition: all 0.2s cubic-bezier(0.25,0.1,0.25,1);
+}
+[data-theme="apple"] .help-drawer-close:hover {
+  background: rgba(0,0,0,0.1);
+  transform: scale(1.08);
+}
+[data-theme="apple"] .help-drawer-close:active {
+  transform: scale(0.92);
+}
+/* Dark mode overrides */
+[data-theme="apple"][data-theme-mode="dark"] .help-btn {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.1);
+  color: var(--t3);
+}
+[data-theme="apple"][data-theme-mode="dark"] .help-btn:hover {
+  background: rgba(0,113,227,0.25);
+  color: #5ac8fa;
+}
+[data-theme="apple"][data-theme-mode="dark"] .help-overlay {
+  background: rgba(0,0,0,0.5);
+}
+[data-theme="apple"][data-theme-mode="dark"] .help-drawer {
+  background: rgba(30,30,32,0.92);
+  border-left-color: rgba(255,255,255,0.08);
+  box-shadow: -12px 0 48px rgba(0,0,0,0.4);
+}
+[data-theme="apple"][data-theme-mode="dark"] .help-drawer-hdr {
+  background: rgba(40,40,42,0.6);
+  border-bottom-color: rgba(255,255,255,0.08);
+}
+[data-theme="apple"][data-theme-mode="dark"] .help-drawer-close {
+  background: rgba(255,255,255,0.1);
+  border-color: rgba(255,255,255,0.1);
+  color: var(--t2);
+}
+[data-theme="apple"][data-theme-mode="dark"] .help-drawer-close:hover {
+  background: rgba(255,255,255,0.18);
+}

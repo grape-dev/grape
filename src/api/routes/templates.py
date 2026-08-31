@@ -61,6 +61,69 @@ async def list_templates(user: dict = Depends(get_current_user)):
     return {"categories": data.get("categories", [])}
 
 
+@router.get("/top1000")
+async def list_top1000_templates(
+    platform: str = "all",
+    page: int = 0,
+    size: int = 20,
+    sort_by: str = "stars",
+    keyword: str = "",
+    user: dict = Depends(get_current_user),
+):
+    """返回优选项目模板（从 DB featured_templates 表读取，支持分页+搜索+排序）"""
+    from src.session_manager import db, db_lock
+    offset = page * size
+    where_clauses = []
+    params = []
+    if platform and platform != "all" and platform != "undefined":
+        where_clauses.append("platform = ?")
+        params.append(platform)
+    if keyword:
+        where_clauses.append("(repo_full_name LIKE ? OR description LIKE ? OR repo_name LIKE ?)")
+        params.extend([f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"])
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    sort_col = "stars" if sort_by == "stars" else "forks" if sort_by == "forks" else "stars"
+    with db_lock:
+        c = db.cursor()
+        # 总数
+        c.execute(f"SELECT COUNT(*) FROM featured_templates{where_sql}", params)
+        total = c.fetchone()[0]
+        # 分页数据
+        c.execute(
+            f"SELECT platform, repo_full_name, repo_name, description, language, "
+            f"stars, forks, topics, html_url, clone_url, category, recommend_reason, fetched_at "
+            f"FROM featured_templates{where_sql} "
+            f"ORDER BY {sort_col} DESC LIMIT ? OFFSET ?",
+            params + [size, offset]
+        )
+        rows = c.fetchall()
+    import json as _json
+    templates = []
+    for r in rows:
+        topics = []
+        try:
+            topics = _json.loads(r[7]) if r[7] else []
+        except Exception:
+            pass
+        templates.append({
+            "id": f"{r[0]}-{r[1].replace('/', '-')}",
+            "name": r[2],
+            "description": (r[3] or "")[:120],
+            "recommend_reason": r[11] or "",
+            "icon": "📦",
+            "source": "git",
+            "source_repo": r[1],
+            "source_platform": r[0],
+            "clone_url": r[9],
+            "html_url": r[8] or "",
+            "default_repo_name": r[2].lower()[:30],
+            "tags": topics[:5] or ([r[4]] if r[4] else []),
+            "scene_id": "default",
+            "stats": {"show": True, "stars": r[5], "language": r[4], "platform": r[0]},
+        })
+    return {"templates": templates, "total": total, "page": page, "size": size}
+
+
 class CreateTemplateRequest(BaseModel):
     template_id: str
     repo_name: str = ""
@@ -104,10 +167,14 @@ async def create_from_template(body: CreateTemplateRequest,
 
     full_name = f"{gitcode_login}/{repo_name}"
 
-    # 2. 写入模板代码（source=local 复制目录 / source=git clone）
+    # 2. 写入模板代码（放到 executor 避免阻塞 event loop）
     try:
         bot_token, _ = _load_global_bot_config()
-        push_template_to_repo(tpl, gitcode_login, repo_name, api_token, bot_token=bot_token)
+        import asyncio, functools
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None,
+            functools.partial(push_template_to_repo, tpl, gitcode_login, repo_name,
+                              api_token, bot_token=bot_token))
     except Exception as e:
         log.warning(f"template push failed: {e}")
         if not repo_created:
@@ -115,15 +182,20 @@ async def create_from_template(body: CreateTemplateRequest,
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但模板代码写入失败: {e}"})
 
     # 3. 自动加入托管（复用 /api/repos/host 全链路）
+    webhook_id = 0
+    host_warning = ""
     try:
         from src.api.routes.repos import RepoAction, host_repo
         host_result = await host_repo(RepoAction(full_name=full_name), user)
         webhook_id = host_result.get("webhook_id", 0)
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        # 托管失败（如 grace_bot 未成为维护者）— 不中断流程，返回提醒
+        detail = e.detail if isinstance(e.detail, str) else (e.detail.get("message", "") if isinstance(e.detail, dict) else str(e.detail))
+        log.warning(f"template host failed (non-fatal): {detail}")
+        host_warning = detail or "托管配置失败"
     except Exception as e:
-        log.warning(f"template host failed: {e}")
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但托管失败: {e}（可稍后手动托管）"})
+        log.warning(f"template host failed (non-fatal): {e}")
+        host_warning = str(e)
 
     # 4. 应用开发场景
     scene_id = tpl.get("scene_id") or ctx.get("scene_id") or "default"
@@ -150,5 +222,9 @@ async def create_from_template(body: CreateTemplateRequest,
     except Exception as e:
         log.warning(f"template onboarding trigger failed: {e}")
 
+    msg = f"项目 {full_name} 创建成功"
+    if host_warning:
+        msg += "。⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（grace_bot）添加为维护者，然后手动托管仓库以完成自动化配置。"
     return {"full_name": full_name, "webhook_id": webhook_id, "scene_id": scene_id,
-            "message": f"项目 {full_name} 创建并托管成功"}
+            "host_warning": host_warning,
+            "message": msg}

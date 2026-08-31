@@ -170,7 +170,7 @@ function _renderHorizontalCards(templates, cat, skipPager) {
 
   var cards = pageT.map(function(t) {
     var catName = _tmplCatName(t._cat_name || cat.name || '');
-    var tplUrl = t.source_repo ? 'https://gitcode.com/' + t.source_repo : '';
+    var tplUrl = t.html_url || (t.source_repo ? (t.source_platform === 'github' ? 'https://github.com/' + t.source_repo : 'https://gitcode.com/' + t.source_repo) : '');
     var cardClick = tplUrl
       ? "window.open('" + tplUrl + "','_blank')"
       : "createFromTemplate('" + t.id + "','" + (t.default_repo_name || t.id) + "')";
@@ -184,6 +184,7 @@ function _renderHorizontalCards(templates, cat, skipPager) {
         '<div class="template-card-item-name" title="' + (t.name || '').replace(/"/g, '&quot;') + '">' + (t.name || t.id || '') + '</div>' +
         '<div class="template-card-item-cat">' + catName + '</div>' +
         '<div class="template-card-item-desc">' + (t.description || I18N.t('templates.no_description')) + '</div>' +
+        (t.recommend_reason ? '<div class="template-card-item-reason" title="' + t.recommend_reason.replace(/"/g, '&quot;') + '">💡 ' + t.recommend_reason + '</div>' : '') +
       '</div>' +
       '<span class="' + favCls + '" style="font-size:16px;cursor:pointer;flex-shrink:0;padding:0 2px;line-height:1" onclick="event.stopPropagation();toggleFav(\'' + t.id + '\')">' + favStar + '</span>' +
       '<button class="template-card-item-btn" onclick="event.stopPropagation();createFromTemplate(\'' + t.id + "','" + (t.default_repo_name || t.id) + '\')">' + I18N.t('templates.create_from_template_arrow') + '</button>' +
@@ -418,9 +419,12 @@ function renderTop1000Tab(c, cat) {
         id: t.id,
         name: t.name || t.display_name || '',
         description: t.description || '',
+        recommend_reason: t.recommend_reason || '',
         icon: t.icon || '#' + (t.rank || ''),
         tags: t.tags || [],
         source_repo: t.source_repo || '',
+        html_url: t.html_url || '',
+        source_platform: t.source_platform || '',
         default_repo_name: t.default_repo_name || t.id,
         _cat_name: _tmplCatName(cat.name),
       };
@@ -483,31 +487,83 @@ function doCreateFromTemplate(templateId) {
   var btn = document.getElementById('ptCreateBtn');
   btn.disabled = true;
   btn.textContent = I18N.t('templates.creating');
+
+  // 进度条 UI
+  var progressEl = document.getElementById('ptProgress');
+  if (!progressEl) {
+    progressEl = document.createElement('div');
+    progressEl.id = 'ptProgress';
+    progressEl.style.cssText = 'margin-top:14px';
+    var modalBody = btn.closest('.cd');
+    if (modalBody) modalBody.appendChild(progressEl);
+  }
+  var _step = 0;
+  var _steps = [
+    {pct: 10, text: I18N.t('templates.progress_checking')},
+    {pct: 25, text: I18N.t('templates.progress_creating_repo')},
+    {pct: 45, text: I18N.t('templates.progress_downloading')},
+    {pct: 65, text: I18N.t('templates.progress_pushing')},
+    {pct: 80, text: I18N.t('templates.progress_hosting')},
+    {pct: 95, text: I18N.t('templates.progress_applying_scene')},
+  ];
+  function setProgress(pct, text) {
+    var bar = pct + '%';
+    progressEl.innerHTML =
+      '<div style="font-size:11px;color:var(--t2);margin-bottom:6px">' + text + '</div>' +
+      '<div style="height:6px;background:var(--bg);border-radius:3px;overflow:hidden">' +
+        '<div style="height:100%;width:' + bar + ';background:var(--a);border-radius:3px;transition:width .4s ease"></div>' +
+      '</div>' +
+      '<div style="text-align:right;font-size:10px;color:var(--t3);margin-top:3px">' + pct + '%</div>';
+  }
+  function nextStep() {
+    if (_step < _steps.length) {
+      setProgress(_steps[_step].pct, _steps[_step].text);
+      _step++;
+    }
+  }
+  // 模拟进度推进（实际 API 是同步的，用定时器推进）
+  var _timer = setInterval(nextStep, 3000);
+  // 第一步立即显示
+  setProgress(10, I18N.t('templates.progress_checking'));
+
   API.get('/repos/check-name?name=' + encodeURIComponent(repoName))
     .then(function(check) {
       if (check.exists) {
+        clearInterval(_timer);
         btn.disabled = false;
         btn.textContent = I18N.t('templates.create_btn');
+        progressEl.innerHTML = '';
         app.showToast(I18N.t('templates.repo_exists', {full_name: check.full_name}));
         var input = document.getElementById('ptRepoName');
         if (input) { input.focus(); input.select(); }
         return;
       }
+      setProgress(25, I18N.t('templates.progress_creating_repo'));
       API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}).then(function(r) {
+        clearInterval(_timer);
+        setProgress(100, I18N.t('templates.progress_done'));
         var modal = document.getElementById('ptCreateModal');
-        if (modal) modal.remove();
-        app.showToast('✅ ' + (r.message || I18N.t('templates.create_success_default')));
+        if (modal) setTimeout(function() { modal.remove(); }, 800);
+        if (r.host_warning) {
+          app.showToast(I18N.t('templates.host_warning'), 10000);
+        } else {
+          app.showToast(I18N.t('templates.create_success', {msg: r.message || I18N.t('templates.create_success_default')}));
+        }
         var parts = (r.full_name || '').split('/');
-        selectRepo(r.full_name, parts[0], parts[1]);
+        setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1]); }, 900);
       }).catch(function(e) {
+        clearInterval(_timer);
         btn.disabled = false;
         btn.textContent = I18N.t('templates.create_btn');
+        setProgress(0, I18N.t('templates.progress_failed', {msg: e.message}));
         app.showToast(I18N.t('templates.create_failed', {msg: e.message}));
       });
     })
     .catch(function(err) {
+      clearInterval(_timer);
       btn.disabled = false;
       btn.textContent = I18N.t('templates.create_btn');
+      progressEl.innerHTML = '';
       app.showToast(I18N.t('templates.check_failed', {msg: err.message || err}));
     });
 }

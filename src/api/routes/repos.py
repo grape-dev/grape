@@ -1,4 +1,4 @@
-"""仓库路由：列表、加入、托管、移除、同步"""
+"""仓库路由：列表、托管、移除、同步"""
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.config import log
@@ -36,11 +36,12 @@ def _fetch_and_cache(user_id: int, api_token: str) -> list[dict]:
 
 
 def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
-    """过滤仓库列表：只返回「管理员 / 已加入 / 已被托管（全局）」的仓库。
+    """过滤仓库列表：只返回「管理员自己有权限托管 / 已被托管（全局）」的仓库。
 
-    - user_repos 缓存行带 is_admin / is_join（用户级）。
-    - managed_repos 全局集合决定「该仓库是否已被任何人托管」（仓库级）。
-    - 只要仓库被任一用户托管，任何用户视角都显示「已托管/已加入」，杜绝误显「加入并托管」→ 403。
+    已取消「加入」（join）概念：
+    - in_managed（仓库在 managed_repos = 已被任何人托管/已加入）→ 前端展示「已托管/已加入」+「进入项目」。
+    - is_admin（用户是仓库管理员/所有者）且未托管 → 前端展示「未加入」+「加入并托管」。
+    - 普通成员且未托管 → 一律不返回（消除「加入」按钮，杜绝误显「加入并托管」→ 403）。
     """
     from src.repo_key import to_repo_key
     managed = {r["repo_key"]: r["webhook_id"] for r in user_db.get_all_managed_repos()}
@@ -49,14 +50,13 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
         full_name = r.get("full_name", "")
         repo_key = to_repo_key(r.get("repo_key", "") or full_name)
         is_admin = r.get("is_admin", False)
-        is_join = r.get("is_join", False)
         in_managed = repo_key in managed
         hosted = in_managed and bool(managed.get(repo_key))
 
-        if not is_admin and not is_join and not in_managed:
+        if not is_admin and not in_managed:
             continue
 
-        role = "Admin" if is_admin else "Maintainer" if in_managed else "Member"
+        role = "Admin" if is_admin else "Maintainer"
         result.append({
             "repo_key": repo_key,
             "full_name": full_name,
@@ -64,7 +64,8 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
             "name": r.get("name", ""),
             "description": r.get("description", ""),
             "role": role,
-            "is_joined": is_join or in_managed,
+            "in_managed": in_managed,
+            "is_joined": in_managed,
             "is_hosted": hosted,
         })
     return result
@@ -175,7 +176,17 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
-    # 探活已迁移到 /repos/sync（手动刷新按钮），避免每次进大堂阻塞 2-3 秒
+    # 异步探活清理失效托管（C2）：后台线程执行，接口不等待、页面保持秒开；
+    # 失效（GitCode 已删/丢 webhook）的托管记录在后台被清掉，下一次刷新/进入时数字才校准。
+    try:
+        import threading
+        threading.Thread(
+            target=_probe_stale_repos,
+            args=(api_token, user["id"]),
+            daemon=True,
+        ).start()
+    except Exception as e:
+        log.warning(f"member: background stale probe start failed: {e}")
 
     # 优先读取 DB 缓存（未过期）
     cached = user_db.get_user_repos(user["id"])
@@ -310,21 +321,6 @@ async def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current
         return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": True, "message": "仓库创建并托管成功"}
 
     return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": "仓库创建成功"}
-
-
-@router.post("/join")
-async def join_repo(body: RepoAction, user: dict = Depends(get_current_user)):
-    from src.repo_key import to_repo_key
-    parts = body.full_name.split("/", 1)
-    if len(parts) != 2:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
-    owner, repo_name = parts
-    repo_key = to_repo_key(body.full_name)
-    user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=0)
-    user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=False)
-    from src.api.session_store import ensure_default_agent_sessions
-    ensure_default_agent_sessions(repo_key)
-    return {"message": "已加入仓库"}
 
 
 @router.post("/host")

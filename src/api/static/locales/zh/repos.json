@@ -18,9 +18,8 @@
     "refresh_title": "从 GitCode 刷新仓库列表",
     "hello": "你好，",
     "welcome_sub": "选择一个工作项目，开启由 Agent 驱动的自动化 DevOps 之旅。",
-    "stat_projects": "工作项目",
+    "stat_projects": "我的项目",
     "stat_hosted": "已托管",
-    "stat_joined": "已加入",
     "empty_title": "未找到匹配的项目",
     "empty_desc": "试试更换关键词或筛选条件。",
     "friend": "朋友",
@@ -43,10 +42,9 @@
   "card": {
     "enter_project": "进入项目",
     "join_and_host": "加入并托管",
-    "join": "加入",
     "status_hosted": "已托管",
     "status_joined": "已加入",
-    "status_not_joined": "未加入",
+    "status_not_joined": "未托管",
     "no_description": "暂无描述"
   },
   "managed": {
@@ -58,9 +56,7 @@
     "th_description": "描述"
   },
   "available_btn": {
-    "hosted": "已托管",
-    "join_and_host": "加入并托管",
-    "join": "加入"
+    "join_and_host": "加入并托管"
   },
   "sync": {
     "syncing": "↻ 同步中…",
@@ -70,9 +66,7 @@
     "refresh_success": "刷新成功",
     "refresh_failed": "刷新失败: {{msg}}",
     "host_success": "加入并托管成功",
-    "host_failed": "托管失败: {{msg}}",
-    "join_success": "已成功加入仓库",
-    "join_failed": "加入失败: {{msg}}"
+    "host_failed": "托管失败: {{msg}}"
   },
   "unhost": {
     "confirm": "⚠️ 确定要解除托管 {{name}} 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。",
@@ -106,5 +100,6 @@
   "repositories": "仓库",
   "sync_from_gitcode": "从 GitCode 同步",
   "hosted": "已托管",
-  "no_hosted_project": "暂无已托管项目，请先加入并托管一个项目"
+  "no_hosted_project": "暂无已托管项目，请先加入并托管一个项目",
+  "unhosted_title": "未托管仓库"
 }

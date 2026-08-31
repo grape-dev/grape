@@ -253,10 +253,7 @@ def setup():
     if r.status_code != 200:
         raise RuntimeError(f"Login failed: {r.text[:100]}")
     TOKEN = r.json()["token"]
-    # Join a real repo
-    requests.post(f"{BASE}/api/repos/join",
-        json={"full_name": TEST_REPO},
-        headers={"Authorization": f"Bearer {TOKEN}"}, timeout=10)
+    # 「加入」endpoint 已下线：托管状态由 managed_repos 的 backup/restore fixture 保证（无需手动 join）
 
 @pytest.fixture(scope="module")
 def browser():
