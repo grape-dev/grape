@@ -64,34 +64,28 @@ function switchSidebarTab(tab) {
 
 // ====== 仓库选择主内容 ======
 let _repoPage = 0;
-const _REPO_PAGE_SIZE = 10;
+const _REPO_PAGE_SIZE = 9;
 let _projectSearchQuery = '';
 
-function renderRepoSelection(repos) {
-  const d = document.getElementById('pageContent');
-  if (!d) return;
-  _projectsRepos = repos || [];
-  const _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
-  const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
-  const name = user.split('@')[0];
-  const hostedCount = (repos || []).filter(r => r.is_hosted).length;
-
-  const allRepos = (repos || []).slice().sort((a, b) => {
+function _searchRepos() {
+  const allRepos = (_projectsRepos || []).slice().sort((a, b) => {
     const pa = a.is_hosted ? 2 : a.is_joined ? 1 : 0;
     const pb = b.is_hosted ? 2 : b.is_joined ? 1 : 0;
     if (pa !== pb) return pb - pa;
     return (a.full_name || '').localeCompare(b.full_name || '');
   });
-
   const query = _projectSearchQuery.toLowerCase().trim();
   const filteredRepos = query
     ? allRepos.filter(r => (r.full_name || '').toLowerCase().includes(query) || (r.owner || '').toLowerCase().includes(query))
     : allRepos;
-
-  const total = allRepos.length;
   const pages = Math.max(1, Math.ceil(filteredRepos.length / _REPO_PAGE_SIZE));
   if (_repoPage >= pages) _repoPage = 0;
   const pageRepos = filteredRepos.slice(_repoPage * _REPO_PAGE_SIZE, (_repoPage + 1) * _REPO_PAGE_SIZE);
+  return { allRepos, filteredRepos, pages, pageRepos };
+}
+
+function _buildProjectListHtml() {
+  const { filteredRepos, pages, pageRepos } = _searchRepos();
 
   let pagerHtml = '';
   if (pages > 1) {
@@ -103,32 +97,50 @@ function renderRepoSelection(repos) {
   }
 
   var cardsHtml = pageRepos.map(function(r) { return _buildProjectCard(r); }).join('');
+  var addCardHtml = '<div class="project-card-add" onclick="openCreateRepoModal()">' +
+    '<span class="pca-ic">＋</span><b>' + I18N.t('repos.lobby.new_project_btn') + '</b>' +
+  '</div>';
+
+  return addCardHtml + cardsHtml +
+    (filteredRepos.length === 0 ? '<div class="lobby-empty" style="grid-column:1/-1;margin:0;border:none;background:none"><div class="lobby-empty-ic">🔭</div><h3>' + I18N.t('repos.lobby.empty_title') + '</h3><p>' + I18N.t('repos.lobby.empty_desc') + '</p></div>' : '') +
+    pagerHtml;
+}
+
+function renderRepoSelection(repos) {
+  const d = document.getElementById('pageContent');
+  if (!d) return;
+  _projectsRepos = repos || [];
+  const _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
+  const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
+  const name = user.split('@')[0];
+  const hostedCount = (_projectsRepos).filter(r => r.is_hosted).length;
+  const total = _projectsRepos.length;
+
   var templatesHtml = _renderProjectTemplates();
 
   var inner = '<div class="project-page">' +
     '<div class="project-hero">' +
-      '<div class="project-hero-left">' +
-        '<h1>' + I18N.t('repos.lobby.project_title') + '</h1>' +
-        '<p>' + I18N.t('repos.lobby.project_sub') + '</p>' +
-        '<button class="project-hero-btn" onclick="openCreateRepoModal()">+ ' + I18N.t('repos.lobby.new_project_btn') + '</button>' +
+      '<div class="project-hero-welcome">' +
+        '<span class="pw-icon">👋</span>' +
+        '<div class="pw-text">' +
+          '<span class="pw-title">' + I18N.t('repos.lobby.welcome_back', {name: user}) + '</span>' +
+          '<span class="pw-desc">' + I18N.t('repos.lobby.welcome_tip') + ' · ' + I18N.t('repos.lobby.project_sub') + '</span>' +
+        '</div>' +
       '</div>' +
-    '</div>' +
-    '<div class="project-stats">' +
-      '<div class="project-stat"><b>' + total + '</b><span>' + I18N.t('repos.lobby.stat_projects') + '</span></div>' +
-      '<div class="project-stat"><b>' + hostedCount + '</b><span>' + I18N.t('repos.lobby.stat_hosted') + '</span></div>' +
+      '<div class="project-stats">' +
+        '<div class="project-stat"><b>' + total + '</b><span>' + I18N.t('repos.lobby.stat_projects') + '</span></div>' +
+        '<div class="project-stat"><b>' + hostedCount + '</b><span>' + I18N.t('repos.lobby.stat_hosted') + '</span></div>' +
+      '</div>' +
     '</div>' +
     '<div class="project-section">' +
       '<div class="project-section-header">' +
         '<div class="project-section-header-left"><h2>' + I18N.t('repos.lobby.my_projects') + '</h2></div>' +
         '<div class="project-section-header-right">' +
-          '<button class="project-refresh-btn" onclick="refreshRepos(this)" title="' + I18N.t('repos.lobby.refresh_title') + '">↻ ' + I18N.t('repos.lobby.refresh_btn') + '</button>' +
+          '<button class="project-refresh-btn" onclick="refreshRepos(this)" title="' + I18N.t('repos.lobby.refresh_title') + '">' + I18N.t('repos.lobby.refresh_btn') + '</button>' +
           '<input class="project-search" id="projectSearch" type="text" placeholder="🔍 ' + I18N.t('repos.lobby.search_placeholder') + '" value="' + _projectSearchQuery + '" oninput="onProjectSearch(this.value)">' +
         '</div>' +
       '</div>' +
-      '<div class="project-list">' + cardsHtml +
-        (filteredRepos.length === 0 ? '<div class="lobby-empty" style="grid-column:1/-1;margin:0;border:none;background:none"><div class="lobby-empty-ic">🔭</div><h3>' + I18N.t('repos.lobby.empty_title') + '</h3><p>' + I18N.t('repos.lobby.empty_desc') + '</p></div>' : '') +
-      pagerHtml +
-      '</div>' +
+      '<div class="project-list" id="projectList">' + _buildProjectListHtml() + '</div>' +
     '</div>' +
     templatesHtml +
   '</div>';
@@ -140,14 +152,23 @@ function renderRepoSelection(repos) {
 function onProjectSearch(val) {
   _projectSearchQuery = val;
   _repoPage = 0;
-  renderRepoSelection(_projectsRepos);
+  const list = document.getElementById('projectList');
+  if (list) {
+    list.innerHTML = _buildProjectListHtml();
+  } else {
+    renderRepoSelection(_projectsRepos);
+  }
 }
 
 function goRepoPage(dir) {
-  const total = (_projectsRepos || []).length;
-  const pages = Math.max(1, Math.ceil(total / _REPO_PAGE_SIZE));
+  const { pages } = _searchRepos();
   _repoPage = (_repoPage + dir + pages) % pages;
-  renderRepoSelection(_projectsRepos);
+  const list = document.getElementById('projectList');
+  if (list) {
+    list.innerHTML = _buildProjectListHtml();
+  } else {
+    renderRepoSelection(_projectsRepos);
+  }
 }
 
 function _buildProjectCard(r) {

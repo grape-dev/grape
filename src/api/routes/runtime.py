@@ -160,15 +160,15 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
             row = c.fetchone()
             if row:
                 rid = row[0]
-                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=? WHERE id=?",
+                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=?, worker_version=? WHERE id=?",
                           (rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
-                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, rid))
+                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version))
                 rid = c.lastrowid
             # 服务端默认写入 "all" 标签到 engine_capabilities（worker 不需要传 tags）
             # 后续标签增删改全部来自 WebUI 操作

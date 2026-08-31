@@ -176,7 +176,17 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
-    # 探活已迁移到 /repos/sync（手动刷新按钮），避免每次进大堂阻塞 2-3 秒
+    # 异步探活清理失效托管（C2）：后台线程执行，接口不等待、页面保持秒开；
+    # 失效（GitCode 已删/丢 webhook）的托管记录在后台被清掉，下一次刷新/进入时数字才校准。
+    try:
+        import threading
+        threading.Thread(
+            target=_probe_stale_repos,
+            args=(api_token, user["id"]),
+            daemon=True,
+        ).start()
+    except Exception as e:
+        log.warning(f"member: background stale probe start failed: {e}")
 
     # 优先读取 DB 缓存（未过期）
     cached = user_db.get_user_repos(user["id"])
