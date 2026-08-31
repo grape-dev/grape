@@ -7,7 +7,7 @@
         <span class="t3" style="font-size:12px">{{ lastUpdate || '—' }}</span>
         <button class="btn btn-sm" @click="load">🔄 刷新</button>
         <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-secondary)">
-          <input type="checkbox" v-model="autoRefresh" @change="toggleAuto" style="margin:0" />自动(15s)
+          <input type="checkbox" v-model="autoRefresh" @change="toggleAuto" style="margin:0" />自动(10s)
         </label>
       </span>
     </div>
@@ -374,7 +374,7 @@ import { onMounted, onUnmounted, ref, computed, nextTick } from 'vue'
 import http from '../api'
 
 const activeTab = ref('tasks')
-const autoRefresh = ref(false)
+const autoRefresh = ref(true)
 let timer = null
 
 const lastUpdate = ref('')
@@ -468,8 +468,8 @@ async function load() {
     infraDetails.value = data.infraDetails || []
     alerts.value = data.alerts || []
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-    if (timelineIssues.value.length === 0) loadTimeline()
-    // 自动刷新时也刷新设备概览数据
+    // 刷新当前 tab 的详细数据
+    if (activeTab.value === 'tasks') loadTimeline()
     loadOverview()
   } catch (e) {
     console.error('[HealthCenter] load failed', e)
@@ -832,7 +832,7 @@ function loadColor(running, max) {
 }
 
 function toggleAuto() {
-  if (autoRefresh.value) { timer = setInterval(load, 15000) }
+  if (autoRefresh.value) { timer = setInterval(load, 10000) }
   else { clearInterval(timer); timer = null }
 }
 
@@ -901,7 +901,7 @@ function formatTaskDur(t) {
   if (isNaN(s) || s <= 0) return '—'
   return formatDuration2(s)
 }
-onMounted(load)
+onMounted(() => { load(); if (autoRefresh.value) timer = setInterval(load, 10000) })
 onUnmounted(() => { if (timer) clearInterval(timer) })
 </script>
 
