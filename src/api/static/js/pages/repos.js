@@ -87,6 +87,12 @@ function _searchRepos() {
     const pa = a.is_hosted ? 2 : a.is_joined ? 1 : 0;
     const pb = b.is_hosted ? 2 : b.is_joined ? 1 : 0;
     if (pa !== pb) return pb - pa;
+    // 同级内：新建时间越近越前（created_at 倒序）；无时间则按全名兜底
+    const ca = a.created_at || '';
+    const cb = b.created_at || '';
+    if (ca && cb && ca !== cb) return ca < cb ? 1 : -1;
+    if (ca && !cb) return -1;
+    if (!ca && cb) return 1;
     return (a.full_name || '').localeCompare(b.full_name || '');
   });
   const query = _projectSearchQuery.toLowerCase().trim();
