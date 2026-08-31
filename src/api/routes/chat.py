@@ -4,13 +4,17 @@ import json, asyncio, tempfile, os, threading, time
 from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 from src.prompt_builder import build_general_chat_prompt
 
-def _get_chat_cwd(user_id: int, conv_id: str) -> str:
+def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     """每个 conversation 独立工作目录，避免相互影响。
 
-    返回逻辑路径（/home/grape/chat/...），远端 worker 执行时按 _remap_cwd 映射到
-    各自用户 home；本机 direct 执行（root）下 /home/grape 亦可写。
+    统一结构 WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}，与飞书 IM 严格一致
+    （同一 conv_id 同一路径，见 web-chat-no-response-cwd-fix.md §4）。
+    远端 worker 执行时按 _remap_cwd 映射到各自用户 home；本机 direct 执行 root 可写。
     """
-    path = os.path.join(CHAT_CWD_BASE, "chat", str(user_id), conv_id)
+    from src.repo_key import parse_repo_key
+    _, owner, repo = parse_repo_key(repo_key or "")
+    path = os.path.join(WORKSPACE_DIR, owner or "__none__", repo or "__none__",
+                        "chat", str(user_id), conv_id)
     os.makedirs(path, exist_ok=True)
     return path
 # 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
@@ -319,7 +323,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         nonlocal new_runtime_session_id
         with _CHAT_AGENT_SEMAPHORE:
             for evt_type, data in stream_agent(
-                prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=runtime_session_id,
+                prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                 agent_label=f"[Agent:chat|user:{user['username']}]",
@@ -497,7 +501,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     repo_key=repo_key or f"chat:{user['id']}", agent_type="chat",
                     skill=skill_name or "chat",
                     skill_id=skill_id,
-                    prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id),
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
                     runtime_session_id=runtime_session_id,
                     event_type="chat",
                     account=user.get("username") or "", user_id=user["id"],
@@ -551,7 +555,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             worker_error = ""
             try:
                 for evt_type, data in stream_agent(
-                    prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id), session_id=runtime_session_id,
+prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
@@ -728,7 +732,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     if (runtime_credential_id(runtime_id) or 0) == 0:
         return {"reply": "⚠️ 未配置远端引擎，任务会话需先在 Agent 配置中绑定远端引擎", "conversation_id": conv_id}
 
-    cwd = _get_chat_cwd(user["id"], conv_id)
+    cwd = _get_chat_cwd(user["id"], repo_key, conv_id)
     _os.makedirs(cwd, exist_ok=True)
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task + 任务描述 + 历史）；
     # 一般会话走通用 prompt（queue 模式也带最近历史，与 direct 一致）
@@ -1137,7 +1141,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
             return {"task_id": chat_task_id, "conversation_id": conv_id, "status": "error",
                     "error": _reply}
 
-    cwd = _get_chat_cwd(user["id"], conv_id)
+    cwd = _get_chat_cwd(user["id"], repo_key, conv_id)
 
     if kind == EXEC_MODE_DIRECT:
         # 本机直连：ChatTaskManager 启动 agent_fn
@@ -1460,7 +1464,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
             repo_key=repo_key or f"chat:{user['id']}", agent_type="chat",
             skill=skill_name or "chat",
             skill_id=skill_id,
-            prompt=prompt, cwd=_get_chat_cwd(user["id"], conv_id),
+            prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
             runtime_session_id=runtime_session_id,
             event_type="chat",
             account=user.get("username") or "", user_id=user["id"],
