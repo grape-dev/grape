@@ -283,7 +283,7 @@ function loadAgentTypes() {
         renderDashboard(dashData);
       }).catch(e => {
         // 编辑中出错只 toast 不覆盖 UI；非编辑中清 loading 显示错误
-        if (window._dashboardEditing) { app.showToast && app.showToast('刷新失败: ' + e.message); return; }
+        if (window._dashboardEditing) { app.showToast && app.showToast(I18N.t('dashboard.refresh_failed', {msg: e.message})); return; }
         pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
       });
       loadDash();

@@ -58,6 +58,7 @@
   "save_engine": "Save Engine",
   "engine_config_saved": "Engine config saved",
   "save_failed": "Save failed: {{msg}}",
+  "refresh_failed": "Refresh failed: {{msg}}",
   "please_input_scene_name": "Please enter a scene name",
   "scene_saved": "Scene saved",
   "scene_created": "Scene created successfully",
