@@ -144,6 +144,8 @@
     "cannot_delete_running": "运行中不可删除，请先关机",
     "create_success": "创建成功",
     "count_limit": "创建环境数量已达上限",
+    "template_not_published": "AI DevSpace 模板未发布，请联系管理员将模板加入白名单",
+    "create_failed_msg": "创建失败: {{msg}}",
     "cred_gen_failed": "凭据生成失败",
     "cred_gen_failed_msg": "凭据生成失败: {{msg}}",
     "cred_name": "凭据名称",

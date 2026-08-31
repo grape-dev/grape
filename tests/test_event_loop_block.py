@@ -32,6 +32,7 @@ class _SlowClient:
 
     async def report_messages(self, tid, batch):
         self.messages_batches += 1
+        return True  # 非 None 表示服务端仍存活（防 report_messages 返回 None 触发中止）
 
     async def complete(self, tid, result_text, exit_code, session_id="", work_dir=""):
         self.completed.append((tid, exit_code))
@@ -108,9 +109,9 @@ class TestEventLoopBlock:
                 await hb_task
             except asyncio.CancelledError:
                 pass
-            return heartbeats["n"], client
+            return heartbeats["n"], client, exec_task.result()
 
-        hb_count, client = asyncio.run(_run())
+        hb_count, client, _result = asyncio.run(_run())
 
         # 5 个事件 × 0.02s = 0.1s 执行窗口；heartbeat 每 0.005s → 期望约 20 次
         # 修复后（迭代让出）应远大于 1；若阻塞则接近 0
@@ -120,13 +121,15 @@ class TestEventLoopBlock:
         )
 
     def test_task_start_and_complete_called(self, monkeypatch):
-        """慢生成器执行完后，task_start 与 complete 应被正常调用。"""
+        """慢生成器执行完后，task_start 应被调用且 _execute_task 返回 done 事件。"""
         monkeypatch.setattr("src.runtime.executor.stream_runtime", _slow_stream_runtime)
         client = _SlowClient()
         task = self._build_task(monkeypatch)
-        asyncio.run(runtime_agent._execute_task(client, task))
+        result = asyncio.run(runtime_agent._execute_task(client, task))
         assert "t_slow_1" in client.started
-        assert any(tid == "t_slow_1" for tid, _ in client.completed), "慢任务完成后应 complete"
+        # _execute_task 返回 done dict（含 exit_code）；complete 由外层 _wrap 调用
+        assert isinstance(result, dict) and result.get("exit_code") == 0, \
+            f"_execute_task 应返回 done 事件, got {result}"
 
     def test_heartbeat_scheduled_during_silent_long_command(self, monkeypatch):
         """「长命令静默无输出」场景下事件循环不得被阻塞（worker-event-loop-block-rootcause.md §8.3/8.5）。
@@ -154,9 +157,9 @@ class TestEventLoopBlock:
                 await hb_task
             except asyncio.CancelledError:
                 pass
-            return heartbeats["n"], client
+            return heartbeats["n"], client, exec_task.result()
 
-        hb_count, client = asyncio.run(_run())
+        hb_count, client, _result = asyncio.run(_run())
 
         # 3 个静默段 × 0.2s = 0.6s 执行窗口；heartbeat 每 0.005s → 期望约 120 次
         # 方案 1（sleep(0)）下 0.2s 静默无 yield → heartbeat 被冻结，计数远低于期望；
@@ -166,7 +169,9 @@ class TestEventLoopBlock:
             f"修复：_stream_runtime_async 线程化迭代 stream_runtime，readline() 阻塞不占事件循环。"
         )
         assert "t_slow_1" in client.started
-        assert any(tid == "t_slow_1" for tid, _ in client.completed), "静默长任务完成后应 complete"
+        # _execute_task 返回 done dict；complete 由外层 _wrap 调用，此处验证执行成功
+        assert _result is not None and isinstance(_result, dict) and _result.get("exit_code") == 0, \
+            "静默长任务应正常完成"
 
     def test_worktree_created_before_skill_materialize(self, monkeypatch, tmp_path):
         """方案 A 顺序看护（coding-worktree-skill-collision.md §5.2）：

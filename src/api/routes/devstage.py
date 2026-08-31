@@ -150,15 +150,15 @@ async def create_environment(body: CreateEnvBody, user: dict = Depends(get_curre
     ak, sk = _get_ak_sk(user)
     # 默认 AI DEVSPACE 模板
     template_id = "4ef59a2b4d3d4909aacd80f6007c00b2"
-    # 查询规格
-    specs = _list_specs(ak, sk, template_id)
-    if not specs:
-        raise HTTPException(status_code=502, detail={"code": "NO_SPEC", "message": "未找到可用规格"})
-    spec = specs[0]
-    flavor_id = spec.get("flavor_id", "")
-    cores = spec.get("env_cpu_size", 2)
-    memory = spec.get("env_mem_size", 4)
     try:
+        # 查询规格
+        specs = _list_specs(ak, sk, template_id)
+        if not specs:
+            raise HTTPException(status_code=502, detail={"code": "NO_SPEC", "message": "未找到可用规格"})
+        spec = specs[0]
+        flavor_id = spec.get("flavor_id", "")
+        cores = spec.get("env_cpu_size", 2)
+        memory = spec.get("env_mem_size", 4)
         env_vars = None
         init_scripts = None
         if body.grape_server and body.grape_token:

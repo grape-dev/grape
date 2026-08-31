@@ -838,19 +838,24 @@ function _showCreateEnvForm() {
         var msg = e.message || '';
         // 环境名冲突：删除凭据，换名重试
         if (attempt < 10 && (msg.indexOf('98320005') >= 0 || msg.indexOf('already been used') >= 0)) {
-          API.del('/settings/runtime-credentials/' + credId).then(function() {
+          API.post('/settings/runtime-credentials/' + credId + '/revoke').then(function() {
             _doCreateEnvWithRetry(baseName, attempt + 1);
           }).catch(function() {
             _doCreateEnvWithRetry(baseName, attempt + 1);
           });
         } else if (msg.indexOf('98320022') >= 0 || msg.indexOf('count limit') >= 0) {
-          API.del('/settings/runtime-credentials/' + credId);
+          API.post('/settings/runtime-credentials/' + credId + '/revoke');
           app.showToast(I18N.t('runtimes.devspace.count_limit'));
           _refreshDevspaceList();
+        } else if (msg.indexOf('98320049') >= 0 || msg.indexOf('Template not published') >= 0) {
+          // 模板未发布/未加白名单：删除凭据，提示用户联系管理员
+          API.post('/settings/runtime-credentials/' + credId + '/revoke');
+          app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+          _refreshDevspaceList();
         } else {
-          // 其他失败也删除凭据
-          API.del('/settings/runtime-credentials/' + credId);
-          app.showToast(I18N.t('runtimes.devspace.load_failed') + ': ' + msg);
+          // 其他失败也删除凭据，不残留无效 worker
+          API.post('/settings/runtime-credentials/' + credId + '/revoke');
+          app.showToast(I18N.t('runtimes.devspace.create_failed_msg', {msg: msg}));
           _refreshDevspaceList();
         }
       });

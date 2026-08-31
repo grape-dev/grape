@@ -144,7 +144,8 @@ class TestA2AQueue:
         t = self._latest_task()
         assert t, "应已入队"
         # 模拟 worker 完成：complete_task 会回写 event
-        svc.complete_task(t["id"], "test done", exit_code=0)
+        # 需含结构化 JSON 产出（conclusion），否则被 premature end_turn 重试逻辑拦截
+        svc.complete_task(t["id"], '{"conclusion": "test done"}', exit_code=0)
         with db_lock:
             c = db.cursor()
             row = c.execute("SELECT status FROM events WHERE seq=?", (t["event_seq"],)).fetchone()

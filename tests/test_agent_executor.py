@@ -52,7 +52,10 @@ class TestCodeArtsRuntime:
         assert "json" in args
         assert "--dangerously-skip-permissions" not in args
         assert "hello world" in args  # prompt passed as positional arg
-        assert "--model" in args
+        # --model 仅在 CODEARTS_MODEL 环境变量设置时才传，默认不传
+        import os
+        if not os.environ.get("CODEARTS_MODEL"):
+            assert "--model" not in args
 
     def test_build_args_with_session(self):
         """codearts 忽略 session_id（跨引擎 session 不可见，每次从头开始）"""
@@ -60,7 +63,6 @@ class TestCodeArtsRuntime:
         assert "--session" not in args
         assert "sess_abc" not in args
         assert "test prompt" in args
-        assert "--model" in args
 
     def test_build_args_no_dangerous_flag(self):
         """CodeArts should NOT have --dangerously-skip-permissions."""
@@ -210,7 +212,7 @@ class TestStreamAgentBackwardCompat:
 class _SleepBackend(AgentRuntime):
     """无输出的假 backend：spawn `python -c time.sleep(60)`，用于测超时终止。"""
     name = "sleepbackend"
-    binary = "python"
+    binary = "python3"
     prompt_via_stdin = True
 
     def build_args(self, prompt, session_id=""):
