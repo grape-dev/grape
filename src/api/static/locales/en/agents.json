@@ -38,7 +38,8 @@
     "completed": "Completed",
     "running": "Running",
     "recent_n": "Recent {{n}}",
-    "history_title": "Event History"
+    "history_title": "Event History",
+    "table_actor": "Actor"
   },
   "config": {
     "im_title": "IM Configuration",

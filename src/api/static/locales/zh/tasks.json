@@ -73,5 +73,11 @@
     "go_conversation": "去对话 ↗"
   },
   "search_placeholder": "搜索任务...",
-  "change_status_failed": "状态更新失败: {{msg}}"
+  "change_status_failed": "状态更新失败: {{msg}}",
+  "scene_default_badge": "（默认）",
+  "multi_task_badge": "多任务模式",
+  "single_task_badge": "单任务",
+  "parent_task": "父任务",
+  "pipeline_scene": "流水线场景",
+  "task_mode": "任务模式"
 }

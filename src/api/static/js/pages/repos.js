@@ -20,7 +20,7 @@ function renderSelectionShell(tab, innerHtml) {
       <nav class="lobby-tabs">
         <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">${I18N.t('repos.tab.projects')}</a>
         <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">${I18N.t('repos.tab.templates')}</a>
-        <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">工作台</a>
+        <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">${I18N.t('repos.tab.workspace')}</a>
       </nav>
       <div class="lobby-user" onclick="app.logout()" title="${I18N.t('repos.logout_title')}">
         <span class="lobby-avatar">${avatar}</span>
@@ -271,7 +271,7 @@ function renderRepos() {
     }
     html += `</div>`;
 
-    html += `<div class="cd"><div class="cd-h"><h2>未托管仓库 <span class="c">${availableRepos.length}</span></h2></div>`;
+    html += `<div class="cd"><div class="cd-h"><h2>${I18N.t('repos.unhosted_title')} <span class="c">${availableRepos.length}</span></h2></div>`;
     if (availableRepos.length === 0) {
       html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_available') + '</div>';
     } else {

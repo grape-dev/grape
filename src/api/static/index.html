@@ -72,7 +72,7 @@
 <div class="av" id="userAvatar">U</div>
 <div class="by"><span id="userName">User</span><span id="userRole" style="font-size:10px;color:var(--t3)">Maintainer</span></div>
 <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
-<a onclick="app.openHelp()" class="help-btn" title="使用帮助"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></a>
+<a onclick="app.openHelp()" class="help-btn" data-i18n-title="app.help.button_title" title="使用帮助"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></a>
 <a onclick="app.logout()" style="color:var(--t3);font-size:10px;cursor:pointer;text-decoration:none" title="登出" data-i18n-title="app.logout">↩</a>
 </div>
 </div>
@@ -82,7 +82,7 @@
 <div class="tb" id="tb">
 <div class="bc"><b id="pageTitle"></b> <span id="repoTitle" style="color:var(--a);font-weight:500"></span></div>
 <div class="sp"></div>
-<a href="/static/help.html" target="_blank" style="color:var(--t3);font-size:13px;text-decoration:none">📖 帮助</a>
+<a href="/static/help.html" target="_blank" style="color:var(--t3);font-size:13px;text-decoration:none" data-i18n="app.help.link_text">📖 帮助</a>
 </div>
 <div class="ct" id="pageContent">
 <div class="loading" data-i18n="app.loading">加载中...</div>
@@ -94,30 +94,30 @@
 <script src="/static/js/vendor/marked.min.js?v=1"></script>
 <script src="/static/js/vendor/qrcode.min.js?v=1"></script>
 <script src="/static/js/api.js?v=16"></script>
-<script src="/static/js/pages/dashboard.js?v=14"></script>
+<script src="/static/js/pages/dashboard.js?v=15"></script>
 <script src="/static/js/pages/pipeline.js?v=33"></script>
 <script src="/static/js/pages/agents.js?v=21"></script>
 <script src="/static/js/pages/events.js?v=37"></script>
 <script src="/static/js/pages/chat.js?v=24"></script>
-<script src="/static/js/pages/repos.js?v=29"></script>
-<script src="/static/js/pages/templates.js?v=16"></script>
+<script src="/static/js/pages/repos.js?v=30"></script>
+<script src="/static/js/pages/templates.js?v=17"></script>
 <script src="/static/js/pages/tasks.js?v=31"></script>
 <script src="/static/js/pages/settings.js?v=13"></script>
 <script src="/static/js/pages/skills.js?v=15"></script>
 <script src="/static/js/pages/knowledge.js?v=7"></script>
 <script src="/static/js/pages/runtimes.js?v=22"></script>
 <script src="/static/js/pages/observability.js?v=58"></script>
-<script src="/static/js/app.js?v=43"></script>
+<script src="/static/js/app.js?v=44"></script>
 
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>
 <div class="help-drawer" id="helpDrawer">
   <div class="help-drawer-hdr">
-    <h2>📖 使用帮助 & FAQ</h2>
+    <h2 data-i18n="app.help.drawer_title">📖 使用帮助 & FAQ</h2>
     <button class="help-drawer-close" onclick="app.closeHelp()">✕</button>
   </div>
   <div class="help-drawer-body">
-    <div class="help-loading">加载中...</div>
+    <div class="help-loading" data-i18n="app.help.loading">加载中...</div>
   </div>
 </div>
 </body>

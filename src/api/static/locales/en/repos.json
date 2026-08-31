@@ -1,7 +1,8 @@
 {
   "tab": {
     "projects": "My Projects",
-    "templates": "Templates"
+    "templates": "Templates",
+    "workspace": "Workspace"
   },
   "logout_title": "Logout",
   "loading": "Loading...",
@@ -101,5 +102,7 @@
   "brand_sub": "Agentic DevOps",
   "repositories": "Repositories",
   "sync_from_gitcode": "Sync from GitCode",
-  "hosted": "Hosted"
+  "hosted": "Hosted",
+  "no_hosted_project": "No hosted projects, please join and host a project first",
+  "unhosted_title": "Unhosted Repositories"
 }

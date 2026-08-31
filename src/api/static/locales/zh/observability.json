@@ -132,5 +132,6 @@
   "probe_fail": "失败",
   "search_engine_placeholder": "搜索引擎/设备/版本...",
   "all_devices": "全部设备",
-  "task_total": "总任务"
+  "task_total": "总任务",
+  "main_tag": "主控"
 }

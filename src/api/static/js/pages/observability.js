@@ -280,7 +280,7 @@ function renderOverview(ops, rt, mt) {
       const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
       const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
       const isMain = wk.last_ip === '127.0.0.1' || (wk.name || '').startsWith('grape-main');
-      const mainTag = isMain ? '<span style="font-size:9px;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 6px;margin-left:4px">主控</span>' : '';
+      const mainTag = isMain ? `<span style="font-size:9px;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 6px;margin-left:4px">${I18N.t('observability.main_tag')}</span>` : '';
       workerCards += `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
@@ -610,7 +610,7 @@ function loadErrorLogs(container) {
       </select>
       <span class="ts t3" id="errorLogCount"></span>
     </div>
-    <div id="errorLogBody"><div class="loading">' + I18N.t('observability.loading') + '</div></div>
+    <div id="errorLogBody"><div class="loading">${I18N.t('observability.loading')}</div></div>
   `;
   // 加载来源列表
   fetch('/api/dashboard/ops/error-logs/sources').then(r => r.json()).then(d => {
