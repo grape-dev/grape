@@ -289,7 +289,7 @@ function renderOverview(ops, rt, mt) {
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:10px;color:var(--t3);margin-bottom:8px">
           <div>IP: ${wk.last_ip || '-'}</div>
-          <div>${I18N.t('observability.heartbeat')}: <span id="wk-${wid}-seen">${(wk.last_seen_at||'-').substring(11,19)}</span></div>
+          <div>${I18N.t('observability.heartbeat')}: <span id="wk-${wid}-seen">${fmtLocalTime(wk.last_seen_at||'').substring(11,19)}</span></div>
         </div>
         ${_barHTML(I18N.t('observability.cpu'), wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
         ${_barHTML(I18N.t('observability.mem'), wk.memory_percent, null, 'wk-' + wid + '-mem')}
@@ -418,7 +418,7 @@ function updateOverview(ops, rt, mt) {
       if (healthEl) { healthEl.textContent = I18N.t("observability." + (wk.health || "offline")); healthEl.style.color = hc; }
 
       const seenEl = document.getElementById('wk-' + wid + '-seen');
-      if (seenEl) seenEl.textContent = (wk.last_seen_at || '-').substring(11, 19);
+      if (seenEl) seenEl.textContent = fmtLocalTime(wk.last_seen_at || '').substring(11, 19);
 
       // 进度条
       _updateBar('wk-' + wid + '-cpu', wk.cpu_percent);
@@ -515,7 +515,7 @@ function loadA2aHealth() {
       html += table(['Seq', 'Type', 'Repo', 'Issue', 'Status', 'Time'],
         d.recent_a2a.map(a => [
           a.seq, a.event_type.substring(0,20), (a.repo_key||'').replace('gitcode:','').substring(0,15),
-          a.issue_id || '-', a.status || '-', `<span class="ts t3">${(a.created_at||'').substring(0,19)}</span>`
+          a.issue_id || '-', a.status || '-', `<span class="ts t3">${fmtLocalTime(a.created_at)}</span>`
         ])
       );
     }
@@ -544,7 +544,7 @@ function renderAnomalyTab(container, ops) {
   }));
   const _row = (s, showFailed) => {
     const is = (s.issue_id && s.event_seq) ? `${s.issue_id} #${s.event_seq}` : s.id.substring(0,12);
-    const time = showFailed ? (s.completed_at||'') : (s.started_at||'');
+    const time = showFailed ? fmtLocalTime(s.completed_at||s.started_at||'') : fmtLocalTime(s.started_at||'');
     let badge;
     if (showFailed) {
       const errs = s.errors || [];
@@ -727,7 +727,7 @@ function _buildSequence(iss) {
   let prev = null;
   for (const ev of iss.events) {
     const a = _mermaidId(ev.agentType || '—');
-    const t = ev.createdAt ? ev.createdAt.slice(11, 19) : '';
+    const t = ev.createdAt ? fmtLocalTime(ev.createdAt).slice(11, 19) : '';
     const label = t ? t + ' ' + _actionText(ev.eventType) : _actionText(ev.eventType);
     if (prev && a !== prev) {
       // 跨 agent 交互：prev -> a
@@ -894,7 +894,7 @@ function renderTimelineList(container, issues, repoKey) {
     const _totalDurStr = _fmtTotalDur(_totalDur);
     html += '<span class="ts t3">' + I18N.t('observability.events_count', {count: iss.eventCount}) + '</span>' + statusBadge;
     html += '<span class="ts t3" style="color:var(--a)">' + I18N.t('observability.total_duration') + ': ' + _totalDurStr + '</span>';
-    html += '<span class="ts t3">' + (iss.lastAt || '').substring(0,16) + '</span>';
+    html += '<span class="ts t3">' + fmtLocalTime(iss.lastAt || '').substring(0,16) + '</span>';
     html += '</div>';
     html += '<div id="tl-body-' + iss.issueId + '" style="display:' + (expanded ? 'block' : 'none') + ';padding:10px 14px;border-top:1px solid var(--b)">';
     // 切换按钮
@@ -911,7 +911,7 @@ function renderTimelineList(container, issues, repoKey) {
       const enc = ev.taskId ? encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''})) : '';
       const clickable = ev.taskId ? 'cursor:pointer' : '';
       const onclick = ev.taskId ? " onclick=\"openTaskLogModal('" + ev.taskId + "','" + enc + "')\"" : '';
-      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + _engineWithIp(ev.engine) + '</td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + (ev.createdAt||'').substring(0,19) + '</td></tr>';
+      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + _engineWithIp(ev.engine) + '</td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + fmtLocalTime(ev.createdAt||'').substring(0,19) + '</td></tr>';
     }).join('');
     html += '</tbody></table></div>';
     html += '</div></div>';
@@ -1088,7 +1088,7 @@ function renderSessionList(container, sessions, rtName) {
         '<td class="ts"><b>' + is + '</b></td>' +
         '<td class="ts t3">' + (s.skill||'-') + '</td>' +
         '<td><span style="color:' + (taskStatusColor[ct.status]||'var(--a)') + '">' + (taskStatusIcon[ct.status]||'🔄') + ' ' + ct.status + '</span></td>' +
-        '<td class="ts t3">' + (ct.started_at||'').substring(0,16) + '</td>' +
+        '<td class="ts t3">' + fmtLocalTime(ct.started_at||'').substring(0,16) + '</td>' +
         '</tr>';
     });
     html += '</tbody></table></div>';
@@ -1126,7 +1126,7 @@ function renderSessionList(container, sessions, rtName) {
         '<td><span style="color:' + (taskStatusColor[t.status]||'var(--t3)') + '">' + (taskStatusIcon[t.status]||'') + ' ' + t.status + '</span></td>' +
         '<td><span style="color:' + durColor + '">' + durStr + '</span></td>' +
         '<td>' + (t.exit_code != null ? t.exit_code : '-') + '</td>' +
-        '<td class="ts t3">' + (t.completed_at||'').substring(0,16) + '</td>' +
+        '<td class="ts t3">' + fmtLocalTime(t.completed_at||'').substring(0,16) + '</td>' +
         '</tr>';
     });
     html += '</tbody></table></div>';
@@ -1273,7 +1273,7 @@ function renderRuntimeTaskList(container, tasks, rtName) {
       <td class="ts t3">${(t.repo_key || '').replace('gitcode:','').substring(0,20)}</td>
       <td><span style="color:${statusColor[t.status] || 'var(--t3)'}">${statusIcon[t.status] || ''} ${I18N.t('common.status.' + t.status) !== ('common.status.' + t.status) ? I18N.t('common.status.' + t.status) : t.status}</span></td>
       <td>${t.exit_code ?? '-'}</td>
-      <td class="ts t3">${(t.created_at || '').substring(0,16)}</td>
+      <td class="ts t3">${fmtLocalTime(t.created_at || '').substring(0,16)}</td>
     </tr>`;
   });
   html += '</tbody></table></div>';
@@ -1450,7 +1450,7 @@ function renderTaskLogMessages(container, msgs, errorInfo) {
   msgs.forEach(m => {
     const icon = typeIcon[m.type] || '•';
     const color = typeColor[m.type] || '#c2cad6';
-    const time = (m.created_at || '').substring(11,19);
+    const time = fmtLocalTime(m.created_at || '').substring(11,19);
     let content = '';
     if (m.type === 'tool_use') {
       content = `<b style="color:${color}">${m.tool || 'tool'}</b>`;
