@@ -9,12 +9,14 @@ def test_conv_priority_when_nonempty():
 
 
 def test_fallback_repo_when_empty():
-    assert _resolve_oc_sid({"runtime_session_id": ""}, "ses_repoX") == "ses_repoX"
+    # conv 无 runtime_session_id → 返回空（不兜底 repo 级，让 opencode 在 conv cwd 新建）
+    # 旧 repo 级会话目录与 conv 级 cwd 不一致，兜底会再次错位。
+    assert _resolve_oc_sid({"runtime_session_id": ""}, "ses_repoX") == ""
 
 
 def test_fallback_repo_when_missing():
-    assert _resolve_oc_sid({}, "ses_repoX") == "ses_repoX"
-    assert _resolve_oc_sid(None, "ses_repoX") == "ses_repoX"
+    assert _resolve_oc_sid({}, "ses_repoX") == ""
+    assert _resolve_oc_sid(None, "ses_repoX") == ""
 
 
 def test_empty_both():

@@ -826,15 +826,18 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
 
 def _resolve_oc_sid(conv: dict | None, repo_oc_sid: str) -> str:
-    """解析 opencode 会话 id：优先 conversation.runtime_session_id（与 web 同源），空则回退 repo 级。
+    """解析 opencode 会话 id：优先 conversation.runtime_session_id（与 web 同源），空则返回空让 opencode 新建。
 
     feishu-chat-reuse-web-session.md §3.1：飞书与 web 对同一 conversation 复用相同 session，
-    避免 cwd（conv 级）与 session.directory（repo 级）不匹配导致历史加载失败。
+    避免 cwd（conv 级）与 session.directory 不匹配导致历史加载失败。
+    首次（conv 无 runtime_session_id）不兜底 repo 级——repo 级会话是旧目录，与 conv 级 cwd 不一致，
+    应传空让 opencode 在当前 cwd 下新建会话，随后写回 conv。
     """
-    conv_sid = ""
     if conv:
         conv_sid = (conv.get("runtime_session_id") or "").strip()
-    return conv_sid or (repo_oc_sid or "")
+        if conv_sid:
+            return conv_sid
+    return ""
 
 
 async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
