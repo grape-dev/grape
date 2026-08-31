@@ -66,5 +66,12 @@
     "repos": "Repos",
     "agents": "Agents",
     "title": "Search"
+  },
+  "help": {
+    "button_title": "Help",
+    "link_text": "📖 Help",
+    "drawer_title": "📖 Help & FAQ",
+    "loading": "Loading...",
+    "iframe_title": "Grape Help"
   }
 }

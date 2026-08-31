@@ -432,7 +432,7 @@ function loadAgentTypes() {
     // 动态加载 help.html 到 iframe（避免跨域，用同路径）
     const body = drawer.querySelector('.help-drawer-body');
     if (body && !body.querySelector('iframe')) {
-      body.innerHTML = '<iframe src="/static/help.html" title="Grape 使用帮助"></iframe>';
+      body.innerHTML = '<iframe src="/static/help.html" title="' + I18N.t('app.help.iframe_title') + '"></iframe>';
     }
   }
   function closeHelp() {
