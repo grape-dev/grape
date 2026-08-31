@@ -504,10 +504,8 @@ async def health_realtime():
 
 @app.get("/metrics")
 async def metrics():
-    """Prometheus 指标端点（参考 multica metrics/server.go NewHandler）。
-
-    scrape 时触发 MySQL 指标采集 + BusinessSampler 采样。
+    """Prometheus 指标端点已禁用——无外部 Prometheus 消费，且无认证暴露 API 路由结构有安全风险。
+    如需启用，配置 METRICS_ADDR 并添加认证后取消下方注释。
     """
-    from src.observability import on_metrics_scrape
-    on_metrics_scrape()
-    return metrics_endpoint()
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
