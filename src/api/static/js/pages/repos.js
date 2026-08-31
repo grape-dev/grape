@@ -119,7 +119,9 @@ function _buildProjectListHtml() {
 
   var cardsHtml = pageRepos.map(function(r) { return _buildProjectCard(r); }).join('');
   var addCardHtml = '<div class="project-card-add" onclick="openCreateRepoModal()">' +
-    '<span class="pca-ic">＋</span><b>' + I18N.t('repos.lobby.new_project_btn') + '</b>' +
+    '<span class="pca-ic">＋</span>' +
+    '<b>' + I18N.t('repos.lobby.new_project_btn') + '</b>' +
+    '<span class="pca-tip">' + I18N.t('repos.lobby.new_project_tip') + '</span>' +
   '</div>';
 
   return addCardHtml + cardsHtml +
@@ -277,7 +279,7 @@ function renderRepos() {
     }
     html += `</div>`;
 
-    html += `<div class="cd"><div class="cd-h"><h2>${I18N.t('repos.unhosted_title')} <span class="c">${availableRepos.length}</span></h2></div>`;
+    html += `<div class="cd"><div class="cd-h"><h2>未托管仓库 <span class="c">${availableRepos.length}</span></h2></div>`;
     if (availableRepos.length === 0) {
       html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_available') + '</div>';
     } else {

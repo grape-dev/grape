@@ -650,6 +650,11 @@ class HermesACPBackend:
             else:
                 exit_code = proc.returncode if proc.returncode is not None else -1
             full_text = "\n".join(collected_text)
+            # JSON 鲁棒拼接：修复 flush 边界 \n 导致的字段名断裂、缺闭合 } 等
+            if _detect_structured_output(full_text):
+                _fixed = _robust_join_json(collected_text)
+                if _fixed and _detect_structured_output(_fixed):
+                    full_text = _fixed
 
             yield ("done", {
                 "exit_code": exit_code,
@@ -960,6 +965,97 @@ def _detect_structured_output(text: str) -> bool:
     # 去除所有空白字符（空格、换行、制表符）后匹配
     compact = re.sub(r'\s+', '', text)
     return '"actions"' in compact and '"conclusion"' in compact and '"issue_summary"' in compact
+
+
+# ── JSON 鲁棒拼接辅助函数（源头预防 flush 边界损坏）──
+
+_KNOWN_JSON_FIELDS = ("actions", "conclusion", "artifacts", "next_step", "issue_summary")
+
+
+def _robust_join_json(chunks: list) -> str:
+    """拼接 collected_text，修复 flush 边界导致的 JSON 损坏。
+
+    只对 JSON 块部分操作，不影响非 JSON 文本。
+    """
+    full = "\n".join(chunks)
+    # 定位 JSON 块起点：找 {"actions" 模式
+    m = re.search(r'\{\s*"actions"', full)
+    if not m:
+        return full
+    start = m.start()
+    json_part = full[start:]
+    # 去掉尾部非 JSON 标记
+    for marker in ('[PREMATURE_END_TURN]', '\n---', '\n\n['):
+        idx = json_part.rfind(marker)
+        if idx > 0:
+            json_part = json_part[:idx]
+    # 修复 1: 断裂字段名（\n 在字段名中间）
+    for field in _KNOWN_JSON_FIELDS:
+        for i in range(1, len(field)):
+            broken = field[:i] + '\n' + field[i:]
+            if broken in json_part:
+                json_part = json_part.replace(broken, field)
+    # 修复 2: 字符串外 \n 去除，字符串内裸 \n 转义
+    json_part = _fix_json_newlines(json_part)
+    # 修复 3: 补闭合 } 如果缺失
+    json_part = _ensure_closed(json_part)
+    return full[:start] + json_part
+
+
+def _fix_json_newlines(json_str: str) -> str:
+    """去掉 JSON 中非字符串值内的换行符，字符串内的裸 \\n 转为 \\\\n。"""
+    result = []
+    in_string = False
+    escape = False
+    for ch in json_str:
+        if escape:
+            result.append(ch)
+            escape = False
+            continue
+        if ch == '\\':
+            result.append(ch)
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+        if ch == '\n':
+            if in_string:
+                result.append('\\n')
+            # 字符串外: 跳过
+            continue
+        result.append(ch)
+    return "".join(result)
+
+
+def _ensure_closed(json_str: str) -> str:
+    """如果 JSON 缺少闭合 }，按括号深度补上（忽略字符串内的 {{ }}）。"""
+    s = json_str.rstrip()
+    if s.endswith('}'):
+        return s
+    depth = 0
+    in_string = False
+    escape = False
+    for ch in s:
+        if escape:
+            escape = False
+            continue
+        if ch == '\\':
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+    if depth > 0:
+        s += '}' * depth
+    return s
 
 def _done_result(exit_code, text, session_id, errors, stderr) -> dict:
     return {

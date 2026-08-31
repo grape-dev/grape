@@ -315,7 +315,8 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                     if _ptag:
                         c2.execute(
                             "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
-                            "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.tag=? AND ec.enabled=1 "
+                            "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
+                            "AND (ec.tag=? OR ec.tag='all') "
                             "WHERE ar.status='online' AND ar.healthy=1 AND ar.credential_id > 0 "
                             "ORDER BY ar.busy_slots ASC LIMIT 1",
                             (_ptag,)
@@ -325,7 +326,8 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                             # No remote engine with this tag, try local direct
                             c2.execute(
                                 "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
-                                "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.tag=? AND ec.enabled=1 "
+                                "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
+                                "AND (ec.tag=? OR ec.tag='all') "
                                 "WHERE ar.status='online' AND ar.healthy=1 "
                                 "ORDER BY ar.busy_slots ASC LIMIT 1",
                                 (_ptag,)
@@ -455,7 +457,8 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                             c3 = db.cursor()
                             c3.execute(
                                 "SELECT ar.id FROM agent_runtimes ar "
-                                "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.tag=? AND ec.enabled=1 "
+                                "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
+                                "AND (ec.tag=? OR ec.tag='all') "
                                 "WHERE ar.status='online' AND ar.healthy=1 "
                                 "ORDER BY ar.busy_slots ASC LIMIT 1",
                                 (old.get("pool_tag"),)

@@ -7,10 +7,11 @@
   "logout_title": "退出登录",
   "loading": "加载中...",
   "load_failed": "加载失败",
-  "lobby": {
+"lobby": {
     "project_title": "项目",
     "project_sub": "多人协同，打造超级团队",
     "new_project_btn": "新建项目",
+    "new_project_tip": "开启你的AI for AI项目之旅",
     "my_projects": "我的项目",
     "search_placeholder": "搜索项目",
     "from_template": "从模版创建",
@@ -102,7 +103,5 @@
   "brand_sub": "Agentic DevOps",
   "repositories": "仓库",
   "sync_from_gitcode": "从 GitCode 同步",
-  "hosted": "已托管",
-  "no_hosted_project": "暂无已托管项目，请先加入并托管一个项目",
-  "unhosted_title": "未托管仓库"
+  "hosted": "已托管"
 }

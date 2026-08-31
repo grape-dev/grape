@@ -283,7 +283,7 @@ function loadAgentTypes() {
         renderDashboard(dashData);
       }).catch(e => {
         // 编辑中出错只 toast 不覆盖 UI；非编辑中清 loading 显示错误
-        if (window._dashboardEditing) { app.showToast && app.showToast(I18N.t('dashboard.refresh_failed', {msg: e.message})); return; }
+        if (window._dashboardEditing) { app.showToast && app.showToast('刷新失败: ' + e.message); return; }
         pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
       });
       loadDash();
@@ -438,7 +438,7 @@ function loadAgentTypes() {
     // 动态加载 help.html 到 iframe（避免跨域，用同路径）
     const body = drawer.querySelector('.help-drawer-body');
     if (body && !body.querySelector('iframe')) {
-      body.innerHTML = '<iframe src="/static/help.html" title="' + I18N.t('app.help.iframe_title') + '"></iframe>';
+      body.innerHTML = '<iframe src="/static/help.html" title="Grape 使用帮助"></iframe>';
     }
   }
   function closeHelp() {

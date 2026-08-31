@@ -831,12 +831,13 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
         c = db.cursor()
         try:
             # 1. 校验标签能力 + 获取引擎 scope
+            # 标签匹配：精确 tag OR "all"（all 可认领任意 pool_tag 任务）
             c.execute(
                 "SELECT ec.tag, rc.scope, rc.owner_id, rc.owner_name "
                 "FROM engine_capabilities ec "
                 "JOIN agent_runtimes ar ON ar.id = ec.runtime_id "
                 "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
-                "WHERE ec.runtime_id=? AND ec.tag=? AND ec.enabled=1",
+                "WHERE ec.runtime_id=? AND ec.enabled=1 AND (ec.tag=? OR ec.tag='all')",
                 (runtime_id, tag)
             )
             row = c.fetchone()
@@ -850,7 +851,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             c.execute(
                 "SELECT ec.max_concurrent, "
                 "(SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')) "
-                "FROM engine_capabilities ec WHERE ec.runtime_id=? AND ec.tag=?",
+                "FROM engine_capabilities ec WHERE ec.runtime_id=? AND ec.enabled=1 AND (ec.tag=? OR ec.tag='all')",
                 (runtime_id, runtime_id, tag)
             )
             cap_row = c.fetchone()
@@ -1413,22 +1414,62 @@ def _auto_advance_pipeline(task: dict):
         return  # stage 已推进（agent 成功调了 A2A），不需要补触发
     # stage 还等于当前 agent_type → A2A 没被调用，需要补触发
 
-    # 从 pipelines.json 查找 next agent
-    _next_agent = ""
+    # 检查 Issue 是否已关闭（agent 有意不推进 A2A，如重复 Issue 关闭后无需交办）
+    _issue_closed = False
     try:
-        import os as _os
-        _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))),
-                                   "configs", "pipelines.json")
-        import json as _json
-        with open(_pipe_path, "r", encoding="utf-8") as _f:
-            _pipes = _json.load(_f)
-        _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
-        for _node in (_scene.get("nodes") or []):
-            if _node.get("id") == _agent_type:
-                _next_agent = _node.get("next", "")
-                break
-    except Exception:
-        pass
+        import requests as _req
+        _repo_display = _repo_key.split(":", 1)[-1] if ":" in _repo_key else _repo_key
+        _owner, _repo = _repo_display.split("/", 1)
+        _issue_num = _issue_id.lstrip("#")
+        from src.user.db import get_repo_bot_token_no_global
+        _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
+        _api_url = f"https://api.gitcode.com/api/v5/repos/{_owner}/{_repo}/issues/{_issue_num}"
+        _resp = _req.get(_api_url, headers={"Authorization": f"Bearer {_bot_token}"}, timeout=10)
+        if _resp.status_code == 200:
+            _issue_data = _resp.json()
+            _issue_state = (_issue_data.get("state") or "").lower()
+            if _issue_state in ("closed", "close"):
+                _issue_closed = True
+                log.info(f"Auto-advance skipped: issue={_issue_id} agent={_agent_type} "
+                         f"(issue already closed, agent intentionally did not advance)")
+    except Exception as _e:
+        log.warning(f"Auto-advance issue state check failed: {_e}")
+    if _issue_closed:
+        return  # Issue 已关闭，agent 有意不推进 pipeline，不补触发
+
+    # 查找 next agent：优先从 DB 自定义场景查，降级到 pipelines.json
+    _next_agent = ""
+    _scene_nodes = None
+    # 1. DB 自定义场景（custom-xxx）
+    if _scene_id and _scene_id.startswith("custom-"):
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT nodes_json FROM devops_pipeline_scene WHERE scene_id=? AND is_active=1",
+                          (_scene_id,))
+                _row = c.fetchone()
+            if _row and _row[0]:
+                import json as _json
+                _scene_nodes = _json.loads(_row[0])
+        except Exception:
+            pass
+    # 2. pipelines.json（官方场景或自定义场景未命中时的降级）
+    if not _scene_nodes:
+        try:
+            import os as _os
+            _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))),
+                                       "configs", "pipelines.json")
+            import json as _json
+            with open(_pipe_path, "r", encoding="utf-8") as _f:
+                _pipes = _json.load(_f)
+            _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
+            _scene_nodes = _scene.get("nodes") or []
+        except Exception:
+            pass
+    for _node in (_scene_nodes or []):
+        if _node.get("id") == _agent_type:
+            _next_agent = _node.get("next", "")
+            break
     if not _next_agent or _next_agent == "done":
         return  # 没有下一个 agent，或已经是最后一步
 
