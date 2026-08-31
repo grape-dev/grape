@@ -1,7 +1,13 @@
 # 前端 UI 国际化设计方案（最终版）
 
-> **范围声明：本阶段只做前端页面国际化（JS + HTML + JSON 语言包 + 后端 /en 路由）。**
-> **后端 API 返回的中文（chat.py 错误消息 / DB skill display_name/description / configs/project-templates.json 配置数据等）属于二期后端国际化，本阶段不处理。**
+> **范围声明：当前阶段只做前端页面国际化（JS + HTML + JSON 语言包 + 后端 /en 路由）。**
+> **后端 API 返回的中文（错误消息 / DB skill display_name/description / 场景名 / 引擎名 / Issue 标题 / configs 配置数据等）属于二期后端国际化，当前阶段不处理、不修改后端 Python 代码、不修改测试断言。**
+>
+> **两个特例（前端语言包优先于后端值）：**
+> 1. templates 分类名 — 前端 _tmplCatName() 查语言包 cat 翻译，无 key fallback 原名
+> 2. dashboard Agent 描述 — descs[at] 语言包优先于 meta.description
+>
+> **场景下拉框不做前端翻译** — 场景名是后端配置数据，可能新增/改名，前端硬编码翻译会不同步。已回退（git revert），直接用后端 ${s.name}。
 
 ---
 
@@ -369,3 +375,54 @@ skills.json 新增：
 4. tasks.js / events.js / repos.js / observability.js / agents.js / skills.js — 少量改动
 5. 逐文件 node --check 语法验证
 6. Playwright 中英双语渲染验证 0 泄露
+
+## 十三、二期后端国际化清单（当前阶段不处理）
+
+> **当前阶段只做前端页面国际化。以下后端返回的中文数据前端直接渲染，无法翻译，统一放二期。**
+
+### 前端直接渲染后端中文数据（42处）
+
+| 文件 | 处数 | 字段 | 数据来源 | 说明 |
+|------|------|------|----------|------|
+| skills.js | 13 | s.name/s.description/sub.name | DB skill 表 | 用户上传的技能名/描述/子技能名 |
+| observability.js | 5 | rti.name/iss.title/k.label | 引擎实例名/Issue标题/日志标签 | 后端运行时数据 |
+| runtimes.js | 5 | rt.name/s.name | 引擎名/技能名 | 后端运行时数据 |
+| dashboard.js | 3 | s.name/s.skill_name/s.display_name | 场景名/技能下拉框 | 后端配置/DB 数据 |
+| knowledge.js | 4 | doc.name/f.label | 文档名/文件标签 | 后端知识库数据 |
+| repos.js | 3 | t.name/r.name | 模板名/仓库名 | 后端配置/GitCode 数据 |
+| app.js | 2 | a.name/a.display_name | Agent 名称 | 后端 API 返回 |
+| agents.js | 2 | r.name/repo.name | 仓库名 | 后端数据 |
+| pipeline.js | 2 | displayPipe.title | 流水线标题 | 后端 Issue 标题 |
+| chat.js | 1 | b.name | 后端引擎名 | 后端 API 返回 |
+| settings.js | 1 | t.label | 配置标签 | 后端配置数据 |
+| templates.js | 1 | cache.error | API 错误消息 | 后端返回的错误文本 |
+
+### 后端 Python 硬编码中文（API 返回给前端）
+
+| 文件 | 处数 | 内容类型 |
+|------|------|----------|
+| tasks.py | 83 | 任务状态消息/错误消息 |
+| db_setup.py | 82 | 建表注释/默认数据 |
+| event_pipeline.py | 78 | 事件处理消息 |
+| chat.py | 78 | 聊天错误消息/流消息（"思考中"/"生成中"等） |
+| skills.py | 66 | 技能操作消息 |
+| repos.py | 58 | 仓库操作消息 |
+| settings.py | 54 | 配置操作消息 |
+| events.py | 51 | 事件消息 |
+| knowledge.py | 51 | 知识库消息 |
+| runtime.py | 47 | 运行时消息 |
+| knowledge.py (非routes) | 42 | 知识库处理逻辑 |
+| jwt_utils.py | 30 | 认证消息 |
+| onboarding.py | 30 | 引导消息 |
+| event_store.py | 29 | 事件存储消息 |
+| feishu_onboard.py | 27 | 飞书引导消息 |
+
+### 二期处理原则
+
+1. **后端 API 返回的中文** — 后端做国际化（Accept-Language 头或 /en API 前缀），前端不改
+2. **DB 动态数据**（skill name/description、scene name）— DB 存双语字段或后端翻译
+3. **configs 配置数据**（project-templates.json 分类名/模板名）— 配置文件加双语字段
+4. **两个已做前端翻译的特例保持不变**：
+   - templates 分类名 _tmplCatName()（语言包 cat 翻译）
+   - dashboard Agent 描述 descs[at]（语言包优先于 meta.description）
+5. **场景下拉框不做前端翻译** — 已回退，直接用后端 ${s.name}
