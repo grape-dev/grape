@@ -1,91 +1,75 @@
 #!/usr/bin/env python3
-"""一次性迁移 opencode.db 中 chat 会话的 directory 到新统一结构
-（web-chat-no-response-cwd-fix.md §4 存量修正）。
+"""一次性迁移 opencode.db 中【被 chat_conversations 引用】的 chat 会话 directory 到新结构。
 
-旧形态：
+web-chat-no-response-cwd-fix.md §4 存量修正：
+旧形态（上次执行确认 119 个 chat-pattern session，仅 25 个被 conversation.runtime_session_id 引用）：
   /home/grape/chat/{uid}/{conv}
   /opt/grape_workspace/chat/{uid}/{conv}
   {WORKSPACE_DIR}/chat/{uid}/{conv}
-  {WORKSPACE_DIR}/feishu/{owner_repo}/{sess}
-
 新形态：
   {WORKSPACE_DIR}/{owner}/{repo}/chat/{uid}/{conv_id}
 
-依赖 chat_conversations 表（repo_key, user_id, id=conv_id）反查 owner/repo/uid。
+- 仅迁移「conversation.runtime_session_id == session.id」的会话（活跃对话可续聊），
+  孤儿 session 不迁移（历史残留，不影响使用）。
+- owner/repo/uid/conv 从 chat_conversations 权威取（repo_key / user_id / id）。
+- 幂等：已在新结构的跳过。
 """
 import os, sqlite3, sys
 
 GRAPE_DB = "/opt/grape/data/sessions.db"
 OPCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
-WORKSPACE_DIR = os.path.expanduser("~")
+NEW_BASE = os.path.expanduser("~/grape-workspaces")
 DRY_RUN = "--apply" not in sys.argv
 
 
-def parse_chat_old(path: str):
-    """识别旧 chat 结构，返回 (uid, conv_id) 或 None；feishu 旧结构返回 ("feishu", sess)。"""
-    if "/chat/" in path:
-        # .../chat/{uid}/{conv}
-        idx = path.index("/chat/")
-        rest = path[idx + len("/chat/"):]
-        parts = rest.strip("/").split("/")
-        if len(parts) >= 2:
-            return ("uid_conv", parts[0], parts[1])
-    if "/feishu/" in path:
-        # .../feishu/{owner_repo}/{sess}
-        idx = path.index("/feishu/")
-        rest = path[idx + len("/feishu/"):]
-        parts = rest.strip("/").split("/")
-        if len(parts) >= 2:
-            return ("feishu_sess", parts[0], parts[1])
-    return None
-
-
 def main():
-    g = sqlite3.connect(GRAPE_DB)
-    convs = {}
-    try:
-        for r in g.execute("SELECT id, repo_key, user_id FROM chat_conversations").fetchall():
-            convs[r[0]] = (r[1] or "", r[2] or 0)
-    except Exception as e:
-        print("chat_conversations 读取失败:", e); return 1
-
     from src.repo_key import parse_repo_key  # noqa: E402
 
-    if not os.path.exists(OPCODE_DB):
-        print("opencode.db 不存在:", OPCODE_DB); return 0
+    g = sqlite3.connect(GRAPE_DB)
+    # id -> (repo_key, user_id)
+    convs = {}
+    try:
+        for rid, rk, uid in g.execute("SELECT id, repo_key, user_id FROM chat_conversations").fetchall():
+            convs[rid] = (rk or "", uid or 0)
+    except Exception as e:
+        print("read chat_conversations failed:", e); return 1
+
+    # session.id -> conv_id（被引用的）
+    sess_to_conv = {}
+    try:
+        for sid, cid in g.execute("SELECT runtime_session_id, id FROM chat_conversations WHERE runtime_session_id LIKE 'ses_%'").fetchall():
+            if sid:
+                sess_to_conv[sid] = cid
+    except Exception as e:
+        print("read runtime_session_id failed:", e); return 1
+
     db = sqlite3.connect(OPCODE_DB)
     rows = db.execute("SELECT id, directory FROM session").fetchall()
-    changed = 0
+    planned = 0
     for sid, directory in rows:
-        if not directory:
+        if not directory or "/chat/" not in directory:
             continue
-        old = parse_chat_old(directory)
-        if old is None:
-            continue
-        kind = old[0]
-        if kind == "uid_conv":
-            uid, conv = old[1], old[2]
-            repo_key, db_uid = convs.get(conv, ("", 0))
-            owner_id = uid if db_uid == 0 else db_uid
-        else:  # feishu_sess：通过 im_channel 反查 conv 不在此；跳过记录，需人工
-            print("SKIP (feishu 需人工反查 conv_id):", sid, directory)
-            continue
-        _, owner, repo = parse_repo_key(repo_key or "")
+        conv_id = sess_to_conv.get(sid)
+        if not conv_id:
+            continue  # 只迁被引用的
+        rk, uid = convs.get(conv_id, ("", 0))
+        if not rk:
+            print("SKIP (conv 无 repo_key):", sid); continue
+        _, owner, repo = parse_repo_key(rk)
         if not owner or not repo:
-            print("SKIP (无 repo_key):", sid, directory); continue
-        new_dir = os.path.join(WORKSPACE_DIR, "grape-workspaces", owner, repo,
-                               "chat", str(owner_id), conv)
+            print("SKIP (repo_key 空件):", sid); continue
+        new_dir = os.path.join(NEW_BASE, owner, repo, "chat", str(uid), conv_id)
         if new_dir == directory:
             continue
-        print(("DRY  " if DRY_RUN else "MOVE ") + f"{sid}: {directory} -> {new_dir}")
+        print(("DRY  " if DRY_RUN else "MOVE ") + f"{sid}: {directory}\n      -> {new_dir}")
         if not DRY_RUN:
             db.execute("UPDATE session SET directory=?, path=? WHERE id=?", (new_dir, new_dir, sid))
-            changed += 1
+        planned += 1
     if not DRY_RUN:
         db.commit()
-        print(f"updated {changed} sessions")
+        print(f"updated {planned} sessions")
     else:
-        print("dry-run，未改动；加 --apply 生效")
+        print(f"dry-run：{planned} 个被引用会话将迁移（加 --apply 生效）")
     return 0
 
 
