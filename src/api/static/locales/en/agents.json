@@ -95,5 +95,7 @@
   },
   "btn_configure": "Configure",
   "btn_events": "Events",
-  "skill_label": "Skill"
+  "skill_label": "Skill",
+  "event_table_seq": "Seq",
+  "backend_engines_label": "Backend Engines"
 }

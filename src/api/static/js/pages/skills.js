@@ -79,7 +79,7 @@ function _loadSkills() {
       if (!groupSkills || groupSkills.length === 0) return;
 
       html += `<div class="skill-group" style="margin-bottom:18px">
-        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${label} Skills</h3>
+        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${label} ${I18N.t('skills.group_skills_suffix')}</h3>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">`;
       groupSkills.forEach(s => {
         const tagClass = s.scope === 'official' ? 'tg-c' : s.scope === 'repo' ? 'tg-i' : 'tg-d';

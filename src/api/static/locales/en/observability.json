@@ -133,5 +133,10 @@
   "search_engine_placeholder": "Search engine/device/version...",
   "all_devices": "All devices",
   "task_total": "Total Tasks",
-  "main_tag": "Main"
+  "main_tag": "Main",
+  "col_seq": "Seq",
+  "col_agent": "Agent",
+  "col_skill": "Skill",
+  "col_issue_seq": "Issue / Seq",
+  "col_failed_short": "Failed"
 }

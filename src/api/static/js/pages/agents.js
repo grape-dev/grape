@@ -197,7 +197,7 @@ function renderAgent(name, data) {
   const evtHtml = events.length > 0 ? `
     <table style="width:100%;font-size:12px;table-layout:fixed">
       <thead><tr>
-        <th style="width:60px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Seq</th>
+        <th style="width:60px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event_table_seq')}</th>
         <th style="width:130px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_time')}</th>
         <th style="width:auto;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_content')}</th>
         <th style="width:75px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Issue</th>
@@ -247,7 +247,7 @@ function renderAgent(name, data) {
 </div>
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
   <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('agents.config.title')}</h3>
-  <div class="srow" style="align-items:flex-start"><label>Backend Engines<br><span class="ts t3" style="font-weight:400">${I18N.t('agents.engine.backend_engines_hint')}</span></label>
+  <div class="srow" style="align-items:flex-start"><label>${I18N.t('agents.backend_engines_label')}<br><span class="ts t3" style="font-weight:400">${I18N.t('agents.engine.backend_engines_hint')}</span></label>
     <div class="cfg-backends" data-backends="${(data.backends || []).join(',')}" data-agent="${name}" style="flex:1;position:relative">
       <div class="cfg-backends-trigger" onclick="toggleBackendsDropdown(event)" style="min-height:34px;padding:5px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);cursor:pointer;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
         <span class="cfg-backends-ph ts t2" style="color:var(--t2)">${I18N.t('agents.engine.select_placeholder')}</span>

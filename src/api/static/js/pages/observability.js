@@ -577,7 +577,7 @@ function renderAnomalyTab(container, ops) {
     const pageItems = failed.slice(start, start + _ANOMALY_PAGE_SIZE);
 
     html += section(I18N.t('observability.failed_tasks'), I18N.t('observability.failed_tasks_subtitle', {total: failed.length, page: (_anomalyPage+1), pages: totalPages}));
-    html += table(['Issue/Seq', 'Agent', 'Repo', 'Failed', I18N.t('observability.col_result')],
+    html += table([I18N.t('observability.col_issue_seq'), I18N.t('observability.col_agent'), I18N.t('observability.col_repo'), I18N.t('observability.col_failed_short'), I18N.t('observability.col_result')],
       pageItems.map(s => _row(s, true))
     );
 
@@ -906,7 +906,7 @@ function renderTimelineList(container, issues, repoKey) {
     html += '<div id="tl-diagram-' + iss.issueId + '" class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto;' + (_issueViewMode[iss.issueId] === 'events' ? 'display:none' : '') + '"></div>';
     // 事件列表容器
     html += '<div id="tl-events-' + iss.issueId + '" style="' + (_issueViewMode[iss.issueId] !== 'events' ? 'display:none' : '') + '">';
-    html += '<table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>' + I18N.t('observability.col_event') + '</th><th>Agent</th><th>' + I18N.t('observability.col_engine') + '</th><th>Skill</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
+    html += '<table style="width:100%;font-size:11px"><thead><tr><th>' + I18N.t('observability.col_seq') + '</th><th>' + I18N.t('observability.col_event') + '</th><th>' + I18N.t('observability.col_agent') + '</th><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_skill') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
     html += iss.events.map(ev => {
       const enc = ev.taskId ? encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''})) : '';
       const clickable = ev.taskId ? 'cursor:pointer' : '';
@@ -1106,7 +1106,7 @@ function renderSessionList(container, sessions, rtName) {
     });
     allTasks.sort((a, b) => (b.event_seq || 0) - (a.event_seq || 0));
     if (!allTasks.length) return '<div class="ts t3" style="padding:8px">' + I18N.t('observability.no_completed_tasks') + '</div>';
-    let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>Exit</th><th>' + I18N.t('observability.col_complete_time') + '</th></tr></thead><tbody>';
+    let html = '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_issue_seq') + '</th><th>' + I18N.t('observability.col_agent') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_exit') + '</th><th>' + I18N.t('observability.col_complete_time') + '</th></tr></thead><tbody>';
     allTasks.forEach(t => {
       const is = (t.issue_id && t.event_seq) ? t.issue_id + ' #' + t.event_seq : (t.event_seq ? '#' + t.event_seq : t.id.substring(0,12));
       const enc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:'', created:t.completed_at||''}));
