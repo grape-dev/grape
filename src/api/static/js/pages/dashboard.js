@@ -398,7 +398,8 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     const skillDisplay = node ? (ag.skill_display_name || ag.skill || node.skill || '') : (ag.skill_display_name || ag.skill || '');
     const engineIds = node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []);
     const accentColor = meta.color || colors[at] || '#86868b';
-    const desc = meta.description || descs[at] || '';
+    // 语言包优先于后端 description（后端返回中文时英文模式用前端翻译）
+    const desc = descs[at] || meta.description || '';
     const canToggle = at !== 'vod' && at !== 'issue';
 
     let toggleBtn = '';
