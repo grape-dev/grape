@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -26,12 +27,15 @@ import java.util.Set;
 public class TemplatesService {
 
     private final Path repoRoot;
+    private final String templatesConfig;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public TemplatesService(@Value("${app.skills-dir:../../skills}") String skillsDir,
+                            @Value("${app.templates-config:configs/project-templates.json}") String templatesConfig,
                             @Qualifier("grapeJdbcTemplate") JdbcTemplate jdbcTemplate) {
         this.repoRoot = RepoPaths.resolveRepoRoot(skillsDir);
+        this.templatesConfig = templatesConfig;
         this.jdbcTemplate = jdbcTemplate;
     }
 
@@ -161,7 +165,12 @@ public class TemplatesService {
     }
 
     private Map<String, Object> loadConfig() {
-        Path cfg = repoRoot.resolve("configs").resolve("project-templates.json");
+        // 优先用 templates-config 配置项（可为绝对路径或相对路径）
+        Path cfg = Paths.get(templatesConfig).toAbsolutePath().normalize();
+        if (!Files.exists(cfg)) {
+            // 兜底：从 repoRoot/configs/project-templates.json 查找
+            cfg = repoRoot.resolve("configs").resolve("project-templates.json");
+        }
         try {
             String json = new String(Files.readAllBytes(cfg), StandardCharsets.UTF_8);
             return objectMapper.readValue(json, Map.class);

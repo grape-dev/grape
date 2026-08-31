@@ -1,0 +1,6 @@
+{
+  "backend": "sqlite",
+  "sqlite": {
+    "path": "data/grape-test.db"
+  }
+}

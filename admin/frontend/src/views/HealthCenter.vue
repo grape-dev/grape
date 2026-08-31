@@ -381,7 +381,7 @@ const alerts = ref([])
 const alertExpanded = ref(false)
 
 // KPI
-const taskKpi = ref({ total: 0, completed: 0, running: 0, failed: 0, queued: 0, stuck: 0 })
+const taskKpi = ref({ total: 0, completed: 0, running: 0, failed: 0 })
 const deviceKpi = ref({ total: 0, online: 0, offline: 0, unhealthy: 0 })
 const infraKpi = ref({ dbCount: 0, dbHealthy: true, elbCount: 0 })
 const infraDetails = ref([])
@@ -410,7 +410,7 @@ const runtimesList = ref([])
 const taskHealth = computed(() => {
   const f = taskKpi.value.failed
   if (f > 5) return { text: '异常', color: 'var(--danger)' }
-  if (f > 0 || taskKpi.value.stuck > 0) return { text: '警告', color: 'var(--warning)' }
+  if (f > 0) return { text: '警告', color: 'var(--warning)' }
   return { text: '正常', color: 'var(--success)' }
 })
 const deviceHealth = computed(() => {

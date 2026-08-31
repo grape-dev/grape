@@ -121,6 +121,7 @@ def test_filter_repos_admin_not_hosted_shows_host_button():
               "description": "", "is_admin": True, "is_join": False}]
     out = _filter(1, repos)
     assert len(out) == 1
+    assert out[0]["in_managed"] is False
     assert out[0]["is_hosted"] is False
     assert out[0]["is_joined"] is False
     assert out[0]["role"] == "Admin"
@@ -134,19 +135,50 @@ def test_filter_repos_member_but_managed_hides_host_button():
               "description": "", "is_admin": False, "is_join": False}]
     out = _filter(1, repos)
     assert len(out) == 1, "已被托管的仓库应展示"
+    assert out[0]["in_managed"] is True
     assert out[0]["is_hosted"] is True
     assert out[0]["is_joined"] is True
-    assert out[0]["role"] != "Admin" or True
+    assert out[0]["role"] == "Maintainer"
     _clean()
 
 
-def test_filter_repos_joined_user_visible():
+def test_filter_repos_unmanaged_member_hidden():
+    """「加入」已砍掉：is_join 缓存默认回灌 1 的普通成员仓库，未托管 → 不返回"""
     _clean()
     repos = [{"repo_key": "gitcode:owner/repo", "full_name": "owner/repo", "owner": "owner", "name": "repo",
               "description": "", "is_admin": False, "is_join": True}]
     out = _filter(1, repos)
+    assert out == [], "未托管且非管理员的仓库不应展示"
+
+
+def test_filter_repos_member_managed_no_webhook_shows_joined():
+    """成员 + 仓库在 managed_repos 但 webhook_id=0（仅登记未托管）→ 展示为「已加入」非「加入并托管」"""
+    _clean()
+    user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=0)
+    repos = [{"repo_key": "gitcode:owner/repo", "full_name": "owner/repo", "owner": "owner", "name": "repo",
+              "description": "", "is_admin": False, "is_join": False}]
+    out = _filter(1, repos)
     assert len(out) == 1
+    assert out[0]["in_managed"] is True
     assert out[0]["is_joined"] is True
+    assert out[0]["is_hosted"] is False
+    assert out[0]["role"] == "Maintainer"
+    _clean()
+
+
+def test_filter_repos_admin_managed_hosted():
+    """Admin + 仓库已在 managed_repos → 已托管、展示「进入项目」"""
+    _clean()
+    user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=777)
+    repos = [{"repo_key": "gitcode:owner/repo", "full_name": "owner/repo", "owner": "owner", "name": "repo",
+              "description": "", "is_admin": True, "is_join": False}]
+    out = _filter(1, repos)
+    assert len(out) == 1
+    assert out[0]["in_managed"] is True
+    assert out[0]["is_joined"] is True
+    assert out[0]["is_hosted"] is True
+    assert out[0]["role"] == "Admin"
+    _clean()
 
 
 def test_filter_repos_ignores_unmanaged_member():

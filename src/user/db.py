@@ -753,13 +753,13 @@ def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
 
 
 def get_skill_by_id(skill_id) -> dict | None:
-    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type）"""
+    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type、content_hash）"""
     if not skill_id:
         return None
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
+            c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id, content_hash FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
             row = c.fetchone()
             if not row:
                 return None
@@ -768,10 +768,44 @@ def get_skill_by_id(skill_id) -> dict | None:
                 "description": row[3] or "", "agent_type": row[4] or "",
                 "skill_path": row[5] or row[1], "file_path": row[6] or "",
                 "scope": row[7] or "official", "owner_id": row[8] or "",
+                "content_hash": row[9] or "",
             }
     except Exception as e:
         log.warning(f"get_skill_by_id failed: {e}")
         return None
+
+
+def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str, str]:
+    """读取技能的主键 id、content_hash 和 file_path（变更检测用）。
+    返回 (id, content_hash, file_path)，id=0 表示不存在。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, content_hash, file_path FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
+            row = c.fetchone()
+            if not row:
+                return (0, "", "")
+            return (row[0], row[1] or "", row[2] or "")
+    except Exception as e:
+        log.warning(f"get_skill_content_hash failed: {e}")
+        return (0, "", "")
+
+
+def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = "") -> bool:
+    """按主键 id 更新技能的 content_hash 和 file_path（OBS 同步后调用）"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            if file_path:
+                c.execute("UPDATE skill SET content_hash=?, file_path=? WHERE id=?", (content_hash, file_path, skill_id))
+            else:
+                c.execute("UPDATE skill SET content_hash=? WHERE id=?", (content_hash, skill_id))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"update_skill_content_hash failed: {e}")
+        return False
 
 
 def resolve_skill_id(skill_name: str, owner_id: str = "") -> int:
@@ -1466,17 +1500,25 @@ def init_user_repos_table():
 
 
 def save_user_repos(user_id: int, repos: list[dict]):
-    """批量写入用户仓库缓存（repos 元素含 full_name/owner/name/...，full_name 无前缀）"""
+    """批量写入用户仓库缓存（repos 元素含 full_name/owner/name/...，full_name 无前缀）
+
+    is_join 不再硬编码为 1：仅当仓库已存在于 managed_repos（已托管/已加入）时为 1，
+    保证「已加入」标记和其它 is_join 消费方（engine_select/飞书 role）口径不失真。
+    """
     from src.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
+        c.execute("SELECT repo_key FROM managed_repos")
+        managed_keys = {row[0] for row in c.fetchall()}
         c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
         for r in repos:
             full_name = r.get("full_name", "") or r.get("repo_key", "")
+            repo_key = to_repo_key(full_name)
+            is_join = 1 if repo_key in managed_keys else 0
             c.execute(
-                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join) VALUES (?,?,?,?,?,?,?,1)",
-                (user_id, to_repo_key(full_name), r.get("owner", ""), r.get("name", ""),
-                 r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0)
+                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join) VALUES (?,?,?,?,?,?,?,?)",
+                (user_id, repo_key, r.get("owner", ""), r.get("name", ""),
+                 r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0, is_join)
             )
         db.commit()
 

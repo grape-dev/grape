@@ -93,8 +93,11 @@ async def list_skills(user: dict = Depends(get_current_user), repo: str = "", sc
 
 @router.post("/sync-official")
 async def sync_official_skills(user: dict = Depends(get_current_user)):
-    """从 configs/skill-description.json 同步官方技能到 skill 表。
-    新增的官方技能会被插入，已有的会更新。返回新增数量。
+    """从 configs/skill-description.json 同步官方技能到 skill 表，并触发 OBS 同步。
+
+    1. DB 同步：新增 INSERT + 已有 UPDATE 元信息（display_name/description/agent_type）
+    2. OBS 同步：计算 content_hash，变更的技能打包 zip 上传 OBS
+    返回同步结果。
     """
     from src.session_manager import db, db_lock
 
@@ -107,6 +110,7 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
         data = json.load(f)
 
     added = 0
+    # 1. DB 同步（INSERT/UPDATE 元信息）
     with db_lock:
         c = db.cursor()
         for skill_name, info in data.items():
@@ -114,11 +118,8 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
             description = info.get("description", "")
             agent_type = info.get("agent_type", "")
             skill_path = info.get("path", skill_name)
-            # 检查是否已存在
             existed = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'", (skill_name,)).fetchone()[0]
             if existed:
-                # 已存在：仅更新元信息。OBS 集群模式（file_path 非空）保留 skill_path（对象键不能被重置）；
-                # 本地技能刷新 skill_path，保证目录按 agent_type 分组后 DB 路径与磁盘一致。
                 _fp = c.execute("SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''", (skill_name,)).fetchone()
                 if _fp:
                     c.execute(
@@ -132,14 +133,22 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
                     )
             else:
                 c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
-                    (skill_name, display_name, description, agent_type, skill_path)
+                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash) VALUES (?,?,?,?,?,'official','',?)",
+                    (skill_name, display_name, description, agent_type, skill_path, "")
                 )
             if existed == 0:
                 added += 1
         db.commit()
 
-    return {"message": f"官方技能同步完成，新增 {added} 个", "added": added}
+    # 2. OBS 同步（hash 检测 + 上传）
+    from src.storage.skill_sync import sync_official_skills_to_obs
+    obs_result = await sync_official_skills_to_obs()
+
+    return {
+        "message": f"官方技能同步完成，新增 {added} 个，OBS 同步: +{obs_result['added']} ~{obs_result['updated']} 跳过{obs_result['skipped']}",
+        "added": added,
+        "obs_result": obs_result,
+    }
 
 
 @router.get("/template")

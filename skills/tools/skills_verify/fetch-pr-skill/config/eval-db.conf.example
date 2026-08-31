@@ -1,0 +1,13 @@
+# fetch-pr-skill 数据库配置模板
+#
+# 使用方法:
+#   1. 复制本文件到 ~/.fetch-pr-skill/eval-db.conf
+#      mkdir -p ~/.fetch-pr-skill && cp config/eval-db.conf.example ~/.fetch-pr-skill/eval-db.conf
+#   2. 填入真实的数据库连接信息
+#   3. 权限建议: chmod 600 ~/.fetch-pr-skill/eval-db.conf
+
+# 评测数据库（MySQL），评测结果写入 hd_eval_* 系列表
+EVAL_DB_HOST=your-db-host
+EVAL_DB_USER=your-db-user
+EVAL_DB_PASSWORD=your-db-password
+EVAL_DB_NAME=your-db-name
