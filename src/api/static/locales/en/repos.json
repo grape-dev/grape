@@ -17,7 +17,7 @@
     "refresh_title": "Refresh repository list from GitCode",
     "hello": "Hello, ",
     "welcome_sub": "Select a project to start your Agent-driven automated DevOps journey.",
-    "stat_projects": "Projects",
+    "stat_projects": "My Projects",
     "stat_hosted": "Hosted",
     "empty_title": "No matching projects found",
     "empty_desc": "Try different keywords or filter conditions.",
@@ -43,7 +43,7 @@
     "join_and_host": "Join & Host",
     "status_hosted": "Hosted",
     "status_joined": "Joined",
-    "status_not_joined": "Not Joined",
+    "status_not_joined": "Not Hosted",
     "no_description": "No description"
   },
   "managed": {

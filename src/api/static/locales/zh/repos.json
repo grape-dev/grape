@@ -17,7 +17,7 @@
     "refresh_title": "从 GitCode 刷新仓库列表",
     "hello": "你好，",
     "welcome_sub": "选择一个工作项目，开启由 Agent 驱动的自动化 DevOps 之旅。",
-    "stat_projects": "工作项目",
+    "stat_projects": "我的项目",
     "stat_hosted": "已托管",
     "empty_title": "未找到匹配的项目",
     "empty_desc": "试试更换关键词或筛选条件。",
@@ -43,7 +43,7 @@
     "join_and_host": "加入并托管",
     "status_hosted": "已托管",
     "status_joined": "已加入",
-    "status_not_joined": "未加入",
+    "status_not_joined": "未托管",
     "no_description": "暂无描述"
   },
   "managed": {

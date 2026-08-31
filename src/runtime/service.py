@@ -1254,6 +1254,42 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                 exit_code = 1
                 log.info(f"Task {task_id}: business failure detected "
                          f"(agent={task.get('agent_type')}), overriding exit_code to 1")
+
+            # 完成度校验：exit_code=0 但无结构化产出 → LLM 提前 end_turn
+            # coding/qa/sre/issue agent 正常完成应有 actions/conclusion/issue_summary JSON 块
+            # 没有则说明 LLM 提前 end_turn，未执行完任务
+            _agent_type = task.get("agent_type") or ""
+            if exit_code == 0 and not output and _agent_type in ("coding", "qa", "sre", "issue"):
+                _attempts = (task.get("attempts") or 0)
+                if _attempts < 2:
+                    log.warning(
+                        f"Task {task_id}: premature end_turn (no structured output, "
+                        f"agent={_agent_type}, attempt={_attempts+1}/3), requeueing")
+                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 结束但无结构化产出，疑似 LLM 提前 end_turn，自动重试"
+                    update_task_status(task_id, "queued", started_at=None,
+                                       result_text=result_text,
+                                       usage_json=json.dumps(usage or {}))
+                    # 释放槽位 + attempts+1
+                    with db_lock:
+                        c2 = db.cursor()
+                        c2.execute("UPDATE agent_tasks SET attempts=attempts+1, "
+                                   "runtime_id=0, started_at=NULL, status='queued' "
+                                   "WHERE id=?", (task_id,))
+                        if task.get("runtime_id"):
+                            c2.execute(
+                                "UPDATE agent_runtimes SET busy_slots = CASE "
+                                "WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END "
+                                "WHERE id=?", (task.get("runtime_id"),))
+                        db.commit()
+                    log.info(f"Task {task_id}: requeued for retry (attempt={_attempts+1})")
+                    return
+                else:
+                    log.warning(
+                        f"Task {task_id}: premature end_turn, max retries exceeded "
+                        f"(attempt={_attempts}/3), marking failed")
+                    exit_code = 1
+                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 多次结束但无结构化产出，已达最大重试次数"
+
             status = "completed" if exit_code == 0 else "failed"
             duration = None
             try:

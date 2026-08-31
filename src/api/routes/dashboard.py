@@ -34,6 +34,7 @@ async def get_ops_overview(repo: str = ""):
     # repo 过滤条件
     _repo_filter = ""
     _repo_params = []
+    repo_key = ""
     if repo:
         repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
         _repo_filter = " AND repo_key=?"
@@ -216,13 +217,26 @@ async def get_ops_overview(repo: str = ""):
             except Exception:
                 pass
 
-        # 查所有 worker（凭据），排除已注销（revoked）；主控机记录也含在其中
+        # 查 worker（凭据），排除已注销（revoked）
+        # scope=repo 的 worker 只在所属仓库的监控页面显示，全局看板只看 global scope
         try:
-            c.execute(
-                "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
-                "FROM runtime_credentials WHERE status != 'revoked' ORDER BY id"
-            )
+            if repo:
+                # 仓库级看板：显示 global + 该 repo 的 worker（repo_key 可能带 gitcode: 前缀也可能不带）
+                c.execute(
+                    "SELECT id, name, device_name, status, last_seen_at, last_ip, "
+                    "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
+                    "FROM runtime_credentials WHERE status != 'revoked' "
+                    "AND (scope='global' OR repo_key=? OR repo_key=?) ORDER BY id",
+                    (repo_key, repo)
+                )
+            else:
+                # 全局看板：只显示 global scope 的 worker
+                c.execute(
+                    "SELECT id, name, device_name, status, last_seen_at, last_ip, "
+                    "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
+                    "FROM runtime_credentials WHERE status != 'revoked' "
+                    "AND scope='global' ORDER BY id"
+                )
             for w in c.fetchall():
                 wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w
                 worker_total += 1

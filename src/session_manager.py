@@ -35,15 +35,6 @@ CREATE TABLE IF NOT EXISTS unified_user_mapping (
 )
 """
 
-TEMPLATE_USAGE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS template_usage (
-    template_id TEXT NOT NULL,
-    user_key    TEXT NOT NULL,
-    created_at  TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (template_id, user_key)
-)
-"""
-
 _db_path = os.environ.get("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data/sessions.db"))
 db_lock = threading.RLock()
 
@@ -176,7 +167,6 @@ try:
 except Exception as e:
     log.warning(f"Rebuild unified_user_mapping check failed: {e}")
 db.execute(UNIFIED_USER_MAPPING_TABLE_SQL)
-db.execute(TEMPLATE_USAGE_TABLE_SQL)
 # 回填 unified_user_mapping：user_accounts 已有但未映射的用户（INSERT OR IGNORE 不覆盖已有飞书绑定）
 # 使 /api/tasks/notify 能解析 assignee→user_id（tasks.py:52）；幂等，每次启动执行
 try:

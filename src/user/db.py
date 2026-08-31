@@ -284,24 +284,6 @@ CREATE TABLE IF NOT EXISTS user_credentials (
 )
 """
 
-def init_db():
-    """初始化用户相关表（幂等）"""
-    with db_lock:
-        db.execute(_USERS_DDL)
-        db.execute(_CREDENTIALS_DDL)
-        for col in ["created_by"]:
-            try:
-                db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
-            except Exception:
-                pass
-        for col in ["hw_iam_domain", "hw_iam_user", "hw_iam_password", "hw_iam_account_type"]:
-            try:
-                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
-            except Exception:
-                pass
-        db.commit()
-
-
 # ====== 凭据 CRUD ======
 
 def set_credential(user_id: int, provider: str, config: dict) -> bool:
@@ -596,6 +578,12 @@ def init_db():
             db.execute("ALTER TABLE user_accounts ADD COLUMN last_active_at TEXT DEFAULT NULL")
         except Exception:
             pass
+        # 兼容旧列迁移（幂等）：华为云 IAM 列（存量库升级；CREATE TABLE 只影响新库）
+        for col in ["hw_iam_domain", "hw_iam_user", "hw_iam_password", "hw_iam_account_type"]:
+            try:
+                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
+            except Exception:
+                pass
         db.execute(_CREDENTIALS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)

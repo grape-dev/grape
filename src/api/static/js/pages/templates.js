@@ -97,46 +97,12 @@ function _sceneClass(sceneId) {
 }
 
 // ====== 精选模板竖排卡片 ======
-const _MAX_FEATURED = 5;
-
 function _renderFeaturedCarousel() {
   var cats = _tmplState.categories.filter(function(x) { return x.id !== 'all' && x.id !== '_fav'; });
   if (cats.length === 0) return '';
 
-  // 新规则：按「创建过该模板的不同用户数 create_count」降序取前 N
-  var ranked = [];
-  cats.forEach(function(cat) {
-    (cat.templates || []).forEach(function(t) {
-      var cnt = t.create_count || 0;
-      if (cnt > 0) ranked.push({cnt: cnt, cat: cat.name, t: t});
-    });
-  });
-  ranked.sort(function(a, b) {
-    if (b.cnt !== a.cnt) return b.cnt - a.cnt;
-    return (a.t.name || '').localeCompare(b.t.name || '');
-  });
-
   var itemsHtml = '';
-  if (ranked.length > 0) {
-    ranked.slice(0, _MAX_FEATURED).forEach(function(it) {
-      var t = it.t;
-      var nm = t.name || t.display_name || t.id || '';
-      var ic = t.icon || '📄';
-      itemsHtml += '<div class="feat-item" onclick="createFromTemplate(\'' + t.id + '\',\'' + (t.default_repo_name || t.id) + '\')">' +
-        '<span class="feat-item-ic">' + ic + '</span>' +
-        '<div class="feat-item-info">' +
-          '<span class="feat-item-name">' + nm + '</span>' +
-          '<span class="feat-item-cat">' + it.cat + '</span>' +
-        '</div>' +
-      '</div>';
-    });
-    return '<div class="feat-single">' +
-      '<div class="feat-single-h">精选推荐</div>' +
-      '<div class="feat-single-body">' + itemsHtml + '</div>' +
-    '</div>';
-  }
 
-  // 回退：暂无使用数据 → 每分类取第一个（不空白）
   for (var si = 0; si < cats.length; si++) {
     var x = cats[si];
     var tmplItem = null;
@@ -152,12 +118,12 @@ function _renderFeaturedCarousel() {
     }
 
     if (tmplItem) {
-      var nm2 = tmplItem.name || tmplItem.display_name || tmplItem.id || '';
-      var ic2 = tmplItem.icon || '📄';
+      var nm = tmplItem.name || tmplItem.display_name || tmplItem.id || '';
+      var ic = tmplItem.icon || '📄';
       itemsHtml += '<div class="feat-item" onclick="createFromTemplate(\'' + tmplItem.id + '\',\'' + (tmplItem.default_repo_name || tmplItem.id) + '\')">' +
-        '<span class="feat-item-ic">' + ic2 + '</span>' +
+        '<span class="feat-item-ic">' + ic + '</span>' +
         '<div class="feat-item-info">' +
-          '<span class="feat-item-name">' + nm2 + '</span>' +
+          '<span class="feat-item-name">' + nm + '</span>' +
           '<span class="feat-item-cat">' + x.name + '</span>' +
         '</div>' +
       '</div>';
