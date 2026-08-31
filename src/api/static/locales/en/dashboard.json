@@ -88,5 +88,8 @@
   "hero_member": "Member",
   "stat_active": "Active",
   "stat_events": "Events",
-  "stat_failed": "Failed"
+  "stat_failed": "Failed",
+  "confirm_delete_scene": "Delete Scene",
+  "scene_deleted": "Scene deleted",
+  "delete_failed": "Delete failed: {{msg}}"
 }
