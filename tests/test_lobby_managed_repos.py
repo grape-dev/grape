@@ -124,6 +124,7 @@ def test_filter_repos_admin_not_hosted_shows_host_button():
     assert out[0]["in_managed"] is False
     assert out[0]["is_hosted"] is False
     assert out[0]["is_joined"] is False
+    assert out[0]["can_host"] is True
     assert out[0]["role"] == "Admin"
 
 
@@ -138,21 +139,26 @@ def test_filter_repos_member_but_managed_hides_host_button():
     assert out[0]["in_managed"] is True
     assert out[0]["is_hosted"] is True
     assert out[0]["is_joined"] is True
-    assert out[0]["role"] == "Maintainer"
+    assert out[0]["can_host"] is False
+    assert out[0]["role"] == "Member"
     _clean()
 
 
 def test_filter_repos_unmanaged_member_hidden():
-    """「加入」已砍掉：is_join 缓存默认回灌 1 的普通成员仓库，未托管 → 不返回"""
+    """「加入」已砍掉：普通成员 + 未托管 → 仍展示为「未托管」（点加入并托管由前端提示无权限）"""
     _clean()
     repos = [{"repo_key": "gitcode:owner/repo", "full_name": "owner/repo", "owner": "owner", "name": "repo",
               "description": "", "is_admin": False, "is_join": True}]
     out = _filter(1, repos)
-    assert out == [], "未托管且非管理员的仓库不应展示"
+    assert len(out) == 1, "未托管且非管理员的仓库应展示「未托管」"
+    assert out[0]["is_hosted"] is False
+    assert out[0]["is_joined"] is False
+    assert out[0]["can_host"] is False
+    assert out[0]["role"] == "Member"
 
 
 def test_filter_repos_member_managed_no_webhook_shows_joined():
-    """成员 + 仓库在 managed_repos 但 webhook_id=0（仅登记未托管）→ 展示为「已加入」非「加入并托管」"""
+    """成员 + 仓库在 managed_repos 但 webhook_id=0（仅登记未托管）→ 展示「未托管」（is_hosted=False）"""
     _clean()
     user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=0)
     repos = [{"repo_key": "gitcode:owner/repo", "full_name": "owner/repo", "owner": "owner", "name": "repo",
@@ -162,7 +168,8 @@ def test_filter_repos_member_managed_no_webhook_shows_joined():
     assert out[0]["in_managed"] is True
     assert out[0]["is_joined"] is True
     assert out[0]["is_hosted"] is False
-    assert out[0]["role"] == "Maintainer"
+    assert out[0]["can_host"] is False
+    assert out[0]["role"] == "Member"
     _clean()
 
 
@@ -177,6 +184,7 @@ def test_filter_repos_admin_managed_hosted():
     assert out[0]["in_managed"] is True
     assert out[0]["is_joined"] is True
     assert out[0]["is_hosted"] is True
+    assert out[0]["can_host"] is True
     assert out[0]["role"] == "Admin"
     _clean()
 
@@ -186,11 +194,13 @@ def test_filter_repos_ignores_unmanaged_member():
     repos = [{"repo_key": "gitcode:owner/repo", "full_name": "owner/repo", "owner": "owner", "name": "repo",
               "description": "", "is_admin": False, "is_join": False}]
     out = _filter(1, repos)
-    assert out == [], "非管理员 + 非已加入 + 未托管 → 不展示"
+    assert len(out) == 1, "非管理员 + 未托管 → 应展示「未托管」（前端提示无权限），不再隐藏"
+    assert out[0]["can_host"] is False
+    assert out[0]["is_hosted"] is False
 
 
 def test_filter_repos_prefix_isolates_across_platforms():
-    """跨平台同名仓库隔离：gitcode:owner/repo 被托管不影响 github:owner/repo"""
+    """跨平台同名仓库隔离：gitcode 已托管不影响 github 同名仓库的托管状态"""
     _clean()
     user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)
     repos = [
@@ -201,8 +211,8 @@ def test_filter_repos_prefix_isolates_across_platforms():
     ]
     out = _filter(1, repos)
     by_key = {r["repo_key"]: r for r in out}
-    assert "gitcode:owner/repo" in by_key, "gitcode 托管命中应展示"
-    assert "github:owner/repo" not in by_key, "github 同名仓库不应被误判托管"
+    assert "gitcode:owner/repo" in by_key and by_key["gitcode:owner/repo"]["is_hosted"] is True, "gitcode 托管命中应展示已托管"
+    assert "github:owner/repo" in by_key and by_key["github:owner/repo"]["is_hosted"] is False, "github 同名仓库不应被误判托管"
     _clean()
 
 
@@ -227,4 +237,5 @@ def test_api_responses_strip_prefix():
     out = _filter(1, fetched)
     assert out and out[0]["full_name"] == "me/own"
     assert not out[0]["full_name"].startswith("gitcode:"), "对外 full_name 不得带前缀"
+    assert out[0]["can_host"] is True
     _clean()
