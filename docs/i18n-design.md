@@ -426,3 +426,63 @@ skills.json 新增：
    - templates 分类名 _tmplCatName()（语言包 cat 翻译）
    - dashboard Agent 描述 descs[at]（语言包优先于 meta.description）
 5. **场景下拉框不做前端翻译** — 已回退，直接用后端 ${s.name}
+6. **tasks.js 场景名不做前端翻译** — 已回退，直接用后端 t.scene_name || t.scene_id
+
+## 十四、最终验证报告
+
+### 验证范围
+
+| 模式 | 场景数 | 覆盖内容 |
+|------|--------|----------|
+| 中文 | 20 | 11个主页面 + repos 3个子tab + settings 4个子tab + dashboard 2个交互模式 |
+| 英文 | 25 | 同上 + dashboard 引擎弹窗 + observability 错误日志 + templates 创建弹窗 + runtimes 技能详情 |
+| 登录页 | 2 | 中英文各1 |
+
+### 验证结果
+
+| 检查项 | 结果 |
+|--------|------|
+| I18N.t 字面量泄露 | 0 处 |
+| 模板字面量内 '+ I18N.t() +' bug | 0 处（已修复 observability.js:606） |
+| 单引号字符串内嵌 I18N.t() 不拼接 | 0 处 |
+| 前端 JS 硬编码中文 | 0 处（仅剩3处后端文本匹配/注释，二期不改） |
+| 硬编码英文 UI 文案 | 0 处 |
+| 语言包 zh/en key 对齐 | 全部对齐（15个模块） |
+| 中文包纯英文值 | 0 处 |
+| 语言包 JSON 合法性 | 全部合法 |
+| node --check 语法 | 15个 JS 文件全部 OK |
+| 语言切换不刷新页面 | 已验证（原地重渲染 + URL 前缀更新） |
+| settings tab 状态保留 | 已验证（4个子tab切换语言后均保留） |
+| F5 刷新语言保持 | 已验证 |
+| 前进后退正常 | 已验证 |
+
+### 英文模式中文残留（全部是后端动态数据，二期）
+
+| 页面 | 残留内容 | 数据来源 |
+|------|----------|----------|
+| chat | "你好" 欢迎语 | 后端返回 |
+| skills | "对话助手"/"IM对话处理"/"IM通知" | DB skill 表 |
+| repos-templates | "静态网页模板"/"Python小游戏合集" | configs/project-templates.json |
+
+### 与 dev（上个版本）的差异
+
+改动文件 27 个，+468/-151 行：
+
+**JS 代码（11个文件）**：
+- i18n.js — setLang 改为不刷新页面（replaceState + 原地重渲染），settings tab 状态保留
+- observability.js — L606 模板字面量 bug 修复，L276 "主控"徽章国际化
+- dashboard.js — 47处硬编码中文→I18N.t()，Agent 描述语言包优先，场景下拉框回退
+- templates.js — 33处硬编码中文→I18N.t()，分类名 _tmplCatName() 前端翻译
+- tasks.js — 6处硬编码中文→I18N.t()，场景名语言包 fallback 回退
+- events.js — 2处 "（无回复）"/"（错误）" → I18N.t()
+- repos.js — 2处 "工作台"/"暂无已托管项目" → I18N.t()
+- agents.js — 1处 "Actor" 表头 → I18N.t()
+- skills.js — 2处 "Description" label → I18N.t()
+
+**语言包 JSON（16个文件，zh+en 各8个）**：
+- dashboard.json +43 key、templates.json +10 key、tasks.json +6 key
+- events.json +2 key、repos.json +2 key、observability.json +1 key
+- agents.json +1 key、skills.json +1 key
+
+**设计文档（1个文件）**：
+- docs/i18n-design.md +121行：范围声明强化 + 第十二章补漏清单 + 第十三章二期清单 + 第十四章验证报告
