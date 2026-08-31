@@ -126,6 +126,7 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                  agent_type or "", skill_name or "", skill_id or 0,
                  "", "", "", "", "", 0, repo_gitcode_token or "", "{}",
                  "{}", "", "", "{}", "{}", "{}", 0, "", 0, "", "",
+                 "", "",
                  "queued", None, "", "", "", "{}", now, None, now)
             )
             db.commit()
@@ -203,8 +204,8 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
                  prompt, cwd, "",
                  evt.get("type", "") or "", repository or evt.get("account", "") or "", 0, repo_gitcode_token,
                  json.dumps(env_extra), "{}", "",
-                 "", "{}", "{}", "{}", 0,
-                 agent_type or "" if is_plugin_mode() else "", 0, agent_type or "" if is_plugin_mode() else "",
+                 "", "{}", "{}", "{}", 0, "",
+                 agent_type or "" if is_plugin_mode() else "", 0, agent_type or "" if is_plugin_mode() else "", "", "",
                  "failed", 1, "", _reason, "", "{}", now, now, now)
             )
             db.commit()
