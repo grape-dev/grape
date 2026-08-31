@@ -12,7 +12,7 @@ let _tmplState = {
 function renderTemplates() {
   const d = document.getElementById('pageContent');
   if (!d) return;
-  renderSelectionShell('templates', '<div class="loading">加载中...</div>');
+  renderSelectionShell('templates', '<div class="loading">' + I18N.t('templates.loading') + '</div>');
   API.get('/project-templates').then(data => {
     const rawCats = data.categories || [];
     const nonTop1000Cats = rawCats.filter(cat => !cat.top1000);
@@ -21,12 +21,12 @@ function renderTemplates() {
     );
     var _favTemplates = allTemplates.filter(function(t) { return _tmplState._favState[t.id]; });
     _tmplState.categories = [{
-      id: '_fav', name: '收藏', icon: '⭐',
-      description: '你收藏的项目模板。',
+      id: '_fav', name: I18N.t('templates.fav_cat'), icon: '⭐',
+      description: I18N.t('templates.fav_cat_desc'),
       scene_id: 'default', page_size: 9, templates: _favTemplates,
     }, {
-      id: 'all', name: '全部', icon: '📋',
-      description: '浏览所有可用项目模板，一键创建你的 DevOps 项目',
+      id: 'all', name: I18N.t('templates.all'), icon: '📋',
+      description: I18N.t('templates.all_desc'),
       scene_id: 'default', page_size: 9, templates: allTemplates,
     }, ...rawCats];
     _tmplState.activeCat = 1;
@@ -51,7 +51,7 @@ function renderTemplates() {
     });
   }).catch(e => {
     const c = document.getElementById('ptContent');
-    if (c) c.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    if (c) c.innerHTML = '<div class="error">' + I18N.t('templates.load_failed', {msg: e.message}) + '</div>';
   });
 }
 
@@ -131,7 +131,7 @@ function _renderFeaturedCarousel() {
       itemsHtml += '<div class="feat-item" onclick="onFeaturedClick(' + si + ')">' +
         '<span class="feat-item-ic">⏳</span>' +
         '<div class="feat-item-info">' +
-          '<span class="feat-item-name" style="color:var(--t3);font-size:12px">加载中...</span>' +
+          '<span class="feat-item-name" style="color:var(--t3);font-size:12px">' + I18N.t('templates.loading') + '</span>' +
           '<span class="feat-item-cat">' + x.name + '</span>' +
         '</div>' +
       '</div>';
@@ -139,7 +139,7 @@ function _renderFeaturedCarousel() {
   }
 
   return '<div class="feat-single">' +
-    '<div class="feat-single-h">精选推荐</div>' +
+    '<div class="feat-single-h">' + I18N.t('templates.featured_title') + '</div>' +
     '<div class="feat-single-body">' + itemsHtml + '</div>' +
   '</div>';
 }
@@ -176,10 +176,10 @@ function _renderHorizontalCards(templates, cat, skipPager) {
       '<div class="template-card-item-info">' +
         '<div class="template-card-item-name" title="' + (t.name || '').replace(/"/g, '&quot;') + '">' + (t.name || t.id || '') + '</div>' +
         '<div class="template-card-item-cat">' + catName + '</div>' +
-        '<div class="template-card-item-desc">' + (t.description || '暂无描述') + '</div>' +
+        '<div class="template-card-item-desc">' + (t.description || I18N.t('templates.no_description')) + '</div>' +
       '</div>' +
       '<span class="' + favCls + '" style="font-size:16px;cursor:pointer;flex-shrink:0;padding:0 2px;line-height:1" onclick="event.stopPropagation();toggleFav(\'' + t.id + '\')">' + favStar + '</span>' +
-      '<button class="template-card-item-btn" onclick="event.stopPropagation();createFromTemplate(\'' + t.id + "','" + (t.default_repo_name || t.id) + '\')">一键创建→</button>' +
+      '<button class="template-card-item-btn" onclick="event.stopPropagation();createFromTemplate(\'' + t.id + "','" + (t.default_repo_name || t.id) + '\')">' + I18N.t('templates.create_from_template_arrow') + '</button>' +
     '</div>';
   }).join('');
 
@@ -244,7 +244,7 @@ function renderTemplateCategory() {
   var c = document.getElementById('ptContent');
   if (!c) return;
   if (!cats || cats.length === 0) {
-    c.innerHTML = '<div class="lobby-empty" style="border:none;background:none;color:var(--t2)"><div class="lobby-empty-ic">📦</div><h3>暂无项目模板</h3><p>等待管理员配置项目模板。</p></div>';
+    c.innerHTML = '<div class="lobby-empty" style="border:none;background:none;color:var(--t2)"><div class="lobby-empty-ic">📦</div><h3>' + I18N.t('templates.no_templates_title') + '</h3><p>' + I18N.t('templates.no_templates_desc') + '</p></div>';
     return;
   }
   var cat = _tmplState.categories[_tmplState.activeCat] || cats[0];
@@ -290,10 +290,10 @@ function renderTemplateCategory() {
 
   c.innerHTML = '<div class="project-page">' +
     '<div class="tmpl-search-wide">' +
-      '<h2>模板库</h2>' +
+      '<h2>' + I18N.t('templates.gallery_title') + '</h2>' +
       '<div class="tmpl-search-bar-inline">' +
-        '<input id="tmplSearchInput" type="text" placeholder="🔍 搜索项目名称、描述..." value="' + (_tmplState.search || '') + '" onkeydown="if(event.key===\'Enter\')doSearch()">' +
-        '<button onclick="doSearch()">搜索</button>' +
+        '<input id="tmplSearchInput" type="text" placeholder="' + I18N.t('templates.search_placeholder') + '" value="' + (_tmplState.search || '') + '" onkeydown="if(event.key===\'Enter\')doSearch()">' +
+        '<button onclick="doSearch()">' + I18N.t('templates.search_btn') + '</button>' +
       '</div>' +
     '</div>' +
     '<div class="template-layout">' +
@@ -352,7 +352,7 @@ function loadTop1000(catIdx) {
       var c2 = _tmplState.top1000Cache[cat.id];
       if (!c2) return;
       c2.loading = false;
-      c2.error = err.message || '加载失败';
+      c2.error = err.message || I18N.t('templates.load_failed_simple');
       _tmplState.top1000Cache[cat.id] = c2;
       renderTemplateCategory();
     });
@@ -401,7 +401,7 @@ function renderTop1000Tab(c, cat) {
   var contentHtml = '';
 
   if (cache.loading) {
-    contentHtml = '<div class="loading" style="padding:45px;text-align:center">⏳ 加载 Top1000 数据...</div>';
+    contentHtml = '<div class="loading" style="padding:45px;text-align:center">' + I18N.t('templates.loading_top1000') + '</div>';
   } else if (cache.error) {
     contentHtml = '<div class="error" style="padding:40px;text-align:center">❌ ' + cache.error + '</div>';
   } else {
@@ -426,7 +426,7 @@ function renderTop1000Tab(c, cat) {
       var nextDisabled = cache.page >= cache.totalPages - 1 ? ' disabled' : '';
       pagerHtml = '<div class="top1000-pager">' +
         '<button' + prevDisabled + ' onclick="goTop1000Page(-1)">‹</button>' +
-        '<span>' + (cache.page + 1) + ' / ' + cache.totalPages + ' (' + cache.total + ' 个)</span>' +
+        '<span>' + (cache.page + 1) + ' / ' + cache.totalPages + ' (' + I18N.t('templates.page_count', {count: cache.total}) + ')</span>' +
         '<button' + nextDisabled + ' onclick="goTop1000Page(1)">›</button>' +
       '</div>';
     }
@@ -435,10 +435,10 @@ function renderTop1000Tab(c, cat) {
 
   c.innerHTML = '<div class="project-page">' +
     '<div class="tmpl-search-wide">' +
-      '<h2>模板库</h2>' +
+      '<h2>' + I18N.t('templates.gallery_title') + '</h2>' +
       '<div class="tmpl-search-bar-inline">' +
-        '<input id="tmplSearchInput" type="text" placeholder="🔍 搜索项目名称、描述..." value="' + (cache.search || _tmplState.search || '') + '" onkeydown="if(event.key===\'Enter\')doSearch()">' +
-        '<button onclick="doSearch()">搜索</button>' +
+        '<input id="tmplSearchInput" type="text" placeholder="' + I18N.t('templates.search_placeholder') + '" value="' + (cache.search || _tmplState.search || '') + '" onkeydown="if(event.key===\'Enter\')doSearch()">' +
+        '<button onclick="doSearch()">' + I18N.t('templates.search_btn') + '</button>' +
       '</div>' +
     '</div>' +
     '<div class="template-layout">' +
@@ -458,13 +458,13 @@ function createFromTemplate(templateId, defaultName) {
   modal.id = 'ptCreateModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
   modal.innerHTML = '<div class="cd" style="width:440px;padding:20px;border-radius:10px">' +
-    '<h3 style="font-size:14px;font-weight:600;margin-bottom:6px">一键创建项目</h3>' +
-    '<p class="ts t2" style="margin-bottom:14px">将在你的 GitCode 个人账号下创建同名仓库，并自动加入项目托管、应用对应的开发场景。</p>' +
-    '<label class="ts t2" style="display:block;margin-bottom:4px">仓库名</label>' +
+    '<h3 style="font-size:14px;font-weight:600;margin-bottom:6px">' + I18N.t('templates.create_modal_title') + '</h3>' +
+    '<p class="ts t2" style="margin-bottom:14px">' + I18N.t('templates.create_modal_desc') + '</p>' +
+    '<label class="ts t2" style="display:block;margin-bottom:4px">' + I18N.t('templates.repo_name') + '</label>' +
     '<input id="ptRepoName" value="'+ defaultName + '" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c)">' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">' +
-      '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">取消</button>' +
-      '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')">创建</button>' +
+      '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">' + I18N.t('templates.cancel') + '</button>' +
+      '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')">' + I18N.t('templates.create_btn') + '</button>' +
     '</div>' +
   '</div>';
   document.body.appendChild(modal);
@@ -475,13 +475,13 @@ function doCreateFromTemplate(templateId) {
   var repoName = (document.getElementById('ptRepoName').value || '').trim();
   var btn = document.getElementById('ptCreateBtn');
   btn.disabled = true;
-  btn.textContent = '创建中...';
+  btn.textContent = I18N.t('templates.creating');
   API.get('/repos/check-name?name=' + encodeURIComponent(repoName))
     .then(function(check) {
       if (check.exists) {
         btn.disabled = false;
-        btn.textContent = '创建';
-        app.showToast('⚠️ 仓库 ' + check.full_name + ' 已存在，请更换仓库名');
+        btn.textContent = I18N.t('templates.create_btn');
+        app.showToast(I18N.t('templates.repo_exists', {full_name: check.full_name}));
         var input = document.getElementById('ptRepoName');
         if (input) { input.focus(); input.select(); }
         return;
@@ -489,18 +489,18 @@ function doCreateFromTemplate(templateId) {
       API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}).then(function(r) {
         var modal = document.getElementById('ptCreateModal');
         if (modal) modal.remove();
-        app.showToast('✅ ' + (r.message || '创建成功'));
+        app.showToast('✅ ' + (r.message || I18N.t('templates.create_success_default')));
         var parts = (r.full_name || '').split('/');
         selectRepo(r.full_name, parts[0], parts[1]);
       }).catch(function(e) {
         btn.disabled = false;
-        btn.textContent = '创建';
-        app.showToast('创建失败: ' + e.message);
+        btn.textContent = I18N.t('templates.create_btn');
+        app.showToast(I18N.t('templates.create_failed', {msg: e.message}));
       });
     })
     .catch(function(err) {
       btn.disabled = false;
-      btn.textContent = '创建';
-      app.showToast('检查失败: ' + (err.message || err));
+      btn.textContent = I18N.t('templates.create_btn');
+      app.showToast(I18N.t('templates.check_failed', {msg: err.message || err}));
     });
 }

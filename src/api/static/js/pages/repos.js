@@ -20,7 +20,7 @@ function renderSelectionShell(tab, innerHtml) {
       <nav class="lobby-tabs">
         <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">${I18N.t('repos.tab.projects')}</a>
         <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">${I18N.t('repos.tab.templates')}</a>
-        <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">工作台</a>
+        <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">${I18N.t('repos.tab.workspace')}</a>
       </nav>
       <div class="lobby-user" onclick="app.logout()" title="${I18N.t('repos.logout_title')}">
         <span class="lobby-avatar">${avatar}</span>
@@ -45,7 +45,7 @@ function switchSidebarTab(tab) {
         const first = hosted[0];
         selectRepo(first.full_name, first.owner, first.name);
       } else {
-        app.showToast('暂无已托管项目，请先加入并托管一个项目');
+        app.showToast(I18N.t('repos.no_hosted_project'));
         switchSidebarTab('projects');
       }
     }).catch(() => {

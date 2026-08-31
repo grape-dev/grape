@@ -309,3 +309,63 @@ if (current !== 'gitcode') {
 | 13 | "请在任务中心查看并处理" | 后端返回的任务提示消息 | 前端搜索 0 匹配 |
 
 验证方法：`search_files(pattern="本机 Runtime|请在任务中心", path="src/api/static/js")` → 0 结果
+
+## 十二、补漏：i18n 合并后遗漏的硬编码文案（fix/i18n-template-literal-bug 分支）
+
+合并 dev 后深度扫描发现部分页面仍有硬编码中文/英文未做 I18N.t()，以下为补漏清单及实施方案。
+
+### 改动范围（仅前端 JS + JSON 语言包，不改后端 Python / 不改测试）
+
+| 文件 | 遗漏数 | 内容 |
+|------|--------|------|
+| dashboard.js | 47 | 场景编辑/创建/引擎选择弹窗全功能块 + 统计标签 + Hero 副标题 |
+| templates.js | 33 | 模板库标题/搜索/分页/创建弹窗/收藏/精选推荐 + Toast |
+| tasks.js | 6 | 场景标签对象 + 多任务/单任务徽章 + 父任务 + 流水线场景/任务模式 label |
+| events.js | 2 | '（无回复）' / '（错误）' fallback |
+| repos.js | 2 | '工作台' tab + '暂无已托管项目' Toast |
+| observability.js | 1 | '主控' 徽章 |
+| agents.js | 1 | 'Actor' 表头 |
+| skills.js | 2 | 'Description' label (L298 + L391) |
+| chat.js | 0 | '思考中'/'已被' 属后端返回文本匹配，二期不改 |
+
+### 语言包新增 key 规划
+
+dashboard.json 新增：
+- scene_center_title, create_custom_scene, edit_scene, apply_scene, config_engine, cancel_edit, cancel_config, save_engine
+- scene_applied, apply_failed, engine_config_saved, save_failed, please_select_repo, please_input_scene_name, scene_saved, scene_created
+- select_engine, engines_available, no_engine_broadcast, online, confirm, cancel
+- edit_custom_scene, save_custom_scene, scene_name, scene_name_placeholder, desc_optional, desc_placeholder, visibility, scope_user, scope_repo
+- select_skill, change_engine, engine_count, broadcast, not_needed_in_scene
+- hero_maintainer, hero_member, stat_active, stat_events, stat_failed, label_skill, label_engine
+- desc_vod/issue/coding/qa/sre 已有
+
+templates.json 新增：
+- fav_cat, fav_cat_desc, all_cat, all_cat_desc (已有 all/all_desc)
+- featured_title, loading_top1000, page_count
+- gallery_title 已有, create_from_template 已有
+
+tasks.json 新增：
+- scene_label, scene_default_badge, multi_task_badge, single_task_badge, parent_task, pipeline_scene, task_mode
+
+events.json 新增：
+- no_reply, error_reply
+
+repos.json 新增：
+- tab_workspace, no_hosted_project
+
+observability.json 新增：
+- main_tag
+
+agents.json 新增：
+- event_table_actor
+
+skills.json 新增：
+- info_description (已有则复用)
+
+### 实施顺序
+1. 先更新 zh + en 语言包 JSON（新增 key）
+2. dashboard.js — 最大改动，模板字面量 + 单引号拼接混合
+3. templates.js — 单引号字符串拼接为主
+4. tasks.js / events.js / repos.js / observability.js / agents.js / skills.js — 少量改动
+5. 逐文件 node --check 语法验证
+6. Playwright 中英双语渲染验证 0 泄露

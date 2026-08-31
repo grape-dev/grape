@@ -363,11 +363,11 @@ async function streamConvTask(taskId, elId, seq) {
             const d = JSON.parse(line.substring(6));
             if (d.type === 'done') {
               finalText = d.text || finalText;
-              if (el) el.innerHTML = renderMarkdown(finalText) || '（无回复）';
+              if (el) el.innerHTML = renderMarkdown(finalText) || I18N.t('events.no_reply');
               _clearConvTask(seq);
               loadConversation();
             } else if (d.type === 'error') {
-              if (el) el.innerHTML = renderMarkdown(d.text || '') || '（错误）';
+              if (el) el.innerHTML = renderMarkdown(d.text || '') || I18N.t('events.error_reply');
               _clearConvTask(seq);
             } else if (d.type === 'text' && d.text) {
               finalText += d.text;

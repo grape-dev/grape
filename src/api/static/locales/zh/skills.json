@@ -89,5 +89,6 @@
   "info_title": "技能信息",
   "info_name": "名称",
   "info_agent_type": "Agent 类型",
-  "info_type": "类型"
+  "info_type": "类型",
+  "info_description": "描述"
 }

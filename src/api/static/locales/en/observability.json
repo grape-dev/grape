@@ -131,5 +131,6 @@
   "probe_fail": "Fail",
   "search_engine_placeholder": "Search engine/device/version...",
   "all_devices": "All devices",
-  "task_total": "Total Tasks"
+  "task_total": "Total Tasks",
+  "main_tag": "Main"
 }
