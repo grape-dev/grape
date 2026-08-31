@@ -100,9 +100,9 @@ function renderDashboard(data) {
       <h2>${I18N.t('dashboard.scene_center_title')}</h2>
       <div class="ap-bar">
         <select id="sceneSelect" class="ap-sel">${sceneOpts}</select>
-        ${isCustomScene ? `<button class="ap-btn ap-btn-o" onclick="toggleEditMode()">${I18N.t('dashboard.edit_scene')}</button>` : `<button class="ap-btn ap-btn-o" onclick="toggleEngineMode()">${I18N.t('dashboard.config_engine')}</button>`}
-        ${isCustomScene ? `<button class="ap-btn ap-btn-o" style="color:#ff3b30;border-color:#ff3b30" onclick="deleteCustomScene()">${I18N.t('common.delete')}</button>` : ''}
-        <button class="ap-btn ap-btn-o" onclick="applyScene('${owner}', '${name}')">${I18N.t('dashboard.apply_scene')}</button>
+        ${isCustomScene ? '<button class="ap-btn ap-btn-o" onclick="toggleEditMode()">编辑场景</button>' : '<button class="ap-btn ap-btn-o" onclick="toggleEngineMode()">配置引擎</button>'}
+        ${isCustomScene ? '<button class="ap-btn ap-btn-o" style="color:#ff3b30;border-color:#ff3b30" onclick="deleteCustomScene()">删除</button>' : ''}
+        <button class="ap-btn ap-btn-o" onclick="applyScene('${owner}', '${name}')">应用</button>
       </div>
     </div>
     <div class="ap-grid" id="agentCards">`;
@@ -224,7 +224,7 @@ function renderDashboard(data) {
       window._dashboardEditing = false;
       app.showToast(I18N.t('dashboard.engine_config_saved'));
       API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(() => {});
-    }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
+    }).catch(e => { window._dashboardEditing = false; app.showToast('保存失败: ' + (e.detail?.message || e.message)); });
   };
 
   window.enterCreateMode = function() {
@@ -328,8 +328,19 @@ function renderDashboard(data) {
       };
     });
 
-    // 弹框设置场景名称 / 描述 / 可见范围
     const isEditingExisting = currentScene && currentScene !== 'default' && isCustomScene;
+
+    // 编辑已有自定义场景：直接 PUT 保存 nodes，不弹名称/描述输入框
+    if (isEditingExisting) {
+      API.put('/scenes/' + currentScene, { name: '', description: '', nodes: nodesPayload }).then(() => {
+        window._dashboardEditing = false;
+        app.showToast('场景已保存');
+        API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+      }).catch(e => { window._dashboardEditing = false; app.showToast('保存失败: ' + (e.detail?.message || e.message)); });
+      return;
+    }
+
+    // 创建新场景：弹框设置场景名称 / 描述 / 可见范围
     const existingName = (currentSceneObj && currentSceneObj.name) || '';
     const existingDesc = (currentSceneObj && currentSceneObj.description) || '';
     const existingScope = (currentSceneObj && currentSceneObj.scope) || 'user';
@@ -337,7 +348,7 @@ function renderDashboard(data) {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
     overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:360px;max-width:460px;box-shadow:0 12px 48px rgba(0,0,0,.15)">
-      <h3 style="margin:0 0 20px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${isEditingExisting ? I18N.t('dashboard.edit_custom_scene') : I18N.t('dashboard.save_custom_scene')}</h3>
+      <h3 style="margin:0 0 20px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">保存自定义场景</h3>
       <div style="margin-bottom:14px">
         <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">${I18N.t('dashboard.scene_name')}</label>
         <input id="sceneNameInput" type="text" value="${(existingName||'').replace(/"/g,'&quot;')}" placeholder="${I18N.t('dashboard.scene_name_placeholder')}" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
@@ -366,23 +377,41 @@ function renderDashboard(data) {
       const sceneDesc = document.getElementById('sceneDescInput').value.trim();
       const sceneScope = document.getElementById('sceneScopeSelect').value;
 
-      if (isEditingExisting) {
-        // 编辑已有自定义场景：PUT（含名称/描述更新）
-        API.put('/scenes/' + currentScene, { name: sceneName, description: sceneDesc, nodes: nodesPayload }).then(() => {
-          window._dashboardEditing = false;
-          overlay.remove();
-          app.showToast(I18N.t('dashboard.scene_saved'));
-          API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
-        }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
-      } else {
-        // 创建新场景：POST
-        API.post('/scenes', { name: sceneName, description: sceneDesc, scope: sceneScope, nodes: nodesPayload }).then(r => {
-          window._dashboardEditing = false;
-          overlay.remove();
-          app.showToast(I18N.t('dashboard.scene_created'));
-          if (r.scene_id) { applyScene(owner, name, r.scene_id); }
-        }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
-      }
+      // 创建新场景：POST
+      API.post('/scenes', { name: sceneName, description: sceneDesc, scope: sceneScope, nodes: nodesPayload }).then(r => {
+        window._dashboardEditing = false;
+        overlay.remove();
+        app.showToast('场景创建成功');
+        if (r.scene_id) { applyScene(owner, name, r.scene_id); }
+      }).catch(e => { window._dashboardEditing = false; app.showToast('保存失败: ' + (e.detail?.message || e.message)); });
+    };
+  };
+
+  // 删除自定义场景
+  window.deleteCustomScene = function() {
+    if (!currentScene || currentScene === 'default') { app.showToast('官方场景不可删除'); return; }
+    if (!isCustomScene) { app.showToast('仅可删除自定义场景'); return; }
+    const sceneName = (currentSceneObj && currentSceneObj.name) || currentScene;
+    // 确认弹框
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+    overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:320px;max-width:400px;box-shadow:0 12px 48px rgba(0,0,0,.15)">
+      <h3 style="margin:0 0 12px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">删除场景</h3>
+      <p style="margin:0 0 24px;font-size:13px;color:#86868b;line-height:1.5">确定要删除场景「${sceneName}」吗？此操作不可撤销。</p>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">取消</button>
+        <button class="ap-btn" style="background:#ff3b30;color:#fff;border:none" id="confirmDeleteSceneBtn">删除</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    document.getElementById('confirmDeleteSceneBtn').onclick = function() {
+      API.del('/scenes/' + currentScene).then(() => {
+        window._dashboardEditing = false;
+        overlay.remove();
+        app.showToast('场景已删除');
+        // 删除后切换回 default 场景
+        applyScene(owner, name, 'default');
+      }).catch(e => { overlay.remove(); app.showToast('删除失败: ' + (e.detail?.message || e.message)); });
     };
   };
 

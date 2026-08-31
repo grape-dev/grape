@@ -226,5 +226,11 @@
     "agent_type": "sre",
     "path": "sre/runtime-install",
     "description": "安装、配置和注册 hermes/opencode/codearts 运行时引擎到 Grape 系统，包括自定义 API 端点和模型配置"
+  },
+  "cce-terrapilot": {
+    "name": "CCE TerraPilot",
+    "agent_type": "sre",
+    "path": "sre/cce-terrapilot",
+    "description": "Guide users through an 11-question checklist to scope a Huawei Cloud CCE deployment, then generate Terraform configs and run terraform plan. Triggers: CCE, 容器部署, 华为云 Terraform, HSS, WAF."
   }
 }

@@ -131,7 +131,7 @@ function _renderFeaturedCarousel() {
         '<span class="feat-item-ic">' + ic + '</span>' +
         '<div class="feat-item-info">' +
           '<span class="feat-item-name">' + nm + '</span>' +
-          '<span class="feat-item-cat">' + _tmplCatName(x.name) + '</span>' +
+          '<span class="feat-item-cat">' + x.name + '</span>' +
         '</div>' +
       '</div>';
     } else {
@@ -538,7 +538,7 @@ function doCreateFromTemplate(templateId) {
         if (input) { input.focus(); input.select(); }
         return;
       }
-      setProgress(25, I18N.t('templates.progress_creating_repo'));
+      setProgress(25, '正在创建 GitCode 仓库...');
       API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}, 300000).then(function(r) {
         clearInterval(_timer);
         setProgress(100, I18N.t('templates.progress_done'));

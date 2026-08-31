@@ -170,17 +170,8 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
                      1 if rt.get("healthy", True) else 0, 1, "online",
                      datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version))
                 rid = c.lastrowid
-            # 服务端默认写入 "all" 标签到 engine_capabilities（worker 不需要传 tags）
-            # 后续标签增删改全部来自 WebUI 操作
-            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-            if not c.fetchone():
-                _now = datetime.now(timezone.utc).isoformat()
-                try:
-                    c.execute(
-                        "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
-                        (rid, "all", _now, _now))
-                except Exception:
-                    pass
+            # 不再自动写入默认 "all" 标签——新引擎默认无标签，由用户在控制台手动配置。
+            # 空标签引擎不参与任务分发（claim_by_tag 的 SQL 查 engine_capabilities 表，无行即不匹配）。
             registered.append({"id": rid, "name": name})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
@@ -1041,7 +1032,7 @@ async def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_use
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
-    return {"tags": json.loads(row[0] or '["all"]') if row[0] else ["all"]}
+    return {"tags": json.loads(row[0]) if row[0] else []}
 
 
 @router.put("/runtimes/{runtime_id}/tags")
@@ -1063,7 +1054,7 @@ async def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get
             raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
         # 先写 engine_capabilities：先删旧标签，再插新标签
         c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (runtime_id,))
-        for tag in (tags or ["all"]):
+        for tag in tags:
             try:
                 c.execute(
                     "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "

@@ -606,12 +606,12 @@ def claim(runtime_id) -> dict | None:
                         pass
                     c.execute(
                         "UPDATE agent_tasks SET attempts=attempts+1, "
-                        "status=CASE WHEN attempts+1 >= 3 THEN 'failed' ELSE 'queued' END, "
-                        "runtime_id=CASE WHEN attempts+1 >= 3 THEN runtime_id ELSE 0 END, "
-                        "pool_agent_type=CASE WHEN attempts+1 < 3 AND pool_agent_type='' "
+                        "status=CASE WHEN attempts+1 >= 50 THEN 'failed' ELSE 'queued' END, "
+                        "runtime_id=CASE WHEN attempts+1 >= 50 THEN runtime_id ELSE 0 END, "
+                        "pool_agent_type=CASE WHEN attempts+1 < 50 AND pool_agent_type='' "
                         "THEN ? ELSE pool_agent_type END, "
                         "started_at=NULL, "
-                        "result_text=CASE WHEN attempts+1 >= 3 THEN '回收超限(dispatched 超时 3 次)' ELSE result_text END "
+                        "result_text=CASE WHEN attempts+1 >= 50 THEN '回收超限(dispatched 超时 50 次)' ELSE result_text END "
                         "WHERE id=? AND status='dispatched'",
                         (_pool_fill, _tid))
                     if c.rowcount and _rid:
@@ -865,10 +865,12 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             _tag_match_noprefix = "(pool_tag!='' AND runtime_id=0)" if tag == "all" else "(pool_tag=? AND runtime_id=0)"
             params = [] if tag == "all" else [tag]
             if scope == "repo":
+                # repo_key 可能带前缀（gitcode:owner/repo）也可能不带，两种都要匹配
                 params.append(owner_id)
+                params.append(f"gitcode:{owner_id}")
                 sql = (
                     "SELECT t.id FROM agent_tasks t "
-                    f"WHERE { _tag_match} AND t.status='queued' AND t.repo_key=? "
+                    f"WHERE { _tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=?) "
                     "AND NOT EXISTS ("
                     "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
                     "    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
@@ -932,7 +934,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 if scope == "repo":
                     c.execute(
                         f"SELECT t.id FROM agent_tasks t "
-                        f"WHERE {_tag_match} AND t.status='queued' AND t.repo_key=? "
+                        f"WHERE {_tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=?) "
                         f"AND t.id NOT IN ({_tried_str}) "
                         f"AND NOT EXISTS ("
                         f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
@@ -962,7 +964,8 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                         f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
                         f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
                         f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
-                        f"  )) ORDER BY created_at ASC LIMIT 1"
+                        f"  )) ORDER BY created_at ASC LIMIT 1",
+                        tuple(params)
                     )
                 task_row = c.fetchone()
                 if not task_row:
@@ -1274,10 +1277,10 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
             _agent_type = task.get("agent_type") or ""
             if exit_code == 0 and not output and _agent_type in ("coding", "qa", "sre", "issue"):
                 _attempts = (task.get("attempts") or 0)
-                if _attempts < 2:
+                if _attempts < 49:
                     log.warning(
                         f"Task {task_id}: premature end_turn (no structured output, "
-                        f"agent={_agent_type}, attempt={_attempts+1}/3), requeueing")
+                        f"agent={_agent_type}, attempt={_attempts+1}/50), requeueing")
                     result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 结束但无结构化产出，疑似 LLM 提前 end_turn，自动重试"
                     update_task_status(task_id, "queued", started_at=None,
                                        result_text=result_text,
@@ -1299,9 +1302,9 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                 else:
                     log.warning(
                         f"Task {task_id}: premature end_turn, max retries exceeded "
-                        f"(attempt={_attempts}/3), marking failed")
+                        f"(attempt={_attempts}/50), marking failed")
                     exit_code = 1
-                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 多次结束但无结构化产出，已达最大重试次数"
+                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 多次结束但无结构化产出，已达最大重试次数(50)"
 
             status = "completed" if exit_code == 0 else "failed"
             duration = None

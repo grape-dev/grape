@@ -543,7 +543,7 @@ class HermesACPBackend:
                         break
 
                     elapsed_silent = time.time() - _last_activity
-                    if collected_text and elapsed_silent > 15:
+                    if collected_text and elapsed_silent > 120:
                         log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s with {len(collected_text)} text chunks, assuming done")
                         prompt_result["stopReason"] = "end_turn"
                         break
@@ -603,7 +603,6 @@ class HermesACPBackend:
                         break
                 else:
                     _consecutive_no_tool = 0
-
                 if attempt >= MAX_ATTEMPTS:
                     log.warning(f"{label}hermes ACP max attempts ({MAX_ATTEMPTS}) reached without structured output")
                     break
@@ -611,7 +610,6 @@ class HermesACPBackend:
                 # 记录本步 text 输出摘要（用于下一步 continuation prompt）
                 _prev_text_summary = "\n".join(collected_text[-10:])[-800:]
                 log.info(f"{label}hermes ACP attempt {attempt} ended without structured output, will retry with new process")
-
             # ── 3. 收尾 ──
             stop_reason = _final_stop_reason
             log.info(f"{label}hermes ACP final: stopReason={stop_reason}, attempts={attempt if attempt else 0}")
@@ -1056,6 +1054,7 @@ def _ensure_closed(json_str: str) -> str:
     if depth > 0:
         s += '}' * depth
     return s
+
 
 def _done_result(exit_code, text, session_id, errors, stderr) -> dict:
     return {

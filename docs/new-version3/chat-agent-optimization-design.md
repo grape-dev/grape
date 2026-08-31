@@ -1203,3 +1203,62 @@ if (view === 'chat') {
 - chat.py: 新增 submit/stream 端点
 - chat_task_manager.py: 新文件
 - hermes_acp.py: idle 超时参数调整
+
+## 七、ACP 静默超时按任务类型区分（2026-08-31）
+
+### 问题
+
+2.7 节将 `elapsed_silent` 从 15s 降到 8s（chat 场景），但同一超时值也应用于 coding/qa/sre/issue 等非 chat 任务。这些任务的 LLM 在步骤间正常思考 10-30 秒（如 skill-creator 技术调研完成后构思文件结构），15s 超时会误判为 turn 结束，导致：
+
+- hermes_acp 触发 `stopReason=end_turn`，结束当前轮
+- service.py complete_task 检测到 `exit_code=0` 但无结构化 JSON 产出 → `PREMATURE_END_TURN`
+- 重试 2 次后判定 failed
+
+实际案例：BLOG-SYS-mini issue #3 的 coding 阶段（skill-creator），agent 做完 hcloud OBS ls 技术调研后说"现在生成 skill 骨架文件"，思考期间 15s 超时触发，被掐断。
+
+### 修复
+
+```python
+# hermes_acp.py 内循环
+
+# 旧：所有任务统一 15s
+if collected_text and elapsed_silent > 15:
+    ...
+
+# 新：chat 任务保持短超时，coding 等任务放宽到 120s
+_silent_limit = 15 if _is_chat_task else 120
+if collected_text and elapsed_silent > _silent_limit:
+    ...
+```
+
+chat 任务不受影响（仍是 15s），coding/qa/sre/issue 任务从 15s 放宽到 120s。
+
+### 全局超时层级
+
+改动后的完整超时链路（从内到外）：
+
+| 层级 | 位置 | 超时值 | 作用 |
+|------|------|--------|------|
+| 1 | hermes_acp.py `_silent_limit` | 15s(chat) / 120s(coding) | 有文本输出后无新事件 → 认为这轮结束 |
+| 2 | hermes_acp.py `max_exec_seconds` | 600s | 无任何活动（含无文本）→ 续期一次到 1200s |
+| 3 | hermes_acp.py `_global_timeout` | 1200s | 多步重试总上限（MAX_ATTEMPTS=50 受此约束） |
+| 4 | agent.py `RUNTIME_TASK_TIMEOUT` | 1800s | worker 外层 asyncio.wait_for，杀进程+fail |
+| 5 | service.py recover | 600s | 主服务回收 dispatched 超时任务（不处理 running） |
+| 6 | service.py PREMATURE_END_TURN | attempts<2 | exit_code=0 但无 JSON → 重新入队，最多 3 次 |
+
+### 影响分析
+
+**正常思考场景（最常见）**：agent 步骤间思考 10-30s 不再被误杀，120s 足够。
+
+**agent 真卡死场景**（输出过文本后不再动）：120s 触发 end_turn → 续步 → 120s 再触发 → 连续 2 次无 tool_use → 放弃。最坏 240s 释放槽位（改前 30s）。多了 210s，但 max_concurrent=1 且有 12 个 worker 引擎轮询，对吞吐影响小。
+
+**agent 从未输出场景**：不受 120s 影响（条件是 `collected_text and ...`），走 600s → 1200s 老路径。
+
+**总时间上限**：`_global_timeout=1200s` 是硬上限，不管 `_silent_limit` 是 15 还是 120，hermes_acp 内部最多跑 1200s。加上 service.py 2 次重试，总上限约 3×1200=3600s，改前改后一样。
+
+**对 recover 的影响**：recover 只处理 `status=dispatched`，worker task_start 后置 running，120s 超时期间不会被误回收。
+
+### 验证
+
+- 语法检查通过
+- pytest 52 passed / 3 failed（3 个失败为已有问题，与本次改动无关）

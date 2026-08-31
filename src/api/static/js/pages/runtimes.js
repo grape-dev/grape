@@ -820,7 +820,27 @@ function _showCreateEnvForm() {
     var grapeServer = window.location.origin;
     var credName = envName.slice(0, 20);
 
-    // Step 1: 生成凭据
+    // Step 0: 预检模板可用性——模板未发布时不创建凭据，避免脏数据写入 worker 设备
+    var GRAPE_TPL = '4ef59a2b4d3d4909aacd80f6007c00b2';
+    API.get('/devstage/specs?template_id=' + GRAPE_TPL).then(function(specResp) {
+      var specs = specResp.specs || [];
+      if (!specs.length) {
+        app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+        _refreshDevspaceList();
+        return;
+      }
+      // 模板可用，继续创建凭据 + 环境
+      _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);
+    }).catch(function(e) {
+      var msg = e.message || '';
+      // 模板未发布（AK/SK 未加入白名单）：不创建凭据，直接提示
+      app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+      _refreshDevspaceList();
+    });
+  }
+
+  function _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt) {
+    // Step 1: 生成凭据（模板预检已通过）
     API.post('/settings/runtime-credentials', { name: credName, scope: 'repo', repo_key: repoKey }).then(function(d) {
       var grapeToken = d.token || '';
       var credId = d.id || 0;
@@ -848,7 +868,7 @@ function _showCreateEnvForm() {
           app.showToast(I18N.t('runtimes.devspace.count_limit'));
           _refreshDevspaceList();
         } else if (msg.indexOf('98320049') >= 0 || msg.indexOf('Template not published') >= 0) {
-          // 模板未发布/未加白名单：删除凭据，提示用户联系管理员
+          // 模板未发布（预检与实际创建之间的竞态）：删除凭据，显示精准提示
           API.post('/settings/runtime-credentials/' + credId + '/revoke');
           app.showToast(I18N.t('runtimes.devspace.template_not_published'));
           _refreshDevspaceList();

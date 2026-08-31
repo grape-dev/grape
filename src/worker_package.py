@@ -189,7 +189,7 @@ def _python_fingerprint(py_root: str | None) -> str:
                 continue
             h.update(r.encode("utf-8"))
             h.update(str(st.st_size).encode())
-            h.update(str(st.st_mtime).encode())
+            h.update(str(int(st.st_mtime)).encode())  # 整秒——跨机器文件系统精度差异不影响指纹
     except Exception:
         pass
     return h.hexdigest()[:8]

@@ -151,7 +151,7 @@ async def create_environment(body: CreateEnvBody, user: dict = Depends(get_curre
     # 默认 AI DEVSPACE 模板
     template_id = "4ef59a2b4d3d4909aacd80f6007c00b2"
     try:
-        # 查询规格
+        # 查询规格（模板未发布/AK-SK 未授权时此处会抛 DevStageError）
         specs = _list_specs(ak, sk, template_id)
         if not specs:
             raise HTTPException(status_code=502, detail={"code": "NO_SPEC", "message": "未找到可用规格"})
@@ -166,12 +166,16 @@ async def create_environment(body: CreateEnvBody, user: dict = Depends(get_curre
                 "GRAPE_DEV_SERVER": body.grape_server,
                 "GRAPE_DEV_TOKEN": body.grape_token,
             }
+            # init_script：DevSpace 环境为 root 用户，用 --root 走 systemd 管理进程；
+            # --device 用环境名作为设备名（比 hostname 更可识别）。
             init_scripts = [{
                 "command": (
                     f"curl -fsSL {body.grape_server}/api/runtime/install"
                     f" -o /tmp/install.sh && "
                     f"bash /tmp/install.sh --token {body.grape_token}"
                     f" --server {body.grape_server}"
+                    f" --device {body.name}"
+                    f" --root"
                 )
             }]
         devstage_id = _create_env(
@@ -185,6 +189,7 @@ async def create_environment(body: CreateEnvBody, user: dict = Depends(get_curre
         # 环境创建后进入 cde.0004（就绪），由用户在页面上点击开机。
         return {"devstage_id": devstage_id, "message": "创建成功"}
     except DevStageError as e:
+        # 将 DevStageError 的 code + message 透传给前端，前端按 code 做精准提示
         raise HTTPException(status_code=502, detail={"code": e.code, "message": str(e)})
 
 

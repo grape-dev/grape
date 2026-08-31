@@ -965,7 +965,7 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
-                                     "status": e["status"], "tags": e.get("tags", ["all"])}
+                                     "status": e["status"], "tags": e.get("tags", [])}
                                     for e in engines]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")
