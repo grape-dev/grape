@@ -159,6 +159,35 @@ def _auto_title(conv: dict, message: str):
         update_conversation(conv["id"], title=title)
 
 
+def _dispatch_push_to_main_loop(coro):
+    """把 web→飞书推送协程投递到主事件循环执行。
+
+    agent_fn 运行在 ChatTaskManager 后台线程，`asyncio.run(coro)` 会新建事件循环，
+    而复用的共享 aiohttp ClientSession 绑定主 loop → 跨 loop 抛
+    "Timeout context manager should be used inside a task"。这里用 run_coroutine_threadsafe
+    投递回 BotManager 保存的主 loop，与共享 session 同 loop。
+
+    返回主 loop 的 Future（调用方不等待——fire-and-forget），失败仅告警。
+    """
+    import asyncio
+    from src import api as _api_pkg
+    bm = getattr(getattr(_api_pkg, "main", None), "bot_manager", None)
+    loop = getattr(bm, "loop", None)
+    if loop is not None and loop.is_running():
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            fut.add_done_callback(lambda f: f.exception() if not f.cancelled() and f.exception() else None)
+            return fut
+        except Exception as e:
+            log.warning(f"Chat web->feishu push dispatch failed: {e}")
+    # 无主 loop（启动异常/测试）→ 兜底同步跑
+    try:
+        asyncio.run(coro)
+    except Exception as e:
+        log.warning(f"Chat web->feishu push (fallback) failed: {e}")
+    return None
+
+
 async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
     """web 答复推送到飞书（feishu-web-chat-unified-design.md §3.2）。
 
@@ -1195,11 +1224,11 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
                         touch_conversation(conv_id)
                     except Exception as _de:
                         log.warning(f"[Chat submit] DB save (empty) failed: {_de}")
-                # 飞书推送
+                # 飞书推送（投递到主事件循环；后台线程不能跨 loop 复用共享 aiohttp session）
                 if _final_text:
                     try:
                         import asyncio as _aio
-                        _aio.run(_push_reply_to_feishu(conv, user, _final_text))
+                        _dispatch_push_to_main_loop(_push_reply_to_feishu(conv, user, _final_text))
                     except Exception:
                         pass
                 # 保存 session_id
@@ -1256,10 +1285,10 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
                 touch_conversation(conv_id)
             except Exception as _de:
                 log.warning(f"[Chat submit remote] DB save failed: {_de}")
-            # 飞书推送
+            # 飞书推送（后台线程 → 投递主 loop）
             try:
                 import asyncio as _aio
-                _aio.run(_push_reply_to_feishu(conv, user, _final_text))
+                _dispatch_push_to_main_loop(_push_reply_to_feishu(conv, user, _final_text))
             except Exception:
                 pass
             yield ("done", {"text": _final_text})
@@ -1608,9 +1637,9 @@ def _execute_chat_task(task_id: str):
             final_text = f"收到您的消息：「{task.get('body_message', '')}」\n\n当前使用 {backend_name} 后端处理。"
         add_message(conv_id, "agent", final_text)
         touch_conversation(conv_id)
-        # 推送到飞书（用 asyncio.run 在独立线程中执行，不干扰主 event loop）
+        # 推送到飞书（投递主 loop，避免跨 loop 复用共享 aiohttp session）
         try:
-            _aio.run(_push_reply_to_feishu(conv, user, final_text))
+            _dispatch_push_to_main_loop(_push_reply_to_feishu(conv, user, final_text))
         except Exception:
             pass
         if runtime_session_id and not task.get("runtime_session_id"):
