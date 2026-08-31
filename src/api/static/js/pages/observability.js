@@ -86,9 +86,9 @@ function refreshObs(isAutoRefresh) {
   Promise.all([
     API.get('/dashboard/ops/overview' + repoParam).catch(() => null),
     fetch('/health/realtime').then(r => r.json()).catch(() => null),
-    fetch('/metrics').then(r => r.text()).catch(() => null),
-  ]).then(([ops, realtime, metricsText]) => {
-    _obsData = { ops, realtime, metricsText };
+    // fetch('/metrics').then(r => r.text()).catch(() => null),  // metrics 数据当前未使用，注释掉避免无用请求
+  ]).then(([ops, realtime]) => {
+    _obsData = { ops, realtime };
     const now = new Date().toLocaleTimeString('zh-CN');
     const lu = document.getElementById('obsLastUpdate');
     if (lu) lu.textContent = now;
@@ -161,12 +161,12 @@ function _rerenderRuntimeTable() {
 function renderObsContent(isAutoRefresh) {
   const c = document.getElementById('obsContent');
   if (!c) return;
-  const { ops, realtime, metricsText } = _obsData;
+  const { ops, realtime } = _obsData;
 
   // 降级：ops 401 时从 realtime 补齐
   const realOps = (ops && !ops.error) ? ops : fallbackOps(realtime);
   const rt = realtime || {};
-  const mt = metricsText || '';
+  // const mt = metricsText || '';  // metrics 数据当前未使用
 
   // 错误日志 Tab: 独立异步加载，只首次加载 + 手动刷新，定时器不触发
   if (_obsTab === 'errorlogs') {
@@ -186,26 +186,26 @@ function renderObsContent(isAutoRefresh) {
   if (_obsTab === 'overview') {
     if (canPartialUpdate) {
       // 尝试局部更新；元素缺失（如新增 worker）时回退到完整渲染
-      if (!updateOverview(realOps, rt, mt)) {
-        c.innerHTML = renderOverview(realOps, rt, mt);
+      if (!updateOverview(realOps, rt)) {
+        c.innerHTML = renderOverview(realOps, rt);
         _obsRendered = true;
         _obsRenderedTab = _obsTab;
       }
     } else {
-      c.innerHTML = renderOverview(realOps, rt, mt);
+      c.innerHTML = renderOverview(realOps, rt);
       _obsRendered = true;
       _obsRenderedTab = _obsTab;
     }
   }
   else if (_obsTab === 'tasks') {
     if (canPartialUpdate) {
-      if (!updateTasks(realOps, rt, mt)) {
-        c.innerHTML = renderTasksTab(realOps, rt, mt);
+      if (!updateTasks(realOps, rt)) {
+        c.innerHTML = renderTasksTab(realOps, rt);
         _obsRendered = true;
         _obsRenderedTab = _obsTab;
       }
     } else {
-      c.innerHTML = renderTasksTab(realOps, rt, mt);
+      c.innerHTML = renderTasksTab(realOps, rt);
       _obsRendered = true;
       _obsRenderedTab = _obsTab;
     }
@@ -261,7 +261,7 @@ function _barHTML(label, pct, color, idPrefix) {
   </div>`;
 }
 
-function renderOverview(ops, rt, mt) {
+function renderOverview(ops, rt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
 
@@ -390,7 +390,7 @@ function renderOverview(ops, rt, mt) {
 
 // ===== 局部更新：概览 Tab =====
 // 返回 true=成功局部更新, false=元素缺失需回退到完整渲染
-function updateOverview(ops, rt, mt) {
+function updateOverview(ops, rt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
 
@@ -466,7 +466,7 @@ function updateOverview(ops, rt, mt) {
 
 // ===== 局部更新：任务 Tab =====
 // 返回 true=成功局部更新, false=需回退到完整渲染
-function updateTasks(ops, rt, mt) {
+function updateTasks(ops, rt) {
   const t = ops.tasks || {};
   const _is = t.issue_stats || {};
 
@@ -660,7 +660,7 @@ let _errorLogLevel = '';
 let _errorLogSource = '';
 
 // ===== Tab: 任务 =====
-function renderTasksTab(ops, rt, mt) {
+function renderTasksTab(ops, rt) {
   const t = ops.tasks || {};
   const sc = t.status_counts || {};
   let html = '';
@@ -994,44 +994,44 @@ function fallbackOps(realtime) {
   };
 }
 
-// ===== Prometheus 文本解析 =====
-function parseMetric(text, name) {
-  const m = text.match(new RegExp('^' + name + '\\s+(\\d+\\.?\\d*)', 'm'));
-  return m ? parseFloat(m[1]) : 0;
-}
-function parseMetrics(text, names) {
-  const r = {};
-  for (const n of names) r[n] = parseMetric(text, n);
-  return r;
-}
-function parseLabeledSum(text, name) {
-  let total = 0;
-  const re = new RegExp('^' + name + '\\{[^}]*\\}\\s+(\\d+\\.?\\d*)', 'gm');
-  let m;
-  while ((m = re.exec(text)) !== null) total += parseFloat(m[1]);
-  return total;
-}
-function parseLabeledSumByLabel(text, name, key, val) {
-  let total = 0;
-  const re = new RegExp('^' + name + '\\{[^}]*' + key + '="' + val + '"[^}]*\\}\\s+(\\d+\\.?\\d*)', 'gm');
-  let m;
-  while ((m = re.exec(text)) !== null) total += parseFloat(m[1]);
-  return total;
-}
-function fmtNum(n) {
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(n);
-}
-function parseLabeledKeys(text, name, labelKey) {
-  const keys = [];
-  const re = new RegExp('^' + name + '\\\\{[^}]*' + labelKey + '=\"([^\"]+)\"[^}]*\\\\}', 'gm');
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    if (!keys.includes(m[1])) keys.push(m[1]);
-  }
-  return keys;
-}
+// ===== Prometheus 文本解析（当前未使用，注释保留备用）=====
+// function parseMetric(text, name) {
+//   const m = text.match(new RegExp('^' + name + '\\s+(\\d+\\.?\\d*)', 'm'));
+//   return m ? parseFloat(m[1]) : 0;
+// }
+// function parseMetrics(text, names) {
+//   const r = {};
+//   for (const n of names) r[n] = parseMetric(text, n);
+//   return r;
+// }
+// function parseLabeledSum(text, name) {
+//   let total = 0;
+//   const re = new RegExp('^' + name + '\\{[^}]*\\}\\s+(\\d+\\.?\\d*)', 'gm');
+//   let m;
+//   while ((m = re.exec(text)) !== null) total += parseFloat(m[1]);
+//   return total;
+// }
+// function parseLabeledSumByLabel(text, name, key, val) {
+//   let total = 0;
+//   const re = new RegExp('^' + name + '\\{[^}]*' + key + '="' + val + '"[^}]*\\}\\s+(\\d+\\.?\\d*)', 'gm');
+//   let m;
+//   while ((m = re.exec(text)) !== null) total += parseFloat(m[1]);
+//   return total;
+// }
+// function fmtNum(n) {
+//   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+//   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+//   return String(n);
+// }
+// function parseLabeledKeys(text, name, labelKey) {
+//   const keys = [];
+//   const re = new RegExp('^' + name + '\\\\{[^}]*' + labelKey + '="([^"]+)"[^}]*\\\\}', 'gm');
+//   let m;
+//   while ((m = re.exec(text)) !== null) {
+//     if (!keys.includes(m[1])) keys.push(m[1]);
+//   }
+//   return keys;
+// }
 
 // ===== Runtime 任务列表 + 日志弹窗（从 runtimes.js 迁移）=====
 
