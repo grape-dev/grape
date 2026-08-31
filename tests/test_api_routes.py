@@ -674,6 +674,8 @@ class TestChat:
         uid = _uid["id"]
         uniq = uuid.uuid4().hex[:8]
         repo_key = f"org/chat-skill-{uniq}"
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(repo_key)
         # 造一个个人 chat 技能 + 一个仓库 chat 技能（agent_type='chat'）
         with db_lock:
             c = db.cursor()
@@ -681,7 +683,7 @@ class TestChat:
             c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
                       (f"chatskill{uniq}-user", f"chat-skill-user-{uniq}", "desc", "chat", f"chatskill{uniq}-user", "user", str(uid)))
             c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
-                      (f"chatskill{uniq}-repo", f"chat-skill-repo-{uniq}", "desc", "chat", f"chatskill{uniq}-repo", "repo", repo_key))
+                      (f"chatskill{uniq}-repo", f"chat-skill-repo-{uniq}", "desc", "chat", f"chatskill{uniq}-repo", "repo", rk))
             db.commit()
 
         try:
@@ -714,6 +716,8 @@ class TestChat:
         repo_key = f"org/chat-skillid-{uniq}"
         user_skill = f"chatsid{uniq}-user"
         repo_skill = f"chatsid{uniq}-repo"
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(repo_key)
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,))
@@ -722,7 +726,7 @@ class TestChat:
             c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
                       (user_skill, "u", "d", "chat", user_skill, "user", str(uid)))
             c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
-                      (repo_skill, "r", "d", "chat", repo_skill, "repo", repo_key))
+                      (repo_skill, "r", "d", "chat", repo_skill, "repo", rk))
             db.commit()
 
         try:
@@ -759,6 +763,8 @@ class TestChat:
         uniq = uuid.uuid4().hex[:8]
         repo_key = f"org/scope-{uniq}"
         same_name = f"dupname{uniq}"
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(repo_key)
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,))
@@ -767,7 +773,7 @@ class TestChat:
             c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
                       (same_name, "official-dup", "o", "chat", same_name, "official", ""))
             c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
-                      (same_name, "repo-dup", "r", "chat", same_name, "repo", repo_key))
+                      (same_name, "repo-dup", "r", "chat", same_name, "repo", rk))
             db.commit()
         try:
             # 不带 skill_scope：repo 优先 → 命中仓库技能
@@ -776,7 +782,7 @@ class TestChat:
             with db_lock:
                 c = db.cursor()
                 row = c.execute("SELECT skill, skill_id FROM chat_agent_session WHERE user_id=? AND repo_key=''", (uid,)).fetchone()
-            repo_id = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?", (same_name, repo_key)).fetchone()
+            repo_id = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?", (same_name, rk)).fetchone()
             assert row and row[1] == repo_id[0], f"default should resolve repo skill (repo-first), got {row}"
 
             # 显式 skill_scope=official → 解析官方技能（精确匹配）
@@ -960,19 +966,30 @@ class TestSkills:
         with db_lock:
             c = db.cursor()
             row = c.execute("SELECT agent_type, scope, owner_id, description, id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
-                            ("skill-repoupload", "owner/repo-x")).fetchone()
+                            ("skill-repoupload", "gitcode:owner/repo-x")).fetchone()
         assert row, "repo skill should be created"
         # owner_id 存归一化 repo_key（OBS 化后带平台前缀，见 repo_key.to_repo_key）
         assert row[0] == "sre" and row[1] == "repo", f"got {row}"
         assert row[2].endswith("owner/repo-x"), f"owner_id 应为 owner/repo-x（可带平台前缀），got {row}"
         assert row[3] == "repo skill", f"description should be parsed from front matter, got {row}"
+        # by-id 权限校验需要 user_repos 中有该仓库记录
+        from src.repo_key import to_repo_key
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (?,?,?,?,?,?)",
+                      (_uid["id"], to_repo_key("owner/repo-x"), "owner", "repo-x", 1, 1))
+            db.commit()
         # 无 repo 参数也应能查看仓库技能详情（此前只查 official+user，导致 404 加载失败；按 id 精确查询）
         sid = row[4]
         detail = client.get(f"/api/skills/by-id/{sid}", headers=_headers)
         assert detail.status_code == 200, f"Got {detail.status_code}: {detail.text[:200]}"
         assert detail.json().get("scope") == "repo"
         assert "skill-repoupload" in detail.json().get("content", "")
-        # 清理磁盘目录，避免污染后续测试
+        # 清理磁盘目录 + user_repos 记录
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key=?", (_uid["id"], to_repo_key("owner/repo-x")))
+            db.commit()
         target = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", "owner/repo-x", "skill-repoupload")
         if os.path.exists(target):
             shutil.rmtree(os.path.dirname(os.path.dirname(target)), ignore_errors=True)
@@ -990,6 +1007,8 @@ class TestSkills:
         uniq = uuid.uuid4().hex[:8]
         skill_name = f"convskill{uniq}"
         repo_key = f"org/convert-{uniq}"
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(repo_key)
 
         # 造一个个人技能（目录 + DB）
         user_dir = os.path.join(user_db.SKILL_DIR, str(_uid["id"]), skill_name)
@@ -1012,10 +1031,10 @@ class TestSkills:
             # DB：仓库技能记录创建，原个人技能保留
             with db_lock:
                 c = db.cursor()
-                repo_row = c.execute("SELECT scope, owner_id, agent_type, description FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?", (skill_name, repo_key)).fetchone()
+                repo_row = c.execute("SELECT scope, owner_id, agent_type, description FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?", (skill_name, rk)).fetchone()
                 user_row = c.execute("SELECT scope FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?", (skill_name, str(_uid["id"]))).fetchone()
             assert repo_row, "repo skill record should exist"
-            assert repo_row[0] == "repo" and repo_row[1] == repo_key
+            assert repo_row[0] == "repo" and repo_row[1] == rk
             assert repo_row[2] == "vod", f"agent_type should carry over, got {repo_row[2]}"
             assert user_row, "original user skill should be preserved"
 
@@ -1043,12 +1062,14 @@ class TestSkills:
         uniq = uuid.uuid4().hex[:8]
         skill_name = f"convdup{uniq}"
         repo_key = f"org/dup-{uniq}"
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(repo_key)
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"convdup{uniq}%",))
             # 造同名仓库技能 + 该用户拥有的个人技能
             c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
-                      (skill_name, skill_name, "d", "vod", skill_name, "repo", repo_key))
+                      (skill_name, skill_name, "d", "vod", skill_name, "repo", rk))
             c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
                       (skill_name, skill_name, "d", "vod", skill_name, "user", str(_uid["id"])))
             db.commit()
