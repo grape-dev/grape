@@ -66,5 +66,12 @@
     "repos": "仓库",
     "agents": "Agent",
     "title": "搜索"
+  },
+  "help": {
+    "button_title": "使用帮助",
+    "link_text": "📖 帮助",
+    "drawer_title": "📖 使用帮助 & FAQ",
+    "loading": "加载中...",
+    "iframe_title": "Grape 使用帮助"
   }
 }

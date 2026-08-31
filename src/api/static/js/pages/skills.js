@@ -295,7 +295,7 @@ function renderSkillDetail(data) {
         <div class="srow"><label>${I18N.t('skills.info_name')}</label><span>${data.name}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_agent_type')}</label><span>${data.agent_type}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_type')}</label><span>${SCOPE_NAMES[data.scope] || data.scope}</span></div>
-        <div class="srow"><label>Description</label><span class="t2">${data.description || '—'}</span></div>
+        <div class="srow"><label>${I18N.t('skills.info_description')}</label><span class="t2">${data.description || '—'}</span></div>
       </div>
     </div>`;
 }
@@ -388,7 +388,7 @@ function loadSubSkillDetail(pkgId, subName) {
           <div class="srow"><label>${I18N.t('skills.info_name')}</label><span>${data.name}</span></div>
           <div class="srow"><label>${I18N.t('skills.info_agent_type')}</label><span>${data.agent_type}</span></div>
           <div class="srow"><label>${I18N.t('skills.info_type')}</label><span>${SCOPE_NAMES[data.scope] || data.scope}</span></div>
-          <div class="srow"><label>Description</label><span class="t2">${data.description || '—'}</span></div>
+          <div class="srow"><label>${I18N.t('skills.info_description')}</label><span class="t2">${data.description || '—'}</span></div>
         </div>
       </div>`;
   }).catch(function(e) {

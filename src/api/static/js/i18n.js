@@ -202,17 +202,80 @@ var I18N = (function () {
     return _interpolate(val, vars);
   }
 
-  // ── setLang(lang): switch language, dual-write storage, reload with URL prefix ──
+  // ── setLang(lang): switch language in-place (no page reload) ──
   function setLang(lang) {
     if (SUPPORTED.indexOf(lang) < 0) lang = DEFAULT_LANG;
     if (lang === _currentLang) return;
+    _currentLang = lang;
 
     // Dual-write: localStorage + cookie
     try { localStorage.setItem(STORAGE_KEY, lang); } catch (e) {}
     _setCookie(STORAGE_KEY, lang, 31536000, '/');
 
-    // Apply URL prefix and reload
-    _applyUrlLang(lang);
+    // Update URL prefix without reload (replaceState preserves hash + state)
+    _updateUrlLang(lang);
+
+    // Load new language packs, then re-apply DOM + re-render current page
+    _loadedLangs[lang] = false;
+    loadPacks(lang).then(function () {
+      applyI18nToDOM();
+      _rerenderCurrentPage();
+    }).catch(function () {});
+  }
+
+  // ── _updateUrlLang(lang): adjust URL prefix without reload ──
+  function _updateUrlLang(lang) {
+    var path = window.location.pathname || '/';
+    var hash = window.location.hash || '';
+    var search = window.location.search || '';
+
+    if (lang === 'en') {
+      if (path !== '/en' && path.indexOf('/en/') !== 0) {
+        path = '/en' + (path === '/' ? '' : path);
+      }
+    } else {
+      if (path === '/en') {
+        path = '/';
+      } else if (path.indexOf('/en/') === 0) {
+        path = path.substring(3);
+      }
+    }
+
+    try {
+      window.history.replaceState(window.history.state, '', path + search + hash);
+    } catch (e) {}
+  }
+
+  // ── _rerenderCurrentPage(): re-navigate to current view after lang switch ──
+  function _rerenderCurrentPage() {
+    // Recover current view from history state or hash
+    var state = window.history.state;
+    var view = null, param = null;
+    if (state && state.view) {
+      view = state.view;
+      param = state.param;
+    } else {
+      var hash = window.location.hash;
+      if (hash && hash.length > 1) {
+        var parts = hash.substring(1).split('/');
+        view = parts[0];
+        param = parts[1] ? decodeURIComponent(parts[1]) : null;
+      }
+    }
+    if (!view || typeof app === 'undefined' || !app.nav) return;
+
+    // For settings page, preserve the active sub-tab across re-render
+    if (view === 'settings' && typeof renderSettings === 'function') {
+      try {
+        var activeTab = document.querySelector('.stabs a.ac');
+        var tabId = activeTab ? (activeTab.getAttribute('onclick') || '').match(/'([^']+)'/) : null;
+        var savedTab = tabId ? tabId[1] : null;
+        renderSettings(savedTab || 'credentials');
+        return;
+      } catch (e) {}
+    }
+
+    try { app.nav(view, param); } catch (e) {}
   }
 
   // ── _setCookie(name, value, maxAge, path) ──

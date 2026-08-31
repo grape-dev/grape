@@ -75,5 +75,7 @@
   "task_terminated_sent": "⏹ Task termination request sent",
   "terminate_failed": "Terminate failed: {{msg}}",
   "no_inline_log": "(No execution logs — agent did not actually run)",
-  "load_log_failed": "Failed to load logs: {{msg}}"
+  "load_log_failed": "Failed to load logs: {{msg}}",
+  "no_reply": "(No reply)",
+  "error_reply": "(Error)"
 }

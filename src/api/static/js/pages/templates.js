@@ -1,4 +1,11 @@
 // ====== 项目模板页 ======
+// 翻译后端返回的分类名：语言包优先，无则 fallback 原名
+function _tmplCatName(name) {
+  if (!name) return '';
+  var t = I18N.t('templates.cat.' + name);
+  return t !== ('templates.cat.' + name) ? t : name;
+}
+
 let _tmplState = {
   categories: [],
   activeCat: 0,
@@ -12,7 +19,7 @@ let _tmplState = {
 function renderTemplates() {
   const d = document.getElementById('pageContent');
   if (!d) return;
-  renderSelectionShell('templates', '<div class="loading">加载中...</div>');
+  renderSelectionShell('templates', '<div class="loading">' + I18N.t('templates.loading') + '</div>');
   API.get('/project-templates').then(data => {
     const rawCats = data.categories || [];
     const nonTop1000Cats = rawCats.filter(cat => !cat.top1000);
@@ -21,12 +28,12 @@ function renderTemplates() {
     );
     var _favTemplates = allTemplates.filter(function(t) { return _tmplState._favState[t.id]; });
     _tmplState.categories = [{
-      id: '_fav', name: '收藏', icon: '⭐',
-      description: '你收藏的项目模板。',
+      id: '_fav', name: I18N.t('templates.fav_cat'), icon: '⭐',
+      description: I18N.t('templates.fav_cat_desc'),
       scene_id: 'default', page_size: 9, templates: _favTemplates,
     }, {
-      id: 'all', name: '全部', icon: '📋',
-      description: '浏览所有可用项目模板，一键创建你的 DevOps 项目',
+      id: 'all', name: I18N.t('templates.all'), icon: '📋',
+      description: I18N.t('templates.all_desc'),
       scene_id: 'default', page_size: 9, templates: allTemplates,
     }, ...rawCats];
     _tmplState.activeCat = 1;
@@ -51,7 +58,7 @@ function renderTemplates() {
     });
   }).catch(e => {
     const c = document.getElementById('ptContent');
-    if (c) c.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+    if (c) c.innerHTML = '<div class="error">' + I18N.t('templates.load_failed', {msg: e.message}) + '</div>';
   });
 }
 
@@ -124,22 +131,22 @@ function _renderFeaturedCarousel() {
         '<span class="feat-item-ic">' + ic + '</span>' +
         '<div class="feat-item-info">' +
           '<span class="feat-item-name">' + nm + '</span>' +
-          '<span class="feat-item-cat">' + x.name + '</span>' +
+          '<span class="feat-item-cat">' + _tmplCatName(x.name) + '</span>' +
         '</div>' +
       '</div>';
     } else {
       itemsHtml += '<div class="feat-item" onclick="onFeaturedClick(' + si + ')">' +
         '<span class="feat-item-ic">⏳</span>' +
         '<div class="feat-item-info">' +
-          '<span class="feat-item-name" style="color:var(--t3);font-size:12px">加载中...</span>' +
-          '<span class="feat-item-cat">' + x.name + '</span>' +
+          '<span class="feat-item-name" style="color:var(--t3);font-size:12px">' + I18N.t('templates.loading') + '</span>' +
+          '<span class="feat-item-cat">' + _tmplCatName(x.name) + '</span>' +
         '</div>' +
       '</div>';
     }
   }
 
   return '<div class="feat-single">' +
-    '<div class="feat-single-h">精选推荐</div>' +
+    '<div class="feat-single-h">' + I18N.t('templates.featured_title') + '</div>' +
     '<div class="feat-single-body">' + itemsHtml + '</div>' +
   '</div>';
 }
@@ -162,7 +169,7 @@ function _renderHorizontalCards(templates, cat, skipPager) {
   var pageT = templates.slice(_tmplState.page * 12, (_tmplState.page + 1) * 12);
 
   var cards = pageT.map(function(t) {
-    var catName = t._cat_name || cat.name || '';
+    var catName = _tmplCatName(t._cat_name || cat.name || '');
     var tplUrl = t.html_url || (t.source_repo ? (t.source_platform === 'github' ? 'https://github.com/' + t.source_repo : 'https://gitcode.com/' + t.source_repo) : '');
     var cardClick = tplUrl
       ? "window.open('" + tplUrl + "','_blank')"
@@ -176,11 +183,11 @@ function _renderHorizontalCards(templates, cat, skipPager) {
       '<div class="template-card-item-info">' +
         '<div class="template-card-item-name" title="' + (t.name || '').replace(/"/g, '&quot;') + '">' + (t.name || t.id || '') + '</div>' +
         '<div class="template-card-item-cat">' + catName + '</div>' +
-        '<div class="template-card-item-desc">' + (t.description || '暂无描述') + '</div>' +
+        '<div class="template-card-item-desc">' + (t.description || I18N.t('templates.no_description')) + '</div>' +
         (t.recommend_reason ? '<div class="template-card-item-reason" title="' + t.recommend_reason.replace(/"/g, '&quot;') + '">💡 ' + t.recommend_reason + '</div>' : '') +
       '</div>' +
       '<span class="' + favCls + '" style="font-size:16px;cursor:pointer;flex-shrink:0;padding:0 2px;line-height:1" onclick="event.stopPropagation();toggleFav(\'' + t.id + '\')">' + favStar + '</span>' +
-      '<button class="template-card-item-btn" onclick="event.stopPropagation();createFromTemplate(\'' + t.id + "','" + (t.default_repo_name || t.id) + '\')">一键创建→</button>' +
+      '<button class="template-card-item-btn" onclick="event.stopPropagation();createFromTemplate(\'' + t.id + "','" + (t.default_repo_name || t.id) + '\')">' + I18N.t('templates.create_from_template_arrow') + '</button>' +
     '</div>';
   }).join('');
 
@@ -245,7 +252,7 @@ function renderTemplateCategory() {
   var c = document.getElementById('ptContent');
   if (!c) return;
   if (!cats || cats.length === 0) {
-    c.innerHTML = '<div class="lobby-empty" style="border:none;background:none;color:var(--t2)"><div class="lobby-empty-ic">📦</div><h3>暂无项目模板</h3><p>等待管理员配置项目模板。</p></div>';
+    c.innerHTML = '<div class="lobby-empty" style="border:none;background:none;color:var(--t2)"><div class="lobby-empty-ic">📦</div><h3>' + I18N.t('templates.no_templates_title') + '</h3><p>' + I18N.t('templates.no_templates_desc') + '</p></div>';
     return;
   }
   var cat = _tmplState.categories[_tmplState.activeCat] || cats[0];
@@ -275,7 +282,7 @@ function renderTemplateCategory() {
     var cnt = (x.templates || []).length;
     var act = i === _tmplState.activeCat ? ' tmpl-tab-act' : '';
     var favCls = x.id === '_fav' ? ' tmpl-tab-fav' : '';
-    return '<button class="tmpl-tab' + act + favCls + '" onclick="switchTemplateCat(' + i + ')"><span class="tmpl-tab-ic">' + (x.icon || '📦') + '</span><span class="tmpl-tab-name">' + x.name + '</span><span class="tmpl-tab-cnt">' + cnt + '</span></button>';
+    return '<button class="tmpl-tab' + act + favCls + '" onclick="switchTemplateCat(' + i + ')"><span class="tmpl-tab-ic">' + (x.icon || '📦') + '</span><span class="tmpl-tab-name">' + _tmplCatName(x.name) + '</span><span class="tmpl-tab-cnt">' + cnt + '</span></button>';
   }).join('');
 
   var allT = cat.templates || [];
@@ -291,10 +298,10 @@ function renderTemplateCategory() {
 
   c.innerHTML = '<div class="project-page">' +
     '<div class="tmpl-search-wide">' +
-      '<h2>模板库</h2>' +
+      '<h2>' + I18N.t('templates.gallery_title') + '</h2>' +
       '<div class="tmpl-search-bar-inline">' +
-        '<input id="tmplSearchInput" type="text" placeholder="🔍 搜索项目名称、描述..." value="' + (_tmplState.search || '') + '" onkeydown="if(event.key===\'Enter\')doSearch()">' +
-        '<button onclick="doSearch()">搜索</button>' +
+        '<input id="tmplSearchInput" type="text" placeholder="' + I18N.t('templates.search_placeholder') + '" value="' + (_tmplState.search || '') + '" onkeydown="if(event.key===\'Enter\')doSearch()">' +
+        '<button onclick="doSearch()">' + I18N.t('templates.search_btn') + '</button>' +
       '</div>' +
     '</div>' +
     '<div class="template-layout">' +
@@ -353,7 +360,7 @@ function loadTop1000(catIdx) {
       var c2 = _tmplState.top1000Cache[cat.id];
       if (!c2) return;
       c2.loading = false;
-      c2.error = err.message || '加载失败';
+      c2.error = err.message || I18N.t('templates.load_failed_simple');
       _tmplState.top1000Cache[cat.id] = c2;
       renderTemplateCategory();
     });
@@ -390,7 +397,7 @@ function renderTop1000Tab(c, cat) {
     var cnt = x.id === '_fav' ? Object.keys(_tmplState._favState).length : (x.top1000 ? (x.total || 0) : (x.templates || []).length);
     var act = i === _tmplState.activeCat ? ' tmpl-tab-act' : '';
     var favCls = x.id === '_fav' ? ' tmpl-tab-fav' : '';
-    return '<button class="tmpl-tab' + act + favCls + '" onclick="switchTemplateCat(' + i + ')"><span class="tmpl-tab-ic">' + (x.icon || '📦') + '</span><span class="tmpl-tab-name">' + x.name + '</span><span class="tmpl-tab-cnt">' + cnt + '</span></button>';
+    return '<button class="tmpl-tab' + act + favCls + '" onclick="switchTemplateCat(' + i + ')"><span class="tmpl-tab-ic">' + (x.icon || '📦') + '</span><span class="tmpl-tab-name">' + _tmplCatName(x.name) + '</span><span class="tmpl-tab-cnt">' + cnt + '</span></button>';
   }).join('');
 
   var cache = _tmplState.top1000Cache[cat.id] || {
@@ -402,7 +409,7 @@ function renderTop1000Tab(c, cat) {
   var contentHtml = '';
 
   if (cache.loading) {
-    contentHtml = '<div class="loading" style="padding:45px;text-align:center">⏳ 加载 Top1000 数据...</div>';
+    contentHtml = '<div class="loading" style="padding:45px;text-align:center">' + I18N.t('templates.loading_top1000') + '</div>';
   } else if (cache.error) {
     contentHtml = '<div class="error" style="padding:40px;text-align:center">❌ ' + cache.error + '</div>';
   } else {
@@ -419,7 +426,7 @@ function renderTop1000Tab(c, cat) {
         html_url: t.html_url || '',
         source_platform: t.source_platform || '',
         default_repo_name: t.default_repo_name || t.id,
-        _cat_name: cat.name,
+        _cat_name: _tmplCatName(cat.name),
       };
     });
     contentHtml = _renderHorizontalCards(top1000Tmpls, cat, true);
@@ -430,7 +437,7 @@ function renderTop1000Tab(c, cat) {
       var nextDisabled = cache.page >= cache.totalPages - 1 ? ' disabled' : '';
       pagerHtml = '<div class="top1000-pager">' +
         '<button' + prevDisabled + ' onclick="goTop1000Page(-1)">‹</button>' +
-        '<span>' + (cache.page + 1) + ' / ' + cache.totalPages + ' (' + cache.total + ' 个)</span>' +
+        '<span>' + (cache.page + 1) + ' / ' + cache.totalPages + ' (' + I18N.t('templates.page_count', {count: cache.total}) + ')</span>' +
         '<button' + nextDisabled + ' onclick="goTop1000Page(1)">›</button>' +
       '</div>';
     }
@@ -439,10 +446,10 @@ function renderTop1000Tab(c, cat) {
 
   c.innerHTML = '<div class="project-page">' +
     '<div class="tmpl-search-wide">' +
-      '<h2>模板库</h2>' +
+      '<h2>' + I18N.t('templates.gallery_title') + '</h2>' +
       '<div class="tmpl-search-bar-inline">' +
-        '<input id="tmplSearchInput" type="text" placeholder="🔍 搜索项目名称、描述..." value="' + (cache.search || _tmplState.search || '') + '" onkeydown="if(event.key===\'Enter\')doSearch()">' +
-        '<button onclick="doSearch()">搜索</button>' +
+        '<input id="tmplSearchInput" type="text" placeholder="' + I18N.t('templates.search_placeholder') + '" value="' + (cache.search || _tmplState.search || '') + '" onkeydown="if(event.key===\'Enter\')doSearch()">' +
+        '<button onclick="doSearch()">' + I18N.t('templates.search_btn') + '</button>' +
       '</div>' +
     '</div>' +
     '<div class="template-layout">' +
@@ -462,13 +469,13 @@ function createFromTemplate(templateId, defaultName) {
   modal.id = 'ptCreateModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
   modal.innerHTML = '<div class="cd" style="width:440px;padding:20px;border-radius:10px">' +
-    '<h3 style="font-size:14px;font-weight:600;margin-bottom:6px">一键创建项目</h3>' +
-    '<p class="ts t2" style="margin-bottom:14px">将在你的 GitCode 个人账号下创建同名仓库，并自动加入项目托管、应用对应的开发场景。</p>' +
-    '<label class="ts t2" style="display:block;margin-bottom:4px">仓库名</label>' +
+    '<h3 style="font-size:14px;font-weight:600;margin-bottom:6px">' + I18N.t('templates.create_modal_title') + '</h3>' +
+    '<p class="ts t2" style="margin-bottom:14px">' + I18N.t('templates.create_modal_desc') + '</p>' +
+    '<label class="ts t2" style="display:block;margin-bottom:4px">' + I18N.t('templates.repo_name') + '</label>' +
     '<input id="ptRepoName" value="'+ defaultName + '" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c)">' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">' +
-      '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">取消</button>' +
-      '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')">创建</button>' +
+      '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">' + I18N.t('templates.cancel') + '</button>' +
+      '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')">' + I18N.t('templates.create_btn') + '</button>' +
     '</div>' +
   '</div>';
   document.body.appendChild(modal);
@@ -479,7 +486,7 @@ function doCreateFromTemplate(templateId) {
   var repoName = (document.getElementById('ptRepoName').value || '').trim();
   var btn = document.getElementById('ptCreateBtn');
   btn.disabled = true;
-  btn.textContent = '创建中...';
+  btn.textContent = I18N.t('templates.creating');
 
   // 进度条 UI
   var progressEl = document.getElementById('ptProgress');
@@ -492,12 +499,12 @@ function doCreateFromTemplate(templateId) {
   }
   var _step = 0;
   var _steps = [
-    {pct: 10, text: '正在检查仓库名...'},
-    {pct: 25, text: '正在创建 GitCode 仓库...'},
-    {pct: 45, text: '正在下载模板代码...'},
-    {pct: 65, text: '正在推送代码到仓库...'},
-    {pct: 80, text: '正在配置仓库托管...'},
-    {pct: 95, text: '正在应用开发场景...'},
+    {pct: 10, text: I18N.t('templates.progress_checking')},
+    {pct: 25, text: I18N.t('templates.progress_creating_repo')},
+    {pct: 45, text: I18N.t('templates.progress_downloading')},
+    {pct: 65, text: I18N.t('templates.progress_pushing')},
+    {pct: 80, text: I18N.t('templates.progress_hosting')},
+    {pct: 95, text: I18N.t('templates.progress_applying_scene')},
   ];
   function setProgress(pct, text) {
     var bar = pct + '%';
@@ -515,48 +522,48 @@ function doCreateFromTemplate(templateId) {
     }
   }
   // 模拟进度推进（实际 API 是同步的，用定时器推进）
-  var _timer = setInterval(nextStep, 3000);
+  var _timer = setInterval(nextStep, 5000);
   // 第一步立即显示
-  setProgress(10, '正在检查仓库名...');
+  setProgress(10, I18N.t('templates.progress_checking'));
 
   API.get('/repos/check-name?name=' + encodeURIComponent(repoName))
     .then(function(check) {
       if (check.exists) {
         clearInterval(_timer);
         btn.disabled = false;
-        btn.textContent = '创建';
+        btn.textContent = I18N.t('templates.create_btn');
         progressEl.innerHTML = '';
-        app.showToast('⚠️ 仓库 ' + check.full_name + ' 已存在，请更换仓库名');
+        app.showToast(I18N.t('templates.repo_exists', {full_name: check.full_name}));
         var input = document.getElementById('ptRepoName');
         if (input) { input.focus(); input.select(); }
         return;
       }
-      setProgress(25, '正在创建 GitCode 仓库...');
-      API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}).then(function(r) {
+      setProgress(25, I18N.t('templates.progress_creating_repo'));
+      API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}, 300000).then(function(r) {
         clearInterval(_timer);
-        setProgress(100, '✅ 创建成功！');
+        setProgress(100, I18N.t('templates.progress_done'));
         var modal = document.getElementById('ptCreateModal');
         if (modal) setTimeout(function() { modal.remove(); }, 800);
         if (r.host_warning) {
-          app.showToast('⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（grace_bot）添加为维护者，然后手动托管仓库以完成自动化配置。', 10000);
+          app.showToast(I18N.t('templates.host_warning'), 10000);
         } else {
-          app.showToast('✅ ' + (r.message || '创建成功'));
+          app.showToast(I18N.t('templates.create_success', {msg: r.message || I18N.t('templates.create_success_default')}));
         }
         var parts = (r.full_name || '').split('/');
         setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1]); }, 900);
       }).catch(function(e) {
         clearInterval(_timer);
         btn.disabled = false;
-        btn.textContent = '创建';
-        setProgress(0, '❌ ' + (e.message || '创建失败'));
-        app.showToast('创建失败: ' + e.message);
+        btn.textContent = I18N.t('templates.create_btn');
+        setProgress(0, I18N.t('templates.progress_failed', {msg: e.message}));
+        app.showToast(I18N.t('templates.create_failed', {msg: e.message}));
       });
     })
     .catch(function(err) {
       clearInterval(_timer);
       btn.disabled = false;
-      btn.textContent = '创建';
+      btn.textContent = I18N.t('templates.create_btn');
       progressEl.innerHTML = '';
-      app.showToast('检查失败: ' + (err.message || err));
+      app.showToast(I18N.t('templates.check_failed', {msg: err.message || err}));
     });
 }

@@ -1,7 +1,13 @@
 # 前端 UI 国际化设计方案（最终版）
 
-> **范围声明：本阶段只做前端页面国际化（JS + HTML + JSON 语言包 + 后端 /en 路由）。**
-> **后端 API 返回的中文（chat.py 错误消息 / DB skill display_name/description / configs/project-templates.json 配置数据等）属于二期后端国际化，本阶段不处理。**
+> **范围声明：当前阶段只做前端页面国际化（JS + HTML + JSON 语言包 + 后端 /en 路由）。**
+> **后端 API 返回的中文（错误消息 / DB skill display_name/description / 场景名 / 引擎名 / Issue 标题 / configs 配置数据等）属于二期后端国际化，当前阶段不处理、不修改后端 Python 代码、不修改测试断言。**
+>
+> **两个特例（前端语言包优先于后端值）：**
+> 1. templates 分类名 — 前端 _tmplCatName() 查语言包 cat 翻译，无 key fallback 原名
+> 2. dashboard Agent 描述 — descs[at] 语言包优先于 meta.description
+>
+> **场景下拉框不做前端翻译** — 场景名是后端配置数据，可能新增/改名，前端硬编码翻译会不同步。已回退（git revert），直接用后端 ${s.name}。
 
 ---
 
@@ -309,3 +315,174 @@ if (current !== 'gitcode') {
 | 13 | "请在任务中心查看并处理" | 后端返回的任务提示消息 | 前端搜索 0 匹配 |
 
 验证方法：`search_files(pattern="本机 Runtime|请在任务中心", path="src/api/static/js")` → 0 结果
+
+## 十二、补漏：i18n 合并后遗漏的硬编码文案（fix/i18n-template-literal-bug 分支）
+
+合并 dev 后深度扫描发现部分页面仍有硬编码中文/英文未做 I18N.t()，以下为补漏清单及实施方案。
+
+### 改动范围（仅前端 JS + JSON 语言包，不改后端 Python / 不改测试）
+
+| 文件 | 遗漏数 | 内容 |
+|------|--------|------|
+| dashboard.js | 47 | 场景编辑/创建/引擎选择弹窗全功能块 + 统计标签 + Hero 副标题 |
+| templates.js | 33 | 模板库标题/搜索/分页/创建弹窗/收藏/精选推荐 + Toast |
+| tasks.js | 6 | 场景标签对象 + 多任务/单任务徽章 + 父任务 + 流水线场景/任务模式 label |
+| events.js | 2 | '（无回复）' / '（错误）' fallback |
+| repos.js | 2 | '工作台' tab + '暂无已托管项目' Toast |
+| observability.js | 1 | '主控' 徽章 |
+| agents.js | 1 | 'Actor' 表头 |
+| skills.js | 2 | 'Description' label (L298 + L391) |
+| chat.js | 0 | '思考中'/'已被' 属后端返回文本匹配，二期不改 |
+
+### 语言包新增 key 规划
+
+dashboard.json 新增：
+- scene_center_title, create_custom_scene, edit_scene, apply_scene, config_engine, cancel_edit, cancel_config, save_engine
+- scene_applied, apply_failed, engine_config_saved, save_failed, please_select_repo, please_input_scene_name, scene_saved, scene_created
+- select_engine, engines_available, no_engine_broadcast, online, confirm, cancel
+- edit_custom_scene, save_custom_scene, scene_name, scene_name_placeholder, desc_optional, desc_placeholder, visibility, scope_user, scope_repo
+- select_skill, change_engine, engine_count, broadcast, not_needed_in_scene
+- hero_maintainer, hero_member, stat_active, stat_events, stat_failed, label_skill, label_engine
+- desc_vod/issue/coding/qa/sre 已有
+
+templates.json 新增：
+- fav_cat, fav_cat_desc, all_cat, all_cat_desc (已有 all/all_desc)
+- featured_title, loading_top1000, page_count
+- gallery_title 已有, create_from_template 已有
+
+tasks.json 新增：
+- scene_label, scene_default_badge, multi_task_badge, single_task_badge, parent_task, pipeline_scene, task_mode
+
+events.json 新增：
+- no_reply, error_reply
+
+repos.json 新增：
+- tab_workspace, no_hosted_project
+
+observability.json 新增：
+- main_tag
+
+agents.json 新增：
+- event_table_actor
+
+skills.json 新增：
+- info_description (已有则复用)
+
+### 实施顺序
+1. 先更新 zh + en 语言包 JSON（新增 key）
+2. dashboard.js — 最大改动，模板字面量 + 单引号拼接混合
+3. templates.js — 单引号字符串拼接为主
+4. tasks.js / events.js / repos.js / observability.js / agents.js / skills.js — 少量改动
+5. 逐文件 node --check 语法验证
+6. Playwright 中英双语渲染验证 0 泄露
+
+## 十三、二期后端国际化清单（当前阶段不处理）
+
+> **当前阶段只做前端页面国际化。以下后端返回的中文数据前端直接渲染，无法翻译，统一放二期。**
+
+### 前端直接渲染后端中文数据（42处）
+
+| 文件 | 处数 | 字段 | 数据来源 | 说明 |
+|------|------|------|----------|------|
+| skills.js | 13 | s.name/s.description/sub.name | DB skill 表 | 用户上传的技能名/描述/子技能名 |
+| observability.js | 5 | rti.name/iss.title/k.label | 引擎实例名/Issue标题/日志标签 | 后端运行时数据 |
+| runtimes.js | 5 | rt.name/s.name | 引擎名/技能名 | 后端运行时数据 |
+| dashboard.js | 3 | s.name/s.skill_name/s.display_name | 场景名/技能下拉框 | 后端配置/DB 数据 |
+| knowledge.js | 4 | doc.name/f.label | 文档名/文件标签 | 后端知识库数据 |
+| repos.js | 3 | t.name/r.name | 模板名/仓库名 | 后端配置/GitCode 数据 |
+| app.js | 2 | a.name/a.display_name | Agent 名称 | 后端 API 返回 |
+| agents.js | 2 | r.name/repo.name | 仓库名 | 后端数据 |
+| pipeline.js | 2 | displayPipe.title | 流水线标题 | 后端 Issue 标题 |
+| chat.js | 1 | b.name | 后端引擎名 | 后端 API 返回 |
+| settings.js | 1 | t.label | 配置标签 | 后端配置数据 |
+| templates.js | 1 | cache.error | API 错误消息 | 后端返回的错误文本 |
+
+### 后端 Python 硬编码中文（API 返回给前端）
+
+| 文件 | 处数 | 内容类型 |
+|------|------|----------|
+| tasks.py | 83 | 任务状态消息/错误消息 |
+| db_setup.py | 82 | 建表注释/默认数据 |
+| event_pipeline.py | 78 | 事件处理消息 |
+| chat.py | 78 | 聊天错误消息/流消息（"思考中"/"生成中"等） |
+| skills.py | 66 | 技能操作消息 |
+| repos.py | 58 | 仓库操作消息 |
+| settings.py | 54 | 配置操作消息 |
+| events.py | 51 | 事件消息 |
+| knowledge.py | 51 | 知识库消息 |
+| runtime.py | 47 | 运行时消息 |
+| knowledge.py (非routes) | 42 | 知识库处理逻辑 |
+| jwt_utils.py | 30 | 认证消息 |
+| onboarding.py | 30 | 引导消息 |
+| event_store.py | 29 | 事件存储消息 |
+| feishu_onboard.py | 27 | 飞书引导消息 |
+
+### 二期处理原则
+
+1. **后端 API 返回的中文** — 后端做国际化（Accept-Language 头或 /en API 前缀），前端不改
+2. **DB 动态数据**（skill name/description、scene name）— DB 存双语字段或后端翻译
+3. **configs 配置数据**（project-templates.json 分类名/模板名）— 配置文件加双语字段
+4. **两个已做前端翻译的特例保持不变**：
+   - templates 分类名 _tmplCatName()（语言包 cat 翻译）
+   - dashboard Agent 描述 descs[at]（语言包优先于 meta.description）
+5. **场景下拉框不做前端翻译** — 已回退，直接用后端 ${s.name}
+6. **tasks.js 场景名不做前端翻译** — 已回退，直接用后端 t.scene_name || t.scene_id
+
+## 十四、最终验证报告
+
+### 验证范围
+
+| 模式 | 场景数 | 覆盖内容 |
+|------|--------|----------|
+| 中文 | 20 | 11个主页面 + repos 3个子tab + settings 4个子tab + dashboard 2个交互模式 |
+| 英文 | 25 | 同上 + dashboard 引擎弹窗 + observability 错误日志 + templates 创建弹窗 + runtimes 技能详情 |
+| 登录页 | 2 | 中英文各1 |
+
+### 验证结果
+
+| 检查项 | 结果 |
+|--------|------|
+| I18N.t 字面量泄露 | 0 处 |
+| 模板字面量内 '+ I18N.t() +' bug | 0 处（已修复 observability.js:606） |
+| 单引号字符串内嵌 I18N.t() 不拼接 | 0 处 |
+| 前端 JS 硬编码中文 | 0 处（仅剩3处后端文本匹配/注释，二期不改） |
+| 硬编码英文 UI 文案 | 0 处 |
+| 语言包 zh/en key 对齐 | 全部对齐（15个模块） |
+| 中文包纯英文值 | 0 处 |
+| 语言包 JSON 合法性 | 全部合法 |
+| node --check 语法 | 15个 JS 文件全部 OK |
+| 语言切换不刷新页面 | 已验证（原地重渲染 + URL 前缀更新） |
+| settings tab 状态保留 | 已验证（4个子tab切换语言后均保留） |
+| F5 刷新语言保持 | 已验证 |
+| 前进后退正常 | 已验证 |
+
+### 英文模式中文残留（全部是后端动态数据，二期）
+
+| 页面 | 残留内容 | 数据来源 |
+|------|----------|----------|
+| chat | "你好" 欢迎语 | 后端返回 |
+| skills | "对话助手"/"IM对话处理"/"IM通知" | DB skill 表 |
+| repos-templates | "静态网页模板"/"Python小游戏合集" | configs/project-templates.json |
+
+### 与 dev（上个版本）的差异
+
+改动文件 27 个，+468/-151 行：
+
+**JS 代码（11个文件）**：
+- i18n.js — setLang 改为不刷新页面（replaceState + 原地重渲染），settings tab 状态保留
+- observability.js — L606 模板字面量 bug 修复，L276 "主控"徽章国际化
+- dashboard.js — 47处硬编码中文→I18N.t()，Agent 描述语言包优先，场景下拉框回退
+- templates.js — 33处硬编码中文→I18N.t()，分类名 _tmplCatName() 前端翻译
+- tasks.js — 6处硬编码中文→I18N.t()，场景名语言包 fallback 回退
+- events.js — 2处 "（无回复）"/"（错误）" → I18N.t()
+- repos.js — 2处 "工作台"/"暂无已托管项目" → I18N.t()
+- agents.js — 1处 "Actor" 表头 → I18N.t()
+- skills.js — 2处 "Description" label → I18N.t()
+
+**语言包 JSON（16个文件，zh+en 各8个）**：
+- dashboard.json +43 key、templates.json +10 key、tasks.json +6 key
+- events.json +2 key、repos.json +2 key、observability.json +1 key
+- agents.json +1 key、skills.json +1 key
+
+**设计文档（1个文件）**：
+- docs/i18n-design.md +121行：范围声明强化 + 第十二章补漏清单 + 第十三章二期清单 + 第十四章验证报告

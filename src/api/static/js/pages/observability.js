@@ -233,6 +233,13 @@ function section(title, subtitle) {
   return `<div style="margin-bottom:8px;margin-top:16px"><h2 style="font-size:13px;font-weight:600">${title}</h2>${subtitle ? `<span style="font-size:10px;color:var(--t3);margin-left:8px">${subtitle}</span>` : ''}</div>`;
 }
 
+function _fmtTotalDur(s) {
+  if (!s || s <= 0) return '0s';
+  if (s < 60) return Math.round(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60 > 0 ? Math.round(s % 60) + 's' : '');
+  return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm';
+}
+
 function table(headers, rows) {
   return `<div class="tw" style="border:1px solid var(--b);border-radius:10px;overflow:hidden;margin-bottom:16px"><table><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
@@ -273,7 +280,7 @@ function renderOverview(ops, rt, mt) {
       const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
       const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
       const isMain = wk.last_ip === '127.0.0.1' || (wk.name || '').startsWith('grape-main');
-      const mainTag = isMain ? '<span style="font-size:9px;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 6px;margin-left:4px">主控</span>' : '';
+      const mainTag = isMain ? `<span style="font-size:9px;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 6px;margin-left:4px">${I18N.t('observability.main_tag')}</span>` : '';
       workerCards += `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
@@ -603,7 +610,7 @@ function loadErrorLogs(container) {
       </select>
       <span class="ts t3" id="errorLogCount"></span>
     </div>
-    <div id="errorLogBody"><div class="loading">' + I18N.t('observability.loading') + '</div></div>
+    <div id="errorLogBody"><div class="loading">${I18N.t('observability.loading')}</div></div>
   `;
   // 加载来源列表
   fetch('/api/dashboard/ops/error-logs/sources').then(r => r.json()).then(d => {
@@ -883,7 +890,10 @@ function renderTimelineList(container, issues, repoKey) {
     html += '<span style="font-size:12px">' + (expanded ? '\u25be' : '\u25b8') + '</span>';
     html += _issueLink;
     html += iss.title ? '<span class="ts t3" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + iss.title + '</span>' : '<span style="flex:1"></span>';
+    const _totalDur = iss.events.reduce((s, e) => s + (e.duration || 0), 0);
+    const _totalDurStr = _fmtTotalDur(_totalDur);
     html += '<span class="ts t3">' + I18N.t('observability.events_count', {count: iss.eventCount}) + '</span>' + statusBadge;
+    html += '<span class="ts t3" style="color:var(--a)">' + I18N.t('observability.total_duration') + ': ' + _totalDurStr + '</span>';
     html += '<span class="ts t3">' + (iss.lastAt || '').substring(0,16) + '</span>';
     html += '</div>';
     html += '<div id="tl-body-' + iss.issueId + '" style="display:' + (expanded ? 'block' : 'none') + ';padding:10px 14px;border-top:1px solid var(--b)">';

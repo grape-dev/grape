@@ -1,7 +1,8 @@
 {
   "tab": {
-    "projects": "Projects",
-    "templates": "Templates"
+    "projects": "My Projects",
+    "templates": "Templates",
+    "workspace": "Workspace"
   },
   "logout_title": "Logout",
   "loading": "Loading...",
@@ -24,7 +25,10 @@
     "friend": "Friend",
     "welcome_back": "Welcome back, {{name}}",
     "welcome_tip": "Let's get things done today!",
-    "welcome_to_grape": "WELCOME TO GRAPE"
+    "welcome_to_grape": "WELCOME TO GRAPE",
+    "ws_empty_title": "No hosted project yet",
+    "ws_empty_desc": "Host a repository to Grape and the workspace will automatically aggregate your Agent automations and project activity.",
+    "ws_go_host": "Host my repo"
   },
   "template": {
     "hello_world": "Hello World Starter",
@@ -98,5 +102,7 @@
   "brand_sub": "Agentic DevOps",
   "repositories": "Repositories",
   "sync_from_gitcode": "Sync from GitCode",
-  "hosted": "Hosted"
+  "hosted": "Hosted",
+  "no_hosted_project": "No hosted projects, please join and host a project first",
+  "unhosted_title": "Unhosted Repositories"
 }

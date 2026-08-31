@@ -22,13 +22,13 @@ function renderDashboard(data) {
 
   const sceneOpts = [
     ...scenes.map(s => `<option value="${s.id}"${s.id === currentScene ? ' selected' : ''}>${s.name}</option>`),
-    '<option value="__create__">➕ 创建自定义场景</option>',
+    `<option value="__create__">➕ ${I18N.t('dashboard.create_custom_scene')}</option>`,
   ].join('');
 
   const agentOrder = ['vod','issue','coding','qa','sre'];
   const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
   const colors = {vod:'#ff2d92',issue:'#ff3b30',coding:'#0071e3',qa:'#af52de',sre:'#ff9f0a'};
-  const descs = {vod:'从开发者声音中收集反馈、聚类分析共性、提炼价值、自动创建 Issue',issue:'Issue 分类、标签、指派、A2A 触发 Coding Agent',coding:'代码实现、PR 创建、自我审查',qa:'代码审查、自动化测试、功能验证、安全检查',sre:'构建部署、发布管理、监控运维、故障排查'};
+  const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
 
   const currentSceneObj = scenes.find(s => s.id === currentScene);
   const isCustomScene = currentSceneObj && currentSceneObj.scope !== 'official';
@@ -85,23 +85,23 @@ function renderDashboard(data) {
       <div class="ap-hero-icon">■</div>
       <div style="flex:1">
         <div class="ap-hero-title">${owner}/${name} <span style="font-size:10px;font-weight:500;color:#0071e3;background:#e3edfd;padding:2px 8px;border-radius:6px;vertical-align:middle;margin-left:4px">${role}</span></div>
-        <div class="ap-hero-sub">${role === 'Maintainer' ? 'Maintainer' : 'Member'} · ★ main · Webhook OK</div>
+        <div class="ap-hero-sub">${role === 'Maintainer' ? I18N.t('dashboard.hero_maintainer') : I18N.t('dashboard.hero_member')} · ★ main · ${I18N.t('dashboard.webhook_ok')}</div>
       </div>
       <div class="ap-stats">
-        <div class="ap-stat"><div class="v" style="color:#34c759">${m.active_agents || 0}</div><div class="l">Active</div></div>
-        <div class="ap-stat"><div class="v" style="color:#0071e3">${m.total_events || 0}</div><div class="l">Events</div></div>
-        <div class="ap-stat"><div class="v" style="color:#ff3b30">${m.failed_events || 0}</div><div class="l">Failed</div></div>
+        <div class="ap-stat"><div class="v" style="color:#34c759">${m.active_agents || 0}</div><div class="l">${I18N.t('dashboard.stat_active')}</div></div>
+        <div class="ap-stat"><div class="v" style="color:#0071e3">${m.total_events || 0}</div><div class="l">${I18N.t('dashboard.stat_events')}</div></div>
+        <div class="ap-stat"><div class="v" style="color:#ff3b30">${m.failed_events || 0}</div><div class="l">${I18N.t('dashboard.stat_failed')}</div></div>
       </div>
     </div>
   </div>
 
   <div class="ap-card">
     <div class="ap-card-hdr">
-      <h2>Scene Center</h2>
+      <h2>${I18N.t('dashboard.scene_center_title')}</h2>
       <div class="ap-bar">
         <select id="sceneSelect" class="ap-sel">${sceneOpts}</select>
-        ${isCustomScene ? '<button class="ap-btn ap-btn-o" onclick="toggleEditMode()">编辑场景</button>' : '<button class="ap-btn ap-btn-o" onclick="toggleEngineMode()">配置引擎</button>'}
-        <button class="ap-btn ap-btn-o" onclick="applyScene('${owner}', '${name}')">应用</button>
+        ${isCustomScene ? `<button class="ap-btn ap-btn-o" onclick="toggleEditMode()">${I18N.t('dashboard.edit_scene')}</button>` : `<button class="ap-btn ap-btn-o" onclick="toggleEngineMode()">${I18N.t('dashboard.config_engine')}</button>`}
+        <button class="ap-btn ap-btn-o" onclick="applyScene('${owner}', '${name}')">${I18N.t('dashboard.apply_scene')}</button>
       </div>
     </div>
     <div class="ap-grid" id="agentCards">`;
@@ -122,9 +122,9 @@ function renderDashboard(data) {
     const sid = sceneId || document.getElementById('sceneSelect').value;
     if (sid === '__create__') return;
     API.post('/scenes/apply/' + owner + '/' + name, {scene_id: sid}).then(r => {
-      app.showToast(r.message || '场景已应用');
+      app.showToast(r.message || I18N.t('dashboard.scene_applied'));
       API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
-    }).catch(e => app.showToast('应用失败: ' + (e.detail?.message || e.message)));
+    }).catch(e => app.showToast(I18N.t('dashboard.apply_failed', {msg: (e.detail?.message || e.message)})));
   };
 
   window.toggleEditMode = function() {
@@ -150,15 +150,15 @@ function renderDashboard(data) {
     const cardsEl = document.getElementById('agentCards');
     cardsEl.innerHTML = renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngines, isCustomScene, editMode, editNodes, false);
     const btn = document.querySelector('button[onclick="toggleEditMode()"]');
-    if (btn) btn.textContent = editMode ? '取消编辑' : '编辑场景';
+    if (btn) btn.textContent = editMode ? I18N.t('dashboard.cancel_edit') : I18N.t('dashboard.edit_scene');
     const eBtn = document.querySelector('button[onclick="toggleEngineMode()"]');
-    if (eBtn) eBtn.textContent = '配置引擎';
+    if (eBtn) eBtn.textContent = I18N.t('dashboard.config_engine');
     let saveBtn = document.getElementById('saveSceneBtn');
     if (editMode && !saveBtn) {
       saveBtn = document.createElement('button');
       saveBtn.id = 'saveSceneBtn';
       saveBtn.className = 'ap-btn ap-btn-p';
-      saveBtn.textContent = '保存';
+      saveBtn.textContent = I18N.t('common.save');
       saveBtn.onclick = saveCustomScene;
       btn.parentNode.insertBefore(saveBtn, btn.nextSibling);
     } else if (!editMode && saveBtn) { saveBtn.remove(); }
@@ -188,15 +188,15 @@ function renderDashboard(data) {
     const cardsEl = document.getElementById('agentCards');
     cardsEl.innerHTML = renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngines, isCustomScene, false, editNodes, engineMode);
     const eBtn = document.querySelector('button[onclick="toggleEngineMode()"]');
-    if (eBtn) eBtn.textContent = engineMode ? '取消配置' : '配置引擎';
+    if (eBtn) eBtn.textContent = engineMode ? I18N.t('dashboard.cancel_config') : I18N.t('dashboard.config_engine');
     const btn = document.querySelector('button[onclick="toggleEditMode()"]');
-    if (btn) btn.textContent = '编辑场景';
+    if (btn) btn.textContent = I18N.t('dashboard.edit_scene');
     let saveBtn = document.getElementById('saveEngineBtn');
     if (engineMode && !saveBtn) {
       saveBtn = document.createElement('button');
       saveBtn.id = 'saveEngineBtn';
       saveBtn.className = 'ap-btn ap-btn-p';
-      saveBtn.textContent = '保存引擎';
+      saveBtn.textContent = I18N.t('dashboard.save_engine');
       saveBtn.onclick = saveEngineBinding;
       eBtn.parentNode.insertBefore(saveBtn, eBtn.nextSibling);
     } else if (!engineMode && saveBtn) { saveBtn.remove(); }
@@ -204,7 +204,7 @@ function renderDashboard(data) {
 
   window.saveEngineBinding = function() {
     const repo = app.currentRepo();
-    if (!repo) { app.showToast('请先选择仓库'); return; }
+    if (!repo) { app.showToast(I18N.t('dashboard.please_select_repo')); return; }
     // 从 dashboard 返回的当前场景 nodes 保留结构，只覆盖 engine_runtime_ids
     const nodesPayload = currentSceneNodes.map(n => {
       const ed = editNodes.find(e => e.id === (n.id || n.tag));
@@ -221,9 +221,9 @@ function renderDashboard(data) {
     });
     API.put('/scenes/' + currentScene, { nodes: nodesPayload }).then(() => {
       window._dashboardEditing = false;
-      app.showToast('引擎配置已保存');
+      app.showToast(I18N.t('dashboard.engine_config_saved'));
       API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(() => {});
-    }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
+    }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
   };
 
   window.enterCreateMode = function() {
@@ -240,7 +240,7 @@ function renderDashboard(data) {
     if (headerDiv) {
       const saveBtn = document.createElement('button');
       saveBtn.className = 'ap-btn ap-btn-p';
-      saveBtn.textContent = '保存';
+      saveBtn.textContent = I18N.t('common.save');
       saveBtn.onclick = saveCustomScene;
       headerDiv.appendChild(saveBtn);
     }
@@ -275,10 +275,10 @@ function renderDashboard(data) {
     const title = meta.display_name || agentType;
 
     overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:380px;max-width:500px;max-height:80vh;overflow-y:auto;box-shadow:0 12px 48px rgba(0,0,0,.15)">
-      <h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">选择引擎 — ${title}</h3>
-      <div style="font-size:12px;color:#86868b;margin-bottom:20px">${engines.length} 个可用引擎 · 不选 = 广播竞争</div>
+      <h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${I18N.t('dashboard.select_engine')} — ${title}</h3>
+      <div style="font-size:12px;color:#86868b;margin-bottom:20px">${I18N.t('dashboard.engines_available', {count: engines.length})}</div>
       <div style="display:flex;flex-direction:column;gap:8px">
-        ${engines.length === 0 ? '<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">无可用引擎，将使用广播</div>' : engines.map(e => {
+        ${engines.length === 0 ? `<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">${I18N.t('dashboard.no_engine_broadcast')}</div>` : engines.map(e => {
           const checked = currentIds.includes(e.id);
           return `<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:1px solid ${checked ? '#0071e3' : '#e8e8ed'};border-radius:12px;cursor:pointer;background:${checked ? 'rgba(0,113,227,.04)' : '#f5f5f7'};transition:all .15s">
             <input type="checkbox" data-eid="${e.id}" ${checked ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">
@@ -286,13 +286,13 @@ function renderDashboard(data) {
               <div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center">${e.name}${_tagBadge(e.tags)}</div>
               <div style="font-size:10px;color:#86868b;margin-top:3px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div>
             </div>
-            <span style="font-size:11px;font-weight:500;color:#34c759">● 在线</span>
+            <span style="font-size:11px;font-weight:500;color:#34c759">${I18N.t('dashboard.online')}</span>
           </label>`;
         }).join('')}
       </div>
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:24px">
-        <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">取消</button>
-        <button class="ap-btn ap-btn-p" id="confirmEngineBtn">确认</button>
+        <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')}</button>
+        <button class="ap-btn ap-btn-p" id="confirmEngineBtn">${I18N.t('common.confirm')}</button>
       </div>
     </div>`;
     document.body.appendChild(overlay);
@@ -336,32 +336,32 @@ function renderDashboard(data) {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
     overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:360px;max-width:460px;box-shadow:0 12px 48px rgba(0,0,0,.15)">
-      <h3 style="margin:0 0 20px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${isEditingExisting ? '编辑自定义场景' : '保存自定义场景'}</h3>
+      <h3 style="margin:0 0 20px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${isEditingExisting ? I18N.t('dashboard.edit_custom_scene') : I18N.t('dashboard.save_custom_scene')}</h3>
       <div style="margin-bottom:14px">
-        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">场景名称</label>
-        <input id="sceneNameInput" type="text" value="${(existingName||'').replace(/"/g,'&quot;')}" placeholder="如：我的开发流程" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
+        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">${I18N.t('dashboard.scene_name')}</label>
+        <input id="sceneNameInput" type="text" value="${(existingName||'').replace(/"/g,'&quot;')}" placeholder="${I18N.t('dashboard.scene_name_placeholder')}" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
       </div>
       <div style="margin-bottom:14px">
-        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">描述（可选）</label>
-        <input id="sceneDescInput" type="text" value="${(existingDesc||'').replace(/"/g,'&quot;')}" placeholder="场景描述..." style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
+        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">${I18N.t('dashboard.desc_optional')}</label>
+        <input id="sceneDescInput" type="text" value="${(existingDesc||'').replace(/"/g,'&quot;')}" placeholder="${I18N.t('dashboard.desc_placeholder')}" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
       </div>
       <div style="margin-bottom:20px">
-        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">可见范围</label>
+        <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">${I18N.t('dashboard.visibility')}</label>
         <select id="sceneScopeSelect" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
-          <option value="user" ${existingScope==='user'?'selected':''}>个人级（所有仓库可见）</option>
-          <option value="repo" ${existingScope==='repo'?'selected':''}>仓库级（仅当前仓库可见）</option>
+          <option value="user" ${existingScope==='user'?'selected':''}>${I18N.t('dashboard.scope_user')}</option>
+          <option value="repo" ${existingScope==='repo'?'selected':''}>${I18N.t('dashboard.scope_repo')}</option>
         </select>
       </div>
       <div style="display:flex;justify-content:flex-end;gap:8px">
-        <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">取消</button>
-        <button class="ap-btn ap-btn-p" id="confirmSaveSceneBtn">保存</button>
+        <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')}</button>
+        <button class="ap-btn ap-btn-p" id="confirmSaveSceneBtn">${I18N.t('common.save')}</button>
       </div>
     </div>`;
     document.body.appendChild(overlay);
 
     document.getElementById('confirmSaveSceneBtn').onclick = function() {
       const sceneName = document.getElementById('sceneNameInput').value.trim();
-      if (!sceneName) { app.showToast('请输入场景名称'); return; }
+      if (!sceneName) { app.showToast(I18N.t('dashboard.please_input_scene_name')); return; }
       const sceneDesc = document.getElementById('sceneDescInput').value.trim();
       const sceneScope = document.getElementById('sceneScopeSelect').value;
 
@@ -370,17 +370,17 @@ function renderDashboard(data) {
         API.put('/scenes/' + currentScene, { name: sceneName, description: sceneDesc, nodes: nodesPayload }).then(() => {
           window._dashboardEditing = false;
           overlay.remove();
-          app.showToast('场景已保存');
+          app.showToast(I18N.t('dashboard.scene_saved'));
           API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
-        }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
+        }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
       } else {
         // 创建新场景：POST
         API.post('/scenes', { name: sceneName, description: sceneDesc, scope: sceneScope, nodes: nodesPayload }).then(r => {
           window._dashboardEditing = false;
           overlay.remove();
-          app.showToast('场景创建成功');
+          app.showToast(I18N.t('dashboard.scene_created'));
           if (r.scene_id) { applyScene(owner, name, r.scene_id); }
-        }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
+        }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
       }
     };
   };
@@ -398,25 +398,26 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     const skillDisplay = node ? (ag.skill_display_name || ag.skill || node.skill || '') : (ag.skill_display_name || ag.skill || '');
     const engineIds = node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []);
     const accentColor = meta.color || colors[at] || '#86868b';
-    const desc = meta.description || descs[at] || '';
+    // 语言包优先于后端 description（后端返回中文时英文模式用前端翻译）
+    const desc = descs[at] || meta.description || '';
     const canToggle = at !== 'vod' && at !== 'issue';
 
     let toggleBtn = '';
     if (editMode && canToggle) {
-      toggleBtn = `<span onclick="event.stopPropagation();toggleAgentInScene('${at}')" style="cursor:pointer;font-size:14px;color:${enabled ? '#ff3b30' : '#34c759'};margin-left:auto;padding:2px 6px" title="${enabled ? '点击禁用此 Agent' : '点击启用此 Agent'}">${enabled ? '✕' : '✓'}</span>`;
+      toggleBtn = `<span onclick="event.stopPropagation();toggleAgentInScene('${at}')" style="cursor:pointer;font-size:14px;color:${enabled ? '#ff3b30' : '#34c759'};margin-left:auto;padding:2px 6px" title="${enabled ? I18N.t('dashboard.disable_agent') : I18N.t('dashboard.enable_agent')}">${enabled ? '✕' : '✓'}</span>`;
     }
 
     let skillHtml;
     if (editMode && enabled) {
       skillHtml = `<select onchange="selectAgentSkill('${at}', this.value)" style="width:100%;padding:4px 8px;border:1px solid #d2d2d7;border-radius:8px;font-size:11px;background:#fff;color:#1d1d1f;outline:none">
-        <option value="">选择 Skill...</option>
+        <option value="">${I18N.t('dashboard.select_skill')}</option>
       </select>`;
       setTimeout(() => {
         API.get('/scenes/skills/' + at).then(r => {
           const sel = document.querySelector(`select[onchange*="${at}"]`);
           if (sel && r.skills) {
             const current = editNodes.find(n => n.id === at)?.skill || '';
-            sel.innerHTML = '<option value="">选择 Skill...</option>' +
+            sel.innerHTML = '<option value="">' + I18N.t('dashboard.select_skill') + '</option>' +
               r.skills.map(s => `<option value="${s.skill_name}"${s.skill_name === current ? ' selected' : ''}>${s.display_name}</option>`).join('');
           }
         }).catch(() => {});
@@ -432,19 +433,19 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     if ((editMode || engineMode) && enabled) {
       if (engineIds.length > 0) {
         engineHtml = `<div class="ap-nd-eng">
-          <span style="display:inline-flex;align-items:center;gap:4px;background:#0071e314;color:#0071e3;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${engineIds.length} 个引擎</span>
-          <button class="ap-eng-btn" onclick="openEngineModal('${at}')">更改</button>
+          <span style="display:inline-flex;align-items:center;gap:4px;background:#0071e314;color:#0071e3;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.engine_count', {count: engineIds.length})}</span>
+          <button class="ap-eng-btn" onclick="openEngineModal('${at}')">${I18N.t('dashboard.change_engine')}</button>
         </div>`;
       } else {
         engineHtml = `<div class="ap-nd-eng">
-          <span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">广播</span>
-          <button class="ap-eng-btn" onclick="openEngineModal('${at}')">选择引擎</button>
+          <span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.broadcast')}</span>
+          <button class="ap-eng-btn" onclick="openEngineModal('${at}')">${I18N.t('dashboard.select_engine')}</button>
         </div>`;
       }
     } else if (enabled && engineIds.length > 0) {
-      engineHtml = `<div class="ap-nd-eng"><span style="display:inline-flex;align-items:center;gap:4px;background:#0071e314;color:#0071e3;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${engineIds.length} 个引擎</span></div>`;
+      engineHtml = `<div class="ap-nd-eng"><span style="display:inline-flex;align-items:center;gap:4px;background:#0071e314;color:#0071e3;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.engine_count', {count: engineIds.length})}</span></div>`;
     } else if (enabled) {
-      engineHtml = `<div class="ap-nd-eng"><span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">广播</span></div>`;
+      engineHtml = `<div class="ap-nd-eng"><span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.broadcast')}</span></div>`;
     } else {
       engineHtml = `<div class="ap-nd-eng"><span style="font-size:11px;color:#86868b">none</span></div>`;
     }
@@ -456,14 +457,14 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
         <span style="font-size:14px;font-weight:600;color:#1d1d1f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${meta.display_name || agentLabels[i]}</span>
         ${toggleBtn}
       </div>
-      ${enabled ? `<div class="ap-nd-desc">${desc}</div>` : '<div style="font-size:10px;color:#86868b;margin-bottom:8px">此场景下不需要</div>'}
+      ${enabled ? `<div class="ap-nd-desc">${desc}</div>` : `<div style="font-size:10px;color:#86868b;margin-bottom:8px">${I18N.t('dashboard.not_needed_in_scene')}</div>`}
       <div style="height:1px;background:#e8e8ed;margin:8px 0"></div>
       <div style="background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center">
-        <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">Skill</div>
+        <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">${I18N.t('dashboard.label_skill')}</div>
         ${skillHtml}
       </div>
       <div style="background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center">
-        <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">Engine</div>
+        <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">${I18N.t('dashboard.label_engine')}</div>
         ${engineHtml}
       </div>
     </div>`;

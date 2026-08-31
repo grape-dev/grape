@@ -20,7 +20,7 @@ function renderSelectionShell(tab, innerHtml) {
       <nav class="lobby-tabs">
         <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">${I18N.t('repos.tab.projects')}</a>
         <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">${I18N.t('repos.tab.templates')}</a>
-        <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">工作台</a>
+        <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">${I18N.t('repos.tab.workspace')}</a>
       </nav>
       <div class="lobby-user" onclick="app.logout()" title="${I18N.t('repos.logout_title')}">
         <span class="lobby-avatar">${avatar}</span>
@@ -45,8 +45,7 @@ function switchSidebarTab(tab) {
         const first = hosted[0];
         selectRepo(first.full_name, first.owner, first.name);
       } else {
-        app.showToast('暂无已托管项目，请先加入并托管一个项目');
-        switchSidebarTab('projects');
+        _renderWorkspaceEmpty();
       }
     }).catch(() => {
       switchSidebarTab('projects');
@@ -60,6 +59,22 @@ function switchSidebarTab(tab) {
       renderRepos();
     }
   }
+}
+
+// 无托管仓库时的工作台空态引导
+function _workspaceEmptyHtml() {
+  return '<div class="ws-empty">' +
+    '<div class="ws-empty-ic">🧭</div>' +
+    '<h2>' + I18N.t('repos.lobby.ws_empty_title') + '</h2>' +
+    '<p>' + I18N.t('repos.lobby.ws_empty_desc') + '</p>' +
+    '<div class="ws-empty-actions">' +
+      '<button class="ws-empty-btn2" onclick="switchSidebarTab(\'projects\')">' + I18N.t('repos.lobby.ws_go_host') + '</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function _renderWorkspaceEmpty() {
+  renderSelectionShell('workspace', _workspaceEmptyHtml());
 }
 
 // ====== 仓库选择主内容 ======
@@ -256,7 +271,7 @@ function renderRepos() {
     }
     html += `</div>`;
 
-    html += `<div class="cd"><div class="cd-h"><h2>未托管仓库 <span class="c">${availableRepos.length}</span></h2></div>`;
+    html += `<div class="cd"><div class="cd-h"><h2>${I18N.t('repos.unhosted_title')} <span class="c">${availableRepos.length}</span></h2></div>`;
     if (availableRepos.length === 0) {
       html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_available') + '</div>';
     } else {
@@ -446,7 +461,7 @@ function submitCreateRepo(e) {
         app.showToast(I18N.t('repos.create.err_exists', {name: check.full_name}));
         return;
       }
-      API.post('/repos/create', {name, description: desc, visibility})
+      API.post('/repos/create', {name, description: desc, visibility}, 120000)
         .then(r => {
           app.showToast(I18N.t('repos.create.success', {name: (r.full_name || name)}));
           closeCreateRepoModal();

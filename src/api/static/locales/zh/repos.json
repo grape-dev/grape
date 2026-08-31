@@ -1,12 +1,13 @@
 {
   "tab": {
-    "projects": "工作项目",
-    "templates": "项目模板"
+    "projects": "我的项目",
+    "templates": "项目模板",
+    "workspace": "工作台"
   },
   "logout_title": "退出登录",
   "loading": "加载中...",
   "load_failed": "加载失败",
-"lobby": {
+  "lobby": {
     "project_title": "项目",
     "project_sub": "多人协同，打造超级团队",
     "new_project_btn": "新建项目",
@@ -24,7 +25,10 @@
     "friend": "朋友",
     "welcome_back": "欢迎回来，{{name}}",
     "welcome_tip": "今天也要加油哟！",
-    "welcome_to_grape": "欢迎使用 Grape"
+    "welcome_to_grape": "欢迎使用 Grape",
+    "ws_empty_title": "还没有已托管项目",
+    "ws_empty_desc": "将仓库托管到 Grape，工作台会自动汇总你的 Agent 自动化和项目动态。",
+    "ws_go_host": "去托管我的仓库"
   },
   "template": {
     "hello_world": "Hello World 新手模板",
@@ -98,5 +102,7 @@
   "brand_sub": "Agentic DevOps",
   "repositories": "仓库",
   "sync_from_gitcode": "从 GitCode 同步",
-  "hosted": "已托管"
+  "hosted": "已托管",
+  "no_hosted_project": "暂无已托管项目，请先加入并托管一个项目",
+  "unhosted_title": "未托管仓库"
 }
