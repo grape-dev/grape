@@ -21,7 +21,12 @@ function renderDashboard(data) {
   const m = data.metrics || {};
 
   const sceneOpts = [
-    ...scenes.map(s => `<option value="${s.id}"${s.id === currentScene ? ' selected' : ''}>${s.name}</option>`),
+    ...scenes.map(s => {
+      var sceneKey = 'dashboard.scene_' + (s.id || '').replace(/-/g, '_');
+      var sceneT = I18N.t(sceneKey);
+      var sceneLabel = sceneT !== sceneKey ? sceneT : s.name;
+      return `<option value="${s.id}"${s.id === currentScene ? ' selected' : ''}>${sceneLabel}</option>`;
+    }),
     `<option value="__create__">➕ ${I18N.t('dashboard.create_custom_scene')}</option>`,
   ].join('');
 
