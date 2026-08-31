@@ -111,7 +111,7 @@ class TestClaim:
         isess = get_or_create_issue_session("gitcode:test/repo", "issue", "#5")
         _enqueue(session_id="s1", runtime_id=1, seq=1, issue_session_id=isess["id"], issue_id="#5")
         tid = service.claim(1)["id"]
-        service.complete_task(tid, "done", 0, usage={"session_id": "new_ses"})
+        service.complete_task(tid, '{"conclusion": "done"}', 0, usage={"session_id": "new_ses"})
         got = get_issue_session("gitcode:test/repo", "issue", "#5")
         assert got["runtime_session_id"] == "new_ses", "续接指针应写回 Issue 级会话"
 

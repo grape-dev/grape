@@ -5,14 +5,16 @@ import sys
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
-from src.api.routes import agents as agents_mod
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")
+
 from src.session_manager import db, db_lock
 
 
 def _clean():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE '%test-agents%' OR agent_key LIKE '%test-agents%'")
+        c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE '%test-agents%'")
         db.commit()
 
 
@@ -24,25 +26,40 @@ def teardown_function():
     _clean()
 
 
+def _jwt_access_token(user_id, username="test"):
+    from src.api.jwt_utils import create_access_token
+    from src.user.db import get_token_version
+    return create_access_token(user_id, username, get_token_version(user_id))
+
+
 def test_agents_routes():
-    """确保 agents 路由暴露 & 基础健康：选择即写会话"""
-    from src.api.main import app  # FastAPI 实例
+    """确保 agents PUT 路由能正确写入 agent session（backends → runtime_id 解析）。"""
+    from src.api.main import app
     from fastapi.testclient import TestClient
+    from src.user import db as user_db
 
     _clean()
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO devops_agent_session "
-            "(agent_id, repo_key, agent_type, backend, skill, chat_session_id) "
-            "VALUES ('agent-test','gitcode:owner/test-agents','chat','opencode','',0,'act')"
-        )
-        db.commit()
+    # 准备测试用户 + JWT
+    uid = user_db.create_user("test_agents", "test123")
+    if not uid:
+        uid = user_db.get_user_by_username("test_agents")
+    token = _jwt_access_token(uid["id"], uid["username"])
+    headers = {"Authorization": f"Bearer {token}"}
+
     with TestClient(app) as client:
-        r = client.put("/agents/owner/test-agents", json={"backends": ["new-engine"], "skill": "opencode"})
-        assert r.status_code == 200
+        # PUT /agents/{name}/{owner}/{repo} — name 必须在 AGENT_TYPES 中
+        r = client.put(
+            "/api/agents/coding/owner/test-agents",
+            json={"backends": ["opencode"], "skill": ""},
+            headers=headers,
+        )
+        assert r.status_code == 200, f"PUT 应返回 200, got {r.status_code}: {r.text}"
+        # 验证 session 已写入
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT backend FROM devops_agent_session WHERE agent_id='agent-test'")
-            row = c.fetchone()
-    assert row and row[0] == "newengine", "后端应被直写"
+            row = c.execute(
+                "SELECT runtime_id, agent_type, status FROM devops_agent_session "
+                "WHERE repo_key LIKE '%test-agents%'"
+            ).fetchone()
+    assert row, "agent session 应已写入"
+    assert row[1] == "coding", "agent_type 应为 coding"

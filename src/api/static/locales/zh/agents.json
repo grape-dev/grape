@@ -95,5 +95,7 @@
   },
   "btn_configure": "配置",
   "btn_events": "事件",
-  "skill_label": "技能"
+  "skill_label": "技能",
+  "event_table_seq": "序号",
+  "backend_engines_label": "后端引擎"
 }

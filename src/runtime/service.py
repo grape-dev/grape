@@ -1462,11 +1462,15 @@ def _auto_advance_pipeline(task: dict):
             # 获取 bot token
             from src.user.db import get_repo_bot_token_no_global
             _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
-            _server_url = "https://example.com"
+            # 优先用本地直连（127.0.0.1:8000），避免兄弟节点经公网域名绕回导致超时
+            _server_url = "http://127.0.0.1:8000"
             try:
                 from src.user.db import get_meta_value
                 _sbu = get_meta_value("server_base_url")
-                if _sbu:
+                if _sbu and "127.0.0.1" not in _sbu and "localhost" not in _sbu:
+                    # meta 配置的是公网域名 → 转成本地直连
+                    _server_url = "http://127.0.0.1:8000"
+                elif _sbu:
                     _server_url = _sbu
             except Exception:
                 pass

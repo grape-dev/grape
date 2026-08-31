@@ -41,5 +41,8 @@
   "sre_triggered": "✅ SRE Agent triggered!\n\nEvent seq: seq={{seq}}\nView progress in the Events page.",
   "sre_result": "SRE trigger result: {{result}}",
   "sre_trigger_failed": "Failed to trigger SRE: {{msg}}",
-  "th_parent": "Parent"
+  "th_parent": "Parent",
+  "stat_active": "Active",
+  "stat_today": "Today",
+  "stat_failed": "Failed"
 }

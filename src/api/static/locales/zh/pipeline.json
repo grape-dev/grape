@@ -41,5 +41,8 @@
   "sre_triggered": "✅ SRE Agent 已触发！\n\n事件编号：seq={{seq}}\n可在 Events 页面查看执行进度。",
   "sre_result": "SRE 触发结果：{{result}}",
   "sre_trigger_failed": "触发 SRE 失败：{{msg}}",
-  "th_parent": "父任务"
+  "th_parent": "父任务",
+  "stat_active": "活跃",
+  "stat_today": "今日",
+  "stat_failed": "失败"
 }

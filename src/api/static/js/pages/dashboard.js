@@ -84,7 +84,7 @@ function renderDashboard(data) {
     <div class="ap-hero-row">
       <div class="ap-hero-icon">■</div>
       <div style="flex:1">
-        <div class="ap-hero-title">${owner}/${name} <span style="font-size:10px;font-weight:500;color:#0071e3;background:#e3edfd;padding:2px 8px;border-radius:6px;vertical-align:middle;margin-left:4px">${role}</span></div>
+        <div class="ap-hero-title">${owner}/${name} <span style="font-size:10px;font-weight:500;color:#0071e3;background:#e3edfd;padding:2px 8px;border-radius:6px;vertical-align:middle;margin-left:4px">${role === 'Maintainer' ? I18N.t('dashboard.hero_maintainer') : I18N.t('dashboard.hero_member')}</span></div>
         <div class="ap-hero-sub">${role === 'Maintainer' ? I18N.t('dashboard.hero_maintainer') : I18N.t('dashboard.hero_member')} · ★ main · ${I18N.t('dashboard.webhook_ok')}</div>
       </div>
       <div class="ap-stats">
@@ -101,6 +101,7 @@ function renderDashboard(data) {
       <div class="ap-bar">
         <select id="sceneSelect" class="ap-sel">${sceneOpts}</select>
         ${isCustomScene ? `<button class="ap-btn ap-btn-o" onclick="toggleEditMode()">${I18N.t('dashboard.edit_scene')}</button>` : `<button class="ap-btn ap-btn-o" onclick="toggleEngineMode()">${I18N.t('dashboard.config_engine')}</button>`}
+        ${isCustomScene ? `<button class="ap-btn ap-btn-o" style="color:#ff3b30;border-color:#ff3b30" onclick="deleteCustomScene()">${I18N.t('common.delete')}</button>` : ''}
         <button class="ap-btn ap-btn-o" onclick="applyScene('${owner}', '${name}')">${I18N.t('dashboard.apply_scene')}</button>
       </div>
     </div>
@@ -382,6 +383,28 @@ function renderDashboard(data) {
           if (r.scene_id) { applyScene(owner, name, r.scene_id); }
         }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
       }
+    };
+  };
+
+  window.deleteCustomScene = function() {
+    if (!currentScene || !isCustomScene) return;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+    overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:320px;max-width:400px;box-shadow:0 12px 48px rgba(0,0,0,.15)">
+      <h3 style="margin:0 0 12px;font-size:17px;font-weight:600;color:#1d1d1f">${I18N.t('dashboard.confirm_delete_scene')}</h3>
+      <p style="margin:0 0 20px;font-size:13px;color:#86868b;line-height:1.5">${(currentSceneObj && currentSceneObj.name) || ''}</p>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')}</button>
+        <button class="ap-btn ap-btn-p" id="confirmDeleteSceneBtn" style="background:#ff3b30">${I18N.t('common.delete')}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    document.getElementById('confirmDeleteSceneBtn').onclick = function() {
+      API.delete('/scenes/' + currentScene).then(() => {
+        overlay.remove();
+        app.showToast(I18N.t('dashboard.scene_deleted'));
+        API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+      }).catch(e => { overlay.remove(); app.showToast(I18N.t('dashboard.delete_failed', {msg: (e.detail?.message || e.message)})); });
     };
   };
 }
