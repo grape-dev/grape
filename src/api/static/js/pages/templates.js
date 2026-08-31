@@ -515,7 +515,7 @@ function doCreateFromTemplate(templateId) {
     }
   }
   // 模拟进度推进（实际 API 是同步的，用定时器推进）
-  var _timer = setInterval(nextStep, 3000);
+  var _timer = setInterval(nextStep, 5000);
   // 第一步立即显示
   setProgress(10, '正在检查仓库名...');
 
@@ -532,7 +532,7 @@ function doCreateFromTemplate(templateId) {
         return;
       }
       setProgress(25, '正在创建 GitCode 仓库...');
-      API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}).then(function(r) {
+      API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}, 300000).then(function(r) {
         clearInterval(_timer);
         setProgress(100, '✅ 创建成功！');
         var modal = document.getElementById('ptCreateModal');

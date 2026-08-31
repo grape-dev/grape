@@ -394,6 +394,7 @@ CREATE TABLE IF NOT EXISTS user_repos (
     role TEXT DEFAULT '',
     is_admin INTEGER DEFAULT 0,
     is_join INTEGER DEFAULT 0,            -- 该用户是否已「加入」该仓库（用户级状态）
+    created_at TEXT DEFAULT '',           -- GitCode 仓库创建时间（同级内按新建时间倒序用）
     synced_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, repo_key)
 )
@@ -478,6 +479,12 @@ def _migrate_repo_key_tables():
             if "is_join" not in ur_cols2:
                 try:
                     c.execute("ALTER TABLE user_repos ADD COLUMN is_join INTEGER DEFAULT 0")
+                    db.commit()
+                except Exception:
+                    pass
+            if "created_at" not in ur_cols2:
+                try:
+                    c.execute("ALTER TABLE user_repos ADD COLUMN created_at TEXT DEFAULT ''")
                     db.commit()
                 except Exception:
                     pass
@@ -1516,9 +1523,10 @@ def save_user_repos(user_id: int, repos: list[dict]):
             repo_key = to_repo_key(full_name)
             is_join = 1 if repo_key in managed_keys else 0
             c.execute(
-                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (user_id, repo_key, r.get("owner", ""), r.get("name", ""),
-                 r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0, is_join)
+                 r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0, is_join,
+                 r.get("created_at", "") or "")
             )
         db.commit()
 
@@ -1528,10 +1536,12 @@ def get_user_repos(user_id: int) -> list[dict]:
     from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, owner, name, description, role, is_admin, is_join FROM user_repos WHERE user_id=? ORDER BY repo_key", (user_id,))
+        c.execute("SELECT repo_key, owner, name, description, role, is_admin, is_join, created_at FROM user_repos WHERE user_id=? ORDER BY repo_key", (user_id,))
         return [
             {"repo_key": r[0], "full_name": from_repo_key(r[0]), "owner": r[1], "name": r[2],
-             "description": r[3], "role": r[4], "is_admin": bool(r[5]), "is_join": bool(r[6])}
+             "description": r[3], "role": r[4], "is_admin": bool(r[5]), "is_join": bool(r[6]),
+
+             "created_at": r[7] or ""}
             for r in c.fetchall()
         ]
 

@@ -67,6 +67,7 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
             "in_managed": in_managed,
             "is_joined": in_managed,
             "is_hosted": hosted,
+            "created_at": r.get("created_at", "") or "",
         })
     return result
 

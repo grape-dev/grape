@@ -88,6 +88,13 @@
 .project-hero-left p{font-size:14px;color:var(--t2);margin-bottom:24px}
 .project-hero-btn{padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;border:none;background:#1a1a1a;color:#fff;transition:all .2s}
 .project-hero-btn:hover{background:#333;transform:translateY(-1px)}
+.ws-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:80px 20px;gap:12px}
+.ws-empty-ic{font-size:64px;opacity:.9;margin-bottom:2px}
+.ws-empty h2{font-size:22px;font-weight:800;color:#101724;margin-bottom:4px}
+.ws-empty p{font-size:14px;color:#5b667b;max-width:420px;line-height:1.7;margin-bottom:18px}
+.ws-empty-actions{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}
+.ws-empty-btn2{padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid #e5e7eb;background:var(--c);color:var(--t2);transition:all .2s}
+.ws-empty-btn2:hover{border-color:var(--a);color:var(--a);background:#f0f5ff}
 .project-hero-right{flex:0 0 45%;display:flex;justify-content:flex-end}
 .project-hero-welcome{display:flex;align-items:center;gap:20px;padding:30px 44px;border-radius:20px;background:linear-gradient(135deg,#eef2ff 0%,#f5f3ff 45%,#fff0f6 100%);max-width:560px;box-shadow:0 12px 32px rgba(49,104,224,.10)}
 .pw-icon{font-size:48px;flex-shrink:0}

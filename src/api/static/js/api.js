@@ -133,17 +133,26 @@ const API = (() => {
     return r.json();
   }
 
-  function _get(path) {
-    return fetch(BASE + path, {headers: headers()}).then(r => handleResp(r, () => _get(path)));
+  // fetch 超时封装：30s 后 abort，防止后端 hang 导致前端永久 loading
+  const _DEFAULT_TIMEOUT = 30000;
+  function _fetchWithTimeout(url, opts, timeout) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout || _DEFAULT_TIMEOUT);
+    opts = Object.assign({}, opts, { signal: controller.signal });
+    return fetch(url, opts).finally(() => clearTimeout(timer));
   }
-  function _post(path, body) {
-    return fetch(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}).then(r => handleResp(r, () => _post(path, body)));
+
+  function _get(path, timeout) {
+    return _fetchWithTimeout(BASE + path, {headers: headers()}, timeout).then(r => handleResp(r, () => _get(path, timeout)));
   }
-  function _put(path, body) {
-    return fetch(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}).then(r => handleResp(r, () => _put(path, body)));
+  function _post(path, body, timeout) {
+    return _fetchWithTimeout(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}, timeout).then(r => handleResp(r, () => _post(path, body, timeout)));
   }
-  function _del(path) {
-    return fetch(BASE + path, {method: 'DELETE', headers: headers()}).then(r => handleResp(r, () => _del(path)));
+  function _put(path, body, timeout) {
+    return _fetchWithTimeout(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}, timeout).then(r => handleResp(r, () => _put(path, body, timeout)));
+  }
+  function _del(path, timeout) {
+    return _fetchWithTimeout(BASE + path, {method: 'DELETE', headers: headers()}, timeout).then(r => handleResp(r, () => _del(path, timeout)));
   }
 
   return {

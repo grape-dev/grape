@@ -223,7 +223,7 @@ function renderDashboard(data) {
       window._dashboardEditing = false;
       app.showToast('引擎配置已保存');
       API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(() => {});
-    }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
+    }).catch(e => { window._dashboardEditing = false; app.showToast('保存失败: ' + (e.detail?.message || e.message)); });
   };
 
   window.enterCreateMode = function() {
@@ -372,7 +372,7 @@ function renderDashboard(data) {
           overlay.remove();
           app.showToast('场景已保存');
           API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
-        }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
+        }).catch(e => { window._dashboardEditing = false; app.showToast('保存失败: ' + (e.detail?.message || e.message)); });
       } else {
         // 创建新场景：POST
         API.post('/scenes', { name: sceneName, description: sceneDesc, scope: sceneScope, nodes: nodesPayload }).then(r => {
@@ -380,7 +380,7 @@ function renderDashboard(data) {
           overlay.remove();
           app.showToast('场景创建成功');
           if (r.scene_id) { applyScene(owner, name, r.scene_id); }
-        }).catch(e => app.showToast('保存失败: ' + (e.detail?.message || e.message)));
+        }).catch(e => { window._dashboardEditing = false; app.showToast('保存失败: ' + (e.detail?.message || e.message)); });
       }
     };
   };
