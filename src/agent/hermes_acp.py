@@ -188,13 +188,7 @@ class HermesACPBackend:
                             log.info(f"{label}hermes ACP detected JSON record in text output, assuming prompt done")
                             prompt_result["stopReason"] = "end_turn"
                             prompt_done.set()
-                            # 主动关闭 stdin 触发 hermes 退出（避免死锁：
-                            # hermes 等下一个请求不退出，reader 检测不到 EOF，
-                            # 主循环不 break，收尾代码不执行）
-                            try:
-                                proc.stdin.close()
-                            except Exception:
-                                pass
+                            # 多步模式：不 close stdin，让外层循环判断是否续步
                         elif _is_chat_task and collected_text:
                             # chat 任务不输出 JSON 记录块（actions/conclusion/issue_summary），
                             # 用 text 输出稳定检测：记录首次有 text 的时间，
@@ -209,10 +203,6 @@ class HermesACPBackend:
                                 log.info(f"{label}hermes ACP chat task text stable for {_CHAT_IDLE_SECONDS}s, assuming done")
                                 prompt_result["stopReason"] = "end_turn"
                                 prompt_done.set()
-                                try:
-                                    proc.stdin.close()
-                                except Exception:
-                                    pass
             elif msg_type == "thinking":
                 _think_buf.append(content)
                 if "\n" in content or sum(len(s) for s in _think_buf) >= _BUF_MAX:
@@ -772,6 +762,16 @@ def _extract_session_id(result) -> str:
             if sid:
                 return sid
     return ""
+
+def _detect_structured_output(text: str) -> bool:
+    """检测 agent 累积输出中是否包含结构化 JSON 记录块。
+
+    Grape agent 任务完成时输出含 actions + conclusion + issue_summary
+    字段的 JSON 块。有则任务真正完成；无则 LLM 提前 end_turn，需续步。
+    """
+    if not text:
+        return False
+    return '"actions"' in text and '"conclusion"' in text and '"issue_summary"' in text
 
 def _done_result(exit_code, text, session_id, errors, stderr) -> dict:
     return {

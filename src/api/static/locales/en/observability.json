@@ -65,6 +65,7 @@
   "has_failure": "❌ Has failures",
   "normal": "✓ OK",
   "events_count": "{{count}} events",
+  "total_duration": "Total",
   "sequence_diagram": "📊 Sequence Diagram",
   "event_list": "📋 Event List",
   "col_event": "Event",

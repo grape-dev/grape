@@ -522,7 +522,7 @@ function doCreateFromTemplate(templateId) {
     }
   }
   // 模拟进度推进（实际 API 是同步的，用定时器推进）
-  var _timer = setInterval(nextStep, 3000);
+  var _timer = setInterval(nextStep, 5000);
   // 第一步立即显示
   setProgress(10, I18N.t('templates.progress_checking'));
 
@@ -539,7 +539,7 @@ function doCreateFromTemplate(templateId) {
         return;
       }
       setProgress(25, I18N.t('templates.progress_creating_repo'));
-      API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}).then(function(r) {
+      API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}, 300000).then(function(r) {
         clearInterval(_timer);
         setProgress(100, I18N.t('templates.progress_done'));
         var modal = document.getElementById('ptCreateModal');

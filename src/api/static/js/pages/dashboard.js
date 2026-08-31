@@ -223,7 +223,7 @@ function renderDashboard(data) {
       window._dashboardEditing = false;
       app.showToast(I18N.t('dashboard.engine_config_saved'));
       API.get('/dashboard/' + repo.owner + '/' + repo.name).then(renderDashboard).catch(() => {});
-    }).catch(e => app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})));
+    }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
   };
 
   window.enterCreateMode = function() {
@@ -372,7 +372,7 @@ function renderDashboard(data) {
           overlay.remove();
           app.showToast(I18N.t('dashboard.scene_saved'));
           API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
-        }).catch(e => app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})));
+        }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
       } else {
         // 创建新场景：POST
         API.post('/scenes', { name: sceneName, description: sceneDesc, scope: sceneScope, nodes: nodesPayload }).then(r => {
@@ -380,7 +380,7 @@ function renderDashboard(data) {
           overlay.remove();
           app.showToast(I18N.t('dashboard.scene_created'));
           if (r.scene_id) { applyScene(owner, name, r.scene_id); }
-        }).catch(e => app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})));
+        }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
       }
     };
   };
