@@ -111,7 +111,7 @@
             </div>
           </div>
           <div style="padding:12px 20px">
-            <div v-if="timelineLoading" style="text-align:center;padding:32px;color:var(--text-tertiary)">加载中...</div>
+            <div v-if="timelineLoading && timelineIssues.length === 0" style="text-align:center;padding:32px;color:var(--text-tertiary)">加载中...</div>
             <div v-else-if="timelineIssues.length === 0" style="text-align:center;padding:32px;color:var(--text-tertiary)">暂无任务事件</div>
             <!-- Issue 行 -->
             <div v-for="iss in timelineIssues" :key="iss.issueId" class="tl-issue">
