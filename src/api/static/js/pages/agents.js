@@ -113,7 +113,7 @@ function loadCfgOptions() {
       // 按标签过滤：展示仓库级/全局/个人引擎（个人引擎仅 owner 自己可见，后端已过滤）
       const ok = runtimes.filter(r => {
         if (r.scope !== 'repo' && r.scope !== 'global' && r.scope !== 'user') return false;
-        const tags = r.agent_tags || ['all'];
+        const tags = r.agent_tags || [];
         return tags.includes('all') || tags.includes(agentType);
       });
       const tagLabels = {all: I18N.t('agents.tag.all'), vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE'};
@@ -124,7 +124,7 @@ function loadCfgOptions() {
         const color = _beColor(i);
         const checked = current.includes(v) || current.includes(r.name) ? 'checked' : '';
         const rgb = _beRgb(color);
-        const tagStr = (r.agent_tags || ['all']).map(t => tagLabels[t]||t).join('/');
+        const tagStr = (r.agent_tags || []).map(t => tagLabels[t]||t).join('/');
         return `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap;width:100%;flex-shrink:1;background:${checked ? `rgba(${rgb},.12)` : 'transparent'};${checked ? `box-shadow:inset 2px 0 0 ${color}` : ''};transition:background .12s">
           <input type="checkbox" class="cfg-backend-cb" value="${v}" data-color="${color}" ${checked} style="accent-color:${color};flex:0 0 auto;width:14px;height:14px;margin:0">
           <span style="width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0"></span>

@@ -315,7 +315,7 @@ function openEngineDetail(runtimeId) {
           <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.role_tags')}</span>
           <button class="bt bt-p" style="font-size:11px;padding:4px 10px;border-radius:4px" onclick="saveEngineTags(${runtimeId})">${I18N.t('runtimes.action.save_tags')}</button>
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:4px">${_engineTagCheckboxes(rt.agent_tags || ['all'])}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px">${_engineTagCheckboxes(rt.agent_tags || [])}</div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">

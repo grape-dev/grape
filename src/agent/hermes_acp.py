@@ -286,7 +286,7 @@ class HermesACPBackend:
                 "protocolVersion": 1,
                 "clientInfo": {"name": "grape-agent", "version": "0.1.0"},
                 "clientCapabilities": {},
-            }, timeout=30)
+            }, timeout=100)
             if init_err:
                 error_events.append(f"initialize failed: {init_err}")
                 yield ("done", _done_result(-1, "", session_id, error_events, ""))
@@ -385,7 +385,7 @@ class HermesACPBackend:
                         "protocolVersion": 1,
                         "clientInfo": {"name": "grape-agent", "version": "0.1.0"},
                         "clientCapabilities": {},
-                    }, timeout=30)
+                    }, timeout=100)
                     if init_err:
                         error_events.append(f"re-init failed: {init_err}")
                         break
@@ -398,13 +398,13 @@ class HermesACPBackend:
                         "cwd": cwd if cwd else ".",
                         "sessionId": _resume_sid,
                         "mcpServers": [],
-                    }, timeout=30)
+                    }, timeout=100)
                     if err:
                         log.warning(f"{label}hermes ACP retry attempt {attempt}: resume {_resume_sid[:12]}... failed: {err}, creating new")
                         result, err = client.request("session/new", {
                             "cwd": cwd if cwd else ".",
                             "mcpServers": [],
-                        }, timeout=30)
+                        }, timeout=100)
                         if err:
                             error_events.append(f"re-session/new failed: {err}")
                             break
@@ -426,16 +426,16 @@ class HermesACPBackend:
                             session_id = ""
                             result, err = client.request("session/new", {
                                 "cwd": cwd_arg, "mcpServers": [],
-                            }, timeout=30)
+                            }, timeout=100)
                         else:
                             result, err = client.request("session/resume", {
                                 "cwd": cwd_arg, "sessionId": session_id, "mcpServers": [],
-                            }, timeout=30)
+                            }, timeout=100)
                         if err:
                             log.warning(f"{label}hermes ACP resume {session_id[:12]}... failed: {err}, creating new")
                             result, err = client.request("session/new", {
                                 "cwd": cwd_arg, "mcpServers": [],
-                            }, timeout=30)
+                            }, timeout=100)
                             if err:
                                 error_events.append(f"session/new failed: {err}")
                                 yield ("done", _done_result(-1, "", session_id, error_events, ""))
@@ -446,7 +446,7 @@ class HermesACPBackend:
                     else:
                         result, err = client.request("session/new", {
                             "cwd": cwd_arg, "mcpServers": [],
-                        }, timeout=30)
+                        }, timeout=100)
                         if err:
                             error_events.append(f"session/new failed: {err}")
                             yield ("done", _done_result(-1, "", session_id, error_events, ""))

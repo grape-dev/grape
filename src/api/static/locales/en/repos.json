@@ -49,6 +49,7 @@
     "status_hosted": "Hosted",
     "status_joined": "Joined",
     "status_not_joined": "Not Hosted",
+    "no_permission_host": "No permission to host. Please contact the administrator.",
     "no_description": "No description"
   },
   "managed": {
@@ -103,5 +104,7 @@
   "brand_sub": "Agentic DevOps",
   "repositories": "Repositories",
   "sync_from_gitcode": "Sync from GitCode",
-  "hosted": "Hosted"
+  "hosted": "Hosted",
+  "no_hosted_project": "No hosted projects, please join and host a project first",
+  "unhosted_title": "Unhosted Repositories"
 }
