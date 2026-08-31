@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR
-from src.session_manager import get_or_create_session, update_session, db
+from src.session_manager import get_or_create_session, update_session, update_conversation, db
 from src.prompt_builder import build_chat_prompt
 from src.runtime.executor import consume_stream_async
 from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
@@ -825,16 +825,44 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
             pass
 
 
+def _resolve_oc_sid(conv: dict | None, repo_oc_sid: str) -> str:
+    """解析 opencode 会话 id：优先 conversation.runtime_session_id（与 web 同源），空则回退 repo 级。
+
+    feishu-chat-reuse-web-session.md §3.1：飞书与 web 对同一 conversation 复用相同 session，
+    避免 cwd（conv 级）与 session.directory（repo 级）不匹配导致历史加载失败。
+    """
+    conv_sid = ""
+    if conv:
+        conv_sid = (conv.get("runtime_session_id") or "").strip()
+    return conv_sid or (repo_oc_sid or "")
+
+
 async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                                      parsed, text, repo_key, repository,
                                      msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
-                                     bind_account="", exec_account=""):
+                                     bind_account="", exec_account="", conv_id="", conv=None):
     """异步版内部处理逻辑
 
     bind_account: 用于 repo_im_group_binding 隔离（Chat Bot 场景 = bot app_id）
     exec_account: 用于 workspace history / agent 执行（= 仓库全名 owner/repo）
+    conv_id/conv: 当前 conversation（与 web 同源，用其 runtime_session_id 复用 opencode 会话）
     """
     try:
+        # 获取当前 conversation（飞书 与 web 共源；用于复制 runtime_session_id 复用 opencode 会话）
+        if not conv:
+            try:
+                from src.session_manager import get_conversation_by_im
+                _uid = 0
+                try:
+                    _uid = get_user_id_by_app_id(ctx.app_id) or 0
+                except Exception:
+                    pass
+                conv = get_conversation_by_im(chat_id, _uid) if _uid else None
+            except Exception:
+                conv = None
+        if not conv_id and conv:
+            conv_id = conv.get("id", "")
+
         sender_id = parsed.get('sender_id', '')
         open_id = parsed.get('sender_open_id', '')
         user_info = "## 用户基本信息\n"
@@ -940,6 +968,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         else:
             backend = engine_name(_rid) or ""
             oc_sid = {"opencode": oc_sid, "cc_sid": cc_sid}.get(backend, "")
+            # 优先 conversation 会话（与 web 同源）；空则回退 repo 级
+            oc_sid = _resolve_oc_sid(conv, oc_sid)
             new_oc_session_id = oc_sid
             kind = runtime_execution_kind(_rid)
             # queue_remote 强制模式下兜底：配置引擎离线/本机直连无 claim 方 → 解析在线远端引擎
@@ -1030,6 +1060,12 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         # from src.session_manager import dump_history_to_file
         # dump_history_to_file(repo_key, history, exec_account)
         update_session(sess, history, "idle", new_oc_session_id, backend)
+        # 写回 conversation.runtime_session_id（与 web 同源，保证飞书/web 复用同一 opencode 会话）
+        if conv_id and new_oc_session_id:
+            try:
+                update_conversation(conv_id, runtime_session_id=new_oc_session_id)
+            except Exception as _we:
+                log.warning(f"[Chat:{ctx.name}] write conv runtime_session_id failed: {_we}")
 
         output = final_text.strip()
         if output == "SKIP":
