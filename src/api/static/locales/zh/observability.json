@@ -65,6 +65,7 @@
   "has_failure": "❌ 有失败",
   "normal": "✓ 正常",
   "events_count": "{{count}} 事件",
+  "total_duration": "总耗时",
   "sequence_diagram": "📊 时序图",
   "event_list": "📋 事件列表",
   "col_event": "事件",
