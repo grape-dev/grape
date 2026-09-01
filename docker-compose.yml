@@ -5,16 +5,15 @@ services:
     ports:
       - "80:80"
       - "8080:8080"
-    volumes:
-      - ./data:/app/data
-      - ./configs:/app/configs
-      # 官方技能由独立技能仓库构建期铺入宿主 ./skills（scripts/sync_skills.sh），卷挂载免重建镜像
-      - ./skills:/app/skills
     environment:
       - TZ=Asia/Shanghai
     volumes:
       - grape-data:/app/data
       - ./configs:/app/configs   # 挂载整个 configs 目录（运行时可改配置）
+      # 官方技能由独立技能仓库构建期铺入宿主 ./skills（scripts/sync_skills.sh），卷挂载免重建镜像
+      - ./skills:/app/skills
+      # 官方项目模板由独立模板仓库构建期铺入宿主 ./examples（scripts/sync_templates.sh），卷挂载免重建镜像
+      - ./examples:/app/examples
     restart: unless-stopped
     logging:
       driver: json-file
