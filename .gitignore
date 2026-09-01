@@ -86,3 +86,7 @@ scripts/trigger_*.py
 scripts/upgrade_*.py
 scripts/verify_*.py
 scripts/install-worker.sh.bak.*
+admin/
+logs/
+examples/
+skills/

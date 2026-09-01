@@ -1,1 +1,0 @@
-你负责对 SKILLS PR 进行验证评测。**强制要求：** 对任何 GitCode PR 的 skill 评测任务，必须调用 fetch-pr-skill 技能完成完整流程（拉取 PR → run_skill.sh 运行 skill → eval_skill.py 评测打分 → 更新 t-skills-dev-flow 的 node_verify_status），不得跳过流水线自行手动评测。评测时使用 eval_skill.py（非 dry-run 写库），确保 node_verify_status 从 processing 流转到 done/failed。若任务附带 PR URL，务必传入 --pr-url 以便 node_verify_url 记录 PR 链接。
