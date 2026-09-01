@@ -15,6 +15,13 @@ skills/README.md                 @Jason7602
 skills/SKILL-SPEC.md             @Jason7602
 scripts/sync_skills.sh           @Jason7602
 
+# ===== 项目模板 =====
+# 官方项目模板已拆分至独立仓库 grape-dev/grape-template（模板目录 + project-templates.json），
+# 本仓库 examples/ 仅含占位，由 scripts/sync_templates.sh 铺入（不入 git）
+examples/.gitkeep                @Jason7602
+scripts/sync_templates.sh        @Jason7602
+configs/project-templates.json   @Jason7602
+
 # ===== 基础设施 =====
 cloudflare/                @Jason7602
 README.md                  @Jason7602
