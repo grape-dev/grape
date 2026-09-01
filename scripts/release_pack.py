@@ -4,12 +4,16 @@
 产物: grape-system-<YYYYMMDDHHMM>.tar
   ├── INSTALL.md          (agent 可读安装指南)
   ├── SHA256SUMS          (相对路径校验)
-  ├── backend/            (grape 后端 src + 静态资源 + configs example + examples)
-  ├── frontend/           (grape-admin 前端 dist)
-  ├── admin-backend/      (grape-admin 后端 jar + ai_hermes_query.py)
+  ├── backend/            (grape 后端 src + 静态资源 + configs example)
   ├── database/           (MySQL DDL + 种子数据)
-  ├── skills/             (grape-skills 全量)
+  ├── skills/             (grape-skills 全量，从独立仓库读取)
+  ├── templates/          (grape-template 项目模板，从独立仓库读取)
   └── tools/              (worker 运行时 + install-worker.sh)
+
+注:
+  - admin 运营管理台已独立项目 (grape-dev/grape-admin)，单独打包为 grape-admin-<ts>.tar
+  - skills 已独立项目 (grape-dev/grape-skills)，打包时从独立仓库读取
+  - examples/templates 已独立项目 (grape-dev/grape-template)，打包时从独立仓库读取
 """
 import hashlib, os, subprocess, sys, tarfile, io, shutil, datetime, gzip, json
 
@@ -17,6 +21,10 @@ ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 OUT_DIR = "/root/release"
 BUCKET = "obs-grape-release"
 PREFIX = "release"
+
+# 独立项目路径（可通过环境变量覆盖）
+SKILLS_REPO = os.environ.get("GRAPE_SKILLS_ROOT", "/opt/grape-skills")
+TEMPLATE_REPO = os.environ.get("GRAPE_TEMPLATE_ROOT", "/opt/grape-template")
 
 # ---- 工具函数 ----
 
@@ -54,7 +62,7 @@ def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
 # ---- 子包构建 ----
 
 def pack_backend(ts):
-    """后端: src/ (含 api/static) + configs examples + examples/ + requirements"""
+    """后端: src/ (含 api/static) + configs example + requirements"""
     out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
@@ -73,10 +81,6 @@ def pack_backend(ts):
         p = os.path.join(ROOT, "configs", cf)
         if os.path.isfile(p):
             items.append((p, f"configs/{cf}"))
-    # examples/ (项目模板)
-    ex_dir = os.path.join(ROOT, "examples")
-    if os.path.isdir(ex_dir):
-        items.append((ex_dir, "examples"))
     # requirements
     for rf in ["requirements.txt", "requirements-worker.txt"]:
         p = os.path.join(ROOT, rf)
@@ -86,39 +90,6 @@ def pack_backend(ts):
     df = os.path.join(ROOT, "Dockerfile")
     if os.path.isfile(df):
         items.append((df, "Dockerfile"))
-    make_subtar_gz(items, out)
-    return out
-
-def pack_frontend(ts):
-    """前端: grape-admin 前端构建产物"""
-    out = os.path.join(OUT_DIR, f"staging/frontend/grape-frontend-{ts}.tar.gz")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    dist_dir = os.path.join(ROOT, "admin/frontend/dist")
-    if not os.path.isdir(dist_dir):
-        print(f"[WARN] admin frontend dist 不存在，跳过")
-        return None
-    make_subtar_gz(dist_dir, out, base_dir="dist")
-    return out
-
-def pack_admin_backend(ts):
-    """admin 后端: jar + ai_hermes_query.py"""
-    out = os.path.join(OUT_DIR, f"staging/admin-backend/grape-admin-backend-{ts}.tar.gz")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    items = []
-    jar = os.path.join(ROOT, "admin/backend/target/admin-backend-0.1.0.jar")
-    if os.path.isfile(jar):
-        items.append((jar, "admin-backend-0.1.0.jar"))
-    else:
-        print(f"[WARN] admin backend jar 不存在，跳过")
-        return None
-    ai = os.path.join(ROOT, "admin/backend/ai_hermes_query.py")
-    if os.path.isfile(ai):
-        items.append((ai, "ai_hermes_query.py"))
-    # admin deploy 脚本
-    for sf in ["deploy.sh", "admin-backend.service", "nginx-grape-admin.conf"]:
-        p = os.path.join(ROOT, "admin/deploy", sf)
-        if os.path.isfile(p):
-            items.append((p, f"deploy/{sf}"))
     make_subtar_gz(items, out)
     return out
 
@@ -223,14 +194,24 @@ def pack_database(ts):
     return out
 
 def pack_skills(ts):
-    """skills: grape-skills 全量"""
+    """skills: 从独立仓库 grape-dev/grape-skills 读取全量"""
     out = os.path.join(OUT_DIR, f"staging/skills/grape-skills-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    skills_dir = os.path.join(ROOT, "skills")
+    skills_dir = os.path.join(SKILLS_REPO, "skills")
     if not os.path.isdir(skills_dir):
-        print(f"[WARN] skills 目录不存在，跳过")
+        print(f"[WARN] skills 目录不存在 ({SKILLS_REPO}/skills)，跳过")
         return None
     make_subtar_gz(skills_dir, out, base_dir="skills")
+    return out
+
+def pack_templates(ts):
+    """templates: 从独立仓库 grape-dev/grape-template 读取项目模板"""
+    out = os.path.join(OUT_DIR, f"staging/templates/grape-templates-{ts}.tar.gz")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    if not os.path.isdir(TEMPLATE_REPO):
+        print(f"[WARN] template 目录不存在 ({TEMPLATE_REPO})，跳过")
+        return None
+    make_subtar_gz(TEMPLATE_REPO, out, base_dir="templates")
     return out
 
 def pack_tools(ts):
@@ -294,19 +275,19 @@ Grape 是 Server-Worker 架构:
 Grape Server (1 台, 部署全部服务端组件)
   ├── grape-main      (uvicorn src.api.main:app, :8000)
   ├── grape-webhook   (uvicorn src.api.run_webhook:app, :8080)
-  ├── grape-admin     (Java jar + Vue3 前端, :8090)
   ├── MySQL            (RDS 或本地, :3306)
-  └── nginx            (:80/:443 TLS, 反代 main+webhook+admin)
+  └── nginx            (:80/:443 TLS, 反代 main+webhook)
 
 Remote Workers (N 台, 仅装 worker 运行时)
   └── runtime-agent   (python -m src.runtime.agent)
+
+注: grape-admin 运营管理台为独立项目，单独部署
 ```
 
 ## 2. 前置条件
 
 - OS: Linux aarch64/x86_64 (推荐 Huawei Cloud EulerOS/openEuler)
 - Python: >= 3.10 (推荐 3.12, 用 uv 安装)
-- Java: >= 11 (admin 后端)
 - MySQL: >= 8.0
 - nginx (可选, 生产推荐)
 - 工具: curl, git, uv (Python 包管理)
@@ -361,21 +342,7 @@ mysql -h<HOST> -u<USER> -p -e "CREATE DATABASE IF NOT EXISTS <DB> CHARACTER SET 
 mysql -h<HOST> -u<USER> -p <DB> < grape-db-{ts}.sql
 ```
 
-### 3.4 安装前端 (grape-admin 控制台)
-
-```bash
-# 前端
-mkdir -p /opt/grape-admin/frontend
-tar xzf /path/to/frontend/grape-frontend-{ts}.tar.gz -C /opt/grape-admin/frontend/
-
-# 后端
-tar xzf /path/to/admin-backend/grape-admin-backend-{ts}.tar.gz -C /opt/grape-admin/backend/
-cp /opt/grape-admin/backend/deploy/admin-backend.service /etc/systemd/system/
-cp /opt/grape-admin/backend/deploy/nginx-grape-admin.conf /etc/nginx/conf.d/
-# 配置 /etc/grape/admin.env (MySQL/GitCode 凭据)
-```
-
-### 3.5 安装 Skills
+### 3.4 安装 Skills
 
 ```bash
 # 解压 skills 到 grape 仓库根目录
@@ -384,7 +351,7 @@ tar xzf /path/to/skills/grape-skills-{ts}.tar.gz
 # skills 目录覆盖到 /opt/grape/skills/
 ```
 
-### 3.6 systemd 服务
+### 3.5 systemd 服务
 
 ```bash
 # grape-main.service
@@ -429,7 +396,7 @@ systemctl daemon-reload
 systemctl enable --now grape-main grape-webhook
 ```
 
-### 3.7 验证
+### 3.6 验证
 
 ```bash
 curl -s http://127.0.0.1:8000/health    # {{"status":"ok"}}
@@ -457,12 +424,13 @@ bash install-worker.sh --token <rta_...> --server https://<grape主控域名>
 
 | 子包 | 说明 | 部署位置 |
 |------|------|----------|
-| backend/grape-backend-{ts}.tar.gz | 后端代码(src/api + static) + configs + examples | /opt/grape/ |
-| frontend/grape-frontend-{ts}.tar.gz | admin 控制台前端 (Vue3 dist) | /opt/grape-admin/frontend/ |
-| admin-backend/grape-admin-backend-{ts}.tar.gz | admin 控制台后端 (Java jar) | /opt/grape-admin/backend/ |
+| backend/grape-backend-{ts}.tar.gz | 后端代码(src/api + static) + configs | /opt/grape/ |
 | database/grape-db-{ts}.sql.gz | MySQL DDL + 种子数据 | MySQL |
-| skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills) | /opt/grape/skills/ |
+| skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills，独立仓库) | /opt/grape/skills/ |
+| templates/grape-templates-{ts}.tar.gz | 项目模板 (独立仓库) | /opt/grape/examples/ |
 | tools/grape-toolkit-{ts}.tar.gz | worker 运行时 + 注册脚本 | /opt/grape/ (worker 机) |
+
+注: admin 运营管理台 (grape-admin) 为独立项目，单独打包部署
 
 ## 6. 配置文件 (需现场填写, 不在包内)
 
@@ -493,40 +461,34 @@ def main():
     os.makedirs(os.path.join(OUT_DIR, "staging"), exist_ok=True)
 
     # 1. 构建子包
-    print("[pack] 1/6 构建后端子包...")
+    print("[pack] 1/5 构建后端子包...")
     backend_pkg = pack_backend(ts)
     print(f"  -> {backend_pkg} ({os.path.getsize(backend_pkg) // 1024}KB)")
 
-    print("[pack] 2/6 构建前端子包...")
-    frontend_pkg = pack_frontend(ts)
-    if frontend_pkg:
-        print(f"  -> {frontend_pkg} ({os.path.getsize(frontend_pkg) // 1024}KB)")
-
-    print("[pack] 3/6 构建 admin 后端子包...")
-    admin_pkg = pack_admin_backend(ts)
-    if admin_pkg:
-        print(f"  -> {admin_pkg} ({os.path.getsize(admin_pkg) // 1024}KB)")
-
-    print("[pack] 4/6 构建数据库子包...")
+    print("[pack] 2/5 构建数据库子包...")
     db_pkg = pack_database(ts)
     print(f"  -> {db_pkg} ({os.path.getsize(db_pkg) // 1024}KB)")
 
-    print("[pack] 5/6 构建 skills 子包...")
+    print("[pack] 3/5 构建 skills 子包...")
     skills_pkg = pack_skills(ts)
     if skills_pkg:
         print(f"  -> {skills_pkg} ({os.path.getsize(skills_pkg) // 1024}KB)")
 
-    print("[pack] 6/6 构建 worker toolkit 子包...")
+    print("[pack] 4/5 构建 templates 子包...")
+    templates_pkg = pack_templates(ts)
+    if templates_pkg:
+        print(f"  -> {templates_pkg} ({os.path.getsize(templates_pkg) // 1024}KB)")
+
+    print("[pack] 5/5 构建 worker toolkit 子包...")
     tools_pkg = pack_tools(ts)
     print(f"  -> {tools_pkg} ({os.path.getsize(tools_pkg) // 1024}KB)")
 
-    # 2. 收集子包
+    # 2. 收集子包（admin/skills/templates 已独立项目）
     sub_pkgs = {
         "backend": backend_pkg,
-        "frontend": frontend_pkg,
-        "admin-backend": admin_pkg,
         "database": db_pkg,
         "skills": skills_pkg,
+        "templates": templates_pkg,
         "tools": tools_pkg,
     }
 
@@ -573,9 +535,9 @@ def main():
         "INSTALL.md": any("INSTALL.md" in n for n in names),
         "SHA256SUMS": any("SHA256SUMS" in n for n in names),
         "backend": any("backend/" in n for n in names),
-        "frontend": any("frontend/" in n for n in names),
         "database": any("database/" in n for n in names),
         "skills": any("skills/" in n for n in names),
+        "templates": any("templates/" in n for n in names),
         "tools": any("tools/" in n for n in names),
     }
     for k, v in checks.items():

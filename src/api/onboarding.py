@@ -244,7 +244,8 @@ def _execute_agent_wrapper(repo_key, seq, owner, skill, backend, runtime_id, evt
     _finalize_onboarding(repo_key, seq, owner, _result_path)
 
 
-def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target, skill_id=0):
+def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target, skill_id=0,
+                             pool_tag="", pool_agent_type=""):
     """queue 模式：入队由本地/远端 worker 执行（本地无 opencode 也可运行）。
 
     方案 B：按预分配 issue 号（experience→#1, explore→#2）建 Issue 级会话，传 issue_session_id，
@@ -285,16 +286,33 @@ def _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, t
         skill_path=_skill_p,
         skill_id=skill_id,
         issue_session_id=issue_session_id,
+        pool_tag=pool_tag,
+        pool_agent_type=pool_agent_type,
         env_extra={"REPO_FULL_NAME": repository, "REPO_OWNER": owner,
                    "ONBOARDING_RESULT": result_path, "ONBOARDING_TARGET": target},
     )
     log.info(f"[Onboarding|repo:{repo_key}] enqueued task={tid} seq={seq} target={target} issue={issue_id} issue_session={issue_session_id}")
     # queue 模式终态后补库：轮询任务终态，触发 _finalize_onboarding
+    # trigger_onboarding 是同步函数，可能不在 async 上下文中——用线程兜底
     try:
-        from src.runtime.service import wait_task_terminal
-        asyncio.create_task(_await_task_and_finalize(repo_key, seq, tid, owner, result_path))
+        try:
+            asyncio.create_task(_await_task_and_finalize(repo_key, seq, tid, owner, result_path))
+        except RuntimeError:
+            # No running event loop → 用线程跑
+            import threading as _th
+            _th.Thread(target=_await_task_and_finalize_sync, args=(repo_key, seq, tid, owner, result_path),
+                       daemon=True, name=f"onboarding-await-{tid}").start()
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] task await setup failed: {e}")
+
+
+def _await_task_and_finalize_sync(repo_key, seq, tid, owner, result_path):
+    """同步包装：在线程里跑 async _await_task_and_finalize"""
+    try:
+        asyncio.run(_await_task_and_finalize(repo_key, seq, tid, owner, result_path))
+    except Exception as e:
+        log.warning(f"[Onboarding|repo:{repo_key}] await sync wrapper failed: {e}")
+        _finalize_onboarding(repo_key, seq, owner, result_path)
 
 
 async def _await_task_and_finalize(repo_key, seq, tid, owner, result_path):
@@ -330,12 +348,20 @@ def trigger_onboarding(repo_key: str, owner: str):
         backend, runtime_id, skill_path, skill_id = _load_vod_session(repo_key)
         # engine-selection-design.md v2：按引擎集合/会话主引擎选引擎；无引擎 → 跳过引导（不隐式 opencode）
         from src.runtime.engine_select import pick_engine, engine_name
-        engine_id = pick_engine(repo_key, "vod", fallback_runtime_id=runtime_id) or 0
-        if not engine_id:
+        from src.api.event_pipeline import is_plugin_mode
+        _picked = pick_engine(repo_key, "vod", fallback_runtime_id=runtime_id)
+        engine_id = _picked if _picked is not None else 0
+        if engine_id is None:
             log.warning(f"[Onboarding|repo:{repo_key}] no available engine, skip onboarding")
             return
-        backend = engine_name(engine_id) or backend
-        runtime_id = engine_id
+        # plugin 模式下 engine_id=0 表示广播（池内引擎竞争认领），是合法值
+        _is_plugin_broadcast = (engine_id == 0 and is_plugin_mode())
+        if _is_plugin_broadcast:
+            backend = backend or "opencode"
+            runtime_id = 0
+        else:
+            backend = engine_name(engine_id) or backend
+            runtime_id = engine_id
 
         # 2. 落库两个主事件 + 两次引导分派（各 target 一次）
         #    执行模式跟随选中引擎（kind = runtime_execution_kind(engine_id)，与 vod_handler_async 一致）
@@ -358,7 +384,10 @@ def trigger_onboarding(repo_key: str, owner: str):
                    "actor": owner or "", "account": from_repo_key(repo_key), "issue_id": f"#{_expected_issue}",
                    "payload": {"repository": from_repo_key(repo_key), "owner": owner, "onboarding_target": target}}
             if kind != EXEC_MODE_DIRECT:
-                _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target, skill_id=skill_id)
+                _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target,
+                                         skill_id=skill_id,
+                                         pool_tag="vod" if _is_plugin_broadcast else "",
+                                         pool_agent_type="vod" if _is_plugin_broadcast else "")
             else:
                 evt["_skill_path"] = skill_path
                 threading.Thread(target=_execute_agent_wrapper, args=(

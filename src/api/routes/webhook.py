@@ -25,10 +25,11 @@ async def _on_handoff_dispatch(event):
     skill_path = payload.get("skill_path", "")
     runtime_id = payload.get("runtime_id", 0)
     scene_id = payload.get("scene_id", "default")
+    scene_user_id = payload.get("scene_user_id", 0)
     node_id = payload.get("node_id", target_agent)
     evt = payload.get("evt", {})
 
-    log.info(f"agent/handoff listener: dispatching {target_agent} (node={node_id}, scene={scene_id})")
+    log.info(f"agent/handoff listener: dispatching {target_agent} (node={node_id}, scene={scene_id}, uid={scene_user_id})")
 
     try:
         result = await dispatch_node(
@@ -43,6 +44,7 @@ async def _on_handoff_dispatch(event):
             skill_path=skill_path,
             runtime_id=runtime_id,
             pool_tag=target_agent,
+            user_id=scene_user_id,
         )
         log.info(f"agent/handoff listener: result={result}")
         if result.get("status") == "failed":
@@ -238,6 +240,31 @@ async def a2a_endpoint(request: Request):
                             skill_path = _sk.get("skill_path") or skill_name
         except Exception:
             pass
+
+        # Issue 级场景优先：scene 非 default 时，用 issue scene 的 skill 覆盖 session 的 skill
+        # 防止场景中心切换场景后污染已选定场景的 issue
+        if issue_number:
+            try:
+                from src.api.session_store import get_issue_scene
+                from src.api.event_pipeline import is_plugin_mode, resolve_skill_from_pipeline
+                _a2a_issue_scene, _a2a_issue_uid = get_issue_scene(repo_key, f"#{issue_number}")
+                _a2a_issue_scene = _a2a_issue_scene or "default"
+                if is_plugin_mode() and _a2a_issue_scene and _a2a_issue_scene != "default":
+                    _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_name, scene_id=_a2a_issue_scene, user_id=_a2a_issue_uid)
+                    if _pipe_skill:
+                        skill_name = _pipe_skill
+                        from src.user.db import resolve_skill_id, get_skill_by_id
+                        _new_sid = resolve_skill_id(_pipe_skill)
+                        if _new_sid:
+                            skill_id = _new_sid
+                            _sk = get_skill_by_id(_new_sid)
+                            skill_path = (_sk.get("skill_path") or _pipe_skill) if _sk else _pipe_skill
+                        else:
+                            skill_path = _pipe_skill
+                            skill_id = 0
+                        log.info(f"A2A: issue scene skill override: {agent_name}={_pipe_skill} sid={skill_id} (scene={_a2a_issue_scene})")
+            except Exception as _oe:
+                log.warning(f"A2A: issue scene skill override failed: {_oe}")
 
         # 回退：DB 未配置 skill 时从 pipelines.json (plugin) 或 agent-skill-mapping.json (legacy) 获取默认 skill
         if not skill_name:
@@ -445,15 +472,17 @@ async def a2a_endpoint(request: Request):
                 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
                 from src.api.pipeline_config import get_pipeline_config, get_node_by_tag
 
-                # Determine scene and node config
+                # Determine scene and node config — 用 Issue 级场景，不是仓库级
                 scene_id = "default"
+                scene_user_id = 0
                 try:
-                    from src.user.db import get_repo_scene
-                    scene_id = get_repo_scene(repo_key) or "default"
+                    from src.api.session_store import get_issue_scene
+                    scene_id, scene_user_id = get_issue_scene(repo_key, f"#{issue_number}") if issue_number else ("default", 0)
+                    scene_id = scene_id or "default"
                 except Exception:
                     pass
 
-                node = get_node_by_tag(scene_id, agent_name)
+                node = get_node_by_tag(scene_id, agent_name, repo_key=repo_key, user_id=scene_user_id)
                 mode = node.get("mode", "emit") if node else "emit"
 
                 handoff_event = GrapeEvent(
@@ -471,6 +500,7 @@ async def a2a_endpoint(request: Request):
                         "runtime_id": runtime_id,
                         "mode": mode,
                         "scene_id": scene_id,
+                        "scene_user_id": scene_user_id,
                         "node_id": node["id"] if node else agent_name,
                         "evt": evt,
                     },

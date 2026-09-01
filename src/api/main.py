@@ -187,7 +187,14 @@ async def lifespan(app: FastAPI):
     log.info("IM WS stopped")
 
 
-app = FastAPI(title="Agentic DevOps API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Agentic DevOps API",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -196,6 +203,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _is_loopback(request: Request) -> bool:
+    """判断请求是否来自内网（127.0.0.1 / ::1）。"""
+    client = request.client
+    if client and client.host in ("127.0.0.1", "::1", "localhost"):
+        return True
+    # 信任反代 X-Forwarded-For（nginx 加 X-Real-IP）
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first in ("127.0.0.1", "::1"):
+            return True
+    xri = request.headers.get("x-real-ip", "")
+    if xri in ("127.0.0.1", "::1"):
+        return True
+    return False
 
 # 可观察性：HTTP 请求指标中间件（仅 METRICS_ADDR 启用时挂载）
 from src.observability import metrics_middleware, start_metrics_server, metrics_endpoint, metrics_enabled
@@ -391,11 +415,14 @@ _PROCESS_STARTED_AT = _dt.now(_tz.utc).isoformat()
 
 
 @app.get("/health")
-async def health():
+async def health(request: Request):
     """Liveness：进程存活，不检查 DB。
 
     K8s livenessProbe 用此端点。DB 挂了不应导致 pod 重启，只标记 NotReady。
+    仅允许内网访问（外网通过 nginx 限制或返回 403）。
     """
+    if not _is_loopback(request):
+        return JSONResponse(status_code=403, content={"error": "forbidden"})
     return {
         "status": "ok",
         "version": "2.0.0",
@@ -411,11 +438,14 @@ _READINESS_CACHE_TTL = 3  # 秒
 
 @app.get("/healthz")
 @app.get("/readyz")
-async def readiness():
+async def readiness(request: Request):
     """Readiness：检查 DB 连通 + 表结构完整性，3s 缓存。
 
     K8s readinessProbe / startupProbe 用此端点。
+    仅允许内网访问。
     """
+    if not _is_loopback(request):
+        return JSONResponse(status_code=403, content={"error": "forbidden"})
     import time as _t
     now = _t.time()
     cached = _readiness_cache["result"]
@@ -456,12 +486,14 @@ async def readiness():
 
 
 @app.get("/health/realtime")
-async def health_realtime():
+async def health_realtime(request: Request):
     """运维诊断：暴露 IM bot 状态、任务队列深度、runtime 在线数。
 
     参考 multica /health/realtime（health_realtime.go）。
-    生产环境建议通过反向代理限制访问（仅 loopback 或 REALTIME_METRICS_TOKEN）。
+    仅允许内网访问——外网不暴露运维细节。
     """
+    if not _is_loopback(request):
+        return JSONResponse(status_code=403, content={"error": "forbidden"})
     from src.session_manager import db, db_lock
     from src.runtime.health import derive_runtime_health
     import time as _time, os as _os
