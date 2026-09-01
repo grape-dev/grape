@@ -26,7 +26,7 @@
     "workspace": "Workspace",
     "devops_agents": "DevOps Agents",
     "knowledge": "Knowledge",
-    "account": "Account",
+    "account": "User Center",
     "settings": "Settings"
   },
   "login": {
@@ -55,7 +55,7 @@
     "workspace": "Workspace",
     "devops_agents": "DevOps Agents",
     "knowledge": "Knowledge",
-    "account": "Account",
+    "account": "User Center",
     "settings": "Settings"
   },
   "loading": "Loading...",

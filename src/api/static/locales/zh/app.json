@@ -26,7 +26,7 @@
     "workspace": "工作区",
     "devops_agents": "DevOps 助手",
     "knowledge": "知识库",
-    "account": "账户",
+    "account": "用户中心",
     "settings": "设置"
   },
   "login": {
@@ -55,7 +55,7 @@
     "workspace": "工作区",
     "devops_agents": "DevOps 助手",
     "knowledge": "知识库",
-    "account": "账户",
+    "account": "用户中心",
     "settings": "设置"
   },
   "loading": "加载中...",
