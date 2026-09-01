@@ -7,10 +7,16 @@
   ├── frontend/           (grape-admin 前端 dist)
   ├── backend/            (grape-admin 后端 jar + ai_hermes_query.py + deploy 脚本)
   └── database/           (admin 相关 MySQL DDL + 种子数据)
+
+admin 已独立项目: https://gitcode.com/grape-dev/grape-admin
+本脚本从 /opt/grape-admin/ 读取源码并构建。
 """
 import hashlib, os, subprocess, sys, tarfile, datetime, gzip, json
 
-ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+# admin 独立项目路径（clone 自 grape-dev/grape-admin）
+ADMIN_ROOT = os.environ.get("GRAPE_ADMIN_ROOT", "/opt/grape-admin")
+# grape 主仓库路径（读取 DB 配置）
+GRAPE_ROOT = "/opt/grape"
 OUT_DIR = "/root/release"
 BUCKET = "obs-grape-release"
 PREFIX = "release"
@@ -36,7 +42,7 @@ def make_subtar_gz(items, out_path):
 
 def pack_frontend(ts):
     out = os.path.join(OUT_DIR, f"staging-admin/frontend/grape-admin-frontend-{ts}.tar.gz")
-    dist_dir = os.path.join(ROOT, "admin/frontend/dist")
+    dist_dir = os.path.join(ADMIN_ROOT, "frontend/dist")
     if not os.path.isdir(dist_dir):
         print(f"[WARN] admin frontend dist 不存在"); return None
     items = [(dist_dir, "dist")]
@@ -46,14 +52,14 @@ def pack_frontend(ts):
 def pack_backend(ts):
     out = os.path.join(OUT_DIR, f"staging-admin/backend/grape-admin-backend-{ts}.tar.gz")
     items = []
-    jar = os.path.join(ROOT, "admin/backend/target/admin-backend-0.1.0.jar")
+    jar = os.path.join(ADMIN_ROOT, "backend/target/admin-backend-0.1.0.jar")
     if os.path.isfile(jar):
         items.append((jar, "admin-backend-0.1.0.jar"))
-    ai = os.path.join(ROOT, "admin/backend/ai_hermes_query.py")
+    ai = os.path.join(ADMIN_ROOT, "backend/ai_hermes_query.py")
     if os.path.isfile(ai):
         items.append((ai, "ai_hermes_query.py"))
     for sf in ["deploy.sh", "admin-backend.service", "nginx-grape-admin.conf"]:
-        p = os.path.join(ROOT, "admin/deploy", sf)
+        p = os.path.join(ADMIN_ROOT, "deploy", sf)
         if os.path.isfile(p):
             items.append((p, f"deploy/{sf}"))
     make_subtar_gz(items, out)
@@ -62,7 +68,7 @@ def pack_backend(ts):
 def pack_database(ts):
     out = os.path.join(OUT_DIR, f"staging-admin/database/grape-admin-db-{ts}.sql.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    db_cfg = json.load(open(os.path.join(ROOT, "configs/db-backend.json")))
+    db_cfg = json.load(open(os.path.join(GRAPE_ROOT, "configs/db-backend.json")))
     mysql = db_cfg.get("mysql", {})
     import pymysql
     conn = pymysql.connect(host=mysql.get("host","127.0.0.1"), port=mysql.get("port",3306),
@@ -216,6 +222,36 @@ systemctl is-active admin-backend
 | /etc/nginx/conf.d/grape-admin.conf | nginx 反代配置 |
 """
 
+def build_admin():
+    """构建 admin 前端 + 后端（在独立项目目录内执行）"""
+    # 1. 前端 npm build
+    print("[build] admin frontend npm build...")
+    r = subprocess.run(["npm", "run", "build"], cwd=os.path.join(ADMIN_ROOT, "frontend"),
+                       capture_output=True, text=True, timeout=180)
+    if r.returncode != 0:
+        print(f"[build] frontend build failed: {r.stderr[-500:]}")
+        sys.exit(1)
+    dist_html = os.path.join(ADMIN_ROOT, "frontend/dist/index.html")
+    if not os.path.isfile(dist_html):
+        print("[build] frontend dist/index.html not found after build")
+        sys.exit(1)
+    print("[build] frontend build OK")
+
+    # 2. 后端 mvn package
+    print("[build] admin backend mvn package...")
+    r = subprocess.run(["mvn", "-B", "-q", "package", "-DskipTests"],
+                       cwd=os.path.join(ADMIN_ROOT, "backend"),
+                       capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        print(f"[build] backend build failed: {r.stderr[-500:]}")
+        sys.exit(1)
+    jar = os.path.join(ADMIN_ROOT, "backend/target/admin-backend-0.1.0.jar")
+    if not os.path.isfile(jar):
+        print("[build] backend jar not found after build")
+        sys.exit(1)
+    print("[build] backend build OK")
+
+
 def main():
     ts = datetime.datetime.now().strftime("%Y%m%d%H%M")
     if len(sys.argv) > 1 and sys.argv[1] == "--ts":
@@ -223,7 +259,11 @@ def main():
     skip_upload = "--skip-upload" in sys.argv
 
     print(f"[pack] 时间戳: {ts}")
+    print(f"[pack] admin 项目: {ADMIN_ROOT}")
     os.makedirs(os.path.join(OUT_DIR, "staging-admin"), exist_ok=True)
+
+    # 0. 构建 admin 前后端
+    build_admin()
 
     print("[pack] 1/3 构建前端子包...")
     fp = pack_frontend(ts)
