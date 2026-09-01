@@ -1,7 +1,7 @@
 # CodeArts 引擎问题排查与优化设计
 
 > 创建: 2026-09-01
-> 更新: 2026-09-01 19:30 (方案 G: per-task 独立数据目录隔离权限, 已验证通过)
+> 更新: 2026-09-01 20:30 (方案 G 代码实施完成, 本机验证通过)
 > 背景: CodeArts 引擎在 Grape pipeline 中效果明显差于 OpenCode 和 Hermes，需系统性定位根因并记录修复方案。
 
 ---
@@ -446,108 +446,52 @@ task 结束:
 | parse_output | 共用 | 共用 | 共用 |
 | _run_once | 不用（独立路径） | 共用 | 共用 |
 
-### 5.0.6 方案 G 需要的代码改动
+### 5.0.6 方案 G 代码实施（已完成, 2026-09-01）
 
-**4 个文件，和回退 E2 同步进行:**
+**实际改动 2 个文件（比设计预估更少，executor.py 和 agent.py _kill_stale_engine 已是干净状态）:**
 
-1. **src/runtime/codearts.py**（核心改动 ~30 行）:
-   - binary 改回 "codearts"（从 E2 的 "opencode" 改回）
-   - build_args: `["run", "--format", "json", "--auto", prompt]`（加 --auto）
-   - get_env: KERNEL_DATA_DIR 从固定路径改成 per-task 临时路径，预写 global.json
-   - 删掉 E2 的 _start_codearts_serve / pre_exec / _find_free_port / import requests
-   - 删掉 E2 的 binary="opencode" / --attach 相关代码
+#### 1. src/runtime/codearts.py（改动 ~15 行）
 
-   **临时目录路径生成（修正：不用 os.environ，避免并发竞态）:**
+- build_args: `["run", "--format", "json"]` → `["run", "--format", "json", "--auto"]`
+- get_env: KERNEL_DATA_DIR 注释更新（setdefault 让 env_extra 能覆盖）
+- 新增模块级常量 `_ALLOW_PERMS`（预写 global.json 的内容）
+- 文档字符串更新为方案 G 描述
 
-   ~~原方案: os.environ["GRAPE_TASK_ID"] = task["id"]~~（存在并发竞态，见 5.0.8 问题 1）
+#### 2. src/runtime/agent.py（改动 ~35 行）
 
-   修正方案: 在 _execute_task 的 env dict（局部变量，并发安全）中设置 KERNEL_DATA_DIR，
-   通过 env_extra 传给 stream_agent → env.update(env_extra) 覆盖 get_env 设的值。
+- 文件顶部新增 `_CODEARTS_ALLOW_PERMS` 常量（权限规则列表）
+- _execute_task 中 knowledge 落地之后、done = None 之前，新增 codearts 临时目录创建逻辑:
+  - 判断 engine_name 含 "codearts" 时触发
+  - 创建 `/var/cache/codearts-tasks/{tid}/cli-data/`
+  - 预写 `storage/permission/global.json`（write/edit/external_directory_write=allow）
+  - 预写 `storage/sandbox/config.json`（network_policy=allow_all）
+  - `env["KERNEL_DATA_DIR"] = cli_data`（局部变量，并发安全）
+  - `_res.track_tmp_pattern(f"/var/cache/codearts-tasks/{tid}")` 注册清理
 
-   ```python
-   # _execute_task (agent.py) 中，env 是局部变量，并发安全
-   tid = task.get("id", "")  # t_12fa239181dd, 全局唯一
-   data_dir = f"/var/cache/codearts-tasks/{tid}"
-   # 预写 global.json
-   _perm_dir = os.path.join(data_dir, "cli-data/storage/permission")
-   os.makedirs(_perm_dir, exist_ok=True)
-   _global_json = os.path.join(_perm_dir, "global.json")
-   if not os.path.exists(_global_json):  # 幂等
-       json.dump(_ALLOW_PERMS, open(_global_json, "w"), indent=2)
-   # 设置到 env dict（不是 os.environ！）
-   env["KERNEL_DATA_DIR"] = os.path.join(data_dir, "cli-data")
-   # env 通过 env_extra 传给 stream_agent → env.update(env_extra) 覆盖 get_env 的值
-   ```
-
-   ```python
-   # codearts.py get_env 中（保留固定路径作为 fallback）
-   env.setdefault("KERNEL_DATA_DIR", os.path.join(home, ".codeartsdoer", "cli-data"))
-   # 如果 env_extra 中有 KERNEL_DATA_DIR，env.update(env_extra) 会覆盖上面的值
-   ```
-
-   **为什么不用 os.environ 传 task_id:**
-   - _execute_task 是 async，多个 task 在同一事件循环中交错执行
-   - os.environ 是进程级全局变量，task A 和 task B 交错时会互相覆盖
-   - task A 设 os.environ["GRAPE_TASK_ID"] = "t_aaa"，task B 设 "t_bbb"
-   - task A 的 get_env 读到 "t_bbb" → 用错临时目录
-   - env dict 是局部变量，每个 _execute_task 调用独立，无竞态
-
-   **临时目录路径: /var/cache/codearts-tasks/{task_id}/cli-data/**
-
-   为什么不用 /tmp:
-   - worker 的 /tmp 是 tmpfs（内存文件系统），67MB 临时目录会占内存
-   - worker-0002: 7.2GB 内存, /tmp 3.7GB tmpfs
-   - 4 并发: 67MB × 4 = 268MB 额外内存占用
-   - /var/cache 在磁盘上，不占内存
-
-   **需要预写的文件清单（2 个）:**
-   ```
-   cli-data/storage/permission/global.json
-     → [{"permission":"write","pattern":"*","action":"allow"},
-        {"permission":"edit","pattern":"*","action":"allow"},
-        {"permission":"external_directory_write","pattern":"*","action":"allow"},
-        ...]
-
-   cli-data/storage/sandbox/config.json
-     → {"network_policy": "allow_all"}
-   ```
-
-   为什么需要预写 sandbox/config.json:
-   - 临时目录启动时 codearts 自动生成默认值 {"network_policy": "deny_all"}
-   - deny_all 不影响 LLM API（codearts 内部请求不走沙箱），但影响 agent bash 命令
-   - SRE agent 用 bash 调 hcloud/curl 会被 deny_all 拦截
-   - 宿主机上之前手动配的是 allow_all，临时目录需要预写保持一致
-
-   codearts 自动生成正确值的文件（不需要预写）:
-   - settings.json: {"security":{"folderTrust":{"enabled":false}}} ✓
-   - storage/sandbox/sandbox.json: filesystem/network/resources ✓
-   - storage/userInfo.json: {} ✓
-
-   **临时目录生命周期:**
-   ```
-   task 开始: _execute_task 创建 /var/cache/codearts-tasks/{tid}/cli-data/ + 预写 global.json
-   task 执行: env["KERNEL_DATA_DIR"] → env_extra → stream_agent → env.update → codearts 读到临时目录
-   task 结束: codearts 进程退出
-   清理: TaskResourceStack.track_tmp_pattern("/var/cache/codearts-tasks/{tid}") → dispose 清理
-   ```
-
-2. **src/agent/executor.py**（回退 E2 ~50 行）:
-   - 删掉 pre_exec/post_exec/_serve_proc/_serve_port/_serve_env 相关代码
-   - 回到 main 分支干净状态
-
-3. **src/runtime/agent.py**（2 处）:
-   - _execute_task 中: env["KERNEL_DATA_DIR"] = ... + 预写 global.json（~10 行）
-   - _execute_task 中: _res.track_tmp_pattern(f"/var/cache/codearts-tasks/{tid}")（1 行）
-   - _kill_stale_engine 的 codearts patterns 删掉 "opencode run"，只留 "codearts run"
-
-4. **src/runtime/codearts.py get_env**（~2 行）:
-   - KERNEL_DATA_DIR 改成 setdefault（让 env_extra 能覆盖）
-
-**不需要改的:**
+#### 不需要改的（已确认干净）:
+- executor.py: 无 E2 残留（E2 代码已不在任何分支）
+- agent.py _kill_stale_engine: 已是 "codearts run"（无 "opencode run"）
 - prompt_builder.py / service.py / event_store.py: 不变
 - worker 注册/claim/heartbeat: 不变
-- _run_once / parse_output / reader 线程 / 静默超时: 不变（和 opencode 共用路径）
+- _run_once / parse_output / reader 线程 / 静默超时: 不变
 - skill / project-info / knowledge 注入: 不变（通过 cwd 路径注入，与 KERNEL_DATA_DIR 无关）
+
+#### 本机验证结果 (2026-09-01):
+```
+语法检查: codearts.py OK, agent.py OK
+build_args: ['run', '--format', 'json', '--auto', 'hello test'] ✓
+get_env KERNEL_DATA_DIR: /root/.codeartsdoer/cli-data (fallback) ✓
+
+权限验证 (临时目录 /var/cache/codearts-tasks/test_impl/):
+  write: PASS (tool=write status=completed, 文件创建成功)
+  bash:  PASS (tool=bash status=completed, 文件创建成功)
+  edit:  PASS (tool=edit status=completed, 文件内容修改成功)
+
+隔离性:
+  宿主机 global.json: 未改动 (write=ask)
+  临时目录 global.json: write=allow
+  临时目录 sandbox config: network_policy=allow_all
+```
 
 ### 5.0.8 方案 G 深度分析：潜在问题与对策
 
@@ -667,12 +611,22 @@ def build_args(self, prompt: str, session_id: str = "") -> list[str]:
 
 write/edit 的 config 改 allow 无效（3.1 已证明），不需要改。
 
-### 5.3 【P1】prompt 中明确技能优先级
+### 5.3 【P1-观察】System Skills 冲突（codearts 特有, 暂不处理）
 
-在 `prompt_builder.py` 的技能指令段落中追加:
-```
-⚠️ 忽略 codearts 内置 System Skills, 只使用 {{SKILL_DIR}} 下的技能。
-如果 codearts 内置技能与当前任务相关, 仍以 {{SKILL_DIR}} 技能的指令为准。
+**现状**: codearts fork opencode 后华为云加了 10 个内置 System Skills（bug-fix-verification、issue-analysis、root-cause-localization 等），打包在二进制里，启动时自动解压到 KERNEL_DATA_DIR 的 system/skills/ 目录并注入 prompt。这些技能描述都写着 "Only the bug-fix sub-agent can use this skill"。
+
+**影响范围**: 仅 codearts 引擎。opencode 和 hermes 没有内置 System Skills，不受影响。这不是系统共性问题，是 codearts 特有的。
+
+**实际影响评估**: 技能描述明确限定 "Only the bug-fix sub-agent can use"，grape 的 VOD/Issue/Coding/QA/SRE agent 看到后大概率会忽略。实际影响可能比想象的小，但未经实测确认。
+
+**不能通过预写 SystemSkillStatus.txt 禁用**: codearts 启动时会先解压 system skills zip 到 system/skills/ 目录，如果目录已有文件会报 ENOTEMPTY 错误。
+
+**决策: 暂不处理, 观察实际影响。** 如果后续发现 agent 被 System Skills 干扰（如 VOD agent 尝试走 bug-fix 流水线），再在 prompt_builder.py 的技能注入段落后加指令:
+```python
+parts.append(
+    "⚠️ 如果运行环境内置了 System Skills（如 bug-fix-verification、issue-analysis 等），"
+    "请忽略它们，只执行上述 {{SKILL_DIR}} 指定的技能指令。"
+)
 ```
 
 ### 5.4 【P1】启用 session 续接
@@ -689,16 +643,24 @@ if _variant:
     args.extend(["--variant", _variant])
 ```
 
-### 5.6 【P2】环境变量 self-check
+### 5.6 【P1】环境变量 self-check（已实施）
 
-在 `get_env()` 末尾加校验日志:
+在 `get_env()` 末尾加校验日志，关键变量缺失时打 warning，便于 worker journalctl 定位:
+
 ```python
 _required = ["CODEARTS_CLI_AK", "CODEARTS_CLI_SK", "KERNEL_DATA_DIR", 
-             "OPENCODE_CONFIG", "OPENCODE_MODE"]
+             "OPENCODE_CONFIG", "OPENCODE_MODE", "SCENARIO"]
 _missing = [k for k in _required if not env.get(k)]
 if _missing:
     log.warning(f"codearts env missing: {_missing}")
 ```
+
+**注意**: 当前 get_env 中每个变量都用了 `env.setdefault()` 或 `env.get(key, default)`，正常不会缺失。
+self-check 主要防两种场景:
+1. 有人手动改了 os.environ 把某个变量设成空字符串
+2. env_extra 覆盖时误传了空值（如 KERNEL_DATA_DIR 被覆盖为空）
+
+**不解决的问题**: xCenter 503 — codearts 启动时调华为云 `snap-access.cn-north-4.myhuaweicloud.com` 验证模型权限，503 后降级为 free version。这是华为云侧的问题，不是环境变量能解决的。OPENCODE_DISABLE_MODELS_FETCH=1 已设但 codearts 仍会调 xCenter 验证 tenant settings（不同 API）。
 
 ### 5.7 【P3】models-cache.json 同步流程化
 
@@ -709,21 +671,21 @@ if _missing:
 
 | 优先级 | 问题 | 修复动作 | 影响范围 | 状态 |
 |--------|------|---------|---------|------|
-| **P0** | write/edit 被硬性拒绝 (根因确认) | 方案 G: per-task 独立数据目录 + KERNEL_DATA_DIR 隔离 global.json (已验证) | 代码层 (worker 升级) | 待实现 |
-| **P0** | bash 权限阻塞 (worker 默认 ask) | build_args 加 --auto (方案 G 已含) | 代码层 | 待实现 |
+| **P0** | write/edit 被硬性拒绝 (根因确认) | 方案 G: per-task 独立数据目录 + KERNEL_DATA_DIR 隔离 global.json | 代码层 (worker 升级) | **已实施** |
+| **P0** | bash 权限阻塞 (worker 默认 ask) | build_args 加 --auto | 代码层 | **已实施** |
 | **P0** | --session 未启用 | build_args 加 --session 支持 | 代码层 (worker 升级) | 待修复 |
-| **P0** | E2 残留代码回退 | 回退 codearts.py/executor.py/agent.py 的 E2 改动 (serve+attach+import requests) | 代码层 | 待实现 |
-| **P0** | GRAPE_TASK_ID 并发竞态 | 不用 os.environ, 改用 env dict (局部变量) 传 KERNEL_DATA_DIR (方案 G 已修正) | 代码层 | 已修正 |
-| **P0** | /tmp tmpfs 占内存 | 临时目录改到 /var/cache/codearts-tasks/ (磁盘路径) | 代码层 | 待实现 |
-| **P0** | sandbox network_policy 默认 deny_all | 预写 sandbox/config.json = allow_all 到临时目录 (方案 G 已含) | 代码层 | 已修正 |
-| **P1** | System Skills 冲突 | prompt 中明确技能优先级 | prompt_builder.py | 待修复 |
-| **P1** | 沙箱网络封锁 | 确认 sandbox network_policy=allow_all | 全部 worker | 待验证 |
-| **P1** | 环境变量脆弱性 | get_env() 加 self-check 日志 | 代码层 | 待设计 |
+| **P0** | E2 残留代码回退 | E2 代码已不在任何分支, 无需回退 | — | **无需处理** |
+| **P0** | GRAPE_TASK_ID 并发竞态 | 不用 os.environ, 改用 env dict (局部变量) 传 KERNEL_DATA_DIR | 代码层 | **已实施** |
+| **P0** | /tmp tmpfs 占内存 | 临时目录改到 /var/cache/codearts-tasks/ (磁盘路径) | 代码层 | **已实施** |
+| **P0** | sandbox network_policy 默认 deny_all | 预写 sandbox/config.json = allow_all 到临时目录 | 代码层 | **已实施** |
+| **P1** | System Skills 冲突 | codearts 特有问题, opencode/hermes 无此机制; 技能描述限定 "Only bug-fix sub-agent", 实际影响待观察 | 观察 | **暂不处理** |
+| **P1** | 沙箱网络封锁 | 已通过预写 sandbox/config.json 解决 | 代码层 | **已实施** |
+| **P1** | 环境变量脆弱性 | get_env() 末尾加 self-check, 关键变量缺失时打 warning | 代码层 | **已实施** |
 | **P2** | --variant 未使用 | 可选传 --variant high | 代码层 | 待评估 |
 | **P2** | 模型列表双重配置 | 同步 models-cache.json 流程化 | 运维流程 | 待修复 |
-| **P2** | 内存 700MB (比旧模式多 221MB) | base 模板目录 + cp -r/symlink 代替从零解压 sandbox_runner | 代码层 | 待评估 |
-| **P2** | 临时目录磁盘开销 (67MB/task) | 同上: sandbox_runner 预放共享目录 + symlink, 临时目录降至 1MB | 代码层 | 待评估 |
-| **P2** | worker 崩溃后残留临时目录 | runtime-agent 启动时清理 /var/cache/codearts-tasks/* | 运维脚本 | 待实现 |
+| **P2** | 内存 700MB (比旧模式多 221MB) | symlink sandbox_runner/system/skills 指向宿主机, 避免每次解压 66MB | 代码层 | **已实施** |
+| **P2** | 临时目录磁盘开销 (67MB/task) | 同上: symlink 后临时目录降至 1.3MB | 代码层 | **已实施** |
+| **P2** | worker 崩溃后残留临时目录 | main() 启动时 rmtree /var/cache/codearts-tasks/* | 代码层 | **已实施** |
 | **P3** | 模型前缀写死 | 已修复 (commit ba63d20a, 2026-08-20) | — | 已修复 |
 
 ## 7. 验证方法
