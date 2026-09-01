@@ -19,13 +19,13 @@ def test_user_info_queries_gitcode_nickname():
 def test_user_info_injects_gitcode_nickname_line():
     """有 gitcode_nickname 且不等于 login 时，注入『GitCode 昵称: xxx』行"""
     src = _read_handler_async()
-    assert 'user_info += f"\\nGitCode 昵称: {gitcode_nickname}"' in src
+    assert 'GitCode 昵称: {gitcode_nickname}' in src
 
 
 def test_user_info_keeps_feishu_name_line():
-    """方案 B：保留原『GitCode nick (use this in cards)』飞书昵称行"""
+    """方案 B：保留飞书昵称行（中文格式）"""
     src = _read_handler_async()
-    assert "GitCode nick (use this in cards)" in src
+    assert "飞书 昵称" in src
     assert "gitcode_nickname" in src
 
 

@@ -314,7 +314,7 @@ def update_custom_scene(scene_id: str, scope: str, repo_key: str, user_id: int,
         if name:
             sets.append("name=?")
             params.append(name)
-        if description is not None:
+        if description:  # 空字符串不覆盖已有描述
             sets.append("description=?")
             params.append(description)
         params.extend([scene_id, scope])

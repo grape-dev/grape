@@ -269,17 +269,23 @@ function loadAgentTypes() {
 
     if (view === 'dash') {
       title.textContent = I18N.t('app.nav.scene_center');
+      // 进入场景中心时清除可能残留的编辑标志（上一次操作异常退出时泄漏）
+      if (!window._dashboardEditing) window._dashboardEditing = false;
       const loadDash = () => Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes'),
       ]).then(([dashData, scenesData]) => {
-        // 编辑中不刷新，避免丢失用户正在进行的修改
+        // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;
         dashData._scenes = scenesData.scenes || [];
         dashData._owner = repo.owner;
         dashData._name = repo.name;
         renderDashboard(dashData);
-      }).catch(e => { if (!window._dashboardEditing) pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      }).catch(e => {
+        // 编辑中出错只 toast 不覆盖 UI；非编辑中清 loading 显示错误
+        if (window._dashboardEditing) { app.showToast && app.showToast('刷新失败: ' + e.message); return; }
+        pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
+      });
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
@@ -422,6 +428,26 @@ function loadAgentTypes() {
     setTimeout(() => t.remove(), duration || 3000);
   }
 
+  // ── 帮助抽屉 ──
+  function openHelp() {
+    const overlay = document.getElementById('helpOverlay');
+    const drawer = document.getElementById('helpDrawer');
+    if (!overlay || !drawer) return;
+    overlay.classList.add('show');
+    drawer.classList.add('show');
+    // 动态加载 help.html 到 iframe（避免跨域，用同路径）
+    const body = drawer.querySelector('.help-drawer-body');
+    if (body && !body.querySelector('iframe')) {
+      body.innerHTML = '<iframe src="/static/help.html" title="Grape 使用帮助"></iframe>';
+    }
+  }
+  function closeHelp() {
+    const overlay = document.getElementById('helpOverlay');
+    const drawer = document.getElementById('helpDrawer');
+    if (overlay) overlay.classList.remove('show');
+    if (drawer) drawer.classList.remove('show');
+  }
+
   function init() {
     console.log("[init] start", JSON.stringify({
       hasToken: !!localStorage.getItem('token'),
@@ -521,6 +547,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });

@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     local_skills TEXT DEFAULT '[]',
     pending_skill_scan INTEGER DEFAULT 0,
     skill_scan_result TEXT DEFAULT '',
-    agent_tags TEXT DEFAULT '["all"]',
+    agent_tags TEXT DEFAULT '[]',
     repo_key TEXT DEFAULT NULL,          -- 关联项目 repo_key（注册时从凭据复制）
     worker_version TEXT DEFAULT '',      -- worker 自报版本号（心跳/兼容性检测，见 knowledge-obs-design）
     host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
@@ -1676,7 +1676,7 @@ def _migrate_tables():
             _ensure_column(c, "agent_runtimes", "local_skills", "TEXT DEFAULT '[]'")
             _ensure_column(c, "agent_runtimes", "pending_skill_scan", "INTEGER DEFAULT 0")
             _ensure_column(c, "agent_runtimes", "skill_scan_result", "TEXT DEFAULT ''")
-            _ensure_column(c, "agent_runtimes", "agent_tags", "TEXT DEFAULT '[\"all\"]'")
+            _ensure_column(c, "agent_runtimes", "agent_tags", "TEXT DEFAULT '[]'")
             db.commit()
             log.info("Added local_skills / pending_skill_scan / skill_scan_result / agent_tags columns to agent_runtimes")
     except Exception as e:

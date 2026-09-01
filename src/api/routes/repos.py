@@ -36,12 +36,13 @@ def _fetch_and_cache(user_id: int, api_token: str) -> list[dict]:
 
 
 def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
-    """过滤仓库列表：只返回「管理员自己有权限托管 / 已被托管（全局）」的仓库。
+    """过滤仓库列表：返回用户身份可见的全部仓库（管理员 + 非管理员成员）。
 
-    已取消「加入」（join）概念：
-    - in_managed（仓库在 managed_repos = 已被任何人托管/已加入）→ 前端展示「已托管/已加入」+「进入项目」。
-    - is_admin（用户是仓库管理员/所有者）且未托管 → 前端展示「未加入」+「加入并托管」。
-    - 普通成员且未托管 → 一律不返回（消除「加入」按钮，杜绝误显「加入并托管」→ 403）。
+    状态语义（前端卡片三态校验）：
+    - in_managed（仓库在 managed_repos = 已被任何人托管）→ is_hosted 按是否配置 webhook；
+    - can_host（用户是仓库管理员/所有者，或 permission.admin）→ 未托管时可「加入并托管」；
+    - 非管理员成员 + 未托管 → 照样返回（展示「未托管」），点「加入并托管」由前端提示
+      「无权限托管，请联系管理员」，不再静默 403。
     """
     from src.repo_key import to_repo_key
     managed = {r["repo_key"]: r["webhook_id"] for r in user_db.get_all_managed_repos()}
@@ -53,10 +54,7 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
         in_managed = repo_key in managed
         hosted = in_managed and bool(managed.get(repo_key))
 
-        if not is_admin and not in_managed:
-            continue
-
-        role = "Admin" if is_admin else "Maintainer"
+        role = "Admin" if is_admin else "Member"
         result.append({
             "repo_key": repo_key,
             "full_name": full_name,
@@ -64,9 +62,11 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
             "name": r.get("name", ""),
             "description": r.get("description", ""),
             "role": role,
+            "can_host": bool(is_admin),
             "in_managed": in_managed,
             "is_joined": in_managed,
             "is_hosted": hosted,
+            "created_at": r.get("created_at", "") or "",
         })
     return result
 
@@ -176,7 +176,17 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
-    # 探活已迁移到 /repos/sync（手动刷新按钮），避免每次进大堂阻塞 2-3 秒
+    # 异步探活清理失效托管（C2）：后台线程执行，接口不等待、页面保持秒开；
+    # 失效（GitCode 已删/丢 webhook）的托管记录在后台被清掉，下一次刷新/进入时数字才校准。
+    try:
+        import threading
+        threading.Thread(
+            target=_probe_stale_repos,
+            args=(api_token, user["id"]),
+            daemon=True,
+        ).start()
+    except Exception as e:
+        log.warning(f"member: background stale probe start failed: {e}")
 
     # 优先读取 DB 缓存（未过期）
     cached = user_db.get_user_repos(user["id"])
@@ -362,7 +372,7 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             is_admin = _check_collaborator_admin(api_token, owner, repo_name, current_user)
 
         if not is_admin:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "托管权限不够：仅仓库的维护员或管理员可以托管"})
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限托管，请联系管理员"})
     except HTTPException:
         raise
     except Exception as e:

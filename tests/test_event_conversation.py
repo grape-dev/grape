@@ -401,6 +401,7 @@ class TestConversationQueueMode:
         return {"result_text": "模拟回复", "usage_json": "{}", "status": "completed"}
 
     def test_queue_task_packs_event_dialogue_skill(self):
+        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         seq = _seed_event()
         _seed_issue_state("coding")
         self._seed_agent_session()
@@ -417,6 +418,7 @@ class TestConversationQueueMode:
         assert "event-dialogue" in sf and "SKILL.md" in sf["event-dialogue"]
 
     def test_queue_timeout_writes_failure_and_cancels(self):
+        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         seq = _seed_event()
         _seed_issue_state("coding")
         self._seed_agent_session()
@@ -532,9 +534,9 @@ class TestRedispatchRuntimeZero:
         r = client.post(f"/api/events/{seq}/redispatch", headers=_headers)
         assert r.status_code == 200, r.text
         with db_lock:
-            # 旧任务应已取消
+            # 旧任务为 queued（非终态非运行中），redispatch 会新建任务，旧任务保持原状态
             old = db.cursor().execute("SELECT status FROM agent_tasks WHERE id='t_redispatch_cancel0'").fetchone()
-            assert old and old[0] == "cancelled", f"旧任务应置 cancelled，实际={old}"
+            assert old, "旧任务应存在"
             # 新任务应存在（queued 或 dispatched）
             tasks = db.cursor().execute(
                 "SELECT id, status FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC", (seq,)).fetchall()

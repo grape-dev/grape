@@ -75,5 +75,7 @@
   "task_terminated_sent": "⏹ 任务终止请求已发送",
   "terminate_failed": "终止失败: {{msg}}",
   "no_inline_log": "(无执行日志 — agent 未实际运行)",
-  "load_log_failed": "加载日志失败: {{msg}}"
+  "load_log_failed": "加载日志失败: {{msg}}",
+  "no_reply": "（无回复）",
+  "error_reply": "（错误）"
 }

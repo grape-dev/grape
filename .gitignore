@@ -62,3 +62,24 @@ SHA256SUMS
 VERSION
 *.swp
 *.swo
+
+# === 临时调试脚本/备份（不进仓库）===
+_tmp_*.py
+query_*.py
+monitor_*.py
+monitor_*.sh
+sre_monitor_loop.sh
+skills.bak.*/
+*.bak.2026082*
+*.bak2
+scripts/check_*.py
+scripts/clean_*.py
+scripts/batch_*.py
+scripts/clear_*.py
+scripts/find_*.py
+scripts/phase1_*.py
+scripts/sync_*.py
+scripts/trigger_*.py
+scripts/upgrade_*.py
+scripts/verify_*.py
+scripts/install-worker.sh.bak.*

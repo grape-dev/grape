@@ -247,7 +247,8 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
             repos.append({"full_name": full_name, "owner": release_owner,
                           # GitCode name 是显示名（可≠URL path，如 shelltest 显示 skillstest），
                           # URL 语义必须用 full_name 拆分——下游拼 gitcode.com/{owner}/{name} 链接
-                          "name": full_name.split("/", 1)[1], "is_admin": is_admin})
+                          "name": full_name.split("/", 1)[1], "is_admin": is_admin,
+                          "created_at": r.get("created_at", "") or ""})
         if len(items) < 100:
             break
         page += 1

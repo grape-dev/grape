@@ -99,23 +99,150 @@ def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: st
 
 
 def parse_agent_output_json(final_text: str) -> dict | None:
-    """从 final_text 提取末尾 JSON 块（结构化产出契约，见 agent-runtime-event-full-design.md §8）。
+    """从 final_text 提取结构化 JSON 产出块（鲁棒解析，兼容 ACP chunk 损坏）。
 
     返回含 actions/conclusion/artifacts/next_step/issue_summary 任一字段的 dict，否则 None。
     """
     if not final_text:
         return None
     import re as _re, json as _json
-    m = _re.search(r"\{.*\}", final_text or "", _re.S)
-    if not m:
-        return None
+
+    # Step 0: 去 markdown code fence
+    _clean = final_text.replace("```json", "").replace("```", "")
+
+    # Step 1: 定位 JSON 块 — 优先用 {"actions" 模式，降级用正则
+    m = _re.search(r'\{\s*"actions"', _clean)
+    if m:
+        raw = _clean[m.start():]
+        # 去掉尾部非 JSON 标记
+        for marker in ('[PREMATURE_END_TURN]', '\n---', '\n\n['):
+            idx = raw.rfind(marker)
+            if idx > 0:
+                raw = raw[:idx]
+    else:
+        # 降级：旧正则
+        m2 = _re.search(r"\{.*\}", _clean, _re.S)
+        if not m2:
+            return None
+        raw = m2.group(0)
+
+    # Step 2: 修复断裂字段名（\n 在字段名中间，如 "con\nclusion"）
+    for field in _KNOWN_OUTPUT_FIELDS:
+        for i in range(1, len(field)):
+            broken = field[:i] + '\n' + field[i:]
+            if broken in raw:
+                raw = raw.replace(broken, field)
+
+    # Step 3: 修复换行（字符串外去 \n，字符串内裸 \n 转义为 \n）
+    raw = _fix_json_newlines(raw)
+
+    # Step 4: 补闭合 } 如果缺失
+    raw = _ensure_json_closed(raw)
+
+    # Step 5: 直接解析
     try:
-        obj = _json.loads(m.group(0))
-        if isinstance(obj, dict) and any(k in obj for k in ("actions", "conclusion", "artifacts", "next_step", "issue_summary")):
+        obj = _json.loads(raw)
+        if _is_valid_output(obj):
             return obj
     except Exception:
-        return None
+        pass
+
+    # Step 6: compact 兜底（去所有非字符串内空白后解析）
+    compact = _strip_non_string_ws(raw)
+    try:
+        obj = _json.loads(compact)
+        if _is_valid_output(obj):
+            return obj
+    except Exception:
+        pass
+
     return None
+
+
+_KNOWN_OUTPUT_FIELDS = ("actions", "conclusion", "artifacts", "next_step", "issue_summary")
+
+
+def _is_valid_output(obj) -> bool:
+    return isinstance(obj, dict) and any(k in obj for k in _KNOWN_OUTPUT_FIELDS)
+
+
+def _fix_json_newlines(json_str: str) -> str:
+    """去掉 JSON 中非字符串值内的换行符，字符串内的裸 \\n 转义为 \\\\n。"""
+    result = []
+    in_string = False
+    escape = False
+    for ch in json_str:
+        if escape:
+            result.append(ch)
+            escape = False
+            continue
+        if ch == '\\':
+            result.append(ch)
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+        if ch == '\n':
+            if in_string:
+                result.append('\\n')
+            continue
+        result.append(ch)
+    return "".join(result)
+
+
+def _ensure_json_closed(json_str: str) -> str:
+    """如果 JSON 缺少闭合 }，按括号深度补上（忽略字符串内的 {{ }}）。"""
+    s = json_str.rstrip()
+    if s.endswith('}'):
+        return s
+    depth = 0
+    in_string = False
+    escape = False
+    for ch in s:
+        if escape:
+            escape = False
+            continue
+        if ch == '\\':
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+    if depth > 0:
+        s += '}' * depth
+    return s
+
+
+def _strip_non_string_ws(json_str: str) -> str:
+    """去掉 JSON 中所有非字符串内的空白（最终兜底）。"""
+    result = []
+    in_string = False
+    escape = False
+    for ch in json_str:
+        if escape:
+            result.append(ch)
+            escape = False
+            continue
+        if ch == '\\':
+            result.append(ch)
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+        if ch in ' \t\n\r' and not in_string:
+            continue
+        result.append(ch)
+    return "".join(result)
 
 
 def _extract_tool_command(t) -> str:

@@ -16,7 +16,7 @@ def _spawn():
     # start_new_session=True：与生产 executor 一致（agent 子进程独立进程组）。
     # 否则测试子进程与 pytest 同进程组，terminate_active_agents 的 killpg(SIGTERM)
     # 会把 pytest 自己一起杀掉 → 全量测试 EXIT=143（2026-08-19 实测）。
-    return subprocess.Popen(["python", "-c", "import time; time.sleep(60)"],
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                             start_new_session=True)
 
 

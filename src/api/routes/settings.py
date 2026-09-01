@@ -316,7 +316,7 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
             for rt in runtimes:
                 _tc2 = db.cursor()
                 _tc2.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
-                rt["agent_tags"] = [r[0] for r in _tc2.fetchall()] or ["all"]
+                rt["agent_tags"] = [r[0] for r in _tc2.fetchall()]
             devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
                             "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
                             "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
@@ -349,7 +349,7 @@ async def get_agent_runtimes(user: dict = Depends(get_current_user)):
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
-                "agent_tags": rt.get("agent_tags", ["all"])})
+                "agent_tags": rt.get("agent_tags", [])})
         # 如果没匹配到设备，跳过（不创建单独的"本机"行）
     # AI Devspace 创建的凭据：worker 尚未上线注册时没有 agent_runtimes 行，
     # 但用户需要在 Workers 列表看到这个待接入设备（凭据已生成，环境正在启动）。
@@ -638,7 +638,7 @@ def _sync_agent_tags(rid: int, cursor):
     供前端展示用。此函数确保两表一致。
     """
     cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
-    tags = [r[0] for r in cursor.fetchall()] or ["all"]
+    tags = [r[0] for r in cursor.fetchall()]
     cursor.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), rid))
 
 

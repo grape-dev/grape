@@ -113,7 +113,7 @@ function loadCfgOptions() {
       // 按标签过滤：展示仓库级/全局/个人引擎（个人引擎仅 owner 自己可见，后端已过滤）
       const ok = runtimes.filter(r => {
         if (r.scope !== 'repo' && r.scope !== 'global' && r.scope !== 'user') return false;
-        const tags = r.agent_tags || ['all'];
+        const tags = r.agent_tags || [];
         return tags.includes('all') || tags.includes(agentType);
       });
       const tagLabels = {all: I18N.t('agents.tag.all'), vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE'};
@@ -124,7 +124,7 @@ function loadCfgOptions() {
         const color = _beColor(i);
         const checked = current.includes(v) || current.includes(r.name) ? 'checked' : '';
         const rgb = _beRgb(color);
-        const tagStr = (r.agent_tags || ['all']).map(t => tagLabels[t]||t).join('/');
+        const tagStr = (r.agent_tags || []).map(t => tagLabels[t]||t).join('/');
         return `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap;width:100%;flex-shrink:1;background:${checked ? `rgba(${rgb},.12)` : 'transparent'};${checked ? `box-shadow:inset 2px 0 0 ${color}` : ''};transition:background .12s">
           <input type="checkbox" class="cfg-backend-cb" value="${v}" data-color="${color}" ${checked} style="accent-color:${color};flex:0 0 auto;width:14px;height:14px;margin:0">
           <span style="width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0"></span>
@@ -197,11 +197,11 @@ function renderAgent(name, data) {
   const evtHtml = events.length > 0 ? `
     <table style="width:100%;font-size:12px;table-layout:fixed">
       <thead><tr>
-        <th style="width:60px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Seq</th>
+        <th style="width:60px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event_table_seq')}</th>
         <th style="width:130px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_time')}</th>
         <th style="width:auto;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_content')}</th>
         <th style="width:75px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Issue</th>
-        <th style="width:85px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">Actor</th>
+        <th style="width:85px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_actor')}</th>
         <th style="width:60px;text-align:center;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_duration')}</th>
         <th style="width:160px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_engine')}</th>
         <th style="width:70px;text-align:right;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_status')}</th>
@@ -247,7 +247,7 @@ function renderAgent(name, data) {
 </div>
 <div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
   <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('agents.config.title')}</h3>
-  <div class="srow" style="align-items:flex-start"><label>Backend Engines<br><span class="ts t3" style="font-weight:400">${I18N.t('agents.engine.backend_engines_hint')}</span></label>
+  <div class="srow" style="align-items:flex-start"><label>${I18N.t('agents.backend_engines_label')}<br><span class="ts t3" style="font-weight:400">${I18N.t('agents.engine.backend_engines_hint')}</span></label>
     <div class="cfg-backends" data-backends="${(data.backends || []).join(',')}" data-agent="${name}" style="flex:1;position:relative">
       <div class="cfg-backends-trigger" onclick="toggleBackendsDropdown(event)" style="min-height:34px;padding:5px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);cursor:pointer;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
         <span class="cfg-backends-ph ts t2" style="color:var(--t2)">${I18N.t('agents.engine.select_placeholder')}</span>

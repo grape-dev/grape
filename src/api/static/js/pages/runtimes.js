@@ -315,7 +315,7 @@ function openEngineDetail(runtimeId) {
           <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.role_tags')}</span>
           <button class="bt bt-p" style="font-size:11px;padding:4px 10px;border-radius:4px" onclick="saveEngineTags(${runtimeId})">${I18N.t('runtimes.action.save_tags')}</button>
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:4px">${_engineTagCheckboxes(rt.agent_tags || ['all'])}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px">${_engineTagCheckboxes(rt.agent_tags || [])}</div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
@@ -820,7 +820,27 @@ function _showCreateEnvForm() {
     var grapeServer = window.location.origin;
     var credName = envName.slice(0, 20);
 
-    // Step 1: 生成凭据
+    // Step 0: 预检模板可用性——模板未发布时不创建凭据，避免脏数据写入 worker 设备
+    var GRAPE_TPL = '4ef59a2b4d3d4909aacd80f6007c00b2';
+    API.get('/devstage/specs?template_id=' + GRAPE_TPL).then(function(specResp) {
+      var specs = specResp.specs || [];
+      if (!specs.length) {
+        app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+        _refreshDevspaceList();
+        return;
+      }
+      // 模板可用，继续创建凭据 + 环境
+      _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);
+    }).catch(function(e) {
+      var msg = e.message || '';
+      // 模板未发布（AK/SK 未加入白名单）：不创建凭据，直接提示
+      app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+      _refreshDevspaceList();
+    });
+  }
+
+  function _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt) {
+    // Step 1: 生成凭据（模板预检已通过）
     API.post('/settings/runtime-credentials', { name: credName, scope: 'repo', repo_key: repoKey }).then(function(d) {
       var grapeToken = d.token || '';
       var credId = d.id || 0;
@@ -838,19 +858,24 @@ function _showCreateEnvForm() {
         var msg = e.message || '';
         // 环境名冲突：删除凭据，换名重试
         if (attempt < 10 && (msg.indexOf('98320005') >= 0 || msg.indexOf('already been used') >= 0)) {
-          API.del('/settings/runtime-credentials/' + credId).then(function() {
+          API.post('/settings/runtime-credentials/' + credId + '/revoke').then(function() {
             _doCreateEnvWithRetry(baseName, attempt + 1);
           }).catch(function() {
             _doCreateEnvWithRetry(baseName, attempt + 1);
           });
         } else if (msg.indexOf('98320022') >= 0 || msg.indexOf('count limit') >= 0) {
-          API.del('/settings/runtime-credentials/' + credId);
+          API.post('/settings/runtime-credentials/' + credId + '/revoke');
           app.showToast(I18N.t('runtimes.devspace.count_limit'));
           _refreshDevspaceList();
+        } else if (msg.indexOf('98320049') >= 0 || msg.indexOf('Template not published') >= 0) {
+          // 模板未发布（预检与实际创建之间的竞态）：删除凭据，显示精准提示
+          API.post('/settings/runtime-credentials/' + credId + '/revoke');
+          app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+          _refreshDevspaceList();
         } else {
-          // 其他失败也删除凭据
-          API.del('/settings/runtime-credentials/' + credId);
-          app.showToast(I18N.t('runtimes.devspace.load_failed') + ': ' + msg);
+          // 其他失败也删除凭据，不残留无效 worker
+          API.post('/settings/runtime-credentials/' + credId + '/revoke');
+          app.showToast(I18N.t('runtimes.devspace.create_failed_msg', {msg: msg}));
           _refreshDevspaceList();
         }
       });

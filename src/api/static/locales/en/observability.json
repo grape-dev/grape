@@ -65,6 +65,7 @@
   "has_failure": "❌ Has failures",
   "normal": "✓ OK",
   "events_count": "{{count}} events",
+  "total_duration": "Total",
   "sequence_diagram": "📊 Sequence Diagram",
   "event_list": "📋 Event List",
   "col_event": "Event",
@@ -131,5 +132,11 @@
   "probe_fail": "Fail",
   "search_engine_placeholder": "Search engine/device/version...",
   "all_devices": "All devices",
-  "task_total": "Total Tasks"
+  "task_total": "Total Tasks",
+  "main_tag": "Main",
+  "col_seq": "Seq",
+  "col_agent": "Agent",
+  "col_skill": "Skill",
+  "col_issue_seq": "Issue / Seq",
+  "col_failed_short": "Failed"
 }

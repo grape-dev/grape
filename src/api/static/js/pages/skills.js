@@ -79,7 +79,7 @@ function _loadSkills() {
       if (!groupSkills || groupSkills.length === 0) return;
 
       html += `<div class="skill-group" style="margin-bottom:18px">
-        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${label} Skills</h3>
+        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${label} ${I18N.t('skills.group_skills_suffix')}</h3>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">`;
       groupSkills.forEach(s => {
         const tagClass = s.scope === 'official' ? 'tg-c' : s.scope === 'repo' ? 'tg-i' : 'tg-d';
@@ -295,7 +295,7 @@ function renderSkillDetail(data) {
         <div class="srow"><label>${I18N.t('skills.info_name')}</label><span>${data.name}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_agent_type')}</label><span>${data.agent_type}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_type')}</label><span>${SCOPE_NAMES[data.scope] || data.scope}</span></div>
-        <div class="srow"><label>Description</label><span class="t2">${data.description || '—'}</span></div>
+        <div class="srow"><label>${I18N.t('skills.info_description')}</label><span class="t2">${data.description || '—'}</span></div>
       </div>
     </div>`;
 }
@@ -388,7 +388,7 @@ function loadSubSkillDetail(pkgId, subName) {
           <div class="srow"><label>${I18N.t('skills.info_name')}</label><span>${data.name}</span></div>
           <div class="srow"><label>${I18N.t('skills.info_agent_type')}</label><span>${data.agent_type}</span></div>
           <div class="srow"><label>${I18N.t('skills.info_type')}</label><span>${SCOPE_NAMES[data.scope] || data.scope}</span></div>
-          <div class="srow"><label>Description</label><span class="t2">${data.description || '—'}</span></div>
+          <div class="srow"><label>${I18N.t('skills.info_description')}</label><span class="t2">${data.description || '—'}</span></div>
         </div>
       </div>`;
   }).catch(function(e) {

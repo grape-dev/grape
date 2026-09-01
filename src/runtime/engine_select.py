@@ -211,7 +211,7 @@ def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
             if not rid:
                 continue
             c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,))
-            tags = [r[0] for r in c.fetchall()] or ["all"]
+            tags = [r[0] for r in c.fetchall()]
             if agent_type in tags or "all" in tags:
                 result.append(m)
     return result
@@ -375,13 +375,13 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
         # agent_type 标签过滤（r[10] = GROUP_CONCAT(tag) from engine_capabilities, e.g. "all" or "all,coding"）
         if agent_type:
             tags_str = r[10] or ""
-            tags = [t.strip() for t in tags_str.split(",") if t.strip()] or ["all"]
+            tags = [t.strip() for t in tags_str.split(",") if t.strip()]
             if agent_type not in tags and "all" not in tags:
                 continue
         out.append({
             "runtime_id": r[0], "name": r[1], "status": r[2] or "offline", "healthy": bool(r[3]),
             "installed": bool(r[4]), "credential_id": r[5] or 0, "last_seen_at": r[6] or "",
             "device_name": r[7] or "", "owner_name": r[8] or "",
-            "tags": [t.strip() for t in (r[10] or "").split(",") if t.strip()] or ["all"],
+            "tags": [t.strip() for t in (r[10] or "").split(",") if t.strip()],
         })
     return out

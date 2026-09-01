@@ -89,5 +89,7 @@
   "info_title": "Skill Info",
   "info_name": "Name",
   "info_agent_type": "Agent Type",
-  "info_type": "Type"
+  "info_type": "Type",
+  "info_description": "Description",
+  "group_skills_suffix": "Skills"
 }

@@ -65,6 +65,7 @@
   "has_failure": "❌ 有失败",
   "normal": "✓ 正常",
   "events_count": "{{count}} 事件",
+  "total_duration": "总耗时",
   "sequence_diagram": "📊 时序图",
   "event_list": "📋 事件列表",
   "col_event": "事件",
@@ -131,5 +132,11 @@
   "probe_fail": "失败",
   "search_engine_placeholder": "搜索引擎/设备/版本...",
   "all_devices": "全部设备",
-  "task_total": "总任务"
+  "task_total": "总任务",
+  "main_tag": "主控",
+  "col_seq": "序号",
+  "col_agent": "Agent",
+  "col_skill": "技能",
+  "col_issue_seq": "Issue / 序号",
+  "col_failed_short": "失败"
 }

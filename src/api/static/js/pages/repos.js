@@ -20,7 +20,7 @@ function renderSelectionShell(tab, innerHtml) {
       <nav class="lobby-tabs">
         <a class="${tabCls('projects')}" onclick="switchSidebarTab('projects')">${I18N.t('repos.tab.projects')}</a>
         <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">${I18N.t('repos.tab.templates')}</a>
-        <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">工作台</a>
+        <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">${I18N.t('repos.tab.workspace')}</a>
       </nav>
       <div class="lobby-user" onclick="app.logout()" title="${I18N.t('repos.logout_title')}">
         <span class="lobby-avatar">${avatar}</span>
@@ -45,8 +45,7 @@ function switchSidebarTab(tab) {
         const first = hosted[0];
         selectRepo(first.full_name, first.owner, first.name);
       } else {
-        app.showToast('暂无已托管项目，请先加入并托管一个项目');
-        switchSidebarTab('projects');
+        _renderWorkspaceEmpty();
       }
     }).catch(() => {
       switchSidebarTab('projects');
@@ -62,36 +61,52 @@ function switchSidebarTab(tab) {
   }
 }
 
+// 无托管仓库时的工作台空态引导
+function _workspaceEmptyHtml() {
+  return '<div class="ws-empty">' +
+    '<div class="ws-empty-ic">🧭</div>' +
+    '<h2>' + I18N.t('repos.lobby.ws_empty_title') + '</h2>' +
+    '<p>' + I18N.t('repos.lobby.ws_empty_desc') + '</p>' +
+    '<div class="ws-empty-actions">' +
+      '<button class="ws-empty-btn2" onclick="switchSidebarTab(\'projects\')">' + I18N.t('repos.lobby.ws_go_host') + '</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function _renderWorkspaceEmpty() {
+  renderSelectionShell('workspace', _workspaceEmptyHtml());
+}
+
 // ====== 仓库选择主内容 ======
 let _repoPage = 0;
-const _REPO_PAGE_SIZE = 10;
+const _REPO_PAGE_SIZE = 9;
 let _projectSearchQuery = '';
 
-function renderRepoSelection(repos) {
-  const d = document.getElementById('pageContent');
-  if (!d) return;
-  _projectsRepos = repos || [];
-  const _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
-  const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
-  const name = user.split('@')[0];
-  const hostedCount = (repos || []).filter(r => r.is_hosted).length;
-
-  const allRepos = (repos || []).slice().sort((a, b) => {
+function _searchRepos() {
+  const allRepos = (_projectsRepos || []).slice().sort((a, b) => {
     const pa = a.is_hosted ? 2 : a.is_joined ? 1 : 0;
     const pb = b.is_hosted ? 2 : b.is_joined ? 1 : 0;
     if (pa !== pb) return pb - pa;
+    // 同级内：新建时间越近越前（created_at 倒序）；无时间则按全名兜底
+    const ca = a.created_at || '';
+    const cb = b.created_at || '';
+    if (ca && cb && ca !== cb) return ca < cb ? 1 : -1;
+    if (ca && !cb) return -1;
+    if (!ca && cb) return 1;
     return (a.full_name || '').localeCompare(b.full_name || '');
   });
-
   const query = _projectSearchQuery.toLowerCase().trim();
   const filteredRepos = query
     ? allRepos.filter(r => (r.full_name || '').toLowerCase().includes(query) || (r.owner || '').toLowerCase().includes(query))
     : allRepos;
-
-  const total = allRepos.length;
   const pages = Math.max(1, Math.ceil(filteredRepos.length / _REPO_PAGE_SIZE));
   if (_repoPage >= pages) _repoPage = 0;
   const pageRepos = filteredRepos.slice(_repoPage * _REPO_PAGE_SIZE, (_repoPage + 1) * _REPO_PAGE_SIZE);
+  return { allRepos, filteredRepos, pages, pageRepos };
+}
+
+function _buildProjectListHtml() {
+  const { filteredRepos, pages, pageRepos } = _searchRepos();
 
   let pagerHtml = '';
   if (pages > 1) {
@@ -103,32 +118,52 @@ function renderRepoSelection(repos) {
   }
 
   var cardsHtml = pageRepos.map(function(r) { return _buildProjectCard(r); }).join('');
+  var addCardHtml = '<div class="project-card-add" onclick="openCreateRepoModal()">' +
+    '<span class="pca-ic">＋</span>' +
+    '<b>' + I18N.t('repos.lobby.new_project_btn') + '</b>' +
+    '<span class="pca-tip">' + I18N.t('repos.lobby.new_project_tip') + '</span>' +
+  '</div>';
+
+  return addCardHtml + cardsHtml +
+    (filteredRepos.length === 0 ? '<div class="lobby-empty" style="grid-column:1/-1;margin:0;border:none;background:none"><div class="lobby-empty-ic">🔭</div><h3>' + I18N.t('repos.lobby.empty_title') + '</h3><p>' + I18N.t('repos.lobby.empty_desc') + '</p></div>' : '') +
+    pagerHtml;
+}
+
+function renderRepoSelection(repos) {
+  const d = document.getElementById('pageContent');
+  if (!d) return;
+  _projectsRepos = repos || [];
+  const _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
+  const user = (_lu && (_lu.nickname || _lu.username)) || 'User';
+  const name = user.split('@')[0];
+  const hostedCount = (_projectsRepos).filter(r => r.is_hosted).length;
+  const total = _projectsRepos.length;
+
   var templatesHtml = _renderProjectTemplates();
 
   var inner = '<div class="project-page">' +
     '<div class="project-hero">' +
-      '<div class="project-hero-left">' +
-        '<h1>' + I18N.t('repos.lobby.project_title') + '</h1>' +
-        '<p>' + I18N.t('repos.lobby.project_sub') + '</p>' +
-        '<button class="project-hero-btn" onclick="openCreateRepoModal()">+ ' + I18N.t('repos.lobby.new_project_btn') + '</button>' +
+      '<div class="project-hero-welcome">' +
+        '<span class="pw-icon">👋</span>' +
+        '<div class="pw-text">' +
+          '<span class="pw-title">' + I18N.t('repos.lobby.welcome_back', {name: user}) + '</span>' +
+          '<span class="pw-desc">' + I18N.t('repos.lobby.welcome_tip') + ' · ' + I18N.t('repos.lobby.project_sub') + '</span>' +
+        '</div>' +
       '</div>' +
-    '</div>' +
-    '<div class="project-stats">' +
-      '<div class="project-stat"><b>' + total + '</b><span>' + I18N.t('repos.lobby.stat_projects') + '</span></div>' +
-      '<div class="project-stat"><b>' + hostedCount + '</b><span>' + I18N.t('repos.lobby.stat_hosted') + '</span></div>' +
+      '<div class="project-stats">' +
+        '<div class="project-stat"><b>' + total + '</b><span>' + I18N.t('repos.lobby.stat_projects') + '</span></div>' +
+        '<div class="project-stat"><b>' + hostedCount + '</b><span>' + I18N.t('repos.lobby.stat_hosted') + '</span></div>' +
+      '</div>' +
     '</div>' +
     '<div class="project-section">' +
       '<div class="project-section-header">' +
         '<div class="project-section-header-left"><h2>' + I18N.t('repos.lobby.my_projects') + '</h2></div>' +
         '<div class="project-section-header-right">' +
-          '<button class="project-refresh-btn" onclick="refreshRepos(this)" title="' + I18N.t('repos.lobby.refresh_title') + '">↻ ' + I18N.t('repos.lobby.refresh_btn') + '</button>' +
+          '<button class="project-refresh-btn" onclick="refreshRepos(this)" title="' + I18N.t('repos.lobby.refresh_title') + '">' + I18N.t('repos.lobby.refresh_btn') + '</button>' +
           '<input class="project-search" id="projectSearch" type="text" placeholder="🔍 ' + I18N.t('repos.lobby.search_placeholder') + '" value="' + _projectSearchQuery + '" oninput="onProjectSearch(this.value)">' +
         '</div>' +
       '</div>' +
-      '<div class="project-list">' + cardsHtml +
-        (filteredRepos.length === 0 ? '<div class="lobby-empty" style="grid-column:1/-1;margin:0;border:none;background:none"><div class="lobby-empty-ic">🔭</div><h3>' + I18N.t('repos.lobby.empty_title') + '</h3><p>' + I18N.t('repos.lobby.empty_desc') + '</p></div>' : '') +
-      pagerHtml +
-      '</div>' +
+      '<div class="project-list" id="projectList">' + _buildProjectListHtml() + '</div>' +
     '</div>' +
     templatesHtml +
   '</div>';
@@ -140,27 +175,38 @@ function renderRepoSelection(repos) {
 function onProjectSearch(val) {
   _projectSearchQuery = val;
   _repoPage = 0;
-  renderRepoSelection(_projectsRepos);
+  const list = document.getElementById('projectList');
+  if (list) {
+    list.innerHTML = _buildProjectListHtml();
+  } else {
+    renderRepoSelection(_projectsRepos);
+  }
 }
 
 function goRepoPage(dir) {
-  const total = (_projectsRepos || []).length;
-  const pages = Math.max(1, Math.ceil(total / _REPO_PAGE_SIZE));
+  const { pages } = _searchRepos();
   _repoPage = (_repoPage + dir + pages) % pages;
-  renderRepoSelection(_projectsRepos);
+  const list = document.getElementById('projectList');
+  if (list) {
+    list.innerHTML = _buildProjectListHtml();
+  } else {
+    renderRepoSelection(_projectsRepos);
+  }
 }
 
 function _buildProjectCard(r) {
   const repoUrl = 'https://gitcode.com/' + (r.full_name || '');
   const initials = (r.name || '?').substring(0, 2).toUpperCase();
-  const statusTxt = r.is_hosted ? I18N.t('repos.card.status_hosted') : r.is_joined ? I18N.t('repos.card.status_joined') : I18N.t('repos.card.status_not_joined');
-  const statusCls = r.is_hosted ? 'project-card-status-hosted' : r.is_joined ? 'project-card-status-joined' : 'project-card-status-none';
+  const statusTxt = r.is_hosted ? I18N.t('repos.card.status_hosted') : I18N.t('repos.card.status_not_joined');
+  const statusCls = r.is_hosted ? 'project-card-status-hosted' : 'project-card-status-none';
 
   var actionHtml;
-  if (r.is_hosted || r.is_joined) {
+  if (r.is_hosted) {
     actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();selectRepo(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">' + I18N.t('repos.card.enter_project') + '→</button>';
-  } else {
+  } else if (r.can_host) {
     actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();hostAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">' + I18N.t('repos.card.join_and_host') + '→</button>';
+  } else {
+    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();hostNoPermission()">' + I18N.t('repos.card.join_and_host') + '→</button>';
   }
 
   return '<div class="project-card" onclick="window.open(\'' + repoUrl + '\',\'_blank\')">' +
@@ -235,7 +281,7 @@ function renderRepos() {
     }
     html += `</div>`;
 
-    html += `<div class="cd"><div class="cd-h"><h2>未托管仓库 <span class="c">${availableRepos.length}</span></h2></div>`;
+    html += `<div class="cd"><div class="cd-h"><h2>${I18N.t('repos.unhosted_title')} <span class="c">${availableRepos.length}</span></h2></div>`;
     if (availableRepos.length === 0) {
       html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_available') + '</div>';
     } else {
@@ -243,8 +289,10 @@ function renderRepos() {
         <tr><th>${I18N.t('repos.managed.th_repository')}</th><th>${I18N.t('repos.managed.th_role')}</th><th>${I18N.t('repos.managed.th_description')}</th><th></th></tr>`;
       availableRepos.forEach(r => {
         const roleTag = r.role === 'Admin' ? `<span class="tg tg-s">${r.role}</span>` :
-                        r.role === 'Maintainer' ? `<span class="tg tg-i">${r.role}</span>` : r.role;
-        const btnHtml = `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}')">${I18N.t('repos.available_btn.join_and_host')}</button>`;
+                        r.role === 'Member' ? `<span class="tg tg-d">${r.role}</span>` : r.role;
+        const btnHtml = r.can_host
+          ? `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}')">${I18N.t('repos.available_btn.join_and_host')}</button>`
+          : `<button class="bt bt-o bt-s" onclick="event.stopPropagation();hostNoPermission()">${I18N.t('repos.available_btn.join_and_host')}</button>`;
         html += `<tr><td><b>${r.full_name}</b></td><td>${roleTag}</td><td>${r.description || ''}</td><td>${btnHtml}</td></tr>`;
       });
       html += `</table></div>`;
@@ -286,6 +334,10 @@ function hostAndSelect(fullName, owner, name) {
     app.showToast(I18N.t('repos.sync.host_success'));
     app.loadProfile().then(() => selectRepo(fullName, owner, name));
   }).catch(e => app.showToast(I18N.t('repos.sync.host_failed', {msg: e.message})));
+}
+
+function hostNoPermission() {
+  app.showToast(I18N.t('repos.card.no_permission_host'));
 }
 
 function selectRepo(fullName, owner, name) {
@@ -425,7 +477,7 @@ function submitCreateRepo(e) {
         app.showToast(I18N.t('repos.create.err_exists', {name: check.full_name}));
         return;
       }
-      API.post('/repos/create', {name, description: desc, visibility})
+      API.post('/repos/create', {name, description: desc, visibility}, 120000)
         .then(r => {
           app.showToast(I18N.t('repos.create.success', {name: (r.full_name || name)}));
           closeCreateRepoModal();

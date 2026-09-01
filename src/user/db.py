@@ -394,6 +394,7 @@ CREATE TABLE IF NOT EXISTS user_repos (
     role TEXT DEFAULT '',
     is_admin INTEGER DEFAULT 0,
     is_join INTEGER DEFAULT 0,            -- 该用户是否已「加入」该仓库（用户级状态）
+    created_at TEXT DEFAULT '',           -- GitCode 仓库创建时间（同级内按新建时间倒序用）
     synced_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, repo_key)
 )
@@ -478,6 +479,12 @@ def _migrate_repo_key_tables():
             if "is_join" not in ur_cols2:
                 try:
                     c.execute("ALTER TABLE user_repos ADD COLUMN is_join INTEGER DEFAULT 0")
+                    db.commit()
+                except Exception:
+                    pass
+            if "created_at" not in ur_cols2:
+                try:
+                    c.execute("ALTER TABLE user_repos ADD COLUMN created_at TEXT DEFAULT ''")
                     db.commit()
                 except Exception:
                     pass
@@ -1516,9 +1523,10 @@ def save_user_repos(user_id: int, repos: list[dict]):
             repo_key = to_repo_key(full_name)
             is_join = 1 if repo_key in managed_keys else 0
             c.execute(
-                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (user_id, repo_key, r.get("owner", ""), r.get("name", ""),
-                 r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0, is_join)
+                 r.get("description", ""), r.get("role", ""), 1 if r.get("is_admin") else 0, is_join,
+                 r.get("created_at", "") or "")
             )
         db.commit()
 
@@ -1528,10 +1536,12 @@ def get_user_repos(user_id: int) -> list[dict]:
     from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, owner, name, description, role, is_admin, is_join FROM user_repos WHERE user_id=? ORDER BY repo_key", (user_id,))
+        c.execute("SELECT repo_key, owner, name, description, role, is_admin, is_join, created_at FROM user_repos WHERE user_id=? ORDER BY repo_key", (user_id,))
         return [
             {"repo_key": r[0], "full_name": from_repo_key(r[0]), "owner": r[1], "name": r[2],
-             "description": r[3], "role": r[4], "is_admin": bool(r[5]), "is_join": bool(r[6])}
+             "description": r[3], "role": r[4], "is_admin": bool(r[5]), "is_join": bool(r[6]),
+
+             "created_at": r[7] or ""}
             for r in c.fetchall()
         ]
 
@@ -1627,18 +1637,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                      a.get("version", ""), 1 if a.get("healthy") else 0,
                      a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json, host_name)
                 )
-                # 本机引擎首次创建时补写默认 "all" 标签到 engine_capabilities
-                _new_rid = c.lastrowid
-                try:
-                    c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (_new_rid,))
-                    if not c.fetchone():
-                        from datetime import datetime, timezone
-                        _now = datetime.now(timezone.utc).isoformat()
-                        c.execute(
-                            "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
-                            (_new_rid, "all", _now, _now))
-                except Exception:
-                    pass
+                # 不再自动写入默认 "all" 标签——新引擎默认无标签，由用户在控制台手动配置。
         # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
         # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
         #（见 multi-runtime-instance-design §5.1 防误删）。
@@ -1673,7 +1672,7 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
              "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
              "local_skills": json.loads(r[14] or "[]") if r[14] else [],
              "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
-             "agent_tags": json.loads(r[16] or '["all"]') if r[16] else ["all"],
+             "agent_tags": json.loads(r[16]) if r[16] else [],
              "host_name": r[17] or ""}
             for r in c.fetchall()
         ]

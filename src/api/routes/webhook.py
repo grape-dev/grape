@@ -169,6 +169,42 @@ async def a2a_endpoint(request: Request):
         log.warning(f"A2A: agent '{agent_name}' disabled for repo={repo_key}, rejected")
         return JSONResponse(status_code=403, content={"code": 403, "message": f"agent {agent_name} disabled"})
 
+    # 场景节点校验：目标 agent 不在当前场景的 pipeline nodes 里 → 拦截（不创建事件）
+    # 防止 agent skill 硬编码 A2A 目标（如 coding→qa）与自定义场景 pipeline 冲突
+    if issue_number:
+        try:
+            from src.session_manager import db, db_lock
+            from src.api.session_store import get_issue_scene
+            _scene_id_check, _ = get_issue_scene(repo_key, f"#{issue_number}")
+            _scene_id_check = _scene_id_check or "default"
+            _scene_nodes_check = None
+            # 自定义场景从 DB 查
+            if _scene_id_check.startswith("custom-"):
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT nodes_json FROM devops_pipeline_scene WHERE scene_id=? AND is_active=1",
+                              (_scene_id_check,))
+                    _row = c.fetchone()
+                if _row and _row[0]:
+                    import json as _json
+                    _scene_nodes_check = _json.loads(_row[0])
+            # 官方场景从 pipelines.json 查
+            if not _scene_nodes_check:
+                import os as _os, json as _json
+                _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
+                                           "configs", "pipelines.json")
+                with open(_pipe_path, "r", encoding="utf-8") as _f:
+                    _pipes = _json.load(_f)
+                _scene_def = _pipes.get("scenes", {}).get(_scene_id_check) or _pipes.get("scenes", {}).get("default") or {}
+                _scene_nodes_check = _scene_def.get("nodes") or []
+            # 检查目标 agent 是否在场景 nodes 里
+            _agent_in_scene = any(n.get("id") == agent_name for n in _scene_nodes_check)
+            if not _agent_in_scene:
+                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_id_check}' for issue=#{issue_number}, skipped (nodes={[n.get('id') for n in _scene_nodes_check]})")
+                return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "not_in_scene", "scene": _scene_id_check})
+        except Exception as _se:
+            log.warning(f"A2A: scene node check failed: {_se}")
+
     # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
     try:
         from src.api.event_pipeline import _execute_agent

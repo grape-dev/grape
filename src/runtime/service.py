@@ -606,12 +606,12 @@ def claim(runtime_id) -> dict | None:
                         pass
                     c.execute(
                         "UPDATE agent_tasks SET attempts=attempts+1, "
-                        "status=CASE WHEN attempts+1 >= 3 THEN 'failed' ELSE 'queued' END, "
-                        "runtime_id=CASE WHEN attempts+1 >= 3 THEN runtime_id ELSE 0 END, "
-                        "pool_agent_type=CASE WHEN attempts+1 < 3 AND pool_agent_type='' "
+                        "status=CASE WHEN attempts+1 >= 50 THEN 'failed' ELSE 'queued' END, "
+                        "runtime_id=CASE WHEN attempts+1 >= 50 THEN runtime_id ELSE 0 END, "
+                        "pool_agent_type=CASE WHEN attempts+1 < 50 AND pool_agent_type='' "
                         "THEN ? ELSE pool_agent_type END, "
                         "started_at=NULL, "
-                        "result_text=CASE WHEN attempts+1 >= 3 THEN '回收超限(dispatched 超时 3 次)' ELSE result_text END "
+                        "result_text=CASE WHEN attempts+1 >= 50 THEN '回收超限(dispatched 超时 50 次)' ELSE result_text END "
                         "WHERE id=? AND status='dispatched'",
                         (_pool_fill, _tid))
                     if c.rowcount and _rid:
@@ -831,12 +831,13 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
         c = db.cursor()
         try:
             # 1. 校验标签能力 + 获取引擎 scope
+            # 标签匹配：精确 tag OR "all"（all 可认领任意 pool_tag 任务）
             c.execute(
                 "SELECT ec.tag, rc.scope, rc.owner_id, rc.owner_name "
                 "FROM engine_capabilities ec "
                 "JOIN agent_runtimes ar ON ar.id = ec.runtime_id "
                 "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
-                "WHERE ec.runtime_id=? AND ec.tag=? AND ec.enabled=1",
+                "WHERE ec.runtime_id=? AND ec.enabled=1 AND (ec.tag=? OR ec.tag='all')",
                 (runtime_id, tag)
             )
             row = c.fetchone()
@@ -850,7 +851,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             c.execute(
                 "SELECT ec.max_concurrent, "
                 "(SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')) "
-                "FROM engine_capabilities ec WHERE ec.runtime_id=? AND ec.tag=?",
+                "FROM engine_capabilities ec WHERE ec.runtime_id=? AND ec.enabled=1 AND (ec.tag=? OR ec.tag='all')",
                 (runtime_id, runtime_id, tag)
             )
             cap_row = c.fetchone()
@@ -864,10 +865,12 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             _tag_match_noprefix = "(pool_tag!='' AND runtime_id=0)" if tag == "all" else "(pool_tag=? AND runtime_id=0)"
             params = [] if tag == "all" else [tag]
             if scope == "repo":
+                # repo_key 可能带前缀（gitcode:owner/repo）也可能不带，两种都要匹配
                 params.append(owner_id)
+                params.append(f"gitcode:{owner_id}")
                 sql = (
                     "SELECT t.id FROM agent_tasks t "
-                    f"WHERE { _tag_match} AND t.status='queued' AND t.repo_key=? "
+                    f"WHERE { _tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=?) "
                     "AND NOT EXISTS ("
                     "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
                     "    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
@@ -931,7 +934,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 if scope == "repo":
                     c.execute(
                         f"SELECT t.id FROM agent_tasks t "
-                        f"WHERE {_tag_match} AND t.status='queued' AND t.repo_key=? "
+                        f"WHERE {_tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=?) "
                         f"AND t.id NOT IN ({_tried_str}) "
                         f"AND NOT EXISTS ("
                         f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
@@ -961,7 +964,8 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                         f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
                         f"    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)"
                         f"    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
-                        f"  )) ORDER BY created_at ASC LIMIT 1"
+                        f"  )) ORDER BY created_at ASC LIMIT 1",
+                        tuple(params)
                     )
                 task_row = c.fetchone()
                 if not task_row:
@@ -1240,20 +1244,68 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
     task = get_task(task_id)
     # 幂等保护：如果 task 已经是终态（failed/cancelled），不覆盖（防止 worker 终止后残留进程
     # 跑完调 complete 把 failed 状态覆盖成 completed，2026-08-24 seq#2488 实例）。
+    # 例外：如果 result_text 包含完整结构化输出（actions+conclusion），说明任务实际已完成，
+    # 即使 exit_code 非 0（如 hermes ACP 进程被 SIGTERM 清理后 proc.returncode=-15）也应覆盖为 completed。
     if task and task.get("status") in ("failed", "cancelled"):
-        log.info(f"Task {task_id} already {task.get('status')}, skip complete_task (result={result_text[:60]})")
-        return
+        from src.api.event_store import parse_agent_output_json
+        _output = parse_agent_output_json(result_text or "")
+        if _output and _output.get("actions") and _output.get("conclusion"):
+            log.info(f"Task {task_id} was {task.get('status')} but has structured output, overriding to completed")
+        else:
+            log.info(f"Task {task_id} already {task.get('status')}, skip complete_task (result={result_text[:60]})")
+            return
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import parse_agent_output_json, update_event_complete
             from src.api.event_archive import finalize_event_archive
             output = parse_agent_output_json(result_text or "")
+            # 结构化产出修复：exit_code 非 0 但有完整结构化输出（actions+conclusion）
+            # → hermes ACP 进程被 SIGTERM 清理后 proc.returncode=-15，任务实际已完成
+            if exit_code != 0 and output and output.get("actions") and output.get("conclusion"):
+                log.info(f"Task {task_id}: exit_code {exit_code} but has structured output, overriding to 0")
+                exit_code = 0
             # 业务失败检测：进程退出码=0 但业务实际失败 → 覆盖 exit_code
             if exit_code == 0 and _detect_business_failure(
                     task.get("agent_type") or "", output, result_text):
                 exit_code = 1
                 log.info(f"Task {task_id}: business failure detected "
                          f"(agent={task.get('agent_type')}), overriding exit_code to 1")
+
+            # 完成度校验：exit_code=0 但无结构化产出 → LLM 提前 end_turn
+            # coding/qa/sre/issue agent 正常完成应有 actions/conclusion/issue_summary JSON 块
+            # 没有则说明 LLM 提前 end_turn，未执行完任务
+            _agent_type = task.get("agent_type") or ""
+            if exit_code == 0 and not output and _agent_type in ("coding", "qa", "sre", "issue"):
+                _attempts = (task.get("attempts") or 0)
+                if _attempts < 49:
+                    log.warning(
+                        f"Task {task_id}: premature end_turn (no structured output, "
+                        f"agent={_agent_type}, attempt={_attempts+1}/50), requeueing")
+                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 结束但无结构化产出，疑似 LLM 提前 end_turn，自动重试"
+                    update_task_status(task_id, "queued", started_at=None,
+                                       result_text=result_text,
+                                       usage_json=json.dumps(usage or {}))
+                    # 释放槽位 + attempts+1
+                    with db_lock:
+                        c2 = db.cursor()
+                        c2.execute("UPDATE agent_tasks SET attempts=attempts+1, "
+                                   "runtime_id=0, started_at=NULL, status='queued' "
+                                   "WHERE id=?", (task_id,))
+                        if task.get("runtime_id"):
+                            c2.execute(
+                                "UPDATE agent_runtimes SET busy_slots = CASE "
+                                "WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END "
+                                "WHERE id=?", (task.get("runtime_id"),))
+                        db.commit()
+                    log.info(f"Task {task_id}: requeued for retry (attempt={_attempts+1})")
+                    return
+                else:
+                    log.warning(
+                        f"Task {task_id}: premature end_turn, max retries exceeded "
+                        f"(attempt={_attempts}/50), marking failed")
+                    exit_code = 1
+                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 多次结束但无结构化产出，已达最大重试次数(50)"
+
             status = "completed" if exit_code == 0 else "failed"
             duration = None
             try:
@@ -1365,22 +1417,62 @@ def _auto_advance_pipeline(task: dict):
         return  # stage 已推进（agent 成功调了 A2A），不需要补触发
     # stage 还等于当前 agent_type → A2A 没被调用，需要补触发
 
-    # 从 pipelines.json 查找 next agent
-    _next_agent = ""
+    # 检查 Issue 是否已关闭（agent 有意不推进 A2A，如重复 Issue 关闭后无需交办）
+    _issue_closed = False
     try:
-        import os as _os
-        _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))),
-                                   "configs", "pipelines.json")
-        import json as _json
-        with open(_pipe_path, "r", encoding="utf-8") as _f:
-            _pipes = _json.load(_f)
-        _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
-        for _node in (_scene.get("nodes") or []):
-            if _node.get("id") == _agent_type:
-                _next_agent = _node.get("next", "")
-                break
-    except Exception:
-        pass
+        import requests as _req
+        _repo_display = _repo_key.split(":", 1)[-1] if ":" in _repo_key else _repo_key
+        _owner, _repo = _repo_display.split("/", 1)
+        _issue_num = _issue_id.lstrip("#")
+        from src.user.db import get_repo_bot_token_no_global
+        _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
+        _api_url = f"https://api.gitcode.com/api/v5/repos/{_owner}/{_repo}/issues/{_issue_num}"
+        _resp = _req.get(_api_url, headers={"Authorization": f"Bearer {_bot_token}"}, timeout=10)
+        if _resp.status_code == 200:
+            _issue_data = _resp.json()
+            _issue_state = (_issue_data.get("state") or "").lower()
+            if _issue_state in ("closed", "close"):
+                _issue_closed = True
+                log.info(f"Auto-advance skipped: issue={_issue_id} agent={_agent_type} "
+                         f"(issue already closed, agent intentionally did not advance)")
+    except Exception as _e:
+        log.warning(f"Auto-advance issue state check failed: {_e}")
+    if _issue_closed:
+        return  # Issue 已关闭，agent 有意不推进 pipeline，不补触发
+
+    # 查找 next agent：优先从 DB 自定义场景查，降级到 pipelines.json
+    _next_agent = ""
+    _scene_nodes = None
+    # 1. DB 自定义场景（custom-xxx）
+    if _scene_id and _scene_id.startswith("custom-"):
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT nodes_json FROM devops_pipeline_scene WHERE scene_id=? AND is_active=1",
+                          (_scene_id,))
+                _row = c.fetchone()
+            if _row and _row[0]:
+                import json as _json
+                _scene_nodes = _json.loads(_row[0])
+        except Exception:
+            pass
+    # 2. pipelines.json（官方场景或自定义场景未命中时的降级）
+    if not _scene_nodes:
+        try:
+            import os as _os
+            _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))),
+                                       "configs", "pipelines.json")
+            import json as _json
+            with open(_pipe_path, "r", encoding="utf-8") as _f:
+                _pipes = _json.load(_f)
+            _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
+            _scene_nodes = _scene.get("nodes") or []
+        except Exception:
+            pass
+    for _node in (_scene_nodes or []):
+        if _node.get("id") == _agent_type:
+            _next_agent = _node.get("next", "")
+            break
     if not _next_agent or _next_agent == "done":
         return  # 没有下一个 agent，或已经是最后一步
 
@@ -1426,11 +1518,15 @@ def _auto_advance_pipeline(task: dict):
             # 获取 bot token
             from src.user.db import get_repo_bot_token_no_global
             _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
-            _server_url = "https://example.com"
+            # 优先用本地直连（127.0.0.1:8000），避免兄弟节点经公网域名绕回导致超时
+            _server_url = "http://127.0.0.1:8000"
             try:
                 from src.user.db import get_meta_value
                 _sbu = get_meta_value("server_base_url")
-                if _sbu:
+                if _sbu and "127.0.0.1" not in _sbu and "localhost" not in _sbu:
+                    # meta 配置的是公网域名 → 转成本地直连
+                    _server_url = "http://127.0.0.1:8000"
+                elif _sbu:
                     _server_url = _sbu
             except Exception:
                 pass

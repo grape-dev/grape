@@ -144,6 +144,8 @@
     "cannot_delete_running": "Cannot delete while running, please stop first",
     "create_success": "Created successfully",
     "count_limit": "Environment count limit reached",
+    "template_not_published": "AI DevSpace template not published. Please contact admin to add the template to the whitelist",
+    "create_failed_msg": "Create failed: {{msg}}",
     "cred_gen_failed": "Credential generation failed",
     "cred_gen_failed_msg": "Credential generation failed: {{msg}}",
     "cred_name": "Credential Name",
@@ -168,6 +170,7 @@
     "select_template_first": "Load after selecting a template",
     "select_flavor": "-- Select Flavor --",
     "flavor_load_failed": "Load failed",
+    "template_not_published": "AI DevSpace template not published. Please contact the administrator to add the template to the whitelist.",
     "status": {
       "cde_0000": "Pending",
       "cde_0001": "Creating",

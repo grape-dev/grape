@@ -30,10 +30,10 @@
     "description": "Issue 高级运营（增强版）：项目知识基线（codegraph）→ 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发"
   },
   "issue-multitask": {
-    "name": "多任务模式处理",
+    "name": "Issue 运营 v2（单任务+多任务）",
     "agent_type": "issue",
     "path": "issue/issue-multitask",
-    "description": "多任务模式子任务拆分与快速通道：复杂需求拆分为子 Issue 并行/串行执行；子任务跳过分析直接提取父任务目标 A2A 交办 coding"
+    "description": "Issue 全生命周期运营（单任务深度运营 + 多任务拆分，统一技能）：项目知识基线 → 深度可开发性分析 → 标签/分配 → Spec 生成 → A2A 触发开发。需求复杂时自动拆分子 Issue 并行/串行执行；子任务走快速通道跳过分析直接 A2A 交办 coding。"
   },
   "implementation": {
     "name": "代码实现",
@@ -226,5 +226,11 @@
     "agent_type": "sre",
     "path": "sre/runtime-install",
     "description": "安装、配置和注册 hermes/opencode/codearts 运行时引擎到 Grape 系统，包括自定义 API 端点和模型配置"
+  },
+  "cce-terrapilot": {
+    "name": "CCE TerraPilot",
+    "agent_type": "sre",
+    "path": "sre/cce-terrapilot",
+    "description": "Guide users through an 11-question checklist to scope a Huawei Cloud CCE deployment, then generate Terraform configs and run terraform plan. Triggers: CCE, 容器部署, 华为云 Terraform, HSS, WAF."
   }
 }

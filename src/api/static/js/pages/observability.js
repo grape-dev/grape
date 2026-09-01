@@ -86,9 +86,9 @@ function refreshObs(isAutoRefresh) {
   Promise.all([
     API.get('/dashboard/ops/overview' + repoParam).catch(() => null),
     fetch('/health/realtime').then(r => r.json()).catch(() => null),
-    fetch('/metrics').then(r => r.text()).catch(() => null),
-  ]).then(([ops, realtime, metricsText]) => {
-    _obsData = { ops, realtime, metricsText };
+    // fetch('/metrics').then(r => r.text()).catch(() => null),  // metrics 数据当前未使用，注释掉避免无用请求
+  ]).then(([ops, realtime]) => {
+    _obsData = { ops, realtime };
     const now = new Date().toLocaleTimeString('zh-CN');
     const lu = document.getElementById('obsLastUpdate');
     if (lu) lu.textContent = now;
@@ -161,12 +161,12 @@ function _rerenderRuntimeTable() {
 function renderObsContent(isAutoRefresh) {
   const c = document.getElementById('obsContent');
   if (!c) return;
-  const { ops, realtime, metricsText } = _obsData;
+  const { ops, realtime } = _obsData;
 
   // 降级：ops 401 时从 realtime 补齐
   const realOps = (ops && !ops.error) ? ops : fallbackOps(realtime);
   const rt = realtime || {};
-  const mt = metricsText || '';
+  // const mt = metricsText || '';  // metrics 数据当前未使用
 
   // 错误日志 Tab: 独立异步加载，只首次加载 + 手动刷新，定时器不触发
   if (_obsTab === 'errorlogs') {
@@ -186,26 +186,26 @@ function renderObsContent(isAutoRefresh) {
   if (_obsTab === 'overview') {
     if (canPartialUpdate) {
       // 尝试局部更新；元素缺失（如新增 worker）时回退到完整渲染
-      if (!updateOverview(realOps, rt, mt)) {
-        c.innerHTML = renderOverview(realOps, rt, mt);
+      if (!updateOverview(realOps, rt)) {
+        c.innerHTML = renderOverview(realOps, rt);
         _obsRendered = true;
         _obsRenderedTab = _obsTab;
       }
     } else {
-      c.innerHTML = renderOverview(realOps, rt, mt);
+      c.innerHTML = renderOverview(realOps, rt);
       _obsRendered = true;
       _obsRenderedTab = _obsTab;
     }
   }
   else if (_obsTab === 'tasks') {
     if (canPartialUpdate) {
-      if (!updateTasks(realOps, rt, mt)) {
-        c.innerHTML = renderTasksTab(realOps, rt, mt);
+      if (!updateTasks(realOps, rt)) {
+        c.innerHTML = renderTasksTab(realOps, rt);
         _obsRendered = true;
         _obsRenderedTab = _obsTab;
       }
     } else {
-      c.innerHTML = renderTasksTab(realOps, rt, mt);
+      c.innerHTML = renderTasksTab(realOps, rt);
       _obsRendered = true;
       _obsRenderedTab = _obsTab;
     }
@@ -233,6 +233,13 @@ function section(title, subtitle) {
   return `<div style="margin-bottom:8px;margin-top:16px"><h2 style="font-size:13px;font-weight:600">${title}</h2>${subtitle ? `<span style="font-size:10px;color:var(--t3);margin-left:8px">${subtitle}</span>` : ''}</div>`;
 }
 
+function _fmtTotalDur(s) {
+  if (!s || s <= 0) return '0s';
+  if (s < 60) return Math.round(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60 > 0 ? Math.round(s % 60) + 's' : '');
+  return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm';
+}
+
 function table(headers, rows) {
   return `<div class="tw" style="border:1px solid var(--b);border-radius:10px;overflow:hidden;margin-bottom:16px"><table><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
@@ -254,7 +261,7 @@ function _barHTML(label, pct, color, idPrefix) {
   </div>`;
 }
 
-function renderOverview(ops, rt, mt) {
+function renderOverview(ops, rt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
 
@@ -273,7 +280,7 @@ function renderOverview(ops, rt, mt) {
       const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
       const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
       const isMain = wk.last_ip === '127.0.0.1' || (wk.name || '').startsWith('grape-main');
-      const mainTag = isMain ? '<span style="font-size:9px;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 6px;margin-left:4px">主控</span>' : '';
+      const mainTag = isMain ? `<span style="font-size:9px;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 6px;margin-left:4px">${I18N.t('observability.main_tag')}</span>` : '';
       workerCards += `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
@@ -282,7 +289,7 @@ function renderOverview(ops, rt, mt) {
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:10px;color:var(--t3);margin-bottom:8px">
           <div>IP: ${wk.last_ip || '-'}</div>
-          <div>${I18N.t('observability.heartbeat')}: <span id="wk-${wid}-seen">${(wk.last_seen_at||'-').substring(11,19)}</span></div>
+          <div>${I18N.t('observability.heartbeat')}: <span id="wk-${wid}-seen">${fmtLocalTime(wk.last_seen_at||'').substring(11,19)}</span></div>
         </div>
         ${_barHTML(I18N.t('observability.cpu'), wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
         ${_barHTML(I18N.t('observability.mem'), wk.memory_percent, null, 'wk-' + wid + '-mem')}
@@ -383,7 +390,7 @@ function renderOverview(ops, rt, mt) {
 
 // ===== 局部更新：概览 Tab =====
 // 返回 true=成功局部更新, false=元素缺失需回退到完整渲染
-function updateOverview(ops, rt, mt) {
+function updateOverview(ops, rt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
 
@@ -411,7 +418,7 @@ function updateOverview(ops, rt, mt) {
       if (healthEl) { healthEl.textContent = I18N.t("observability." + (wk.health || "offline")); healthEl.style.color = hc; }
 
       const seenEl = document.getElementById('wk-' + wid + '-seen');
-      if (seenEl) seenEl.textContent = (wk.last_seen_at || '-').substring(11, 19);
+      if (seenEl) seenEl.textContent = fmtLocalTime(wk.last_seen_at || '').substring(11, 19);
 
       // 进度条
       _updateBar('wk-' + wid + '-cpu', wk.cpu_percent);
@@ -459,7 +466,7 @@ function updateOverview(ops, rt, mt) {
 
 // ===== 局部更新：任务 Tab =====
 // 返回 true=成功局部更新, false=需回退到完整渲染
-function updateTasks(ops, rt, mt) {
+function updateTasks(ops, rt) {
   const t = ops.tasks || {};
   const _is = t.issue_stats || {};
 
@@ -508,7 +515,7 @@ function loadA2aHealth() {
       html += table(['Seq', 'Type', 'Repo', 'Issue', 'Status', 'Time'],
         d.recent_a2a.map(a => [
           a.seq, a.event_type.substring(0,20), (a.repo_key||'').replace('gitcode:','').substring(0,15),
-          a.issue_id || '-', a.status || '-', `<span class="ts t3">${(a.created_at||'').substring(0,19)}</span>`
+          a.issue_id || '-', a.status || '-', `<span class="ts t3">${fmtLocalTime(a.created_at)}</span>`
         ])
       );
     }
@@ -537,7 +544,7 @@ function renderAnomalyTab(container, ops) {
   }));
   const _row = (s, showFailed) => {
     const is = (s.issue_id && s.event_seq) ? `${s.issue_id} #${s.event_seq}` : s.id.substring(0,12);
-    const time = showFailed ? (s.completed_at||'') : (s.started_at||'');
+    const time = showFailed ? fmtLocalTime(s.completed_at||s.started_at||'') : fmtLocalTime(s.started_at||'');
     let badge;
     if (showFailed) {
       const errs = s.errors || [];
@@ -570,7 +577,7 @@ function renderAnomalyTab(container, ops) {
     const pageItems = failed.slice(start, start + _ANOMALY_PAGE_SIZE);
 
     html += section(I18N.t('observability.failed_tasks'), I18N.t('observability.failed_tasks_subtitle', {total: failed.length, page: (_anomalyPage+1), pages: totalPages}));
-    html += table(['Issue/Seq', 'Agent', 'Repo', 'Failed', I18N.t('observability.col_result')],
+    html += table([I18N.t('observability.col_issue_seq'), I18N.t('observability.col_agent'), I18N.t('observability.col_repo'), I18N.t('observability.col_failed_short'), I18N.t('observability.col_result')],
       pageItems.map(s => _row(s, true))
     );
 
@@ -603,7 +610,7 @@ function loadErrorLogs(container) {
       </select>
       <span class="ts t3" id="errorLogCount"></span>
     </div>
-    <div id="errorLogBody"><div class="loading">' + I18N.t('observability.loading') + '</div></div>
+    <div id="errorLogBody"><div class="loading">${I18N.t('observability.loading')}</div></div>
   `;
   // 加载来源列表
   fetch('/api/dashboard/ops/error-logs/sources').then(r => r.json()).then(d => {
@@ -653,7 +660,7 @@ let _errorLogLevel = '';
 let _errorLogSource = '';
 
 // ===== Tab: 任务 =====
-function renderTasksTab(ops, rt, mt) {
+function renderTasksTab(ops, rt) {
   const t = ops.tasks || {};
   const sc = t.status_counts || {};
   let html = '';
@@ -720,7 +727,7 @@ function _buildSequence(iss) {
   let prev = null;
   for (const ev of iss.events) {
     const a = _mermaidId(ev.agentType || '—');
-    const t = ev.createdAt ? ev.createdAt.slice(11, 19) : '';
+    const t = ev.createdAt ? fmtLocalTime(ev.createdAt).slice(11, 19) : '';
     const label = t ? t + ' ' + _actionText(ev.eventType) : _actionText(ev.eventType);
     if (prev && a !== prev) {
       // 跨 agent 交互：prev -> a
@@ -883,8 +890,11 @@ function renderTimelineList(container, issues, repoKey) {
     html += '<span style="font-size:12px">' + (expanded ? '\u25be' : '\u25b8') + '</span>';
     html += _issueLink;
     html += iss.title ? '<span class="ts t3" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + iss.title + '</span>' : '<span style="flex:1"></span>';
+    const _totalDur = iss.events.reduce((s, e) => s + (e.duration || 0), 0);
+    const _totalDurStr = _fmtTotalDur(_totalDur);
     html += '<span class="ts t3">' + I18N.t('observability.events_count', {count: iss.eventCount}) + '</span>' + statusBadge;
-    html += '<span class="ts t3">' + (iss.lastAt || '').substring(0,16) + '</span>';
+    html += '<span class="ts t3" style="color:var(--a)">' + I18N.t('observability.total_duration') + ': ' + _totalDurStr + '</span>';
+    html += '<span class="ts t3">' + fmtLocalTime(iss.lastAt || '').substring(0,16) + '</span>';
     html += '</div>';
     html += '<div id="tl-body-' + iss.issueId + '" style="display:' + (expanded ? 'block' : 'none') + ';padding:10px 14px;border-top:1px solid var(--b)">';
     // 切换按钮
@@ -896,12 +906,12 @@ function renderTimelineList(container, issues, repoKey) {
     html += '<div id="tl-diagram-' + iss.issueId + '" class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto;' + (_issueViewMode[iss.issueId] === 'events' ? 'display:none' : '') + '"></div>';
     // 事件列表容器
     html += '<div id="tl-events-' + iss.issueId + '" style="' + (_issueViewMode[iss.issueId] !== 'events' ? 'display:none' : '') + '">';
-    html += '<table style="width:100%;font-size:11px"><thead><tr><th>Seq</th><th>' + I18N.t('observability.col_event') + '</th><th>Agent</th><th>' + I18N.t('observability.col_engine') + '</th><th>Skill</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
+    html += '<table style="width:100%;font-size:11px"><thead><tr><th>' + I18N.t('observability.col_seq') + '</th><th>' + I18N.t('observability.col_event') + '</th><th>' + I18N.t('observability.col_agent') + '</th><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_skill') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
     html += iss.events.map(ev => {
       const enc = ev.taskId ? encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''})) : '';
       const clickable = ev.taskId ? 'cursor:pointer' : '';
       const onclick = ev.taskId ? " onclick=\"openTaskLogModal('" + ev.taskId + "','" + enc + "')\"" : '';
-      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + _engineWithIp(ev.engine) + '</td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + (ev.createdAt||'').substring(0,19) + '</td></tr>';
+      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + _engineWithIp(ev.engine) + '</td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + fmtLocalTime(ev.createdAt||'').substring(0,19) + '</td></tr>';
     }).join('');
     html += '</tbody></table></div>';
     html += '</div></div>';
@@ -984,44 +994,44 @@ function fallbackOps(realtime) {
   };
 }
 
-// ===== Prometheus 文本解析 =====
-function parseMetric(text, name) {
-  const m = text.match(new RegExp('^' + name + '\\s+(\\d+\\.?\\d*)', 'm'));
-  return m ? parseFloat(m[1]) : 0;
-}
-function parseMetrics(text, names) {
-  const r = {};
-  for (const n of names) r[n] = parseMetric(text, n);
-  return r;
-}
-function parseLabeledSum(text, name) {
-  let total = 0;
-  const re = new RegExp('^' + name + '\\{[^}]*\\}\\s+(\\d+\\.?\\d*)', 'gm');
-  let m;
-  while ((m = re.exec(text)) !== null) total += parseFloat(m[1]);
-  return total;
-}
-function parseLabeledSumByLabel(text, name, key, val) {
-  let total = 0;
-  const re = new RegExp('^' + name + '\\{[^}]*' + key + '="' + val + '"[^}]*\\}\\s+(\\d+\\.?\\d*)', 'gm');
-  let m;
-  while ((m = re.exec(text)) !== null) total += parseFloat(m[1]);
-  return total;
-}
-function fmtNum(n) {
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(n);
-}
-function parseLabeledKeys(text, name, labelKey) {
-  const keys = [];
-  const re = new RegExp('^' + name + '\\\\{[^}]*' + labelKey + '=\"([^\"]+)\"[^}]*\\\\}', 'gm');
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    if (!keys.includes(m[1])) keys.push(m[1]);
-  }
-  return keys;
-}
+// ===== Prometheus 文本解析（当前未使用，注释保留备用）=====
+// function parseMetric(text, name) {
+//   const m = text.match(new RegExp('^' + name + '\\s+(\\d+\\.?\\d*)', 'm'));
+//   return m ? parseFloat(m[1]) : 0;
+// }
+// function parseMetrics(text, names) {
+//   const r = {};
+//   for (const n of names) r[n] = parseMetric(text, n);
+//   return r;
+// }
+// function parseLabeledSum(text, name) {
+//   let total = 0;
+//   const re = new RegExp('^' + name + '\\{[^}]*\\}\\s+(\\d+\\.?\\d*)', 'gm');
+//   let m;
+//   while ((m = re.exec(text)) !== null) total += parseFloat(m[1]);
+//   return total;
+// }
+// function parseLabeledSumByLabel(text, name, key, val) {
+//   let total = 0;
+//   const re = new RegExp('^' + name + '\\{[^}]*' + key + '="' + val + '"[^}]*\\}\\s+(\\d+\\.?\\d*)', 'gm');
+//   let m;
+//   while ((m = re.exec(text)) !== null) total += parseFloat(m[1]);
+//   return total;
+// }
+// function fmtNum(n) {
+//   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+//   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+//   return String(n);
+// }
+// function parseLabeledKeys(text, name, labelKey) {
+//   const keys = [];
+//   const re = new RegExp('^' + name + '\\\\{[^}]*' + labelKey + '="([^"]+)"[^}]*\\\\}', 'gm');
+//   let m;
+//   while ((m = re.exec(text)) !== null) {
+//     if (!keys.includes(m[1])) keys.push(m[1]);
+//   }
+//   return keys;
+// }
 
 // ===== Runtime 任务列表 + 日志弹窗（从 runtimes.js 迁移）=====
 
@@ -1043,8 +1053,9 @@ function openRuntimeSessionModal(rtId, rtName) {
     '</div>';
   document.body.appendChild(modal);
 
-  // 系统监控是全局运维视图，引擎 session 查询不应按当前选中仓库过滤
-  API.get('/runtime/runtimes/' + rtId + '/sessions').then(d => {
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
+  API.get('/runtime/runtimes/' + rtId + '/sessions' + repoParam).then(d => {
     renderSessionList(document.getElementById('rtSessionModalBody'), d.sessions || [], rtName);
   }).catch(e => {
     document.getElementById('rtSessionModalBody').innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
@@ -1078,7 +1089,7 @@ function renderSessionList(container, sessions, rtName) {
         '<td class="ts"><b>' + is + '</b></td>' +
         '<td class="ts t3">' + (s.skill||'-') + '</td>' +
         '<td><span style="color:' + (taskStatusColor[ct.status]||'var(--a)') + '">' + (taskStatusIcon[ct.status]||'🔄') + ' ' + ct.status + '</span></td>' +
-        '<td class="ts t3">' + (ct.started_at||'').substring(0,16) + '</td>' +
+        '<td class="ts t3">' + fmtLocalTime(ct.started_at||'').substring(0,16) + '</td>' +
         '</tr>';
     });
     html += '</tbody></table></div>';
@@ -1096,7 +1107,7 @@ function renderSessionList(container, sessions, rtName) {
     });
     allTasks.sort((a, b) => (b.event_seq || 0) - (a.event_seq || 0));
     if (!allTasks.length) return '<div class="ts t3" style="padding:8px">' + I18N.t('observability.no_completed_tasks') + '</div>';
-    let html = '<div class="tw"><table><thead><tr><th>Issue / Seq</th><th>Agent</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>Exit</th><th>' + I18N.t('observability.col_complete_time') + '</th></tr></thead><tbody>';
+    let html = '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_issue_seq') + '</th><th>' + I18N.t('observability.col_agent') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_exit') + '</th><th>' + I18N.t('observability.col_complete_time') + '</th></tr></thead><tbody>';
     allTasks.forEach(t => {
       const is = (t.issue_id && t.event_seq) ? t.issue_id + ' #' + t.event_seq : (t.event_seq ? '#' + t.event_seq : t.id.substring(0,12));
       const enc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:'', created:t.completed_at||''}));
@@ -1116,7 +1127,7 @@ function renderSessionList(container, sessions, rtName) {
         '<td><span style="color:' + (taskStatusColor[t.status]||'var(--t3)') + '">' + (taskStatusIcon[t.status]||'') + ' ' + t.status + '</span></td>' +
         '<td><span style="color:' + durColor + '">' + durStr + '</span></td>' +
         '<td>' + (t.exit_code != null ? t.exit_code : '-') + '</td>' +
-        '<td class="ts t3">' + (t.completed_at||'').substring(0,16) + '</td>' +
+        '<td class="ts t3">' + fmtLocalTime(t.completed_at||'').substring(0,16) + '</td>' +
         '</tr>';
     });
     html += '</tbody></table></div>';
@@ -1263,7 +1274,7 @@ function renderRuntimeTaskList(container, tasks, rtName) {
       <td class="ts t3">${(t.repo_key || '').replace('gitcode:','').substring(0,20)}</td>
       <td><span style="color:${statusColor[t.status] || 'var(--t3)'}">${statusIcon[t.status] || ''} ${I18N.t('common.status.' + t.status) !== ('common.status.' + t.status) ? I18N.t('common.status.' + t.status) : t.status}</span></td>
       <td>${t.exit_code ?? '-'}</td>
-      <td class="ts t3">${(t.created_at || '').substring(0,16)}</td>
+      <td class="ts t3">${fmtLocalTime(t.created_at || '').substring(0,16)}</td>
     </tr>`;
   });
   html += '</tbody></table></div>';
@@ -1440,7 +1451,7 @@ function renderTaskLogMessages(container, msgs, errorInfo) {
   msgs.forEach(m => {
     const icon = typeIcon[m.type] || '•';
     const color = typeColor[m.type] || '#c2cad6';
-    const time = (m.created_at || '').substring(11,19);
+    const time = fmtLocalTime(m.created_at || '').substring(11,19);
     let content = '';
     if (m.type === 'tool_use') {
       content = `<b style="color:${color}">${m.tool || 'tool'}</b>`;
