@@ -337,7 +337,7 @@ function loadTop1000(catIdx) {
   renderTemplateCategory();
 
   var params = new URLSearchParams({
-    platform: cat.platform,
+    platform: cat.platform || (cat.id.indexOf('gitcode') >= 0 ? 'gitcode' : cat.id.indexOf('github') >= 0 ? 'github' : cat.platform),
     page: cache.page,
     size: 20,
     sort_by: cache.sortBy,

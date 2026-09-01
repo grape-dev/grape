@@ -2874,7 +2874,8 @@
             "platform": "gitcode"
           }
         }
-      ]
+      ],
+      "platform": "gitcode"
     },
     {
       "id": "github-featured",
@@ -4005,7 +4006,8 @@
             "platform": "github"
           }
         }
-      ]
+      ],
+      "platform": "github"
     }
   ]
 }
