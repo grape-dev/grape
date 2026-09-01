@@ -4,12 +4,16 @@
 产物: grape-system-<YYYYMMDDHHMM>.tar
   ├── INSTALL.md          (agent 可读安装指南)
   ├── SHA256SUMS          (相对路径校验)
-  ├── backend/            (grape 后端 src + 静态资源 + configs example + examples)
+  ├── backend/            (grape 后端 src + 静态资源 + configs example)
   ├── database/           (MySQL DDL + 种子数据)
-  ├── skills/             (grape-skills 全量)
+  ├── skills/             (grape-skills 全量，从独立仓库读取)
+  ├── templates/          (grape-template 项目模板，从独立仓库读取)
   └── tools/              (worker 运行时 + install-worker.sh)
 
-注: admin 运营管理台已独立项目，单独打包为 grape-admin-<ts>.tar
+注:
+  - admin 运营管理台已独立项目 (grape-dev/grape-admin)，单独打包为 grape-admin-<ts>.tar
+  - skills 已独立项目 (grape-dev/grape-skills)，打包时从独立仓库读取
+  - examples/templates 已独立项目 (grape-dev/grape-template)，打包时从独立仓库读取
 """
 import hashlib, os, subprocess, sys, tarfile, io, shutil, datetime, gzip, json
 
@@ -17,6 +21,10 @@ ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 OUT_DIR = "/root/release"
 BUCKET = "obs-grape-release"
 PREFIX = "release"
+
+# 独立项目路径（可通过环境变量覆盖）
+SKILLS_REPO = os.environ.get("GRAPE_SKILLS_ROOT", "/opt/grape-skills")
+TEMPLATE_REPO = os.environ.get("GRAPE_TEMPLATE_ROOT", "/opt/grape-template")
 
 # ---- 工具函数 ----
 
@@ -54,7 +62,7 @@ def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
 # ---- 子包构建 ----
 
 def pack_backend(ts):
-    """后端: src/ (含 api/static) + configs examples + examples/ + requirements"""
+    """后端: src/ (含 api/static) + configs example + requirements"""
     out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
@@ -73,10 +81,6 @@ def pack_backend(ts):
         p = os.path.join(ROOT, "configs", cf)
         if os.path.isfile(p):
             items.append((p, f"configs/{cf}"))
-    # examples/ (项目模板)
-    ex_dir = os.path.join(ROOT, "examples")
-    if os.path.isdir(ex_dir):
-        items.append((ex_dir, "examples"))
     # requirements
     for rf in ["requirements.txt", "requirements-worker.txt"]:
         p = os.path.join(ROOT, rf)
@@ -190,14 +194,24 @@ def pack_database(ts):
     return out
 
 def pack_skills(ts):
-    """skills: grape-skills 全量"""
+    """skills: 从独立仓库 grape-dev/grape-skills 读取全量"""
     out = os.path.join(OUT_DIR, f"staging/skills/grape-skills-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    skills_dir = os.path.join(ROOT, "skills")
+    skills_dir = os.path.join(SKILLS_REPO, "skills")
     if not os.path.isdir(skills_dir):
-        print(f"[WARN] skills 目录不存在，跳过")
+        print(f"[WARN] skills 目录不存在 ({SKILLS_REPO}/skills)，跳过")
         return None
     make_subtar_gz(skills_dir, out, base_dir="skills")
+    return out
+
+def pack_templates(ts):
+    """templates: 从独立仓库 grape-dev/grape-template 读取项目模板"""
+    out = os.path.join(OUT_DIR, f"staging/templates/grape-templates-{ts}.tar.gz")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    if not os.path.isdir(TEMPLATE_REPO):
+        print(f"[WARN] template 目录不存在 ({TEMPLATE_REPO})，跳过")
+        return None
+    make_subtar_gz(TEMPLATE_REPO, out, base_dir="templates")
     return out
 
 def pack_tools(ts):
@@ -410,9 +424,10 @@ bash install-worker.sh --token <rta_...> --server https://<grape主控域名>
 
 | 子包 | 说明 | 部署位置 |
 |------|------|----------|
-| backend/grape-backend-{ts}.tar.gz | 后端代码(src/api + static) + configs + examples | /opt/grape/ |
+| backend/grape-backend-{ts}.tar.gz | 后端代码(src/api + static) + configs | /opt/grape/ |
 | database/grape-db-{ts}.sql.gz | MySQL DDL + 种子数据 | MySQL |
-| skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills) | /opt/grape/skills/ |
+| skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills，独立仓库) | /opt/grape/skills/ |
+| templates/grape-templates-{ts}.tar.gz | 项目模板 (独立仓库) | /opt/grape/examples/ |
 | tools/grape-toolkit-{ts}.tar.gz | worker 运行时 + 注册脚本 | /opt/grape/ (worker 机) |
 
 注: admin 运营管理台 (grape-admin) 为独立项目，单独打包部署
@@ -446,28 +461,34 @@ def main():
     os.makedirs(os.path.join(OUT_DIR, "staging"), exist_ok=True)
 
     # 1. 构建子包
-    print("[pack] 1/4 构建后端子包...")
+    print("[pack] 1/5 构建后端子包...")
     backend_pkg = pack_backend(ts)
     print(f"  -> {backend_pkg} ({os.path.getsize(backend_pkg) // 1024}KB)")
 
-    print("[pack] 2/4 构建数据库子包...")
+    print("[pack] 2/5 构建数据库子包...")
     db_pkg = pack_database(ts)
     print(f"  -> {db_pkg} ({os.path.getsize(db_pkg) // 1024}KB)")
 
-    print("[pack] 3/4 构建 skills 子包...")
+    print("[pack] 3/5 构建 skills 子包...")
     skills_pkg = pack_skills(ts)
     if skills_pkg:
         print(f"  -> {skills_pkg} ({os.path.getsize(skills_pkg) // 1024}KB)")
 
-    print("[pack] 4/4 构建 worker toolkit 子包...")
+    print("[pack] 4/5 构建 templates 子包...")
+    templates_pkg = pack_templates(ts)
+    if templates_pkg:
+        print(f"  -> {templates_pkg} ({os.path.getsize(templates_pkg) // 1024}KB)")
+
+    print("[pack] 5/5 构建 worker toolkit 子包...")
     tools_pkg = pack_tools(ts)
     print(f"  -> {tools_pkg} ({os.path.getsize(tools_pkg) // 1024}KB)")
 
-    # 2. 收集子包（admin 已独立项目，不再打包）
+    # 2. 收集子包（admin/skills/templates 已独立项目）
     sub_pkgs = {
         "backend": backend_pkg,
         "database": db_pkg,
         "skills": skills_pkg,
+        "templates": templates_pkg,
         "tools": tools_pkg,
     }
 
@@ -516,6 +537,7 @@ def main():
         "backend": any("backend/" in n for n in names),
         "database": any("database/" in n for n in names),
         "skills": any("skills/" in n for n in names),
+        "templates": any("templates/" in n for n in names),
         "tools": any("tools/" in n for n in names),
     }
     for k, v in checks.items():
