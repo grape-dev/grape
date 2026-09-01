@@ -1,6 +1,6 @@
 # agent_tasks 直接创建 INSERT 绑定数不匹配 — 修复设计（Seq #1991/#1992 事故）
 
-> 版本：v1.0 ｜ 日期：2026-09-01 ｜ 状态：**已分析，方案待实施（未改代码）**
+> 版本：v1.2 ｜ 日期：2026-09-01 ｜ 状态：**P0 代码 + 测试看护已实施（未提交）**；P1/P2 其余待排期
 > 事故对象：生产 `Jason7602/hello-flask-9` 模板引导事件 `Seq #1991`（onboarding_exp）/ `#1992`（onboarding_explore）失败
 > 结论：**系统级代码缺陷**（`_create_direct_task` / `_create_failed_task` 的 agent_tasks INSERT 列数与值数不匹配 39/37），非环境偶发。
 
@@ -107,18 +107,35 @@ direct 事件 → _create_direct_task：
 
 ---
 
-## 六、改动清单
+## 六、测试用例设计
 
-| # | 文件 | 改动 | 优先级 |
-|---|------|------|--------|
-| 1 | `src/api/event_pipeline.py` | `_create_direct_task` / `_create_failed_task` 值元组补齐 pool_tag/pool_engine_ids（对齐 39） | P0 |
-| 2 | `src/api/routes/events.py` | redispatch 透传 repository/owner | P1 |
-| 3 | `src/api/onboarding.py` | 引导 target 级幂等补做 | P1 |
-| 4 | `tests/test_event_pipeline.py`（或新增） | 列/值一致性断言 + direct 全链路回归 | P2 |
+基于 P0/P1 修改补充如下用例（与 `tests/` 既有 event_pipeline/onboarding 测试并存，建议与修复同批落地）：
+
+| 用例 | 级别 | 描述 / 断言 |
+|------|------|-------------|
+| `test_task_insert_row_columns_match` | 契约 | `_task_insert_row` 组装值数恒等于 `len(_TASK_COLUMNS_LIST)`；缺列即抛 `ValueError`（从 kv 中删任一列应红） |
+| `test_create_direct_task_inserts_row` | 回归 | 直连执行：`append_event(running)` → `_create_direct_task` → `agent_tasks` 新增 1 行，`event_seq`/`status='queued'`，`pool_tag`/`pool_engine_ids` 存在；不再出现 "bindings" 异常 |
+| `test_task_columns_39_all_bound` | 契约 | 取 `_TASK_COLUMNS_LIST` 全集逐列断言入参覆盖（含 `pool_tag`/`pool_engine_ids` 非缺省占位） |
+| `test_create_failed_task_snapshot` | 回归 | `engine_unavailable` 场景：`_create_failed_task` 落 `status='failed'` 快照（含 prompt/cwd/errors=_reason），列数一致，重派可读到该任务 |
+| `test_onboarding_both_targets_complete` | 集成 | 模板一键创建 → 两主事件 completed、各产出 onboarding-result + issue_state、`agent_tasks` 有对应 direct 行 |
+| `test_redispatch_onboarding_carries_repo` | 集成(P1) | 对 failed 的 onboarding 事件重派 → pipeline 收到非空 `repository`，不再 `Pipeline skipped: repository=''` |
+
+> 结束条件：`pytest -m "not e2e_ui"` 全绿；再以一条直连/本机引擎 E2E 走通「事件→direct task→执行→完成」。
 
 ---
 
-## 七、验证与回归
+## 七、改动清单
+
+| # | 文件 | 改动 | 优先级 |
+|---|------|------|--------|
+| 1 | `src/api/event_pipeline.py` | ✅ **已实施**：新增 `_task_insert_row()`（按 `_TASK_COLUMNS_LIST` 驱动组装、缺列抛错）；`_create_direct_task` / `_create_failed_task` 改为列清单驱动组装（补齐 pool_tag/pool_engine_ids，修复 39/37、39/36） | P0 |
+| 2 | `src/api/routes/events.py` | redispatch 透传 repository/owner | P1 |
+| 3 | `src/api/onboarding.py` | 引导 target 级幂等补做 | P1 |
+| 4 | `tests/test_agent_tasks_insert_contract.py` | ✅ **已实施**：5 用例（契约列值一致 / 缺列抛错 / direct 落行 queued / failed 快照 / 直插不抛绑定错误），本地 `pytest` 通过 | P2 |
+
+---
+
+## 八、验证与回归
 
 1. 单元：新增列/值数一致性断言通过；`pytest -m "not e2e_ui"` 全量回归不红；
 2. 端到端（生产预检）：新模板仓库一键创建 → 引导两事件 completed → `agent_tasks` 出现 direct 任务行、有 agent_logs；重派一个 failed 事件能恢复；
@@ -126,7 +143,7 @@ direct 事件 → _create_direct_task：
 
 ---
 
-## 八、风险
+## 九、风险
 
 | 项 | 说明 |
 |----|------|
@@ -134,4 +151,4 @@ direct 事件 → _create_direct_task：
 | direct 事件在修复前持续 fail | 修复上线部署前，direct 类事件（含新仓库引导）仍会失败——建议尽快合入 new-version3/main 并部署 |
 | 存量 failed 事件 | 本方案不回溯清理已 failed 的 1982-1988/1991-1992；如需可在部署后按需重派或补引导标记 |
 
-*本方案仅文档，未改动任何代码。*
+*P0 代码 + 测试看护（`tests/test_agent_tasks_insert_contract.py`，5 用例全绿）已实施，均未提交；P1（redispatch/引导自愈）与其余 P2 待后续排期。*

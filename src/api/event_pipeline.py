@@ -70,6 +70,19 @@ def start_direct_agent(fn, args, name=""):
     return future
 
 
+def _task_insert_row(_cols, **kw):
+    """按 agent_tasks 列清单顺序组装 INSERT 值。
+
+    以列清单为唯一来源，缺列即抛错——防止列/值数目漂移
+    （历史事故：_TASK_COLUMNS_LIST 扩到 39 列后，两处字面量仍 37/36 值导致 INSERT 失败，
+    事件卡 running 被 sweeper 置 failed，见 docs/new-version3/agent-tasks-direct-create-binding-fix-design.md）。
+    """
+    missing = [c for c in _cols if c not in kw]
+    if missing:
+        raise ValueError(f"agent_tasks INSERT 缺少列值: {missing}")
+    return tuple(kw[c] for c in _cols)
+
+
 def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                         skill_path, engine_id, evt, issue_id="", skill_id=0):
     """direct 执行前创建 agent_tasks + 设 started_at，防 sweeper 误杀。"""
@@ -117,17 +130,23 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
         log.warning(f"create_direct_task: get_gitcode_token failed: {e}")
 
     try:
+        row = _task_insert_row(_TASK_COLUMNS_LIST,
+            id=task_id, agent_session_id=agent_session_id, runtime_id=engine_id,
+            event_seq=seq, issue_id=issue_id, repo_key=repo_key or "",
+            agent_type=agent_type or "", skill=skill_name or "", skill_id=skill_id or 0,
+            prompt="", cwd="", runtime_session_id="", event_type="", account="",
+            user_id=0, repo_gitcode_token=repo_gitcode_token or "",
+            env_extra="{}", skill_files="{}", server_url="", issue_session_id="",
+            project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
+            project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
+            pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
+            status="queued", exit_code=None, result_text="", errors="", stderr="",
+            usage_json="{}", started_at=now, completed_at=None, created_at=now)
         with db_lock:
             c = db.cursor()
             c.execute(
                 f"INSERT INTO agent_tasks ({','.join(_TASK_COLUMNS_LIST)}) VALUES "
-                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
-                (task_id, agent_session_id, engine_id, seq, issue_id, repo_key or "",
-                 agent_type or "", skill_name or "", skill_id or 0,
-                 "", "", "", "", "", 0, repo_gitcode_token or "", "{}",
-                 "{}", "", "", "{}", "{}", "{}", 0, "", 0, "", "",
-                 "queued", None, "", "", "", "{}", now, None, now)
-            )
+                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})", row)
             db.commit()
         log.info(f"Direct task created: {task_id} seq={seq} engine={engine_id}({inst_name}) skill={skill_name}")
     except Exception as e:
@@ -192,21 +211,27 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
 
     now = datetime.now(timezone.utc).isoformat()
     _reason = json.dumps(["无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎"][:500])
+    _pool_tag = agent_type or "" if is_plugin_mode() else ""
     try:
+        row = _task_insert_row(_TASK_COLUMNS_LIST,
+            id=task_id, agent_session_id=agent_session_id, runtime_id=runtime_id,
+            event_seq=seq, issue_id=issue_id, repo_key=repo_key or "",
+            agent_type=agent_type or "", skill=skill_name or "", skill_id=skill_id or 0,
+            prompt=prompt, cwd=cwd, runtime_session_id="",
+            event_type=evt.get("type", "") or "",
+            account=repository or evt.get("account", "") or "", user_id=0,
+            repo_gitcode_token=repo_gitcode_token,
+            env_extra=json.dumps(env_extra), skill_files="{}", server_url="", issue_session_id="",
+            project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
+            project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
+            pool_agent_type=_pool_tag, affinity_runtime_id=0, pool_tag=_pool_tag, pool_engine_ids="",
+            status="failed", exit_code=1, result_text="", errors=_reason, stderr="",
+            usage_json="{}", started_at=now, completed_at=now, created_at=now)
         with db_lock:
             c = db.cursor()
             c.execute(
                 f"INSERT INTO agent_tasks ({','.join(_TASK_COLUMNS_LIST)}) VALUES "
-                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
-                (task_id, agent_session_id, runtime_id, seq, issue_id, repo_key or "",
-                 agent_type or "", skill_name or "", skill_id or 0,
-                 prompt, cwd, "",
-                 evt.get("type", "") or "", repository or evt.get("account", "") or "", 0, repo_gitcode_token,
-                 json.dumps(env_extra), "{}", "",
-                 "", "{}", "{}", "{}", 0,
-                 agent_type or "" if is_plugin_mode() else "", 0, agent_type or "" if is_plugin_mode() else "",
-                 "failed", 1, "", _reason, "", "{}", now, now, now)
-            )
+                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})", row)
             db.commit()
         log.info(f"Failed task snapshot created: {task_id} seq={seq} agent={agent_type} (engine_unavailable)")
     except Exception as e:
