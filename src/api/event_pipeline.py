@@ -847,6 +847,22 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         except Exception:
             pass
     log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
+    # Issue 级场景优先：scene 非 default 时，用 issue scene 的 skill 覆盖 session 的 skill
+    if is_plugin_mode() and _issue_scene and _issue_scene != "default":
+        _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene, user_id=_issue_scene_uid)
+        if _pipe_skill:
+            skill_name = _pipe_skill
+            # 同步更新 skill_id 和 skill_path，否则执行时仍用旧 skill_id 查到旧 skill
+            from src.user.db import resolve_skill_id, get_skill_by_id, get_skill_path
+            _new_sid = resolve_skill_id(_pipe_skill)
+            if _new_sid:
+                skill_id = _new_sid
+                _sk = get_skill_by_id(_new_sid)
+                skill_path = (_sk.get("skill_path") or _pipe_skill) if _sk else _pipe_skill
+            else:
+                skill_path = _pipe_skill
+                skill_id = 0
+            log.info(f"Pipeline (plugin): issue scene skill override: {agent_type}={_pipe_skill} sid={skill_id} (scene={_issue_scene})")
     if not backend or not skill_name:
         # Plugin mode: try pipelines.json first（用 Issue 级场景）
         if is_plugin_mode():

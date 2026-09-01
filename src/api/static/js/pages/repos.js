@@ -147,7 +147,7 @@ function renderRepoSelection(repos) {
         '<span class="pw-icon">👋</span>' +
         '<div class="pw-text">' +
           '<span class="pw-title">' + I18N.t('repos.lobby.welcome_back', {name: user}) + '</span>' +
-          '<span class="pw-desc">' + I18N.t('repos.lobby.welcome_tip') + ' · ' + I18N.t('repos.lobby.project_sub') + '</span>' +
+          '<span class="pw-desc">' + I18N.t('repos.lobby.welcome_tip') + '</span>' +
         '</div>' +
       '</div>' +
       '<div class="project-stats">' +
@@ -300,9 +300,11 @@ function renderRepos() {
     html += `</div>`;
 
     _projectsContent = html;
+    if (localStorage.getItem('sidebarTab') !== 'projects') return;
     const pc = document.getElementById('ptContent');
     if (pc) pc.innerHTML = html;
   }).catch(() => {
+    if (localStorage.getItem('sidebarTab') !== 'projects') return;
     const pc = document.getElementById('ptContent');
     if (pc) pc.innerHTML = '<div class="error">' + I18N.t('repos.load_failed') + '</div>';
   });

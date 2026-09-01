@@ -135,7 +135,11 @@ def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
         lines.append("> 请根据项目知识基线 + 成员上传文档 + 需求特征，判定最匹配的 scene_id。")
         lines.append("> 成员上传文档（project-info/member/）可能包含自定义场景定义（pipelines-user.json），")
         lines.append("> 如有自定义场景且与需求匹配，优先推荐自定义场景。")
-        lines.append("> 在 JSON 产出中输出 `recommended_scene` 和 `scene_reason`。无法确定时留空（回退到仓库默认场景）。")
+        lines.append("⚠️ **必须**在最终 JSON 产出块中额外包含 `recommended_scene` 和 `scene_reason` 两个字段。")
+        lines.append("- `recommended_scene`：填写上表中最匹配的 scene_id（如 \"blog-publish\"、\"iac\"、\"default\"）。")
+        lines.append("- `scene_reason`：一句话说明选择理由。")
+        lines.append("- 无法确定时 `recommended_scene` 填 `\"default\"`，不得省略。")
+        lines.append("- 缺少这两个字段的输出将被系统视为无效并重试。")
     except Exception as _e:
         from src.config import log as _log
         _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")

@@ -57,6 +57,7 @@ function renderTemplates() {
       }
     });
   }).catch(e => {
+    if (localStorage.getItem('sidebarTab') !== 'templates') return;
     const c = document.getElementById('ptContent');
     if (c) c.innerHTML = '<div class="error">' + I18N.t('templates.load_failed', {msg: e.message}) + '</div>';
   });
@@ -248,6 +249,7 @@ function doSearch() {
 
 // ====== 主渲染 ======
 function renderTemplateCategory() {
+  if (localStorage.getItem('sidebarTab') !== 'templates') return;
   var cats = _tmplState.categories;
   var c = document.getElementById('ptContent');
   if (!c) return;
@@ -335,7 +337,7 @@ function loadTop1000(catIdx) {
   renderTemplateCategory();
 
   var params = new URLSearchParams({
-    platform: cat.platform,
+    platform: cat.platform || (cat.id.indexOf('gitcode') >= 0 ? 'gitcode' : cat.id.indexOf('github') >= 0 ? 'github' : cat.platform),
     page: cache.page,
     size: 20,
     sort_by: cache.sortBy,

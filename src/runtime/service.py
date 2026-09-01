@@ -1380,13 +1380,16 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
         pass
     # A2A 自动补触发（2026-08-30 修复）：
     # hermes ACP premature end_turn bug：agent 说完"触发 A2A"后直接 end_turn，
-    # 没实际调用 A2A API → pipeline 卡住。任务完成后检查 issue_state.stage 是否已推进，
-    # 如果 stage 还等于当前 agent_type（说明 A2A 没被调用），自动补触发下一个 agent。
+    # A2A 补触发：延迟 5 分钟检查，给 agent 自己调 A2A 的缓冲窗口。
+    # agent 正常调了 A2A → stage 已推进 → 5 分钟后检查发现不需要补触发。
+    # agent 没调 A2A（如 need-info 等待用户回复）→ 5 分钟后 stage 仍卡住 → 补触发。
+    # 用 Timer 异步等待，不阻塞 complete_task 返回。
     if exit_code == 0 and task:
         try:
-            _auto_advance_pipeline(task)
+            _task_copy = dict(task)  # 浅拷贝，避免外部修改
+            threading.Timer(300.0, lambda: _auto_advance_pipeline(_task_copy)).start()
         except Exception as _ae:
-            log.warning(f"auto advance pipeline failed for task {task_id}: {_ae}")
+            log.warning(f"auto advance pipeline schedule failed for task {task_id}: {_ae}")
 
 
 def _auto_advance_pipeline(task: dict):

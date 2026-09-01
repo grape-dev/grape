@@ -267,6 +267,7 @@ def update_templates_json(gitcode_items, github_items):
         "icon": "🟢",
         "description": "GitCode 云原生热门项目，每日自动同步",
         "scene_id": "default",
+        "platform": "gitcode",
         "page_size": 12,
         "templates": [_to_template(r, "gitcode") for r in gitcode_items],
     }
@@ -276,6 +277,7 @@ def update_templates_json(gitcode_items, github_items):
         "icon": "⚫",
         "description": "GitHub 云原生热门项目，每日自动同步",
         "scene_id": "default",
+        "platform": "github",
         "page_size": 12,
         "templates": [_to_template(r, "github") for r in github_items_dedup],
     }
