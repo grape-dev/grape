@@ -32,6 +32,9 @@ skills/sre/
 skills/chat/
 skills/_template/
 configs/skill-description.json
+# 官方项目模板由独立仓库供给（scripts/sync_templates.sh 铺入，不入 git）
+examples/hello-*
+configs/project-templates.json
 DEPLOYMENT-REMOTE.md
 DEPLOYMENT-WORKER.md
 DEPLOYMENT-TEST.md
