@@ -61,7 +61,7 @@ function _renderProjectTab(d) {
   const degraded = meta.degraded ? '<span class="tr" style="font-size:10px">⚠ ' + I18N.t('knowledge.degraded') + '</span>' : '';
   const updated = meta.last_updated ? (meta.last_updated || '').replace('T',' ').substring(0,19) : '—';
 
-  let html = '<div class="grp-title" style="font-size:13px;font-weight:600;margin:14px 0 10px;color:var(--t)">📦 ' + I18N.t('knowledge.project_baseline_title') + '</div>';
+  let html = '<div class="grp-title" style="font-size:13px;font-weight:600;margin:14px 0 10px;color:var(--t)">' + I18N.t('knowledge.project_baseline_title') + '</div>';
   if (degraded) html += `<div class="ts" style="padding:6px 10px;margin-bottom:8px;font-size:11px;color:var(--or)">${degraded} ${meta.note || ''} · ${I18N.t('knowledge.updated_commit', {updated: updated, sha: (meta.last_commit_sha || '-')})}</div>`;
   else if (updated && updated !== '—') html += `<div class="ts t3" style="padding:2px 0 8px;font-size:11px">${I18N.t('knowledge.updated_commit', {updated: updated, sha: (meta.last_commit_sha || '-')})}</div>`;
 
@@ -88,7 +88,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
   // 项目级知识沉淀（knowledge.md）
   const krows = d.project.knowledge || [];
   if (krows.length) {
-    html += '<div class="grp-title" style="font-size:13px;font-weight:600;margin:16px 0 10px">📄 ' + I18N.t('knowledge.knowledge_sediment_title') + '</div>';
+    html += '<div class="grp-title" style="font-size:13px;font-weight:600;margin:16px 0 10px">' + I18N.t('knowledge.knowledge_sediment_title') + '</div>';
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     krows.forEach(k => {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-3).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
@@ -108,7 +108,7 @@ html += `<div class="cd skill-card" style="padding:14px;cursor:pointer" data-nam
 
   // 成员上传文档
   const docs = d.project.member_docs || [];
-  html += '<div class="grp-title" style="font-size:13px;font-weight:600;margin:16px 0 10px">👥 ' + I18N.t('knowledge.member_docs_title') + '</div>';
+  html += '<div class="grp-title" style="font-size:13px;font-weight:600;margin:16px 0 10px">' + I18N.t('knowledge.member_docs_title') + '</div>';
   if (docs.length === 0) {
     html += '<div class="ts t2" style="padding:12px">' + I18N.t('knowledge.no_member_docs') + '</div>';
   } else {
