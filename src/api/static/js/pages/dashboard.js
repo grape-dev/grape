@@ -239,6 +239,15 @@ function renderDashboard(data) {
     if (engBtn) engBtn.style.display = 'none';
     const headerDiv = document.querySelector('.ap-bar');
     if (headerDiv) {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'ap-btn ap-btn-o';
+      cancelBtn.textContent = I18N.t('common.cancel');
+      cancelBtn.onclick = function() {
+        window._dashboardEditing = false;
+        editMode = false;
+        API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+      };
+      headerDiv.appendChild(cancelBtn);
       const saveBtn = document.createElement('button');
       saveBtn.className = 'ap-btn ap-btn-p';
       saveBtn.textContent = I18N.t('common.save');
