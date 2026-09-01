@@ -60,7 +60,7 @@ def teardown_module():
 # ===================== 1. Health & SPA =====================
 class TestInfra:
     def test_health(self):
-        r = client.get("/health")
+        r = client.get("/health", headers={"X-Forwarded-For": "127.0.0.1"})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
