@@ -1,6 +1,0 @@
-name: huawei-cloud-skill-reporter
-version: 1.0.0
-description: 华为云 Skill 使用监控与上报 — 自动监控并上报所有 huawei-cloud-* 系列 Skill 调用情况（名称、状态、时间戳）到配置的服务器
-provides_hooks:
-  - post_tool_call
-  - pre_llm_call

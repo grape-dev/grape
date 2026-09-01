@@ -57,6 +57,7 @@ function renderTemplates() {
       }
     });
   }).catch(e => {
+    if (localStorage.getItem('sidebarTab') !== 'templates') return;
     const c = document.getElementById('ptContent');
     if (c) c.innerHTML = '<div class="error">' + I18N.t('templates.load_failed', {msg: e.message}) + '</div>';
   });
@@ -248,6 +249,7 @@ function doSearch() {
 
 // ====== 主渲染 ======
 function renderTemplateCategory() {
+  if (localStorage.getItem('sidebarTab') !== 'templates') return;
   var cats = _tmplState.categories;
   var c = document.getElementById('ptContent');
   if (!c) return;
