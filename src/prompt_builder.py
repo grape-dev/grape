@@ -6,6 +6,14 @@ from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skil
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
 
 
+def _local_port() -> str:
+    """本机服务端口，优先读环境变量，默认 3000（兼容老 devops-bot）。
+
+    grape-main 部署时在 systemd Environment 中设 GRAPE_MAIN_PORT=8000 覆盖。
+    """
+    return os.environ.get("GRAPE_MAIN_PORT", "3000")
+
+
 def _resolve_server_url(runtime_id: int = 0) -> str:
     """返回服务端可达地址（A2A/tasks 等对外调用用）。
 
@@ -27,12 +35,12 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
                 if row:
                     cid = row[0] or 0
                     if cid == 0:
-                        return "http://127.0.0.1:3000"
+                        return f"http://127.0.0.1:{_local_port()}"
                     # 检查是否本机 worker（last_ip == 127.0.0.1）
                     c.execute("SELECT last_ip FROM runtime_credentials WHERE id=?", (cid,))
                     cred_row = c.fetchone()
                     if cred_row and (cred_row[0] or "").startswith("127."):
-                        return "http://127.0.0.1:3000"
+                        return f"http://127.0.0.1:{_local_port()}"
         return public_url
     except Exception:
         pass

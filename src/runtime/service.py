@@ -697,6 +697,20 @@ def claim(runtime_id) -> dict | None:
                     try:
                         _allowed = _json.loads(_pe_row[0])
                         if _allowed and runtime_id not in _allowed:
+                            # 检查 pool_engine_ids 中的 id 是否全部 offline
+                            # 如果全部 offline，清空 pool_engine_ids 让 task 可被任意引擎认领
+                            _all_offline = True
+                            for _eid in _allowed:
+                                c.execute("SELECT status FROM agent_runtimes WHERE id=?", (_eid,))
+                                _e_row = c.fetchone()
+                                if _e_row and (_e_row[0] or "") == "online":
+                                    _all_offline = False
+                                    break
+                            if _all_offline:
+                                log.info(f"pool_engine_ids {_allowed} all offline, clearing for task {task_id}")
+                                c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
+                                db.commit()
+                                break  # 清空后当前 task 可认领
                             _skip = True
                     except Exception:
                         pass
@@ -923,6 +937,20 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     try:
                         _allowed = _json.loads(_pe_row[0])
                         if _allowed and runtime_id not in _allowed:
+                            # 检查 pool_engine_ids 中的 id 是否全部 offline
+                            # 如果全部 offline，清空 pool_engine_ids 让 task 可被任意引擎认领
+                            _all_offline = True
+                            for _eid in _allowed:
+                                c.execute("SELECT status FROM agent_runtimes WHERE id=?", (_eid,))
+                                _e_row = c.fetchone()
+                                if _e_row and (_e_row[0] or "") == "online":
+                                    _all_offline = False
+                                    break
+                            if _all_offline:
+                                log.info(f"pool_engine_ids {_allowed} all offline, clearing for task {task_id}")
+                                c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
+                                db.commit()
+                                break  # 清空后当前 task 可认领
                             _skip = True
                     except Exception:
                         pass

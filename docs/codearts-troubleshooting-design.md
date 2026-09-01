@@ -1,7 +1,7 @@
 # CodeArts 引擎问题排查与优化设计
 
 > 创建: 2026-09-01
-> 更新: 2026-09-01 20:30 (方案 G 代码实施完成, 本机验证通过)
+> 更新: 2026-09-01 23:35 (方案 G 全部实施完成, 部署验证通过, --variant 不适用, webhook 修复)
 > 背景: CodeArts 引擎在 Grape pipeline 中效果明显差于 OpenCode 和 Hermes，需系统性定位根因并记录修复方案。
 
 ---
@@ -681,12 +681,16 @@ self-check 主要防两种场景:
 | **P1** | System Skills 冲突 | codearts 特有问题, opencode/hermes 无此机制; 技能描述限定 "Only bug-fix sub-agent", 实际影响待观察 | 观察 | **暂不处理** |
 | **P1** | 沙箱网络封锁 | 已通过预写 sandbox/config.json 解决 | 代码层 | **已实施** |
 | **P1** | 环境变量脆弱性 | get_env() 末尾加 self-check, 关键变量缺失时打 warning | 代码层 | **已实施** |
-| **P2** | --variant 未使用 | 可选传 --variant high | 代码层 | 待评估 |
+| **P2** | --variant 未使用 | codearts v26.8.8 不支持 --variant 参数, 传入后 codearts 打印 help 退出; 待 codearts 升级支持后再加 | 代码层 | **不适用** |
 | **P2** | 模型列表双重配置 | 同步 models-cache.json 流程化 | 运维流程 | 待修复 |
 | **P2** | 内存 700MB (比旧模式多 221MB) | symlink sandbox_runner/system/skills 指向宿主机, 避免每次解压 66MB | 代码层 | **已实施** |
 | **P2** | 临时目录磁盘开销 (67MB/task) | 同上: symlink 后临时目录降至 1.3MB | 代码层 | **已实施** |
 | **P2** | worker 崩溃后残留临时目录 | main() 启动时 rmtree /var/cache/codearts-tasks/* | 代码层 | **已实施** |
 | **P3** | 模型前缀写死 | 已修复 (commit ba63d20a, 2026-08-20) | — | 已修复 |
+| **P0** | pool_engine_ids 引用失效 runtime id 导致 task 永久卡死 | claim 时检查 pool_engine_ids 中的 id 全部 offline 时自动清空, task 变全量广播 | 代码层 | **已实施** |
+| **P0** | direct 模式 agent_tasks 状态不同步 | _update_direct_task 的 SQL 条件 status='queued' 匹配不到 running 状态的行, 改用 update_task_status (和 worker 模式统一) | 代码层 | **已实施** |
+| **P0** | A2A 本机端口错误 (3000→8000) | _resolve_server_url 硬编码 127.0.0.1:3000, 但 grape-main 在 8000 端口; 改为 GRAPE_MAIN_PORT 环境变量, 默认 3000 兼容老服务 | 代码层 | **已实施** |
+| **P1** | VOD 跳过 A2A 时 stage 不推进 | VOD 检测到已有 PR 跳过 A2A 交办, 但 issue_state.stage 停在 vod 不推进到 issue/done, 前端显示"执行中" | SKILL.md | 待修复 |
 
 ## 7. 验证方法
 
@@ -936,3 +940,202 @@ stream_agent()
 | models cache | `~/.cache/codeartsdoer/models-cache.json` | xCenter 503 绕过缓存 |
 | System Skills | `~/.codeartsdoer/cli-data/system/skills/` | 内置 10 个 bug-fix 技能 |
 | codearts-cli skill | `~/.hermes/skills/codearts-cli/SKILL.md` | 安装配置指南 |
+
+## 10. 部署验证发现的问题（2026-09-01）
+
+### 10.1 pool_engine_ids 引用失效 runtime id 导致 task 永久卡死
+
+**发现场景**: 部署方案 G 后触发 issue #26, VOD A2A 交办 issue agent, 但 issue task 一直 queued 无人 claim。
+
+**根因链路**:
+```
+1. 用户在控制台配置场景时选了引擎 rt=80 作为 issue agent 的绑定引擎
+2. 场景配置存在 DB 中, 记录 engine_runtime_ids: [80]
+3. task 创建时从场景配置读出 pool_engine_ids=[80] (event_pipeline.py L1028)
+4. worker claim 时检查 pool_engine_ids (service.py L686-720):
+   - 当前 runtime id (253-270) 都不在 [80] 里 → skip
+   - claim 代码有"跳过不匹配继续找下一个"的逻辑 (2026-08-29 修复)
+   - 但只有一个 queued task → 跳过后没有下一个 → 返回 None
+5. task 永远 claim 不到
+```
+
+**逻辑缺陷**: claim 代码只跳过不匹配的 task 继续找下一个, 但不会清理失效的 pool_engine_ids。
+如果场景配置引用的引擎已经 offline/删除, pool_engine_ids 中的 id 永远不会有人 claim, task 就永久卡死。
+
+**修复方案（已实施）**: claim 和 claim_by_tag 中, 发现 pool_engine_ids 不匹配时检查其中所有 id 是否全部 offline (status != 'online' 或不存在)。如果全部 offline, 自动清空 pool_engine_ids='', 让 task 变成全量广播可被任意引擎认领。如果其中有 online 的 (如 [80, 266] 中 266 online), 不清空, 保持限制。
+
+**修改文件**: src/runtime/service.py — claim() L695-710 和 claim_by_tag() L921-936 两处同步修改。
+
+**部署**: 0007 (本机) + 001 主控端, grape-main 重启。worker 不需要更新 (service.py 是主控端代码)。
+
+### 10.2 direct 模式 agent_tasks 状态不同步
+
+**发现场景**: issue #25 的 codearts VOD 任务在 001 本机 direct 模式执行完成, events 表标 completed, 但 agent_tasks 表还停在 running。
+
+**根因**: `_execute_agent_inner` 中两步操作矛盾:
+- L1464: `update_task_status(task_id, "running")` — 开始执行时改 running
+- L1736/1752: `_update_direct_task(seq, "completed")` — 完成时只更新 `status='queued'` 的行
+- running 状态匹配不到 queued 条件 → agent_tasks 永远停在 running
+
+**修复**: direct 模式改用 `update_task_status(task_id, ...)` (和 worker 模式统一), 通过 task_id 直接更新, 终态幂等保护, running 状态能正常更新成 completed/failed。`_update_direct_task` 的 SQL 条件也改成 `status IN ('queued','running','dispatched')` 作为 fallback。
+
+**修改点 (3 处, _execute_agent_inner + _execute_agent)**:
+- L1736-1740: _execute_agent_inner 无产出 failed 路径, 有 task_id 时用 update_task_status
+- L1756-1760: _execute_agent_inner 有产出 completed/failed 路径, 有 task_id 时用 update_task_status
+- L1434-1437: _execute_agent 顶层 except 崩溃处理, 有 task_id 时用 update_task_status (深度检查发现遗漏+双重调用 bug, 已补修为 if/else)
+
+### 10.3 A2A 本机端口错误 (3000 → 8000)
+
+**发现场景**: direct 模式执行的 codearts agent 调 A2A `127.0.0.1:3000/api/a2a` 失败, "A2A 服务不可达"。
+
+**根因**: `_resolve_server_url` 中本机引擎返回 `http://127.0.0.1:3000`, 但 grape-main 实际在 8000 端口。3000 是老 devops-bot 时代的端口, 迁移到 grape 后改了 8000 但没更新这里。
+
+**修复**: 改为 `GRAPE_MAIN_PORT` 环境变量, 默认 3000 (兼容老 devops-bot), grape-main 部署时在 systemd Environment 中设 `GRAPE_MAIN_PORT=8000`。
+
+### 10.4 VOD 跳过 A2A 时 stage 不推进
+
+**发现场景**: issue #25 VOD 完成后, issue_state.stage 停在 vod, 前端显示"执行中"。
+
+**根因**: VOD SKILL.md 中"重复 A2A 检查"逻辑: 检测到已有 PR#21 就跳过 A2A 交办, 只发评论。但跳过 A2A 就没调 `set_issue_stage`, stage 停在 vod 不推进。
+
+**影响**: 前端显示"执行中"误导用户, 实际 VOD 已完成只是没推进 stage。
+
+**修复方向**: VOD 跳过 A2A 时也要推进 stage (到 issue 或 done), 或在 complete_task 中检测 VOD 完成但 stage 仍=vod 时自动推进。
+
+### 10.5 集群场景安全分析（0007 + 001 双主控）
+
+**架构**: 0007 和 001 两个主控进程, 共享 MySQL DB (127.0.0.1), worker 通过域名 example.com 访问 (nginx 负载均衡到任一主控)。
+
+**并发安全分析**:
+
+1. **db_lock 是进程内线程锁** (`threading.RLock`), 不能跨进程互斥。两个主控进程各自有自己的 db_lock。
+2. **MySQL autocommit=False 事务模式**, claim 中的 SELECT/UPDATE 在事务中执行。
+3. **pool_engine_ids 清空操作是幂等的** — 清空后再清空还是空值, 无副作用。
+4. **真正的 claim 互斥靠 MySQL 行级锁**: `UPDATE agent_tasks SET status='dispatched' WHERE id=? AND status='queued'` — 两个进程同时 UPDATE 同一行, MySQL 行锁保证只有一个成功 (rowcount > 0), 另一个匹配不到 status='queued' 返回 rowcount=0 → return None。
+5. **清空 pool_engine_ids 和 dispatched 之间的间隔**: 0007 清空并 commit 后, 001 看到已清空的 task 也会走到 dispatched 竞争, MySQL 行锁保证只 claim 一次。
+
+**结论**: 集群场景安全。db_lock 保护进程内线程并发, MySQL 事务+行锁保护跨进程数据一致性。
+
+### 10.6 部署验证矩阵
+
+| 检查项 | 0007 | 001 | worker(0002-0006) | 验证方式 |
+|--------|------|-----|-------------------|----------|
+| service.py 两处 pool_engine_ids 修复 | L710 L952 | L710 L952 | 不需要 (不 import) | grep "all offline" 确认 |
+| prompt_builder.py GRAPE_MAIN_PORT | env=8000 | env=8000 | 不需要 | grep + systemctl Environment |
+| event_pipeline.py direct 模式修复 | update_task_status | update_task_status | 不需要 | grep 确认 |
+| codearts.py --auto/--variant/self-check | ✅ | ✅ | ✅ 5台已推 | grep CODEARTS_VARIANT |
+| agent.py 方案G 临时目录+symlink+清理 | ✅ | ✅ | ✅ 5台已推 | grep codearts-tasks |
+| grape-main active + health ok | ✅ pid=2108108 | ✅ pid=80546 | — | curl /health |
+| runtime-agent active | — | — | ✅ 5台 active | systemctl is-active |
+| worker 不 import service.py/prompt_builder.py | — | — | grep 确认无 import | agent.py/client.py/executor.py |
+| 集群 DB 共享 | mysql 127.0.0.1 | mysql 127.0.0.1 | — | db-backend.json 一致 |
+| pool_engine_ids 清空幂等 | 是 | 是 | — | 逻辑分析 |
+
+### 10.7 修改文件清单
+
+| 文件 | 改动内容 | 部署位置 |
+|------|---------|---------|
+| src/runtime/codearts.py | build_args 加 --auto, get_env KERNEL_DATA_DIR setdefault, self-check | 0007 + 001 + 5台 worker |
+| src/runtime/agent.py | _CODEARTS_ALLOW_PERMS 常量, 方案G 临时目录创建+预写 global.json+sandbox config+symlink+track_tmp, main() 启动清理 | 0007 + 001 + 5台 worker |
+| src/runtime/service.py | claim() 和 claim_by_tag() 中 pool_engine_ids 全部 offline 时自动清空 | 0007 + 001 (主控端) |
+| src/prompt_builder.py | _local_port() 环境变量, 默认 3000 兼容老服务 | 0007 + 001 (主控端) |
+| src/api/event_pipeline.py | direct 模式改用 update_task_status, _update_direct_task SQL 条件放宽 | 0007 + 001 (主控端) |
+| /etc/systemd/system/grape-main.service | 加 Environment=GRAPE_MAIN_PORT=8000 | 0007 + 001 |
+| docs/codearts-troubleshooting-design.md | 设计文档全文更新 | 0007 (git) |
+| GitCode webhook | url 从 http://1.92.115.229/webhook/gitcode 改为 https://example.com/webhook/gitcode | GitCode API |
+
+### 10.8 历史 codearts 失败根因总结
+
+之前 codearts "容易失败" 的三个叠加原因:
+
+1. **write/edit 权限被拒** (方案 G 已修复)
+   - codearts 的 permission.asked 事件被二进制硬性 reject
+   - agent 不能写文件, coding agent 需要写代码但写不了, 直接失败
+   - 方案 G: per-task 独立 KERNEL_DATA_DIR + 预写 global.json (write/edit=allow) + --auto
+
+2. **E2 代码 import requests 崩溃** (已回退)
+   - dev 分支 E2 方案在 codearts.py 里 import requests
+   - worker venv (Python 3.14) 没装 requests, 进程启动就崩
+   - 所有 codearts task 3 秒内失败, 报 "timed out after 1800s"
+   - E2 代码已不在任何分支, version-20260901 是干净代码
+
+3. **xCenter 503** (华为云侧偶发, 无法修复)
+   - 华为云模型验证 API 偶发 503, codearts 启动后卡死无输出
+   - OPENCODE_DISABLE_MODELS_FETCH=1 已设但 codearts 仍调 xCenter 验证 tenant settings
+   - 不是代码能解决的问题, 需等华为云恢复
+
+### 10.9 部署验证结论 (2026-09-01)
+
+**方案 G 验证通过:**
+- codearts VOD/issue/coding/qa/sre 全流程执行正常
+- bash/read/write/edit 工具全部正常 (方案 G 权限隔离生效)
+- 临时目录 /var/cache/codearts-tasks/ 执行完自动清理, 无残留
+- symlink sandbox_runner/system/skills 指向宿主机, 临时目录 1.3MB
+- 无 codearts run 子进程残留, 无进程卡死
+- 内存正常 (5台 worker 可用 3.2~5.9GB)
+- 磁盘正常 (/var/cache 4KB, 无堆积)
+
+**codearts vs hermes 执行质量对比 (默认模式, 无 --variant):**
+
+| 维度 | codearts | hermes |
+|------|----------|--------|
+| VOD 步数 | 8-17 步 | 11-25 步 |
+| VOD 工具调用 | 3-12 次 | 11-20 次 |
+| VOD 耗时 | 34-127s | 29-172s |
+| VOD 消息量 | 20-52 条 | 145-486 条 |
+| 结构化输出 | ✅ 完整 JSON (actions+conclusion+artifacts+next_step+issue_summary) | ✅ 有但格式不统一 |
+| coding 能力 | ✅ 9文件 30/30自测 68次工具调用 | 无样本 |
+| issue 分析 | ✅ 4维度评级表格+危险场景识别 | 无样本 |
+| 执行效率 | 步数少 耗时短 消息少 | 消息量大 步数多 |
+
+**codearts 任务统计:** 30 个任务, 1 个 failed (失败率 3.3%, 唯一失败是 --variant high 不支持导致)
+**hermes 任务统计:** 17 个任务, 1 个 failed (失败率 5.9%)
+
+**结论:** 方案 G 修复后 codearts 实际成功率正常, 不再"容易失败"。执行效率高于 hermes, 结构化输出更规范。
+
+### 10.10 方案 G 内存实测与 symlink 安全性
+
+**内存实测 (worker-0003, task 执行中):**
+
+| 场景 | 进程 RSS | 临时目录 | 总占用 | 说明 |
+|------|---------|---------|--------|------|
+| 旧模式 (无方案G) | 479MB | 0 | 479MB | 之前测量值, codearts JS 运行时 |
+| 方案G 无symlink | 700MB | 67MB (tmpfs) | 767MB | sandbox_runner 解压到内存+tmpfs |
+| 方案G 有symlink (实测) | 622MB | 28KB (磁盘) | 622MB | symlink 省掉解压开销 |
+
+**内存明细 (/proc/PID/status):**
+```
+VmRSS:      622MB (实际物理内存)
+Pss_Anon:   570MB (JS 运行时堆, 不可回收, codearts 本身开销)
+Pss_File:   102MB (文件映射: codearts 二进制 + sandbox_runner + system skills)
+Private_Clean: 100MB (文件映射干净页, 可回收)
+Private_Dirty: 570MB (匿名脏页, JS 运行时)
+```
+
+**622MB vs 479MB 多出 143MB 的原因:**
+临时目录是空的, codearts 启动时要从零创建 opencode.db (SQLite 初始化) + 加载 system skills 索引到内存。
+旧模式下这些已在宿主机目录中现成存在, 不需要重新创建。
+symlink 已省掉 sandbox_runner 解压的 78MB (从 700MB 降到 622MB)。
+
+**symlink 并发安全性:**
+- sandbox_runner: 66MB ARM64 沙箱二进制, 只读执行, 不写 → 多进程并发读安全
+- system/skills: 10 个内置技能 SKILL.md + references, 只读加载, 不写 → 多进程并发读安全
+- opencode.db: 每个 task 在各自临时目录中独立创建, 不通过 symlink 共享 → 无并发写问题
+- global.json: 每个 task 在各自临时目录中预写, 不通过 symlink 共享 → 无并发写问题
+- 操作系统文件系统支持并发读, 无锁竞争
+
+**4 并发内存预估:** 622MB × 4 = 2488MB, worker 7.2GB 内存, 可用 4.7GB, 够用。
+
+### 10.11 --variant 参数不适用
+
+codearts v26.8.8 不支持 `--variant` 参数。传入后 codearts 打印 help 退出, task 2 秒失败。
+`codearts run --help` 确认支持的参数: `--auto`, `--format`, `--model`, `--session`, `--continue` 等, 无 `--variant`。
+待 codearts 升级支持后再加, 当前使用默认推理质量。
+
+### 10.12 webhook 地址修复
+
+**发现场景:** issue_comment 事件 (用户回复 Issue 评论) 不触发, VOD 澄清后用户回复但流水线不继续。
+
+**根因:** GitCode webhook 地址是 `http://1.92.115.229/webhook/gitcode` (0007 公网 IP + HTTP), nginx 80 端口做 301 跳转到 443, GitCode POST 请求不跟随跳转, 返回 405。
+
+**修复:** webhook 地址改为 `https://example.com/webhook/gitcode` (HTTPS + 域名), nginx 443 端口正确代理 `/webhook/` 到 grape-webhook。

@@ -221,7 +221,7 @@ def _update_direct_task(seq, status, exit_code=0, result_text=""):
             c = db.cursor()
             c.execute(
                 "UPDATE agent_tasks SET status=?, exit_code=?, result_text=?, completed_at=? "
-                "WHERE event_seq=? AND status='queued'",
+                "WHERE event_seq=? AND status IN ('queued','running','dispatched')",
                 (status, exit_code, result_text or "", datetime.now(timezone.utc).isoformat(), seq)
             )
             db.commit()
@@ -1431,7 +1431,11 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             update_event_complete(seq, "failed", exit_code=1,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=f"执行崩溃：{e}")
-            _update_direct_task(seq, "failed", exit_code=1, result_text=f"执行崩溃：{e}")
+            if task_id:
+                from src.runtime.service import update_task_status
+                update_task_status(task_id, "failed", exit_code=1, result_text=f"执行崩溃：{e}")
+            else:
+                _update_direct_task(seq, "failed", exit_code=1, result_text=f"执行崩溃：{e}")
         except Exception:
             pass
     finally:
@@ -1733,7 +1737,11 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     if not has_output:
         # 无产出 → 标记 failed（保留 event，不删）
         log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, mark failed")
-        _update_direct_task(seq, "failed", exit_code=exit_code, result_text=result_text)
+        if task_id:
+            from src.runtime.service import update_task_status
+            update_task_status(task_id, "failed", exit_code=exit_code, result_text=result_text)
+        else:
+            _update_direct_task(seq, "failed", exit_code=exit_code, result_text=result_text)
         update_event_status(seq, "failed")
         update_event_complete(seq, "failed", exit_code=exit_code, duration=duration,
                               agent_logs=agent_logs, completed_at=completed_at, result=result_text)
@@ -1749,7 +1757,11 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             log.info(f"Exec agent: seq={seq} exit_code={exit_code} but has_output=True, mark completed (signal death after work done)")
     else:
         new_status = "failed"
-    _update_direct_task(seq, new_status, exit_code=exit_code, result_text=result_text)
+    if task_id:
+        from src.runtime.service import update_task_status
+        update_task_status(task_id, new_status, exit_code=exit_code, result_text=result_text)
+    else:
+        _update_direct_task(seq, new_status, exit_code=exit_code, result_text=result_text)
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)
