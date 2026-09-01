@@ -1,1 +1,0 @@
-[@skills_test2](mention://agent/9c3cb099-1e25-4efb-a696-671d0c4135b8) 请对 PR #38（huawei-cloud-maas-query）执行功能测试，完成后将总测试报告保存到 `/tmp/skill_test2_report/huawei-cloud-maas-query/总测试报告.md` 后 @我。
