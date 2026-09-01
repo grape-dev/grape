@@ -135,13 +135,15 @@ def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
 
 def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       description: str = "", assignee: str = "",
-                      event_type: str = "") -> int | None:
+                      event_type: str = "",
+                      subtask_mode: int = -1) -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
     - assignee 优先 → 对应平台 user_id；assignee 为空 → 仓库 owner
     - assignee/owner 未注册平台（无 unified_user_mapping）→ user_id=0 落库；
       任务中心 mine 查询 `user_id=? OR user_id=0` 展示（P2 拍板修订：展示，不隐藏）
     - 幂等：同 repo+issue+assignee 的 active/processing 行复用
+    - subtask_mode: 调用方直接传入（-1=从 issue_state 读取，0/1=直接使用）
     """
     from src.repo_key import to_repo_key, split_owner_repo
     repo_key = to_repo_key(repo_key)
@@ -163,20 +165,23 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         if row:
             task_id = row[0]
             linked = row[1]
-            # 标题更新：webhook 带了真实标题 → 覆盖旧标题（可能为 issue_opened 等类型名）
             if title:
                 c.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
-                db.commit()
+            if subtask_mode >= 0:
+                c.execute("UPDATE tasks SET is_subtask_mode=? WHERE id=?", (subtask_mode, task_id))
+            db.commit()
         else:
             if not title:
                 title = _get_issue_title(repo_key, issue_number)
             if not description:
                 description = f"{event_type or 'Issue'}：请在任务中心查看并处理。"
+            _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
+            _parent_val = _get_issue_parent(repo_key, issue_number)
             c.execute(
                 "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number) "
                 "VALUES (?,?,?,?,?,?,'active',?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
-                 _get_issue_subtask_mode(repo_key, issue_number), _get_issue_parent(repo_key, issue_number))
+                 _subtask_val, _parent_val)
             )
             db.commit()
             task_id = c.lastrowid
@@ -648,15 +653,32 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                                          "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
         issue_num = int(n)
         created = True
-    # 2) 按既有流程幂等建档（同 issue 任务 id 复用）
-    task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee)
+    # 2) 自动检测多任务模式：根据场景的 issue skill 是否为 issue-multitask
+    _auto_subtask_mode = 0
+    if body.scene_id:
+        try:
+            from src.api.pipeline_config import _query_scene_by_id
+            from src.config import log as _log
+            _scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key, user_id=user.get("id", 0))
+            if _scene_obj:
+                _nodes = _scene_obj.get("nodes", []) or []
+                _issue_skill = next((n.get("skill", "") for n in _nodes if n.get("id") == "issue"), "")
+                if _issue_skill == "issue-multitask":
+                    _auto_subtask_mode = 1
+                    _log.info(f"Auto multi-task mode: scene={body.scene_id} issue skill=issue-multitask")
+        except Exception as _e:
+            from src.config import log as _log
+            _log.warning(f"Auto multi-task detection failed: {_e}")
+
+    # 3) 按既有流程幂等建档（同 issue 任务 id 复用）
+    task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee,
+                                subtask_mode=_auto_subtask_mode)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
-    # 3) 如指定了开发场景 → 写入 issue_state.scene_id + scene_user_id（后续 VOD/流水线按此场景执行）
+    # 4) 如指定了开发场景 → 写入 issue_state.scene_id + scene_user_id
     if body.scene_id:
         try:
             from src.api.session_store import set_issue_scene
-            # 查场景的 scope 和 user_id（用户级场景需要记录 user_id 供后续流水线查询）
             scene_uid = 0
             try:
                 from src.api.pipeline_config import _query_scene_by_id
@@ -669,23 +691,23 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         except Exception as _e:
             from src.config import log
             log.warning(f"create_task: set_issue_scene failed: {_e}")
-    # 4) 多任务模式 → Issue body 追加标记 + issue_state 标记
-    if body.is_subtask_mode:
+    # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记
+    if _auto_subtask_mode:
         try:
             from src.api.session_store import set_subtask_mode
             set_subtask_mode(repo_key, f"#{issue_num}", True)
         except Exception as _e:
             from src.config import log
             log.warning(f"create_task: set_subtask_mode failed: {_e}")
-        # 追加标记到 Issue body（让 VOD 识别）
         try:
-            _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 拆分为子任务执行。"
+            _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 自动判断是否拆分为子任务执行。"
             _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
         except Exception as _e:
             from src.config import log
             log.warning(f"create_task: patch issue body for multi-task-mode failed: {_e}")
     return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
-            "assignee": assignee, "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
+            "assignee": assignee, "is_subtask_mode": _auto_subtask_mode,
+            "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 
 
 @router.put("/{task_id}/status")
