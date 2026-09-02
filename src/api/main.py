@@ -288,6 +288,8 @@ def _redact_path(path: str) -> str:
 
 # 健康探针路径不记请求日志（参考 multica isHealthProbePath）
 _LOG_SKIP_PATHS = frozenset({"/health", "/healthz", "/readyz", "/metrics"})
+# Worker 轮询路径跳过请求日志（13 台 worker × 3s × 3 请求 = ~24 行/秒, 膨胀日志）
+_LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/")
 
 
 @app.middleware("http")
@@ -339,7 +341,7 @@ async def request_id_and_log_middleware(request: Request, call_next):
             pass
     token_uid = user_var.set(_uid)
 
-    skip_log = path in _LOG_SKIP_PATHS
+    skip_log = path in _LOG_SKIP_PATHS or path.startswith(_LOG_SKIP_PREFIXES)
     start = _time.time()
     status = 500
     try:

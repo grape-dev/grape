@@ -76,7 +76,7 @@ class CreateEnvBody(BaseModel):
 
 
 @router.get("/config")
-async def get_devstage_config(user: dict = Depends(get_current_user)):
+def get_devstage_config(user: dict = Depends(get_current_user)):
     """获取 DevStage 配置状态"""
     base_url = _resolve_base_url()
     acc = user_db.get_user_account(user["username"]) or {}
@@ -89,7 +89,7 @@ async def get_devstage_config(user: dict = Depends(get_current_user)):
 
 
 @router.put("/config")
-async def update_devstage_config(body: dict = {}, user: dict = Depends(get_current_user)):
+def update_devstage_config(body: dict = {}, user: dict = Depends(get_current_user)):
     """更新 DevStage 配置"""
     url = (body.get("base_url") or "").strip().rstrip("/")
     if url:
@@ -109,7 +109,7 @@ async def update_devstage_config(body: dict = {}, user: dict = Depends(get_curre
 
 
 @router.get("/templates")
-async def list_templates(user: dict = Depends(get_current_user)):
+def list_templates(user: dict = Depends(get_current_user)):
     """查询可用模板列表"""
     ak, sk = _get_ak_sk(user)
     import json
@@ -135,7 +135,7 @@ async def list_templates(user: dict = Depends(get_current_user)):
 
 
 @router.get("/specs")
-async def list_specs(template_id: str = "", user: dict = Depends(get_current_user)):
+def list_specs(template_id: str = "", user: dict = Depends(get_current_user)):
     """查询可用规格"""
     ak, sk = _get_ak_sk(user)
     try:
@@ -149,7 +149,7 @@ GRAPE_AI_DEVSPACE_TEMPLATE = "4ef59a2b4d3d4909aacd80f6007c00b2"
 
 
 @router.get("/environments")
-async def list_environments(user: dict = Depends(get_current_user)):
+def list_environments(user: dict = Depends(get_current_user)):
     """查询所有 DevStage 开发环境（仅返回 Grape AI Devspace 模板创建的环境）
     附带 worker_online 字段：环境对应的 Worker（device_name=env.name）是否已上线。
     """
@@ -188,7 +188,7 @@ async def list_environments(user: dict = Depends(get_current_user)):
 
 
 @router.post("/environments")
-async def create_environment(body: CreateEnvBody, user: dict = Depends(get_current_user)):
+def create_environment(body: CreateEnvBody, user: dict = Depends(get_current_user)):
     """创建开发环境（默认 AI DEVSPACE 模板，自动查规格，自动开机，自动注入凭据）"""
     ak, sk = _get_ak_sk(user)
     # 默认 AI DEVSPACE 模板
@@ -239,7 +239,7 @@ async def create_environment(body: CreateEnvBody, user: dict = Depends(get_curre
 
 
 @router.post("/environments/{action}")
-async def environment_action(action: str, body: dict = {}, user: dict = Depends(get_current_user)):
+def environment_action(action: str, body: dict = {}, user: dict = Depends(get_current_user)):
     """开机/关机"""
     if action not in ("start", "stop"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "action must be start/stop"})
@@ -257,7 +257,7 @@ async def environment_action(action: str, body: dict = {}, user: dict = Depends(
 
 
 @router.delete("/environments/{devstage_id}")
-async def delete_environment(devstage_id: str, user: dict = Depends(get_current_user)):
+def delete_environment(devstage_id: str, user: dict = Depends(get_current_user)):
     """删除开发环境，同时删除对应的 Worker 凭据"""
     ak, sk = _get_ak_sk(user)
     # 先查环境名（用于匹配凭据）

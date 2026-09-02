@@ -51,7 +51,7 @@ class FeedbackBody(BaseModel):
 # ====== Conversations ======
 
 @router.get("/conversations")
-async def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user)):
+def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user)):
     convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
 
@@ -61,13 +61,13 @@ class NewConversationBody(BaseModel):
 
 
 @router.post("/conversations")
-async def new_conversation(body: NewConversationBody, user: dict = Depends(get_current_user)):
+def new_conversation(body: NewConversationBody, user: dict = Depends(get_current_user)):
     cid = create_conversation(user["id"], repo_key=body.repo_key)
     return {"conversation_id": cid}
 
 
 @router.delete("/conversations/{conv_id}")
-async def remove_conversation(conv_id: str, user: dict = Depends(get_current_user)):
+def remove_conversation(conv_id: str, user: dict = Depends(get_current_user)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
@@ -82,7 +82,7 @@ class EnsureIssueConvBody(BaseModel):
 
 
 @router.post("/conversations/ensure-issue")
-async def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(get_current_user)):
+def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(get_current_user)):
     """基于 repo_key + issue_number 查找或新建任务会话（Task Center 跳转用）。
 
     会话被删除后，Task Center 双击跳转时调用此接口重建「Issue #N」会话，
@@ -126,7 +126,7 @@ async def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depe
 # ====== Messages ======
 
 @router.get("/messages/{conv_id}")
-async def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user)):
+def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
@@ -795,7 +795,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
 # ====== Feedback ======
 
 @router.post("/feedback")
-async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
+def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
     from src.session_manager import db, db_lock
 
     with db_lock:
@@ -838,7 +838,7 @@ async def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_u
 # ====== Config ======
 
 @router.get("/config")
-async def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
+def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
     cfg = _get_chat_config(user["id"])
     # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
     from src.runtime.instances import instance_name
@@ -1665,7 +1665,7 @@ def _execute_chat_task(task_id: str):
 
 
 @router.get("/task/{task_id}/status")
-async def chat_task_status(task_id: str, user: dict = Depends(get_current_user)):
+def chat_task_status(task_id: str, user: dict = Depends(get_current_user)):
     """查询 chat 任务状态（跨机器可查，对齐 Admin AI getTaskFinalStatus）。
 
     ChatTaskManager 内存优先（v2）→ 旧 _chat_tasks 内存 → DB 兜底。

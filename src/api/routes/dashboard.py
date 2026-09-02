@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/ops/overview")
-async def get_ops_overview(repo: str = ""):
+def get_ops_overview(repo: str = ""):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
 
     参考 multica BusinessSampler（metrics/business_sampler.go）的实时采样设计，
@@ -421,7 +421,7 @@ async def get_ops_overview(repo: str = ""):
 
 
 @router.get("/ops/probe-now")
-async def probe_engines_now():
+def probe_engines_now():
     """手动触发引擎探测（60s 防抖：窗口内重复请求返回上次结果，不重新探测）。"""
     from src.observability.engine_probe import get_probe_results, _last_probe_time
     import time, threading
@@ -802,7 +802,7 @@ async def get_a2a_health():
 
 
 @router.get("/{owner}/{repo}")
-async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 

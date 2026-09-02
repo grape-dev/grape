@@ -416,7 +416,7 @@ async def _consume(prompt: str, cwd: str, cfg: dict, user_id: int, user_token: s
 
 
 @router.post("/notify")
-async def notify_task(body: TaskNotifyBody, request: Request):
+def notify_task(body: TaskNotifyBody, request: Request):
     """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 后台 chat-agent + 飞书通知"""
     from src.repo_key import to_repo_key
     if not body.assignee or not body.repo_key or not body.issue_number:
@@ -505,7 +505,7 @@ def _resolve_user_chat_bot(bm, user_id: int):
 
 
 @router.post("/{task_id}/start")
-async def start_task(task_id: int, user: dict = Depends(get_current_user)):
+def start_task(task_id: int, user: dict = Depends(get_current_user)):
     """打开任务会话（"去对话"）——不再翻转状态。
 
     task-status-processing-trigger-fix.md §3.3：状态变更以"任务会话收到真实用户消息"为准
@@ -615,7 +615,7 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
 
 
 @router.post("/create")
-async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
+def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
     - issue 责任人 = 系统 General Settings 的 Account（settings.credentials.gitcode.account，
@@ -711,7 +711,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
 
 
 @router.put("/{task_id}/status")
-async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user)):
+def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user)):
     """任务状态迁移（active → processing → completed / cancelled；cancelled → active 可恢复）。
 
     终端状态 completed 不可改；同一任务只能单向流转（按 _TASK_STATUS_FLOWS 校验）。
@@ -769,7 +769,7 @@ def _find_agent_task_ids(repo_key: str, issue_number: int) -> list[str]:
 
 
 @router.get("/{task_id}/clarifications")
-async def get_task_clarifications(task_id: int, user: dict = Depends(get_current_user)):
+def get_task_clarifications(task_id: int, user: dict = Depends(get_current_user)):
     """拉取 agent 在该 Issue 上的澄清消息（task_messages 中 text/tool_use 类型）。
 
     关联链：tasks.issue_number + repo_key → agent_tasks.id → task_messages.task_id。
@@ -813,7 +813,7 @@ async def get_task_clarifications(task_id: int, user: dict = Depends(get_current
 
 
 @router.post("/{task_id}/clarify")
-async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
+def reply_to_clarification(task_id: int, body: TaskClarifyBody,
                                  user: dict = Depends(get_current_user)):
     """开发者在 Task Center 回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。
 
@@ -864,7 +864,7 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
 
 
 @router.post("/close")
-async def close_tasks(body: TaskCloseBody, request: Request):
+def close_tasks(body: TaskCloseBody, request: Request):
     """issue agent 关闭 Issue 后调用：该 issue 全部 active 任务 → completed（issue_closed）"""
     from src.repo_key import to_repo_key
     if not body.repo_key or not body.issue_number:
@@ -884,7 +884,7 @@ async def close_tasks(body: TaskCloseBody, request: Request):
 
 
 @router.get("/mine")
-async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
+def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                    repo_key: str = Query("", description="按仓库过滤"),
                    user: dict = Depends(get_current_user)):
     """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤）"""

@@ -55,14 +55,14 @@ def _load_global_bot_config() -> tuple[str, str]:
 
 
 @router.get("")
-async def list_templates(user: dict = Depends(get_current_user)):
+def list_templates(user: dict = Depends(get_current_user)):
     """返回配置化的模板分类与模板列表"""
     data = _load_templates()
     return {"categories": data.get("categories", [])}
 
 
 @router.get("/top1000")
-async def list_top1000_templates(
+def list_top1000_templates(
     platform: str = "all",
     page: int = 0,
     size: int = 20,

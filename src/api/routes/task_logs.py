@@ -27,7 +27,7 @@ def _require_task_exists(task_id: str):
 
 
 @router.get("/{task_id}/info")
-async def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_user)):
+def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_user)):
     """任务关联的执行引擎/机器信息 + 接收上下文（prompt）。
 
     返回：{agent_name, agent_version, device_name, last_ip, owner_name, prompt, prompt_full_length,
@@ -77,7 +77,7 @@ async def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_u
 
 
 @router.get("/{task_id}/messages")
-async def get_task_messages(task_id: str, user: dict = Depends(get_current_user),
+def get_task_messages(task_id: str, user: dict = Depends(get_current_user),
                             since: int = Query(0, ge=0)):
     """增量拉取：since 之后的消息（seq 单调递增）。"""
     _require_task_exists(task_id)
