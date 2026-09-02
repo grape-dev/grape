@@ -84,9 +84,9 @@ src/api/static/js/pages/skills.js        @xiaowu2119
 # ===== Chat Agent =====
 # 介绍：个人对话助手，飞书/WebUI 交互，会话管理、消息与配置。
 src/api/routes/chat.py                   @mm6667
-src/im/                                  @songspace
-src/session_manager.py                   @songspace
-src/api/static/js/pages/chat.js          @songspace
+src/im/                                  @mm6667
+src/session_manager.py                   @mm6667
+src/api/static/js/pages/chat.js          @mm6667
 
 # ===== 通用设置 =====
 # 介绍：凭据、通知偏好、OAuth 配置、登录白名单、Backend Runtimes 展示。
