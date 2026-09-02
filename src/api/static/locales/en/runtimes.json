@@ -139,6 +139,7 @@
     "deleting": "Deleting",
     "starting": "Starting",
     "stopping": "Stopping",
+    "online_progress": "Environment coming online, est. 5-7 min...",
     "op_failed": "Operation failed: {{msg}}",
     "delete_failed": "Delete failed: {{msg}}",
     "cannot_delete_running": "Cannot delete while running, please stop first",

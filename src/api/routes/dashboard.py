@@ -970,10 +970,14 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
                        + query_engines(repo_key, "repo", agent_type=atype)
                        + query_engines(repo_key, "local", agent_type=atype))
             _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
+            from src.runtime.health import derive_runtime_health
+            import time as _time
+            _now = _time.time()
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
-                                     "status": e["status"], "tags": e.get("tags", []),
+                                     "status": derive_runtime_health(e["status"], e.get("last_seen_at"), _now),
+                                     "tags": e.get("tags", []),
                                      "scope": e.get("scope", "global"),
                                      "scope_label": _scope_labels.get(e.get("scope", "global"), "")}
                                     for e in engines]

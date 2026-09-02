@@ -1509,19 +1509,19 @@ def init_user_repos_table():
 def save_user_repos(user_id: int, repos: list[dict]):
     """批量写入用户仓库缓存（repos 元素含 full_name/owner/name/...，full_name 无前缀）
 
-    is_join 不再硬编码为 1：仅当仓库已存在于 managed_repos（已托管/已加入）时为 1，
-    保证「已加入」标记和其它 is_join 消费方（engine_select/飞书 role）口径不失真。
+    is_join 从用户自己的主动托管记录（mark_user_repo_join 写入的 is_join=1 AND is_admin=1）继承，
+    不再查询全局 managed_repos，防止 A 托管的仓库污染 B 的下拉框。
     """
     from src.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key FROM managed_repos")
-        managed_keys = {row[0] for row in c.fetchall()}
+        c.execute("SELECT repo_key FROM user_repos WHERE user_id=? AND is_join=1 AND is_admin=1", (user_id,))
+        joined_keys = {row[0] for row in c.fetchall()}
         c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
         for r in repos:
             full_name = r.get("full_name", "") or r.get("repo_key", "")
             repo_key = to_repo_key(full_name)
-            is_join = 1 if repo_key in managed_keys else 0
+            is_join = 1 if repo_key in joined_keys else 0
             c.execute(
                 "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (user_id, repo_key, r.get("owner", ""), r.get("name", ""),

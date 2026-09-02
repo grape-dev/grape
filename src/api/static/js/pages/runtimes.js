@@ -139,7 +139,6 @@ function renderWorkers(data, devices) {
         <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">
           <span style="color:var(--t3);white-space:nowrap;flex-shrink:0">${I18N.t('runtimes.label.hosted_engines')}</span>
           <span style="flex:1;min-width:0;word-break:break-all">${clis || '—'}</span>
-          ${d.credential_id ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="openDeviceTasks(${d.credential_id})">${I18N.t('runtimes.action.tasks')}</button>` : ''}
         </div>
       </div>`;
     });
@@ -593,6 +592,30 @@ function _stopDevspaceAutoRefresh() {
   if (tag) { tag.style.display = 'none'; tag.textContent = ''; }
 }
 
+// ====== Worker 上线进度跟踪 ======
+// 后端返回 worker_online 字段表示对应 Worker 是否已真正上线（心跳<5min）。
+// 环境处于"运行中"但 worker_online=false 时显示进度条，上线后自动消失。
+// 进度条百分比基于"预计5-7分钟"做线性插值（仅用于视觉，不决定消失）。
+var _devspaceRunningSince = {};  // { envId: timestamp_ms }
+
+function _devspaceOnlineProgressHtml(envId, workerOnline, runningSinceMap) {
+  if (workerOnline) return '';  // worker 已上线，不显示进度条
+  var now = Date.now();
+  if (!runningSinceMap[envId]) {
+    runningSinceMap[envId] = now;
+  }
+  var elapsed = (now - runningSinceMap[envId]) / 1000;
+  var DURATION = 420;  // 7 minutes — 仅用于进度条宽度估算
+  var pct = Math.min(95, Math.round(elapsed / DURATION * 100));  // 封顶95%，只有真实上线才消失
+  return '<div style="margin-top:6px;display:flex;align-items:center;gap:8px">' +
+    '<div style="width:160px;height:6px;background:rgba(96,165,250,.12);border-radius:3px;overflow:hidden;flex-shrink:0">' +
+    '<div style="width:' + pct + '%;height:100%;background:linear-gradient(90deg,#60a5fa,#a78bfa);border-radius:3px;animation:devspacePulse 2s ease-in-out infinite"></div>' +
+    '</div>' +
+    '<span style="font-size:10px;color:var(--t3)">' + I18N.t('runtimes.devspace.online_progress') + '</span>' +
+    '</div>' +
+    '<style>@keyframes devspacePulse{0%,100%{opacity:1}50%{opacity:.6}}</style>';
+}
+
 function _devspaceSilentRefresh() {
   var body = document.getElementById('aiDevspaceBody');
   if (!body) return;
@@ -619,13 +642,15 @@ function _devspaceSilentRefresh() {
       var isDeleted = st === 'cde.0009';
       var isError = ['cde.1001','cde.1002','cde.1003','cde.1004'].indexOf(st) >= 0;
       var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
+      if (!isRunning) delete _devspaceRunningSince[id];  // 非运行中时清除计时，下次开机重新开始
       html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
         '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
         '<div style="flex:1;min-width:0">' +
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">' +
         '<span style="font-size:13px;font-weight:600">' + (e.name || id) + '</span>' +
         _devStatusLabel(st) + '</div>' +
-        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div></div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div>' +
+        (isRunning ? _devspaceOnlineProgressHtml(id, e.worker_online, _devspaceRunningSince) : '') + '</div>' +
         '<div style="display:flex;gap:4px;flex-shrink:0">' +
         ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
         (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
@@ -664,13 +689,15 @@ function _refreshDevspaceList() {
       var isDeleted = st === 'cde.0009';
       var isError = ['cde.1001','cde.1002','cde.1003','cde.1004'].indexOf(st) >= 0;
       var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
+      if (!isRunning) delete _devspaceRunningSince[id];
       html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
         '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
         '<div style="flex:1;min-width:0">' +
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">' +
         '<span style="font-size:13px;font-weight:600">' + (e.name || id) + '</span>' +
         _devStatusLabel(st) + '</div>' +
-        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div></div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div>' +
+        (isRunning ? _devspaceOnlineProgressHtml(id, e.worker_online, _devspaceRunningSince) : '') + '</div>' +
         '<div style="display:flex;gap:4px;flex-shrink:0">' +
         ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
         (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
