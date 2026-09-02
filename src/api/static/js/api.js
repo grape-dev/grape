@@ -75,6 +75,8 @@ const API = (() => {
   // 并发 401 时所有请求等待同一个 Promise——避免重复 refresh
   function doRefresh() {
     if (_refreshPromise) return _refreshPromise;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
     _refreshPromise = fetch(BASE + '/auth/refresh', {
       method: 'POST',
       headers: {
@@ -82,6 +84,7 @@ const API = (() => {
         'X-Requested-With': 'XMLHttpRequest',  // CSRF 保护——跨站伪造无法加自定义 header
       },
       credentials: 'same-origin',  // 自动带 HttpOnly cookie 里的 refresh_token
+      signal: controller.signal,
     }).then(r => {
       if (!r.ok) throw new Error('refresh failed');
       return r.json();
@@ -93,8 +96,12 @@ const API = (() => {
       }
       throw new Error('no token in refresh response');
     }).catch(e => {
+      // 超时/abort/网络错误 → 清 token 跳登录页
+      localStorage.removeItem('token');
+      if (location.pathname !== '/login') location.href = '/login';
       throw e;
     }).finally(() => {
+      clearTimeout(timer);
       _refreshPromise = null;
     });
     return _refreshPromise;
