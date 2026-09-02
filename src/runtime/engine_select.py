@@ -346,11 +346,29 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
 
 # ===== 候选引擎查询（供绑定配置下拉 / 展示）=====
 
-def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]:
+def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str = "") -> list[dict]:
     """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。
-    agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。"""
+    agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。
+    username 非空时，user scope 只返回该用户的个人引擎。
+    repo scope 返回用户加入的所有仓库的仓库级引擎（不只当前仓库）。"""
     repo = _norm_repo(repo_key)
     db, lock = _db()
+    # 收集用户加入的仓库列表（用于 repo scope 过滤）
+    user_repos = set()
+    if username and scope == "repo":
+        try:
+            from src.session_manager import db as _udb, db_lock as _ulock
+            from src.repo_key import from_repo_key
+            with _ulock:
+                uc = _udb.cursor()
+                uc.execute(
+                    "SELECT ur.repo_key FROM user_repos ur "
+                    "JOIN user_accounts ua ON ua.id = ur.user_id "
+                    "WHERE ua.username = ? AND ur.is_join = 1", (username,))
+                for row in uc.fetchall():
+                    user_repos.add(from_repo_key(row[0] or ""))
+        except Exception as _e:
+            log.warning(f"query_engines: get_user_repos failed: {_e}")
     with lock:
         c = db.cursor()
         try:
@@ -362,17 +380,26 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
+                # 本机引擎（credential_id=0）对所有人可见
                 c.execute(
                     "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
                     " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             elif scope == "user":
-                c.execute(
-                    "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
-                    "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
+                if username:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' AND rc.owner_name=? ORDER BY r.id", (username,))
+                else:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
             else:
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
@@ -388,7 +415,9 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
     for r in rows:
         if scope == "repo":
             from src.repo_key import from_repo_key
-            if from_repo_key(r[9] or "") != repo:
+            _repo_owner = from_repo_key(r[9] or "")
+            # 只返回用户加入的仓库的仓库级引擎
+            if username and user_repos and _repo_owner not in user_repos:
                 continue
         # agent_type 标签过滤（r[10] = GROUP_CONCAT(tag) from engine_capabilities, e.g. "all" or "all,coding"）
         if agent_type:

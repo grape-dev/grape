@@ -481,7 +481,7 @@ function renderDashboard(data) {
               <div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">${e.name}${_tagBadge(e.tags)}${_scopeBadge(e.scope)}</div>
               <div style="font-size:10px;color:#86868b;margin-top:3px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div>
             </div>
-            <span style="font-size:11px;font-weight:500;color:#34c759">${I18N.t('dashboard.online')}</span>
+            <span style="font-size:11px;font-weight:500;color:${e.status === 'recently_lost' ? '#f59e0b' : '#34c759'}">${e.status === 'recently_lost' ? '失联' : I18N.t('dashboard.online')}</span>
           </label>`;
         }).join('');
       });

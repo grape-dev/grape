@@ -964,11 +964,12 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
     try:
         from src.runtime.engine_select import query_engines
         from src.runtime.instances import instance_name
+        _uname = user.get("username") or ""
         for atype in all_types:
             engines = (query_engines(repo_key, "global", agent_type=atype)
-                       + query_engines(repo_key, "user", agent_type=atype)
+                       + query_engines(repo_key, "user", agent_type=atype, username=_uname)
                        + query_engines(repo_key, "repo", agent_type=atype)
-                       + query_engines(repo_key, "local", agent_type=atype))
+                       + query_engines(repo_key, "local", agent_type=atype, username=_uname))
             _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
             from src.runtime.health import derive_runtime_health
             import time as _time
