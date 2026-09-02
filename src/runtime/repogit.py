@@ -113,7 +113,11 @@ def _default_base_branch(base: str, token: str = "") -> str:
 
 
 def _write_askpass(issue_dir: str) -> str:
-    """写 GIT_ASKPASS 辅助脚本：从环境变量读 token，token 不落盘。"""
+    """写 GIT_ASKPASS 辅助脚本：从环境变量读 token，token 不落盘。
+
+    chmod 后检查执行权限，失败则用 sh wrapper 兜底（不依赖 +x）。
+    返回实际可执行的脚本路径（原脚本或 wrapper）。
+    """
     script = os.path.join(issue_dir, ".git-askpass.sh")
     try:
         with open(script, "w", encoding="utf-8") as f:
@@ -122,9 +126,28 @@ def _write_askpass(issue_dir: str) -> str:
             os.chmod(script, 0o700)
         except Exception:
             pass
-        return script
+        # chmod 后检查执行权限，失败则写 sh wrapper 兜底
+        if os.access(script, os.X_OK):
+            return script
+        wrapper = os.path.join(issue_dir, ".git-askpass-wrapper.sh")
+        with open(wrapper, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\nsh "{script}"\n')
+        try:
+            os.chmod(wrapper, 0o700)
+        except Exception:
+            pass
+        log.warning(f"_write_askpass: chmod failed, using sh wrapper: {wrapper}")
+        return wrapper
     except Exception:
         return ""
+
+
+def askpass_path(issue_dir: str) -> str:
+    """返回实际可执行的 askpass 脚本路径（wrapper 优先，否则原脚本）。"""
+    wrapper = os.path.join(issue_dir, ".git-askpass-wrapper.sh")
+    if os.path.isfile(wrapper):
+        return wrapper
+    return os.path.join(issue_dir, ".git-askpass.sh")
 
 
 def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "") -> str | None:
