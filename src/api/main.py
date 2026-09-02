@@ -38,6 +38,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Engine probe start failed: {e}")
 
+        # 模板自愈：启动时检查 project-templates.json + examples/ 是否存在，
+        # 缺失则自动从 grape-template 仓库拉取（防 git merge 删除后模板页变空）
+        try:
+            _templates_ok = _check_and_sync_templates()
+            if _templates_ok:
+                log.info("Templates: project-templates.json + examples/ verified OK")
+            else:
+                log.warning("Templates: auto-sync attempted but issues remain, check logs")
+        except Exception as e:
+            log.warning(f"Templates: startup check failed: {e}")
+
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
         lease_store = None
@@ -135,6 +146,30 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Local probe loop start failed: {e}")
 
+    # 远端 runtime 僵尸清理（每 60 秒）：AI DevSpace 被删后 runtime 行残留 status=online
+    # 但 worker 不再心跳。reap_stale_runtimes 把 last_seen_at 过期的标 offline +
+    # 重新派发其 queued 任务，防止任务永久卡死。
+    _reap_task = None
+    try:
+        async def _reap_stale_loop():
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    result = await asyncio.to_thread(_reap_stale_runtimes_sync)
+                    if result.get("reaped"):
+                        log.info(f"Reap loop: {result}")
+                except Exception as e:
+                    log.warning(f"Reap stale runtimes failed: {e}")
+
+        def _reap_stale_runtimes_sync():
+            from src.runtime.service import reap_stale_runtimes
+            return reap_stale_runtimes()
+
+        _reap_task = asyncio.create_task(_reap_stale_loop())
+        log.info("Reap stale runtimes loop started (60s)")
+    except Exception as e:
+        log.warning(f"Reap stale runtimes loop start failed: {e}")
+
     # 用户活跃状态追踪：每 30 秒批量更新 last_active_at
     _active_tracker_task = None
     try:
@@ -171,6 +206,8 @@ async def lifespan(app: FastAPI):
         _sweep_task.cancel()
     if _probe_task:
         _probe_task.cancel()
+    if _reap_task:
+        _reap_task.cancel()
     # 官方技能 OBS 同步：优雅关闭定时任务
     try:
         from src.storage.skill_sync import stop_skill_sync_scheduler
@@ -476,6 +513,18 @@ async def readiness(request: Request):
             checks["tables"] = "error: agent_tasks missing"
             status = "not_ready"
             http_status = 503
+    # 模板检查：project-templates.json 存在且非空
+    import os as _os_mod2
+    _json_path = _os_mod2.path.join(
+        _os_mod2.path.dirname(_os_mod2.path.dirname(_os_mod2.path.dirname(_os_mod2.path.abspath(__file__)))),
+        "configs", "project-templates.json")
+    if _os_mod2.path.isfile(_json_path) and _os_mod2.path.getsize(_json_path) > 100:
+        checks["templates"] = "ok"
+    else:
+        checks["templates"] = "missing: project-templates.json"
+        # 不阻断 readiness（模板缺失不影响核心功能，但标记告警）
+        if status == "ok":
+            status = "degraded"
     resp = JSONResponse(
         status_code=http_status,
         content={"status": status, "checks": checks},
@@ -541,3 +590,62 @@ async def metrics():
     """
     from fastapi.responses import JSONResponse
     return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
+
+
+# ===== 模板自愈：启动时检查 + 自动同步 =====
+
+def _check_and_sync_templates() -> bool:
+    """检查 project-templates.json + examples/ 是否存在，缺失则自动从 grape-template 仓库拉取。
+
+    防止 git merge/pull 后模板文件被删除导致模板页变空（commit 838f2c98 事故）。
+    调用 scripts/sync_templates.sh 执行实际同步。
+    """
+    import os as _os
+    from src.config import log
+
+    _repo_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    _json_path = _os.path.join(_repo_root, "configs", "project-templates.json")
+    _examples_dir = _os.path.join(_repo_root, "examples")
+
+    # 1. 检查 JSON 文件
+    json_ok = _os.path.isfile(_json_path) and _os.path.getsize(_json_path) > 100
+    # 2. 检查 examples/ 目录有内容（至少有 1 个子目录）
+    examples_ok = _os.path.isdir(_examples_dir) and \
+        any(_os.path.isdir(_os.path.join(_examples_dir, d)) for d in _os.listdir(_examples_dir) if not d.startswith('.'))
+
+    if json_ok and examples_ok:
+        return True  # 一切正常
+
+    # 3. 缺失 → 执行 sync_templates.sh 自动拉取
+    missing = []
+    if not json_ok:
+        missing.append("configs/project-templates.json")
+    if not examples_ok:
+        missing.append("examples/")
+    log.warning(f"Templates: missing {missing}, auto-syncing from grape-template repo...")
+
+    _sync_script = _os.path.join(_repo_root, "scripts", "sync_templates.sh")
+    if not _os.path.isfile(_sync_script):
+        log.error(f"Templates: sync script not found at {_sync_script}")
+        return False
+
+    import subprocess as _sp
+    try:
+        _result = _sp.run(
+            ["bash", _sync_script],
+            capture_output=True, text=True, timeout=60,
+            env={**_os.environ, "TEMPLATES_REPO": "https://mm6667:shhnrXxGm1E1SJ-FxKxQ9M2Q@gitcode.com/grape-dev/grape-template.git"}
+        )
+        if _result.returncode == 0:
+            log.info(f"Templates: auto-sync OK\n{_result.stdout}")
+        else:
+            log.error(f"Templates: auto-sync failed (exit={_result.returncode})\n{_result.stderr}")
+    except Exception as e:
+        log.error(f"Templates: auto-sync exception: {e}")
+        return False
+
+    # 4. 再次检查
+    json_ok = _os.path.isfile(_json_path) and _os.path.getsize(_json_path) > 100
+    examples_ok = _os.path.isdir(_examples_dir) and \
+        any(_os.path.isdir(_os.path.join(_examples_dir, d)) for d in _os.listdir(_examples_dir) if not d.startswith('.'))
+    return json_ok and examples_ok
