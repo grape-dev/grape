@@ -20,33 +20,39 @@ def _load_scenes() -> dict:
 
 
 @router.get("")
-async def list_scenes(user: dict = Depends(get_current_user)):
-    """返回所有可用场景列表（official + repo + user）"""
+async def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
+    """返回所有可用场景列表（repo + user，不含 official）"""
     from src.api.pipeline_config import get_scenes
     from src.repo_key import to_repo_key
     repo_key = ""
-    try:
-        repo = app_current_repo()
-        if repo:
-            repo_key = to_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
-    except Exception:
-        pass
+    if repo:
+        repo_key = to_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
     scenes = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
     return {"scenes": scenes}
 
 
 @router.get("/with-pipeline")
-async def list_scenes_with_pipeline(user: dict = Depends(get_current_user)):
+async def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str = ""):
     """返回场景列表 + 各场景流水线配置"""
     from src.api.pipeline_config import get_scenes, get_pipeline_config
     from src.repo_key import to_repo_key
     repo_key = ""
-    try:
-        repo = app_current_repo()
-        if repo:
-            repo_key = to_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
-    except Exception:
-        pass
+    if repo:
+        repo_key = to_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
     scene_list = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
     result = []
     for s in scene_list:
@@ -124,7 +130,7 @@ class ApplySceneRequest(BaseModel):
 
 
 @router.post("")
-async def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user)):
+async def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
     """创建自定义场景"""
     from src.api.pipeline_config import create_custom_scene
     from src.repo_key import to_repo_key
@@ -135,10 +141,17 @@ async def create_scene(body: CreateSceneRequest, user: dict = Depends(get_curren
 
     repo_key = ""
     if body.scope == "repo":
-        repo = app_current_repo()
-        if not repo:
+        if repo:
+            repo_key = to_repo_key(repo)
+        else:
+            try:
+                _repo = app_current_repo()
+                if _repo:
+                    repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+            except Exception:
+                pass
+        if not repo_key:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库级场景需要先选择仓库"})
-        repo_key = to_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
 
     scene_id = body.scene_id or f"custom-{uuid.uuid4().hex[:8]}"
     nodes_json = [n.model_dump() for n in body.nodes]
@@ -158,29 +171,28 @@ async def create_scene(body: CreateSceneRequest, user: dict = Depends(get_curren
 
 
 @router.put("/{scene_id}")
-async def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(get_current_user)):
-    """更新场景（官方场景 fork 到 user scope 后更新）"""
-    from src.api.pipeline_config import update_custom_scene, _query_scene_by_id, fork_official_scene
+async def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
+    """更新场景（repo/user scope 直接更新，official 不可修改）"""
+    from src.api.pipeline_config import update_custom_scene, _query_scene_by_id
     from src.repo_key import to_repo_key
 
     repo_key = ""
-    try:
-        repo = app_current_repo()
-        if repo:
-            repo_key = to_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
-    except Exception:
-        pass
+    if repo:
+        repo_key = to_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
 
     existing = _query_scene_by_id(scene_id, repo_key=repo_key, user_id=user.get("id", 0))
     if not existing:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
 
-    # 官方场景：fork 到 user scope，然后更新 fork 出来的副本
     if existing["scope"] == "official":
-        fork_official_scene(scene_id, user.get("id", 0), repo_key=repo_key)
-        existing = _query_scene_by_id(scene_id, repo_key=repo_key, user_id=user.get("id", 0))
-        if not existing or existing["scope"] != "user":
-            raise HTTPException(status_code=500, detail={"code": 500, "message": "Fork 官方场景失败"})
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可修改，请先创建自定义场景"})
 
     nodes_json = [n.model_dump() for n in body.nodes]
     update_custom_scene(
@@ -193,18 +205,21 @@ async def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Dep
 
 
 @router.delete("/{scene_id}")
-async def delete_scene(scene_id: str, user: dict = Depends(get_current_user)):
+async def delete_scene(scene_id: str, user: dict = Depends(get_current_user), repo: str = ""):
     """删除自定义场景（软删除，官方场景不可删除）"""
     from src.api.pipeline_config import delete_custom_scene, _query_scene_by_id
     from src.repo_key import to_repo_key
 
     repo_key = ""
-    try:
-        repo = app_current_repo()
-        if repo:
-            repo_key = to_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
-    except Exception:
-        pass
+    if repo:
+        repo_key = to_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
 
     existing = _query_scene_by_id(scene_id, repo_key=repo_key, user_id=user.get("id", 0))
     if not existing:

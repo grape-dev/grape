@@ -275,7 +275,7 @@ function loadAgentTypes() {
       window._dashboardEditing = false;
       const loadDash = () => Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
-        API.get('/scenes'),
+        API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
       ]).then(([dashData, scenesData]) => {
         // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;

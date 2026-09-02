@@ -418,6 +418,12 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
+            # Fork official scenes to repo scope
+            try:
+                from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
+                _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+            except Exception as e:
+                log.warning(f"host_repo: auto-fork scenes failed: {e}")
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
         hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=webhook_token)
@@ -429,6 +435,12 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
         from src.api.session_store import ensure_default_agent_sessions
         ensure_default_agent_sessions(repo_key)
+        # Fork official scenes to repo scope
+        try:
+            from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
+            _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+        except Exception as e:
+            log.warning(f"host_repo: auto-fork scenes failed: {e}")
         return {"message": "仓库托管成功", "webhook_id": hook_id}
     except HTTPException:
         raise
