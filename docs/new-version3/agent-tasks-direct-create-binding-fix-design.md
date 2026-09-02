@@ -1,6 +1,6 @@
 # agent_tasks 直接创建 INSERT 绑定数不匹配 — 修复设计（Seq #1991/#1992 事故）
 
-> 版本：v1.4 ｜ 日期：2026-09-01 ｜ 状态：**P0 + P1 + §十 + §十一 已实施（未提交）**；P2 sweeper 文案已实施，集成测试已补
+> 版本：v1.5 ｜ 日期：2026-09-02 ｜ 状态：**P0 + P1 + §十 + §十一（模拟 webhook 走 run_pipeline）已实施并部署**
 > 事故对象：生产 `Jason7602/hello-flask-9` 模板引导事件 `Seq #1991`（onboarding_exp）/ `#1992`（onboarding_explore）失败
 > 结论：**系统级代码缺陷**（`_create_direct_task` / `_create_failed_task` 的 agent_tasks INSERT 列数与值数不匹配 39/37），非环境偶发。
 
@@ -113,12 +113,15 @@ direct 事件 → _create_direct_task：
 
 | 用例 | 级别 | 描述 / 断言 |
 |------|------|-------------|
-| `test_task_insert_row_columns_match` | 契约 | `_task_insert_row` 组装值数恒等于 `len(_TASK_COLUMNS_LIST)`；缺列即抛 `ValueError`（从 kv 中删任一列应红） |
-| `test_create_direct_task_inserts_row` | 回归 | 直连执行：`append_event(running)` → `_create_direct_task` → `agent_tasks` 新增 1 行，`event_seq`/`status='queued'`，`pool_tag`/`pool_engine_ids` 存在；不再出现 "bindings" 异常 |
-| `test_task_columns_39_all_bound` | 契约 | 取 `_TASK_COLUMNS_LIST` 全集逐列断言入参覆盖（含 `pool_tag`/`pool_engine_ids` 非缺省占位） |
-| `test_create_failed_task_snapshot` | 回归 | `engine_unavailable` 场景：`_create_failed_task` 落 `status='failed'` 快照（含 prompt/cwd/errors=_reason），列数一致，重派可读到该任务 |
-| `test_onboarding_both_targets_complete` | 集成 | 模板一键创建 → 两主事件 completed、各产出 onboarding-result + issue_state、`agent_tasks` 有对应 direct 行 |
-| `test_redispatch_onboarding_carries_repo` | 集成(P1) | 对 failed 的 onboarding 事件重派 → pipeline 收到非空 `repository`，不再 `Pipeline skipped: repository=''` |
+| `test_task_insert_row_fully_covers_columns` / `test_task_insert_row_missing_column_raises` | 契约 | `_task_insert_row` 组装值数恒等于 `len(_TASK_COLUMNS_LIST)`；缺列即抛 `ValueError`  |
+| `test_create_direct_task_inserts_row` / `test_create_failed_task_inserts_failed_snapshot` / `test_create_direct_task_no_bindings_error_in_db` | 回归 | direct 落行 queued / failed 快照 / 直插不抛绑定错误 |
+| `test_trigger_submits_two_webhooks_for_targets` | 集成(§11 v1.5) | `trigger_onboarding` 对 experience/explore 各提交一次模拟 `issue_opened` webhook → `run_pipeline` |
+| `test_submit_webhook_body_carries_onboarding_context` | 契约(§11 v1.5) | webhook 体 `object_attributes.open` → issue_opened；`_onboarding` 上下文含 target/skill/scene/result_path |
+| `test_onboarding_ctx_applied_and_broadcast_dispatches` | 集成(§11 v1.5) | plugin 广播：pick_engine→0 → 入队 pool_tag=vod，任务 skill=repo-onboarding、ONBOARDING_RESULT 注入——**不依赖仓库 runtime 绑定** |
+| `test_onboarding_ctx_legacy_no_engine_fails_event` | 集成(§11 v1.5) | legacy 未绑定引擎 → 与普通事件一致 engine_unavailable（不隐式执行） |
+| `test_retry_onboarding_target_submits_webhook` / `test_retry_onboarding_target_already_done` | 回归(§5.3) | target 自愈：retry 走 webhook；已完成不重复 |
+| `test_finalize_creates_stage_and_event` / `test_finalize_missing_result_noop` | 回归 | 事件终态后 `_finalize_onboarding` 补 issue_state + onboarding_issue 子事件 |
+| `test_redispatch_onboarding_carries_repo` | 集成(P1) | 对 failed 的 onboarding 事件重派 → 走 `retry_onboarding_target`（携带 repo_key/owner） |
 
 > 结束条件：`pytest -m "not e2e_ui"` 全绿；再以一条直连/本机引擎 E2E 走通「事件→direct task→执行→完成」。
 
@@ -128,14 +131,14 @@ direct 事件 → _create_direct_task：
 
 | # | 文件 | 改动 | 优先级 |
 |---|------|------|--------|
-| 1 | `src/api/event_pipeline.py` | ✅ **已实施**：新增 `_task_insert_row()`（按 `_TASK_COLUMNS_LIST` 驱动组装、缺列抛错）；`_create_direct_task` / `_create_failed_task` 改为列清单驱动组装（补齐 pool_tag/pool_engine_ids，修复 39/37、39/36） | P0 |
-| 2 | `src/api/routes/events.py` | ✅ **已实施**：redispatch 新增 onboarding 事件分支 → `onboarding.retry_onboarding_target`（target 级自愈，携带完整 repo_key/owner，不再 `repository='' not recognized`） | P1 |
-| 3 | `src/api/onboarding.py` | ✅ **已实施**：`_dispatch_onboarding_target` / `_fail_onboarding_target` / `retry_onboarding_target`；direct 模式先经 `_create_direct_task` 登记任务行（防 sweeper 误杀）；引擎门禁 `pick_engine=None → engine_unavailable`（failed 快照 + 跳过，不隐式 opencode） | P1 |
-| 4 | `src/api/routing.py` | ✅ **已实施**：`NON_ISSUE_EVENT_ROUTE` 注册 `onboarding_exp`/`onboarding_explore`/`onboarding_issue` → vod（重派/状态机可识别，§11） | P1 |
-| 5 | `src/runtime/cleanup.py` | ✅ **已实施**：sweeper 文案区分「创建任务失败（agent_tasks 无行）」与「running 超时（有行非活跃）」 | P2 |
-| 6 | `src/api/routes/tasks.py` | ✅ **已实施**：`_run_notify` 删除 `_consume`/`_build_task_prompt`，改静态模板 agent 消息 + 飞书通知，不再触发后台 ChatAgent/注入用户 token（§十） | P0 |
-| 7 | `tests/test_agent_tasks_insert_contract.py` | ✅ **已实施**：5 用例（契约列值一致 / 缺列抛错 / direct 落行 queued / failed 快照 / 直插不抛绑定错误），本地 `pytest` 通过 | P2 |
-| 8 | `tests/test_onboarding.py` / `tests/test_cleanup.py` / `tests/test_event_conversation.py` / `tests/test_tasks.py` | ✅ **已实施**：引导任务登记 / 无引擎 failed 快照 / target 自愈 / 幂等跳过 / sweeper 文案 / redispatch 携带 repo / notify 不触发 ChatAgent 回归用例 | P2 |
+| 1 | `src/api/event_pipeline.py` | ✅ **已实施**：`_task_insert_row()`（列驱动、缺列抛错）；`_create_direct_task`/`_create_failed_task` 列清单驱动（修复 39/37、39/36） | P0 |
+| 2 | `src/api/event_pipeline.py` | ✅ **已实施（v1.5）**：run_pipeline 新增 onboarding 上下文钩子——payload._onboarding（target/skill/scene/result_path）覆盖技能 + 注入 ONBOARDING_* 环境变量；`_enqueue_pipeline_task` 合并 `evt._env_extra` | P1(§11) |
+| 3 | `src/api/onboarding.py` | ✅ **已实施（v1.5）**：`trigger_onboarding`/`retry_onboarding_target` 改为构造 GitCode `issue_opened` webhook 体 → `run_pipeline`；删除自建事件/引擎门禁/_create_failed_task 快照/直线程/自定入队；新增 `_submit_onboarding_webhook`（广播模式不需绑定引擎）与 `_await_event_and_finalize`（事件终态兜底补库） | P1(§11) |
+| 4 | `src/api/routing.py` | ✅ **已实施**：`onboarding_exp/explore/issue` 注册到 `NON_ISSUE_EVENT_ROUTE`（保留，重派/状态机可识别） | P1(§11) |
+| 5 | `src/api/routes/events.py` | ✅ **已实施**：redispatch onboarding 事件走 `retry_onboarding_target`（target 级自愈） | P1(§5.2) |
+| 6 | `src/runtime/cleanup.py` | ✅ **已实施**：sweeper 文案区分「创建任务失败」与「running 超时」 | P2 |
+| 7 | `src/api/routes/tasks.py` | ✅ **已实施**：`_run_notify` 删除后台 ChatAgent/用户 token，改静态模板消息 + 飞书通知（§十） | P0(§10) |
+| 8 | 测试 | ✅ **已实施**：`test_agent_tasks_insert_contract.py`（5 用例）、`test_onboarding.py`（webhook 提交/上下文/自愈/幂等）、`test_issue_lifecycle_routing.py`（广播入队 + legacy engine_unavailable） | P2 |
 
 ---
 
@@ -216,20 +219,31 @@ direct 事件 → _create_direct_task：
 4. 重派 onboarding 事件报 `repository='' not recognized` → 无法恢复；
 5. `onboarded` 一旦置位不再重讲 → 状态不可自愈。
 
-### 11.3 收敛目标（整改方向）
+### 11.3 收敛目标（整改方向，v1.5 刷新：对齐广播模式）
 
-1. **执行链路复用普通事件管线**：托管回调改向 VOD 提交**等价事件**（注册 `onboarding_*` 到路由/状态机，或复用 `issue_opened` 语义），经 `run_pipeline` 同一套：enable 检查 → 阶段路由 → 会话查找 → `_create_direct_task`/入队登记任务。
-2. **引擎门禁与普通事件一致**：`pick_engine=None → engine_unavailable` 失败快照并**跳过引导**（§五 P0a）；有引擎才走普通 direct/queue 分派——任务有行、受 sweeper 保护、终态一致。
-3. **取消 `_execute_agent_wrapper` 直线索**：引导目标改为"事件驱动 + 任务登记 + 正常终态回报"，不再出现"执行中被打死 / 记账 completed"的分裂状态。
-4. **GitCode 写操作治理统一**：引导建 Issue/评论一律走仓库 bot token，不注入用户个人 token（§十 3）。
-5. **保留**：`onboarded` 幂等标记、experience/explore 双目标、`repo-onboarding` skill、托管时仅触发一次的 UX——只改"怎么执行"，不改"何时/做什么"。
+> **关键认知（2026-09-02 复盘）**：生产引擎为**广播（plugin）模式**——引擎按 `pool_tag`/`claim_by_tag` 竞争认领，**不依赖 per-repo 的 `devops_agent_session.runtime_id` 绑定**。`pick_engine` 在 plugin 模式下恒返回 `0`（广播），`run_pipeline` 尾部（`event_pipeline.py:1051`）对 `engine_id==0 + plugin` 走 `_enqueue_pipeline_task` 入队广播 → 引擎认领执行。
+>
+> 因此 onboarding 的**正确收敛方式不是"给仓库绑定 runtime"，而是"把自己伪装成一条普通 GitCode webhook 事件，完全走 run_pipeline"**。这样广播模式天然可用，且与普通事件的引擎门禁/任务登记/监督/重派完全同一套。
+
+整改方向（刷新）：
+
+1. **触发 = 模拟 GitCode webhook 事件体**：`templates.create_from_template` 托管完成后，不再自建 `onboarding_exp/explore` 事件，而是**构造等价于 GitCode `issue_opened` 的 webhook 事件体**（repo_key/owner/仓库名的 `object_attributes` 结构），直接提交 `run_pipeline(raw, headers, account, repo_key_override)`——与 webhook.py:115 完全同一条路径。
+   - `run_pipeline` 内部自会：归一化 → enable 检查 → 阶段路由（`issue_opened → vod`）→ 会话查找 → 引擎门禁 `pick_engine` → 广播入队或 direct 执行 → `_create_direct_task`/`enqueue_task` 登记任务。
+   - **不再需要 onboarding 自己 `pick_engine`、自己拦截 engine_unavailable、自己写 failed 快照**——这些都是 run_pipeline 的职责。
+2. **引导技能注入**：webhook 事件体 payload 携带引导目标（`ONBOARDING_TARGET`）+ 场景（`ONBOARDING_RESULT`）所需上下文；`repo-onboarding` 技能名经事件体的 skill 字段/场景 skill 解析（与普通事件取技能完全一致，不改技能分发）。
+3. **删除 onboarding 引擎旁路**：`trigger_onboarding` 内不再套用 `pick_engine`+`engine_unavailable` 门禁与 `_create_failed_task` 快照；`_dispatch_onboarding_target` → 直接构造 webhook 体提交 `run_pipeline`。`_execute_agent_wrapper` 直线程、`_enqueue_onboarding_task` 自定入队一并移除（由 run_pipeline 统一 direct/queue）。
+   - plugin（广播）模式：`pick_engine→0` → 广播入队（pool_tag=vod）→ 引擎认领，**仓库无需绑定 runtime**，Seq 2008/2009 的 `engine_unavailable` 不再发生。
+   - legacy 模式：仓库若绑了引擎走 direct/queue；未绑则与普通事件一致 engine_unavailable（不隐式执行，行为正确可见）。
+   - 保留 baseline：`onboarded` 幂等、双 target（#1/#2）、`repo-onboarding` 技能，只改"丢给 run_pipeline"，改"何时/做什么"。
+4. **`_finalize_onboarding` 依托事件终态**：执行仍产出 `onboarding-result-{target}.json`；由 run_pipeline 执行终态后（completed/failed）触发兜底补库（issue_state + 子事件），不再"线程内自收尾"。
+5. **GitCode 写操作治理统一**：引导建 Issue/评论一律走仓库 bot token，不注入用户个人 token（§十 3）。
 
 ### 11.4 影响评估
 
-- 涉及：`onboarding.py`（触发→提交等价 VOD 事件）、`routing.py`（注册 `onboarding_*` 使重派/状态机可用）、事件分类与存量恢复（`Seq 1991/1992、1998/1999` 之类已 failed 主事件可重派）。
-- 收益：引导不再能绕过引擎与监督做危险写操作；事件/任务/状态机/重派全部对齐普通流程；杜绝"无人输入却以用户名义发评论"。
-- 风险：模板一键创建的引导体验路径变化，需回归验证双目标均按正常 VOD 事件走通。
+- 涉及：`onboarding.py`（触发→**模拟 `issue_opened` webhook 体提交 `run_pipeline`**，删除自建事件/引擎门禁/直线程/自定入队）、`routing.py`（已有 `onboarding_*` 注册保留，事件类型改为 `issue_opened` 后走原生路由）、webhook 事件体构造（`templates.create_from_template` 调用点）、`_finalize_onboarding` 触发位置（事件终态兜底）、事件分类与存量恢复（`Seq 2008/2009、1991/1992、1998/1999` 之类已 failed 事件可重派走广播）。
+- 收益：**广播（plugin）模式下 onboarding 不再依赖仓库绑定 runtime**，`engine_unavailable` 消失；引导与普通事件共用引擎门禁/任务登记/监督/重派/状态机；杜绝无监督写操作与人名冒用。
+- 风险：模板一键创建引导路径需回归验证——plugin 广播认领、legacy 绑定与未绑定两种模式，双 target（#1/#2）各走通，`onboarding-result` 落盘与 `_finalize_onboarding` 兜底正常。
 
 ---
 
-*P0 代码 + P1（redispatch/引导自愈）+ §十（tasks/notify 收敛）+ §十一（onboarding 收敛/引擎门禁/任务登记）+ P2 sweeper 文案与集成测试均已实施，均未提交；剩余风险见 §九「存量 failed 事件」按需处理。*
+*P0 + P1 + §十 + §十一（v1.5 模拟 webhook 走 run_pipeline）均已实施并部署；广播模式 onboarding 无需绑定 runtime；存量 failed 事件见 §九按需重派。*

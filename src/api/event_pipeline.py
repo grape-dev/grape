@@ -920,6 +920,44 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.warning(f"Pipeline: failed to load default skill config: {e}")
                 return result
 
+    # 4.5 onboarding 引导上下文（§11 v1.5）：模板一键创建模拟 issue_opened webhook 提交 run_pipeline，
+    #     完全走普通链路（广播模式靠 pool_tag 认领，不依赖仓库 runtime_id 绑定）。
+    #     事件体 payload 携带 _onboarding={"target","skill","scene","result_path"} → 覆盖技能 + 注入 ONBOARDING_* 环境变量。
+    try:
+        _onb = (evt.get("payload") or {}).get("_onboarding")
+    except Exception:
+        _onb = None
+    if isinstance(_onb, dict) and (_onb.get("target") or _onb.get("skill")):
+        _ob_skill = str(_onb.get("skill", "") or "").strip() or skill_name
+        log.info(f"Pipeline onboarding ctx: skill={_ob_skill} target={_onb.get('target')} scene={_onb.get('scene')}")
+        if _ob_skill:
+            try:
+                from src.user.db import resolve_skill_id, get_skill_by_id
+                _ob_sid = resolve_skill_id(_ob_skill)
+                if _ob_sid:
+                    skill_id = _ob_sid
+                    _ob_sk = get_skill_by_id(_ob_sid)
+                    skill_name = (_ob_sk.get("skill_name") or _ob_skill) if _ob_sk else _ob_skill
+                    skill_path = (_ob_sk.get("skill_path") or skill_name) if _ob_sk else skill_name
+                else:
+                    skill_name = _ob_skill
+                    skill_path = _ob_skill
+            except Exception as e:
+                log.warning(f"Pipeline onboarding skill resolve failed: {e}")
+                skill_name = _ob_skill
+                skill_path = _ob_skill
+        # 环境变量注入（repo-onboarding skill 读取 ONBOARDING_RESULT/TARGET）
+        _ob_ext = dict(evt.get("_env_extra") or {})
+        if _onb.get("target"):
+            _ob_ext["ONBOARDING_TARGET"] = str(_onb["target"])
+        if _onb.get("result_path"):
+            _ob_ext["ONBOARDING_RESULT"] = str(_onb["result_path"])
+        if _onb.get("scene"):
+            _ob_ext["ONBOARDING_SCENE"] = str(_onb["scene"])
+        evt["_env_extra"] = _ob_ext
+        backend = backend or ""
+        log.info(f"Pipeline: onboarding ctx applied, skill={skill_name} env={list(_ob_ext.keys())}")
+
     # 5. 提取 Issue ID
     payload = evt.get("payload", {})
     if event_type in ("note_hook_pr", "pull_request_opened", "pull_request_updated", "pull_request_merged"):
@@ -1301,6 +1339,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     _inject_cloud_credentials(env_extra, repo_key)
+    # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT/TARGET，§11 v1.5）
+    _evt_ext = evt.get("_env_extra") or {}
+    if isinstance(_evt_ext, dict):
+        env_extra.update(_evt_ext)
     # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
     if agent_type == "sre":
         # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
