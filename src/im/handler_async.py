@@ -484,7 +484,16 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
             conv_history = []
         body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info, has_valid_session=has_valid_session)
     else:
-        body = build_chat_prompt(text, repo_key, history, skills=skills,
+        # general chat：用 chat_messages 表的历史（格式 {role, content}），与 task 会话一致；
+        # 不用 event_history（格式 {type, stdout}，与 _append_chat_history 的 role/content 不匹配）
+        conv_history = []
+        if conv_id:
+            try:
+                from src.session_manager import get_messages
+                conv_history = get_messages(conv_id, limit=20)
+            except Exception:
+                pass
+        body = build_chat_prompt(text, repo_key, conv_history, skills=skills,
                                  runtime_id=chat_runtime_id, user_info=user_info,
                                  has_valid_session=has_valid_session)
     return body
@@ -943,10 +952,18 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         except Exception:
             chat_runtime_id = 0
 
+        # 引擎类型感知的 has_valid_session：提前解析引擎类型，
+        # codearts 忽略 session_id；只有 opencode/hermes 才真正使用 session 续接。
+        from src.runtime.engine_select import resolve_local_engine, engine_name
+        _rid = chat_runtime_id or (resolve_local_engine() or 0)
+        _engine_name = engine_name(_rid) if _rid else ""
+        _conv_sid = (conv or {}).get("runtime_session_id", "").strip()
+        has_valid_session = bool(_conv_sid) and _engine_name in ("opencode", "hermes")
+
         prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
                                            chat_runtime_id, conv_id, user_info=user_info,
-                                           has_valid_session=bool((oc_sid or "").startswith("ses_")))
-        log.info(f"Chat prompt ({len(prompt)} chars, repo={repository})")
+                                           has_valid_session=has_valid_session)
+        log.info(f"Chat prompt ({len(prompt)} chars, repo={repository}, engine={_engine_name}, has_session={has_valid_session})")
 
         # 与 Web Chat 严格一致：同一 conv_id 同一目录 WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}
         # （web-chat-no-response-cwd-fix.md §4；去掉原 feishu/ 段与 sess 尾巴）
@@ -961,15 +978,13 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         final_text = ""
         exit_code = 0
         backend = ""
-        # engine-selection-design.md v2：无引擎（本机直连/远端均未配置）→ 明确不可用，不隐式 opencode
-        from src.runtime.engine_select import resolve_local_engine, engine_name
-        _rid = chat_runtime_id or (resolve_local_engine() or 0)
+        # 引擎类型已在上方提前解析（_rid, _engine_name）；此处复用
         if not _rid:
             log.warning(f"[Chat:{ctx.name}] no available engine for user, task skipped")
             final_text = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
             exit_code = -1
         else:
-            backend = engine_name(_rid) or ""
+            backend = _engine_name
             oc_sid = {"opencode": oc_sid, "cc_sid": cc_sid}.get(backend, "")
             # 优先 conversation 会话（与 web 同源）；空则回退 repo 级
             oc_sid = _resolve_oc_sid(conv, oc_sid)
@@ -991,12 +1006,31 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     _orig_rid = _rid
                     from src.session_manager import _resolve_chat_runtime_id
                     _rid2 = _resolve_chat_runtime_id(backend) or 0
-                    if _rid2 and _remote_runtime_ready(_rid2):
+                    # queue_remote 模式下必须找远端引擎（credential_id>0），本机直连行无 claim 方
+                    if (_rid2 and (runtime_credential_id(_rid2) or 0) > 0
+                            and _remote_runtime_ready(_rid2)):
                         _rid = _rid2
                         kind = runtime_execution_kind(_rid)
                         log.info(f"[Chat:{ctx.name}] engine fallback: {_orig_rid}->{_rid} (original offline/local-direct)")
                     else:
-                        log.warning(f"[Chat:{ctx.name}] engine fallback failed: no online remote engine for backend={backend}")
+                        # 按名找的引擎仍为本机直连 → 扫描在线远端 worker 引擎兜底
+                        from src.session_manager import db as _sdb, db_lock as _slock
+                        _found = 0
+                        with _slock:
+                            _c = _sdb.cursor()
+                            _c.execute(
+                                "SELECT id FROM agent_runtimes "
+                                "WHERE credential_id > 0 AND status = 'online' AND name = ? "
+                                "ORDER BY id LIMIT 1", (backend,))
+                            _row = _c.fetchone()
+                            if _row:
+                                _found = _row[0]
+                        if _found and _remote_runtime_ready(_found):
+                            _rid = _found
+                            kind = runtime_execution_kind(_rid)
+                            log.info(f"[Chat:{ctx.name}] engine fallback (scan): {_orig_rid}->{_rid} (remote {backend})")
+                        else:
+                            log.warning(f"[Chat:{ctx.name}] engine fallback failed: no online remote engine for backend={backend}")
             if kind != EXEC_MODE_DIRECT:
                 # 入队 + 轮询：任务由远端 RuntimeAgent claim 执行（见 multi-runtime-instance-design）
                 import json as _json

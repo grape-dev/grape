@@ -241,54 +241,7 @@ function renderAgent(name, data) {
 <div class="cd" style="background:${meta.bg || 'var(--bg)'};border-color:${meta.color || 'var(--b)'}33">
   <div class="flex fc gap12">
     <div style="width:44px;height:44px;border-radius:10px;background:${meta.color || 'var(--b)'}22;display:flex;align-items:center;justify-content:center;font-size:20px">${meta.icon || '?'}</div>
-    <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${_agentTypeDisplay(name, meta)}</h2><div class="ts t2">${_agentTypeDesc(name, meta)}</div>${engineBadge}</div>
-    <div class="flex gap6"><button id="btnConfigure" class="bt bt-o bt-s" onclick="toggleAgentCfg(true)">${I18N.t('agents.btn_configure')}</button><button id="btnEvents" class="bt bt-p bt-s" onclick="toggleAgentCfg(false)">${I18N.t('agents.btn_events')}</button></div>
-  </div>
-</div>
-<div id="agentCfgPanel" class="cd hidden" style="padding:16px 20px;margin-bottom:14px">
-  <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('agents.config.title')}</h3>
-  <div class="srow" style="align-items:flex-start"><label>${I18N.t('agents.backend_engines_label')}<br><span class="ts t3" style="font-weight:400">${I18N.t('agents.engine.backend_engines_hint')}</span></label>
-    <div class="cfg-backends" data-backends="${(data.backends || []).join(',')}" data-agent="${name}" style="flex:1;position:relative">
-      <div class="cfg-backends-trigger" onclick="toggleBackendsDropdown(event)" style="min-height:34px;padding:5px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);cursor:pointer;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
-        <span class="cfg-backends-ph ts t2" style="color:var(--t2)">${I18N.t('agents.engine.select_placeholder')}</span>
-      </div>
-      <div class="cfg-backends-panel hidden" style="position:absolute;left:0;top:calc(100% + 4px);width:max(100%,360px);max-width:calc(100vw - 24px);background:var(--bg);border:1px solid var(--b);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.18);z-index:50;max-height:240px;overflow:auto;padding:6px">
-        <span class="ts t2">${I18N.t('common.loading')}</span>
-      </div>
-    </div>
-  </div>
-    <div class="srow" style="align-items:flex-start"><label>${I18N.t('agents.skill_label')}</label>
-    <div style="flex:1;display:flex;gap:8px">
-      <select class="cfg-skill-scope" onchange="_switchSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:7px 6px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg);outline:none">
-        <option value="official">${I18N.t('agents.scope_short.global')}</option>
-        <option value="repo">${I18N.t('agents.scope_short.repo')}</option>
-        <option value="user">${I18N.t('agents.scope_short.user')}</option>
-      </select>
-      <select class="cfg-skill" data-agent="${name}" data-skill-id="${(data.skill_id || 0)}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)">
-      <option value="0" ${!data.skill_id ? 'selected' : ''}>${data.skill ? I18N.t('common.loading') : I18N.t('agents.skill.default_official')}</option>
-    </select>
-    </div>
-  </div>
-  ${name === 'sre' ? _agentSubsSection(name, data) : ''}
-  ${name === 'vod' ? `
-  <div style="margin:16px 0 12px;border-top:1px solid var(--b);padding-top:12px">
-    <div class="flex fc jbtw" style="margin-bottom:8px">
-      <h3 style="font-size:13px;font-weight:600">${I18N.t('agents.config.im_title')}</h3>
-      <span class="ts t3">${data.im && data.im.connected ? I18N.t('agents.config.im_configured') : ''}</span>
-    </div>
-    <div class="srow"><label>${I18N.t('agents.config.bot_app_id')}</label><input id="vodImAppId" value="${(data.im && data.im.im_app_id) || ''}" placeholder="cli_xxxxxxxx" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
-    <div class="srow"><label>${I18N.t('agents.config.bot_secret')}</label><input id="vodImSecret" type="password" value="${data.im && data.im.connected ? '********' : ''}" placeholder="${I18N.t('agents.config.bot_secret_placeholder')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
-    <div class="srow"><label></label><button class="bt bt-o bt-s" onclick="startVodOnboard()" style="padding:7px 14px">${I18N.t('agents.config.scan_config')}</button></div>
-    ${data.im && data.im.conversations && data.im.conversations.length > 0 ? `
-    <div style="margin-top:8px">
-      <span class="ts t3">${I18N.t('agents.config.bound_chats', {n: data.im.conversations.length})}</span>
-      ${data.im.conversations.map(c => `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--b)">${c.chat_name || c.chat_id} <span class="ts t3">${I18N.t('common.status.' + c.status) !== ('common.status.' + c.status) ? I18N.t('common.status.' + c.status) : c.status}</span></div>`).join('')}
-    </div>` : ''}
-  </div>` : ''}
-  <div class="flex gap6 mt16"><button class="bt bt-p bt-s" onclick="saveAgentConfig('${name}')">${I18N.t('common.save')}</button><button class="bt bt-o bt-s" onclick="toggleAgentCfg(false)">${I18N.t('common.cancel')}</button></div>
-  <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
-    <div class="ts t3" style="margin-bottom:6px">${I18N.t('agents.config.clean_session_hint')}</div>
-    <button class="bt bt-r bt-s" onclick="cleanAgentSession('${name}')">${I18N.t('agents.config.clean_session_btn')}</button>
+    <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${_agentTypeDisplay(name, meta)}</h2><div class="ts t2">${_agentTypeDesc(name, meta)}</div></div>
   </div>
 </div>
 <div class="stats mt16 mb16">

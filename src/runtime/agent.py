@@ -878,7 +878,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
                                                 _num, token=task.get("repo_gitcode_token") or "")
             if _wt:
-                env["GIT_ASKPASS"] = _os.path.join(_wt, ".git-askpass.sh")
+                env["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     skill_dir = _os.path.join(cwd, ".skills")

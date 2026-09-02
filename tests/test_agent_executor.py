@@ -50,6 +50,8 @@ class TestCodeArtsRuntime:
         assert "run" in args
         assert "--format" in args
         assert "json" in args
+        assert "--auto" in args               # E2: opencode --auto 批准 write/edit
+        assert "--attach" in args              # E2: attach 到 codearts serve
         assert "--dangerously-skip-permissions" not in args
         assert "hello world" in args  # prompt passed as positional arg
         # --model 仅在 CODEARTS_MODEL 环境变量设置时才传，默认不传
@@ -58,10 +60,11 @@ class TestCodeArtsRuntime:
             assert "--model" not in args
 
     def test_build_args_with_session(self):
-        """codearts 忽略 session_id（跨引擎 session 不可见，每次从头开始）"""
+        """E2: codearts 通过 opencode --session 传递 session_id"""
         args = self.backend.build_args("test prompt", "sess_abc")
-        assert "--session" not in args
-        assert "sess_abc" not in args
+        assert "--session" in args
+        idx = args.index("--session")
+        assert args[idx + 1] == "sess_abc"
         assert "test prompt" in args
 
     def test_build_args_no_dangerous_flag(self):

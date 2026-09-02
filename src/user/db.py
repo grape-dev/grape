@@ -1006,7 +1006,7 @@ def get_skill_md(user_id: int, skill_name: str) -> str | None:
 
 def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id: int = 0,
                      bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
-                     bot_username: str = "", dev_scene: str = "default") -> bool:
+                     bot_username: str = "", dev_scene: str = "") -> bool:
     """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。"""
     from src.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
@@ -1016,7 +1016,7 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
             c = db.cursor()
             c.execute(
                 "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
-                (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "default", bot_gitcode_token, gitcode_webhook_token, bot_username))
+                (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username))
             db.commit()
             return True
     except Exception as e:
@@ -1038,7 +1038,7 @@ def set_repo_scene(repo_key: str, scene_id: str):
 
 
 def get_repo_scene(repo_key: str) -> str:
-    """读取仓库开发场景（managed_repos.dev_scene），无记录返回 'default'。"""
+    """读取仓库开发场景（managed_repos.dev_scene），无记录或未设置返回空字符串。"""
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
@@ -1046,10 +1046,10 @@ def get_repo_scene(repo_key: str) -> str:
             c = db.cursor()
             c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
             row = c.fetchone()
-            return (row[0] or "default") if row else "default"
+            return (row[0] or "") if row else ""
     except Exception as e:
         log.warning(f"Get repo scene failed: {e}")
-        return "default"
+        return ""
 
 
 def get_managed_repos(user_id: int) -> list[dict]:

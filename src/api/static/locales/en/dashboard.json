@@ -73,8 +73,10 @@
   "desc_optional": "Description (optional)",
   "desc_placeholder": "Scene description...",
   "visibility": "Visibility",
-  "scope_user": "Personal (visible in all repos)",
+  "scope_user": "User-level (visible in all repos)",
   "scope_repo": "Repo-level (current repo only)",
+  "scope_user_short": "User",
+  "scope_repo_short": "Repo",
   "select_skill": "Select Skill...",
   "change_engine": "Change",
   "engine_count": "{{count}} engines",
@@ -91,5 +93,10 @@
   "stat_failed": "Failed",
   "confirm_delete_scene": "Delete Scene",
   "scene_deleted": "Scene deleted",
-  "delete_failed": "Delete failed: {{msg}}"
+  "delete_failed": "Delete failed: {{msg}}",
+  "no_scene_title": "No Scene",
+  "no_scene_desc": "No dev scene configured. Please create a new scene.",
+  "no_scene_create": "Create New Scene",
+  "skill_empty_warning": "The following agents have no skill selected: {{agents}}",
+  "edit_info": "Edit Info"
 }

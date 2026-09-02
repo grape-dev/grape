@@ -62,13 +62,24 @@ def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
 # ---- 子包构建 ----
 
 def pack_backend(ts):
-    """后端: src/ (含 api/static) + configs example + requirements"""
+    """后端: src/ (含 api/static) + scripts/ + 仓库根文件 + configs example + requirements"""
     out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
     # src/ 目录
     src_dir = os.path.join(ROOT, "src")
     items.append((src_dir, "src"))
+    # scripts/ 目录 (install-worker.sh, sync_templates.sh, sync_skills.sh 等)
+    scripts_dir = os.path.join(ROOT, "scripts")
+    if os.path.isdir(scripts_dir):
+        items.append((scripts_dir, "scripts"))
+    # 仓库根文件 (start-worker.sh, Dockerfile, docker-compose.yml, README 等)
+    for rf in ["start-worker.sh", "Dockerfile", "docker-compose.yml",
+               "README.md", "README.zh.md", "requirements.txt",
+               "requirements-worker.txt", ".gitignore"]:
+        p = os.path.join(ROOT, rf)
+        if os.path.isfile(p):
+            items.append((p, rf))
     # configs (只保留 *.example.json + 种子 json)
     config_keep = [
         "agent-description.json", "agent-skill-mapping.json",
@@ -81,7 +92,7 @@ def pack_backend(ts):
         p = os.path.join(ROOT, "configs", cf)
         if os.path.isfile(p):
             items.append((p, f"configs/{cf}"))
-    # requirements
+    # requirements (顶层也放一份)
     for rf in ["requirements.txt", "requirements-worker.txt"]:
         p = os.path.join(ROOT, rf)
         if os.path.isfile(p):
@@ -291,6 +302,7 @@ Remote Workers (N 台, 仅装 worker 运行时)
 - MySQL: >= 8.0
 - nginx (可选, 生产推荐)
 - 工具: curl, git, uv (Python 包管理)
+- Hermes Agent: `pip install hermes-agent[acp]` (含 ACP 支持, 装完 `hermes acp --check` 验证)
 
 ## 3. 安装步骤 (服务端)
 

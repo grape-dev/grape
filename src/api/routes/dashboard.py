@@ -919,10 +919,16 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
         scenes = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
-        # 获取当前场景的 nodes（含 skill / enabled / engine_runtime_ids）
-        cfg = get_pipeline_config(dev_scene, repo_key=repo_key, user_id=user.get("id", 0))
-        if cfg:
-            scene_nodes = cfg.get("nodes", [])
+        # dev_scene 必须在可见场景列表中才加载，否则自动选中第一个场景
+        scene_ids = {s["id"] for s in scenes}
+        if scenes:
+            if not dev_scene or dev_scene not in scene_ids:
+                dev_scene = scenes[0]["id"]
+            cfg = get_pipeline_config(dev_scene, repo_key=repo_key, user_id=user.get("id", 0))
+            if cfg:
+                scene_nodes = cfg.get("nodes", [])
+        else:
+            dev_scene = ""
     except Exception as e:
         log.warning(f"Dashboard: scene load failed: {e}")
 
@@ -961,11 +967,15 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         for atype in all_types:
             engines = (query_engines(repo_key, "global", agent_type=atype)
                        + query_engines(repo_key, "user", agent_type=atype)
+                       + query_engines(repo_key, "repo", agent_type=atype)
                        + query_engines(repo_key, "local", agent_type=atype))
+            _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
-                                     "status": e["status"], "tags": e.get("tags", [])}
+                                     "status": e["status"], "tags": e.get("tags", []),
+                                     "scope": e.get("scope", "global"),
+                                     "scope_label": _scope_labels.get(e.get("scope", "global"), "")}
                                     for e in engines]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")

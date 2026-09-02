@@ -61,14 +61,23 @@ function _filteredTasks() {
   if (_tasksTab === 'active') list = list.filter(t => t.status === 'active' || t.status === 'processing');
   else if (_tasksTab === 'completed') list = list.filter(t => t.status === 'completed');
   if (_taskQuery) {
-    const q = _taskQuery.toLowerCase();
-    list = list.filter(t =>
-      String(t.id).includes(q) ||
-      (t.title || '').toLowerCase().includes(q) ||
-      (t.task_description || '').toLowerCase().includes(q) ||
-      String(t.issue_number).includes(q) ||
-      (t.repo_key || '').toLowerCase().includes(q)
-    );
+    const q = _taskQuery.toLowerCase().trim();
+    if (q) {
+      list = list.filter(t => {
+        const _haystack = [
+          String(t.id || ''),
+          (t.title || ''),
+          (t.task_description || ''),
+          String(t.issue_number || ''),
+          (t.repo_key || ''),
+          (t.assignee || ''),
+          (t.scene_name || ''),
+          (t.status || ''),
+          (t.repo_display || ''),
+        ].join(' ').toLowerCase();
+        return _haystack.includes(q);
+      });
+    }
   }
   return list;
 }
@@ -176,7 +185,7 @@ function _render() {
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:10px">${I18N.t('tasks.create.btn_new')}</button>
         ${tab('all', I18N.t('tasks.tab.all'), cntAll)}${tab('active', I18N.t('tasks.tab.active'), cntActive)}${tab('completed', I18N.t('tasks.tab.completed'), cntDone)}
-        <div class="tsk-search"><span>🔍</span><input placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" oninput="_taskQuery=this.value;_taskPage=1;if(_taskQuery.length>1||!_taskQuery){_render()}" onkeyup="if(event.key==='Enter')_render()"></div>
+        <div class="tsk-search"><span>🔍</span><input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_taskPage=1;_render()}" onchange="_taskQuery=this.value;_taskPage=1;_render()"></div>
       </div>
     </div>
     <div class="tsk-layout" style="height:calc(100vh - 200px)">
@@ -283,15 +292,16 @@ function openTaskCreateModal() {
   document.body.appendChild(ov);
   _taskCreateModal = ov;
 
-  // 异步加载场景列表填充下拉框
-  API.get('/scenes/with-pipeline').then(function(d) {
+  // 异步加载场景列表填充下拉框（带 repo 参数获取仓库级场景）
+  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
     const sel = document.getElementById('tcCreateScene');
     if (!sel) return;
     const scenes = d.scenes || [];
     scenes.forEach(function(s) {
       const opt = document.createElement('option');
       opt.value = s.id;
-      opt.textContent = s.name || s.id;
+      const scopeTag = s.scope === 'repo' ? '【仓库级】' : s.scope === 'user' ? '【用户级】' : '';
+      opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
       sel.appendChild(opt);
     });
   }).catch(function(){});
