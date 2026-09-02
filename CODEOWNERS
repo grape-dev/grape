@@ -1,32 +1,124 @@
-# DevOps Bot - CODEOWNERS
+# Grape - CODEOWNERS
 # 项目模块责任人分配
-# 当前测试阶段，全部指向 @Jason7602
+#
+# 组织方式：按 Grape 前端功能模块拆分，每个模块给出「模块介绍 + 核心代码路径」。
+# 每个路径行末的 @成员 即该代码的 owner（在对应 MR 中负责最终把关）。
+#
+# 约定：
+#   1) 路径只需给到大致的目录/文件级，认领时可按实际范围细化。
+#   2) 越靠后的规则优先级越高（就近匹配），模块行需放在兜底规则之后。
+#   3) 官方技能/官方模板已拆分至独立仓库，本仓库仅保留占位与同步脚本。
 
-# ===== 核心引擎 =====
-src/                       @Jason7602
+# ===== 兜底（默认） =====
+# 未在下方案中认领的代码，默认 owner。
+src/                                    @gcw_3FZApeLT
 
-# ===== 配置文件 =====
-configs/                   @Jason7602
+# ===== 登录 / 认证 =====
+# 介绍：GitCode OAuth 登录、用户名密码登录、JWT 鉴权、用户信息、登录白名单。
+#       前端登录/鉴权交互在 app.js 的 showLogin / oauthLogin / auth.profile 逻辑中。
+src/api/routes/auth.py                   @wdmike
+src/api/deps.py                          @wdmike
+src/api/jwt_utils.py                     @wdmike
+src/user/                                @wdmike
+src/api/static/js/app.js                 @wdmike
 
-# ===== 技能库 =====
-# 官方技能已拆分至独立仓库 grape-dev/grape-skills（skills/<agent_type>/<skill>），
-# 本仓库 skills/ 仅含文档（README.md / SKILL-SPEC.md）与运行时目录（custom/、repo/）
-skills/README.md                 @Jason7602
-skills/SKILL-SPEC.md             @Jason7602
-scripts/sync_skills.sh           @Jason7602
+# ===== 我的项目 =====
+# 介绍：成员项目列表、项目托管/移除/同步，即「我的项目」页面。
+src/api/routes/repos.py                  @wdmike
+src/user/repo_manager.py                 @wdmike
+src/api/static/js/pages/repos.js         @wdmike
 
 # ===== 项目模板 =====
-# 官方项目模板已拆分至独立仓库 grape-dev/grape-template（模板目录 + project-templates.json），
-# 本仓库 examples/ 仅含占位，由 scripts/sync_templates.sh 铺入（不入 git）
-examples/.gitkeep                @Jason7602
-scripts/sync_templates.sh        @Jason7602
-configs/project-templates.json   @Jason7602
+# 介绍：项目模板列表、一键创建并托管、首次引导（onboarding）。
+#       官方模板在独立仓库 grape-dev/grape-template，本仓库经 sync_templates.sh 同步。
+src/api/routes/templates.py              @wdmike
+src/api/onboarding.py                    @wdmike
+configs/project-templates.json           @wdmike
+scripts/sync_templates.sh                @wdmike
+src/api/static/js/pages/templates.js     @wdmike
 
-# ===== 基础设施 =====
-cloudflare/                @Jason7602
-README.md                  @Jason7602
+# ===== 任务中心 =====
+# 介绍：个人任务中心（notify / close / mine）、任务运行日志 SSE 实时流。
+src/api/routes/tasks.py                  @songspace
+src/api/routes/task_logs.py              @songspace
+src/api/chat_task_manager.py             @songspace
+src/api/static/js/pages/tasks.js         @songspace
 
-# ===== 跨仓 Issue 同步映射 =====
-# 格式：@用户名 → owner/目标仓库
-# 留空或不存在时跳过同步。
-# @younger_eric  → Jason7602/devops-bot-test
+# ===== 场景中心 =====
+# 介绍：开发场景列表 / CRUD / 应用，场景与 Agent×Skill 的映射配置。
+#       场景中心入口嵌在仪表盘（dashboard.js / app.json）。
+src/api/routes/scenes.py                 @XOcto
+configs/agent-skill-mapping.json         @XOcto
+src/api/static/js/pages/dashboard.js     @XOcto
+
+# ===== Pipeline =====
+# 介绍：Issue 工作流聚合展示、流水线配置与执行、事件流水线（event_pipeline/event_bus）。
+src/api/routes/pipeline.py               @XOcto
+src/api/pipeline_config.py               @XOcto
+src/api/pipeline_executor.py             @XOcto
+src/api/event_pipeline.py                @XOcto
+src/api/event_bus.py                     @XOcto
+src/api/static/js/pages/pipeline.js      @XOcto
+
+# ===== DevOps Agent =====
+# 介绍：Agent 类型元数据、详情、配置；后端接入引擎（opencode/codearts/hermes）。
+#       Agent 类型种子来自 configs/agent-description.json。
+src/api/routes/agents.py                 @XOcto
+src/agent/                               @XOcto
+configs/agent-description.json           @XOcto
+src/api/static/js/pages/agents.js        @XOcto
+
+# ===== 知识 =====
+# 介绍：项目知识看板（项目级 + DevOps Agent 维度）、知识基线构建底层逻辑。
+#       同时包含 DevOps Skills：技能列表、上传、删除、个人技能转仓库技能。
+src/api/routes/knowledge.py              @xiaowu2119
+src/api/knowledge.py                     @xiaowu2119
+src/project_info/                        @xiaowu2119
+src/api/static/js/pages/knowledge.js     @xiaowu2119
+src/api/routes/skills.py                 @xiaowu2119
+configs/skill-description.json           @xiaowu2119
+src/storage/skill_sync.py                @xiaowu2119
+scripts/sync_skills.sh                   @xiaowu2119
+src/api/static/js/pages/skills.js        @xiaowu2119
+
+# ===== Chat Agent =====
+# 介绍：个人对话助手，飞书/WebUI 交互，会话管理、消息与配置。
+src/api/routes/chat.py                   @mm6667
+src/im/                                  @songspace
+src/session_manager.py                   @songspace
+src/api/static/js/pages/chat.js          @songspace
+
+# ===== 通用设置 =====
+# 介绍：凭据、通知偏好、OAuth 配置、登录白名单、Backend Runtimes 展示。
+src/api/routes/settings.py               @xiaowu2119
+configs/login-whitelist.json             @xiaowu2119
+src/api/static/js/pages/settings.js      @xiaowu2119
+
+# ===== GitCode 仓库集成 =====
+# 介绍：GitCode/GitHub VCS 适配、仓库 key 归一化、Webhook 事件接入、事件存储。
+src/vcs/                                 @wdmike
+src/repo_key.py                          @wdmike
+src/api/routes/webhook.py                @wdmike
+src/api/event_store.py                   @wdmike
+
+# ===== Agent Runtime =====
+# 介绍：Agent 运行时管理，引擎选择、运行时健康/实例状态、可观测探测。
+src/api/routes/runtime.py                @mm6667
+src/runtime/                             @mm6667
+src/observability/                       @mm6667
+src/api/static/js/pages/runtimes.js      @mm6667
+
+# ===== 基础设施与对外文档 =====
+# 介绍：构建、部署、入口启动、全局配置、公共文档。
+README.md                                @gcw_3FZApeLT
+README.zh.md                             @gcw_3FZApeLT
+Dockerfile                               @gcw_3FZApeLT
+docker-compose.yml                       @gcw_3FZApeLT
+nginx-grape.conf                         @gcw_3FZApeLT
+deploy/                                  @gcw_3FZApeLT
+start_server.py                          @gcw_3FZApeLT
+start-worker.sh                          @gcw_3FZApeLT
+src/config.py                            @gcw_3FZApeLT
+src/mysql_compat.py                      @gcw_3FZApeLT
+scripts/                                 @gcw_3FZApeLT
+cloudflare/                              @gcw_3FZApeLT
