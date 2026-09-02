@@ -52,12 +52,18 @@ def _target_main_event_done(repo_key: str, target: str) -> bool:
 
 
 def _scene_onboarding_skill(scene_id: str) -> str:
-    """读 agent-skill-mapping.json，返回场景的 onboarding 技能 key；无则空串。"""
+    """读 agent-skill-mapping.json，返回场景的 onboarding 技能 key；无则空串。
+
+    plugin 模式下 dev_scene 可能为 `repo:{scene}`（scope 前缀），此处剥离后查配置。
+    """
+    _lookup = (scene_id or "").strip()
+    if _lookup.startswith("repo:") or _lookup.startswith("user:"):
+        _lookup = _lookup.split(":", 1)[1]
     try:
         _path = os.path.join(CONFIG_DIR, "agent-skill-mapping.json")
         with open(_path, encoding="utf-8") as f:
             data = json.load(f)
-        return data.get("scenes", {}).get(scene_id, {}).get("onboarding", "") or ""
+        return data.get("scenes", {}).get(_lookup, {}).get("onboarding", "") or ""
     except Exception as e:
         log.warning(f"onboarding: load scene skill failed: {e}")
         return ""
