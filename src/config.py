@@ -281,12 +281,26 @@ def read_server_config() -> dict:
 def is_gitcode_user_allowed(gitcode_login: str) -> bool:
     """白名单判定（GitCode 用户名，非昵称）。
 
-    - 配置文件缺失 / whitelist 为空 → 全部放行（默认开放）
+    优先查 DB（login_whitelist 表），降级读 login-whitelist.json 文件。
+    - DB 表存在且有数据 → gitcode_login 必须在表中
+    - DB 不可用 → 降级文件逻辑
+    - 文件缺失 / whitelist 为空 → 全部放行（默认开放）
     - 读取异常 → 保守放行（避免误锁所有用户）
-    - 否则 gitcode_login 必须在 whitelist 内才放行
     """
     if not gitcode_login:
         return False
+    # 优先查 DB
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
+            if count > 0:
+                row = c.execute("SELECT 1 FROM login_whitelist WHERE gitcode_username=?", (gitcode_login,)).fetchone()
+                return row is not None
+    except Exception:
+        pass  # DB 不可用，降级文件
+    # 降级：读文件
     try:
         if not os.path.exists(LOGIN_WHITELIST_PATH):
             return True
