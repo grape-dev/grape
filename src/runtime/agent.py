@@ -19,6 +19,18 @@ import zipfile as _zf
 import urllib.request as _urllib
 import shutil as _shutil
 
+# 方案 G: codearts per-task 权限隔离预写配置
+_CODEARTS_ALLOW_PERMS = [
+    {"permission": "browser", "pattern": "*", "action": "ask"},
+    {"permission": "edit", "pattern": "*", "action": "allow"},
+    {"permission": "write", "pattern": "*", "action": "allow"},
+    {"permission": "webfetch", "pattern": "*", "action": "ask"},
+    {"permission": "websearch", "pattern": "*", "action": "allow"},
+    {"permission": "external_directory_write", "pattern": "*", "action": "allow"},
+    {"permission": "external_directory_read", "pattern": "*", "action": "allow"},
+    {"permission": "dotfile", "pattern": "*", "action": "ask"},
+]
+
 from src.config import log, CHAT_CWD_BASE
 
 # Worker 日志内存缓冲区——收集最近 ERROR/WARNING 日志，心跳时上报给主控
@@ -956,6 +968,48 @@ async def _execute_task(client, task, engine_name: str = ""):
     except Exception as e:
         log.warning(f"knowledge materialize failed: {e}")
 
+    # ── 方案 G: codearts per-task 独立数据目录 ──
+    # 通过 KERNEL_DATA_DIR 指向 per-task 临时目录，预写 global.json + sandbox/config.json
+    # 实现 per-process 权限隔离，不影响宿主机全局配置。
+    # env 是局部变量，并发安全（不用 os.environ 避免 async 交错竞态）。
+    # 通过 env_extra 传给 stream_agent → env.update(env_extra) 覆盖 get_env 的默认值。
+    _engine = engine_name or ""
+    if "codearts" in _engine.lower():
+        try:
+            _data_dir = _os.path.join("/var/cache/codearts-tasks", tid)
+            _cli_data = _os.path.join(_data_dir, "cli-data")
+            # 1. 预写 global.json (write/edit/external_directory_write=allow)
+            _perm_dir = _os.path.join(_cli_data, "storage", "permission")
+            _os.makedirs(_perm_dir, exist_ok=True)
+            _global_json = _os.path.join(_perm_dir, "global.json")
+            if not _os.path.exists(_global_json):  # 幂等
+                with open(_global_json, "w") as f:
+                    json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
+            # 2. 预写 sandbox/config.json (network_policy=allow_all)
+            _sandbox_dir = _os.path.join(_cli_data, "storage", "sandbox")
+            _os.makedirs(_sandbox_dir, exist_ok=True)
+            _sandbox_cfg = _os.path.join(_sandbox_dir, "config.json")
+            if not _os.path.exists(_sandbox_cfg):  # 幂等
+                with open(_sandbox_cfg, "w") as f:
+                    f.write('{"network_policy": "allow_all"}')
+            # 3. symlink sandbox_runner + system/skills 指向宿主机（避免每次解压 66MB）
+            _home = _os.path.expanduser("~")
+            _host_cli = _os.path.join(_home, ".codeartsdoer", "cli-data")
+            _sandbox_runner = _os.path.join(_cli_data, "sandbox_runner")
+            if not _os.path.exists(_sandbox_runner) and _os.path.isdir(_os.path.join(_host_cli, "sandbox_runner")):
+                _os.symlink(_os.path.join(_host_cli, "sandbox_runner"), _sandbox_runner)
+            _sys_skills = _os.path.join(_cli_data, "system", "skills")
+            if not _os.path.exists(_sys_skills) and _os.path.isdir(_os.path.join(_host_cli, "system", "skills")):
+                _os.makedirs(_os.path.join(_cli_data, "system"), exist_ok=True)
+                _os.symlink(_os.path.join(_host_cli, "system", "skills"), _sys_skills)
+            # 4. 设置 KERNEL_DATA_DIR 到 env dict（局部变量，并发安全）
+            env["KERNEL_DATA_DIR"] = _cli_data
+            # 5. 注册清理：task 结束时删除临时目录
+            _res.track_tmp_pattern(f"/var/cache/codearts-tasks/{tid}")
+            log.info(f"[Agent:{task.get('agent_type') or ''}] codearts data dir: {_cli_data}")
+        except Exception as e:
+            log.warning(f"codearts data dir setup failed: {e}")
+
     done = None
     batch = []
     started = False
@@ -1407,6 +1461,14 @@ def main():
 
     # 启动早期检测 opencode API key 环境变量缺失（2026-08-28 事故预防）
     _check_opencode_api_keys()
+
+    # 清理上次崩溃残留的 codearts 临时目录（方案 G: per-task 独立数据目录）
+    import shutil as _sh
+    _codearts_tasks_dir = "/var/cache/codearts-tasks"
+    if os.path.isdir(_codearts_tasks_dir):
+        _sh.rmtree(_codearts_tasks_dir, ignore_errors=True)
+        os.makedirs(_codearts_tasks_dir, exist_ok=True)
+        log.info(f"cleaned codearts tasks dir: {_codearts_tasks_dir}")
 
     from src.runtime.client import RuntimeClient
 

@@ -260,6 +260,8 @@ function loadAgentTypes() {
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     // 离开任务中心时停止场景识别轮询
     if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
+    // 离开场景中心时清除编辑标志（防止 _dashboardEditing 泄漏导致重新进入时卡在加载中）
+    if (view !== 'dash') window._dashboardEditing = false;
 
     if (repo) {
       repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.fullName || (repo.owner + '/' + repo.name)}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
@@ -269,8 +271,8 @@ function loadAgentTypes() {
 
     if (view === 'dash') {
       title.textContent = I18N.t('app.nav.scene_center');
-      // 进入场景中心时清除可能残留的编辑标志（上一次操作异常退出时泄漏）
-      if (!window._dashboardEditing) window._dashboardEditing = false;
+      // 进入场景中心时无条件清除编辑标志（上一次操作异常退出时泄漏）
+      window._dashboardEditing = false;
       const loadDash = () => Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes'),
