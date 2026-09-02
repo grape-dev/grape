@@ -433,7 +433,7 @@ function renderDashboard(data) {
   };
 
   window.openEngineModal = function(agentType) {
-    const allEngines = (agentEngines[agentType] || []).filter(e => e.status === 'online');
+    const allEngines = (agentEngines[agentType] || []).filter(e => e.status === 'online' || e.status === 'recently_lost');
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
     let currentIds = node.engine_runtime_ids || [];

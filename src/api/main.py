@@ -649,3 +649,11 @@ def _check_and_sync_templates() -> bool:
     examples_ok = _os.path.isdir(_examples_dir) and \
         any(_os.path.isdir(_os.path.join(_examples_dir, d)) for d in _os.listdir(_examples_dir) if not d.startswith('.'))
     return json_ok and examples_ok
+# SPA catch-all：非 API/static 的路径（如 /login）回退到 index.html
+# 必须放在所有 API 路由之后，否则会拦截 /health /healthz 等端点
+@app.get("/{path:path}")
+async def spa_catch_all(path: str):
+    if path.startswith("api/") or path.startswith("static/"):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404)
+    return _spa_response()

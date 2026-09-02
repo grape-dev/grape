@@ -115,18 +115,23 @@ def _write_file(repo_key: str, name: str, content: str):
 
 
 def _write_to_obs(repo_key: str, name: str, content: str):
-    """写 OBS + 落库 baseline 记录。OBS 写失败时只 log warning（降级到本地）。"""
+    """写 OBS + 落库 baseline 记录。OBS 写失败时只 log warning（降级到本地）。
+
+    OBS 未启用时：跳过 OBS 上传，但仍写 DB（obs_key 留空），
+    保证 agent_shared_knowledge 表的 content_hash/file_path 与本地文件同步，
+    防止前端读到旧记录（如 codegraph 重新生成后 DB 仍为降级版本）。
+    """
     import hashlib
     try:
         from src.storage import get_storage
         storage = get_storage()
-        if not storage:
-            return  # OBS 未启用，只写本地
-        storage_key = f"project-info/{repo_key}/{name}"
-        storage.save_bytes(storage_key, content.encode("utf-8"))
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
-        # file_path 用 WORKSPACE_DIR 相对路径——和 write_knowledge 格式一致
         file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)
+        storage_key = ""
+        if storage:
+            storage_key = f"project-info/{repo_key}/{name}"
+            storage.save_bytes(storage_key, content.encode("utf-8"))
+        # 无论 OBS 是否启用，都写 DB（obs_key 留空时前端走本地文件读取）
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
