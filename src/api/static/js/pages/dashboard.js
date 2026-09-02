@@ -271,47 +271,99 @@ function renderDashboard(data) {
   };
 
   window.openEngineModal = function(agentType) {
-    const engines = (agentEngines[agentType] || []).filter(e => e.status === 'online');
+    const allEngines = (agentEngines[agentType] || []).filter(e => e.status === 'online');
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
-    const currentIds = node.engine_runtime_ids || [];
+    let currentIds = node.engine_runtime_ids || [];
 
     const _ENG_TAG_COLORS = {all:'#6366f1',vod:'#ec4899',issue:'#ef4444',coding:'#3b82f6',qa:'#a855f7',sre:'#f59e0b'};
     const _tagBadge = (tags) => (tags||[]).map(t => `<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:${_ENG_TAG_COLORS[t]||'#999'};margin-left:4px;font-weight:500">${t==='all'?'All':t.charAt(0).toUpperCase()+t.slice(1)}</span>`).join('');
+    const _SCOPE_COLORS = {global:'#6366f1',user:'#34c759',repo:'#f59e0b',local:'#86868b'};
+    const _scopeBadge = (s) => s ? `<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:${_SCOPE_COLORS[s]||'#999'};margin-left:4px;font-weight:500">${s==='global'?'全局':s==='user'?'个人':s==='repo'?'仓库':s==='local'?'本机':s}</span>` : '';
+    const _SCOPE_ORDER = {user:0, repo:1, global:2, local:3};
 
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
     const meta = _AGENT_TYPES[agentType] || {};
     const title = meta.display_name || agentType;
 
-    overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:380px;max-width:500px;max-height:80vh;overflow-y:auto;box-shadow:0 12px 48px rgba(0,0,0,.15)">
-      <h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${I18N.t('dashboard.select_engine')} — ${title}</h3>
-      <div style="font-size:12px;color:#86868b;margin-bottom:20px">${I18N.t('dashboard.engines_available', {count: engines.length})}</div>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        ${engines.length === 0 ? `<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">${I18N.t('dashboard.no_engine_broadcast')}</div>` : engines.map(e => {
+    // 按 scope 分组排序
+    const sorted = allEngines.slice().sort((a,b) => (_SCOPE_ORDER[a.scope]||9) - (_SCOPE_ORDER[b.scope]||9));
+
+    function _renderEngineList(filter) {
+      // 从 _engCurIds 同步勾选状态（checkbox onchange 已实时更新）
+      currentIds = (window._engCurIds || []).slice();
+
+      const q = (filter || '').toLowerCase().trim();
+      const filtered = q ? sorted.filter(e => {
+        const hay = [e.name, e.device, e.cred_name, e.scope_label, (e.tags||[]).join(' ')].join(' ').toLowerCase();
+        return hay.includes(q);
+      }) : sorted;
+
+      // 按 scope 分组
+      const groups = {};
+      filtered.forEach(e => { const s = e.scope || 'global'; if (!groups[s]) groups[s] = []; groups[s].push(e); });
+      const _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
+      const _SCOPE_ORDER2 = ['user','repo','global','local'];
+
+      let html = '';
+      if (filtered.length === 0) {
+        return `<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">${I18N.t('dashboard.no_engine_broadcast')}</div>`;
+      }
+      _SCOPE_ORDER2.forEach(s => {
+        if (!groups[s]) return;
+        html += `<div style="margin-top:12px;margin-bottom:4px;font-size:11px;font-weight:600;color:#86868b;text-transform:uppercase;letter-spacing:.5px">${_SCOPE_LABELS[s]||s} (${groups[s].length})</div>`;
+        html += groups[s].map(e => {
           const checked = currentIds.includes(e.id);
           return `<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:1px solid ${checked ? '#0071e3' : '#e8e8ed'};border-radius:12px;cursor:pointer;background:${checked ? 'rgba(0,113,227,.04)' : '#f5f5f7'};transition:all .15s">
-            <input type="checkbox" data-eid="${e.id}" ${checked ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">
+            <input type="checkbox" data-eid="${e.id}" ${checked ? 'checked' : ''} onchange="if(this.checked){window._engCurIds.push(${e.id})}else{window._engCurIds=window._engCurIds.filter(x=>x!==${e.id})}" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">
             <div style="flex:1;min-width:0">
-              <div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center">${e.name}${_tagBadge(e.tags)}</div>
+              <div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">${e.name}${_tagBadge(e.tags)}${_scopeBadge(e.scope)}</div>
               <div style="font-size:10px;color:#86868b;margin-top:3px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div>
             </div>
             <span style="font-size:11px;font-weight:500;color:#34c759">${I18N.t('dashboard.online')}</span>
           </label>`;
-        }).join('')}
+        }).join('');
+      });
+      return html;
+    }
+
+    // currentIds 可变数组（checkbox onchange 实时同步）
+    window._engCurIds = currentIds.slice();
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+
+    overlay.innerHTML = `<div id="engModalBox" style="background:#fff;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 12px 48px rgba(0,0,0,.15);display:flex;flex-direction:column">
+      <h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${I18N.t('dashboard.select_engine')} — ${title}</h3>
+      <div style="font-size:12px;color:#86868b;margin-bottom:12px">${I18N.t('dashboard.engines_available', {count: allEngines.length})}</div>
+      <div style="margin-bottom:16px;flex-shrink:0">
+        <input id="engSearchInput" placeholder="搜索引擎名称/设备/标签..." style="width:100%;padding:8px 12px;border:1px solid #e8e8ed;border-radius:8px;font-size:13px;background:#f5f5f7;color:#1d1d1f">
       </div>
-      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:24px">
+      <div id="engListContainer" style="display:flex;flex-direction:column;gap:4px;flex:1;overflow-y:auto;min-height:0">
+        ${_renderEngineList('')}
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;flex-shrink:0">
         <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')}</button>
         <button class="ap-btn ap-btn-p" id="confirmEngineBtn">${I18N.t('common.confirm')}</button>
       </div>
     </div>`;
     document.body.appendChild(overlay);
 
+    // 搜索输入：实时触发（非中文组合阶段），中文组合完成后再触发
+    const _engInput = document.getElementById('engSearchInput');
+    let _engComposing = false;
+    _engInput.addEventListener('compositionstart', function() { _engComposing = true; });
+    _engInput.addEventListener('compositionend', function() { _engComposing = false; _refreshEngList(); });
+    _engInput.addEventListener('input', function() { if (!_engComposing) _refreshEngList(); });
+    function _refreshEngList() {
+      const c = document.getElementById('engListContainer');
+      if (c) c.innerHTML = window._engRenderFn(_engInput.value);
+    }
+
+    // 暴露渲染函数供搜索框调用
+    window._engRenderFn = _renderEngineList;
+
     document.getElementById('confirmEngineBtn').onclick = function() {
-      const checks = overlay.querySelectorAll('input[type=checkbox][data-eid]');
-      const newIds = [];
-      checks.forEach(c => { if (c.checked) newIds.push(parseInt(c.dataset.eid)); });
-      node.engine_runtime_ids = newIds;
+      node.engine_runtime_ids = window._engCurIds.slice();
       overlay.remove();
       const cardsEl = document.getElementById('agentCards');
       cardsEl.innerHTML = renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngines, isCustomScene, editMode, editNodes, engineMode);

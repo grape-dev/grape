@@ -961,11 +961,15 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         for atype in all_types:
             engines = (query_engines(repo_key, "global", agent_type=atype)
                        + query_engines(repo_key, "user", agent_type=atype)
+                       + query_engines(repo_key, "repo", agent_type=atype)
                        + query_engines(repo_key, "local", agent_type=atype))
+            _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
-                                     "status": e["status"], "tags": e.get("tags", [])}
+                                     "status": e["status"], "tags": e.get("tags", []),
+                                     "scope": e.get("scope", "global"),
+                                     "scope_label": _scope_labels.get(e.get("scope", "global"), "")}
                                     for e in engines]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")
