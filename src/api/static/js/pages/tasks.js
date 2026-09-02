@@ -292,15 +292,16 @@ function openTaskCreateModal() {
   document.body.appendChild(ov);
   _taskCreateModal = ov;
 
-  // 异步加载场景列表填充下拉框
-  API.get('/scenes/with-pipeline').then(function(d) {
+  // 异步加载场景列表填充下拉框（带 repo 参数获取仓库级场景）
+  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
     const sel = document.getElementById('tcCreateScene');
     if (!sel) return;
     const scenes = d.scenes || [];
     scenes.forEach(function(s) {
       const opt = document.createElement('option');
       opt.value = s.id;
-      opt.textContent = s.name || s.id;
+      const scopeTag = s.scope === 'repo' ? '【仓库级】' : s.scope === 'user' ? '【用户级】' : '';
+      opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
       sel.appendChild(opt);
     });
   }).catch(function(){});
