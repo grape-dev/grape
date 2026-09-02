@@ -274,6 +274,36 @@ def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
 
     evt = _load_event(seq)
 
+    # 1.5）onboarding 主事件重派 → target 级自愈（§5.2/§5.3/§11）：
+    #     引导事件无普通 task 快照、payload 无 repository（source='template'），走 re-run_pipeline 会被
+    #     `repository='' not recognized` 静默跳过——改为按 target 重新触发引导，恢复正常分派回归。
+    _onb_target = (
+        "experience" if evt.get("event_type") == "onboarding_exp"
+        else "explore" if evt.get("event_type") == "onboarding_explore" else ""
+    )
+    if _onb_target:
+        from src.repo_key import split_owner_repo
+        from src.api.onboarding import retry_onboarding_target
+        _owner, _repo = split_owner_repo(evt.get("repo_key", "") or "")
+        log.info(f"[redispatch] seq={seq} onboarding {_onb_target}: target-level retry, repo={evt.get('repo_key')}")
+        _res = retry_onboarding_target(evt.get("repo_key", "") or "", _owner, _onb_target)
+        # 原 seq 标记 failed（保持历史记录），新 seq 接管
+        try:
+            update_event_status(seq, "failed")
+        except Exception:
+            pass
+        try:
+            from src.user.db import set_meta_value as _smv
+            import time as _time
+            _smv(f"redispatch:{seq}", str(_time.time()))
+        except Exception:
+            pass
+        if not (_res or {}).get("ok"):
+            raise HTTPException(status_code=409, detail={"code": 409,
+                "message": f"引导重派失败：{(_res or {}).get('reason', 'unknown')}"})
+        return {"status": "redispatched", "task_id": "(new)", "event_seq": (_res or {}).get("seq", 0),
+                "original_seq": seq}
+
     # 2) 查关联任务
     task_id = ""
     with db_lock:

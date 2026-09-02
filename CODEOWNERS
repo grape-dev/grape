@@ -11,31 +11,31 @@
 
 # ===== 兜底（默认） =====
 # 未在下方案中认领的代码，默认 owner。
-src/                                    @gcw_3FZApeLT
+src/                                    @gcw_3FZApeLT @songspace
 
 # ===== 登录 / 认证 =====
 # 介绍：GitCode OAuth 登录、用户名密码登录、JWT 鉴权、用户信息、登录白名单。
 #       前端登录/鉴权交互在 app.js 的 showLogin / oauthLogin / auth.profile 逻辑中。
-src/api/routes/auth.py                   @wdmike
-src/api/deps.py                          @wdmike
-src/api/jwt_utils.py                     @wdmike
-src/user/                                @wdmike
-src/api/static/js/app.js                 @wdmike
+src/api/routes/auth.py                   @wdmike @songspace
+src/api/deps.py                          @wdmike @songspace
+src/api/jwt_utils.py                     @wdmike @songspace
+src/user/                                @wdmike @songspace
+src/api/static/js/app.js                 @wdmike @songspace
 
 # ===== 我的项目 =====
 # 介绍：成员项目列表、项目托管/移除/同步，即「我的项目」页面。
-src/api/routes/repos.py                  @wdmike
-src/user/repo_manager.py                 @wdmike
-src/api/static/js/pages/repos.js         @wdmike
+src/api/routes/repos.py                  @wdmike @songspace
+src/user/repo_manager.py                 @wdmike @songspace
+src/api/static/js/pages/repos.js         @wdmike @songspace
 
 # ===== 项目模板 =====
 # 介绍：项目模板列表、一键创建并托管、首次引导（onboarding）。
 #       官方模板在独立仓库 grape-dev/grape-template，本仓库经 sync_templates.sh 同步。
-src/api/routes/templates.py              @wdmike
-src/api/onboarding.py                    @wdmike
-configs/project-templates.json           @wdmike
-scripts/sync_templates.sh                @wdmike
-src/api/static/js/pages/templates.js     @wdmike
+src/api/routes/templates.py              @wdmike @songspace
+src/api/onboarding.py                    @wdmike @songspace
+configs/project-templates.json           @wdmike @songspace
+scripts/sync_templates.sh                @wdmike @songspace
+src/api/static/js/pages/templates.js     @wdmike @songspace
 
 # ===== 任务中心 =====
 # 介绍：个人任务中心（notify / close / mine）、任务运行日志 SSE 实时流。
@@ -47,78 +47,78 @@ src/api/static/js/pages/tasks.js         @songspace
 # ===== 场景中心 =====
 # 介绍：开发场景列表 / CRUD / 应用，场景与 Agent×Skill 的映射配置。
 #       场景中心入口嵌在仪表盘（dashboard.js / app.json）。
-src/api/routes/scenes.py                 @XOcto
-configs/agent-skill-mapping.json         @XOcto
-src/api/static/js/pages/dashboard.js     @XOcto
+src/api/routes/scenes.py                 @XOcto @songspace
+configs/agent-skill-mapping.json         @XOcto @songspace
+src/api/static/js/pages/dashboard.js     @XOcto @songspace
 
 # ===== Pipeline =====
 # 介绍：Issue 工作流聚合展示、流水线配置与执行、事件流水线（event_pipeline/event_bus）。
-src/api/routes/pipeline.py               @XOcto
-src/api/pipeline_config.py               @XOcto
-src/api/pipeline_executor.py             @XOcto
-src/api/event_pipeline.py                @XOcto
-src/api/event_bus.py                     @XOcto
-src/api/static/js/pages/pipeline.js      @XOcto
+src/api/routes/pipeline.py               @XOcto @songspace
+src/api/pipeline_config.py               @XOcto @songspace
+src/api/pipeline_executor.py             @XOcto @songspace
+src/api/event_pipeline.py                @XOcto @songspace
+src/api/event_bus.py                     @XOcto @songspace
+src/api/static/js/pages/pipeline.js      @XOcto @songspace
 
 # ===== DevOps Agent =====
 # 介绍：Agent 类型元数据、详情、配置；后端接入引擎（opencode/codearts/hermes）。
 #       Agent 类型种子来自 configs/agent-description.json。
-src/api/routes/agents.py                 @XOcto
-src/agent/                               @XOcto
-configs/agent-description.json           @XOcto
-src/api/static/js/pages/agents.js        @XOcto
+src/api/routes/agents.py                 @XOcto @songspace
+src/agent/                               @XOcto @songspace
+configs/agent-description.json           @XOcto @songspace
+src/api/static/js/pages/agents.js        @XOcto @songspace
 
 # ===== 知识 =====
 # 介绍：项目知识看板（项目级 + DevOps Agent 维度）、知识基线构建底层逻辑。
 #       同时包含 DevOps Skills：技能列表、上传、删除、个人技能转仓库技能。
-src/api/routes/knowledge.py              @xiaowu2119
-src/api/knowledge.py                     @xiaowu2119
-src/project_info/                        @xiaowu2119
-src/api/static/js/pages/knowledge.js     @xiaowu2119
-src/api/routes/skills.py                 @xiaowu2119
-configs/skill-description.json           @xiaowu2119
-src/storage/skill_sync.py                @xiaowu2119
-scripts/sync_skills.sh                   @xiaowu2119
-src/api/static/js/pages/skills.js        @xiaowu2119
+src/api/routes/knowledge.py              @xiaowu2119 @songspace
+src/api/knowledge.py                     @xiaowu2119 @songspace
+src/project_info/                        @xiaowu2119 @songspace
+src/api/static/js/pages/knowledge.js     @xiaowu2119 @songspace
+src/api/routes/skills.py                 @xiaowu2119 @songspace
+configs/skill-description.json           @xiaowu2119 @songspace
+src/storage/skill_sync.py                @xiaowu2119 @songspace
+scripts/sync_skills.sh                   @xiaowu2119 @songspace
+src/api/static/js/pages/skills.js        @xiaowu2119 @songspace
 
 # ===== Chat Agent =====
 # 介绍：个人对话助手，飞书/WebUI 交互，会话管理、消息与配置。
-src/api/routes/chat.py                   @mm6667
-src/im/                                  @mm6667
-src/session_manager.py                   @mm6667
-src/api/static/js/pages/chat.js          @mm6667
+src/api/routes/chat.py                   @mm6667 @songspace
+src/im/                                  @mm6667 @songspace
+src/session_manager.py                   @mm6667 @songspace
+src/api/static/js/pages/chat.js          @mm6667 @songspace
 
 # ===== 通用设置 =====
 # 介绍：凭据、通知偏好、OAuth 配置、登录白名单、Backend Runtimes 展示。
-src/api/routes/settings.py               @xiaowu2119
-configs/login-whitelist.json             @xiaowu2119
-src/api/static/js/pages/settings.js      @xiaowu2119
+src/api/routes/settings.py               @xiaowu2119 @songspace
+configs/login-whitelist.json             @xiaowu2119 @songspace
+src/api/static/js/pages/settings.js      @xiaowu2119 @songspace
 
 # ===== GitCode 仓库集成 =====
 # 介绍：GitCode/GitHub VCS 适配、仓库 key 归一化、Webhook 事件接入、事件存储。
-src/vcs/                                 @wdmike
-src/repo_key.py                          @wdmike
-src/api/routes/webhook.py                @wdmike
-src/api/event_store.py                   @wdmike
+src/vcs/                                 @wdmike @songspace
+src/repo_key.py                          @wdmike @songspace
+src/api/routes/webhook.py                @wdmike @songspace
+src/api/event_store.py                   @wdmike @songspace
 
 # ===== Agent Runtime =====
 # 介绍：Agent 运行时管理，引擎选择、运行时健康/实例状态、可观测探测。
-src/api/routes/runtime.py                @mm6667
-src/runtime/                             @mm6667
-src/observability/                       @mm6667
-src/api/static/js/pages/runtimes.js      @mm6667
+src/api/routes/runtime.py                @mm6667 @songspace
+src/runtime/                             @mm6667 @songspace
+src/observability/                       @mm6667 @songspace
+src/api/static/js/pages/runtimes.js      @mm6667 @songspace
 
 # ===== 基础设施与对外文档 =====
 # 介绍：构建、部署、入口启动、全局配置、公共文档。
-README.md                                @gcw_3FZApeLT
-README.zh.md                             @gcw_3FZApeLT
-Dockerfile                               @gcw_3FZApeLT
-docker-compose.yml                       @gcw_3FZApeLT
-nginx-grape.conf                         @gcw_3FZApeLT
-deploy/                                  @gcw_3FZApeLT
-start_server.py                          @gcw_3FZApeLT
-start-worker.sh                          @gcw_3FZApeLT
-src/config.py                            @gcw_3FZApeLT
-src/mysql_compat.py                      @gcw_3FZApeLT
-scripts/                                 @gcw_3FZApeLT
-cloudflare/                              @gcw_3FZApeLT
+README.md                                @gcw_3FZApeLT @songspace
+README.zh.md                             @gcw_3FZApeLT @songspace
+Dockerfile                               @gcw_3FZApeLT @songspace
+docker-compose.yml                       @gcw_3FZApeLT @songspace
+nginx-grape.conf                         @gcw_3FZApeLT @songspace
+deploy/                                  @gcw_3FZApeLT @songspace
+start_server.py                          @gcw_3FZApeLT @songspace
+start-worker.sh                          @gcw_3FZApeLT @songspace
+src/config.py                            @gcw_3FZApeLT @songspace
+src/mysql_compat.py                      @gcw_3FZApeLT @songspace
+scripts/                                 @gcw_3FZApeLT @songspace
+cloudflare/                              @gcw_3FZApeLT @songspace

@@ -1,16 +1,16 @@
 """Tasks 路由：个人任务中心（notify / close / mine）
 
-- notify: issue agent 分配/换人后调用 → 建任务 + 换人刷新 + Web conversation + 后台 chat-agent + 飞书通知
+- notify: issue agent 分配/换人后调用 → 建任务 + 换人刷新 + Web conversation + 静态模板消息 + 飞书通知
+          （§十：不得触发后台 ChatAgent / 不得注入用户个人 token 执行 opencode）
 - close:  issue agent 关闭 Issue 后调用 → 该 issue 全部 active 任务完成（issue_closed）
 - mine:   任务中心 → 当前登录用户的待处理/已完成任务
 """
 import asyncio
-import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user, get_user_token
-from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
+from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (
     db, db_lock, get_chat_config, create_conversation, add_message,
@@ -337,53 +337,26 @@ def _build_task_context_message(title: str, task_description: str, repo_key: str
     return "\n".join(lines)
 
 
-def _build_task_prompt(task_description: str, repo_key: str, issue_number: int, user_id: int) -> str:
-    """构建任务 prompt：issue 上下文 + 任务描述"""
-    from src.prompt_builder import build_chat_prompt
-    title = _get_issue_title(repo_key, issue_number)
-    try:
-        from src.api.event_store import get_issue_summary
-        issue_summary = get_issue_summary(repo_key)
-    except Exception:
-        issue_summary = ""
-    ctx = f"## 任务 Issue\n仓库: {repo_key}\nIssue: #{issue_number}"
-    if title:
-        ctx += f"\n标题: {title}"
-    if issue_summary:
-        ctx += f"\n\n{issue_summary}"
-    ctx += f"\n\n## 任务描述\n{task_description}"
-    from src.repo_key import split_owner_repo
-    _owner, _repo = split_owner_repo(repo_key)
-    return build_chat_prompt(ctx, repo_key, [], skills=["chat"], account=_owner)
-
-
 async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                       task_description: str, repo_key: str, issue_number: int, cfg: dict):
-    """后台执行 chat-agent：构建 prompt → consume_stream_async → 记录消息 → 飞书通知"""
+    """任务分配通知：仅静态模板消息 + 飞书通知，不执行任何后台 LLM/ChatAgent。
+
+    §十 原则：ChatAgent 只在用户真实回复消息时执行；任务分配/通知不得触发 opencode/stream，
+    也不注入用户个人 token 用于 GitCode 写操作（见 agent-tasks-direct-create-binding-fix-design.md §10.4）。
+    """
     try:
-        user_token = ""
-        try:
-            from src.user.db import get_user_gitcode_token
-            user_token = get_user_gitcode_token(user_id) or ""
-            # 用户 token 为空 → 仓库 api token 兜底（避免 chat agent 调 GitCode API 401）
-            if not user_token:
-                from src.user.db import get_gitcode_token
-                user_token = get_gitcode_token(repo_key=repo_key) or ""
-        except Exception:
-            pass
-        prompt = _build_task_prompt(task_description, repo_key, issue_number, user_id)
-        cwd = os.path.join(CHAT_CWD_BASE, "chat", str(user_id), conv_id)
-        os.makedirs(cwd, exist_ok=True)
-
-        final_text = ""
-        async for evt_type, data in _consume(prompt, cwd, cfg, user_id, user_token, repo_key):
-            if evt_type == "done":
-                final_text = data.get("text", "") if isinstance(data, dict) else ""
-
-        # 预写入已含完整任务上下文（含 task_description），此处仅追加 agent 回复，
-        # 不再重复写 user 任务描述（见 task-conversation-role-fix.md §3.2）
-        if final_text:
-            add_message(conv_id, "agent", final_text)
+        # 静态模板 agent 消息（不生成 LLM 回复，提示用户去任务中心『去对话』）。
+        # 任务上下文/描述已由 _ensure_task_conversation 预写入，此处仅追加指针消息，不重复内容。
+        if conv_id:
+            try:
+                from src.repo_key import from_repo_key
+                _tpl = (f"📋 任务已分配 · Issue #{issue_number}\n\n"
+                        f"仓库: {from_repo_key(repo_key)}\n\n"
+                        f"请到任务中心『去对话』查看并处理。你的第一条回复将创建会话。")
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Task notify: static template written to conv={conv_id} (no chat-agent)")
+            except Exception as e:
+                log.warning(f"Task notify: static template write failed: {e}")
 
         # 飞书仅作通知（D3）
         if open_id and api and ctx:
@@ -400,24 +373,9 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
         log.warning(f"Task notify _run_notify error: {e}")
 
 
-async def _consume(prompt: str, cwd: str, cfg: dict, user_id: int, user_token: str, repo_key: str):
-    """async 桥接 consume_stream_async（在线程池消费 stream_agent，不阻塞事件循环）"""
-    from src.runtime.executor import consume_stream_async
-    from src.repo_key import split_owner_repo
-    backend = cfg.get("backend", "opencode")
-    _owner, _repo = split_owner_repo(repo_key)
-    async for evt_type, data in consume_stream_async(
-        prompt, cwd, session_id="",
-        backend_name=backend, account=_owner,
-        user_id=user_id, user_token=user_token,
-        agent_name="Chat Agent", agent_label=f"[Agent:task|repo:{repo_key}]",
-    ):
-        yield evt_type, data
-
-
 @router.post("/notify")
-def notify_task(body: TaskNotifyBody, request: Request):
-    """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 后台 chat-agent + 飞书通知"""
+async def notify_task(body: TaskNotifyBody, request: Request):
+    """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 静态模板通知 + 飞书通知（不触发 ChatAgent）"""
     from src.repo_key import to_repo_key
     if not body.assignee or not body.repo_key or not body.issue_number:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "assignee / repo_key / issue_number 必填"})
@@ -463,7 +421,7 @@ def notify_task(body: TaskNotifyBody, request: Request):
             c.execute("UPDATE tasks SET conversation_id=? WHERE id=?", (conv_id, task_id))
             db.commit()
 
-    # 后台执行 chat-agent（立即返回）
+    # 后台仅静态通知（不触发 ChatAgent，§十；立即返回）
     open_id = _get_feishu_open_id(body.assignee)
     if not open_id:
         log.warning(f"Task notify: assignee={body.assignee} 无飞书 open_id（unified_user_mapping.feishu_open_id 为空），跳过飞书通知 task_id={task_id} issue=#{body.issue_number}")
@@ -505,7 +463,7 @@ def _resolve_user_chat_bot(bm, user_id: int):
 
 
 @router.post("/{task_id}/start")
-def start_task(task_id: int, user: dict = Depends(get_current_user)):
+async def start_task(task_id: int, user: dict = Depends(get_current_user)):
     """打开任务会话（"去对话"）——不再翻转状态。
 
     task-status-processing-trigger-fix.md §3.3：状态变更以"任务会话收到真实用户消息"为准
@@ -615,7 +573,7 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
 
 
 @router.post("/create")
-def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
+async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
     - issue 责任人 = 系统 General Settings 的 Account（settings.credentials.gitcode.account，
@@ -711,7 +669,7 @@ def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current
 
 
 @router.put("/{task_id}/status")
-def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user)):
+async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user)):
     """任务状态迁移（active → processing → completed / cancelled；cancelled → active 可恢复）。
 
     终端状态 completed 不可改；同一任务只能单向流转（按 _TASK_STATUS_FLOWS 校验）。
@@ -769,7 +727,7 @@ def _find_agent_task_ids(repo_key: str, issue_number: int) -> list[str]:
 
 
 @router.get("/{task_id}/clarifications")
-def get_task_clarifications(task_id: int, user: dict = Depends(get_current_user)):
+async def get_task_clarifications(task_id: int, user: dict = Depends(get_current_user)):
     """拉取 agent 在该 Issue 上的澄清消息（task_messages 中 text/tool_use 类型）。
 
     关联链：tasks.issue_number + repo_key → agent_tasks.id → task_messages.task_id。
@@ -813,7 +771,7 @@ def get_task_clarifications(task_id: int, user: dict = Depends(get_current_user)
 
 
 @router.post("/{task_id}/clarify")
-def reply_to_clarification(task_id: int, body: TaskClarifyBody,
+async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
                                  user: dict = Depends(get_current_user)):
     """开发者在 Task Center 回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。
 
@@ -864,7 +822,7 @@ def reply_to_clarification(task_id: int, body: TaskClarifyBody,
 
 
 @router.post("/close")
-def close_tasks(body: TaskCloseBody, request: Request):
+async def close_tasks(body: TaskCloseBody, request: Request):
     """issue agent 关闭 Issue 后调用：该 issue 全部 active 任务 → completed（issue_closed）"""
     from src.repo_key import to_repo_key
     if not body.repo_key or not body.issue_number:
@@ -884,7 +842,7 @@ def close_tasks(body: TaskCloseBody, request: Request):
 
 
 @router.get("/mine")
-def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
+async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                    repo_key: str = Query("", description="按仓库过滤"),
                    user: dict = Depends(get_current_user)):
     """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤）"""

@@ -1,6 +1,7 @@
 """Issue 生命周期事件路由测试（见 vod-skill-upgrade-plan.md L1~L10 归属矩阵）"""
 import json, os
 import pytest
+from unittest.mock import patch as _p
 
 from src.session_manager import db, db_lock
 from src.api import event_pipeline as ep
@@ -147,3 +148,62 @@ class TestIssueAssigneeAndStage:
         p = _get_issue_pipeline(RK, "#5", events)
         assert p is not None
         assert p["stage"] == "vod"
+
+
+class TestOnboardingWebhookPipeline:
+    """§11 v1.5：onboarding 模拟 GitCode issue_opened webhook → run_pipeline（广播模式不需绑引擎）。"""
+
+    def test_onboarding_ctx_applied_and_broadcast_dispatches(self):
+        """模拟 webhook：issue_opened 路由 vod；_onboarding 上下文注入技能/环境变量；plugin 广播入队（engine_id=0）。"""
+        import json as _j
+        # 构造与 onboarding._submit_onboarding_webhook 一致的 webhook 体
+        raw = _j.dumps({
+            "object_kind": "issue",
+            "project": {"path_with_namespace": "owner/repo", "name": "repo"},
+            "repository": {"full_name": "owner/repo", "name": "repo"},
+            "object_attributes": {"action": "open", "iid": 1, "number": 1,
+                                  "title": "引导·快速部署体验", "state": "opened"},
+            "user": {"username": "alice"},
+            "user_name": "alice",
+            "_onboarding": {"target": "experience", "skill": "repo-onboarding", "skill_id": 0,
+                            "scene": "default", "result_path": "/tmp/onboarding-result-experience.json"},
+        }).encode()
+
+        # 广播（plugin）模式：is_plugin_mode→True、pick_engine→0、enqueue_task 记 pool_tag
+        captured = {"enqueued": []}
+        with _p("src.api.event_pipeline.is_plugin_mode", return_value=True), \
+             _p("src.runtime.engine_select.pick_engine", return_value=0), \
+             _p("src.runtime.service.get_execution_mode", return_value="queue_remote"), \
+             _p("src.runtime.service.enqueue_task",
+                side_effect=lambda **kw: captured["enqueued"].append(kw) or "t_onb_demo"):
+            r = ep.run_pipeline(raw, {"X-GitCode-Event": "Issue Hook"},
+                                account="owner/repo", repo_key_override="test/repo")
+        assert r.get("ok") is True and r.get("event_type") == "issue_opened"
+        assert captured["enqueued"], "广播模式应入队"
+        task = captured["enqueued"][0]
+        assert task.get("agent_type") == "vod"
+        assert task.get("pool_tag") == "vod" or task.get("pool_agent_type") == "vod", "pool 认领依赖 tag"
+        assert "ONBOARDING_RESULT" in task.get("env_extra", {}), "onboarding 上下文应注入 ONBOARDING_* 环境变量"
+        assert task.get("skill") == "repo-onboarding", "技能应被引导技能覆盖"
+
+    def test_onboarding_ctx_legacy_no_engine_fails_event(self):
+        """legacy 未绑定引擎：与普通事件一致 engine_unavailable（不隐式执行）。"""
+        import json as _j
+        raw = _j.dumps({
+            "object_kind": "issue",
+            "project": {"path_with_namespace": "owner/repo"},
+            "object_attributes": {"action": "open", "iid": 2, "number": 2,
+                                  "title": "引导·探索方向", "state": "opened"},
+            "user": {"username": "alice"},
+            "user_name": "alice",
+            "_onboarding": {"target": "explore", "skill": "repo-onboarding", "skill_id": 0,
+                            "scene": "default", "result_path": "/tmp/onboarding-result-explore.json"},
+        }).encode()
+        with _p("src.api.event_pipeline.is_plugin_mode", return_value=False), \
+             _p("src.runtime.engine_select.pick_engine", return_value=None):
+            r = ep.run_pipeline(raw, {"X-GitCode-Event": "Issue Hook"},
+                                account="owner/repo", repo_key_override="test/repo")
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT status FROM events WHERE repo_key=? ORDER BY seq DESC LIMIT 1", (RK,)).fetchone()
+        assert row and row[0] == "failed"
