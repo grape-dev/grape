@@ -1643,7 +1643,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         if repogit.is_git_agent(agent_type) and _gnum and issue_session_id:
             _wt = repogit.ensure_issue_worktree(repo_key, agent_type, _gnum, token=repo_gitcode_token)
             if _wt:
-                env_extra["GIT_ASKPASS"] = os.path.join(_wt, ".git-askpass.sh")
+                env_extra["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
 
