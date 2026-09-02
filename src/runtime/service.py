@@ -1712,3 +1712,57 @@ def heartbeat_consolidated(credential_id: int, runtime_ids: list[int], client_ip
     # Opportunistic stale recovery (every call, but batch is cheap)
     # In production, this would be rate-limited to every N seconds
     return {"status": "ok", "timestamp": now}
+
+
+def reap_stale_runtimes() -> dict:
+    """清理僵尸 runtime：把 last_seen_at 过期（> _RUNTIME_STALE_SECONDS）的远端引擎标 offline，
+    并把绑定到这些 runtime 上的 dispatched 任务回收为 queued（防任务永久卡死）。
+
+    场景：AI DevSpace 被删后 runtime 行残留 status=online 但 worker 不再心跳。
+    由 main.py 每 60 秒调用一次（_reap_stale_loop）。
+    """
+    from src.runtime.health import parse_dt
+    now = time.time()
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(seconds=_RUNTIME_STALE_SECONDS)).isoformat()
+    reaped = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            # 查找远端引擎（credential_id>0）status=online 但心跳过期的行
+            c.execute(
+                "SELECT id, name, credential_id FROM agent_runtimes "
+                "WHERE status='online' AND credential_id > 0 AND last_seen_at IS NOT NULL "
+                "AND last_seen_at < ?",
+                (cutoff_iso,)
+            )
+            stale = c.fetchall()
+            for row in stale:
+                rid, rname, cid = row[0], row[1], row[2]
+                # 标记 offline
+                c.execute(
+                    "UPDATE agent_runtimes SET status='offline' WHERE id=?",
+                    (rid,)
+                )
+                # 回收该 runtime 上的 dispatched 任务 → queued
+                c.execute(
+                    "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=NULL "
+                    "WHERE runtime_id=? AND status IN ('dispatched','running')",
+                    (rid,)
+                )
+                recovered = c.rowcount
+                if recovered > 0:
+                    c.execute(
+                        "UPDATE agent_runtimes SET busy_slots=0 WHERE id=?",
+                        (rid,)
+                    )
+                reaped.append({"runtime_id": rid, "name": rname, "recovered_tasks": recovered})
+            if stale:
+                db.commit()
+        except Exception as e:
+            log.warning(f"reap_stale_runtimes failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return {"reaped": 0, "error": str(e)}
+    return {"reaped": len(reaped), "details": reaped}

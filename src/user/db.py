@@ -1604,48 +1604,62 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
     """
     with db_lock:
         c = db.cursor()
-        for a in agents:
-            name = (a.get("name", "") or "").strip().lower()
-            if not name:
-                continue
-            # 本机直连 engine 的 local_skills + skill 详情
-            _ls_json = json.dumps(a.get("local_skills", []), ensure_ascii=False)
-            _detail = a.get("local_skills_detail")
-            _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
-            # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
-            c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 AND host_name=?", (name, scope, owner_id, host_name))
-            row = c.fetchone()
-            if row:
-                c.execute(
-                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
-                    (a.get("display_name", name),
-                     1 if a.get("installed") else 0, a.get("cli_path", ""),
-                     a.get("version", ""), 1 if a.get("healthy") else 0,
-                     a.get("pip_package", ""), _ls_json, _detail_json, row[0])
-                )
-            else:
-                # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
-                # refresh 仅持久化"真实安装"的本机 CLI（settings.py 已过滤 installed），即使同名已有
-                # 凭据绑定行（远端 worker），也创建本机直连行；未安装则跳过（防 -cred0 幽灵占位，
-                # 见 runtime-admin-two-view-design §6.2）。
-                if not a.get("installed"):
+        # P0 修复：MySQL 下缩短 innodb_lock_wait_timeout（50s→5s），
+        # 防止 admin 连接池泄漏占锁时 DELETE 被阻塞导致进程崩溃 (Lock wait timeout 1205)。
+        # SQLite 无此概念，执行会报错直接忽略。
+        try:
+            c.execute("SET SESSION innodb_lock_wait_timeout=5")
+        except Exception:
+            pass
+        try:
+            for a in agents:
+                name = (a.get("name", "") or "").strip().lower()
+                if not name:
                     continue
-                c.execute(
-                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (name, a.get("display_name", name),
-                     1, a.get("cli_path", ""),
-                     a.get("version", ""), 1 if a.get("healthy") else 0,
-                     a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json, host_name)
-                )
-                # 不再自动写入默认 "all" 标签——新引擎默认无标签，由用户在控制台手动配置。
-        # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
-        # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
-        #（见 multi-runtime-instance-design §5.1 防误删）。
-        current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
-        if current_names:
-            placeholders = ",".join("?" for _ in current_names)
-            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
-        db.commit()
+                # 本机直连 engine 的 local_skills + skill 详情
+                _ls_json = json.dumps(a.get("local_skills", []), ensure_ascii=False)
+                _detail = a.get("local_skills_detail")
+                _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
+                # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
+                c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 AND host_name=?", (name, scope, owner_id, host_name))
+                row = c.fetchone()
+                if row:
+                    c.execute(
+                        "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
+                        (a.get("display_name", name),
+                         1 if a.get("installed") else 0, a.get("cli_path", ""),
+                         a.get("version", ""), 1 if a.get("healthy") else 0,
+                         a.get("pip_package", ""), _ls_json, _detail_json, row[0])
+                    )
+                else:
+                    # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
+                    # refresh 仅持久化"真实安装"的本机 CLI（settings.py 已过滤 installed），即使同名已有
+                    # 凭据绑定行（远端 worker），也创建本机直连行；未安装则跳过（防 -cred0 幽灵占位，
+                    # 见 runtime-admin-two-view-design §6.2）。
+                    if not a.get("installed"):
+                        continue
+                    c.execute(
+                        "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (name, a.get("display_name", name),
+                         1, a.get("cli_path", ""),
+                         a.get("version", ""), 1 if a.get("healthy") else 0,
+                         a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json, host_name)
+                    )
+                    # 不再自动写入默认 "all" 标签——新引擎默认无标签，由用户在控制台手动配置。
+            # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
+            # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
+            #（见 multi-runtime-instance-design §5.1 防误删）。
+            current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
+            if current_names:
+                placeholders = ",".join("?" for _ in current_names)
+                c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
+            db.commit()
+        except Exception as e:
+            log.warning(f"save_agent_runtimes failed (lock timeout or error): {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
 
 def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
