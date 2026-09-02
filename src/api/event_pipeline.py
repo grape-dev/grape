@@ -1987,9 +1987,12 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
     existing_sigs = set()
     # 匹配 [XXX Agent] 标记（可能在引用块 > 之后出现，不要求在 body 开头）
     _agent_tag_re = re.compile(r'\[([A-Za-z_]+)\s+Agent\]', re.IGNORECASE)
+    # 系统回帖标记——统一过滤，确保 existing_sigs 和新评论指纹生成方式一致
+    _auto_comment_marker = "<!-- grape-auto-comment -->"
     for m in existing_msgs:
         content = m.get("content", "")
-        # 去掉引用块和 [XXX Agent] 标记后取前 80 字符做指纹
+        # 统一过滤系统标记 + 去掉 [XXX Agent] 标记后取前 80 字符做指纹
+        content = content.replace(_auto_comment_marker, "").rstrip()
         sig = _agent_tag_re.sub("", content).strip()[:80].lower()
         existing_sigs.add(sig)
 
@@ -2000,7 +2003,7 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
         if not body:
             continue
         # 过滤系统标记，避免在 Chat 页面显示
-        body = body.replace("<!-- grape-auto-comment -->", "").rstrip()
+        body = body.replace(_auto_comment_marker, "").rstrip()
         # 评论中必须包含 [XXX Agent] 标记（可能在引用块之后）
         tag_match = _agent_tag_re.search(body)
         if not tag_match:
