@@ -667,6 +667,20 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 return result
         log.info(f"Pipeline: comment from {actor}, not a bot ({bot_usernames})")
 
+    # 2.0a 系统回帖标记检测：含 <!-- grape-auto-comment --> 的评论是系统自动回帖的回声，跳过
+    if event_type in ("issue_comment", "note_hook_pr"):
+        try:
+            _payload = evt.get("payload", {}) or {}
+            _oa = _payload.get("object_attributes", {}) or {}
+            _note = str(_oa.get("note") or _payload.get("body") or "")
+            if "<!-- grape-auto-comment -->" in _note:
+                log.info(f"Pipeline skip: system auto-comment marker detected, event={event_type}")
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "system_auto_comment")
+                return result
+        except Exception as e:
+            log.warning(f"Pipeline: auto-comment marker check failed: {e}")
+
     # 2.1 issue_updated 纯标签变更（changes.labels 有变化、其余内容未动）→ bot 打标签回声，跳过
     if event_type == "issue_updated":
         try:
@@ -1838,6 +1852,7 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
     try:
         import urllib.request, json as _json
         _comment = f"[{agent_type.upper()} Agent] {result_text[:3000]}"
+        _comment += "\n<!-- grape-auto-comment -->"
         _data = _json.dumps({"body": _comment}).encode("utf-8")
         _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
         _req = urllib.request.Request(
@@ -1879,6 +1894,7 @@ def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, pare
         _out = parse_agent_output_json(result_text)
         _summary = (_out.get("conclusion", "") if _out else "") or result_text[:200]
         _comment = f"### \u5b50\u4efb\u52a1 #{sub_issue_num} \u5df2\u5b8c\u6210\n\n{_summary}\n\n---\n\u5b50\u4efb\u52a1\u6d41\u6c34\u7ebf\u5df2\u5168\u90e8\u5b8c\u6210\u3002"
+        _comment += "\n<!-- grape-auto-comment -->"
         _data = _json.dumps({"body": _comment}).encode("utf-8")
         _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
         _req = urllib.request.Request(_url, data=_data,
@@ -1901,6 +1917,7 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
             _lines.append(f"- {_status} {_sid} ({_stage})")
         _lines.append(f"\n\u7236\u4efb\u52a1 #{parent_issue_num} \u7684\u6240\u6709\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\u3002")
         _comment = "\n".join(_lines)
+        _comment += "\n<!-- grape-auto-comment -->"
         _data = _json.dumps({"body": _comment}).encode("utf-8")
         _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
         _req = urllib.request.Request(_url, data=_data,
@@ -1982,6 +1999,8 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
         body = cm.get("body", "")
         if not body:
             continue
+        # 过滤系统标记，避免在 Chat 页面显示
+        body = body.replace("<!-- grape-auto-comment -->", "").rstrip()
         # 评论中必须包含 [XXX Agent] 标记（可能在引用块之后）
         tag_match = _agent_tag_re.search(body)
         if not tag_match:
