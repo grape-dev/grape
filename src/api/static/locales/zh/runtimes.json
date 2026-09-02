@@ -139,6 +139,7 @@
     "deleting": "删除中",
     "starting": "开机中",
     "stopping": "关机中",
+    "online_progress": "环境上线中，预计5-7分钟...",
     "op_failed": "操作失败: {{msg}}",
     "delete_failed": "删除失败: {{msg}}",
     "cannot_delete_running": "运行中不可删除，请先关机",

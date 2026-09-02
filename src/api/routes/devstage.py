@@ -34,6 +34,41 @@ def _get_ak_sk(user: dict) -> tuple:
     return ak, sk
 
 
+def _annotate_worker_online(envs: list) -> None:
+    """为每个环境附带 worker_online 字段。
+    环境创建时凭据 name = env.name（见 _genCredForEnv / create_environment），
+    所以 runtime_credentials.name == env.name 即为对应 Worker。
+    用该凭据的 status + last_seen_at 判断 worker 是否真正上线（心跳 <5min）。
+    """
+    if not envs:
+        return
+    from src.session_manager import db, db_lock
+    from src.runtime.health import derive_runtime_health
+    from datetime import datetime, timezone
+    now_ts = datetime.now(timezone.utc).timestamp()
+    # 一次性查出所有 active 凭据的 name → health
+    cred_map: dict[str, str] = {}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT name, status, last_seen_at FROM runtime_credentials "
+                "WHERE status != 'revoked'"
+            )
+            for cname, cstatus, last_seen in c.fetchall():
+                if not cname:
+                    continue
+                h = derive_runtime_health(cstatus or "offline", last_seen, now_ts)
+                cred_map[cname] = h
+    except Exception as e:
+        log.warning(f"_annotate_worker_online: DB query failed: {e}")
+    # 注入到每个环境对象
+    for e in envs:
+        env_name = e.get("name") or ""
+        health = cred_map.get(env_name, "offline")
+        e["worker_online"] = (health == "online")
+
+
 class CreateEnvBody(BaseModel):
     name: str
     grape_server: str = ""
@@ -115,7 +150,9 @@ GRAPE_AI_DEVSPACE_TEMPLATE = "4ef59a2b4d3d4909aacd80f6007c00b2"
 
 @router.get("/environments")
 async def list_environments(user: dict = Depends(get_current_user)):
-    """查询所有 DevStage 开发环境（仅返回 Grape AI Devspace 模板创建的环境）"""
+    """查询所有 DevStage 开发环境（仅返回 Grape AI Devspace 模板创建的环境）
+    附带 worker_online 字段：环境对应的 Worker（device_name=env.name）是否已上线。
+    """
     ak, sk = _get_ak_sk(user)
     try:
         envs = _list_envs(ak, sk)
@@ -135,10 +172,16 @@ async def list_environments(user: dict = Depends(get_current_user)):
             tpl_only = [e for e in envs if (e.get("template_id") or "").strip() == GRAPE_AI_DEVSPACE_TEMPLATE]
             if tpl_only:
                 log.warning(f"GRAPE_DEV_SERVER 过滤后为空，回退到仅按 template_id 过滤，匹配 {len(tpl_only)} 个")
-                return {"environments": tpl_only}
-            # template_id 也匹配不到，全部回退
-            log.warning(f"过滤后为空但原始列表有 {len(envs)} 个环境，回退返回全部")
-            return {"environments": envs}
+                filtered = tpl_only
+            else:
+                # template_id 也匹配不到，全部回退
+                log.warning(f"过滤后为空但原始列表有 {len(envs)} 个环境，回退返回全部")
+                filtered = envs
+
+        # 附带 Worker 上线状态：环境创建时 --device {env.name}，所以
+        # runtime_credentials.device_name == env.name 即为对应 Worker。
+        _annotate_worker_online(filtered)
+
         return {"environments": filtered}
     except DevStageError as e:
         raise HTTPException(status_code=502, detail={"code": e.code, "message": str(e)})
