@@ -21,6 +21,7 @@ def _clean():
         c.execute("DELETE FROM meta WHERE key LIKE 'onboarded:%'")
         c.execute("DELETE FROM events")
         c.execute("DELETE FROM issue_state")
+        c.execute("DELETE FROM agent_tasks WHERE repo_key LIKE '%owner/repo%'")
         db.commit()
 
 
@@ -80,13 +81,17 @@ def test_trigger_skips_when_no_skill():
     _clean()
 
 
-def test_trigger_skips_when_already_onboarded():
+def test_trigger_skips_when_already_onboarded_and_done():
+    """§5.3 自愈语义：onboarded=1 且双 target 均已完成 → 跳过（不再重复触发）。"""
     _clean()
     with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding"), \
          patch.object(ob_mod, "_is_onboarded", return_value=True), \
-         patch.object(ob_mod, "_mark_onboarding_started") as mock_mark:
+         patch.object(ob_mod, "_target_main_event_done", return_value=True), \
+         patch.object(ob_mod, "_mark_onboarding_started") as mock_mark, \
+         patch.object(ob_mod, "_dispatch_onboarding_target") as mock_dispatch:
         ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
         mock_mark.assert_not_called()
+        mock_dispatch.assert_not_called()
     _clean()
 
 
@@ -229,4 +234,108 @@ def test_finalize_missing_result_noop():
     with db_lock:
         cnt = db.cursor().execute("SELECT COUNT(*) FROM events WHERE repo_key='gitcode:owner/repo'").fetchone()[0]
     assert cnt == 0
+    _clean()
+
+
+# ===================== §11 收敛 / §5.2-5.3 自愈回归 =====================
+
+def test_trigger_registers_direct_task_rows():
+    """direct 模式：引导任务经 _create_direct_task 登记 agent_tasks（受 sweeper 保护），pool 字段非空。"""
+    _clean()
+    from src.api.event_pipeline import _create_direct_task as _orig_create_direct_task
+    user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)
+    created = []
+
+    def _fake_create_direct(repo_key, seq, agent_type, backend, skill, skill_path, engine_id, evt,
+                            issue_id="", skill_id=0):
+        _tid = _orig_create_direct_task(repo_key, seq, agent_type, backend, skill, skill_path,
+                                        engine_id, evt, issue_id, skill_id=skill_id)
+        if _tid:
+            created.append((seq, _tid))
+        return _tid
+
+    with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding"), \
+         patch.object(ob_mod, "_is_onboarded", return_value=False), \
+         patch.object(ob_mod, "_mark_onboarding_started"), \
+         patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 1, "skills/vod/SKILL.md", 1)), \
+         patch("src.runtime.engine_select.pick_engine", return_value=1), \
+         patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
+         patch("src.runtime.service.runtime_execution_kind", return_value="direct"), \
+         patch("src.api.event_pipeline._create_direct_task", side_effect=_fake_create_direct) as m_create:
+        ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
+        # 线程异步执行，轮询等待两个任务行登记完成
+        import time as _t
+        for _ in range(100):
+            if len(created) >= 2:
+                break
+            _t.sleep(0.05)
+        assert m_create.call_count == 2
+    # 两个 direct 引导任务各落一行 agent_tasks（event_seq 递增、pool_engine_ids 存在）
+    assert len(created) == 2
+    for seq, tid in created:
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT status, pool_tag, pool_engine_ids, skill FROM agent_tasks WHERE id=?", (tid,)).fetchone()
+        assert row, f"task {tid} 应存在"
+        assert row[0] in ("queued", "running") and row[3] == "repo-onboarding"
+        assert row[1] == "" and row[2] == ""  # 非插件广播 → 空占位（非 None，INSERT 不漂移）
+    _clean()
+
+
+def test_trigger_no_engine_marks_failed_snapshot():
+    """§11 引擎门禁：pick_engine=None → engine_unavailable，不隐式 opencode，落 failed 事件+快照。"""
+    _clean()
+    user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)
+    with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding"), \
+         patch.object(ob_mod, "_is_onboarded", return_value=False), \
+         patch.object(ob_mod, "_mark_onboarding_started"), \
+         patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "", 0)), \
+         patch("src.runtime.engine_select.pick_engine", return_value=None), \
+         patch.object(ob_mod, "_execute_agent_wrapper") as mock_wrap, \
+         patch.object(ob_mod, "_enqueue_onboarding_task") as mock_enq:
+        ob_mod.trigger_onboarding("gitcode:owner/repo", "owner")
+        mock_wrap.assert_not_called()
+        mock_enq.assert_not_called()
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT status FROM events WHERE repo_key='gitcode:owner/repo'").fetchall()
+        assert rows and all(r[0] == "failed" for r in rows)
+        snap = db.cursor().execute(
+            "SELECT COUNT(*) FROM agent_tasks WHERE repo_key='gitcode:owner/repo'").fetchone()[0]
+    assert snap == 2, "两个 target 均应落 failed 快照（重派可恢复）"
+    _clean()
+
+
+def test_retry_onboarding_target_self_heal():
+    """§5.3：onboarded=1 但某 target 失败 → retry 该 target 补齐，不因全量标记放弃。"""
+    _clean()
+    user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)
+    with db_lock:
+        # 模拟历史：explore 主事件 failed
+        db.cursor().execute(
+            "INSERT INTO events (repo_key, issue_id, event_type, agent_type, title, status) "
+            "VALUES ('gitcode:owner/repo', '#2', 'onboarding_explore', 'vod', '引导·探索方向', 'failed')")
+        db.commit()
+    with patch.object(ob_mod, "_scene_onboarding_skill", return_value="repo-onboarding"), \
+         patch.object(ob_mod, "_load_vod_session", return_value=("opencode", 0, "", 0)), \
+         patch("src.runtime.engine_select.pick_engine", return_value=1), \
+         patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
+         patch("src.runtime.service.runtime_execution_kind", return_value="direct"), \
+         patch.object(ob_mod, "_dispatch_onboarding_target", return_value=5001) as m_dispatch:
+        res = ob_mod.retry_onboarding_target("gitcode:owner/repo", "owner", "explore")
+    assert res["ok"] is True and res["seq"] == 5001
+    assert m_dispatch.call_count == 1
+    assert m_dispatch.call_args.args[7] == "explore"  # target 参数
+    _clean()
+
+
+def test_retry_onboarding_target_already_done():
+    """§5.3 幂等：target 已完成 → retry 不重复触发。"""
+    _clean()
+    user_db.add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=1)
+    with patch.object(ob_mod, "_target_main_event_done", return_value=True), \
+         patch.object(ob_mod, "_dispatch_onboarding_target") as m_dispatch:
+        res = ob_mod.retry_onboarding_target("gitcode:owner/repo", "owner", "experience")
+    assert res["ok"] is True and res["seq"] == 0
+    m_dispatch.assert_not_called()
     _clean()

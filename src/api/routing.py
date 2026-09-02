@@ -25,6 +25,11 @@ NON_ISSUE_EVENT_ROUTE = {
     "build_failure": "sre",
     "deploy_start": "sre",
     "deploy_failure": "sre",
+    # 引导（onboarding）事件：注册到路由/状态机，使重派/sweeper 可识别（§11 onboarding 收敛）。
+    # 由 onboarding.trigger_onboarding 主动创建，不会来自 webhook；此处仅保证可路由、可重派。
+    "onboarding_exp": "vod",
+    "onboarding_explore": "vod",
+    "onboarding_issue": "vod",
 }
 
 

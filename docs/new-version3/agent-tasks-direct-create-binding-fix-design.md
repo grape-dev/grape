@@ -1,6 +1,6 @@
 # agent_tasks 直接创建 INSERT 绑定数不匹配 — 修复设计（Seq #1991/#1992 事故）
 
-> 版本：v1.4 ｜ 日期：2026-09-01 ｜ 状态：**P0 代码 + 测试看护已实施（未提交）**；§十一 onboarding 收敛、§十 原则整改与 P1/P2 其余待排期
+> 版本：v1.4 ｜ 日期：2026-09-01 ｜ 状态：**P0 + P1 + §十 + §十一 已实施（未提交）**；P2 sweeper 文案已实施，集成测试已补
 > 事故对象：生产 `Jason7602/hello-flask-9` 模板引导事件 `Seq #1991`（onboarding_exp）/ `#1992`（onboarding_explore）失败
 > 结论：**系统级代码缺陷**（`_create_direct_task` / `_create_failed_task` 的 agent_tasks INSERT 列数与值数不匹配 39/37），非环境偶发。
 
@@ -129,9 +129,13 @@ direct 事件 → _create_direct_task：
 | # | 文件 | 改动 | 优先级 |
 |---|------|------|--------|
 | 1 | `src/api/event_pipeline.py` | ✅ **已实施**：新增 `_task_insert_row()`（按 `_TASK_COLUMNS_LIST` 驱动组装、缺列抛错）；`_create_direct_task` / `_create_failed_task` 改为列清单驱动组装（补齐 pool_tag/pool_engine_ids，修复 39/37、39/36） | P0 |
-| 2 | `src/api/routes/events.py` | redispatch 透传 repository/owner | P1 |
-| 3 | `src/api/onboarding.py` | 引导 target 级幂等补做 | P1 |
-| 4 | `tests/test_agent_tasks_insert_contract.py` | ✅ **已实施**：5 用例（契约列值一致 / 缺列抛错 / direct 落行 queued / failed 快照 / 直插不抛绑定错误），本地 `pytest` 通过 | P2 |
+| 2 | `src/api/routes/events.py` | ✅ **已实施**：redispatch 新增 onboarding 事件分支 → `onboarding.retry_onboarding_target`（target 级自愈，携带完整 repo_key/owner，不再 `repository='' not recognized`） | P1 |
+| 3 | `src/api/onboarding.py` | ✅ **已实施**：`_dispatch_onboarding_target` / `_fail_onboarding_target` / `retry_onboarding_target`；direct 模式先经 `_create_direct_task` 登记任务行（防 sweeper 误杀）；引擎门禁 `pick_engine=None → engine_unavailable`（failed 快照 + 跳过，不隐式 opencode） | P1 |
+| 4 | `src/api/routing.py` | ✅ **已实施**：`NON_ISSUE_EVENT_ROUTE` 注册 `onboarding_exp`/`onboarding_explore`/`onboarding_issue` → vod（重派/状态机可识别，§11） | P1 |
+| 5 | `src/runtime/cleanup.py` | ✅ **已实施**：sweeper 文案区分「创建任务失败（agent_tasks 无行）」与「running 超时（有行非活跃）」 | P2 |
+| 6 | `src/api/routes/tasks.py` | ✅ **已实施**：`_run_notify` 删除 `_consume`/`_build_task_prompt`，改静态模板 agent 消息 + 飞书通知，不再触发后台 ChatAgent/注入用户 token（§十） | P0 |
+| 7 | `tests/test_agent_tasks_insert_contract.py` | ✅ **已实施**：5 用例（契约列值一致 / 缺列抛错 / direct 落行 queued / failed 快照 / 直插不抛绑定错误），本地 `pytest` 通过 | P2 |
+| 8 | `tests/test_onboarding.py` / `tests/test_cleanup.py` / `tests/test_event_conversation.py` / `tests/test_tasks.py` | ✅ **已实施**：引导任务登记 / 无引擎 failed 快照 / target 自愈 / 幂等跳过 / sweeper 文案 / redispatch 携带 repo / notify 不触发 ChatAgent 回归用例 | P2 |
 
 ---
 
@@ -228,4 +232,4 @@ direct 事件 → _create_direct_task：
 
 ---
 
-*P0 代码 + 测试看护（`tests/test_agent_tasks_insert_contract.py`，5 用例全绿）已实施，均未提交；§十 ChatAgent 触发原则整改、§十一 onboarding 收敛、P1（redispatch/引导自愈）与其余 P2 待后续排期。*
+*P0 代码 + P1（redispatch/引导自愈）+ §十（tasks/notify 收敛）+ §十一（onboarding 收敛/引擎门禁/任务登记）+ P2 sweeper 文案与集成测试均已实施，均未提交；剩余风险见 §九「存量 failed 事件」按需处理。*

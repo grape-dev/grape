@@ -14,9 +14,42 @@ import json
 import threading
 
 from src.config import log, SKILLS_DIR, CONFIG_DIR
+from src.session_manager import db, db_lock
 
 # 引导目标类型：experience（快速部署体验）/ explore（探索方向引导），各执行一次
 ONBOARDING_TARGETS = ("experience", "explore")
+
+# target → 主事件类型 映射
+ONBOARDING_EVENT_TYPE = {"experience": "onboarding_exp", "explore": "onboarding_explore"}
+
+
+def _target_main_event_done(repo_key: str, target: str) -> bool:
+    """该 target 主事件是否已成功完成（status=completed 且已产出对应引导 Issue）。
+
+    用于 target 级幂等：不因 `onboarded:*` 全量标记一次性放弃两个 target
+    （§5.3 引导状态自愈，见 agent-tasks-direct-create-binding-fix-design.md）。
+    """
+    if target not in ONBOARDING_EVENT_TYPE:
+        return False
+    _expected = ONBOARDING_TARGETS.index(target) + 1
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq FROM events WHERE repo_key=? AND event_type=? AND status='completed' "
+                "ORDER BY seq DESC LIMIT 1",
+                (repo_key, ONBOARDING_EVENT_TYPE[target]),
+            )
+            if not c.fetchone():
+                return False
+            c.execute(
+                "SELECT 1 FROM events WHERE repo_key=? AND event_type='onboarding_issue' AND issue_id=? LIMIT 1",
+                (repo_key, f"#{_expected}"),
+            )
+            return c.fetchone() is not None
+    except Exception as e:
+        log.warning(f"[Onboarding|repo:{repo_key}] target done check failed: {e}")
+        return False
 
 
 def _scene_onboarding_skill(scene_id: str) -> str:
@@ -232,15 +265,53 @@ def _finalize_onboarding(repo_key: str, seq: int, owner: str, result_path: str =
     log.info(f"[Onboarding|repo:{repo_key}] issue_state=vod for #{num} ({title})")
 
 
-def _execute_agent_wrapper(repo_key, seq, owner, skill, backend, runtime_id, evt, skill_path, target):
-    """direct 模式：复用 _execute_agent 执行 repo-onboarding 技能，注入 ONBOARDING_RESULT/TARGET。"""
-    from src.api.event_pipeline import _execute_agent
+def _execute_agent_wrapper(repo_key, seq, owner, skill, backend, runtime_id, evt, skill_path, target,
+                           node_ctx=None):
+    """direct 模式：复用 _execute_agent 执行 repo-onboarding 技能，注入 ONBOARDING_RESULT/TARGET。
+
+    先登记 agent_tasks（_create_direct_task，含 pool_tag/pool_engine_ids 列驱动补齐）再执行，
+    使引导任务与普通事件同等受 sweeper 保护（§11 onboarding 收敛）。node_ctx 为 (engine_id, skill_id,
+    pool_tag, pool_engine_ids)，供登记使用；保留 task_id 用于终态回报。
+    """
+    from src.api.event_pipeline import _execute_agent, _create_direct_task
+    from src.api.event_store import update_event_status
     _ws = _onboarding_workdir(repo_key, target)
     os.makedirs(_ws, exist_ok=True)
     _result_path = os.path.join(_ws, f"onboarding-result-{target}.json")
     evt.setdefault("_env_extra", {})["ONBOARDING_RESULT"] = _result_path
     evt.setdefault("_env_extra", {})["ONBOARDING_TARGET"] = target
-    _execute_agent(repo_key, seq, "vod", backend, skill, evt, runtime_id)
+
+    # 任务登记（与普通事件 direct 路径同一函数）→ sweeper 不再误杀 running 主事件
+    _engine_id, _skill_id = 0, 0
+    _pool_tag, _pool_engine_ids = "", ""
+    if node_ctx and len(node_ctx) >= 4:
+        _engine_id, _skill_id, _pool_tag, _pool_engine_ids = node_ctx
+    task_id = ""
+    try:
+        from src.api.event_pipeline import _task_insert_row
+        task_id = _create_direct_task(
+            repo_key, seq, "vod", backend, skill, skill_path, _engine_id,
+            evt, issue_id=evt.get("issue_id", ""), skill_id=_skill_id,
+        )
+        if task_id:
+            # 插件模式 pool_tag/pool_engine_ids 在 _create_direct_task 中默认空，按 node_ctx 补写
+            if _pool_tag or _pool_engine_ids:
+                from src.session_manager import db as _db, db_lock as _dl
+                with _dl:
+                    c = _db.cursor()
+                    c.execute(
+                        "UPDATE agent_tasks SET pool_tag=?, pool_engine_ids=? WHERE id=?",
+                        (_pool_tag, _pool_engine_ids, task_id))
+                    _db.commit()
+        else:
+            log.warning(f"[Onboarding|repo:{repo_key}] direct task register failed, seq={seq} target={target}")
+            update_event_status(seq, "failed")
+            return
+    except Exception as e:
+        log.warning(f"[Onboarding|repo:{repo_key}] direct task register failed: {e} seq={seq}")
+        update_event_status(seq, "failed")
+        return
+    _execute_agent(repo_key, seq, "vod", backend, skill, evt, runtime_id, task_id)
     _finalize_onboarding(repo_key, seq, owner, _result_path)
 
 
@@ -326,11 +397,79 @@ async def _await_task_and_finalize(repo_key, seq, tid, owner, result_path):
     _finalize_onboarding(repo_key, seq, owner, result_path)
 
 
+def _dispatch_onboarding_target(repo_key: str, owner: str, skill: str, backend: str,
+                                runtime_id: int, skill_path: str, skill_id: int,
+                                target: str, kind: str, engine_id: int = 0,
+                                pool_tag: str = "", pool_engine_ids: str = ""):
+    """单 target 引导分派：主事件 + 任务登记/入队。
+
+    与普通事件的 direct/queue 分派对齐：direct 先 `_create_direct_task` 登记任务行
+    （防 sweeper 误杀），queue 走 `_enqueue_onboarding_task`（§11 onboarding 收敛）。
+    """
+    from src.repo_key import from_repo_key
+    from src.api.event_store import append_event
+    from src.runtime.service import EXEC_MODE_DIRECT
+    _title = "引导·快速部署体验" if target == "experience" else "引导·探索方向"
+    _event_type = ONBOARDING_EVENT_TYPE[target]
+    _expected_issue = ONBOARDING_TARGETS.index(target) + 1  # experience→#1, explore→#2
+    seq = append_event(
+        repo_key=repo_key, event_type=_event_type, title=_title,
+        issue_id=f"#{_expected_issue}", agent_type="vod", source="template",
+        actor=owner or "", summary=f"{_title}（VOD Agent）：创建对应类型的引导 Issue",
+        status="running",
+    )
+    evt = {"type": _event_type, "repository": from_repo_key(repo_key), "source": "template",
+           "actor": owner or "", "account": from_repo_key(repo_key), "issue_id": f"#{_expected_issue}",
+           "payload": {"repository": from_repo_key(repo_key), "owner": owner, "onboarding_target": target}}
+    if kind != EXEC_MODE_DIRECT:
+        _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target,
+                                 skill_id=skill_id,
+                                 pool_tag=pool_tag or ("vod" if engine_id == 0 else ""),
+                                 pool_agent_type=pool_tag or ("vod" if engine_id == 0 else ""))
+    else:
+        evt["_skill_path"] = skill_path
+        threading.Thread(target=_execute_agent_wrapper, args=(
+            repo_key, seq, owner, skill, backend, runtime_id, evt, skill_path, target,
+            (engine_id, skill_id, pool_tag, pool_engine_ids),
+        ), daemon=True, name=f"onboarding-{target}-{seq}").start()
+    log.info(f"[Onboarding|repo:{repo_key}] 触发引导 target={target}, event seq={seq}, backend={backend}")
+    return seq
+
+
+def _fail_onboarding_target(repo_key: str, owner: str, skill: str, skill_path: str, skill_id: int,
+                            target: str, engine_id: int = 0):
+    """引擎不可用时为目标落 failed 事件 + failed 任务快照（供重派恢复，与普通事件 engine_unavailable 一致）。"""
+    from src.repo_key import from_repo_key
+    from src.api.event_store import append_event
+    from src.api.event_pipeline import _create_failed_task
+    _title = "引导·快速部署体验" if target == "experience" else "引导·探索方向"
+    _event_type = ONBOARDING_EVENT_TYPE[target]
+    _expected_issue = ONBOARDING_TARGETS.index(target) + 1
+    seq = append_event(
+        repo_key=repo_key, event_type=_event_type, title=_title,
+        issue_id=f"#{_expected_issue}", agent_type="vod", source="template",
+        actor=owner or "", summary=f"{_title}（VOD Agent）：无可用引擎，跳过",
+        status="failed",
+    )
+    evt = {"type": _event_type, "repository": from_repo_key(repo_key), "source": "template",
+           "actor": owner or "", "account": from_repo_key(repo_key), "issue_id": f"#{_expected_issue}",
+           "payload": {"repository": from_repo_key(repo_key), "owner": owner, "onboarding_target": target}}
+    try:
+        _create_failed_task(repo_key, seq, "vod", "", skill, skill_path, skill_id, evt,
+                            issue_id=f"#{_expected_issue}", runtime_id=engine_id)
+    except Exception as e:
+        log.warning(f"[Onboarding|repo:{repo_key}] failed snapshot create failed: {e}")
+    return seq
+
+
 def trigger_onboarding(repo_key: str, owner: str):
-    """模板一键创建完成后调用：仅首次触发引导。
+    """模板一键创建完成后调用：触发引导（target 级幂等，支持单 target 自愈）。
 
     仅在 templates.create_from_template 中调用（手动托管 /repos/host 不调用）。
     场景从 managed_repos.dev_scene 读取（不依赖请求参数）。
+
+    引导状态自愈（§5.3）：不因 `onboarded:*` 全量标记一次性放弃两个 target——
+    已 failed 且未产出对应 Issue 的 target 会在此重试（补齐），已完成的不重复。
     """
     try:
         from src.user.db import get_repo_scene
@@ -339,21 +478,25 @@ def trigger_onboarding(repo_key: str, owner: str):
         if not skill:
             log.info(f"[Onboarding|repo:{repo_key}] scene='{scene_id}' 无 onboarding 技能，跳过")
             return
-        if _is_onboarded(repo_key):
-            log.info(f"[Onboarding|repo:{repo_key}] 已引导过，跳过")
+        if _is_onboarded(repo_key) and all(_target_main_event_done(repo_key, t) for t in ONBOARDING_TARGETS):
+            log.info(f"[Onboarding|repo:{repo_key}] 已引导且双 target 均完成，跳过")
             return
         _mark_onboarding_started(repo_key)  # 防并发重复
 
         # 1. 查 VOD 会话配置（backend/runtime_id/skill_path，走 VOD Agent）
         backend, runtime_id, skill_path, skill_id = _load_vod_session(repo_key)
-        # engine-selection-design.md v2：按引擎集合/会话主引擎选引擎；无引擎 → 跳过引导（不隐式 opencode）
-        from src.runtime.engine_select import pick_engine, engine_name
+        # 2. 引擎门禁（§11）：pick_engine=None → engine_unavailable，与普通事件一致——不隐式 opencode
+        from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
         from src.api.event_pipeline import is_plugin_mode
+        from src.runtime.service import runtime_execution_kind
         _picked = pick_engine(repo_key, "vod", fallback_runtime_id=runtime_id)
-        engine_id = _picked if _picked is not None else 0
-        if engine_id is None:
-            log.warning(f"[Onboarding|repo:{repo_key}] no available engine, skip onboarding")
+        if _picked is None:
+            log.warning(f"[Onboarding|repo:{repo_key}] no available engine, skip onboarding (engine_unavailable)")
+            for target in ONBOARDING_TARGETS:
+                if not _target_main_event_done(repo_key, target):
+                    _fail_onboarding_target(repo_key, owner, skill, skill_path, skill_id, target)
             return
+        engine_id = _picked
         # plugin 模式下 engine_id=0 表示广播（池内引擎竞争认领），是合法值
         _is_plugin_broadcast = (engine_id == 0 and is_plugin_mode())
         if _is_plugin_broadcast:
@@ -362,37 +505,67 @@ def trigger_onboarding(repo_key: str, owner: str):
         else:
             backend = engine_name(engine_id) or backend
             runtime_id = engine_id
-
-        # 2. 落库两个主事件 + 两次引导分派（各 target 一次）
-        #    执行模式跟随选中引擎（kind = runtime_execution_kind(engine_id)，与 vod_handler_async 一致）
-        #    主事件 issue_id 预分配：新仓库 Issue 从 1 递增 → experience=#1, explore=#2
-        from src.repo_key import from_repo_key
-        from src.api.event_store import append_event
-        from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
         kind = runtime_execution_kind(runtime_id or 0)
+
+        # 3. 落库 + 分派：逐 target 判断完成状态（自愈），已完成的不重复
         for target in ONBOARDING_TARGETS:
-            _title = "引导·快速部署体验" if target == "experience" else "引导·探索方向"
-            _event_type = "onboarding_exp" if target == "experience" else "onboarding_explore"
-            _expected_issue = ONBOARDING_TARGETS.index(target) + 1  # experience→#1, explore→#2
-            seq = append_event(
-                repo_key=repo_key, event_type=_event_type, title=_title,
-                issue_id=f"#{_expected_issue}", agent_type="vod", source="template",
-                actor=owner or "", summary=f"{_title}（VOD Agent）：创建对应类型的引导 Issue",
-                status="running",
+            if _target_main_event_done(repo_key, target):
+                log.info(f"[Onboarding|repo:{repo_key}] target={target} 已完成，跳过")
+                continue
+            _pool_tag = "vod" if _is_plugin_broadcast else ""
+            _pool_eids = get_scene_pool_engine_ids(scene_id, "vod", repo_key=repo_key) if _is_plugin_broadcast else ""
+            _dispatch_onboarding_target(
+                repo_key, owner, skill, backend, runtime_id, skill_path, skill_id,
+                target, kind, engine_id=engine_id, pool_tag=_pool_tag, pool_engine_ids=_pool_eids,
             )
-            evt = {"type": _event_type, "repository": from_repo_key(repo_key), "source": "template",
-                   "actor": owner or "", "account": from_repo_key(repo_key), "issue_id": f"#{_expected_issue}",
-                   "payload": {"repository": from_repo_key(repo_key), "owner": owner, "onboarding_target": target}}
-            if kind != EXEC_MODE_DIRECT:
-                _enqueue_onboarding_task(repo_key, seq, backend, runtime_id, owner, skill, target,
-                                         skill_id=skill_id,
-                                         pool_tag="vod" if _is_plugin_broadcast else "",
-                                         pool_agent_type="vod" if _is_plugin_broadcast else "")
-            else:
-                evt["_skill_path"] = skill_path
-                threading.Thread(target=_execute_agent_wrapper, args=(
-                    repo_key, seq, owner, skill, backend, runtime_id, evt, skill_path, target,
-                ), daemon=True, name=f"onboarding-{target}-{seq}").start()
-            log.info(f"[Onboarding|repo:{repo_key}] 触发引导 target={target}, event seq={seq}, backend={backend}")
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] trigger failed: {e}")
+
+
+def retry_onboarding_target(repo_key: str, owner: str, target: str) -> dict:
+    """target 级引导自愈：主事件 failed 且未产出对应 Issue → 重新触发该 target。
+
+    供重派（events redispatch）调用，避免依赖 `onboarded:*` 全量标记。
+    返回 {"ok": bool, "seq": int, "reason": str}。
+    """
+    if target not in ONBOARDING_TARGETS:
+        return {"ok": False, "reason": f"unknown target: {target}"}
+    if _target_main_event_done(repo_key, target):
+        return {"ok": True, "seq": 0, "reason": "target already complete, no retry needed"}
+    if _is_onboarded(repo_key):
+        # 全量标记已置位且该 target 未完成 → 允许补做（否则历史 failed 的 target 永远救不回）
+        log.info(f"[Onboarding|repo:{repo_key}] onboarded=1 but target={target} incomplete, retry")
+    try:
+        from src.user.db import get_repo_scene
+        scene_id = get_repo_scene(repo_key) or "default"
+        skill = _scene_onboarding_skill(scene_id)
+        if not skill:
+            return {"ok": False, "reason": f"scene='{scene_id}' 无 onboarding 技能"}
+        backend, runtime_id, skill_path, skill_id = _load_vod_session(repo_key)
+        from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
+        from src.api.event_pipeline import is_plugin_mode
+        from src.runtime.service import runtime_execution_kind
+        _picked = pick_engine(repo_key, "vod", fallback_runtime_id=runtime_id)
+        if _picked is None:
+            seq = _fail_onboarding_target(repo_key, owner, skill, skill_path, skill_id, target)
+            return {"ok": True, "seq": seq, "reason": "engine_unavailable, failed snapshot recorded"}
+        engine_id = _picked
+        _is_plugin_broadcast = (engine_id == 0 and is_plugin_mode())
+        if _is_plugin_broadcast:
+            backend = backend or "opencode"
+            runtime_id = 0
+        else:
+            backend = engine_name(engine_id) or backend
+            runtime_id = engine_id
+        kind = runtime_execution_kind(runtime_id or 0)
+        _mark_onboarding_started(repo_key)
+        _pool_tag = "vod" if _is_plugin_broadcast else ""
+        _pool_eids = get_scene_pool_engine_ids(scene_id, "vod", repo_key=repo_key) if _is_plugin_broadcast else ""
+        seq = _dispatch_onboarding_target(
+            repo_key, owner, skill, backend, runtime_id, skill_path, skill_id,
+            target, kind, engine_id=engine_id, pool_tag=_pool_tag, pool_engine_ids=_pool_eids,
+        )
+        return {"ok": True, "seq": seq, "reason": ""}
+    except Exception as e:
+        log.warning(f"[Onboarding|repo:{repo_key}] retry target={target} failed: {e}")
+        return {"ok": False, "reason": str(e)}

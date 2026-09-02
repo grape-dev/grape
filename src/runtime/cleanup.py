@@ -254,14 +254,36 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
         if dead:
             ph2 = ",".join("?" * len(dead))
             now_iso = now_utc.isoformat()
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    f"UPDATE events SET status='failed', exit_code=1, completed_at=?, "
-                    f"result='中断：running 超时无任务执行记录（sweeper 兜底回收）' WHERE seq IN ({ph2})",
-                    (now_iso, *dead))
-                fixed = c.rowcount
-                db.commit()
+            # 区分「创建任务失败」与「running 超时」：
+            # - 该事件在 agent_tasks 连一条记录都没有 → 极可能是 _create_direct_task/pre 入队失败（INSERT 绑定数错误等），
+            #   结果写明真实根因，避免一律误标"running 超时"（见 agent-tasks-direct-create-binding-fix-design.md §5.4）。
+            # - 有任务记录但非活跃（终态/缺失）→ 才是真正的 running 超时/执行中断。
+            _no_task_txt = "中断：running 超时无任务执行记录，且 agent_tasks 无任何关联行——疑似创建任务失败（create_direct_task/enqueue 未落行，请查服务端日志）"
+            _timeout_txt = "中断：running 超时无活跃任务执行记录（sweeper 兜底回收）"
+            _with_task_rows = set()
+            try:
+                with db_lock:
+                    _c = db.cursor()
+                    _c.execute(f"SELECT DISTINCT event_seq FROM agent_tasks WHERE event_seq IN ({ph2})", dead)
+                    _with_task_rows = {r[0] for r in _c.fetchall()}
+                    _c2 = db.cursor()
+                    for s in dead:
+                        _txt = _timeout_txt if s in _with_task_rows else _no_task_txt
+                        _c2.execute(
+                            "UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? WHERE seq=?",
+                            (now_iso, _txt, s))
+                        fixed += _c2.rowcount
+                    db.commit()
+            except Exception as e:
+                log.warning(f"sweeper: per-seq recovery failed, fallback bulk: {e}")
+                with db_lock:
+                    _c = db.cursor()
+                    _c.execute(
+                        f"UPDATE events SET status='failed', exit_code=1, completed_at=?, "
+                        f"result='{_timeout_txt}' WHERE seq IN ({ph2})",
+                        (now_iso, *dead))
+                    fixed = _c.rowcount
+                    db.commit()
             if fixed:
                 log.info(f"sweeper: recovered {fixed} stuck running event(s): {dead}")
             # 取消对应的线程池排队任务（防止 event 已 failed 但子进程还在跑）
