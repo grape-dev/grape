@@ -317,6 +317,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     # 需要脱敏的 token 列表（用于日志/事件输出）
     _tokens = [t for t in (bot_token, user_token) if t]
 
+    # codearts 方案E2: serve 启动移到 _run_once 内部（每次执行启动自己的 serve，避免单例并发串号）
+    # pre_exec/post_exec 由 _run_once 内部调用，serve 信息用局部变量
+
     agent_cmd = shutil.which(backend.binary) or shutil.which(backend.binary + ".cmd")
     if not agent_cmd:
         log.error(f"{label}{backend.name} CLI not found in PATH")
@@ -328,6 +331,34 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
     # 单次进程执行：返回 (full_text, new_session_id, exit_code, stderr, error_events)
     def _run_once(use_session_id: str):
+        # codearts 方案E2: 每次执行启动独立的 codearts serve
+        # serve 信息存在局部变量 _serve_port/_serve_proc 中，不写到单例 backend 上
+        # build_args 从 backend._serve_port 读取（同一 _run_once 内设置，串行无并发问题）
+        _serve_port = 0
+        _serve_proc = None
+        if hasattr(backend, "pre_exec") and callable(backend.pre_exec):
+            try:
+                serve_info = backend.pre_exec(cwd=cwd, env=dict(env))
+                _serve_port = serve_info.get("port", 0)
+                _serve_proc = serve_info.get("proc")
+                _serve_env = serve_info.get("env", env)
+                # 临时存 port 供 build_args 读取（同一线程内，_run_once 串行执行无并发）
+                backend._serve_port = _serve_port
+            except Exception as _pe_err:
+                # serve 启动失败（codearts 二进制缺失/配置错误/30s 超时）：
+                # 不能让异常传播到 _stream_runtime_async 线程（会导致 done=None →
+                # 上层误报"task timed out after 1800s"，掩盖真实根因）。
+                # yield 明确的 done event，把错误信息传回。
+                log.error(f"{label}{backend.name} pre_exec failed: {_pe_err}")
+                yield ("done", {
+                    "exit_code": -1, "text": "", "oc_session_id": use_session_id,
+                    "errors": [f"{backend.name} engine startup failed: {_pe_err}"],
+                    "stderr": str(_pe_err)[:500],
+                })
+                return
+        else:
+            _serve_env = env
+
         args = backend.build_args(prompt, use_session_id)
         log.info(f"{label}{backend.name} args: {' '.join(args)[:2000]}...")
         log.info(f"{label}{backend.name} cwd: {cwd}")
@@ -340,7 +371,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         # hermes 引擎：每个子进程隔离 HERMES_HOME → 独立 state.db，避免并发争锁
         # （多 hermes chat -q 子进程共享 ~/.hermes/state.db 时 SQLite 写锁互斥阻塞）
         # 必须把 config.yaml / .env 复制过去，否则 hermes 在空目录里找不到 provider/key
-        _proc_env = env
+        _proc_env = _serve_env  # codearts 方案E2: 用 pre_exec 返回的 env（含 CODEARTS_SERVER_PASSWORD）
         _iso_home = ""
         if backend.name == "hermes":
             import tempfile, shutil as _sh
@@ -545,6 +576,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         "stderr": "",
                     })
                     _untrack_proc(proc)
+                    # codearts 方案E2: 超时也要杀 serve
+                    if _serve_proc and _serve_proc.poll() is None:
+                        try:
+                            os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
+                            _serve_proc.wait(timeout=3)
+                        except Exception:
+                            try: os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
+                            except Exception: _serve_proc.kill()
                     return
                 time.sleep(0.1)
 
@@ -555,6 +594,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             _terminate_proc(proc, f"{label}{backend.name}")
             _reader_thread.join(timeout=5)
             _untrack_proc(proc)
+            # codearts 方案E2: 超时也要杀 serve
+            if _serve_proc and _serve_proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
+                    _serve_proc.wait(timeout=3)
+                except Exception:
+                    try: os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
+                    except Exception: _serve_proc.kill()
             yield ("done", {
                 "exit_code": -1, "text": "", "oc_session_id": new_session_id,
                 "errors": [f"{backend.name} timed out"], "stderr": ""
@@ -587,6 +634,20 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
         log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
         _untrack_proc(proc)
+
+        # codearts 方案E2: 杀掉 per-task codearts serve 子进程，释放内存
+        if _serve_proc and _serve_proc.poll() is None:
+            try:
+                _pgid = os.getpgid(_serve_proc.pid)
+                os.killpg(_pgid, signal.SIGTERM)
+                _serve_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    _pgid = os.getpgid(_serve_proc.pid)
+                    os.killpg(_pgid, signal.SIGKILL)
+                except Exception:
+                    _serve_proc.kill()
+            log.info(f"{label}codearts serve (pid={_serve_proc.pid}) killed, RSS released")
 
         # 清理 hermes 隔离的 HERMES_HOME 临时目录（state.db 等不再需要）
         if backend.name == "hermes" and _iso_home:

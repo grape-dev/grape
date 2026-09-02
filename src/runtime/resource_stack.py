@@ -62,8 +62,12 @@ class TaskResourceStack:
         """Register a glob pattern for /tmp cleanup."""
         self._tmp_patterns.append(pattern)
 
-    def dispose(self, kill_procs: bool = True):
-        """Release all tracked resources. Idempotent."""
+    def dispose(self, kill_procs: bool = True, keep_overlays: bool = False):
+        """Release all tracked resources. Idempotent.
+
+        keep_overlays: True 时保留 overlay 目录（用于 hermes ACP 稳定 iso_home，
+        state.db 需持久化供下次 session/resume，chat-ctx-fix §方向一）。
+        """
         if self._disposed:
             return
         self._disposed = True
@@ -78,12 +82,13 @@ class TaskResourceStack:
                 except Exception:
                     pass
 
-        # 2. Remove overlay dirs
-        for path in self._overlays:
-            try:
-                shutil.rmtree(path, ignore_errors=True)
-            except Exception:
-                pass
+        # 2. Remove overlay dirs (unless keep_overlays)
+        if not keep_overlays:
+            for path in self._overlays:
+                try:
+                    shutil.rmtree(path, ignore_errors=True)
+                except Exception:
+                    pass
 
         # 3. Clean tmp patterns
         for pattern in self._tmp_patterns:

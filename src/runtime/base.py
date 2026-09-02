@@ -7,6 +7,7 @@ class AgentRuntime:
     name = ""
     binary = ""
     prompt_via_stdin = False
+    _serve_port = 0  # codearts 方案E2: serve 端口（pre_exec 设置，build_args 读取）
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         raise NotImplementedError
@@ -50,3 +51,9 @@ class AgentRuntime:
 
     def get_env(self, account: str = "", user_id: int = 0) -> dict:
         return {}
+
+    def pre_exec(self, cwd: str, env: dict) -> dict:
+        """_run_once 启动子进程前的钩子（默认无操作）。
+        codearts 方案E2 用此钩子启动 per-task codearts serve，返回 {port, proc, env}。
+        """
+        return {"port": 0, "proc": None, "env": env}
