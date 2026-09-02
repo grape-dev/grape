@@ -183,14 +183,13 @@ async def gitcode_oauth_callback(request: Request, code: str = "", state: str = 
     if not local_user:
         local_user = user_db.get_user_by_username(gitcode_login)
 
-    # 白名单校验：已存在本地用户默认放行；全新用户须在白名单内（拒绝则无任何数据产生）
-    if not local_user:
-        from src.config import is_gitcode_user_allowed
-        if not is_gitcode_user_allowed(gitcode_login):
-            raise HTTPException(status_code=403, detail={
-                "code": 403,
-                "message": "您的 GitCode 账号不在白名单内，无法登录本系统。请联系统管理员。"
-            })
+    # 白名单校验：所有用户（含已存在）都必须在白名单内，踢出白名单后立即无法登录
+    from src.config import is_gitcode_user_allowed
+    if not is_gitcode_user_allowed(gitcode_login):
+        raise HTTPException(status_code=403, detail={
+            "code": 403,
+            "message": "您的 GitCode 账号不在白名单内，无法登录本系统。请联系统管理员。"
+        })
 
     # 新用户才创建
     if not local_user:
