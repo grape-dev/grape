@@ -1,6 +1,6 @@
 # agent_tasks 直接创建 INSERT 绑定数不匹配 — 修复设计（Seq #1991/#1992 事故）
 
-> 版本：v1.2 ｜ 日期：2026-09-01 ｜ 状态：**P0 代码 + 测试看护已实施（未提交）**；P1/P2 其余待排期
+> 版本：v1.4 ｜ 日期：2026-09-01 ｜ 状态：**P0 代码 + 测试看护已实施（未提交）**；§十一 onboarding 收敛、§十 原则整改与 P1/P2 其余待排期
 > 事故对象：生产 `Jason7602/hello-flask-9` 模板引导事件 `Seq #1991`（onboarding_exp）/ `#1992`（onboarding_explore）失败
 > 结论：**系统级代码缺陷**（`_create_direct_task` / `_create_failed_task` 的 agent_tasks INSERT 列数与值数不匹配 39/37），非环境偶发。
 
@@ -151,4 +151,81 @@ direct 事件 → _create_direct_task：
 | direct 事件在修复前持续 fail | 修复上线部署前，direct 类事件（含新仓库引导）仍会失败——建议尽快合入 new-version3/main 并部署 |
 | 存量 failed 事件 | 本方案不回溯清理已 failed 的 1982-1988/1991-1992；如需可在部署后按需重派或补引导标记 |
 
-*P0 代码 + 测试看护（`tests/test_agent_tasks_insert_contract.py`，5 用例全绿）已实施，均未提交；P1（redispatch/引导自愈）与其余 P2 待后续排期。*
+## 十、补充：任务分配不得触发 ChatAgent（原则与整改）
+
+> **原则（必须遵守）**：ChatAgent 只在「用户真实回复消息」时执行；任务分配 / 通知**不得**触发 ChatAgent，也不得注入用户个人 token 用于 GitCode 写操作。
+
+### 10.1 事故回放（本次实锤）
+
+- 引导 VOD Agent 执行 `repo-onboarding` 时调 `POST /api/tasks/notify`（`tasks.py:419`，接口注释即含"…+ **后台 chat-agent** + 飞书通知"）；
+- `:479` 无条件 `asyncio.create_task(_run_notify(...))` → **无任何用户输入即后台执行一次完整 chat-agent**；
+- `_run_notify` 内：`get_user_gitcode_token(user_id)`（注入用户个人 token）→ `_build_task_prompt(…)`（**任务对话 prompt**，含"澄清需求并回帖"职责）→ `_consume`（实际跑 opencode，cwd=`chat/{uid}/{conv}`）；
+- 该自动会话按"回帖"职责把结果 POST 到 GitCode Issue → **作者 = 用户本人**（本次 Jason7602，评论 `187623090` @10:51:44，webhook `seq 2002`）；
+- 对比：引导结果评论 `187623013`（grape_bot @10:50:59）走 bot token、作者为 grape_bot —— 同 Issue 上两条评论分属两条链路，正是误解来源。
+
+### 10.2 ChatAgent 触发点核对
+
+| 触发路径 | 用户真实消息 | 符合原则 |
+|---|---|---|
+| Web `/api/chat/send*` `/submit` | ✅ | ✅ |
+| 飞书 `im/handler_async.process_chat_async` | ✅ | ✅ |
+| `tasks/notify → _run_notify` 后台自动执行 | ❌ | ❌（**唯一违规点**） |
+| VOD/事件 direct 执行、`vod_handler_async` | — | 非 ChatAgent 流程 |
+
+### 10.3 与既有状态机原则的一致性
+
+`task-status-processing-trigger-fix.md §3.3` 已确立"任务状态**仅在任务会话收到真实用户消息**时翻转 `processing`"（`mark_task_processing_by_conversation`），`/api/tasks/{id}/start` 只读不翻转。即**状态侧早已遵循"用户主动权"，唯独 `_run_notify` 的自动 agent 执行漏网**，两者语义矛盾（自动跑了一次对话，任务却仍 `active`）。
+
+### 10.4 整改方案（待实施）
+
+1. **`tasks/notify` 去掉后台 LLM 执行**：`_run_notify` 删除 `_consume`，改为**静态模板** agent 消息（「📋 任务已分配 · Issue #N · 请到任务中心『去对话』查看」）+ 飞书通知，不调 opencode/stream；
+   - （可选）首条欢迎推迟到用户真正进入对话后的第一条回复时，由 chat 正常链路生成。
+2. **收敛 ChatAgent 触发**：仅 Web `send*`/`submit` 与飞书 `process_chat_async`（用户消息）执行；`start_task`/会话列表保持只读。
+3. **写操作身份隔离**：任何"非用户主动提交"路径不注入 `USER_GITCODE_TOKEN`；回帖/评论/建 Issue 一律走仓库 bot token（grape_bot）并署名"系统代发"。
+4. **回归看护**：`tasks/notify` 后断言**不产生** agent 执行（conv 首条为模板消息、无 stream 调用）；`/api/chat/send` 才触发 agent。
+
+---
+
+## 十一、Onboarding 应收敛为「普通 VOD 事件」（原则与整改）
+
+> **原则**：Onboarding 除「托管时向 VOD 主动提交」这一触发差异外，**执行语义必须与普通事件完全等价**（同一套引擎门禁、任务登记、监督、重派、状态机）。
+
+### 11.1 现状：onboarding 是"旁路执行"
+
+`onboarding.py trigger_onboarding` 与普通事件（webhook → `run_pipeline`）的偏差：
+
+| 环节 | 普通事件 | onboarding 现状 | 偏差 |
+|---|---|---|---|
+| 触发 | GitCode webhook | 模板一键创建回调（仅托管时） | ✅ 允许（触发差异） |
+| 事件类型 | 可路由（`issue_opened` 等） | `onboarding_exp/onboarding_explore`，**不在路由映射** | 不可被 pipeline/重派识别（重派 `not recognized`） |
+| 路由/反循环/enable 检查 | ✅ | ❌ 不经过 | 直接发 |
+| 引擎门禁 | `pick_engine=None → engine_unavailable`，不执行 | **死守卫**（`if engine_id is None` 永不成立）→ **无引擎照跑本机 opencode** | 核心漏洞 |
+| 执行方式 | direct 分支统一 `_execute_agent`（登记 `agent_tasks`） | 自开线程 `_execute_agent_wrapper → _execute_agent`，**不经任务登记** | 无任务行 |
+| 任务登记 | 有行 → sweeper 不杀 | 无行 → **sweeper 秒判 failed** | 主事件假失败 |
+| GitCode 写操作 | 按 skill/bot 治理 | 引导 skill 直接建 Issue/发评论，token 回退用户 | 无人把关的写副作用 |
+
+### 11.2 由此导致的已发故障（全部对得上）
+
+1. 无引擎也派发 → `Seq 1998/1999` 无任务行、`event.runtime=''`；
+2. sweeper 按"无活跃任务"把 running 主事件判死 → 事件 failed，但本机 opencode 后台跑完（建 Issue #1/#2、以用户名义评论 `187623090`）；
+3. 子事件 `2000/2001` 由 `_finalize_onboarding` 以 `completed` 记账（构造即完成，非执行结果）→ "无引擎却 completed" 表象；
+4. 重派 onboarding 事件报 `repository='' not recognized` → 无法恢复；
+5. `onboarded` 一旦置位不再重讲 → 状态不可自愈。
+
+### 11.3 收敛目标（整改方向）
+
+1. **执行链路复用普通事件管线**：托管回调改向 VOD 提交**等价事件**（注册 `onboarding_*` 到路由/状态机，或复用 `issue_opened` 语义），经 `run_pipeline` 同一套：enable 检查 → 阶段路由 → 会话查找 → `_create_direct_task`/入队登记任务。
+2. **引擎门禁与普通事件一致**：`pick_engine=None → engine_unavailable` 失败快照并**跳过引导**（§五 P0a）；有引擎才走普通 direct/queue 分派——任务有行、受 sweeper 保护、终态一致。
+3. **取消 `_execute_agent_wrapper` 直线索**：引导目标改为"事件驱动 + 任务登记 + 正常终态回报"，不再出现"执行中被打死 / 记账 completed"的分裂状态。
+4. **GitCode 写操作治理统一**：引导建 Issue/评论一律走仓库 bot token，不注入用户个人 token（§十 3）。
+5. **保留**：`onboarded` 幂等标记、experience/explore 双目标、`repo-onboarding` skill、托管时仅触发一次的 UX——只改"怎么执行"，不改"何时/做什么"。
+
+### 11.4 影响评估
+
+- 涉及：`onboarding.py`（触发→提交等价 VOD 事件）、`routing.py`（注册 `onboarding_*` 使重派/状态机可用）、事件分类与存量恢复（`Seq 1991/1992、1998/1999` 之类已 failed 主事件可重派）。
+- 收益：引导不再能绕过引擎与监督做危险写操作；事件/任务/状态机/重派全部对齐普通流程；杜绝"无人输入却以用户名义发评论"。
+- 风险：模板一键创建的引导体验路径变化，需回归验证双目标均按正常 VOD 事件走通。
+
+---
+
+*P0 代码 + 测试看护（`tests/test_agent_tasks_insert_contract.py`，5 用例全绿）已实施，均未提交；§十 ChatAgent 触发原则整改、§十一 onboarding 收敛、P1（redispatch/引导自愈）与其余 P2 待后续排期。*
