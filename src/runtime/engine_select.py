@@ -346,9 +346,10 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
 
 # ===== 候选引擎查询（供绑定配置下拉 / 展示）=====
 
-def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]:
+def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str = "") -> list[dict]:
     """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。
-    agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。"""
+    agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。
+    username 非空时，user scope 只返回该用户的个人引擎，local scope 只返回该用户的本机引擎。"""
     repo = _norm_repo(repo_key)
     db, lock = _db()
     with lock:
@@ -362,17 +363,31 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
-                c.execute(
-                    "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
-                    "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
+                if username:
+                    c.execute(
+                        "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
+                        "FROM agent_runtimes WHERE credential_id=0 AND owner_id=? ORDER BY id", (username,))
+                else:
+                    c.execute(
+                        "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
+                        "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             elif scope == "user":
-                c.execute(
-                    "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
-                    "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
+                if username:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' AND rc.owner_name=? ORDER BY r.id", (username,))
+                else:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
             else:
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
