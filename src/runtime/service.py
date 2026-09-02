@@ -1377,6 +1377,20 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
         except Exception as e:
             log.warning(f"complete_task update repo session failed: {e}")
     log.info(f"Task completed: {task_id} exit={exit_code}")
+    # remote worker 模式下 _execute_agent 不执行，系统回帖在此补触发
+    if exit_code == 0 and task and task.get("issue_id") and task.get("repo_gitcode_token"):
+        try:
+            from src.api.event_pipeline import _post_result_to_issue, _issue_num_from
+            from src.repo_key import from_repo_key
+            _issue_id = task["issue_id"]
+            _issue_num = _issue_num_from(_issue_id)
+            _repo = from_repo_key(task["repo_key"]) or task.get("account") or ""
+            _token = task["repo_gitcode_token"]
+            _agent_type = task.get("agent_type") or ""
+            if _issue_num and _repo and _token:
+                _post_result_to_issue(_repo, _issue_num, result_text or "", _token, _agent_type)
+        except Exception as _pe:
+            log.warning(f"complete_task post_result_to_issue failed: {_pe}")
     # 可观察性埋点：任务到达终态
     try:
         from src.observability import record_task_terminal
