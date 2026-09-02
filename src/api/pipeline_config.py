@@ -80,17 +80,17 @@ def _query_official_scene_ids() -> set[str]:
 
 
 def _query_scenes_from_db(repo_key: str = "", user_id: int = 0) -> list[dict]:
-    """Query visible scenes from DB: user-scoped + repo-scoped + official.
+    """Query visible scenes from DB: user-scoped + repo-scoped.
 
-    Priority: user > repo > official. Duplicate scene_id from lower priority
-    scopes is hidden when a higher-priority copy exists.
+    Official scenes are internal templates, not shown to users directly.
+    Users see their fork copies (user scope) only.
     """
     db, lock = _db()
     rows = []
     with lock:
         c = db.cursor()
         try:
-            # user-scoped scenes (current user only) — highest priority
+            # user-scoped scenes (current user only)
             if user_id:
                 c.execute(
                     "SELECT scene_id, name, description, scope, nodes_json, onboarding FROM devops_pipeline_scene "
@@ -102,11 +102,7 @@ def _query_scenes_from_db(repo_key: str = "", user_id: int = 0) -> list[dict]:
                     "SELECT scene_id, name, description, scope, nodes_json, onboarding FROM devops_pipeline_scene "
                     "WHERE is_active=1 AND scope='repo' AND repo_key=? ORDER BY id", (repo_key,))
                 rows.extend(c.fetchall())
-            # official scenes (all users see them) — lowest priority
-            c.execute(
-                "SELECT scene_id, name, description, scope, nodes_json, onboarding FROM devops_pipeline_scene "
-                "WHERE is_active=1 AND scope='official' ORDER BY id")
-            rows.extend(c.fetchall())
+            # official scenes 不加入用户可见列表（仅作 fork 源和 fallback）
         except Exception as e:
             log.warning(f"_query_scenes_from_db failed: {e}")
     result = []
@@ -176,26 +172,16 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "", user_id: int = 0) -> O
 def get_scenes(repo_key: str = "", user_id: int = 0) -> list[dict]:
     """Return scene list [{id, name, scope}] for API.
 
-    Auto-forks all official scenes to user scope so the user can edit
-    engine_runtime_ids without an explicit apply step.
+    Returns repo-scoped (current repo) + user-scoped (current user) scenes.
+    Official scenes are internal templates, not shown to users.
+    Auto-fork is triggered only at repo hosting time (host_repo), not here.
     """
-    # Auto-fork: ensure every official scene has a user-scoped copy
-    if user_id:
-        try:
-            _auto_fork_official_scenes(user_id)
-        except Exception as e:
-            log.warning(f"get_scenes: auto-fork failed: {e}")
     db_scenes = _query_scenes_from_db(repo_key=repo_key, user_id=user_id)
     if db_scenes:
-        # auto-forked user copies (same scene_id as official) → report as "official"
-        # truly custom scenes (no official counterpart) → report as "user"
-        official_ids = _query_official_scene_ids()
         return [{"id": s["scene_id"], "name": s["name"],
-                 "scope": "official" if s["scene_id"] in official_ids else s["scope"]}
+                 "scope": s["scope"]}
                 for s in db_scenes]
-    # Fallback to file
-    data = _load_pipelines_file()
-    return [{"id": k, "name": v.get("name", k), "scope": "official"} for k, v in data.get("scenes", {}).items()]
+    return []
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "", user_id: int = 0) -> Optional[dict]:
@@ -285,13 +271,34 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
 
 def create_custom_scene(scene_id: str, name: str, description: str, scope: str,
                         repo_key: str, user_id: int, nodes: list, onboarding: str = "repo-onboarding") -> int:
-    """Create a custom scene in DB. Returns DB id. Raises on conflict."""
+    """Create or reactivate a custom scene in DB. Returns DB id."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     with lock:
         c = db.cursor()
+        # Check if a soft-deleted record exists (is_active=0) — reactivate it
+        extra_cond = ""
+        extra_params = []
+        if scope == "repo":
+            extra_cond = "AND repo_key=?"
+            extra_params.append(repo_key)
+        elif scope == "user":
+            extra_cond = "AND user_id=?"
+            extra_params.append(user_id)
+        c.execute(
+            f"SELECT id FROM devops_pipeline_scene WHERE scene_id=? AND scope=? {extra_cond} LIMIT 1",
+            [scene_id, scope] + extra_params)
+        existing = c.fetchone()
+        if existing:
+            # Reactivate soft-deleted record
+            c.execute(
+                f"UPDATE devops_pipeline_scene SET name=?, description=?, nodes_json=?, onboarding=?, is_active=1, updated_at=? WHERE id=?",
+                (name, description, nodes_json, onboarding, now, existing[0]))
+            db.commit()
+            return existing[0]
+        # Insert new record
         c.execute(
             "INSERT INTO devops_pipeline_scene (scene_id, name, description, scope, repo_key, user_id, nodes_json, onboarding, is_active, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,1,?,?)",
@@ -351,11 +358,11 @@ def delete_custom_scene(scene_id: str, scope: str, repo_key: str, user_id: int):
         db.commit()
 
 
-def _auto_fork_official_scenes(user_id: int):
-    """Auto-fork all official scenes to user scope (idempotent).
+def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int):
+    """Auto-fork all official scenes to repo scope (idempotent).
 
-    Called by get_scenes so the user always has editable copies without
-    needing to click "apply" first.
+    Called by host_repo when a repo is first hosted. Creates repo-scoped copies
+    with scene_id prefixed 'repo:' to avoid cross-scope collisions.
     """
     db, lock = _db()
     official_ids = []
@@ -367,27 +374,41 @@ def _auto_fork_official_scenes(user_id: int):
                 "WHERE is_active=1 AND scope='official' ORDER BY id")
             official_ids = [r[0] for r in c.fetchall()]
         except Exception as e:
-            log.warning(f"_auto_fork_official_scenes: query failed: {e}")
+            log.warning(f"_auto_fork_official_scenes_to_repo: query failed: {e}")
     for sid in official_ids:
         try:
-            fork_official_scene(sid, user_id)
+            fork_official_scene(sid, user_id, repo_key=repo_key)
         except Exception as e:
-            log.warning(f"_auto_fork_official_scenes: fork {sid} failed: {e}")
+            log.warning(f"_auto_fork_official_scenes_to_repo: fork {sid} failed: {e}")
 
 
 def fork_official_scene(scene_id: str, user_id: int, repo_key: str = "") -> bool:
-    """Fork an official scene into user scope so the user can edit engine_runtime_ids
-    without affecting the official template or other users.
+    """Fork an official scene into repo or user scope.
 
-    Copies nodes as-is (engine_runtime_ids left empty). Idempotent: if a user-scoped
-    copy already exists, does nothing. Returns True if a new fork was created.
+    - repo_key non-empty: create repo-scoped copy with scene_id='repo:{scene_id}'
+    - repo_key empty: create user-scoped copy with original scene_id (legacy)
+    Idempotent: if a copy already exists, does nothing.
     """
-    if not user_id:
+    if not user_id and not repo_key:
         return False
-    # Check if user already has a fork
-    existing = _query_scene_by_id(scene_id, repo_key="", user_id=user_id)
-    if existing and existing["scope"] == "user":
-        return False
+
+    # Determine fork target scope and scene_id
+    if repo_key:
+        fork_scene_id = f"repo:{scene_id}"
+        fork_scope = "repo"
+        # Check if repo already has a fork
+        existing = _query_scene_by_id(fork_scene_id, repo_key=repo_key, user_id=user_id)
+        if existing:
+            return False
+    else:
+        fork_scene_id = scene_id
+        fork_scope = "user"
+        if not user_id:
+            return False
+        existing = _query_scene_by_id(fork_scene_id, repo_key="", user_id=user_id)
+        if existing and existing["scope"] == "user":
+            return False
+
     # Find official source
     official = None
     db, lock = _db()
@@ -407,13 +428,13 @@ def fork_official_scene(scene_id: str, user_id: int, repo_key: str = "") -> bool
             log.warning(f"fork_official_scene: query official failed: {e}")
     if not official:
         return False
-    # Create user-scoped copy with same scene_id
+    # Create scoped copy
     try:
         create_custom_scene(
-            scene_id=scene_id, name=official["name"], description=official["description"],
-            scope="user", repo_key="", user_id=user_id,
+            scene_id=fork_scene_id, name=official["name"], description=official["description"],
+            scope=fork_scope, repo_key=repo_key, user_id=user_id,
             nodes=json.loads(official["nodes_json"] or "[]"), onboarding=official["onboarding"])
-        log.info(f"Forked official scene '{scene_id}' to user scope (user_id={user_id})")
+        log.info(f"Forked official scene '{scene_id}' to {fork_scope} scope (scene_id={fork_scene_id}, repo_key={repo_key}, user_id={user_id})")
         return True
     except Exception as e:
         log.warning(f"fork_official_scene: create failed: {e}")
