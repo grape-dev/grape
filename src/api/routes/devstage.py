@@ -165,6 +165,8 @@ async def create_environment(body: CreateEnvBody, user: dict = Depends(get_curre
             env_vars = {
                 "GRAPE_DEV_SERVER": body.grape_server,
                 "GRAPE_DEV_TOKEN": body.grape_token,
+                "AK": ak,
+                "SK": sk,
             }
             # init_script：DevSpace 环境为 root 用户，用 --root 走 systemd 管理进程；
             # --device 用环境名作为设备名（比 hostname 更可识别）。

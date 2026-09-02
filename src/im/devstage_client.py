@@ -96,6 +96,8 @@ def _request(method, path, ak, sk, body=None):
     base = _resolve_base_url().rstrip("/")
     url = f"{base}{path}"
     auth, x_sdk_date, body_str = _build_auth_header(method, url, body, ak, sk)
+    if method == "POST":
+        log.info(f"[DEBUG] DevStage POST {url} body={body_str}")
     data = body_str.encode("utf-8") if body_str else None
     headers = {
         "Content-Type": "application/json",
