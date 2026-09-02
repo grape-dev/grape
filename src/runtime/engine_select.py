@@ -13,6 +13,10 @@ from src.config import CONFIG_DIR, log
 
 _ENGINE_SELECTION_PATH = os.path.join(CONFIG_DIR, "engine-selection.json")
 
+# 远端引擎心跳超时阈值（秒）：last_seen_at 超过此值视为死引擎（AI DevSpace 被删后残留 runtime）。
+# 与 service.py _RUNTIME_STALE_SECONDS 保持一致。
+_RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "300"))
+
 # 默认优先级档位（小=高优先）
 _PRIO_REPO = 10
 _PRIO_GLOBAL = 50
@@ -86,11 +90,25 @@ def _member_scope(m: dict, repo: str) -> str:
 
 
 def _health_ok(m: dict) -> bool:
-    """健康判定：远端按 status='online'；本机按 installed+healthy（settings._runtime_health 同口径）。"""
+    """健康判定：远端按 status='online' + last_seen_at 新鲜；本机按 installed+healthy。
+
+    远端引擎（credential_id>0）必须 last_seen_at 在 _RUNTIME_STALE_SECONDS 内才算健康，
+    防止 AI DevSpace 环境被删后 runtime 行残留 status=online 但实际不可达（模式 QQ）。
+    """
     cid = m.get("credential_id") or 0
     if cid == 0:
         return bool(m.get("installed")) and bool(m.get("healthy"))
-    return (m.get("status") or "") == "online"
+    if (m.get("status") or "") != "online":
+        return False
+    # 远端引擎检查心跳新鲜度
+    last_seen = m.get("last_seen_at") or ""
+    if last_seen:
+        from src.runtime.health import parse_dt
+        import time as _time
+        ts = parse_dt(last_seen)
+        if ts is not None and _time.time() - ts > _RUNTIME_STALE_SECONDS:
+            return False
+    return True
 
 
 def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
