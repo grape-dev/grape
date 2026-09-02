@@ -488,6 +488,17 @@ CREATE TABLE IF NOT EXISTS featured_templates (
 )
 """
 
+_LOGIN_WHITELIST_DDL = """
+CREATE TABLE IF NOT EXISTS login_whitelist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gitcode_username VARCHAR(64) NOT NULL,
+    remark VARCHAR(128) DEFAULT '',
+    created_by VARCHAR(64) DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (gitcode_username)
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
@@ -521,6 +532,7 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
 )"""),
     ("devops_pipeline_scene", _PIPELINE_SCENE_DDL),
     ("featured_templates", _FEATURED_TEMPLATES_DDL),
+    ("login_whitelist", _LOGIN_WHITELIST_DDL),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -747,6 +759,38 @@ def _insert_seed_data(table: str, data: dict):
         db.commit()
 
 
+def _migrate_whitelist_from_file():
+    """首次启动：如果 login_whitelist 表为空但 login-whitelist.json 存在，导入文件中的用户名（一次性）。"""
+    try:
+        from src.config import LOGIN_WHITELIST_PATH
+        if not os.path.exists(LOGIN_WHITELIST_PATH):
+            return
+        with db_lock:
+            c = db.cursor()
+            count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
+            if count > 0:
+                return  # 表已有数据，不重复导入
+        with open(LOGIN_WHITELIST_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        wl = data.get("whitelist") if isinstance(data, dict) else None
+        if not wl:
+            return
+        imported = 0
+        with db_lock:
+            for username in wl:
+                try:
+                    c.execute("INSERT OR IGNORE INTO login_whitelist (gitcode_username, remark) VALUES (?, ?)",
+                              (username, "from file"))
+                    imported += c.rowcount
+                except Exception:
+                    pass
+            db.commit()
+        if imported:
+            log.info(f"Whitelist migrated from file: {imported} users")
+    except Exception as e:
+        log.warning(f"Whitelist file migration skipped: {e}")
+
+
 def init_database():
     """初始化所有新表(幂等),启动时调用"""
     # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
@@ -770,6 +814,7 @@ def init_database():
                 _align_agent_enable()
                 _cleanup_stale_meta()
                 _cleanup_chat_shared_worker_runtime()
+                _migrate_whitelist_from_file()
             finally:
                 c.execute("SELECT RELEASE_LOCK('grape_migrate')")
     else:
@@ -782,6 +827,7 @@ def init_database():
         _align_agent_enable()
         _cleanup_stale_meta()
         _cleanup_chat_shared_worker_runtime()
+        _migrate_whitelist_from_file()
     # MySQL with session_manager
 
 def _sync_official_skills():
