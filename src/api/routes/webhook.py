@@ -320,17 +320,13 @@ async def a2a_endpoint(request: Request):
 
         # Issue 生命周期阶段推进（D9/D10，见 vod-skill-upgrade-plan.md §3.0.2）
         # A2A 交办 → issue_state 归属转移到目标 agent（qa 回 coding 允许回退）
-        # Pipeline 顺序校验（2026-08-30 修复）：
-        # VOD agent 有时会跳过 issue 直接触发 coding（premature 判断），
-        # 需要按 pipelines.json 定义强制走 vod→issue→coding→qa→sre 顺序。
-        # 如果 A2A 目标 agent 超前于当前 stage 的 next，自动修正为正确的 next agent。
+        # 回退检测：A2A 目标 agent 比当前 stage 更早时，取消已派发的下游任务。
+        # 不做跳步修正——agent 有权 A2A 到任意目标 agent，pipeline 顺序由 skill 逻辑保证。
         if issue_number:
             try:
-                # 获取当前 stage
                 from src.api.session_store import get_issue_stage
                 _stage_info = get_issue_stage(repo_key, f"#{issue_number}")
                 _current_stage = _stage_info["stage"] if _stage_info else ""
-                # 获取 scene_id 对应的 pipeline next 映射
                 _pipeline_next = {}
                 try:
                     import os as _os, json as _json
@@ -345,20 +341,9 @@ async def a2a_endpoint(request: Request):
                         _pipeline_next[_node.get("id", "")] = _node.get("next", "")
                 except Exception:
                     pass
-                # stage_order 计算提到 if 块外面，确保回退场景（stage=done）也能获取
                 _stage_order = list(_pipeline_next.keys())
                 _cur_idx = _stage_order.index(_current_stage) if _current_stage in _stage_order else -1
                 _target_idx = _stage_order.index(agent_name) if agent_name in _stage_order else -1
-
-                # 跳步修正（原有逻辑）
-                _expected_next = _pipeline_next.get(_current_stage, "")
-                if _expected_next and _expected_next != "done" and agent_name != _expected_next:
-                    if _target_idx > _cur_idx + 1:
-                        # 跳步：自动修正为正确的 next agent
-                        log.warning(f"A2A: pipeline order fix — issue=#{issue_number} "
-                                    f"stage={_current_stage} target={agent_name} -> corrected to {_expected_next}")
-                        agent_name = _expected_next
-                        _target_idx = _stage_order.index(agent_name)
 
                 # 回退检测 + 取消下游任务
                 if _target_idx < _cur_idx and _cur_idx > 0:

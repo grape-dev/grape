@@ -93,3 +93,4 @@ examples/
 skills/
 !.opencode/
 !.opencode/skills/
+trace_*.py

@@ -677,7 +677,7 @@ function _stopDevspaceAutoRefresh() {
 // ====== Worker 上线进度跟踪 ======
 // 后端返回 worker_online 字段表示对应 Worker 是否已真正上线（心跳<5min）。
 // 环境处于"运行中"但 worker_online=false 时显示进度条，上线后自动消失。
-// 进度条百分比基于"预计5-7分钟"做线性插值（仅用于视觉，不决定消失）。
+// 进度条百分比基于"预计2-3分钟"做线性插值（仅用于视觉，不决定消失）。
 var _devspaceRunningSince = {};  // { envId: timestamp_ms }
 
 function _devspaceOnlineProgressHtml(envId, workerOnline, runningSinceMap) {
@@ -687,13 +687,12 @@ function _devspaceOnlineProgressHtml(envId, workerOnline, runningSinceMap) {
     runningSinceMap[envId] = now;
   }
   var elapsed = (now - runningSinceMap[envId]) / 1000;
-  var DURATION = 420;  // 7 minutes — 仅用于进度条宽度估算
+  var DURATION = 180;  // 3 minutes — 仅用于进度条宽度估算
   var pct = Math.min(95, Math.round(elapsed / DURATION * 100));  // 封顶95%，只有真实上线才消失
   return '<div style="margin-top:6px;display:flex;align-items:center;gap:8px">' +
     '<div style="width:160px;height:6px;background:rgba(96,165,250,.12);border-radius:3px;overflow:hidden;flex-shrink:0">' +
     '<div style="width:' + pct + '%;height:100%;background:linear-gradient(90deg,#60a5fa,#a78bfa);border-radius:3px;animation:devspacePulse 2s ease-in-out infinite"></div>' +
     '</div>' +
-    '<span style="font-size:10px;color:var(--t3)">' + I18N.t('runtimes.devspace.online_progress') + '</span>' +
     '</div>' +
     '<style>@keyframes devspacePulse{0%,100%{opacity:1}50%{opacity:.6}}</style>';
 }
