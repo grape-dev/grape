@@ -457,6 +457,20 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
             return "issue"  # Issue Agent 审视
         if stage == "done":
             return ""
+        # PR updated 事件 + stage=coding：检查是否有 QA 历史记录
+        # 如果 QA 曾经审查过（说明 coding 是被 QA 回流后的修复），PR updated 应路由到 QA 复审
+        if event_type == "pull_request_updated" and stage == "coding":
+            try:
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? AND agent_type='qa' LIMIT 1",
+                        (repo_key, issue_id))
+                    if c.fetchone():
+                        return "qa"  # QA 有历史 → 路由到 QA 复审
+            except Exception:
+                pass
         return stage  # coding/qa/sre → 对应执行 Agent
 
 
