@@ -90,3 +90,5 @@ admin/
 logs/
 examples/
 skills/
+!.opencode/
+!.opencode/skills/
