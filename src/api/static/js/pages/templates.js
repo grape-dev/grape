@@ -46,6 +46,7 @@ function renderTemplates() {
           items: c.templates || [], total: (c.templates || []).length,
           page: 0, loading: false, error: null,
           search: '', sortBy: 'stars', totalPages: 1, loaded: true,
+          fallbackItems: c.templates || [],
         };
       }
     });
@@ -361,8 +362,16 @@ function loadTop1000(catIdx) {
     .catch(function(err) {
       var c2 = _tmplState.top1000Cache[cat.id];
       if (!c2) return;
+      if (c2.fallbackItems && c2.fallbackItems.length > 0) {
+        c2.items = c2.fallbackItems;
+        c2.total = c2.fallbackItems.length;
+        c2.totalPages = 1;
+        c2.error = null;
+      } else {
+        c2.error = err.message || I18N.t('templates.load_failed_simple');
+      }
       c2.loading = false;
-      c2.error = err.message || I18N.t('templates.load_failed_simple');
+      c2.loaded = true;
       _tmplState.top1000Cache[cat.id] = c2;
       renderTemplateCategory();
     });
