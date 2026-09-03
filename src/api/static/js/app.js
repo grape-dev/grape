@@ -462,7 +462,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '8');
+      localStorage.setItem('app_cache_ver', '9');
       if (p.get('first_login') === '1') {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -485,7 +485,7 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '8') {
+    if (localStorage.getItem('app_cache_ver') !== '9') {
       const oldRepo = localStorage.getItem('currentRepo');
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
@@ -493,7 +493,7 @@ function loadAgentTypes() {
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
       if (oldRepo) localStorage.setItem('currentRepo', oldRepo);
-      localStorage.setItem('app_cache_ver', '8');
+      localStorage.setItem('app_cache_ver', '9');
     }
 
     const token = localStorage.getItem('token');
