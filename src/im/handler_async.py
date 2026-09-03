@@ -51,6 +51,31 @@ def _clear_pending_selection(chat_id: str):
     _pending_selections.pop(chat_id, None)
 
 
+# 最近图片描述缓存：chat_id -> {"desc": str, "expires": float}
+# 用户发图片后，后续追问在 TTL 窗口内自动注入图片描述，避免上下文丢失
+# 导致 opencode 以"非 DevOps 话题"拒绝回答图片相关问题。
+_PENDING_IMAGE_TTL = 300.0  # 5 分钟
+_pending_image_desc: dict[str, dict] = {}
+
+
+def _set_pending_image(chat_id: str, desc: str):
+    _pending_image_desc[chat_id] = {"desc": desc, "expires": time.time() + _PENDING_IMAGE_TTL}
+
+
+def _get_pending_image(chat_id: str) -> str:
+    p = _pending_image_desc.get(chat_id)
+    if not p:
+        return ""
+    if p.get("expires", 0) < time.time():
+        _pending_image_desc.pop(chat_id, None)
+        return ""
+    return p.get("desc", "")
+
+
+def _clear_pending_image(chat_id: str):
+    _pending_image_desc.pop(chat_id, None)
+
+
 def _current_bound_repo(chat_id: str, account: str, db) -> str:
     """当前飞书聊天绑定的仓库 repo_key（repo_im_group_binding）"""
     try:
@@ -638,6 +663,45 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         text = parsed["text"]
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
+        image_key = parsed.get("image_key", "")
+
+        # 图片消息：下载图片并理解
+        image_description = ""
+        if image_key:
+            try:
+                image_bytes = await api.download_image(ctx, image_key, message_id=msg_id)
+                if image_bytes:
+                    import importlib.util as _ilu
+                    _spec = _ilu.spec_from_file_location("image_understanding",
+                        os.path.join(os.path.dirname(__file__), "..", "agent", "image_understanding.py"))
+                    _mod = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)
+                    image_description = _mod.understand_image_from_bytes(image_bytes)
+                    log.info(f"[Chat:{ctx.name}] image understood: {len(image_description)} chars desc")
+                    if not image_description:
+                        image_description = "用户发送了一张图片，但未能提取有效信息（可能无文字或图片分析失败）。"
+                    # 缓存图片描述，后续追问在 TTL 窗口内自动注入
+                    _set_pending_image(chat_id, image_description)
+                    # 图片消息无文本，用描述作为"文本"
+                    if not text or text == "[图片]":
+                        text = "请帮我分析这张图片"
+                else:
+                    log.warning(f"[Chat:{ctx.name}] image download failed: {image_key}")
+                    image_description = "用户发送了一张图片，但下载失败，无法分析。"
+                    if not text or text == "[图片]":
+                        text = "请帮我分析这张图片"
+            except Exception as e:
+                log.warning(f"[Chat:{ctx.name}] image understanding failed: {e}")
+                image_description = f"用户发送了一张图片，但分析出错: {e}"
+                if not text or text == "[图片]":
+                    text = "请帮我分析这张图片"
+        else:
+            # 非图片消息：检查是否有近期图片上下文，自动注入供追问使用
+            # （修复：用户发图片后追问图片相关问题，图片描述丢失导致 opencode 拒答）
+            cached = _get_pending_image(chat_id)
+            if cached:
+                image_description = cached
+                log.info(f"[Chat:{ctx.name}] reused cached image desc ({len(image_description)} chars) for follow-up")
         # 快捷菜单/card action 没有真实 message_id，优先用 _reply_id（卡片 open_message_id）
         if not msg_id or not msg_id.startswith("om_"):
             _reply_id = parsed.get("_reply_id", "")
@@ -821,7 +885,8 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         async with lock:
             await _process_chat_inner_async(ctx, api, parsed, text, repo_key, repository,
                                             msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
-                                            bind_account=account, exec_account=repo_key)
+                                            bind_account=account, exec_account=repo_key,
+                                            image_description=image_description)
 
     except Exception as e:
         import traceback
@@ -852,7 +917,8 @@ def _resolve_oc_sid(conv: dict | None, repo_oc_sid: str) -> str:
 async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                                      parsed, text, repo_key, repository,
                                      msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
-                                     bind_account="", exec_account="", conv_id="", conv=None):
+                                     bind_account="", exec_account="", conv_id="", conv=None,
+                                     image_description=""):
     """异步版内部处理逻辑
 
     bind_account: 用于 repo_im_group_binding 隔离（Chat Bot 场景 = bot app_id）
@@ -963,6 +1029,10 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
                                            chat_runtime_id, conv_id, user_info=user_info,
                                            has_valid_session=has_valid_session)
+        # 图片理解描述注入 prompt
+        if image_description:
+            prompt = prompt + "\n\n" + image_description
+            log.info(f"Chat prompt with image desc injected ({len(prompt)} chars total)")
         log.info(f"Chat prompt ({len(prompt)} chars, repo={repository}, engine={_engine_name}, has_session={has_valid_session})")
 
         # 与 Web Chat 严格一致：同一 conv_id 同一目录 WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}

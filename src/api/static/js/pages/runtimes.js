@@ -706,12 +706,15 @@ function _refreshDevspaceList() {
     }
     body.innerHTML = html;
   }).catch(function(e) {
+    var msg = e.message || '';
+    var isAuthErr = msg.indexOf('Unauthorized') >= 0 || msg.indexOf('APIGW.0301') >= 0;
+    var isAgreementErr = msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0;
     body.innerHTML = '<div style="padding:32px 20px;text-align:center">' +
       '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom:10px;opacity:.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>' +
       '<div style="font-size:13px;color:var(--t2);margin-bottom:4px">' +
-      (e.message.indexOf('Unauthorized') >= 0 || e.message.indexOf('APIGW.0301') >= 0 ? I18N.t('runtimes.devspace.configure_aksk') : I18N.t('runtimes.devspace.load_failed')) + '</div>' +
+      (isAuthErr ? I18N.t('runtimes.devspace.configure_aksk') : isAgreementErr ? I18N.t('runtimes.devspace.agreement_not_signed') : I18N.t('runtimes.devspace.load_failed')) + '</div>' +
       '<div style="font-size:11px;color:var(--t3)">' +
-      (e.message.indexOf('Unauthorized') >= 0 || e.message.indexOf('APIGW.0301') >= 0 ? I18N.t('runtimes.devspace.configure_aksk_hint') : e.message) + '</div></div>';
+      (isAuthErr ? I18N.t('runtimes.devspace.configure_aksk_hint') : isAgreementErr ? '' : msg) + '</div></div>';
   });
 }
 
@@ -860,8 +863,13 @@ function _showCreateEnvForm() {
       _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);
     }).catch(function(e) {
       var msg = e.message || '';
-      // 模板未发布（AK/SK 未加入白名单）：不创建凭据，直接提示
-      app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+      // 账号未签署服务协议——精准提示
+      if (msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0) {
+        app.showToast(I18N.t('runtimes.devspace.agreement_not_signed'), 8000);
+      } else {
+        // 模板未发布（AK/SK 未加入白名单）：不创建凭据，直接提示
+        app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+      }
       _refreshDevspaceList();
     });
   }
@@ -893,6 +901,11 @@ function _showCreateEnvForm() {
         } else if (msg.indexOf('98320022') >= 0 || msg.indexOf('count limit') >= 0) {
           API.post('/settings/runtime-credentials/' + credId + '/revoke');
           app.showToast(I18N.t('runtimes.devspace.count_limit'));
+          _refreshDevspaceList();
+        } else if (msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0) {
+          // 账号未签署 CodeArts 开发环境服务协议
+          API.post('/settings/runtime-credentials/' + credId + '/revoke');
+          app.showToast(I18N.t('runtimes.devspace.agreement_not_signed'), 8000);
           _refreshDevspaceList();
         } else if (msg.indexOf('98320049') >= 0 || msg.indexOf('Template not published') >= 0) {
           // 模板未发布（预检与实际创建之间的竞态）：删除凭据，显示精准提示
