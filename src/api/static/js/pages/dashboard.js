@@ -450,15 +450,30 @@ function renderDashboard(data) {
     // 按 scope 分组排序
     const sorted = allEngines.slice().sort((a,b) => (_SCOPE_ORDER[a.scope]||9) - (_SCOPE_ORDER[b.scope]||9));
 
+    // 快速筛选状态
+    let _engFilterType = '';  // hermes / opencode / codearts
+    let _engFilterScope = ''; // local / user / repo / global
+
     function _renderEngineList(filter) {
       // 从 _engCurIds 同步勾选状态（checkbox onchange 已实时更新）
       currentIds = (window._engCurIds || []).slice();
 
       const q = (filter || '').toLowerCase().trim();
-      const filtered = q ? sorted.filter(e => {
-        const hay = [e.name, e.device, e.cred_name, e.scope_label, (e.tags||[]).join(' ')].join(' ').toLowerCase();
-        return hay.includes(q);
-      }) : sorted;
+      const filtered = sorted.filter(e => {
+        // 搜索关键词
+        if (q) {
+          const hay = [e.name, e.device, e.cred_name, e.scope_label, (e.tags||[]).join(' ')].join(' ').toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        // 引擎类型筛选
+        if (_engFilterType) {
+          const ename = (e.name || '').toLowerCase();
+          if (!ename.includes(_engFilterType)) return false;
+        }
+        // scope 筛选
+        if (_engFilterScope && (e.scope || 'global') !== _engFilterScope) return false;
+        return true;
+      });
 
       // 按 scope 分组
       const groups = {};
@@ -491,13 +506,70 @@ function renderDashboard(data) {
     // currentIds 可变数组（checkbox onchange 实时同步）
     window._engCurIds = currentIds.slice();
 
+    // 收集可用引擎类型和 scope
+    const _availTypes = [...new Set(sorted.map(e => {
+      const n = (e.name || '').toLowerCase();
+      if (n.includes('hermes')) return 'hermes';
+      if (n.includes('opencode')) return 'opencode';
+      if (n.includes('codearts')) return 'codearts';
+      return '';
+    }).filter(Boolean))];
+    const _availScopes = [...new Set(sorted.map(e => e.scope || 'global'))];
+    const _SCOPE_LABELS_ALL = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
+    const _SCOPE_ORDER_ALL = ['local','user','repo','global'];
+
+    // 快速筛选标签 HTML
+    function _renderFilterTags() {
+      let html = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;flex-shrink:0">';
+      // 引擎类型标签
+      _availTypes.forEach(t => {
+        const act = _engFilterType === t;
+        html += `<span onclick="window._engToggleType('${t}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid ${act?'#0071e3':'#e8e8ed'};color:${act?'#fff':'#1d1d1f'};background:${act?'#0071e3':'#f5f5f7'};font-weight:500;transition:all .15s">${t}</span>`;
+      });
+      // 分隔
+      if (_availTypes.length > 0) html += '<span style="width:1px;background:#e8e8ed;margin:2px 4px"></span>';
+      // scope 标签
+      _SCOPE_ORDER_ALL.forEach(s => {
+        if (!_availScopes.includes(s)) return;
+        const act = _engFilterScope === s;
+        html += `<span onclick="window._engToggleScope('${s}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid ${act?'#0071e3':'#e8e8ed'};color:${act?'#fff':'#1d1d1f'};background:${act?'#0071e3':'#f5f5f7'};font-weight:500;transition:all .15s">${_SCOPE_LABELS_ALL[s]||s}</span>`;
+      });
+      // 全不选按钮
+      html += '<span style="flex:1"></span>';
+      html += `<span onclick="window._engClearAll()" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid #e8e8ed;color:#86868b;background:#f5f5f7;font-weight:500;transition:all .15s" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">全不选</span>`;
+      html += '</div>';
+      return html;
+    }
+
+    // 筛选切换函数
+    window._engToggleType = function(t) {
+      _engFilterType = (_engFilterType === t) ? '' : t;
+      _refreshEngAll();
+    };
+    window._engToggleScope = function(s) {
+      _engFilterScope = (_engFilterScope === s) ? '' : s;
+      _refreshEngAll();
+    };
+    window._engClearAll = function() {
+      window._engCurIds = [];
+      _refreshEngAll();
+    };
+
+    function _refreshEngAll() {
+      const tagsEl = document.getElementById('engFilterTags');
+      if (tagsEl) tagsEl.innerHTML = _renderFilterTags();
+      const c = document.getElementById('engListContainer');
+      if (c) c.innerHTML = window._engRenderFn(document.getElementById('engSearchInput') ? document.getElementById('engSearchInput').value : '');
+    }
+
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
 
     overlay.innerHTML = `<div id="engModalBox" style="background:#fff;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 12px 48px rgba(0,0,0,.15);display:flex;flex-direction:column">
       <h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${I18N.t('dashboard.select_engine')} — ${title}</h3>
       <div style="font-size:12px;color:#86868b;margin-bottom:12px">${I18N.t('dashboard.engines_available', {count: allEngines.length})}</div>
-      <div style="margin-bottom:16px;flex-shrink:0">
+      <div id="engFilterTags" style="flex-shrink:0">${_renderFilterTags()}</div>
+      <div style="margin-bottom:12px;flex-shrink:0">
         <input id="engSearchInput" placeholder="搜索引擎名称/设备/标签..." style="width:100%;padding:8px 12px;border:1px solid #e8e8ed;border-radius:8px;font-size:13px;background:#f5f5f7;color:#1d1d1f">
       </div>
       <div id="engListContainer" style="display:flex;flex-direction:column;gap:4px;flex:1;overflow-y:auto;min-height:0">
@@ -514,7 +586,7 @@ function renderDashboard(data) {
     const _engInput = document.getElementById('engSearchInput');
     let _engComposing = false;
     _engInput.addEventListener('compositionstart', function() { _engComposing = true; });
-    _engInput.addEventListener('compositionend', function() { _engComposing = false; _refreshEngList(); });
+    _engInput.addEventListener('compositionend', function() { _engComposing = false; _refreshEngAll(); });
     _engInput.addEventListener('input', function() { if (!_engComposing) _refreshEngList(); });
     function _refreshEngList() {
       const c = document.getElementById('engListContainer');
