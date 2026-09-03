@@ -1864,6 +1864,22 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         if _issue_num and repo_gitcode_token:
             _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type)
 
+    # SRE 完成后 → 从 result_text 提取部署 URL 并写入 managed_repos.deploy_url
+    if new_status == "completed" and agent_type == "sre" and result_text:
+        try:
+            import re
+            _urls = re.findall(r'https?://[\d\w.\-]+(?::\d+)?(?:/)?', result_text)
+            if _urls:
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("UPDATE managed_repos SET deploy_url=? WHERE repo_key=?", (_urls[0], repo_key))
+                    if c.rowcount > 0:
+                        db.commit()
+                        log.info(f"SRE deploy_url auto-registered: {_urls[0]} for {repo_key}")
+        except Exception as _e:
+            log.warning(f"SRE deploy_url extraction failed: {_e}")
+
     # 子任务 SRE 完成后 → 登记完成情况到父 Issue
     if new_status == "completed" and agent_type == "sre" and issue_id:
         try:

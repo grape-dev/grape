@@ -509,6 +509,39 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user
     return {"message": "Bot Token 已更新", "bot_username": repo_bot_username}
 
 
+class DeployUrlBody(BaseModel):
+    full_name: str
+    deploy_url: str = ""
+
+
+@router.put("/deploy-url")
+def set_deploy_url(body: DeployUrlBody, user: dict = Depends(get_current_user)):
+    """登记业务系统部署后的访问 URL"""
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+    repo_key = to_repo_key(body.full_name)
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE managed_repos SET deploy_url=? WHERE repo_key=?", (body.deploy_url or "", repo_key))
+        if c.rowcount == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
+        db.commit()
+    return {"message": "部署 URL 已更新", "deploy_url": body.deploy_url}
+
+
+@router.get("/deploy-url/{owner}/{repo_name}")
+def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(get_current_user)):
+    """获取仓库的部署访问 URL"""
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+    repo_key = to_repo_key(f"{owner}/{repo_name}")
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT deploy_url FROM managed_repos WHERE repo_key=?", (repo_key,))
+        row = c.fetchone()
+    return {"deploy_url": (row[0] if row else "") or ""}
+
+
 def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     """解除托管时的同步清理：关联数据表 + 仓库 skill 目录 + workspace 目录。
 
