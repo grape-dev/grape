@@ -1,0 +1,6 @@
+{
+  "base_url": "https://api.modelarts-maas.com/v1",
+  "api_key": "***",
+  "model": "qwen2.5-vl-72b",
+  "max_tokens": 500
+}

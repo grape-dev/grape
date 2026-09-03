@@ -70,5 +70,11 @@
   "querying": "查询中",
   "backend": "后端",
   "placeholder": "问我任何问题...",
-  "send": "发送"
+  "send": "发送",
+  "upload_image": "上传图片",
+  "remove_image": "移除图片",
+  "image_too_large": "图片大小不能超过5MB",
+  "image_max_reached": "最多只能上传{{max}}张图片",
+  "image_max_exceeded": "超过最大数量限制，只添加了部分图片（最多{{max}}张）",
+  "image_attached": "已附加图片: {{name}}，输入文字或直接发送"
 }
