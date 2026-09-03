@@ -902,6 +902,21 @@ async def _execute_task(client, task, engine_name: str = ""):
             env.update(_fresh_env)
     except Exception:
         pass
+    # 本机 worker 修正对外服务地址：任务入队时 plugin 广播 runtime_id=0，server_url 被写成
+    # 公网 server_base_url（如 http://123.249.19.227）。本机 worker 抢到任务后，agent 内部
+    # A2A/tasks 等调用若走公网会 NAT 回环不通（超时）；必须覆盖为 localhost 直连。
+    # 远程 worker 的 RUNTIME_SERVER_URL 是公网，不受影响（保持原 server_url）。
+    _rts = os.environ.get("RUNTIME_SERVER_URL", "") or ""
+    _is_local_worker = ("localhost" in _rts) or ("127.0.0.1" in _rts) or _rts.startswith("127.")
+    _local_base = ""
+    _old_server_url = task.get("server_url") or ""
+    if _is_local_worker:
+        _local_base = _rts.rstrip("/") if _rts else "http://127.0.0.1:3000"
+        if "://" in _local_base and ":" not in _local_base.split("://", 1)[1]:
+            _local_base = _local_base + ":3000"
+        env["GRAPE_SERVER_URL"] = _local_base
+        task["server_url"] = _local_base
+        log.info(f"local worker: override GRAPE_SERVER_URL/server_url -> {_local_base}")
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
     # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
@@ -919,6 +934,12 @@ async def _execute_task(client, task, engine_name: str = ""):
     skill_dir = _os.path.join(cwd, ".skills")
     prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
                                        .replace("{{SERVER_URL}}", task.get("server_url") or "")
+    # 本机 worker：prompt 里 build_prompt 已把 {{SERVER_URL}} 替换成公网 server_base_url
+    # （worker 端此处 .replace("{{SERVER_URL}}") 是空操作），需把 prompt 里已硬编码的公网
+    # 地址回改为 localhost，否则本机 worker 的 A2A 走公网 NAT 回环不通（超时）。
+    if _is_local_worker and _old_server_url and _local_base and _old_server_url != _local_base:
+        prompt = prompt.replace(_old_server_url, _local_base)
+        log.info(f"local worker: rewrote prompt server_url {_old_server_url} -> {_local_base}")
     try:
         # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
         # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
@@ -1505,9 +1526,28 @@ def main():
     import shutil as _sh
     _codearts_tasks_dir = "/var/cache/codearts-tasks"
     if os.path.isdir(_codearts_tasks_dir):
-        _sh.rmtree(_codearts_tasks_dir, ignore_errors=True)
-        os.makedirs(_codearts_tasks_dir, exist_ok=True)
+        # 清理子目录（保留父目录权限，避免 rmtree+makedirs 重建后丢失 1777）
+        for _entry in os.listdir(_codearts_tasks_dir):
+            _child = os.path.join(_codearts_tasks_dir, _entry)
+            try:
+                if os.path.isdir(_child):
+                    _sh.rmtree(_child, ignore_errors=True)
+                else:
+                    os.unlink(_child)
+            except Exception:
+                pass
+        try:
+            os.chmod(_codearts_tasks_dir, 0o1777)
+        except PermissionError:
+            pass
         log.info(f"cleaned codearts tasks dir: {_codearts_tasks_dir}")
+    else:
+        os.makedirs(_codearts_tasks_dir, exist_ok=True)
+        try:
+            os.chmod(_codearts_tasks_dir, 0o1777)
+        except PermissionError:
+            pass
+        log.info(f"created codearts tasks dir: {_codearts_tasks_dir}")
 
     from src.runtime.client import RuntimeClient
 
