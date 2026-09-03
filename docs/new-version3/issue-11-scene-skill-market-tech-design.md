@@ -16,11 +16,14 @@
   skills.js 重写   → 技能市场页面（精选+点赞+使用统计+查找+现有能力）
 
 新增后端
-  scenes.py 扩展   → 场景市场 API（市场列表+详情+体验+应用+搜索）
+  scenes.py 扩展   → 场景市场 API（市场列表+详情+体验+应用+搜索+点赞）
   skills.py 扩展   → 点赞 API + 精选 API + 使用统计 API + 技能查找 API
 
 新增数据库
+  新建 scene_category 表     → 场景分类（独立管理，图标/排序/启用禁用）
   新建 scene_market 表      → 场景市场（完全独立，自包含，不和 devops_pipeline_scene 耦合）
+  新建 scene_likes 表        → 场景点赞（user_id + scene_id 联合唯一）
+  新建 scene_skill_ref 表    → 场景-技能关联关系（预计算，统计高性能）
   devops_pipeline_scene 加字段 → market_scene_id（记录用户场景的市场来源，单向关联）
   skill 表加字段             → is_featured, like_count
   新建 skill_likes 表         → user_id + skill_id 联合唯一
@@ -28,27 +31,71 @@
 
 ## 二、数据库变更
 
-### 2.1 新建 scene_market 表（核心——完全独立，自包含）
+### 2.1 新建 scene_category 表（场景分类，独立管理）
+
+```sql
+CREATE TABLE IF NOT EXISTS scene_category (
+    id          INT NOT NULL AUTO_INCREMENT,               -- 主键自增
+    name        VARCHAR(64) NOT NULL COMMENT '分类名称（通用/移动开发/基础设施/技能开发/AI应用/内容创作）',
+    icon        VARCHAR(32) DEFAULT '' COMMENT '分类图标（emoji）',
+    order_num   INT DEFAULT 0 COMMENT '排序序号',
+    is_active   INT DEFAULT 1 COMMENT '是否启用 0=否 1=是',
+    created_by  VARCHAR(64) DEFAULT '' COMMENT '创建者',
+    updated_by  VARCHAR(64) DEFAULT '' COMMENT '更新者',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+设计原则：
+- **独立管理**：分类有自己的元信息（图标、排序、启用/禁用），不依赖场景数据
+- **外键引用**：scene_market.category_id → scene_category.id，用户导入场景时从已有分类列表选择，不是自由输入字符串
+- **和 agent_type 表模式一致**：agent_type 是独立表，skill 通过 agent_type 字段引用；scene_category 同样独立，scene_market 通过 category_id 引用
+- **可控扩展**：新增分类走独立流程，不会因场景导入意外产生垃圾分类
+
+初始 6 个分类数据：
+
+| id | name | icon | order_num |
+|----|------|------|-----------|
+| 1 | 通用 | ⚙ | 1 |
+| 2 | 移动开发 | 🍃 | 2 |
+| 3 | 基础设施 | ☁ | 3 |
+| 4 | 技能开发 | 🔧 | 4 |
+| 5 | AI应用 | 🤖 | 5 |
+| 6 | 内容创作 | 📝 | 6 |
+
+### 2.2 新建 scene_market 表（核心——完全独立，自包含）
 
 ```sql
 CREATE TABLE IF NOT EXISTS scene_market (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,          -- 主键自增
-    name        VARCHAR(256) NOT NULL,                      -- 场景名称（通用开发 / IaC开发 / ...）
-    description TEXT DEFAULT '',                            -- 简短描述
-    market_description TEXT DEFAULT '',                     -- 市场展示用的详细功能介绍（2-3 句话）
-    thumbnail   VARCHAR(512) DEFAULT '',                    -- 缩略图存储key（OBS模式存对象key，本地模式存/static/img/scenes/xxx.svg相对路径）
-    is_featured INTEGER DEFAULT 0,                         -- 精选标记 0=否 1=是
-    source      VARCHAR(32) DEFAULT 'official',             -- 来源：official/user/third_party（可扩展）
-    source_user_id INTEGER DEFAULT 0,                      -- source=user 时记录创建者用户ID
-    recommended_template VARCHAR(191) DEFAULT '',           -- 推荐模板ID（体验按钮用此模板创建项目）
-    nodes_json  TEXT DEFAULT '[]',                          -- 技能链路配置（完整nodes，自包含不依赖外部表）
-    onboarding  TEXT DEFAULT 'repo-onboarding',             -- 首次托管引导技能名
-    is_active   INTEGER DEFAULT 1,                         -- 是否启用 0=否 1=是
-    created_by  VARCHAR(64) DEFAULT '',                     -- 创建者
-    updated_by  VARCHAR(64) DEFAULT '',                     -- 更新者
-    created_at  TEXT DEFAULT (datetime('now')),             -- 创建时间
-    updated_at  TEXT DEFAULT (datetime('now'))              -- 更新时间
-)
+    id          INT NOT NULL AUTO_INCREMENT,               -- 主键自增
+    name        VARCHAR(256) NOT NULL COMMENT '场景标识（内部用，如 default / iac，仅小写字母数字连字符）',
+    display_name VARCHAR(256) DEFAULT '' COMMENT '展示名称（通用开发 / IaC开发 / ...，市场卡片展示用）',
+    version     VARCHAR(32) DEFAULT '1.0.0' COMMENT '版本号（语义化版本，用户贡献场景迭代用）',
+    description TEXT COMMENT '简短描述',
+    market_description TEXT COMMENT '市场展示用的详细功能介绍（SCENE.md 正文解析而来）',
+    icon        VARCHAR(512) DEFAULT '' COMMENT '场景图标（用户上传的图片文件，OBS模式存对象key，本地模式存/static/img/scenes/xxx相对路径，空时用 scene_category.icon）',
+    category_id INT DEFAULT 1 COMMENT '分类ID（外键 → scene_category.id）',
+    is_featured INT DEFAULT 0 COMMENT '精选标记 0=否 1=是',
+    like_count  INT DEFAULT 0 COMMENT '点赞数（冗余计数，点赞/取消时同步更新）',
+    source      VARCHAR(32) DEFAULT 'official' COMMENT '来源：official/user/third_party（可扩展）',
+    source_user_id INT DEFAULT 0 COMMENT 'source=user 时记录创建者用户ID',
+    recommended_template VARCHAR(191) DEFAULT '' COMMENT '推荐模板ID（体验按钮用此模板创建项目）',
+    nodes_json  TEXT COMMENT '技能链路配置（完整nodes，自包含不依赖外部表）',
+    onboarding  VARCHAR(191) DEFAULT 'repo-onboarding' COMMENT '首次托管引导技能名',
+    is_active   INT DEFAULT 1 COMMENT '是否启用 0=否 1=是',
+    created_by  VARCHAR(64) DEFAULT '' COMMENT '创建者',
+    updated_by  VARCHAR(64) DEFAULT '' COMMENT '更新者',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_name_source (name, source, source_user_id),
+    INDEX idx_category_id (category_id),
+    INDEX idx_is_featured (is_featured),
+    INDEX idx_source (source)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
 设计原则：
@@ -57,32 +104,37 @@ CREATE TABLE IF NOT EXISTS scene_market (
 - **可扩展**：source 字段区分来源（official/user/third_party），将来用户自建场景上市场只加一行
 - **审计字段**：created_by/updated_by VARCHAR(64)，和现有 skill 表等系统表一致
 
-7 个初始场景数据：
+8 个初始场景数据：
 
-| id | name | recommended_template | source |
-|----|------|---------------------|--------|
-| 1 | 通用开发 | hello-flask | official |
-| 2 | 云原生开发 | micro-svc | official |
-| 3 | IaC开发 | tf-infra | official |
-| 4 | Agent开发 | ai-interview-swarm | official |
-| 5 | 华为云Skill开发 | hello-skill | official |
-| 6 | 通用Skill开发 | hello-skill | official |
-| 7 | 博客发布 | (需要补一个博客模板) | official |
+| id | name | display_name | version | category_id | recommended_template | source |
+|----|------|-------------|---------|-------------|---------------------|--------|
+| 1 | harmony | 鸿蒙开发 | 1.0.0 | 2（移动开发） | harmony-ecommerce | official |
+| 2 | default | 通用开发 | 1.0.0 | 1（通用） | hello-flask | official |
+| 3 | iac | IaC开发 | 1.0.0 | 3（基础设施） | tf-infra | official |
+| 4 | skill-dev | 华为云Skill开发 | 1.0.0 | 4（技能开发） | hello-skill | official |
+| 5 | cloud-native | 云原生开发 | 1.0.0 | 3（基础设施） | micro-svc | official |
+| 6 | agent-dev | Agent开发 | 1.0.0 | 5（AI应用） | ai-interview-swarm | official |
+| 7 | api-skill-dev | 通用Skill开发 | 1.0.0 | 4（技能开发） | hello-skill | official |
+| 8 | blog-publish | 博客发布 | 1.0.0 | 6（内容创作） | (需要补一个博客模板) | official |
 
-### 2.2 devops_pipeline_scene 表加字段（单向关联）
+### 2.3 devops_pipeline_scene 表加字段（单向关联）
 
 ```sql
 -- DDL（_PIPELINE_SCENE_DDL 末尾加）
 ALTER TABLE devops_pipeline_scene ADD COLUMN market_scene_id INTEGER DEFAULT NULL;
 
+-- 索引（统计在用仓库数时按 market_scene_id 查询）
+CREATE INDEX idx_market_scene_id ON devops_pipeline_scene (market_scene_id);
+
 -- migration
 "ALTER TABLE devops_pipeline_scene ADD COLUMN market_scene_id INTEGER DEFAULT NULL",
+"CREATE INDEX IF NOT EXISTS idx_market_scene_id ON devops_pipeline_scene (market_scene_id)",
 ```
 
 - market_scene_id：记录该用户场景是从市场哪个场景复制来的（指向 scene_market.id）
 - 用户自建场景不走市场时 market_scene_id=NULL
 - 统计"在用仓库数"：COUNT devops_pipeline_scene WHERE market_scene_id=?
-- **devops_pipeline_scene 不加任何展示字段**（is_featured/thumbnail 等全在 scene_market 表里）
+- **devops_pipeline_scene 不加任何展示字段**（is_featured/icon 等全在 scene_market 表里）
 
 数据流：
 
@@ -97,36 +149,81 @@ devops_pipeline_scene（用户场景配置，记录来源）
   market_scene_id=NULL            ← 用户自建场景（不走市场）
 ```
 
-### 2.3 skill 表加字段
+### 2.4 skill 表加字段
 
 ```sql
 -- DDL（_SKILL_DDL 末尾加）
 ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0;
 ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0;
 
+-- 索引（精选技能查询用）
+CREATE INDEX idx_skill_is_featured ON skill (is_featured);
+
 -- migration
 "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
 "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
+"CREATE INDEX IF NOT EXISTS idx_skill_is_featured ON skill (is_featured)",
 ```
 
 - is_featured：精选标记，0=否 1=是，仅 official 技能会设为 1
 - like_count：点赞冗余计数，默认 0，点赞/取消时同步更新
 
-### 2.4 新建 skill_likes 表
+### 2.5 新建 skill_likes 表
 
 ```sql
 CREATE TABLE IF NOT EXISTS skill_likes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,          -- 主键自增
-    user_id     INTEGER NOT NULL,                           -- 用户ID
-    skill_id    INTEGER NOT NULL,                           -- 技能ID
-    created_at  TEXT DEFAULT (datetime('now')),             -- 创建时间
-    UNIQUE (user_id, skill_id)                              -- 联合唯一，防重复点赞
-)
+    id          INT NOT NULL AUTO_INCREMENT,               -- 主键自增
+    user_id     INT NOT NULL COMMENT '用户ID',
+    skill_id    INT NOT NULL COMMENT '技能ID',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_user_skill (user_id, skill_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
 - user_id + skill_id 联合唯一，防重复点赞
 - 点赞：INSERT，同时 UPDATE skill SET like_count=like_count+1
 - 取消：DELETE，同时 UPDATE skill SET like_count=like_count-1
+
+### 2.6 新建 scene_likes 表
+
+```sql
+CREATE TABLE IF NOT EXISTS scene_likes (
+    id          INT NOT NULL AUTO_INCREMENT,               -- 主键自增
+    user_id     INT NOT NULL COMMENT '用户ID',
+    scene_id    INT NOT NULL COMMENT '场景市场ID（scene_market.id）',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_user_scene (user_id, scene_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+- user_id + scene_id 联合唯一，防重复点赞
+- 点赞：INSERT，同时 UPDATE scene_market SET like_count=like_count+1
+- 取消：DELETE，同时 UPDATE scene_market SET like_count=like_count-1
+
+### 2.7 新建 scene_skill_ref 表（场景-技能关联关系）
+
+```sql
+CREATE TABLE IF NOT EXISTS scene_skill_ref (
+    id          INT NOT NULL AUTO_INCREMENT,               -- 主键自增
+    scene_id    INT NOT NULL COMMENT '场景市场ID（scene_market.id）',
+    skill_name  VARCHAR(256) NOT NULL COMMENT '技能名（指向 skill.skill_name）',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_scene_skill (scene_id, skill_name),
+    INDEX idx_skill_name (skill_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+设计原则：
+- **预计算关联表**：场景初始化/上传时解析 nodes_json，拆出每个 skill_name 写入此表，避免每次统计都解析 JSON
+- **统计高性能**：技能使用统计直接 SQL 聚合，不解析 JSON 字符串
+  - 被多少场景使用：SELECT COUNT(DISTINCT scene_id) FROM scene_skill_ref WHERE skill_name=?
+  - 被多少仓库间接使用：SELECT COUNT(*) FROM scene_skill_ref sr JOIN devops_pipeline_scene d ON sr.scene_id=d.market_scene_id WHERE sr.skill_name=? AND d.market_scene_id IS NOT NULL
+- **场景变更时同步**：场景 nodes_json 变更时（初始化/上传/同步），先 DELETE WHERE scene_id=? 再重新 INSERT
+- **和 skill 表的 skill_name 关联**：不存 skill_id，因为 nodes_json 里用的是 skill_name（如 "implementation"），直接对应
+- 与"在用仓库数"维度互补：点赞=主观认可（好不好用），在用仓库数=客观使用量（多少团队在用）
 
 ## 三、数据初始化
 
@@ -160,40 +257,80 @@ scene_market 表的初始 7 条数据通过 db_setup.py 建表后 INSERT 初始�
 | 通用Skill开发 | 通用 Skill 开发场景，创建和发布通用技能 | 0 | hello-skill | devops_pipeline_scene scene_id=api-skill-dev |
 | 博客发布 | 博客系统开发与发布场景 | 0 | (待补) | devops_pipeline_scene scene_id=blog-publish |
 
-初始化方式：db_setup.py 里写一个 _init_scene_market_data() 函数，建表后检查是否已有数据，无数据则 INSERT 7 条。有数据则跳过（幂等）。
+初始化方式：db_setup.py 里写一个 _init_scene_market_data() 函数，建表后检查是否已有数据，无数据则 INSERT 8 条。有数据则跳过（幂等）。
 
-### 3.3 场景缩略图
+### 3.3 scene_skill_ref 初始数据
 
-缩略图存储模式和技能包一致——通过 `get_storage()` 判断 OBS 是否启用，两种模式自动兼容：
+scene_skill_ref 表的初始数据在 scene_market 初始化后同步写入：
+
+```python
+def _init_scene_skill_ref():
+    """初始化场景-技能关联关系。
+    遍历 scene_market 全部场景的 nodes_json，拆出每个 skill_name 写入。
+    幂等：已有数据则跳过。
+    """
+    # 1. 查 scene_market 全部记录的 id + nodes_json
+    # 2. 对每条记录：解析 nodes_json，提取每个 node 的 skill 字段
+    # 3. INSERT INTO scene_skill_ref (scene_id, skill_name) VALUES (?, ?)
+    #    跳过已存在的（UNIQUE 约束）
+```
+
+同步时机：scene_market 数据变更时（初始化/上传/同步），先 DELETE WHERE scene_id=? 再重新 INSERT。
+
+### 3.4 场景图标
+
+场景图标有两种来源：
+1. **用户上传**：场景包 ZIP 里放 icon.png / icon.svg / icon.jpg，解压后存储到 OBS 或本地
+2. **分类默认**：用户没上传图标时，用 scene_category 表的 icon 字段（emoji）作为默认图标
+
+存储模式和技能包一致——通过 `get_storage()` 判断 OBS 是否启用，两种模式自动兼容：
 
 **兼容机制**（复用现有 storage 层）：
 
 ```python
-def resolve_thumbnail(thumbnail: str) -> str:
-    """解析缩略图为可访问的 URL"""
-    storage = get_storage()
-    if storage is not None and thumbnail and not thumbnail.startswith('/static/'):
-        # OBS 模式：thumbnail 是对象 key，签发临时签名 URL
-        return storage.temporary_url(thumbnail)
-    # 本地模式：thumbnail 是 /static/xxx 相对路径，直接返回
-    return thumbnail or '/static/img/scenes/default.svg'
+def resolve_scene_icon(icon: str, category_id: int) -> str:
+    """解析场景图标为可访问的 URL 或 emoji。
+    icon 非空 → 用户上传的图片（OBS 签名 URL 或本地路径）。
+    icon 为空 → 查 scene_category 表拿分类 emoji 图标。
+    """
+    if icon:
+        storage = get_storage()
+        if storage is not None and not icon.startswith('/static/'):
+            # OBS 模式：icon 是对象 key，签发临时签名 URL
+            return storage.temporary_url(icon)
+        # 本地模式：icon 是 /static/xxx 相对路径，直接返回
+        return icon
+    # icon 为空，用分类默认图标（emoji）
+    cat = get_scene_category(category_id)
+    return cat.get('icon', '⚙') if cat else '⚙'
 ```
 
-- **系统预置场景**：
-  - 本地模式：thumbnail 存 `/static/img/scenes/default.svg`（静态文件已存在）
-  - OBS 模式：部署时上传 SVG 到 OBS，thumbnail 存 `scenes/default.svg`（对象 key）
-- **用户自建场景**（将来）：
-  - 本地模式：保存到 src/api/static/img/scenes/ 目录，thumbnail 存相对路径
-  - OBS 模式：上传到 OBS，thumbnail 存对象 key
+- **系统预置场景**：icon 存 OBS 对象 key 或本地 /static/img/scenes/xxx 路径
+- **用户上传场景**：
+  - 本地模式：保存到 src/api/static/img/scenes/ 目录，icon 存相对路径
+  - OBS 模式：上传到 OBS，icon 存对象 key（scenes/custom/{user_id}/{scene_name}.png）
+- **图标为空时**：用 scene_category.icon（emoji）兜底，保证每个场景都有图标
 - **集群兼容**：OBS 模式下所有实例通过 OBS 临时签名 URL 访问，天然共享
-- **前端无感知**：后端返回场景列表时统一调 resolve_thumbnail，前端拿到的都是可直接访问的 URL
-- **复用现有机制**：和技能包下载的 temporary_url 是同一套 storage 层逻辑
+- **前端无感知**：后端返回场景列表时统一调 resolve_scene_icon，前端拿到的都是可直接展示的
 
-用 SVG 生成 7 个初始缩略图（苹果风格渐变背景 + 场景图标 + 场景名称），矢量图体积小自动适配。
+系统预置场景用 SVG 生成初始图标（苹果风格渐变背景 + 场景图标 + 场景名称）。
 
 ## 四、后端 API 设计
 
 ### 4.1 场景市场 API（src/api/routes/scenes.py 扩展）
+
+#### GET /api/scenes/market/categories
+
+返回场景分类列表（从 scene_category 表读取，前端动态渲染分类 tab）。
+
+```python
+@router.get("/market/categories")
+def list_scene_categories(user: dict = Depends(get_current_user)):
+    """场景分类列表：按 order_num 排序，只返回 is_active=1 的"""
+    # SELECT id, name, icon, order_num FROM scene_category WHERE is_active=1 ORDER BY order_num
+    # 返回 [{id, name, icon, order_num}]
+    # 注：分类禁用（is_active=0）时不显示 tab，但该分类下的场景仍在"全部"里展示
+```
 
 #### GET /api/scenes/market
 
@@ -201,13 +338,18 @@ def resolve_thumbnail(thumbnail: str) -> str:
 
 ```python
 @router.get("/market")
-def list_scenes_market(user: dict = Depends(get_current_user), q: str = ""):
-    """场景市场列表：精选场景 + 全部场景，支持搜索"""
+def list_scenes_market(user: dict = Depends(get_current_user), q: str = "", category_id: int = 0, sort: str = "latest"):
+    """场景市场列表：精选场景 + 全部场景，支持搜索 + 分类过滤 + 排序"""
     # 1. 查 scene_market WHERE is_active=1
     # 2. 搜索：q 非空时按 name/market_description 过滤
-    # 3. 统计在用仓库数：查 devops_pipeline_scene WHERE market_scene_id=sm.id GROUP BY
-    # 4. 解析 nodes_json 拿技能名称列表
-    # 5. 返回 [{id, name, market_description, thumbnail, is_featured,
+    # 3. 分类过滤：category_id>0 时 WHERE category_id=?
+    # 4. 排序：
+    #    - latest（默认）：按 created_at 降序
+    #    - hot：按 like_count 降序
+    #    - 精选场景始终置顶（is_featured=1 排在前面）
+    # 5. 统计在用仓库数：查 devops_pipeline_scene WHERE market_scene_id=sm.id GROUP BY
+    # 6. 解析 nodes_json 拿技能名称列表
+    # 7. 返回 [{id, name, display_name, version, market_description, icon, category_id, is_featured, like_count, liked_by_me,
     #          skills: [skill_name, ...], recommended_template, repo_count}]
 ```
 
@@ -223,7 +365,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
     # 2. 解析 nodes_json，每个 node 的 skill 查 skill 表拿 display_name + description
     # 3. 查 recommended_template 对应的模板信息（从 project-templates.json 查模板详情）
     # 4. 查 devops_pipeline_scene WHERE market_scene_id=? 拿在用仓库列表
-    # 5. 返回 {id, name, market_description, thumbnail, is_featured,
+    # 5. 返回 {id, name, display_name, version, market_description, icon, category_id, category_name, is_featured, like_count, liked_by_me,
     #         skills: [{name, display_name, agent_type, role_desc}],
     #         template: {id, name, description, language, stars},
     #         repos: [{repo_key, full_name}]}
@@ -237,16 +379,18 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
 @router.post("/market/{market_id}/apply")
 def apply_market_scene(market_id: int, user: dict = Depends(get_current_user)):
     """应用场景：从市场复制配置到当前仓库"""
-    # 1. 查 scene_market WHERE id=? 拿 nodes_json + onboarding
+    # 1. 查 scene_market WHERE id=? 拿 name + nodes_json + onboarding
+    #    不存在 → 404 "场景不存在"
     # 2. 前提：用户已选中已托管仓库（从 localStorage.currentRepo 读）
-    # 3. 在 devops_pipeline_scene 创建/更新 repo scope 副本：
-    #    - scene_id = f"repo:{market_id}"（或保持现有 fork 模式）
-    #    - scope = "repo"
-    #    - market_scene_id = market_id（记录来源）
-    #    - nodes_json = 从 scene_market 复制的
-    # 4. 调现有 apply_scene 逻辑（更新 devops_agent_session 的 skill 配置）
-    # 5. 更新 managed_repos.dev_scene
-    # 6. 返回 {message: "场景已应用"}
+    #    未选仓库 → 400 "请先选择仓库"
+    # 3. 幂等：先查 devops_pipeline_scene WHERE market_scene_id=? AND repo_key=? AND scope='repo'
+    #    已存在 → 更新 nodes_json/onboarding
+    #    不存在 → 新建，scene_id = UUID
+    # 4. 以上操作在 db_lock 事务内执行
+    # 5. 调现有 apply_scene 逻辑（更新 devops_agent_session 的 skill 配置）
+    # 6. 更新 managed_repos.dev_scene = scene_id
+    # 7. 返回 {message: "场景已应用"}
+    # 失败时返回 {code: 4xx, message: "应用失败：原因"}
 ```
 
 #### POST /api/scenes/market/{market_id}/experience
@@ -257,17 +401,36 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user)):
 @router.post("/market/{market_id}/experience")
 async def experience_market_scene(market_id: int, user: dict = Depends(get_current_user)):
     """体验场景：基于场景关联的推荐模板创建项目，每用户每场景限一次"""
-    # 1. 查 scene_market WHERE id=? 拿 recommended_template + nodes_json
-    # 2. 检查去重：查 devops_pipeline_scene WHERE market_scene_id=? 
+    # 1. 查 scene_market WHERE id=? 拿 recommended_template + nodes_json + onboarding
+    #    不存在 → 404 "场景不存在"
+    #    recommended_template 为空 → 400 "该场景暂无体验模板，无法体验"
+    #    前端：recommended_template 为空时禁用体验按钮
+    # 2. 检查去重：查 devops_pipeline_scene WHERE market_scene_id=?
     #    AND user_id=用户id（或 repo_owner=用户 username）
     #    已体验 → 返回 {already_experienced: true, full_name: "xxx/yyy"}
     # 3. 未体验 → 调用现有 create_from_template（template_id=recommended_template）
-    #    建仓库 → 写代码 → 托管 → onboarding
+    #    建仓库 → 写代码 → 托管 → onboarding（触发首次托管引导，建立项目知识基线+创建体验任务）
     # 4. 把 scene_market 的场景配置复制到新仓库的 devops_pipeline_scene：
     #    - market_scene_id = market_id（记录来源）
     #    - nodes_json = 从 scene_market 复制的
     # 5. 调 apply_scene 应用场景配置到 agent_session
     # 6. 返回 {full_name, message}
+    # 失败时返回 {code: 4xx/5xx, message: "体验失败：原因"}
+```
+
+#### POST /api/scenes/market/{market_id}/like
+
+场景点赞/取消点赞（toggle）。
+
+```python
+@router.post("/market/{market_id}/like")
+def toggle_scene_like(market_id: int, user: dict = Depends(get_current_user)):
+    """场景点赞 toggle：已赞→取消，未赞→点赞"""
+    # 在 db_lock 事务内执行，保证 INSERT/DELETE + UPDATE like_count 原子性
+    # 1. 查 scene_likes WHERE user_id=? AND scene_id=?
+    # 2. 已赞 → DELETE + UPDATE scene_market SET like_count=like_count-1
+    # 3. 未赞 → INSERT + UPDATE scene_market SET like_count=like_count+1
+    # 4. 返回 {liked: true/false, like_count: N}
 ```
 
 ### 4.2 技能市场 API（src/api/routes/skills.py 扩展）
@@ -280,6 +443,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
 @router.post("/{skill_id}/like")
 def toggle_like(skill_id: int, user: dict = Depends(get_current_user)):
     """点赞 toggle：已赞→取消，未赞→点赞"""
+    # 在 db_lock 事务内执行，保证 INSERT/DELETE + UPDATE like_count 原子性
     # 1. 查 skill_likes WHERE user_id=? AND skill_id=?
     # 2. 已赞 → DELETE + UPDATE skill SET like_count=like_count-1
     # 3. 未赞 → INSERT + UPDATE skill SET like_count=like_count+1
@@ -303,10 +467,10 @@ def list_featured_skills(user: dict = Depends(get_current_user)):
 ```python
 @router.get("/stats")
 def get_skill_stats(user: dict = Depends(get_current_user)):
-    """技能使用统计"""
-    # 1. 查 scene_market 全部场景的 nodes_json，统计每个 skill_name 出现在几个场景
-    # 2. 查 devops_pipeline_scene WHERE market_scene_id IS NOT NULL → 关联 scene_market 的 nodes
-    #    → 统计每个 skill 被多少仓库间接使用
+    """技能使用统计（通过 scene_skill_ref 关联表 SQL 聚合）"""
+    # 1. 被多少场景使用：SELECT skill_name, COUNT(DISTINCT scene_id) FROM scene_skill_ref GROUP BY skill_name
+    # 2. 被多少仓库间接使用：SELECT sr.skill_name, COUNT(*) FROM scene_skill_ref sr
+    #    JOIN devops_pipeline_scene d ON sr.scene_id = d.market_scene_id WHERE d.market_scene_id IS NOT NULL GROUP BY sr.skill_name
     # 3. 返回 {skill_name: {scene_count: N, repo_count: N}}
 ```
 
@@ -327,9 +491,11 @@ def search_skills(q: str, user: dict = Depends(get_current_user)):
     """
 ```
 
-### 4.3 sync-official 不改
+### 4.3 sync-official 接口保留，内部逻辑重构
 
-现有 sync-official 逻辑不变，不加 featured 字段同步。skill 表的 is_featured 通过 db_setup.py 初始化，不依赖 JSON 同步。
+sync-official 接口（POST /skills/sync-official）保留，但前端不再每次进页面调用。DB 同步逻辑从 skills.py 移到 skill_sync.py，修复 3 个问题（见 §5.4）。定时任务两种模式都启动（OBS 模式 DB+OBS 同步，非 OBS 模式只做 DB 同步）。
+
+skill 表的 is_featured 不通过 sync-official 同步，通过 db_setup.py 初始化。
 
 ## 五、前端设计
 
@@ -362,6 +528,21 @@ const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings'
 // skill → 技能详情页（现有，增强）
 ```
 
+nav 函数权限处理：
+- scene-market 和 scene-detail 加入"不需要选仓库也能访问"白名单（和 repos/settings/tasks/runtimes/observability 一样）
+- 现有 nav 函数里 `if (!repo && view !== 'repos' && view !== 'settings' ...)` 需要加 `&& view !== 'scene-market' && view !== 'scene-detail'`
+- 但 scene-market 仍需登录（get_current_user 鉴权）
+
+场景详情技能跳转技能详情：
+- `app.nav('skill', skill_id)` — skill_id 从 scene_skill_ref 或 skill 表查
+
+技能详情场景跳转场景详情：
+- `app.nav('scene-detail', market_id)` — market_id 从 scenes 返回字段里拿
+
+apply 接口传参：
+- 前端调 POST /api/scenes/market/{market_id}/apply 时，通过 header 或 body 传当前仓库的 owner + repo
+- 和现有 apply_scene 一致（路径参数 /{owner}/{repo}）
+
 ### 5.3 场景市场页面（新建 src/api/static/js/pages/scene-market.js）
 
 页面结构：
@@ -386,12 +567,20 @@ const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings'
 场景详情页（scene-market.js 内渲染）：
 - 完整功能介绍
 - 技能链路详解（每个技能名称+Agent类型+角色描述，可跳转技能详情）
+  - 注意：原型 market-prototype-v2.html 中技能名称跳转未正常工作，实现时需修复
 - 推荐模板（名称、描述、语言、stars）
 - 在用仓库列表
 - [应用] [体验] 按钮
 
 "应用"操作：调 POST /api/scenes/market/{market_id}/apply
 "体验"操作：调 POST /api/scenes/market/{market_id}/experience
+
+前端交互状态：
+- 应用/体验按钮：点击后显示 loading 状态（按钮禁用+加载动画），成功后 toast 提示，失败后 toast 报错
+- 体验按钮：recommended_template 为空时禁用（灰显+tooltip"该场景暂无体验模板"）
+- 点赞按钮：点击后立即 toggle 图标（❤️↔🤍）+ 数字+1/-1，后台异步调 like 接口，失败回滚
+- 场景市场需要登录才能访问（get_current_user 鉴权）
+- 场景市场不要求选仓库也能浏览（和场景中心不同，场景中心需要先选仓库）
 
 ### 5.4 技能市场页面（重写 src/api/static/js/pages/skills.js）
 
@@ -551,12 +740,12 @@ scope 页签（技能市场/仓库技能/个人技能）
 
 | # | 文件 | 改动 |
 |---|------|------|
-| 1 | src/api/db_setup.py | 新建 _SCENE_MARKET_DDL + _SKILL_LIKES_DDL + _SKILL_DDL 加 is_featured/like_count + _PIPELINE_SCENE_DDL 加 market_scene_id + _init_scene_market_data 初始化 7 条场景 + _init_skill_featured 初始化精选标记 + migration 追加 |
-| 2 | src/api/routes/scenes.py | 新增 GET /market、GET /market/{id}、POST /market/{id}/apply、POST /market/{id}/experience |
-| 3 | src/api/routes/skills.py | 新增 POST /{id}/like、GET /featured、GET /stats、GET /search、GET /scenarios。现有 sync-official 接口的 DB 同步逻辑移到 skill_sync.py（接口保留但不再被前端每次调用） |
+| 1 | src/api/db_setup.py | 新建 _SCENE_CATEGORY_DDL + _SCENE_MARKET_DDL（含 category_id/like_count/display_name/version）+ _SCENE_LIKES_DDL + _SCENE_SKILL_REF_DDL + _SKILL_LIKES_DDL + _SKILL_DDL 加 is_featured/like_count + _PIPELINE_SCENE_DDL 加 market_scene_id + _init_scene_category_data 初始化 6 条分类 + _init_scene_market_data 初始化 8 条场景 + _init_scene_skill_ref 初始化关联关系 + _init_skill_featured 初始化精选标记 + migration 追加 |
+| 2 | src/api/routes/scenes.py | 新增 GET /market/categories、GET /market、GET /market/{id}、POST /market/{id}/apply、POST /market/{id}/experience、POST /market/{id}/like |
+| 3 | src/api/routes/skills.py | 新增 POST /{id}/like、GET /featured、GET /stats、GET /search。现有 sync-official 接口的 DB 同步逻辑移到 skill_sync.py（接口保留但不再被前端每次调用） |
 | 4 | src/api/routes/templates.py | 可能微调，支持按 recommended_template 查模板详情 |
 | 5 | src/api/pipeline_config.py | 新增从 scene_market 复制配置到 devops_pipeline_scene 的函数 |
-| 6 | src/user/db.py | 新增点赞 CRUD 函数 + 技能统计查询函数 + scene_market CRUD 函数 |
+| 6 | src/user/db.py | 新增点赞 CRUD 函数 + 技能统计查询函数 + scene_market CRUD 函数 + scene_category CRUD 函数 |
 | 7 | src/storage/skill_sync.py | 新增 _sync_skill_description_to_db()（修复用主键id更新+不碰file_path）+ start_skill_sync_scheduler 两种模式都启动 + worker 改为先 DB 同步再 OBS 同步 |
 | 8 | src/api/static/img/scenes/（新建目录） | 7 个场景 SVG 缩略图 |
 
@@ -584,16 +773,24 @@ scope 页签（技能市场/仓库技能/个人技能）
 
 ```python
 # 从 scene_market 复制配置到 devops_pipeline_scene
-# 1. 查 scene_market WHERE id=? 拿 nodes_json + onboarding + name
+# 1. 查 scene_market WHERE id=? 拿 name + nodes_json + onboarding
 # 2. 查当前选中仓库的 repo_key
-# 3. 在 devops_pipeline_scene 创建/更新 repo scope 副本：
-#    - scene_id = f"market:{market_id}"（新命名，避免和 official scene_id 冲突）
-#    - scope = "repo"
-#    - repo_key = 当前仓库
-#    - market_scene_id = market_id（记录来源）
-#    - nodes_json = 从 scene_market 复制的
-# 4. 调现有 apply_scene 逻辑（遍历 nodes 更新 devops_agent_session）
-# 5. 更新 managed_repos.dev_scene = f"market:{market_id}"
+# 3. 幂等：先查 devops_pipeline_scene WHERE market_scene_id=? AND repo_key=? AND scope='repo'
+#    - 已存在 → 更新 nodes_json/onboarding（同一仓库重复应用同一场景，更新不新建）
+#    - 不存在 → 新建，scene_id = f"custom-{uuid.uuid4().hex[:8]}"（UUID 唯一标识，引擎内部用）
+#      和现有 create_custom_scene 逻辑一致（scenes.py:156）
+# 4. 以上操作在 db_lock 事务内执行，保证原子性
+# 5. 调现有 apply_scene 逻辑（遍历 nodes 更新 devops_agent_session）：
+#    对每个 node（如 vod→issue→coding→qa→sre）：
+#    - agent_type = node.tag（如 "coding"）
+#    - skill = node.skill（如 "implementation"）
+#    - 查 skill_id（skill 表的主键 id）
+#    - 查/分配 runtime_id（引擎运行时 ID，从现有 devops_agent_session 读或调 resolve_default_engine）
+#    - upsert_agent_session：写入 repo_key + agent_type + runtime_id + skill + skill_id
+#    - 跳过 enabled=false 的 node
+# 6. 更新 managed_repos.dev_scene = scene_id
+# 7. 返回 {message: "场景已应用"}
+# 注：scene_id 是引擎内部唯一标识，不展示给用户，用户看到的是 scene_market.display_name
 ```
 
 ### 7.2 场景"体验"去重逻辑
@@ -616,17 +813,21 @@ scope 页签（技能市场/仓库技能/个人技能）
 ### 7.3 技能使用统计查询
 
 ```python
+# 通过 scene_skill_ref 关联表直接 SQL 聚合，不解析 JSON
+
 # 被多少场景使用：
-# 查 scene_market 全部场景的 nodes_json，统计 skill_name 出现次数
-# 一条 SQL 无法完成（nodes_json 是 JSON），Python 侧处理
+# SELECT skill_name, COUNT(DISTINCT scene_id) as scene_count
+# FROM scene_skill_ref GROUP BY skill_name
 
 # 被多少仓库间接使用：
-# 1. 查 devops_pipeline_scene WHERE market_scene_id IS NOT NULL
-# 2. 关联 scene_market 的 nodes_json → 获取该场景用了哪些 skill
-# 3. 统计每个 skill 被多少仓库间接使用（一个仓库用一个场景，一个场景有多个 skill）
+# SELECT sr.skill_name, COUNT(*) as repo_count
+# FROM scene_skill_ref sr
+# JOIN devops_pipeline_scene d ON sr.scene_id = d.market_scene_id
+# WHERE d.market_scene_id IS NOT NULL
+# GROUP BY sr.skill_name
 
-# 实现：一次查 scene_market + devops_pipeline_scene，Python 侧聚合
-# 返回 {skill_name: {scene_count: N, repo_count: N}}
+# 合并为 {skill_name: {scene_count: N, repo_count: N}}
+# list_skills 查出技能列表后，用这个字典补字段，不每个技能单独查
 ```
 
 ### 7.4 技能查找实现（第一期不调 LLM）
@@ -653,23 +854,180 @@ scope 页签（技能市场/仓库技能/个人技能）
 # + is_featured: int
 # + like_count: int
 # + liked_by_me: bool（当前用户是否已赞）
-# + scene_count: int（被多少场景使用，从 scene_market 统计）
-# + repo_count: int（被多少仓库间接使用）
-# + scenes: [{id, name}, ...]（所属场景列表，从 scene_market 查）
+# + scene_count: int（被多少场景使用，从 scene_skill_ref 统计）
+# + repo_count: int（被多少仓库间接使用，从 scene_skill_ref + devops_pipeline_scene 统计）
+# + scenes: [{id, name, display_name}, ...]（所属场景列表，从 scene_skill_ref JOIN scene_market 查）
 
 # 实现：list_skills 查询时 LEFT JOIN skill_likes 拿 liked_by_me，
+# 使用统计单独批量查一次 scene_skill_ref（不每个 skill 单独查）
+# 所属场景列表单独批量查一次 scene_skill_ref JOIN scene_market
+
+### 7.6 现有 get_skill_detail 接口扩展（GET /skills/by-id/{skill_id}）
+
+```python
+# 现有返回字段：{id, name, display_name, description, agent_type, scope, content, is_obs}
+
+# 新增返回字段：
+# + is_featured: int
+# + like_count: int
+# + liked_by_me: bool
+# + scenes: [{id, name, display_name}, ...]（所属场景列表，从 scene_skill_ref JOIN scene_market 查）
+#   技能详情页展示"所属场景"标签，点击可跳转场景详情
+```
 # 使用统计单独批量查一次（不每个 skill 单独查）
 ```
 
-## 八、设计原则和注意事项
+## 八、场景导入（后续迭代，一期不做）
+
+一期不做场景上传/导入。official 场景通过 db_setup.py 初始化，后续迭代会有场景同步定时任务从官方仓库同步。
+以下设计保留供后续迭代参考。
+
+参考 skill 导入模式（ZIP + Markdown 定义文件 + 校验），支持外部用户贡献场景。
+
+### 8.1 场景包格式
+
+ZIP 包结构：
+```
+my-custom-scene.zip
+└── my-custom-scene/
+    ├── SCENE.md          ← 场景定义文件（必须，YAML frontmatter + Markdown 正文）
+    └── icon.png          ← 场景图标图片（可选，支持 png/svg/jpg）
+```
+
+SCENE.md 格式（参考 SKILL.md 模式）：
+```yaml
+---
+name: my-custom-scene
+display_name: 我的自定义场景
+description: 解决 xxx 问题的开发场景
+category_id: 1
+recommended_template: ""
+onboarding: repo-onboarding
+nodes:
+  - id: vod
+    tag: vod
+    skill: vod
+    mode: emit
+    next: issue
+    handoff: a2a
+  - id: issue
+    tag: issue
+    skill: issue-advance
+    mode: emit
+    next: coding
+    handoff: a2a
+  - id: coding
+    tag: coding
+    skill: implementation
+    mode: emit
+    next: qa
+    handoff: a2a
+  - id: qa
+    tag: qa
+    skill: pr
+    mode: emit
+    next: sre
+    handoff: a2a
+  - id: sre
+    tag: sre
+    skill: cloud-deploy
+    mode: emit
+    next: done
+    handoff: complete
+---
+
+# 我的自定义场景
+
+这里写场景的详细介绍，会作为 market_description 展示在场景市场。
+包括适用场景、解决的问题、开发流程等。
+```
+
+### 8.2 校验规则（参考 validate_skill 模式）
+
+```python
+def validate_scene(upload_dir: str, scene_name: str) -> list[str]:
+    """校验自定义场景，返回错误列表。空列表表示通过。"""
+    errors = []
+
+    # 1. 检查 SCENE.md 是否存在
+    scene_path = os.path.join(upload_dir, "SCENE.md")
+    if not os.path.exists(scene_path):
+        return ["缺少 SCENE.md 文件"]
+
+    # 2. 解析 YAML Front Matter（和 skill 一样用 split("---") + yaml.safe_load）
+    # 3. 校验必填字段：
+    #    - name：仅允许小写字母数字连字符，必须和目录名一致
+    #    - display_name：不能为空
+    #    - description：不能为空，不超过 500 字
+    #    - category_id：必须在 scene_category 表中存在
+    #    - nodes：数组非空，至少 2 个节点
+    # 4. 校验 nodes：
+    #    - 每个 node 的 skill 字段必须在 skill 表中存在（official 或当前用户可访问的）
+    #    - next 链路完整性：从第一个节点出发能走到 done，不能断链、不能循环
+    #    - handoff 字段合法值：a2a / complete
+    # 5. 校验 onboarding 字段的技能名必须在 skill 表中存在
+    # 6. 校验 SCENE.md 文件大小不超过 1MB
+    # 7. 校验图标文件（如果存在）：icon.png / icon.svg / icon.jpg，不超过 2MB
+    # 8. 禁止可执行文件（复用 skill 的 FORBIDDEN_EXTS 校验）
+
+    return errors
+```
+
+### 8.3 上传流程（复用 skill upload 模式）
+
+```python
+@router.post("/market/upload")
+async def upload_scene(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """上传场景 ZIP 包。"""
+    # 1. 读取文件，大小限制 10MB
+    # 2. 解压 ZIP（zip 炸弹防护，复用 skill 的 MAX_EXTRACT_BYTES）
+    # 3. 取第一个真实目录（过滤 __MACOSX/.DS_Store，和 skill 一样）
+    # 4. validate_scene 校验 SCENE.md
+    # 5. 解析 frontmatter → 拿 name/display_name/description/category_id/nodes/onboarding
+    # 6. 解析正文 Markdown → 作为 market_description
+    # 7. 图标处理：
+    #    - 有 icon 文件 → 存储到 OBS/本地，icon 存对象 key 或路径
+    #    - 无 icon 文件 → icon 字段为空，展示时用 scene_category.icon 兜底
+    # 8. scene_market 表写一行：
+    #    - source='user', source_user_id=用户id
+    #    - name/display_name/description/market_description/category_id/nodes_json/onboarding/icon
+    #    - is_featured=0（用户上传的不自动精选）
+    # 9. 解析 nodes_json 拆出每个 skill_name，写入 scene_skill_ref 表（先 DELETE WHERE scene_id=? 再 INSERT）
+    # 10. 返回 {message: "场景 xxx 上传成功"}
+```
+
+### 8.4 和技能导入的关键区别
+
+| 维度 | 技能导入 | 场景导入 |
+|------|---------|---------|
+| 定义文件 | SKILL.md | SCENE.md |
+| 图标来源 | agent_type 表（不自己定义） | 用户上传 icon 文件，空时用分类 emoji |
+| 外部依赖 | 无（自包含） | 有（nodes 引用 skill 表的技能名，需校验存在） |
+| 文件存储 | 需存 OBS/本地（有脚本文件） | 只有图标文件需存储（SCENE.md 数据入 DB） |
+| 重打包 | 需要（_normalize_skill_zip） | 不需要 |
+| 校验重点 | frontmatter 格式 + 文件类型 | nodes 链路完整性 + skill 引用合法性 + 图标文件 |
+| 精选标记 | 通过 db_setup.py 初始化 | 用户上传的 is_featured=0，不自动精选 |
+
+### 8.5 场景包下载模板
+
+提供场景模板 ZIP 下载（和技能模板一样），让用户参考格式：
+
+```
+scene-template.zip
+└── scene-template/
+    ├── SCENE.md          ← 模板示例（带注释说明每个字段）
+    └── icon.png          ← 示例图标
+```
+
+## 九、设计原则和注意事项
 
 1. **scene_market 表完全独立**：自包含全部场景信息，不依赖 devops_pipeline_scene。场景市场所有操作只碰 scene_market 一张表，高内聚低耦合
 2. **单向关联**：devops_pipeline_scene.market_scene_id → scene_market.id，用户场景记录自己的市场来源。scene_market 不知道谁在用自己（统计时反向查）
 3. **将来用户自建场景上市场**：往 scene_market 插一行（source='user', source_user_id=用户id），不影响 devops_pipeline_scene
-4. **devops_pipeline_scene 不加展示字段**：is_featured/thumbnail/market_description/recommended_template 全在 scene_market 表里，devops_pipeline_scene 只加 market_scene_id 一个字段
+4. **devops_pipeline_scene 不加展示字段**：is_featured/icon/market_description/recommended_template 全在 scene_market 表里，devops_pipeline_scene 只加 market_scene_id 一个字段
 5. **审计字段**：每张新表统一加 created_by/updated_by VARCHAR(64)，和现有系统表一致
 6. **list_skills 接口兼容**：新增返回字段不影响现有调用方（agents.js 的 skill 下拉、场景中心的 skill 选择），只是多了字段
 7. **skills.js 重写风险**：现有 skills.js 500+ 行包含上传/删除/转仓库/华为云包/子技能等完整逻辑，重写时必须保留所有现有功能
 8. **场景体验的 create_from_template 复用**：现有 create_from_template 是 async 函数，experience_market_scene 也是 async，直接调用即可
 9. **SVG 缩略图**：苹果风格渐变+图标，7 个文件，纯静态资源不影响功能
-10. **DB 迁移**：2 个 ALTER + 2 个 CREATE TABLE，按现有 _migrate_tables 模式追加，幂等执行
+10. **DB 迁移**：2 个 ALTER + 5 个 CREATE TABLE（scene_category + scene_market + scene_likes + scene_skill_ref + skill_likes），按现有 _migrate_tables 模式追加，幂等执行

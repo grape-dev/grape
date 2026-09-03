@@ -95,6 +95,7 @@ DevOps Agents：VOD / Issue / Coding / QA / SRE
 - 功能介绍：场景详细描述（扩充现有 description）
 - 技能链路：列出场景用到的技能名称（VOD → Issue → Coding → QA → SRE）
 - 技能数 + 在用仓库数（如"5 技能 · 5 仓库在用"）
+- 点赞按钮 + 数量（❤️ 图标 + 数字，点击 toggle）
 - 精选徽章：标星场景显示 🌟 徽章
 - "应用"按钮：将场景应用到当前选中仓库
 - "体验"按钮：基于该场景关联的模板项目，一键创建+托管+应用场景+进入项目
@@ -141,6 +142,7 @@ DevOps Agents：VOD / Issue / Coding / QA / SRE
 - 在 configs/agent-skill-mapping.json（或新建 configs/scene-market.json）中配置 `"featured": true`
 - 同步到 devops_pipeline_scene 表（新增 is_featured 字段）
 - 精选场景在市场页面置顶展示（横向滚动），带 🌟 徽章
+- 场景点赞和在用仓库数维度互补：点赞=主观认可（好不好用），在用仓库数=客观使用量（多少团队在用）
 
 ### 3.3 技能市场页面
 
@@ -275,22 +277,88 @@ DevOps Agents：VOD / Issue / Coding / QA / SRE
 ### 4.3 数据库变更
 
 ```sql
+-- 新建 scene_category 表（场景分类，独立管理）
+CREATE TABLE scene_category (
+  id INT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(64) NOT NULL COMMENT '分类名称',
+  icon VARCHAR(32) DEFAULT '' COMMENT '分类图标（emoji）',
+  order_num INT DEFAULT 0 COMMENT '排序序号',
+  is_active INT DEFAULT 1 COMMENT '是否启用 0否 1是',
+  created_by VARCHAR(64) DEFAULT '' COMMENT '创建者',
+  updated_by VARCHAR(64) DEFAULT '' COMMENT '更新者',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 新建 scene_market 表（场景市场，完全独立，自包含）
+CREATE TABLE scene_market (
+  id INT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(256) NOT NULL COMMENT '场景标识（内部用）',
+  display_name VARCHAR(256) DEFAULT '' COMMENT '展示名称',
+  version VARCHAR(32) DEFAULT '1.0.0' COMMENT '版本号',
+  description TEXT COMMENT '简短描述',
+  market_description TEXT COMMENT '市场展示详细功能介绍',
+  icon VARCHAR(512) DEFAULT '' COMMENT '场景图标',
+  category_id INT DEFAULT 1 COMMENT '分类ID（外键→scene_category.id）',
+  is_featured INT DEFAULT 0 COMMENT '精选标记 0否 1是',
+  like_count INT DEFAULT 0 COMMENT '点赞数（冗余计数）',
+  source VARCHAR(32) DEFAULT 'official' COMMENT '来源：official/user/third_party',
+  source_user_id INT DEFAULT 0 COMMENT 'source=user时记录创建者用户ID',
+  recommended_template VARCHAR(191) DEFAULT '' COMMENT '推荐模板ID（体验按钮用）',
+  nodes_json TEXT COMMENT '技能链路配置（完整nodes，自包含）',
+  onboarding VARCHAR(191) DEFAULT 'repo-onboarding' COMMENT '首次托管引导技能名',
+  is_active INT DEFAULT 1 COMMENT '是否启用 0否 1是',
+  created_by VARCHAR(64) DEFAULT '' COMMENT '创建者',
+  updated_by VARCHAR(64) DEFAULT '' COMMENT '更新者',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_name_source (name, source, source_user_id),
+  INDEX idx_category_id (category_id),
+  INDEX idx_is_featured (is_featured),
+  INDEX idx_source (source)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- devops_pipeline_scene 表加字段
+ALTER TABLE devops_pipeline_scene ADD COLUMN market_scene_id INTEGER DEFAULT NULL;
+CREATE INDEX idx_market_scene_id ON devops_pipeline_scene (market_scene_id);
+
 -- skill 表加字段
 ALTER TABLE skill ADD COLUMN is_featured INT DEFAULT 0 COMMENT '精选标记 0否 1是';
 ALTER TABLE skill ADD COLUMN like_count INT DEFAULT 0 COMMENT '点赞数（冗余计数）';
-
--- devops_pipeline_scene 表加字段
-ALTER TABLE devops_pipeline_scene ADD COLUMN is_featured INT DEFAULT 0 COMMENT '精选标记 0否 1是';
-ALTER TABLE devops_pipeline_scene ADD COLUMN thumbnail VARCHAR(512) DEFAULT '' COMMENT '缩略图路径';
+CREATE INDEX idx_skill_is_featured ON skill (is_featured);
 
 -- 新建 skill_likes 表
 CREATE TABLE skill_likes (
   id INT NOT NULL AUTO_INCREMENT,
-  user_id INT NOT NULL,
-  skill_id INT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  user_id INT NOT NULL COMMENT '用户ID',
+  skill_id INT NOT NULL COMMENT '技能ID',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (id),
-  UNIQUE KEY user_skill (user_id, skill_id)
+  UNIQUE KEY uk_user_skill (user_id, skill_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 新建 scene_likes 表
+CREATE TABLE scene_likes (
+  id INT NOT NULL AUTO_INCREMENT,
+  user_id INT NOT NULL COMMENT '用户ID',
+  scene_id INT NOT NULL COMMENT '场景市场ID（scene_market.id）',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_user_scene (user_id, scene_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 新建 scene_skill_ref 表（场景-技能关联关系，预计算统计用）
+CREATE TABLE scene_skill_ref (
+  id INT NOT NULL AUTO_INCREMENT,
+  scene_id INT NOT NULL COMMENT '场景市场ID（scene_market.id）',
+  skill_name VARCHAR(256) NOT NULL COMMENT '技能名（指向 skill.skill_name）',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_scene_skill (scene_id, skill_name),
+  INDEX idx_skill_name (skill_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
@@ -306,3 +374,4 @@ CREATE TABLE skill_likes (
 8. ✅ 技能卡片 Agent 图标：复用 _AGENT_TYPES 配色
 9. ✅ 技能组合场景介绍：取消（场景市场已覆盖）
 10. ✅ 原型文件：src/api/static/market-prototype-v2.html
+11. ✅ 场景点赞：需要（与在用仓库数维度互补）
