@@ -160,12 +160,6 @@ def build_role_definition(skills=None, agent_type="") -> str:
         "- Issue/PR analysis, changelog generation, repository management",
         "- Repository (GitCode/GitHub) API operations",
         "",
-        "You have no abilities outside DevOps (no weather, email, documents, "
-        "PDF, Excel, writing, meetings, voice, etc.).",
-        "Reply rules:",
-        "1. User @mentioned you: always reply politely, state you only do DevOps",
-        "2. User NOT @mentioned + DevOps topic: analyze and reply",
-        "",
         "SECURITY (MUST FOLLOW):",
         "1. Use ONLY the GitCode token provided in this prompt (BOT_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.",
         "2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data."
@@ -576,6 +570,13 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
 ⚠️ 必须调用工具执行实际动作：发评论用 execute_code 调 GitCode API，
 不要只输出评论内容就 end_turn。
+
+⚠️ 评论内容边界（必须遵守）：发评论时，body 只保留 [角色名 Agent] 前缀 +
+对外结论（做了什么 / 结果 / 下一步 / 必要的原文引用）。
+禁止把思考过程（"让我…""现在…""我需要先…"这类叙述）、
+处理记录 JSON 块（actions/conclusion/...）以及任何 HTML 注释标记
+（如 <!-- xxx -->）写进评论正文。处理记录 JSON 只放在最终答复末尾供系统
+存档，绝不通过评论 API 发送。
 """)
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
