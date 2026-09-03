@@ -264,7 +264,14 @@ function loadAgentTypes() {
     if (view !== 'dash') window._dashboardEditing = false;
 
     if (repo) {
-      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.fullName || (repo.owner + '/' + repo.name)}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
+      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.fullName || (repo.owner + '/' + repo.name)}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a><span id="deployLinkSlot" style="margin-left:8px"></span>`;
+      // 异步加载部署 URL
+      API.get('/repos/deploy-url/' + repo.owner + '/' + repo.name).then(d => {
+        const slot = document.getElementById('deployLinkSlot');
+        if (slot && d && d.deploy_url) {
+          slot.innerHTML = `<a href="${d.deploy_url}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="访问部署的业务系统">🌐 访问应用 ↗</a>`;
+        }
+      }).catch(() => {});
     } else {
       repoTitle.textContent = '';
     }
