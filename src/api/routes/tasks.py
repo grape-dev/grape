@@ -142,8 +142,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     - assignee 优先 → 对应平台 user_id；assignee 为空 → 仓库 owner
     - assignee/owner 未注册平台（无 unified_user_mapping）→ user_id=0 落库；
       任务中心 mine 查询 `user_id=? OR user_id=0` 展示（P2 拍板修订：展示，不隐藏）
-    - 幂等：同 repo+issue+assignee 的 active/processing 行复用
-    - subtask_mode: 调用方直接传入（-1=从 issue_state 读取，0/1=直接使用）
+    - 幂等：同一 issue 已存在 active/processing 任务则复用（2026-09-03 修复#15：不再按 assignee 区分，
+      防止 webhook 回声导致同一 issue 产生两个不同 assignee 的任务）
     """
     from src.repo_key import to_repo_key, split_owner_repo
     repo_key = to_repo_key(repo_key)
@@ -157,9 +157,11 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         user_id = 0
     with db_lock:
         c = db.cursor()
+        # 幂等：同一 issue 任何 assignee 的 active/processing 任务都复用
+        # （#15 修复：防止 webhook 回声导致不同 assignee 创建多个任务）
         c.execute(
-            "SELECT id, conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND assignee=? AND status IN ('active','processing') LIMIT 1",
-            (repo_key, issue_number, target)
+            "SELECT id, conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') LIMIT 1",
+            (repo_key, issue_number)
         )
         row = c.fetchone()
         if row:
@@ -169,6 +171,22 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 c.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
             if subtask_mode >= 0:
                 c.execute("UPDATE tasks SET is_subtask_mode=? WHERE id=?", (subtask_mode, task_id))
+            # 如果传入的 assignee 与现有不同，更新 assignee 并关闭旧 assignee 的任务
+            # （#15 修复：复用已有任务时同步 assignee，防止 assignee 与新建 Issue 不匹配）
+            _existing_assignee = ""
+            try:
+                c.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,))
+                _r2 = c.fetchone()
+                if _r2:
+                    _existing_assignee = _r2[0] or ""
+            except Exception:
+                pass
+            if target and _existing_assignee and target != _existing_assignee:
+                c.execute("UPDATE tasks SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
+                try:
+                    _close_other_assignee_tasks(repo_key, issue_number, keep_assignee=target)
+                except Exception:
+                    pass
             db.commit()
         else:
             if not title:
