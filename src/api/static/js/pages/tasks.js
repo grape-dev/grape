@@ -68,7 +68,7 @@ function _renderDeployLink() {
       <span onclick="_deployEditing=true;_renderDeployLink()" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.6" title="编辑部署 URL" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">✎</span>
     </div>`;
   } else {
-    bar.innerHTML = `<button class="tsk-btn tsk-btn-ghost" style="padding:3px 10px;font-size:11px" onclick="_deployEditing=true;_renderDeployLink()">+ 登记部署 URL</button>`;
+    bar.innerHTML = '';
   }
 }
 

@@ -13,6 +13,9 @@ const HEALTH_BADGE = {
 };
 
 let _runtimeTab = 'engines';
+let _runtimeSearch = '';
+let _rtFilterType = '';
+let _rtFilterScope = '';
 let __runtimeData = null;
 let __runtimeDevices = null;
 let _skillScanDirty = false;  // skills 扫描成功后标记，关闭弹窗时刷新引擎列表
@@ -67,6 +70,36 @@ function renderRuntimes(data) {
       ${_runtimeTab === 'workers' ? `<button class="bt bt-p" onclick="openAiDevspace()" data-tooltip="${I18N.t('runtimes.devspace.ai_devspace_tooltip')}" style="background:linear-gradient(135deg,#60a5fa,#a78bfa);border:none;position:relative;box-shadow:0 2px 8px rgba(96,165,250,.3)">☁ AI Devspace</button>` : ''}
       <button class="bt bt-o" onclick="refreshRuntimes()">⟳ ${I18N.t('runtimes.refresh')}</button>
     </div>`;
+  // 过滤标签栏
+  const _availTypes = [...new Set((_runtimeTab === 'engines' ? (data.runtimes||[]) : devices).map(e => {
+    const n = ((e.instance_name || e.name || '')).toLowerCase();
+    if (n.includes('hermes')) return 'hermes';
+    if (n.includes('opencode')) return 'opencode';
+    if (n.includes('codearts')) return 'codearts';
+    return '';
+  }).filter(Boolean))];
+  const _allScopes = ['local','user','repo','global'];
+  const _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
+  const _hasScope = (sc) => {
+    const list = _runtimeTab === 'engines' ? (data.runtimes||[]) : devices;
+    return list.some(e => (e.scope || (e.is_local ? 'local' : 'global')) === sc || (sc === 'local' && e.is_local));
+  };
+  html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+    ${_availTypes.map(t => {
+      const act = _rtFilterType === t;
+      return `<span onclick="_rtToggleType('${t}')" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0071e3':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0071e3':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px">${t}</span>`;
+    }).join('')}
+    ${_availTypes.length > 0 ? '<span style="width:1px;background:var(--b);margin:2px 4px;height:18px"></span>' : ''}
+    ${_allScopes.filter(_hasScope).map(s => {
+      const act = _rtFilterScope === s;
+      return `<span onclick="_rtToggleScope('${s}')" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0071e3':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0071e3':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px">${_SCOPE_LABELS[s]||s}</span>`;
+    }).join('')}
+    ${(_rtFilterType || _rtFilterScope || _runtimeSearch) ? `<span onclick="_rtClearFilters()" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;color:#86868b;font-weight:400" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">✕ 清除</span>` : ''}
+  </div>`;
+  // 搜索框（独立一行，标签下方）
+  html += `<div style="margin-bottom:16px">
+    <input id="runtimeSearchInput" placeholder="搜索名称、设备、标签..." value="${_runtimeSearch}" onkeyup="if(event.key==='Enter'){_runtimeSearch=this.value;renderRuntimes(__runtimeData)}" onchange="_runtimeSearch=this.value;renderRuntimes(__runtimeData)" style="width:100%;max-width:360px;padding:7px 14px;border:1px solid var(--b);border-radius:10px;font-size:13px;background:var(--c);color:var(--t1);transition:border-color .2s" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='var(--b)'">
+  </div>`;
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);
   html += '<style>[data-tooltip]{position:relative}[data-tooltip]:hover::after{content:attr(data-tooltip);position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#1e2940;color:#fff;padding:6px 14px;border-radius:8px;font-size:11px;font-weight:500;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}[data-tooltip]:hover::before{content:"";position:absolute;top:calc(100% + 3px);left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:#1e2940;z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}@keyframes tipIn{to{opacity:1}}</style>';
   html += _legendHtml();
@@ -75,8 +108,25 @@ function renderRuntimes(data) {
 
 function renderEngines(data, devices) {
   const runtimes = data.runtimes || [];
+  // 搜索 + 类型 + scope 过滤
+  const q = (_runtimeSearch || '').toLowerCase().trim();
+  const filtered = runtimes.filter(rt => {
+    if (q) {
+      const hay = [rt.instance_name, rt.name, rt.worker_name, rt.owner, rt.host_name, (rt.tags||[]).join(' '), (rt.local_skills||[]).join(' ')].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (_rtFilterType) {
+      const ename = (rt.instance_name || rt.name || '').toLowerCase();
+      if (!ename.includes(_rtFilterType)) return false;
+    }
+    if (_rtFilterScope) {
+      const sc = rt.is_local ? 'local' : (rt.scope || 'global');
+      if (sc !== _rtFilterScope) return false;
+    }
+    return true;
+  });
   const groups = { global: [], repo: [], user: [] };
-  runtimes.forEach(rt => { (groups[rt.scope] || groups.global).push(rt); });
+  filtered.forEach(rt => { (groups[rt.scope] || groups.global).push(rt); });
   let html = '';
   SCOPE_ORDER.forEach(sc => {
     const list = groups[sc];
@@ -111,8 +161,25 @@ function renderEngines(data, devices) {
 }
 
 function renderWorkers(data, devices) {
+  // 搜索 + 类型 + scope 过滤
+  const q = (_runtimeSearch || '').toLowerCase().trim();
+  const fDevices = devices.filter(d => {
+    if (q) {
+      const hay = [d.name, d.device_name, d.owner, d.worker_ip, (d.runtimes||[]).map(r=>r.name).join(' ')].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (_rtFilterType) {
+      const names = (d.runtimes||[]).map(r => (r.name||'').toLowerCase()).join(' ');
+      if (!names.includes(_rtFilterType)) return false;
+    }
+    if (_rtFilterScope) {
+      const sc = d.credential_id === 0 ? 'local' : (d.scope || 'global');
+      if (sc !== _rtFilterScope) return false;
+    }
+    return true;
+  });
   const groups = { global: [], repo: [], user: [] };
-  devices.forEach(d => { (groups[d.scope] || groups.global).push(d); });
+  fDevices.forEach(d => { (groups[d.scope] || groups.global).push(d); });
   let html = '';
   SCOPE_ORDER.forEach(sc => {
     const list = groups[sc];
@@ -256,6 +323,21 @@ function openDeviceTasks(credId) {
     el.insertAdjacentHTML('afterbegin', html);
   }).catch(e => app.showToast(I18N.t('runtimes.toast.load_tasks_failed', {msg: e.message})));
 }
+
+window._rtToggleType = function(t) {
+  _rtFilterType = (_rtFilterType === t) ? '' : t;
+  renderRuntimes(__runtimeData);
+};
+window._rtToggleScope = function(s) {
+  _rtFilterScope = (_rtFilterScope === s) ? '' : s;
+  renderRuntimes(__runtimeData);
+};
+window._rtClearFilters = function() {
+  _rtFilterType = '';
+  _rtFilterScope = '';
+  _runtimeSearch = '';
+  renderRuntimes(__runtimeData);
+};
 
 function refreshRuntimes() {
   _stopDevspaceAutoRefresh();
