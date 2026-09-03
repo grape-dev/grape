@@ -726,7 +726,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             touch_conversation(conv_id)
             # web→飞书推送（feishu-web-chat-unified-design.md §3.2）
             await _push_reply_to_feishu(conv, user, final_text)
-            if new_sid and not runtime_session_id:
+            if new_sid and new_sid != runtime_session_id:
                 update_conversation(conv_id, runtime_session_id=new_sid)
             yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
 
