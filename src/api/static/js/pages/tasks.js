@@ -63,9 +63,9 @@ function _renderDeployLink() {
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;font-size:12px" onclick="_deployEditing=false;_renderDeployLink()">取消</button>
     </div>`;
   } else if (_deployUrl) {
-    bar.innerHTML = `<div style="display:flex;align-items:center;gap:8px">
+    bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
       <a href="${_deployUrl}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="访问部署的业务系统">🌐 访问应用 ↗</a>
-      <button class="tsk-btn tsk-btn-ghost" style="padding:2px 8px;font-size:11px" onclick="_deployEditing=true;_renderDeployLink()">编辑</button>
+      <span onclick="_deployEditing=true;_renderDeployLink()" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.6" title="编辑部署 URL" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">✎</span>
     </div>`;
   } else {
     bar.innerHTML = `<button class="tsk-btn tsk-btn-ghost" style="padding:3px 10px;font-size:11px" onclick="_deployEditing=true;_renderDeployLink()">+ 登记部署 URL</button>`;
