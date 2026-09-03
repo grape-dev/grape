@@ -85,7 +85,7 @@ function refreshObs(isAutoRefresh) {
   const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
   Promise.all([
     API.get('/dashboard/ops/overview' + repoParam).catch(() => null),
-    fetch('/health/realtime').then(r => r.json()).catch(() => null),
+    fetch('/health/realtime', {signal: AbortSignal.timeout(10000)}).then(r => r.json()).catch(() => null),
     // fetch('/metrics').then(r => r.text()).catch(() => null),  // metrics 数据当前未使用，注释掉避免无用请求
   ]).then(([ops, realtime]) => {
     _obsData = { ops, realtime };
@@ -501,7 +501,7 @@ function loadA2aHealth() {
   const container = document.getElementById('obs-a2a-health');
   if (!container) return;
   container.innerHTML = section(I18N.t('observability.a2a_health'), I18N.t('observability.a2a_health_subtitle')) + '<div class="loading">' + I18N.t('observability.checking') + '</div>';
-  fetch('/api/dashboard/ops/a2a-health').then(r => r.json()).then(d => {
+  fetch('/api/dashboard/ops/a2a-health', {signal: AbortSignal.timeout(10000)}).then(r => r.json()).then(d => {
     const status = d.reachable
       ? `<span style="color:var(--g)">${I18N.t('observability.a2a_reachable')}</span> (${d.latency_ms}ms)`
       : `<span style="color:var(--r)">${I18N.t('observability.a2a_unreachable')}</span> ${d.error ? '<span class="ts t3">'+d.error.substring(0,80)+'</span>' : ''}`;
@@ -613,7 +613,7 @@ function loadErrorLogs(container) {
     <div id="errorLogBody"><div class="loading">${I18N.t('observability.loading')}</div></div>
   `;
   // 加载来源列表
-  fetch('/api/dashboard/ops/error-logs/sources').then(r => r.json()).then(d => {
+  fetch('/api/dashboard/ops/error-logs/sources', {signal: AbortSignal.timeout(10000)}).then(r => r.json()).then(d => {
     const sel = document.getElementById('errorLogSource');
     if (sel) {
       (d.sources || []).forEach(s => {
@@ -629,7 +629,7 @@ function loadErrorLogs(container) {
   const sourceParam = currentSource ? '&source=' + encodeURIComponent(currentSource) : '';
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
   const repoParam = repo && repo.fullName ? '&repo=' + encodeURIComponent(repo.fullName) : '';
-  fetch('/api/dashboard/ops/error-logs?limit=100' + levelParam + sourceParam + repoParam).then(r => r.json()).then(d => {
+  fetch('/api/dashboard/ops/error-logs?limit=100' + levelParam + sourceParam + repoParam, {signal: AbortSignal.timeout(15000)}).then(r => r.json()).then(d => {
     const entries = d.entries || [];
     const countEl = document.getElementById('errorLogCount');
     const bodyEl = document.getElementById('errorLogBody');
@@ -680,7 +680,7 @@ function renderTasksTab(ops, rt) {
     setTimeout(() => renderTimelineList(document.getElementById('obs-timeline-container'), _timelineCache.issues, _timelineCache.repoKey), 0);
   } else {
     const repoParam = repoFullName ? '?repo=' + encodeURIComponent(repoFullName) : '';
-    fetch('/api/dashboard/ops/timeline' + repoParam).then(r => r.json()).then(d => {
+    fetch('/api/dashboard/ops/timeline' + repoParam, {signal: AbortSignal.timeout(10000)}).then(r => r.json()).then(d => {
       _timelineCache = { repo: repoFullName, ts: Date.now(), issues: d.issues || [], repoKey: d.repoKey || '' };
       _timelineIssues = d.issues || [];
       renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || [], d.repoKey || '');
@@ -1209,7 +1209,8 @@ function openSessionLogModal(sessionId, infoEnc) {
   // 先查该引擎 + 该仓库最近的任务
   // 使用 runtime tasks 端点找到最近的 task_id
   fetch('/api/runtime/runtimes/1/tasks?limit=10' + repoParam, {
-    headers: { 'Authorization': 'Bearer ' + (localStorage.token || '') }
+    headers: { 'Authorization': 'Bearer ' + (localStorage.token || '') },
+    signal: AbortSignal.timeout(10000)
   }).then(r => r.json()).then(d => {
     const tasks = d.tasks || [];
     if (!tasks.length) {

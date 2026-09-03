@@ -304,7 +304,7 @@ async def start_onboard(body: StartBody, user: dict = Depends(get_current_user))
 
 
 @router.get("/status")
-async def onboard_status(task_id: str = Query(...), user: dict = Depends(get_current_user)):
+def onboard_status(task_id: str = Query(...), user: dict = Depends(get_current_user)):
     """查询扫码任务状态（前端轮询）。"""
     t = _get_task(task_id)
     if not t:
@@ -327,7 +327,7 @@ class CancelBody(BaseModel):
 
 
 @router.post("/cancel")
-async def cancel_onboard(body: CancelBody, user: dict = Depends(get_current_user)):
+def cancel_onboard(body: CancelBody, user: dict = Depends(get_current_user)):
     """取消进行中的扫码任务。已 connected 的任务取消为幂等，不影响已保存配置。"""
     t = _get_task(body.task_id)
     if not t or t["user_id"] != user["id"]:

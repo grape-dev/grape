@@ -45,7 +45,7 @@ class PasswordLogin(BaseModel):
 
 
 @router.post("/login")
-async def password_login(body: PasswordLogin, response: Response):
+def password_login(body: PasswordLogin, response: Response):
     user = user_db.verify_user(body.username, body.password)
     if not user:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "用户名或密码错误"})
@@ -63,7 +63,7 @@ async def password_login(body: PasswordLogin, response: Response):
 
 
 @router.post("/refresh")
-async def refresh_token(request: Request, response: Response):
+def refresh_token(request: Request, response: Response):
     """用 refresh_token 换新的 access_token + refresh_token（滚动续期）。
 
     refresh_token 从 HttpOnly cookie 读取（不从 body 读——防 XSS）。
@@ -102,7 +102,7 @@ async def refresh_token(request: Request, response: Response):
 
 
 @router.get("/login/gitcode")
-async def gitcode_oauth_login(request: Request):
+def gitcode_oauth_login(request: Request):
     from src.user.db import get_meta_value
     client_id = get_meta_value("oauth_gitcode_client_id")
     if not client_id:
@@ -128,7 +128,7 @@ async def gitcode_oauth_login(request: Request):
 
 
 @router.get("/callback/gitcode")
-async def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     if error:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"GitCode 授权失败: {error}"})
 
@@ -233,7 +233,7 @@ async def gitcode_oauth_callback(request: Request, code: str = "", state: str = 
 
 
 @router.get("/profile")
-async def get_profile(user: dict = Depends(get_current_user)):
+def get_profile(user: dict = Depends(get_current_user)):
     acc = user_db.get_user_account(user["username"]) or {}
     managed_repos_raw = user_db.get_managed_repos(user["id"])
     managed = [{"key": r["full_name"], "full_name": r["full_name"], "is_admin": r["is_admin"]}
@@ -248,7 +248,7 @@ async def get_profile(user: dict = Depends(get_current_user)):
 
 
 @router.post("/logout")
-async def logout(user: dict = Depends(get_current_user), response: Response = None):
+def logout(user: dict = Depends(get_current_user), response: Response = None):
     """登出——token_version+1 撤销所有 token + 清 cookie。"""
     user_db.increment_token_version(user["id"])
     if response:

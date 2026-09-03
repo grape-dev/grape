@@ -20,7 +20,7 @@ def _load_scenes() -> dict:
 
 
 @router.get("")
-async def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
+def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
     """返回所有可用场景列表（repo + user，不含 official）"""
     from src.api.pipeline_config import get_scenes
     from src.repo_key import to_repo_key
@@ -39,7 +39,7 @@ async def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
 
 
 @router.get("/with-pipeline")
-async def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str = ""):
+def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str = ""):
     """返回场景列表 + 各场景流水线配置"""
     from src.api.pipeline_config import get_scenes, get_pipeline_config
     from src.repo_key import to_repo_key
@@ -62,7 +62,7 @@ async def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo
 
 
 @router.get("/{scene_id}")
-async def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)):
+def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)):
     """返回场景详情（nodes + engine 信息）"""
     from src.api.pipeline_config import get_pipeline_config
     from src.repo_key import to_repo_key
@@ -80,7 +80,7 @@ async def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)
 
 
 @router.get("/skills/{agent_type}")
-async def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user)):
+def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user)):
     """返回该 agent_type 可选的 skill 列表"""
     from src.session_manager import db, db_lock
     skills = []
@@ -130,7 +130,7 @@ class ApplySceneRequest(BaseModel):
 
 
 @router.post("")
-async def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
+def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
     """创建自定义场景"""
     from src.api.pipeline_config import create_custom_scene
     from src.repo_key import to_repo_key
@@ -171,7 +171,7 @@ async def create_scene(body: CreateSceneRequest, user: dict = Depends(get_curren
 
 
 @router.put("/{scene_id}")
-async def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
+def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
     """更新场景（repo/user scope 直接更新，official 不可修改）"""
     from src.api.pipeline_config import update_custom_scene, _query_scene_by_id
     from src.repo_key import to_repo_key
@@ -205,7 +205,7 @@ async def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Dep
 
 
 @router.delete("/{scene_id}")
-async def delete_scene(scene_id: str, user: dict = Depends(get_current_user), repo: str = ""):
+def delete_scene(scene_id: str, user: dict = Depends(get_current_user), repo: str = ""):
     """删除自定义场景（软删除，官方场景不可删除）"""
     from src.api.pipeline_config import delete_custom_scene, _query_scene_by_id
     from src.repo_key import to_repo_key
@@ -235,7 +235,7 @@ async def delete_scene(scene_id: str, user: dict = Depends(get_current_user), re
 
 
 @router.post("/apply/{owner}/{repo}")
-async def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
+def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                       user: dict = Depends(get_current_user)):
     """为仓库应用指定场景"""
     from src.api.pipeline_config import get_pipeline_config

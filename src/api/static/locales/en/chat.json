@@ -70,5 +70,11 @@
   "querying": "Querying",
   "backend": "Backend",
   "placeholder": "Ask me anything...",
-  "send": "Send"
+  "send": "Send",
+  "upload_image": "Upload Image",
+  "remove_image": "Remove Image",
+  "image_too_large": "Image size must not exceed 5MB",
+  "image_max_reached": "Maximum {{max}} images allowed",
+  "image_max_exceeded": "Exceeded maximum limit, only partial images added (max {{max}})",
+  "image_attached": "Image attached: {{name}}, type text or just hit send"
 }

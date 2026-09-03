@@ -114,7 +114,7 @@ def _require_credential(request: Request) -> int:
 # ===== 协议端点（M3）=====
 
 @router.post("/register")
-async def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int = Depends(_require_credential)):
+def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int = Depends(_require_credential)):
     """凭据校验 + 按实例键 upsert agent_runtimes（幂等），返回 server 权威 runtime IDs。
 
     多实例键（multi-runtime-instance-design §3.1）：每台 worker（凭据）对每个引擎独占一行，
@@ -193,7 +193,7 @@ async def runtime_register(body: RuntimeRegBody, request: Request, credential_id
 
 
 @router.post("/heartbeat")
-async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
+def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
     """更新 runtime 在线态 / last_seen_at。
 
     归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
@@ -290,7 +290,7 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
 
 
 @router.get("/admin/event-bus")
-async def event_bus_debug(user: dict = Depends(get_current_user)):
+def event_bus_debug(user: dict = Depends(get_current_user)):
     """Debug endpoint: show event bus history and listeners."""
     from src.api.event_bus import get_event_bus
     bus = get_event_bus()
@@ -302,7 +302,7 @@ async def event_bus_debug(user: dict = Depends(get_current_user)):
 
 
 @router.post("/admin/batch-recover")
-async def batch_recover_stale_tasks_api(user: dict = Depends(get_current_user)):
+def batch_recover_stale_tasks_api(user: dict = Depends(get_current_user)):
     """Manually trigger batch stale task recovery (Phase 5)."""
     from src.runtime.service import batch_recover_stale_tasks
     result = batch_recover_stale_tasks()
@@ -354,7 +354,7 @@ def _attach_skill_obs(task: dict) -> None:
 
 
 @router.post("/runtimes/{runtime_id}/tasks/claim")
-async def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
+def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
                         credential_id: int = Depends(_require_credential)):
     """按 runtime_id 拉取队首任务或 null（确定路由 D3 + 串行槽 D9）。
 
@@ -386,7 +386,7 @@ async def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
 
 
 @router.get("/runtimes/{runtime_id}/tags")
-async def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_credential)):
+def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_credential)):
     """Return this engine's claimable tags from DB (worker polls this instead of ENGINE_TAGS env).
 
     Tags are managed by users via the console (settings.py CRUD endpoints).
@@ -408,7 +408,7 @@ async def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_requir
 
 
 @router.get("/tasks/{task_id}/env")
-async def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credential)):
+def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credential)):
     """Return latest env (AK/SK + credentials) for a task from DB.
 
     Workers call this before executing to get fresh credentials,
@@ -428,7 +428,7 @@ async def runtime_task_env(task_id: str, credential_id: int = Depends(_require_c
 
 
 @router.post("/runtimes/{runtime_id}/tasks/claim-by-tag/{tag}")
-async def runtime_claim_by_tag(runtime_id: int, tag: str,
+def runtime_claim_by_tag(runtime_id: int, tag: str,
                                body: RuntimeClaimBody | None = None,
                                credential_id: int = Depends(_require_credential)):
     """Claim task by tag + scope isolation (event-dispatch-redesign-v2.md 2.4).
@@ -458,7 +458,7 @@ async def runtime_claim_by_tag(runtime_id: int, tag: str,
 
 
 @router.post("/tasks/{task_id}/skill-zip")
-async def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_require_credential)):
+def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_require_credential)):
     """v3.0 服务端代拉（降级链 ②）：worker URL 直连失败的兜底。
 
     服务端现查 file_path → get_skill_zip_bytes（自动走 zip_cache：
@@ -499,7 +499,7 @@ async def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_req
 
 
 @router.post("/tasks/{task_id}/start")
-async def runtime_task_start(task_id: str, credential_id: int = Depends(_require_credential)):
+def runtime_task_start(task_id: str, credential_id: int = Depends(_require_credential)):
     t = service.get_task(task_id)
     if not t:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
@@ -508,13 +508,13 @@ async def runtime_task_start(task_id: str, credential_id: int = Depends(_require
 
 
 @router.post("/tasks/{task_id}/progress")
-async def runtime_task_progress(task_id: str, body: ProgressBody, credential_id: int = Depends(_require_credential)):
+def runtime_task_progress(task_id: str, body: ProgressBody, credential_id: int = Depends(_require_credential)):
     service.enqueue_async_report("progress", task_id, {"msg": body.summary, "step": body.step, "total": body.total})
     return {"status": "ok"}
 
 
 @router.post("/tasks/{task_id}/messages")
-async def runtime_task_messages(task_id: str, body: MessagesBody, credential_id: int = Depends(_require_credential)):
+def runtime_task_messages(task_id: str, body: MessagesBody, credential_id: int = Depends(_require_credential)):
     # task 已终态（failed/cancelled/completed）时拒绝消息，返回 410 Gone。
     # worker 端 _execute_task 检测到 410 后中断执行（用户终止后残留进程不再继续产出）。
     task = service.get_task(task_id)
@@ -533,7 +533,7 @@ async def runtime_task_messages(task_id: str, body: MessagesBody, credential_id:
 
 
 @router.post("/tasks/{task_id}/usage")
-async def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int = Depends(_require_credential)):
+def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int = Depends(_require_credential)):
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE agent_tasks SET usage_json=? WHERE id=?",
@@ -549,7 +549,7 @@ async def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int =
 
 
 @router.post("/tasks/{task_id}/complete")
-async def runtime_task_complete(task_id: str, body: CompleteBody, credential_id: int = Depends(_require_credential)):
+def runtime_task_complete(task_id: str, body: CompleteBody, credential_id: int = Depends(_require_credential)):
     """完成（幂等）：解析结构化 output → finalize_event_archive → update_event_complete。"""
     task = service.get_task(task_id)
     if not task:
@@ -560,7 +560,7 @@ async def runtime_task_complete(task_id: str, body: CompleteBody, credential_id:
 
 
 @router.post("/tasks/{task_id}/fail")
-async def runtime_task_fail(task_id: str, body: FailBody, credential_id: int = Depends(_require_credential)):
+def runtime_task_fail(task_id: str, body: FailBody, credential_id: int = Depends(_require_credential)):
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
@@ -569,7 +569,7 @@ async def runtime_task_fail(task_id: str, body: FailBody, credential_id: int = D
 
 
 @router.post("/tasks/{task_id}/requeue")
-async def runtime_task_requeue(task_id: str, credential_id: int = Depends(_require_credential)):
+def runtime_task_requeue(task_id: str, credential_id: int = Depends(_require_credential)):
     """客户端并发冲突跳过时回滚任务为 queued（避免 dispatched 悬空卡死，见 seq#622 教训）。"""
     task = service.get_task(task_id)
     if not task:
@@ -579,7 +579,7 @@ async def runtime_task_requeue(task_id: str, credential_id: int = Depends(_requi
 
 
 @router.post("/runtimes/{runtime_id}/recover-orphans")
-async def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_require_credential)):
+def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_require_credential)):
     """启动时清理该 runtime 遗留的 dispatched/running 任务（置回 queued）。"""
     with db_lock:
         c = db.cursor()
@@ -592,7 +592,7 @@ async def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(
 # ===== 用户态端点（M2，保留）=====
 
 @router.get("/tasks/{task_id}/status")
-async def get_task_status(task_id: str, user: dict = Depends(get_current_user)):
+def get_task_status(task_id: str, user: dict = Depends(get_current_user)):
     """任务状态轮询（chat 前端用，D5 打字机降级）。"""
     task = service.get_task(task_id)
     if not task:
@@ -610,7 +610,7 @@ async def get_task_status(task_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.get("/tasks/{task_id}/state")
-async def runtime_task_state(task_id: str, credential_id: int = Depends(_require_credential)):
+def runtime_task_state(task_id: str, credential_id: int = Depends(_require_credential)):
     """worker 端轻量状态查询：只返回 status，用于 sid 看门狗检测幽灵任务。
 
     worker 的 active_sessions 是内存 set，_wrap 的 finally 在 opencode 进程
@@ -625,7 +625,7 @@ async def runtime_task_state(task_id: str, credential_id: int = Depends(_require
 
 
 @router.post("/tasks/{task_id}/cancel")
-async def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
+def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
     """取消任务（M2-5）：置 cancelled；执行侧由 worker 感知退出。"""
     task = service.get_task(task_id)
     if not task:
@@ -635,7 +635,7 @@ async def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.get("/runtimes/{runtime_id}/tasks")
-async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
+def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
                              status: str = "", limit: int = 50, repo: str = ""):
     """设备任务列表（M4 前端设备 [查看任务]）。"""
     from src.session_manager import db, db_lock
@@ -662,7 +662,7 @@ async def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_u
 
 
 @router.get("/runtimes/{runtime_id}/sessions")
-async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user),
+def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user),
                                 repo: str = ""):
     """引擎 session 列表。
 
@@ -745,7 +745,7 @@ async def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_curren
 
 
 @router.get("/credentials/{cid}/tasks")
-async def list_credential_tasks(cid: int, user: dict = Depends(get_current_user),
+def list_credential_tasks(cid: int, user: dict = Depends(get_current_user),
                                 status: str = "", limit: int = 50):
     """按凭据聚合任务（该凭据所有引擎实例的 agent_tasks，见 runtime-admin-two-view-design.md §4.3）。"""
     from src.session_manager import db, db_lock
@@ -784,7 +784,7 @@ def _server_url() -> str:
 
 
 @router.get("/install")
-async def runtime_install_script():
+def runtime_install_script():
     """返回 Worker 一键安装脚本（只读，无敏感信息；token 由调用方以 --token 注入）。
 
     见 worker-server-delivery-design.md。用法：
@@ -804,7 +804,7 @@ async def runtime_install_script():
 
 
 @router.get("/install/latest")
-async def runtime_install_latest(credential_id: int = Depends(_require_credential)):
+def runtime_install_latest(credential_id: int = Depends(_require_credential)):
     """返回当前 Worker 安装包版本号（rta_ 鉴权）。
 
     供 worker 启动自检（见 worker-server-delivery-design.md §2.4）。
@@ -814,7 +814,7 @@ async def runtime_install_latest(credential_id: int = Depends(_require_credentia
 
 
 @router.get("/grape-worker.tar.gz")
-async def runtime_worker_package_public():
+def runtime_worker_package_public():
     """公开下发 Worker 绿色安装包 tar.gz（无需鉴权）。
 
     包内仅含 worker 运行代码（无任何敏感信息，凭据由安装命令 --token 注入），
@@ -834,7 +834,7 @@ async def runtime_worker_package_public():
 
 
 @router.get("/install/package")
-async def runtime_install_package(credential_id: int = Depends(_require_credential)):
+def runtime_install_package(credential_id: int = Depends(_require_credential)):
     """下发 Worker 安装包 tar.gz（rta_ 鉴权，首次请求动态打包 + 缓存）。
 
     见 worker-server-delivery-design.md §2.1。用法（安装脚本内部调用）：
@@ -922,7 +922,7 @@ def _scan_engine_skills_detail(engine_name: str) -> list[dict]:
 
 
 @router.post("/runtimes/{runtime_id}/refresh-skills")
-async def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dict = Depends(get_current_user)):
+def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dict = Depends(get_current_user)):
     """重新扫描指定 engine 的本地 skill 并返回详情列表。
 
     本机直连引擎（credential_id=0）：直接扫描本机目录，立即返回结果。
@@ -973,7 +973,7 @@ async def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dic
 
 
 @router.post("/runtimes/{runtime_id}/skills-report")
-async def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depends(_require_credential)):
+def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depends(_require_credential)):
     """worker 回报 skill 扫描结果。
 
     worker claim 时收到 scan_request → 执行扫描 → 调本接口回报。
@@ -1023,7 +1023,7 @@ def _apply_tag_rules(tags: list[str]) -> list[str]:
 
 
 @router.get("/runtimes/{runtime_id}/tags")
-async def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_user)):
+def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_user)):
     """返回 engine 的角色标签列表。"""
     from src.session_manager import db, db_lock
     with db_lock:
@@ -1036,7 +1036,7 @@ async def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_use
 
 
 @router.put("/runtimes/{runtime_id}/tags")
-async def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_current_user)):
+def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_current_user)):
     """设置 engine 的角色标签。应用互斥规则后写入。
 
     以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。

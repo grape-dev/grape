@@ -72,3 +72,42 @@ class TestSweeper:
 def repogit_dir(repo_key, agent_type, num):
     from src.runtime import repogit
     return repogit.issue_dir_for(repo_key, agent_type, num)
+
+
+class TestStuckEventText:
+    """sweeper 文案区分「创建任务失败」与「running 超时」——agent-tasks-direct-create-binding-fix-design.md §5.4"""
+
+    def _mk_running_event(self, seq, repo_key, started_at):
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO events (repo_key, issue_id, event_type, agent_type, title, status, started_at) "
+                "VALUES (?, '?#0', 'issue_opened', 'vod', 't', 'running', ?)",
+                (repo_key, started_at))
+            db.commit()
+            return c.lastrowid
+
+    def test_no_task_row_marks_create_failure(self):
+        repo_key = "gitcode:org/sweep-text-1"
+        seq = self._mk_running_event(1, repo_key, "2020-01-01T00:00:00+00:00")
+        cleanup.sweep_stuck_events_once(no_start_minutes=10, stale_minutes=30)
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT status, result FROM events WHERE seq=?", (seq,)).fetchone()
+        assert row and row[0] == "failed"
+        assert "创建任务失败" in row[1] and "create_direct_task" in row[1]
+
+    def test_has_task_row_marks_timeout(self):
+        repo_key = "gitcode:org/sweep-text-2"
+        seq = self._mk_running_event(2, repo_key, "2020-01-01T00:00:00+00:00")
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, status, prompt, repo_key, agent_type) "
+                "VALUES ('t-sweep-timeout', 'sess', 0, ?, 'completed', 'p', ?, 'vod')", (seq, repo_key))
+            db.commit()
+        cleanup.sweep_stuck_events_once(no_start_minutes=10, stale_minutes=30)
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT status, result FROM events WHERE seq=?", (seq,)).fetchone()
+        assert row and row[0] == "failed"
+        assert "running 超时" in row[1] and "创建任务失败" not in row[1]

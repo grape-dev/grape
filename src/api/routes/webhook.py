@@ -320,22 +320,19 @@ async def a2a_endpoint(request: Request):
 
         # Issue 生命周期阶段推进（D9/D10，见 vod-skill-upgrade-plan.md §3.0.2）
         # A2A 交办 → issue_state 归属转移到目标 agent（qa 回 coding 允许回退）
-        # Pipeline 顺序校验（2026-08-30 修复）：
-        # VOD agent 有时会跳过 issue 直接触发 coding（premature 判断），
-        # 需要按 pipelines.json 定义强制走 vod→issue→coding→qa→sre 顺序。
-        # 如果 A2A 目标 agent 超前于当前 stage 的 next，自动修正为正确的 next agent。
+        # 回退检测：A2A 目标 agent 比当前 stage 更早时，取消已派发的下游任务。
+        # 不做跳步修正——agent 有权 A2A 到任意目标 agent，pipeline 顺序由 skill 逻辑保证。
         if issue_number:
             try:
-                # 获取当前 stage
                 from src.api.session_store import get_issue_stage
-                _current_stage = get_issue_stage(repo_key, f"#{issue_number}") or ""
-                # 获取 scene_id 对应的 pipeline next 映射
+                _stage_info = get_issue_stage(repo_key, f"#{issue_number}")
+                _current_stage = _stage_info["stage"] if _stage_info else ""
                 _pipeline_next = {}
                 try:
                     import os as _os, json as _json
                     from src.api.session_store import get_issue_scene
                     _scene_id = get_issue_scene(repo_key, f"#{issue_number}") or "default"
-                    _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)),
+                    _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
                                                "configs", "pipelines.json")
                     with open(_pipe_path, "r", encoding="utf-8") as _f:
                         _pipes = _json.load(_f)
@@ -344,18 +341,74 @@ async def a2a_endpoint(request: Request):
                         _pipeline_next[_node.get("id", "")] = _node.get("next", "")
                 except Exception:
                     pass
-                # 检查是否跳步：当前 stage 的 next 不是目标 agent
-                _expected_next = _pipeline_next.get(_current_stage, "")
-                if _expected_next and _expected_next != "done" and agent_name != _expected_next:
-                    # 允许回退（qa→coding）和允许跳到后续阶段（如 coding 直接触发 sre）
-                    _stage_order = list(_pipeline_next.keys())
-                    _cur_idx = _stage_order.index(_current_stage) if _current_stage in _stage_order else -1
-                    _target_idx = _stage_order.index(agent_name) if agent_name in _stage_order else -1
-                    if _target_idx > _cur_idx + 1:
-                        # 跳步：自动修正为正确的 next agent
-                        log.warning(f"A2A: pipeline order fix — issue=#{issue_number} "
-                                    f"stage={_current_stage} target={agent_name} -> corrected to {_expected_next}")
-                        agent_name = _expected_next
+                _stage_order = list(_pipeline_next.keys())
+                _cur_idx = _stage_order.index(_current_stage) if _current_stage in _stage_order else -1
+                _target_idx = _stage_order.index(agent_name) if agent_name in _stage_order else -1
+
+                # 回退检测 + 取消下游任务
+                if _target_idx < _cur_idx and _cur_idx > 0:
+                    _cancel_agents = [a for a in _stage_order[_cur_idx:] if a != "done"]
+                    log.info(f"A2A: rollback detected — issue=#{issue_number} "
+                             f"from={_current_stage} to={agent_name}, cancelling={_cancel_agents}")
+                    try:
+                        from src.session_manager import db, db_lock
+                        from src.runtime.service import cancel_task
+                        from src.api.event_pipeline import cancel_direct_task
+                        from src.api.event_store import update_event_status
+
+                        with db_lock:
+                            c = db.cursor()
+                            placeholders = ",".join("?" * len(_cancel_agents))
+                            c.execute(
+                                f"SELECT id, event_seq, agent_type FROM agent_tasks "
+                                f"WHERE repo_key=? AND issue_id=? AND agent_type IN ({placeholders}) "
+                                f"AND status IN ('queued','dispatched','running')",
+                                (repo_key, f"#{issue_number}", *_cancel_agents))
+                            tasks = c.fetchall()
+
+                        _cancelled = 0
+                        _errors = []
+                        _sre_completed_alert = False
+
+                        for tid, tseq, ttype in tasks:
+                            try:
+                                cancel_task(tid)
+                                _cancelled += 1
+                            except Exception as _ce:
+                                _errors.append(f"cancel_task({ttype}:{tid}): {_ce}")
+                            try:
+                                if tseq:
+                                    cancel_direct_task(tseq)
+                            except Exception as _de:
+                                _errors.append(f"cancel_direct_task({ttype}:{tseq}): {_de}")
+                            try:
+                                if tseq:
+                                    update_event_status(tseq, "cancelled")
+                            except Exception:
+                                pass
+
+                        # SRE 已完成检测：查 events 表（权威状态）
+                        if "sre" in _cancel_agents:
+                            with db_lock:
+                                c2 = db.cursor()
+                                c2.execute(
+                                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? "
+                                    "AND agent_type='sre' AND status='completed' "
+                                    "ORDER BY seq DESC LIMIT 1",
+                                    (repo_key, f"#{issue_number}"))
+                                _sre_row = c2.fetchone()
+                            if _sre_row:
+                                _sre_completed_alert = True
+
+                        if _sre_completed_alert:
+                            log.warning(f"A2A: SRE already completed for issue=#{issue_number} — "
+                                        f"manual review needed, published artifact may need rollback")
+                        if _errors:
+                            log.warning(f"A2A: cancel errors: {_errors}")
+                        log.info(f"A2A: rollback cancel — {_cancelled} tasks cancelled, "
+                                 f"sre_alert={_sre_completed_alert}")
+                    except Exception as _re:
+                        log.warning(f"A2A: rollback cancel failed: {_re} — A2A continues, cancel may not have taken effect")
             except Exception as _pe:
                 log.warning(f"A2A: pipeline order check failed: {_pe}")
 

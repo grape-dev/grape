@@ -70,6 +70,19 @@ def start_direct_agent(fn, args, name=""):
     return future
 
 
+def _task_insert_row(_cols, **kw):
+    """按 agent_tasks 列清单顺序组装 INSERT 值。
+
+    以列清单为唯一来源，缺列即抛错——防止列/值数目漂移
+    （历史事故：_TASK_COLUMNS_LIST 扩到 39 列后，两处字面量仍 37/36 值导致 INSERT 失败，
+    事件卡 running 被 sweeper 置 failed，见 docs/new-version3/agent-tasks-direct-create-binding-fix-design.md）。
+    """
+    missing = [c for c in _cols if c not in kw]
+    if missing:
+        raise ValueError(f"agent_tasks INSERT 缺少列值: {missing}")
+    return tuple(kw[c] for c in _cols)
+
+
 def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                         skill_path, engine_id, evt, issue_id="", skill_id=0):
     """direct 执行前创建 agent_tasks + 设 started_at，防 sweeper 误杀。"""
@@ -117,17 +130,23 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
         log.warning(f"create_direct_task: get_gitcode_token failed: {e}")
 
     try:
+        row = _task_insert_row(_TASK_COLUMNS_LIST,
+            id=task_id, agent_session_id=agent_session_id, runtime_id=engine_id,
+            event_seq=seq, issue_id=issue_id, repo_key=repo_key or "",
+            agent_type=agent_type or "", skill=skill_name or "", skill_id=skill_id or 0,
+            prompt="", cwd="", runtime_session_id="", event_type="", account="",
+            user_id=0, repo_gitcode_token=repo_gitcode_token or "",
+            env_extra="{}", skill_files="{}", server_url="", issue_session_id="",
+            project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
+            project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
+            pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
+            status="queued", exit_code=None, result_text="", errors="", stderr="",
+            usage_json="{}", started_at=now, completed_at=None, created_at=now)
         with db_lock:
             c = db.cursor()
             c.execute(
                 f"INSERT INTO agent_tasks ({','.join(_TASK_COLUMNS_LIST)}) VALUES "
-                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
-                (task_id, agent_session_id, engine_id, seq, issue_id, repo_key or "",
-                 agent_type or "", skill_name or "", skill_id or 0,
-                 "", "", "", "", "", 0, repo_gitcode_token or "", "{}",
-                 "{}", "", "", "{}", "{}", "{}", 0, "", 0, "", "",
-                 "queued", None, "", "", "", "{}", now, None, now)
-            )
+                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})", row)
             db.commit()
         log.info(f"Direct task created: {task_id} seq={seq} engine={engine_id}({inst_name}) skill={skill_name}")
     except Exception as e:
@@ -192,21 +211,27 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
 
     now = datetime.now(timezone.utc).isoformat()
     _reason = json.dumps(["无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎"][:500])
+    _pool_tag = agent_type or "" if is_plugin_mode() else ""
     try:
+        row = _task_insert_row(_TASK_COLUMNS_LIST,
+            id=task_id, agent_session_id=agent_session_id, runtime_id=runtime_id,
+            event_seq=seq, issue_id=issue_id, repo_key=repo_key or "",
+            agent_type=agent_type or "", skill=skill_name or "", skill_id=skill_id or 0,
+            prompt=prompt, cwd=cwd, runtime_session_id="",
+            event_type=evt.get("type", "") or "",
+            account=repository or evt.get("account", "") or "", user_id=0,
+            repo_gitcode_token=repo_gitcode_token,
+            env_extra=json.dumps(env_extra), skill_files="{}", server_url="", issue_session_id="",
+            project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
+            project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
+            pool_agent_type=_pool_tag, affinity_runtime_id=0, pool_tag=_pool_tag, pool_engine_ids="",
+            status="failed", exit_code=1, result_text="", errors=_reason, stderr="",
+            usage_json="{}", started_at=now, completed_at=now, created_at=now)
         with db_lock:
             c = db.cursor()
             c.execute(
                 f"INSERT INTO agent_tasks ({','.join(_TASK_COLUMNS_LIST)}) VALUES "
-                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
-                (task_id, agent_session_id, runtime_id, seq, issue_id, repo_key or "",
-                 agent_type or "", skill_name or "", skill_id or 0,
-                 prompt, cwd, "",
-                 evt.get("type", "") or "", repository or evt.get("account", "") or "", 0, repo_gitcode_token,
-                 json.dumps(env_extra), "{}", "",
-                 "", "{}", "{}", "{}", 0,
-                 agent_type or "" if is_plugin_mode() else "", 0, agent_type or "" if is_plugin_mode() else "",
-                 "failed", 1, "", _reason, "", "{}", now, now, now)
-            )
+                f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})", row)
             db.commit()
         log.info(f"Failed task snapshot created: {task_id} seq={seq} agent={agent_type} (engine_unavailable)")
     except Exception as e:
@@ -432,6 +457,20 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
             return "issue"  # Issue Agent 审视
         if stage == "done":
             return ""
+        # PR updated 事件 + stage=coding：检查是否有 QA 历史记录
+        # 如果 QA 曾经审查过（说明 coding 是被 QA 回流后的修复），PR updated 应路由到 QA 复审
+        if event_type == "pull_request_updated" and stage == "coding":
+            try:
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? AND agent_type='qa' LIMIT 1",
+                        (repo_key, issue_id))
+                    if c.fetchone():
+                        return "qa"  # QA 有历史 → 路由到 QA 复审
+            except Exception:
+                pass
         return stage  # coding/qa/sre → 对应执行 Agent
 
 
@@ -667,6 +706,20 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 return result
         log.info(f"Pipeline: comment from {actor}, not a bot ({bot_usernames})")
 
+    # 2.0a 系统回帖标记检测：含 <!-- grape-auto-comment --> 的评论是系统自动回帖的回声，跳过
+    if event_type in ("issue_comment", "note_hook_pr"):
+        try:
+            _payload = evt.get("payload", {}) or {}
+            _oa = _payload.get("object_attributes", {}) or {}
+            _note = str(_oa.get("note") or _payload.get("body") or "")
+            if "<!-- grape-auto-comment -->" in _note:
+                log.info(f"Pipeline skip: system auto-comment marker detected, event={event_type}")
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "system_auto_comment")
+                return result
+        except Exception as e:
+            log.warning(f"Pipeline: auto-comment marker check failed: {e}")
+
     # 2.1 issue_updated 纯标签变更（changes.labels 有变化、其余内容未动）→ bot 打标签回声，跳过
     if event_type == "issue_updated":
         try:
@@ -894,6 +947,44 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             except Exception as e:
                 log.warning(f"Pipeline: failed to load default skill config: {e}")
                 return result
+
+    # 4.5 onboarding 引导上下文（§11 v1.5）：模板一键创建模拟 issue_opened webhook 提交 run_pipeline，
+    #     完全走普通链路（广播模式靠 pool_tag 认领，不依赖仓库 runtime_id 绑定）。
+    #     事件体 payload 携带 _onboarding={"target","skill","scene","result_path"} → 覆盖技能 + 注入 ONBOARDING_* 环境变量。
+    try:
+        _onb = (evt.get("payload") or {}).get("_onboarding")
+    except Exception:
+        _onb = None
+    if isinstance(_onb, dict) and (_onb.get("target") or _onb.get("skill")):
+        _ob_skill = str(_onb.get("skill", "") or "").strip() or skill_name
+        log.info(f"Pipeline onboarding ctx: skill={_ob_skill} target={_onb.get('target')} scene={_onb.get('scene')}")
+        if _ob_skill:
+            try:
+                from src.user.db import resolve_skill_id, get_skill_by_id
+                _ob_sid = resolve_skill_id(_ob_skill)
+                if _ob_sid:
+                    skill_id = _ob_sid
+                    _ob_sk = get_skill_by_id(_ob_sid)
+                    skill_name = (_ob_sk.get("skill_name") or _ob_skill) if _ob_sk else _ob_skill
+                    skill_path = (_ob_sk.get("skill_path") or skill_name) if _ob_sk else skill_name
+                else:
+                    skill_name = _ob_skill
+                    skill_path = _ob_skill
+            except Exception as e:
+                log.warning(f"Pipeline onboarding skill resolve failed: {e}")
+                skill_name = _ob_skill
+                skill_path = _ob_skill
+        # 环境变量注入（repo-onboarding skill 读取 ONBOARDING_RESULT/TARGET）
+        _ob_ext = dict(evt.get("_env_extra") or {})
+        if _onb.get("target"):
+            _ob_ext["ONBOARDING_TARGET"] = str(_onb["target"])
+        if _onb.get("result_path"):
+            _ob_ext["ONBOARDING_RESULT"] = str(_onb["result_path"])
+        if _onb.get("scene"):
+            _ob_ext["ONBOARDING_SCENE"] = str(_onb["scene"])
+        evt["_env_extra"] = _ob_ext
+        backend = backend or ""
+        log.info(f"Pipeline: onboarding ctx applied, skill={skill_name} env={list(_ob_ext.keys())}")
 
     # 5. 提取 Issue ID
     payload = evt.get("payload", {})
@@ -1276,6 +1367,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     _inject_cloud_credentials(env_extra, repo_key)
+    # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT/TARGET，§11 v1.5）
+    _evt_ext = evt.get("_env_extra") or {}
+    if isinstance(_evt_ext, dict):
+        env_extra.update(_evt_ext)
     # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
     if agent_type == "sre":
         # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
@@ -1824,6 +1919,22 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         if _issue_num and repo_gitcode_token:
             _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type)
 
+    # SRE 完成后 → 从 result_text 提取部署 URL 并写入 managed_repos.deploy_url
+    if new_status == "completed" and agent_type == "sre" and result_text:
+        try:
+            import re
+            _urls = re.findall(r'https?://[\d\w.\-]+(?::\d+)?(?:/)?', result_text)
+            if _urls:
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("UPDATE managed_repos SET deploy_url=? WHERE repo_key=?", (_urls[0], repo_key))
+                    if c.rowcount > 0:
+                        db.commit()
+                        log.info(f"SRE deploy_url auto-registered: {_urls[0]} for {repo_key}")
+        except Exception as _e:
+            log.warning(f"SRE deploy_url extraction failed: {_e}")
+
     # 子任务 SRE 完成后 → 登记完成情况到父 Issue
     if new_status == "completed" and agent_type == "sre" and issue_id:
         try:
@@ -1879,6 +1990,7 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
     try:
         import urllib.request, json as _json
         _comment = f"[{agent_type.upper()} Agent] {result_text[:3000]}"
+        _comment += "\n<!-- grape-auto-comment -->"
         _data = _json.dumps({"body": _comment}).encode("utf-8")
         _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
         _req = urllib.request.Request(
@@ -1920,6 +2032,7 @@ def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, pare
         _out = parse_agent_output_json(result_text)
         _summary = (_out.get("conclusion", "") if _out else "") or result_text[:200]
         _comment = f"### \u5b50\u4efb\u52a1 #{sub_issue_num} \u5df2\u5b8c\u6210\n\n{_summary}\n\n---\n\u5b50\u4efb\u52a1\u6d41\u6c34\u7ebf\u5df2\u5168\u90e8\u5b8c\u6210\u3002"
+        _comment += "\n<!-- grape-auto-comment -->"
         _data = _json.dumps({"body": _comment}).encode("utf-8")
         _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
         _req = urllib.request.Request(_url, data=_data,
@@ -1942,6 +2055,7 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
             _lines.append(f"- {_status} {_sid} ({_stage})")
         _lines.append(f"\n\u7236\u4efb\u52a1 #{parent_issue_num} \u7684\u6240\u6709\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\u3002")
         _comment = "\n".join(_lines)
+        _comment += "\n<!-- grape-auto-comment -->"
         _data = _json.dumps({"body": _comment}).encode("utf-8")
         _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
         _req = urllib.request.Request(_url, data=_data,
@@ -2011,9 +2125,12 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
     existing_sigs = set()
     # 匹配 [XXX Agent] 标记（可能在引用块 > 之后出现，不要求在 body 开头）
     _agent_tag_re = re.compile(r'\[([A-Za-z_]+)\s+Agent\]', re.IGNORECASE)
+    # 系统回帖标记——统一过滤，确保 existing_sigs 和新评论指纹生成方式一致
+    _auto_comment_marker = "<!-- grape-auto-comment -->"
     for m in existing_msgs:
         content = m.get("content", "")
-        # 去掉引用块和 [XXX Agent] 标记后取前 80 字符做指纹
+        # 统一过滤系统标记 + 去掉 [XXX Agent] 标记后取前 80 字符做指纹
+        content = content.replace(_auto_comment_marker, "").rstrip()
         sig = _agent_tag_re.sub("", content).strip()[:80].lower()
         existing_sigs.add(sig)
 
@@ -2023,6 +2140,8 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
         body = cm.get("body", "")
         if not body:
             continue
+        # 过滤系统标记，避免在 Chat 页面显示
+        body = body.replace(_auto_comment_marker, "").rstrip()
         # 评论中必须包含 [XXX Agent] 标记（可能在引用块之后）
         tag_match = _agent_tag_re.search(body)
         if not tag_match:

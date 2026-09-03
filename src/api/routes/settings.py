@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 # ====== Credentials ======
 
 @router.get("/credentials")
-async def get_credentials(user: dict = Depends(get_current_user), repo_key: str = ""):
+def get_credentials(user: dict = Depends(get_current_user), repo_key: str = ""):
     acc = user_db.get_user_account(user["username"]) or {}
     return {
         "gitcode": {
@@ -62,7 +62,7 @@ def _is_placeholder(value: str) -> bool:
 
 
 @router.put("/credentials")
-async def update_credentials(body: UpdateCredentials, user: dict = Depends(get_current_user)):
+def update_credentials(body: UpdateCredentials, user: dict = Depends(get_current_user)):
     acc = user_db.get_user_account(user["username"]) or {}
     if body.huawei_cloud_ak and not _is_placeholder(body.huawei_cloud_ak):
         acc["huawei_cloud_ak"] = body.huawei_cloud_ak.strip()
@@ -79,7 +79,7 @@ async def update_credentials(body: UpdateCredentials, user: dict = Depends(get_c
 # ====== Notifications ======
 
 @router.get("/notifications")
-async def get_notifications(user: dict = Depends(get_current_user)):
+def get_notifications(user: dict = Depends(get_current_user)):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -110,7 +110,7 @@ class NotificationPrefs(BaseModel):
 
 
 @router.put("/notifications")
-async def update_notifications(body: NotificationPrefs, user: dict = Depends(get_current_user)):
+def update_notifications(body: NotificationPrefs, user: dict = Depends(get_current_user)):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -126,7 +126,7 @@ async def update_notifications(body: NotificationPrefs, user: dict = Depends(get
 # ====== GitCode Repo ======
 
 @router.get("/gitcode-repo/{owner}/{repo}")
-async def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.user.db import get_bot_token_by_repo
     from src.repo_key import to_repo_key
     bot_token = get_bot_token_by_repo(owner, repo)
@@ -152,7 +152,7 @@ class GitCodeRepoConfig(BaseModel):
 
 
 @router.put("/gitcode-repo/{owner}/{repo}")
-async def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
+def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                                      user: dict = Depends(get_current_user)):
     # 将 Bot Token / Bot Username 存储到 managed_repos（webhook_token 由托管流程自动维护）
     from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username
@@ -168,7 +168,7 @@ async def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoCon
 # ====== OAuth 凭据（管理员配置）======
 
 @router.get("/oauth")
-async def get_oauth_config(user: dict = Depends(get_current_user)):
+def get_oauth_config(user: dict = Depends(get_current_user)):
     from src.user.db import get_meta_value
     return {
         "gitcode_oauth_client_id": bool(get_meta_value("oauth_gitcode_client_id")),
@@ -183,7 +183,7 @@ class OAuthConfig(BaseModel):
 
 
 @router.put("/oauth")
-async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_current_user)):
+def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_current_user)):
     from src.user.db import set_meta_value
     if body.gitcode_oauth_client_id:
         set_meta_value("oauth_gitcode_client_id", body.gitcode_oauth_client_id)
@@ -197,7 +197,7 @@ async def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_curren
 # ====== Agent Runtimes ======
 
 @router.get("/agent-runtimes")
-async def get_agent_runtimes(user: dict = Depends(get_current_user)):
+def get_agent_runtimes(user: dict = Depends(get_current_user)):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
     可见性（按当前登录用户）：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级（仓库所有成员可见，不只 owner）。
@@ -409,7 +409,7 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
 @router.get("/backend-agents")
-async def get_backend_agents(user: dict = Depends(get_current_user)):
+def get_backend_agents(user: dict = Depends(get_current_user)):
     cached = user_db_get_backend_agents_alias()
     return {"backends": cached}
 
@@ -420,28 +420,38 @@ def user_db_get_backend_agents_alias():
 
 
 @router.post("/agent-runtimes/refresh")
-async def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
-    """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）"""
+def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
+    """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）
+
+    P0 修复：save_agent_runtimes 可能因 MySQL Lock wait timeout (1205) 抛异常，
+    这里接住返回 500 JSON 而非让异常冒泡导致 uvicorn 进程崩溃（→ 502）。
+    """
     from src.runtime.registry import discover_runtimes
     from src.runtime.local_probe import probe_local_engines
     from src.runtime.agent import _scan_local_skills
     from src.user import db as user_db
+    from src.config import log
     import socket as _sock
     _hostname = _sock.gethostname()
-    discovered = discover_runtimes()
-    results = probe_local_engines(discovered)
+    try:
+        discovered = discover_runtimes()
+        results = probe_local_engines(discovered)
 
-    # 扫描本机 local_skills 详情并注入
-    from src.runtime.agent import _scan_local_skills_with_detail
-    for r in results:
-        _name = (r.get("name") or "").strip().lower()
-        r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
-        r["local_skills"] = [s["name"] for s in r["local_skills_detail"]]
+        # 扫描本机 local_skills 详情并注入
+        from src.runtime.agent import _scan_local_skills_with_detail
+        for r in results:
+            _name = (r.get("name") or "").strip().lower()
+            r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
+            r["local_skills"] = [s["name"] for s in r["local_skills_detail"]]
 
-    # Only persist runtimes that are actually installed
-    results = [r for r in results if r["installed"]]
-    user_db.save_agent_runtimes(results, host_name=_hostname)
-    return {"runtimes": results}
+        # Only persist runtimes that are actually installed
+        results = [r for r in results if r["installed"]]
+        user_db.save_agent_runtimes(results, host_name=_hostname)
+        return {"runtimes": results}
+    except Exception as e:
+        log.warning(f"refresh_agent_runtimes failed: {e}")
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail=f"刷新引擎状态失败: {e}")
 
 # 兼容别名：旧路径 /backend-agents/refresh
 @router.post("/backend-agents/refresh")
@@ -468,7 +478,7 @@ def _normalize_scope(scope: str) -> str:
 
 
 @router.post("/runtime-credentials")
-async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(get_current_user)):
+def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(get_current_user)):
     """生成 rta_ token：仅展示一次明文，DB 存 sha256。owner=当前登录用户（不可选），scope 默认个人。"""
     import hashlib, secrets
     from src.session_manager import db, db_lock
@@ -508,7 +518,7 @@ async def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(
 
 
 @router.put("/runtime-credentials/{cid}")
-async def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depends(get_current_user)):
+def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depends(get_current_user)):
     """改名凭据（worker 名）：全局唯一，重名拒绝。owner/scope 不可改。"""
     from src.session_manager import db, db_lock
     name = (body.name or "").strip()
@@ -537,7 +547,7 @@ async def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict 
 
 
 @router.get("/runtime-credentials")
-async def list_runtime_credentials(user: dict = Depends(get_current_user)):
+def list_runtime_credentials(user: dict = Depends(get_current_user)):
     """凭据列表（不含 token_hash / 明文）"""
     from src.session_manager import db, db_lock
     with db_lock:
@@ -551,7 +561,7 @@ async def list_runtime_credentials(user: dict = Depends(get_current_user)):
 
 
 @router.post("/runtime-credentials/{cid}/revoke")
-async def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_user)):
+def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_user)):
     """吊销并删除 worker 记录：删 runtime_credentials 行 + 级联删其 agent_runtimes 行。
 
     2026-08-17 用户指示「吊销=删除」：删除后 token 即刻失效（_auth_credential
@@ -587,19 +597,19 @@ class ExecModeBody(BaseModel):
 
 
 @router.get("/execution-mode")
-async def get_execution_mode_api(user: dict = Depends(get_current_user)):
+def get_execution_mode_api(user: dict = Depends(get_current_user)):
     from src.runtime.service import get_execution_mode
     return {"mode": get_execution_mode()}
 
 
 @router.get("/pipeline-mode")
-async def get_pipeline_mode_api(user: dict = Depends(get_current_user)):
+def get_pipeline_mode_api(user: dict = Depends(get_current_user)):
     from src.api.event_pipeline import is_plugin_mode
     return {"mode": "plugin" if is_plugin_mode() else "legacy"}
 
 
 @router.put("/pipeline-mode")
-async def set_pipeline_mode_api(body: dict, user: dict = Depends(get_current_user)):
+def set_pipeline_mode_api(body: dict, user: dict = Depends(get_current_user)):
     from src.user.db import set_meta_value
     mode = (body.get("mode") or "").strip().lower()
     if mode not in ("plugin", "legacy"):
@@ -609,7 +619,7 @@ async def set_pipeline_mode_api(body: dict, user: dict = Depends(get_current_use
 
 
 @router.put("/execution-mode")
-async def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_user)):
+def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_user)):
     from src.runtime.service import set_execution_mode
     if body.mode not in ("auto", "direct", "queue_remote"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 auto/direct/queue_remote（queue_local 已废除）"})
@@ -643,7 +653,7 @@ def _sync_agent_tags(rid: int, cursor):
 
 
 @router.get("/agent-runtimes/{rid}/tags")
-async def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
+def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
     """获取引擎的标签列表"""
     from src.session_manager import db, db_lock
     with db_lock:
@@ -665,7 +675,7 @@ async def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
 
 
 @router.post("/agent-runtimes/{rid}/tags")
-async def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_current_user)):
+def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_current_user)):
     """为引擎添加标签（幂等：已有则更新）"""
     from src.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -708,7 +718,7 @@ async def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get
 
 
 @router.put("/agent-runtimes/{rid}/tags/{tag}")
-async def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
+def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
                             user: dict = Depends(get_current_user)):
     """修改引擎标签配置"""
     from src.session_manager import db, db_lock
@@ -736,7 +746,7 @@ async def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
 
 
 @router.delete("/agent-runtimes/{rid}/tags/{tag}")
-async def delete_engine_tag(rid: int, tag: str, user: dict = Depends(get_current_user)):
+def delete_engine_tag(rid: int, tag: str, user: dict = Depends(get_current_user)):
     """删除引擎标签"""
     from src.session_manager import db, db_lock
     tag = tag.strip().lower()

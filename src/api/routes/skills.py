@@ -33,7 +33,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("")
-async def list_skills(user: dict = Depends(get_current_user), repo: str = "", scope: str = ""):
+def list_skills(user: dict = Depends(get_current_user), repo: str = "", scope: str = ""):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
     """
@@ -152,7 +152,7 @@ async def sync_official_skills(user: dict = Depends(get_current_user)):
 
 
 @router.get("/template")
-async def download_skill_template():
+def download_skill_template():
     """下载技能模板 ZIP（skills/_template 目录打包）。免鉴权（token 通过 query 传递）。"""
     from src.config import SKILLS_DIR
 
@@ -188,7 +188,7 @@ async def download_skill_template():
 
 
 @router.get("/by-id/{skill_id}/download")
-async def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_current_user),
+def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_current_user),
                                    repo: str = ""):
     """下载技能包 zip（点击时动态签发，见 obs-skill-storage-design.md N8 下载模式）。
 
@@ -252,7 +252,7 @@ async def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_curre
 
 
 @router.get("/by-id/{skill_id}")
-async def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user),
+def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user),
                                  repo: str = ""):
     """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
 
@@ -471,7 +471,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 
 
 @router.delete("/{skill_name}")
-async def delete_skill(skill_name: str, user: dict = Depends(get_current_user),
+def delete_skill(skill_name: str, user: dict = Depends(get_current_user),
                        scope: str = "user", repo: str = ""):
     """删除技能——按 skill_name + scope 查到后做归属校验，再删除。
 
@@ -560,7 +560,7 @@ class ConvertSkillRequest(BaseModel):
 
 
 @router.post("/convert")
-async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_current_user)):
+def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_current_user)):
     """将个人技能（scope=user）复制为仓库技能（scope=repo）。
 
     原个人技能记录与目录保留（复制而非移动）。复制后可在此仓库的 Agent 中配置使用。
@@ -641,7 +641,7 @@ async def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_curr
 
 
 @router.get("/{skill_id}/sub")
-async def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user)):
+def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user)):
     """返回技能包的子技能列表（从 skill_path 的 references/ 目录读取）"""
     from src.session_manager import db, db_lock
     import re as _re
@@ -698,7 +698,7 @@ async def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user))
 
 
 @router.get("/{skill_id}/sub/{sub_name}")
-async def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user)):
+def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user)):
     """读取技能包子技能的 SKILL.md 内容"""
     from src.session_manager import db, db_lock
 
@@ -742,7 +742,7 @@ async def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_
 
 
 @router.get("/package-sub/{pkg_id}/{sub_name}")
-async def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user)):
+def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user)):
     """返回技能包子技能详情（格式与 skill detail 一致，支持导航到独立详情页）"""
     from src.session_manager import db, db_lock
     import re as _re

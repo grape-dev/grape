@@ -164,7 +164,7 @@ def _probe_stale_repos(api_token: str, user_id: int):
 
 
 @router.get("/member")
-async def list_member_repos(user: dict = Depends(get_current_user)):
+def list_member_repos(user: dict = Depends(get_current_user)):
     """获取用户可操作仓库列表：优先从 user_repos 缓存读取；缓存为空或超过 TTL 时自动从 GitCode 拉取刷新
 
     加载前先检查托管仓库在 GitCode 上是否还存在（GitCode 删仓库不发 webhook，
@@ -219,7 +219,7 @@ async def list_member_repos(user: dict = Depends(get_current_user)):
 
 
 @router.post("/sync")
-async def sync_repos(user: dict = Depends(get_current_user)):
+def sync_repos(user: dict = Depends(get_current_user)):
     """手动从 GitCode 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录"""
     api_token = get_user_token(user["username"])
     if not api_token:
@@ -236,7 +236,7 @@ async def sync_repos(user: dict = Depends(get_current_user)):
 
 
 @router.get("/check-name")
-async def check_repo_name(name: str, user: dict = Depends(get_current_user)):
+def check_repo_name(name: str, user: dict = Depends(get_current_user)):
     """检查当前用户名下是否已存在同名仓库"""
     from src.user.repo_manager import _req, get_user_gitcode_login
     api_token = get_user_token(user["username"])
@@ -259,7 +259,7 @@ async def check_repo_name(name: str, user: dict = Depends(get_current_user)):
 
 
 @router.post("/create")
-async def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)):
+def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)):
     """通过 GitCode API 新建仓库，可选创建后自动托管"""
     import re as _re
     from src.repo_key import to_repo_key
@@ -324,7 +324,7 @@ async def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current
 
 
 @router.post("/host")
-async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
+def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
@@ -449,7 +449,7 @@ async def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
 
 
 @router.get("/managed")
-async def list_managed_repos(user: dict = Depends(get_current_user)):
+def list_managed_repos(user: dict = Depends(get_current_user)):
     repos = user_db.get_managed_repos(user["id"])
     return {"repos": [{
         "full_name": r["full_name"],
@@ -467,14 +467,14 @@ class BotTokenBody(BaseModel):
 
 
 @router.get("/bot-token/{owner}/{repo_name}")
-async def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(get_current_user)):
+def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(get_current_user)):
     """获取仓库绑定的 DevOps Bot Token 是否存在"""
     token = get_bot_token_by_repo(owner, repo_name)
     return {"has_bot_token": bool(token)}
 
 
 @router.put("/bot-token")
-async def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user)):
+def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user)):
     """设置仓库绑定的 DevOps Bot Token；自动将 repo bot 加入维护者"""
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
@@ -507,6 +507,39 @@ async def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_curren
         except Exception:
             pass
     return {"message": "Bot Token 已更新", "bot_username": repo_bot_username}
+
+
+class DeployUrlBody(BaseModel):
+    full_name: str
+    deploy_url: str = ""
+
+
+@router.put("/deploy-url")
+def set_deploy_url(body: DeployUrlBody, user: dict = Depends(get_current_user)):
+    """登记业务系统部署后的访问 URL"""
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+    repo_key = to_repo_key(body.full_name)
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE managed_repos SET deploy_url=? WHERE repo_key=?", (body.deploy_url or "", repo_key))
+        if c.rowcount == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
+        db.commit()
+    return {"message": "部署 URL 已更新", "deploy_url": body.deploy_url}
+
+
+@router.get("/deploy-url/{owner}/{repo_name}")
+def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(get_current_user)):
+    """获取仓库的部署访问 URL"""
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+    repo_key = to_repo_key(f"{owner}/{repo_name}")
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT deploy_url FROM managed_repos WHERE repo_key=?", (repo_key,))
+        row = c.fetchone()
+    return {"deploy_url": (row[0] if row else "") or ""}
 
 
 def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
@@ -613,7 +646,7 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
 
 
 @router.post("/remove")
-async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)):
+def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
@@ -693,7 +726,7 @@ async def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current
 
 
 @router.get("/{owner}/{repo}/project-info")
-async def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_current_user)):
     """读取仓库的权威项目知识基线（repo 全局，多机共享，见 multi-issue-isolation-design.md §2.4）。
 
     返回 files（全文）+ meta（commit/branches/updated/degraded）。无基线 → 空 files + meta。

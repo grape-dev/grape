@@ -39,6 +39,53 @@ function _stopScenePoll() {
   if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
 }
 
+let _deployUrl = '';
+let _deployEditing = false;
+
+function _loadDeployLink() {
+  const repo = app.currentRepo();
+  if (!repo) return;
+  const bar = document.getElementById('deployLinkBar');
+  if (!bar) return;
+  API.get('/repos/deploy-url/' + repo.owner + '/' + repo.name).then(d => {
+    _deployUrl = (d && d.deploy_url) || '';
+    _renderDeployLink();
+  }).catch(() => { _deployUrl = ''; _renderDeployLink(); });
+}
+
+function _renderDeployLink() {
+  const bar = document.getElementById('deployLinkBar');
+  if (!bar) return;
+  if (_deployEditing) {
+    bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
+      <input id="deployUrlInput" value="${_deployUrl}" placeholder="输入部署访问 URL（如 http://1.2.3.4:5000）" style="flex:1;max-width:400px;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:12px;background:#fff">
+      <button class="tsk-btn tsk-btn-primary" style="padding:4px 10px;font-size:12px" onclick="_saveDeployUrl()">保存</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;font-size:12px" onclick="_deployEditing=false;_renderDeployLink()">取消</button>
+    </div>`;
+  } else if (_deployUrl) {
+    bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
+      <a href="${_deployUrl}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="访问部署的业务系统">🌐 访问应用 ↗</a>
+      <span onclick="_deployEditing=true;_renderDeployLink()" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.6" title="编辑部署 URL" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">✎</span>
+    </div>`;
+  } else {
+    bar.innerHTML = '';
+  }
+}
+
+window._saveDeployUrl = function() {
+  const input = document.getElementById('deployUrlInput');
+  if (!input) return;
+  const repo = app.currentRepo();
+  if (!repo) return;
+  const url = input.value.trim();
+  API.put('/repos/deploy-url', {full_name: repo.fullName, deploy_url: url}).then(() => {
+    _deployUrl = url;
+    _deployEditing = false;
+    _renderDeployLink();
+    app.showToast('部署 URL 已保存');
+  }).catch(e => { app.showToast('保存失败: ' + (e.detail?.message || e.message)); });
+};
+
 function loadTasks() {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -182,6 +229,7 @@ function _render() {
   <div class="tsk-page">
     <div class="tsk-top">
       <h1>${I18N.t('tasks.page_title')}</h1>
+      <div id="deployLinkBar" style="margin-top:4px"></div>
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:10px">${I18N.t('tasks.create.btn_new')}</button>
         ${tab('all', I18N.t('tasks.tab.all'), cntAll)}${tab('active', I18N.t('tasks.tab.active'), cntActive)}${tab('completed', I18N.t('tasks.tab.completed'), cntDone)}
@@ -193,6 +241,9 @@ function _render() {
       <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}</div>
     </div>
   </div>`;
+
+  // 加载部署 URL 到任务中心顶部
+  _loadDeployLink();
 
   // 建立 id → task 映射供行点击
   window._tasksById = {};

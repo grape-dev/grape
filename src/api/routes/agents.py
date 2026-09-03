@@ -77,7 +77,7 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
 
 
 @router.get("/types")
-async def list_agent_types():
+def list_agent_types():
     """返回所有 Agent 类型的元数据（显示名、图标、描述、颜色等）"""
     from src.session_manager import db, db_lock
     with db_lock:
@@ -104,7 +104,7 @@ async def list_agent_types():
 
 
 @router.get("/{name}/{owner}/{repo}")
-async def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depends(get_current_user)):
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
@@ -293,7 +293,7 @@ class AgentConfig(BaseModel):
 
 
 @router.post("/{name}/{owner}/{repo}/clean")
-async def clean_agent_session(name: str, owner: str, repo: str,
+def clean_agent_session(name: str, owner: str, repo: str,
                               user: dict = Depends(get_current_user)):
     """清理 Agent 会话：将 devops_agent_session.runtime_session_id 置空。
 

@@ -288,6 +288,8 @@ def _redact_path(path: str) -> str:
 
 # 健康探针路径不记请求日志（参考 multica isHealthProbePath）
 _LOG_SKIP_PATHS = frozenset({"/health", "/healthz", "/readyz", "/metrics"})
+# Worker 轮询路径跳过请求日志（13 台 worker × 3s × 3 请求 = ~24 行/秒, 膨胀日志）
+_LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/")
 
 
 @app.middleware("http")
@@ -339,7 +341,7 @@ async def request_id_and_log_middleware(request: Request, call_next):
             pass
     token_uid = user_var.set(_uid)
 
-    skip_log = path in _LOG_SKIP_PATHS
+    skip_log = path in _LOG_SKIP_PATHS or path.startswith(_LOG_SKIP_PREFIXES)
     start = _time.time()
     status = 500
     try:
@@ -423,6 +425,14 @@ if os.path.isdir(STATIC_DIR):
     @app.get("/en/{path:path}")
     async def serve_spa_en(path: str = ""):
         """英文国际化路由——返回同一个 index.html，前端 i18n.js 从 URL /en 检测语言。"""
+        if path.startswith("api/") or path.startswith("static/"):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404)
+        return _spa_response()
+
+    # SPA catch-all：非 API/static 的路径（如 /login）回退到 index.html
+    @app.get("/{path:path}")
+    async def spa_catch_all(path: str):
         if path.startswith("api/") or path.startswith("static/"):
             from fastapi import HTTPException
             raise HTTPException(status_code=404)
@@ -649,3 +659,11 @@ def _check_and_sync_templates() -> bool:
     examples_ok = _os.path.isdir(_examples_dir) and \
         any(_os.path.isdir(_os.path.join(_examples_dir, d)) for d in _os.listdir(_examples_dir) if not d.startswith('.'))
     return json_ok and examples_ok
+# SPA catch-all：非 API/static 的路径（如 /login）回退到 index.html
+# 必须放在所有 API 路由之后，否则会拦截 /health /healthz 等端点
+@app.get("/{path:path}")
+async def spa_catch_all(path: str):
+    if path.startswith("api/") or path.startswith("static/"):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404)
+    return _spa_response()

@@ -13,6 +13,9 @@ const HEALTH_BADGE = {
 };
 
 let _runtimeTab = 'engines';
+let _runtimeSearch = '';
+let _rtFilterType = '';
+let _rtFilterScope = '';
 let __runtimeData = null;
 let __runtimeDevices = null;
 let _skillScanDirty = false;  // skills 扫描成功后标记，关闭弹窗时刷新引擎列表
@@ -67,6 +70,36 @@ function renderRuntimes(data) {
       ${_runtimeTab === 'workers' ? `<button class="bt bt-p" onclick="openAiDevspace()" data-tooltip="${I18N.t('runtimes.devspace.ai_devspace_tooltip')}" style="background:linear-gradient(135deg,#60a5fa,#a78bfa);border:none;position:relative;box-shadow:0 2px 8px rgba(96,165,250,.3)">☁ AI Devspace</button>` : ''}
       <button class="bt bt-o" onclick="refreshRuntimes()">⟳ ${I18N.t('runtimes.refresh')}</button>
     </div>`;
+  // 过滤标签栏
+  const _availTypes = [...new Set((_runtimeTab === 'engines' ? (data.runtimes||[]) : devices).map(e => {
+    const n = ((e.instance_name || e.name || '')).toLowerCase();
+    if (n.includes('hermes')) return 'hermes';
+    if (n.includes('opencode')) return 'opencode';
+    if (n.includes('codearts')) return 'codearts';
+    return '';
+  }).filter(Boolean))];
+  const _allScopes = ['local','user','repo','global'];
+  const _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
+  const _hasScope = (sc) => {
+    const list = _runtimeTab === 'engines' ? (data.runtimes||[]) : devices;
+    return list.some(e => (e.scope || (e.is_local ? 'local' : 'global')) === sc || (sc === 'local' && e.is_local));
+  };
+  html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+    ${_availTypes.map(t => {
+      const act = _rtFilterType === t;
+      return `<span onclick="_rtToggleType('${t}')" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0071e3':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0071e3':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px">${t}</span>`;
+    }).join('')}
+    ${_availTypes.length > 0 ? '<span style="width:1px;background:var(--b);margin:2px 4px;height:18px"></span>' : ''}
+    ${_allScopes.filter(_hasScope).map(s => {
+      const act = _rtFilterScope === s;
+      return `<span onclick="_rtToggleScope('${s}')" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0071e3':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0071e3':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px">${_SCOPE_LABELS[s]||s}</span>`;
+    }).join('')}
+    ${(_rtFilterType || _rtFilterScope || _runtimeSearch) ? `<span onclick="_rtClearFilters()" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;color:#86868b;font-weight:400" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">✕ 清除</span>` : ''}
+  </div>`;
+  // 搜索框（独立一行，标签下方）
+  html += `<div style="margin-bottom:16px">
+    <input id="runtimeSearchInput" placeholder="搜索名称、设备、标签..." value="${_runtimeSearch}" onkeyup="if(event.key==='Enter'){_runtimeSearch=this.value;renderRuntimes(__runtimeData)}" onchange="_runtimeSearch=this.value;renderRuntimes(__runtimeData)" style="width:100%;max-width:360px;padding:7px 14px;border:1px solid var(--b);border-radius:10px;font-size:13px;background:var(--c);color:var(--t1);transition:border-color .2s" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='var(--b)'">
+  </div>`;
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);
   html += '<style>[data-tooltip]{position:relative}[data-tooltip]:hover::after{content:attr(data-tooltip);position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#1e2940;color:#fff;padding:6px 14px;border-radius:8px;font-size:11px;font-weight:500;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}[data-tooltip]:hover::before{content:"";position:absolute;top:calc(100% + 3px);left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:#1e2940;z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}@keyframes tipIn{to{opacity:1}}</style>';
   html += _legendHtml();
@@ -75,8 +108,25 @@ function renderRuntimes(data) {
 
 function renderEngines(data, devices) {
   const runtimes = data.runtimes || [];
+  // 搜索 + 类型 + scope 过滤
+  const q = (_runtimeSearch || '').toLowerCase().trim();
+  const filtered = runtimes.filter(rt => {
+    if (q) {
+      const hay = [rt.instance_name, rt.name, rt.worker_name, rt.owner, rt.host_name, (rt.tags||[]).join(' '), (rt.local_skills||[]).join(' ')].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (_rtFilterType) {
+      const ename = (rt.instance_name || rt.name || '').toLowerCase();
+      if (!ename.includes(_rtFilterType)) return false;
+    }
+    if (_rtFilterScope) {
+      const sc = rt.is_local ? 'local' : (rt.scope || 'global');
+      if (sc !== _rtFilterScope) return false;
+    }
+    return true;
+  });
   const groups = { global: [], repo: [], user: [] };
-  runtimes.forEach(rt => { (groups[rt.scope] || groups.global).push(rt); });
+  filtered.forEach(rt => { (groups[rt.scope] || groups.global).push(rt); });
   let html = '';
   SCOPE_ORDER.forEach(sc => {
     const list = groups[sc];
@@ -111,8 +161,25 @@ function renderEngines(data, devices) {
 }
 
 function renderWorkers(data, devices) {
+  // 搜索 + 类型 + scope 过滤
+  const q = (_runtimeSearch || '').toLowerCase().trim();
+  const fDevices = devices.filter(d => {
+    if (q) {
+      const hay = [d.name, d.device_name, d.owner, d.worker_ip, (d.runtimes||[]).map(r=>r.name).join(' ')].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (_rtFilterType) {
+      const names = (d.runtimes||[]).map(r => (r.name||'').toLowerCase()).join(' ');
+      if (!names.includes(_rtFilterType)) return false;
+    }
+    if (_rtFilterScope) {
+      const sc = d.credential_id === 0 ? 'local' : (d.scope || 'global');
+      if (sc !== _rtFilterScope) return false;
+    }
+    return true;
+  });
   const groups = { global: [], repo: [], user: [] };
-  devices.forEach(d => { (groups[d.scope] || groups.global).push(d); });
+  fDevices.forEach(d => { (groups[d.scope] || groups.global).push(d); });
   let html = '';
   SCOPE_ORDER.forEach(sc => {
     const list = groups[sc];
@@ -139,7 +206,6 @@ function renderWorkers(data, devices) {
         <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">
           <span style="color:var(--t3);white-space:nowrap;flex-shrink:0">${I18N.t('runtimes.label.hosted_engines')}</span>
           <span style="flex:1;min-width:0;word-break:break-all">${clis || '—'}</span>
-          ${d.credential_id ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="openDeviceTasks(${d.credential_id})">${I18N.t('runtimes.action.tasks')}</button>` : ''}
         </div>
       </div>`;
     });
@@ -257,6 +323,21 @@ function openDeviceTasks(credId) {
     el.insertAdjacentHTML('afterbegin', html);
   }).catch(e => app.showToast(I18N.t('runtimes.toast.load_tasks_failed', {msg: e.message})));
 }
+
+window._rtToggleType = function(t) {
+  _rtFilterType = (_rtFilterType === t) ? '' : t;
+  renderRuntimes(__runtimeData);
+};
+window._rtToggleScope = function(s) {
+  _rtFilterScope = (_rtFilterScope === s) ? '' : s;
+  renderRuntimes(__runtimeData);
+};
+window._rtClearFilters = function() {
+  _rtFilterType = '';
+  _rtFilterScope = '';
+  _runtimeSearch = '';
+  renderRuntimes(__runtimeData);
+};
 
 function refreshRuntimes() {
   _stopDevspaceAutoRefresh();
@@ -593,6 +674,29 @@ function _stopDevspaceAutoRefresh() {
   if (tag) { tag.style.display = 'none'; tag.textContent = ''; }
 }
 
+// ====== Worker 上线进度跟踪 ======
+// 后端返回 worker_online 字段表示对应 Worker 是否已真正上线（心跳<5min）。
+// 环境处于"运行中"但 worker_online=false 时显示进度条，上线后自动消失。
+// 进度条百分比基于"预计2-3分钟"做线性插值（仅用于视觉，不决定消失）。
+var _devspaceRunningSince = {};  // { envId: timestamp_ms }
+
+function _devspaceOnlineProgressHtml(envId, workerOnline, runningSinceMap) {
+  if (workerOnline) return '';  // worker 已上线，不显示进度条
+  var now = Date.now();
+  if (!runningSinceMap[envId]) {
+    runningSinceMap[envId] = now;
+  }
+  var elapsed = (now - runningSinceMap[envId]) / 1000;
+  var DURATION = 180;  // 3 minutes — 仅用于进度条宽度估算
+  var pct = Math.min(95, Math.round(elapsed / DURATION * 100));  // 封顶95%，只有真实上线才消失
+  return '<div style="margin-top:6px;display:flex;align-items:center;gap:8px">' +
+    '<div style="width:160px;height:6px;background:rgba(96,165,250,.12);border-radius:3px;overflow:hidden;flex-shrink:0">' +
+    '<div style="width:' + pct + '%;height:100%;background:linear-gradient(90deg,#60a5fa,#a78bfa);border-radius:3px;animation:devspacePulse 2s ease-in-out infinite"></div>' +
+    '</div>' +
+    '</div>' +
+    '<style>@keyframes devspacePulse{0%,100%{opacity:1}50%{opacity:.6}}</style>';
+}
+
 function _devspaceSilentRefresh() {
   var body = document.getElementById('aiDevspaceBody');
   if (!body) return;
@@ -619,13 +723,15 @@ function _devspaceSilentRefresh() {
       var isDeleted = st === 'cde.0009';
       var isError = ['cde.1001','cde.1002','cde.1003','cde.1004'].indexOf(st) >= 0;
       var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
+      if (!isRunning) delete _devspaceRunningSince[id];  // 非运行中时清除计时，下次开机重新开始
       html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
         '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
         '<div style="flex:1;min-width:0">' +
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">' +
         '<span style="font-size:13px;font-weight:600">' + (e.name || id) + '</span>' +
         _devStatusLabel(st) + '</div>' +
-        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div></div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div>' +
+        (isRunning ? _devspaceOnlineProgressHtml(id, e.worker_online, _devspaceRunningSince) : '') + '</div>' +
         '<div style="display:flex;gap:4px;flex-shrink:0">' +
         ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
         (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
@@ -664,13 +770,15 @@ function _refreshDevspaceList() {
       var isDeleted = st === 'cde.0009';
       var isError = ['cde.1001','cde.1002','cde.1003','cde.1004'].indexOf(st) >= 0;
       var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
+      if (!isRunning) delete _devspaceRunningSince[id];
       html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
         '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
         '<div style="flex:1;min-width:0">' +
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">' +
         '<span style="font-size:13px;font-weight:600">' + (e.name || id) + '</span>' +
         _devStatusLabel(st) + '</div>' +
-        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div></div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div>' +
+        (isRunning ? _devspaceOnlineProgressHtml(id, e.worker_online, _devspaceRunningSince) : '') + '</div>' +
         '<div style="display:flex;gap:4px;flex-shrink:0">' +
         ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
         (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
@@ -679,12 +787,15 @@ function _refreshDevspaceList() {
     }
     body.innerHTML = html;
   }).catch(function(e) {
+    var msg = e.message || '';
+    var isAuthErr = msg.indexOf('Unauthorized') >= 0 || msg.indexOf('APIGW.0301') >= 0;
+    var isAgreementErr = msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0;
     body.innerHTML = '<div style="padding:32px 20px;text-align:center">' +
       '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom:10px;opacity:.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>' +
       '<div style="font-size:13px;color:var(--t2);margin-bottom:4px">' +
-      (e.message.indexOf('Unauthorized') >= 0 || e.message.indexOf('APIGW.0301') >= 0 ? I18N.t('runtimes.devspace.configure_aksk') : I18N.t('runtimes.devspace.load_failed')) + '</div>' +
+      (isAuthErr ? I18N.t('runtimes.devspace.configure_aksk') : isAgreementErr ? I18N.t('runtimes.devspace.agreement_not_signed') : I18N.t('runtimes.devspace.load_failed')) + '</div>' +
       '<div style="font-size:11px;color:var(--t3)">' +
-      (e.message.indexOf('Unauthorized') >= 0 || e.message.indexOf('APIGW.0301') >= 0 ? I18N.t('runtimes.devspace.configure_aksk_hint') : e.message) + '</div></div>';
+      (isAuthErr ? I18N.t('runtimes.devspace.configure_aksk_hint') : isAgreementErr ? '' : msg) + '</div></div>';
   });
 }
 
@@ -833,8 +944,13 @@ function _showCreateEnvForm() {
       _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);
     }).catch(function(e) {
       var msg = e.message || '';
-      // 模板未发布（AK/SK 未加入白名单）：不创建凭据，直接提示
-      app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+      // 账号未签署服务协议——精准提示
+      if (msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0) {
+        app.showToast(I18N.t('runtimes.devspace.agreement_not_signed'), 8000);
+      } else {
+        // 模板未发布（AK/SK 未加入白名单）：不创建凭据，直接提示
+        app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+      }
       _refreshDevspaceList();
     });
   }
@@ -866,6 +982,11 @@ function _showCreateEnvForm() {
         } else if (msg.indexOf('98320022') >= 0 || msg.indexOf('count limit') >= 0) {
           API.post('/settings/runtime-credentials/' + credId + '/revoke');
           app.showToast(I18N.t('runtimes.devspace.count_limit'));
+          _refreshDevspaceList();
+        } else if (msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0) {
+          // 账号未签署 CodeArts 开发环境服务协议
+          API.post('/settings/runtime-credentials/' + credId + '/revoke');
+          app.showToast(I18N.t('runtimes.devspace.agreement_not_signed'), 8000);
           _refreshDevspaceList();
         } else if (msg.indexOf('98320049') >= 0 || msg.indexOf('Template not published') >= 0) {
           // 模板未发布（预检与实际创建之间的竞态）：删除凭据，显示精准提示
