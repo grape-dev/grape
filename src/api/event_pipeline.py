@@ -1411,6 +1411,39 @@ def get_prompt_context(repo_key: str) -> str:
     return f"\n\n[Event History]\n{summary}\n"
 
 
+def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
+    """direct 端任务级工位清理：删轻文件（.skills/.project-info/.knowledge）+ 安全卸载 worktree。
+
+    在 _execute_agent 的 finally 中调用，覆盖正常/失败/异常全部路径且幂等。
+    清理失败只告警，不影响事件结果上报。
+    """
+    try:
+        ws = get_agent_workdir(repo_key, agent_type, issue_id or "")
+        import shutil as _shutil
+        for _sub in (".skills", ".project-info", ".knowledge"):
+            _p = os.path.join(ws, _sub)
+            try:
+                if os.path.isdir(_p):
+                    _shutil.rmtree(_p, ignore_errors=True)
+            except Exception:
+                pass
+        from src.runtime import repogit
+        _num = repogit.issue_num_from(issue_id or "")
+        if _num:
+            _token = ""
+            try:
+                from src.user.db import get_gitcode_token
+                _token = get_gitcode_token(repo_key=repo_key) or ""
+            except Exception:
+                pass
+            repogit.remove_issue_worktree_if_pushed(repo_key, agent_type, _num, token=_token)
+        # 连空 ws 目录一起删（non-git agent 删完物化文件后为空；git agent 的 worktree 已被整目录删掉）
+        if os.path.isdir(ws) and not os.listdir(ws):
+            _shutil.rmtree(ws, ignore_errors=True)
+    except Exception as e:
+        log.warning(f"direct workdir cleanup failed for {repo_key}/{agent_type}: {e}")
+
+
 def _execute_agent(repo_key: str, seq: int, agent_type: str,
                    backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
                    task_id: str = ""):
@@ -1442,6 +1475,14 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         # 清理 Future 记录
         with _DIRECT_FUTURES_LOCK:
             _DIRECT_FUTURES.pop(seq, None)
+        # 任务级工位清理（direct 端）：轻文件 + 确认已 push 的 worktree
+        try:
+            _cleanup_direct_workdir(
+                repo_key, agent_type,
+                evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or ""
+            )
+        except Exception:
+            pass
 
 
 def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,

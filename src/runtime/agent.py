@@ -812,6 +812,41 @@ async def _materialize_files(client, tid, files_dict, file_urls, dest_dir, tag="
             pass
 
 
+def _cleanup_task_workdir(task: dict):
+    """任务结束后清理工位：删轻文件（.skills/.project-info/.knowledge）+ 安全卸载 worktree。
+
+    轻文件直接删（下次派单重新物化）；worktree 走 remove_issue_worktree_if_pushed（确认已 push）。
+    清理失败只告警，不影响任务结果上报与后续流水线。
+    """
+    import os as _os
+    import shutil as _shutil
+    cwd = task.get("cwd") or ""
+    if not cwd or not _os.path.isdir(cwd):
+        return
+    for _sub in (".skills", ".project-info", ".knowledge"):
+        _p = _os.path.join(cwd, _sub)
+        try:
+            if _os.path.isdir(_p):
+                _shutil.rmtree(_p, ignore_errors=True)
+        except Exception:
+            pass
+    try:
+        from src.runtime import repogit
+        _num = repogit.issue_num_from(task.get("issue_id") or "")
+        if _num and task.get("issue_session_id"):
+            repogit.remove_issue_worktree_if_pushed(
+                task.get("repo_key") or "", task.get("agent_type") or "",
+                _num, token=task.get("repo_gitcode_token") or "")
+    except Exception as e:
+        log.warning(f"workdir cleanup failed for task {task.get('id')}: {e}")
+    # 连空 cwd 目录一起删（non-git agent 删完物化文件后为空；git agent 的 worktree 已被整目录删掉）
+    try:
+        if _os.path.isdir(cwd) and not _os.listdir(cwd):
+            _shutil.rmtree(cwd, ignore_errors=True)
+    except Exception:
+        pass
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -1085,6 +1120,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                     log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
                     _kill_stale_engine(task, _backend_for_engine(engine_name))
                     _res.dispose()
+                    _cleanup_task_workdir(task)
                     return {"_error": "task terminated by server (aborted during execution)", "_started": started}
                 batch = []
                 _last_flush = _now
@@ -1094,13 +1130,16 @@ async def _execute_task(client, task, engine_name: str = ""):
                 log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
                 _kill_stale_engine(task, _backend_for_engine(engine_name))
                 _res.dispose()
+                _cleanup_task_workdir(task)
                 return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
         # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
         _res.dispose()
+        _cleanup_task_workdir(task)
         return done
     except Exception as e:
         log.warning(f"task {tid} stream failed: {e}")
         _res.dispose()
+        _cleanup_task_workdir(task)
         return {"_error": str(e), "_started": started}
 
 
