@@ -500,18 +500,30 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     files_read = []
 
     def _match_repo(entry):
-        """检查日志条目是否匹配指定的 repo"""
+        """检查日志条目是否匹配指定的 repo。
+        - 无 repo 过滤条件：全部返回
+        - 日志有 repo_key：必须精确匹配
+        - 日志无 repo_key 但 message 含 owner/repo 格式仓库名：
+          匹配当前仓库则展示，含其他仓库则不展示
+        - 日志不含任何仓库名：始终展示（系统级日志）"""
         if not _repo_filter:
             return True
         entry_repo = entry.get("repo_key", "")
-        if entry_repo and entry_repo == _repo_filter:
-            return True
-        # 旧格式日志无 repo_key 字段，检查 message 中是否包含仓库名
+        if entry_repo:
+            return entry_repo == _repo_filter
         msg = entry.get("message", "")
         repo_short = _repo_filter.replace("gitcode:", "")
         if repo_short in msg:
             return True
-        return False
+        # 检查 message 中是否含其他仓库名（owner/repo 格式，排除路径段如 api/v5）
+        import re as _re2
+        _repo_pattern = _re2.compile(r'\b([a-zA-Z0-9_-]+)/([a-zA-Z0-9_.-]+)\b')
+        for m in _repo_pattern.finditer(msg):
+            candidate = f"{m.group(1)}/{m.group(2)}"
+            if candidate != repo_short and not m.group(1).startswith("api"):
+                return False  # 含其他仓库名，不展示
+        # 不含任何仓库名，系统级日志，始终展示
+        return True
 
     def _match_user(entry):
         """检查日志条目是否匹配指定的 user_id"""
@@ -537,7 +549,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                     continue
                 try:
                     entry = _json.loads(line)
-                    if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry):
+                    if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry) and not _is_http_noise(entry):
                         entries.append(entry)
                         if len(entries) >= limit:
                             return
@@ -545,6 +557,22 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                     continue
         except Exception:
             pass
+
+    def _is_http_noise(entry):
+        """过滤掉正常行为的 HTTP 请求日志（非真正错误）。
+        保留 runtime/worker 凭据失败的 401（运维需感知 worker 掉线）。"""
+        msg = entry.get("message", "")
+        path = entry.get("path", "")
+        status = entry.get("status")
+        # 401：非 runtime 的是 token 过期刷新，过滤
+        if status == 401 or "status=401" in msg:
+            if "/api/runtime/" in path or "/api/runtime/" in msg:
+                return False  # runtime 401 保留
+            return True
+        # 403/404：health 限制、favicon、SPA 路由等，过滤
+        if status in (403, 404) or "status=403" in msg or "status=404" in msg:
+            return True
+        return False
 
     def _parse_text_log(filepath):
         """解析旧纯文本格式日志（正则提取 level + message）"""
@@ -573,7 +601,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                 if _re_json.match(line):
                     try:
                         entry = _json.loads(line)
-                        if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry):
+                        if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry) and not _is_http_noise(entry):
                             entries.append(entry)
                             if len(entries) >= limit:
                                 return
@@ -590,7 +618,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                         _e = {"ts": m.group(1), "level": lvl,
                             "component": m.group(3), "request_id": "-",
                             "message": m.group(4)[:500]}
-                        if _match_repo(_e) and _match_user(_e):
+                        if _match_repo(_e) and _match_user(_e) and not _is_http_noise(_e):
                             entries.append(_e)
                             if len(entries) >= limit:
                                 return
@@ -603,7 +631,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                     if lvl in allowed_levels:
                         _e = {"ts": "", "level": lvl, "component": "",
                             "request_id": "-", "message": m2.group(2)[:500]}
-                        if _match_repo(_e) and _match_user(_e):
+                        if _match_repo(_e) and _match_user(_e) and not _is_http_noise(_e):
                             entries.append(_e)
                         if len(entries) >= limit:
                             return
