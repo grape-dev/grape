@@ -501,20 +501,29 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
 
     def _match_repo(entry):
         """检查日志条目是否匹配指定的 repo。
-        HTTP 请求日志（有 status 字段）精确匹配 repo_key；
-        应用日志（无 status）模糊匹配 message 中是否包含仓库名。"""
+        - 无 repo 过滤条件：全部返回
+        - 日志有 repo_key：必须精确匹配
+        - 日志无 repo_key 但 message 含 owner/repo 格式仓库名：
+          匹配当前仓库则展示，含其他仓库则不展示
+        - 日志不含任何仓库名：始终展示（系统级日志）"""
         if not _repo_filter:
             return True
         entry_repo = entry.get("repo_key", "")
-        if entry_repo and entry_repo == _repo_filter:
+        if entry_repo:
+            return entry_repo == _repo_filter
+        msg = entry.get("message", "")
+        repo_short = _repo_filter.replace("gitcode:", "")
+        if repo_short in msg:
             return True
-        # 应用日志（非 HTTP 请求日志）没有 repo_key，检查 message
-        if not entry.get("status"):
-            msg = entry.get("message", "")
-            repo_short = _repo_filter.replace("gitcode:", "")
-            if repo_short in msg:
-                return True
-        return False
+        # 检查 message 中是否含其他仓库名（owner/repo 格式，排除路径段如 api/v5）
+        import re as _re2
+        _repo_pattern = _re2.compile(r'\b([a-zA-Z0-9_-]+)/([a-zA-Z0-9_.-]+)\b')
+        for m in _repo_pattern.finditer(msg):
+            candidate = f"{m.group(1)}/{m.group(2)}"
+            if candidate != repo_short and not m.group(1).startswith("api"):
+                return False  # 含其他仓库名，不展示
+        # 不含任何仓库名，系统级日志，始终展示
+        return True
 
     def _match_user(entry):
         """检查日志条目是否匹配指定的 user_id"""
