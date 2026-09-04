@@ -13,13 +13,13 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/ops/overview")
-def get_ops_overview(repo: str = ""):
+def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
 
     参考 multica BusinessSampler（metrics/business_sampler.go）的实时采样设计，
     但通过 Dashboard API 暴露给前端看板，无需 Prometheus 基础设施。
 
-    无认证：运维只读数据，不涉及敏感信息（与 /health/realtime 同级）。
+    需登录：user scope worker 按当前用户过滤（与 Agent 运行时页面可见性一致）。
     数据全部来自 agent_tasks / agent_runtimes 表的实时 SQL 查询。
     repo 参数：仓库名（requiredsa/hello-flask），过滤仅该仓库的任务。
     """
@@ -218,24 +218,26 @@ def get_ops_overview(repo: str = ""):
                 pass
 
         # 查 worker（凭据），排除已注销（revoked）
-        # 显示所有 scope 的 worker（global+user+repo），repo scope 在仓库看板额外过滤
+        # worker 可见性：global 全部可见 + user scope 只看自己的 + repo scope 看仓库的
+        _uname = user.get("username") or ""
         try:
             if repo:
-                # 仓库级看板：显示 global + user + 该 repo 的 worker
+                # 仓库级看板：global + 自己的 user + 该 repo 的 worker
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND (scope IN ('global','user') OR repo_key=? OR repo_key=?) ORDER BY id",
-                    (repo_key, repo),
+                    "AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key=? OR repo_key=?) ORDER BY id",
+                    (_uname, repo_key, repo),
                 )
             else:
-                # 全局看板：显示 global + user scope 的 worker
+                # 全局看板：global + 自己的 user scope worker
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND scope IN ('global','user') ORDER BY id"
+                    "AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
+                    (_uname,),
                 )
             for w in c.fetchall():
                 wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w

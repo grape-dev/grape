@@ -149,6 +149,8 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
     """
     from src.agent.hermes_acp import HermesACPBackend
 
+    label = f"{agent_label} " if agent_label else ""
+
     acp = HermesACPBackend()
     env = acp.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
@@ -181,8 +183,6 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
             if t:
                 s = s.replace(t, "[REDACTED]")
         return s
-
-    label = f"{agent_label} " if agent_label else ""
 
     # 会话失效重试（与 stream_agent 一致）
     for evt_type, data in acp.stream_execute(

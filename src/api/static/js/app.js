@@ -226,6 +226,20 @@ function loadAgentTypes() {
   }
 
   let _refreshTimer = null;
+  let _currentView = '';
+  let _currentParam = null;
+  let _hiddenSince = 0;
+  // 页面从后台回到前台时，若隐藏超过 30 秒才刷新（避免短时间切换标签页频繁刷新）
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden') {
+      _hiddenSince = Date.now();
+    } else if (document.visibilityState === 'visible' && _currentView && _hiddenSince) {
+      if (Date.now() - _hiddenSince > 60000) {
+        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(_currentView, _currentParam); }, 300);
+      }
+      _hiddenSince = 0;
+    }
+  });
   function nav(view, param) {
     const repo = currentRepo();
     if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail') { loadRepos(); return; }
@@ -247,6 +261,8 @@ function loadAgentTypes() {
       window._skillDetailFrom = (_prev && _prev.view) ? {view: _prev.view, param: _prev.param || null} : null;
     }
 
+    _currentView = view;
+    _currentParam = param;
     _pushHistory(view, param);
 
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));

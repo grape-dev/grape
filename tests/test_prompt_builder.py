@@ -121,10 +121,10 @@ class TestHistoryInjection:
         assert "怎么部署？" in p
         assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p
 
-    def test_general_with_session_skips_history_keeps_progress(self, pb):
+    def test_general_with_session_keeps_progress_and_recent_history(self, pb):
         p = self._general(True)
-        assert "## 对话历史" not in p                 # session 承载对话，不重复注入
-        assert "怎么部署？" not in p
+        # has_session 时仍注入最近 3 条对话历史作为兜底（防止远端 worker session 丢失）
+        assert "## 对话历史" in p
         assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p   # 进展始终注入
 
     def test_task_no_session_injects_history(self, pb):
@@ -132,9 +132,10 @@ class TestHistoryInjection:
         assert "## 对话历史" in p and "怎么部署？" in p
         assert "## Issue Agent 进展" in p
 
-    def test_task_with_session_skips_history_keeps_progress(self, pb):
+    def test_task_with_session_keeps_progress_and_recent_history(self, pb):
         p = self._task(True)
-        assert "## 对话历史" not in p
+        # has_session 时仍注入最近 3 条对话历史作为兜底
+        assert "## 对话历史" in p
         assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p
 
     def test_no_history_no_sections(self, pb):
