@@ -368,8 +368,6 @@ async def request_id_and_log_middleware(request: Request, call_next):
             msg = f"{request.method} {redacted_path} status={status} duration={duration:.0f}ms"
             if status >= 500:
                 _log.error(msg, extra=extra)
-            elif status >= 400 and status != 401:
-                _log.warning(msg, extra=extra)
             elif status == 401:
                 # 401 降级：前端 token 过期刷新是正常行为不记 WARNING；
                 # 但 runtime/worker 凭据失败保留 WARNING（运维需感知 worker 掉线）
@@ -377,6 +375,11 @@ async def request_id_and_log_middleware(request: Request, call_next):
                     _log.warning(msg, extra=extra)
                 else:
                     _log.debug(msg, extra=extra)
+            elif status in (403, 404):
+                # 403/404 降级：health 外网限制、favicon、SPA 路由回退等正常行为，非错误
+                _log.debug(msg, extra=extra)
+            elif status >= 400:
+                _log.warning(msg, extra=extra)
             else:
                 _log.info(msg, extra=extra)
         request_id_var.reset(token_rid)
