@@ -8,6 +8,27 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..")
 os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 
+@pytest.fixture(autouse=True)
+def _clear_caches():
+    """每个测试前清除引擎缓存 + repo 绑定缓存，防止跨测试污染。"""
+    try:
+        from src.runtime.engine_select import _resolve_local_cache
+        _resolve_local_cache.clear()
+    except Exception:
+        pass
+    try:
+        from src.im.handler_async import _repo_bind_cache
+        _repo_bind_cache.clear()
+    except Exception:
+        pass
+    yield
+    try:
+        from src.runtime.engine_select import _resolve_local_cache
+        _resolve_local_cache.clear()
+    except Exception:
+        pass
+
+
 def _make_ctx(app_id="cli_chat"):
     from src.im.feishu_async import BotContext
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="chat-test")

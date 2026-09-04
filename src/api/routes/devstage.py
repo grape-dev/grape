@@ -215,18 +215,19 @@ def create_environment(body: CreateEnvBody, user: dict = Depends(get_current_use
                 "AK": ak,
                 "SK": sk,
             }
-            # init_script：DevSpace 环境为 root 用户，用 --root 走 systemd 管理进程；
-            # --device 用环境名作为设备名（比 hostname 更可识别）。
-            init_scripts = [{
-                "command": (
-                    f"curl -fsSL {body.grape_server}/api/runtime/install"
-                    f" -o /tmp/install.sh && "
+            # init_script：DevStage 不允许命令含 && ; | > < 等 shell 操作符（HD.32821013），
+            # 所以拆成两条独立命令：先下载安装脚本，再执行。
+            # DevSpace 容器为 root 用户，安装脚本自动检测 systemd 可用性
+            # （容器无 systemd 时回退 nohup/setsid，不再强制 --root）。
+            init_scripts = [
+                {"command": f"curl -fsSL {body.grape_server}/api/runtime/install -o /tmp/install.sh"},
+                {"command": (
                     f"bash /tmp/install.sh --token {body.grape_token}"
                     f" --server {body.grape_server}"
                     f" --device {body.name}"
                     f" --root"
-                )
-            }]
+                )},
+            ]
         devstage_id = _create_env(
             ak, sk, name=body.name, cores=cores,
             arch="ARM", memory=memory,

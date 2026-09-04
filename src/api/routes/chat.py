@@ -1356,6 +1356,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
             from src.runtime.executor import stream_agent
             _final_text = ""
             _new_sid = ""
+            _last_error = ""
             try:
                 for evt_type, data in stream_agent(
                     prompt=prompt, cwd=cwd, session_id=runtime_session_id,
@@ -1378,10 +1379,16 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
                             nsid = data.get("oc_session_id", "")
                             if nsid:
                                 _new_sid = nsid
+                        # session 重试后仍无文本 → 用 error 信息作为回复
+                        if not _final_text and _last_error:
+                            _final_text = _last_error
                         yield ("done", {"text": _final_text})
                     elif evt_type == "error":
+                        # 不 break — 让 stream_agent 继续，使 session 失效重试逻辑
+                        # (_stale_fail 检测 + _run_once("") 重跑) 有机会执行。
+                        # 记住 error，仅在 done 无有效文本时才作为最终结果。
+                        _last_error = str(data)
                         yield ("error", str(data))
-                        break
                     else:
                         yield (evt_type, data)
             finally:
