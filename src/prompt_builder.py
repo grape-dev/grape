@@ -146,8 +146,8 @@ def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
         lines.append("⚠️ **必须**在最终 JSON 产出块中额外包含 `recommended_scene` 和 `scene_reason` 两个字段。")
         lines.append("- `recommended_scene`：填写上表中最匹配的 scene_id（如 \"blog-publish\"、\"iac\"、\"default\"）。")
         lines.append("- `scene_reason`：一句话说明选择理由。")
-        lines.append("- 无法确定时 `recommended_scene` 填 `\"default\"`，不得省略。")
-        lines.append("- 缺少这两个字段的输出将被系统视为无效并重试。")
+        lines.append("- 无法确定时 `recommended_scene` 填仓库当前默认场景，不得省略。")
+        lines.append("- 注意：系统会根据用户设置决定是否采纳你的推荐，未采纳时保持仓库默认场景不变。")
     except Exception as _e:
         from src.config import log as _log
         _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")
@@ -603,7 +603,7 @@ def _append_chat_history(parts: list, history: list = None, has_valid_session: b
     """注入对话历史（chat-prompt-history-injection-design.md §3）。
 
     - 无有效 session → 注入完整「对话历史」（最近 10 条，每条截 500 字符）；
-    - 有 session → 普通对话历史由 opencode session 承载，**不再重复注入**；
+    - 有 session → 最近 3 条对话历史作为兜底上下文（防止远端 worker session 丢失）；
     - 无论 session，**含 [XXX Agent] 的 Issue 进展始终注入**为「Issue Agent 进展」段。
     """
     history = history or []
@@ -614,11 +614,14 @@ def _append_chat_history(parts: list, history: list = None, has_valid_session: b
         parts.append("\n## Issue Agent 进展")
         for m in agent_items[-10:]:
             parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
-    if not has_valid_session:
-        norm = [m for m in history if m.get("role") in ("user", "agent")]
-        if norm:
+    # 始终注入最近对话历史：has_valid_session 时只注入最近 3 条兜底，
+    # 无 session 时注入最近 10 条（与原逻辑一致）。
+    norm = [m for m in history if m.get("role") in ("user", "agent")]
+    if norm:
+        recent = norm[-3:] if has_valid_session else norm[-10:]
+        if recent:
             parts.append("\n## 对话历史")
-            for m in norm[-10:]:
+            for m in recent:
                 parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
 
 

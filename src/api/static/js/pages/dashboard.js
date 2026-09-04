@@ -184,7 +184,6 @@ function renderDashboard(data) {
   // 构建场景选择器
   const _scopeBadge = (scope) => {
     if (scope === 'repo') return `<span class="ap-scene-opt-badge ap-scene-badge-repo">${I18N.t('dashboard.scope_repo_short')}</span>`;
-    if (scope === 'user') return `<span class="ap-scene-opt-badge ap-scene-badge-user">${I18N.t('dashboard.scope_user_short')}</span>`;
     return '';
   };
   const _currentSceneName = (currentSceneObj && currentSceneObj.name) || I18N.t('dashboard.no_scene_title');
@@ -697,11 +696,10 @@ function renderDashboard(data) {
         <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">${I18N.t('dashboard.desc_optional')}</label>
         <input id="sceneDescInput" type="text" value="${(existingDesc||'').replace(/"/g,'&quot;')}" placeholder="${I18N.t('dashboard.desc_placeholder')}" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
       </div>
-      <div style="margin-bottom:20px">
+      <div style="display:none;margin-bottom:20px">
         <label style="font-size:11px;color:#86868b;display:block;margin-bottom:4px">${I18N.t('dashboard.visibility')}</label>
         <select id="sceneScopeSelect" style="width:100%;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;background:#f5f5f7;color:#1d1d1f;font-size:13px;outline:none">
-          <option value="user" ${existingScope==='user'?'selected':''}>${I18N.t('dashboard.scope_user')}</option>
-          <option value="repo" ${existingScope==='repo'?'selected':''}>${I18N.t('dashboard.scope_repo')}</option>
+          <option value="repo" selected>${I18N.t('dashboard.scope_repo')}</option>
         </select>
       </div>
       <div style="display:flex;justify-content:flex-end;gap:8px">

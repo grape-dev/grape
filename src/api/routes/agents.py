@@ -39,9 +39,12 @@ def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[in
     # official 场景先 fork
     if scene_info["scope"] == "official":
         fork_official_scene(scene_id, user_id, repo_key=repo_key)
-        scene_info = _query_scene_by_id(scene_id, repo_key=repo_key, user_id=user_id)
-        if not scene_info or scene_info["scope"] != "user":
+        # fork 后 scene_id 变成 'repo:{原id}'，需要查 fork 后的
+        forked_id = f"repo:{scene_id}"
+        scene_info = _query_scene_by_id(forked_id, repo_key=repo_key, user_id=user_id)
+        if not scene_info or scene_info["scope"] != "repo":
             return  # fork 失败，跳过
+        scene_id = forked_id  # 后续更新用 fork 后的 id
     # 更新 node 的 engine_runtime_ids
     nodes = scene_info.get("nodes", [])
     updated = False
@@ -52,7 +55,7 @@ def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[in
             break
     if updated:
         update_custom_scene(
-            scene_id=scene_id, scope="user", repo_key=repo_key,
+            scene_id=scene_id, scope="repo", repo_key=repo_key,
             user_id=user_id, nodes=nodes)
 
 

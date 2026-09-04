@@ -654,7 +654,7 @@ class CreateSceneRequest(BaseModel):
     scene_id: str = ""
     name: str
     description: str = ""
-    scope: str = "user"  # user / repo
+    scope: str = "repo"  # user / repo（user 已废弃，强制 repo）
     nodes: list[SceneNodeInput] = []
 
 class UpdateSceneRequest(BaseModel):
@@ -675,6 +675,9 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
 
     if body.scope == "official":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "不可创建官方场景"})
+    # 强制 repo scope（user scope 已废弃）
+    if body.scope == "user":
+        body.scope = "repo"
 
     repo_key = ""
     if body.scope == "repo":

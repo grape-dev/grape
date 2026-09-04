@@ -151,6 +151,38 @@ def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: 
     log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
 
 
+def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
+    """设置 Issue 是否允许 VOD 覆盖场景（allow_scene_override），幂等 upsert。"""
+    val = 1 if allowed else 0
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        row = c.fetchone()
+        if row:
+            c.execute("UPDATE issue_state SET allow_scene_override=? WHERE id=?", (val, row[0]))
+        else:
+            c.execute(
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, allow_scene_override, updated_at) "
+                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
+                (repo_key, issue_id, val))
+        db.commit()
+    log.info(f"SceneOverride: repo={repo_key} issue={issue_id} allowed={val}")
+
+
+def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
+    """读取 Issue 是否允许 VOD 覆盖场景。默认 False。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?",
+                (repo_key, issue_id))
+            row = c.fetchone()
+            return bool(row[0]) if row and row[0] else False
+    except Exception:
+        return False
+
+
 def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):
     """标记 Issue 为子任务（设置 parent_issue_id）。"""
     with db_lock:

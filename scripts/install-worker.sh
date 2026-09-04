@@ -152,6 +152,13 @@ if [ ! -x "$VENV/bin/python" ]; then
   log "创建 venv ($PY)"
   "$PY" -m venv "$VENV"
 fi
+# 确保 venv 内有 pip（某些系统 ensurepip 缺失导致 venv 无 pip）
+if [ ! -x "$VENV/bin/pip" ]; then
+  log "venv 缺 pip, 手动安装 ensurepip..."
+  "$VENV/bin/python" -m ensurepip --upgrade 2>/dev/null || \
+    "$VENV/bin/python" -m pip install --upgrade pip 2>/dev/null || \
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>/dev/null || true
+fi
 if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
   PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"

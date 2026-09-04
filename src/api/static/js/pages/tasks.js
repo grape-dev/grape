@@ -314,7 +314,7 @@ function openTaskCreateModal() {
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
   // 异步加载可用场景列表
-  let _sceneOptions = '<option value="">' + I18N.t('tasks.create.scene_none') + '</option>';
+  let _sceneOptions = '<option value="">' + I18N.t('tasks.create.scene_vod_auto') + '</option>';
 
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
@@ -351,7 +351,7 @@ function openTaskCreateModal() {
     scenes.forEach(function(s) {
       const opt = document.createElement('option');
       opt.value = s.id;
-      const scopeTag = s.scope === 'repo' ? '【仓库级】' : s.scope === 'user' ? '【用户级】' : '';
+      const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
       opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
       sel.appendChild(opt);
     });
