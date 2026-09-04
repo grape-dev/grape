@@ -500,16 +500,11 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     files_read = []
 
     def _match_repo(entry):
-        """检查日志条目是否匹配指定的 repo"""
+        """检查日志条目是否匹配指定的 repo（精确匹配，不做子串模糊匹配）"""
         if not _repo_filter:
             return True
         entry_repo = entry.get("repo_key", "")
         if entry_repo and entry_repo == _repo_filter:
-            return True
-        # 旧格式日志无 repo_key 字段，检查 message 中是否包含仓库名
-        msg = entry.get("message", "")
-        repo_short = _repo_filter.replace("gitcode:", "")
-        if repo_short in msg:
             return True
         return False
 
@@ -537,7 +532,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                     continue
                 try:
                     entry = _json.loads(line)
-                    if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry):
+                    if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry) and not _is_http_401(entry):
                         entries.append(entry)
                         if len(entries) >= limit:
                             return
@@ -545,6 +540,18 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                     continue
         except Exception:
             pass
+
+    def _is_http_401(entry):
+        """过滤掉前端 token 过期刷新的 401 请求日志（正常行为，非真正错误）。
+        保留 runtime/worker 凭据失败的 401（运维需感知 worker 掉线）。"""
+        msg = entry.get("message", "")
+        path = entry.get("path", "")
+        if entry.get("status") == 401 or "status=401" in msg:
+            # runtime 路径的 401 是 worker 凭据问题，保留
+            if "/api/runtime/" in path or "/api/runtime/" in msg:
+                return False
+            return True
+        return False
 
     def _parse_text_log(filepath):
         """解析旧纯文本格式日志（正则提取 level + message）"""
@@ -573,7 +580,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                 if _re_json.match(line):
                     try:
                         entry = _json.loads(line)
-                        if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry):
+                        if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry) and not _is_http_401(entry):
                             entries.append(entry)
                             if len(entries) >= limit:
                                 return
@@ -590,7 +597,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                         _e = {"ts": m.group(1), "level": lvl,
                             "component": m.group(3), "request_id": "-",
                             "message": m.group(4)[:500]}
-                        if _match_repo(_e) and _match_user(_e):
+                        if _match_repo(_e) and _match_user(_e) and not _is_http_401(_e):
                             entries.append(_e)
                             if len(entries) >= limit:
                                 return
@@ -603,7 +610,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                     if lvl in allowed_levels:
                         _e = {"ts": "", "level": lvl, "component": "",
                             "request_id": "-", "message": m2.group(2)[:500]}
-                        if _match_repo(_e) and _match_user(_e):
+                        if _match_repo(_e) and _match_user(_e) and not _is_http_401(_e):
                             entries.append(_e)
                         if len(entries) >= limit:
                             return

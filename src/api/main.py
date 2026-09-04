@@ -306,21 +306,24 @@ async def request_id_and_log_middleware(request: Request, call_next):
     # 从请求路径提取 repo_key（如 /api/dashboard/requiredsa/hello-flask → requiredsa/hello-flask）
     path = request.url.path
     _repo = ""
-    # 路径模式：/api/dashboard/{owner}/{repo} 或 /api/pipeline/{owner}/{repo} 等
+    # 从请求路径提取 repo_key，不同模块路径结构不同：
+    # /api/dashboard/{owner}/{repo}          → owner=parts[2], repo=parts[3]
+    # /api/pipeline/{owner}/{repo}           → 同上
+    # /api/agents/{agent_type}/{owner}/{repo} → owner=parts[3], repo=parts[4]
     _path_parts = path.strip("/").split("/")
     if len(_path_parts) >= 4 and _path_parts[0] == "api":
-        _candidate = f"{_path_parts[2]}/{_path_parts[3]}"
-        # 排除已知的非仓库路径段
-        _non_repo_segments = {"ops", "settings", "health", "healthz", "readyz",
-                              "metrics", "auth", "skills", "repos", "scenes",
-                              "search", "webhook", "runtime", "task-logs", "static",
-                              "dashboard", "agents", "events", "chat", "pipeline",
-                              "tasks", "knowledge"}
-        if ("/" in _candidate
-                and _path_parts[2] not in _non_repo_segments
-                and _path_parts[3] not in _non_repo_segments
-                and "." not in _path_parts[2]):
-            _repo = f"gitcode:{_candidate}"
+        _module = _path_parts[1]
+        # agents 路由多一层 agent_type
+        if _module == "agents" and len(_path_parts) >= 5:
+            _owner = _path_parts[3]
+            _repo_name = _path_parts[4]
+            if "/" not in _owner and "." not in _owner:
+                _repo = f"gitcode:{_owner}/{_repo_name}"
+        elif _module in {"dashboard", "pipeline"} and len(_path_parts) >= 4:
+            _owner = _path_parts[2]
+            _repo_name = _path_parts[3]
+            if "/" not in _owner and "." not in _owner:
+                _repo = f"gitcode:{_owner}/{_repo_name}"
     # query param 中的 repo（如 ?repo=requiredsa/hello-flask）
     if not _repo:
         _qp = request.query_params.get("repo", "")
@@ -365,8 +368,15 @@ async def request_id_and_log_middleware(request: Request, call_next):
             msg = f"{request.method} {redacted_path} status={status} duration={duration:.0f}ms"
             if status >= 500:
                 _log.error(msg, extra=extra)
-            elif status >= 400:
+            elif status >= 400 and status != 401:
                 _log.warning(msg, extra=extra)
+            elif status == 401:
+                # 401 降级：前端 token 过期刷新是正常行为不记 WARNING；
+                # 但 runtime/worker 凭据失败保留 WARNING（运维需感知 worker 掉线）
+                if path.startswith("/api/runtime/"):
+                    _log.warning(msg, extra=extra)
+                else:
+                    _log.debug(msg, extra=extra)
             else:
                 _log.info(msg, extra=extra)
         request_id_var.reset(token_rid)
