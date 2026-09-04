@@ -146,8 +146,8 @@ def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
         lines.append("⚠️ **必须**在最终 JSON 产出块中额外包含 `recommended_scene` 和 `scene_reason` 两个字段。")
         lines.append("- `recommended_scene`：填写上表中最匹配的 scene_id（如 \"blog-publish\"、\"iac\"、\"default\"）。")
         lines.append("- `scene_reason`：一句话说明选择理由。")
-        lines.append("- 无法确定时 `recommended_scene` 填 `\"default\"`，不得省略。")
-        lines.append("- 缺少这两个字段的输出将被系统视为无效并重试。")
+        lines.append("- 无法确定时 `recommended_scene` 填仓库当前默认场景，不得省略。")
+        lines.append("- 注意：系统会根据用户设置决定是否采纳你的推荐，未采纳时保持仓库默认场景不变。")
     except Exception as _e:
         from src.config import log as _log
         _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")

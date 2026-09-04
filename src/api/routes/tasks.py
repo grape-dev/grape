@@ -631,7 +631,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         created = True
     # 2) 自动检测多任务模式：根据场景的 issue skill 是否为 issue-multitask
     _auto_subtask_mode = 0
-    if body.scene_id:
+    if body.scene_id and body.scene_id != "vod-auto":
         try:
             from src.api.pipeline_config import _query_scene_by_id
             from src.config import log as _log
@@ -651,9 +651,14 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                 subtask_mode=_auto_subtask_mode)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
-    # 4) 如指定了开发场景 → 写入 issue_state.scene_id + scene_user_id
-    if body.scene_id:
-        try:
+    # 4) 场景选择 + VOD 覆盖开关
+    #    - 不选场景（默认） → 打开开关，用 dev_scene 默认，VOD 可覆盖
+    #    - 选具体场景 → 关闭开关，写入用户选择的 scene_id
+    try:
+        from src.api.session_store import set_scene_override_flag
+        if body.scene_id and body.scene_id != "vod-auto":
+            # 用户指定场景：关闭开关，写入 scene_id
+            set_scene_override_flag(repo_key, f"#{issue_num}", False)
             from src.api.session_store import set_issue_scene
             scene_uid = 0
             try:
@@ -669,9 +674,12 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             except Exception:
                 pass
             set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
-        except Exception as _e:
-            from src.config import log
-            log.warning(f"create_task: set_issue_scene failed: {_e}")
+        else:
+            # 不选场景（含 vod-auto）：打开开关，用 dev_scene 默认，VOD 可覆盖
+            set_scene_override_flag(repo_key, f"#{issue_num}", True)
+    except Exception as _e:
+        from src.config import log
+        log.warning(f"create_task: scene override/scene_id failed: {_e}")
     # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记
     if _auto_subtask_mode:
         try:

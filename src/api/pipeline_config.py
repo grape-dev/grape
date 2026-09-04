@@ -359,27 +359,16 @@ def delete_custom_scene(scene_id: str, scope: str, repo_key: str, user_id: int):
 
 
 def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int):
-    """Auto-fork all official scenes to repo scope (idempotent).
+    """Auto-fork default scene only to repo scope (idempotent).
 
-    Called by host_repo when a repo is first hosted. Creates repo-scoped copies
-    with scene_id prefixed 'repo:' to avoid cross-scope collisions.
+    Called by host_repo when a repo is first hosted. Creates a repo-scoped copy
+    of the 'default' (通用开发) scene with scene_id prefixed 'repo:' to avoid cross-scope collisions.
+    Other official scenes are not auto-forked; users can create custom scenes as needed.
     """
-    db, lock = _db()
-    official_ids = []
-    with lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                "SELECT scene_id FROM devops_pipeline_scene "
-                "WHERE is_active=1 AND scope='official' ORDER BY id")
-            official_ids = [r[0] for r in c.fetchall()]
-        except Exception as e:
-            log.warning(f"_auto_fork_official_scenes_to_repo: query failed: {e}")
-    for sid in official_ids:
-        try:
-            fork_official_scene(sid, user_id, repo_key=repo_key)
-        except Exception as e:
-            log.warning(f"_auto_fork_official_scenes_to_repo: fork {sid} failed: {e}")
+    try:
+        fork_official_scene("default", user_id, repo_key=repo_key)
+    except Exception as e:
+        log.warning(f"_auto_fork_official_scenes_to_repo: fork default failed: {e}")
 
 
 def fork_official_scene(scene_id: str, user_id: int, repo_key: str = "") -> bool:

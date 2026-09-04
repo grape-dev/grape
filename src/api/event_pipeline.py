@@ -1876,18 +1876,23 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 final_text = d.get("text", "")
                 new_oc_session_id = d.get("oc_session_id", "")
                 log.info(f"Agent done: [Agent:{agent_type}|repo:{repo_name}] exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
-                # VOD 场景推荐兜底：解析 JSON 中的 recommended_scene 并持久化
+                # VOD 场景推荐兜底：解析 JSON 中的 recommended_scene 并持久化（受 allow_scene_override 开关控制）
                 if agent_type == "vod" and final_text and issue_id:
                     try:
-                        from src.api.event_store import parse_agent_output_json
-                        _scene_out = parse_agent_output_json(final_text)
-                        if _scene_out and _scene_out.get("recommended_scene"):
-                            _rec_scene = _scene_out["recommended_scene"]
-                            from src.api.session_store import set_issue_scene
-                            from src.runtime.engine_select import _repo_user_id
-                            _vod_uid = _repo_user_id(repo_key)
-                            set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
-                            log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id}")
+                        from src.api.session_store import get_scene_override_flag
+                        _allow_override = get_scene_override_flag(repo_key, issue_id)
+                        if not _allow_override:
+                            log.info(f"VOD done: scene override disabled for {issue_id}, skip recommended_scene")
+                        else:
+                            from src.api.event_store import parse_agent_output_json
+                            _scene_out = parse_agent_output_json(final_text)
+                            if _scene_out and _scene_out.get("recommended_scene"):
+                                _rec_scene = _scene_out["recommended_scene"]
+                                from src.api.session_store import set_issue_scene
+                                from src.runtime.engine_select import _repo_user_id
+                                _vod_uid = _repo_user_id(repo_key)
+                                set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
+                                log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id} (override enabled)")
                     except Exception as _se:
                         log.warning(f"VOD done: scene parse failed: {_se}")
             elif evt_type == "error":
