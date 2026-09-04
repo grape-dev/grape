@@ -193,3 +193,36 @@ def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num):
             except Exception:
                 pass
     shutil.rmtree(issue_dir, ignore_errors=True)
+
+
+def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, token: str = "") -> bool:
+    """任务结束后安全删除 worktree：仅当本地 HEAD 已与远程分支一致（已 push）才删。
+
+    用 `git ls-remote` 直连远程核对（不依赖 bare mirror 的 fetch，避免 fetch 滞后误判）。
+    返回 True=已删除；False=保留（未 push / 远程无此分支 / 异常）。宁可残留，不可误删丢代码。
+    """
+    if not is_git_agent(agent_type):
+        return False
+    try:
+        issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
+        if not os.path.isdir(issue_dir):
+            return False
+        branch = f"feat/issue-{issue_num}"
+        head = _run_git(["-C", issue_dir, "rev-parse", "HEAD"], token=token)
+        if head is None or not (head.stdout or "").strip():
+            return False
+        local_head = head.stdout.strip()
+        remote = _run_git(["ls-remote", clone_url_for(repo_key), f"refs/heads/{branch}"], token=token)
+        if remote is None:
+            return False
+        remote_out = (remote.stdout or "").strip()
+        if not remote_out:
+            return False  # 远程无此分支 = 从未 push，保留
+        remote_head = remote_out.split()[0]
+        if local_head != remote_head:
+            return False  # 本地与远程不一致 = 有未推送提交，保留
+        cleanup_issue_worktree(repo_key, agent_type, issue_num)
+        return True
+    except Exception as e:
+        log.warning(f"repogit remove_issue_worktree_if_pushed failed {repo_key}: {e}")
+        return False

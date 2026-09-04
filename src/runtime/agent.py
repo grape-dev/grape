@@ -812,6 +812,41 @@ async def _materialize_files(client, tid, files_dict, file_urls, dest_dir, tag="
             pass
 
 
+def _cleanup_task_workdir(task: dict):
+    """任务结束后清理工位：删轻文件（.skills/.project-info/.knowledge）+ 安全卸载 worktree。
+
+    轻文件直接删（下次派单重新物化）；worktree 走 remove_issue_worktree_if_pushed（确认已 push）。
+    清理失败只告警，不影响任务结果上报与后续流水线。
+    """
+    import os as _os
+    import shutil as _shutil
+    cwd = task.get("cwd") or ""
+    if not cwd or not _os.path.isdir(cwd):
+        return
+    for _sub in (".skills", ".project-info", ".knowledge"):
+        _p = _os.path.join(cwd, _sub)
+        try:
+            if _os.path.isdir(_p):
+                _shutil.rmtree(_p, ignore_errors=True)
+        except Exception:
+            pass
+    try:
+        from src.runtime import repogit
+        _num = repogit.issue_num_from(task.get("issue_id") or "")
+        if _num and task.get("issue_session_id"):
+            repogit.remove_issue_worktree_if_pushed(
+                task.get("repo_key") or "", task.get("agent_type") or "",
+                _num, token=task.get("repo_gitcode_token") or "")
+    except Exception as e:
+        log.warning(f"workdir cleanup failed for task {task.get('id')}: {e}")
+    # 连空 cwd 目录一起删（non-git agent 删完物化文件后为空；git agent 的 worktree 已被整目录删掉）
+    try:
+        if _os.path.isdir(cwd) and not _os.listdir(cwd):
+            _shutil.rmtree(cwd, ignore_errors=True)
+    except Exception:
+        pass
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -867,6 +902,21 @@ async def _execute_task(client, task, engine_name: str = ""):
             env.update(_fresh_env)
     except Exception:
         pass
+    # 本机 worker 修正对外服务地址：任务入队时 plugin 广播 runtime_id=0，server_url 被写成
+    # 公网 server_base_url（如 http://123.249.19.227）。本机 worker 抢到任务后，agent 内部
+    # A2A/tasks 等调用若走公网会 NAT 回环不通（超时）；必须覆盖为 localhost 直连。
+    # 远程 worker 的 RUNTIME_SERVER_URL 是公网，不受影响（保持原 server_url）。
+    _rts = os.environ.get("RUNTIME_SERVER_URL", "") or ""
+    _is_local_worker = ("localhost" in _rts) or ("127.0.0.1" in _rts) or _rts.startswith("127.")
+    _local_base = ""
+    _old_server_url = task.get("server_url") or ""
+    if _is_local_worker:
+        _local_base = _rts.rstrip("/") if _rts else "http://127.0.0.1:3000"
+        if "://" in _local_base and ":" not in _local_base.split("://", 1)[1]:
+            _local_base = _local_base + ":3000"
+        env["GRAPE_SERVER_URL"] = _local_base
+        task["server_url"] = _local_base
+        log.info(f"local worker: override GRAPE_SERVER_URL/server_url -> {_local_base}")
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
     # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
@@ -884,6 +934,12 @@ async def _execute_task(client, task, engine_name: str = ""):
     skill_dir = _os.path.join(cwd, ".skills")
     prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
                                        .replace("{{SERVER_URL}}", task.get("server_url") or "")
+    # 本机 worker：prompt 里 build_prompt 已把 {{SERVER_URL}} 替换成公网 server_base_url
+    # （worker 端此处 .replace("{{SERVER_URL}}") 是空操作），需把 prompt 里已硬编码的公网
+    # 地址回改为 localhost，否则本机 worker 的 A2A 走公网 NAT 回环不通（超时）。
+    if _is_local_worker and _old_server_url and _local_base and _old_server_url != _local_base:
+        prompt = prompt.replace(_old_server_url, _local_base)
+        log.info(f"local worker: rewrote prompt server_url {_old_server_url} -> {_local_base}")
     try:
         # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
         # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
@@ -1085,6 +1141,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                     log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
                     _kill_stale_engine(task, _backend_for_engine(engine_name))
                     _res.dispose()
+                    _cleanup_task_workdir(task)
                     return {"_error": "task terminated by server (aborted during execution)", "_started": started}
                 batch = []
                 _last_flush = _now
@@ -1094,13 +1151,16 @@ async def _execute_task(client, task, engine_name: str = ""):
                 log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
                 _kill_stale_engine(task, _backend_for_engine(engine_name))
                 _res.dispose()
+                _cleanup_task_workdir(task)
                 return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
         # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
         _res.dispose()
+        _cleanup_task_workdir(task)
         return done
     except Exception as e:
         log.warning(f"task {tid} stream failed: {e}")
         _res.dispose()
+        _cleanup_task_workdir(task)
         return {"_error": str(e), "_started": started}
 
 
@@ -1466,9 +1526,28 @@ def main():
     import shutil as _sh
     _codearts_tasks_dir = "/var/cache/codearts-tasks"
     if os.path.isdir(_codearts_tasks_dir):
-        _sh.rmtree(_codearts_tasks_dir, ignore_errors=True)
-        os.makedirs(_codearts_tasks_dir, exist_ok=True)
+        # 清理子目录（保留父目录权限，避免 rmtree+makedirs 重建后丢失 1777）
+        for _entry in os.listdir(_codearts_tasks_dir):
+            _child = os.path.join(_codearts_tasks_dir, _entry)
+            try:
+                if os.path.isdir(_child):
+                    _sh.rmtree(_child, ignore_errors=True)
+                else:
+                    os.unlink(_child)
+            except Exception:
+                pass
+        try:
+            os.chmod(_codearts_tasks_dir, 0o1777)
+        except PermissionError:
+            pass
         log.info(f"cleaned codearts tasks dir: {_codearts_tasks_dir}")
+    else:
+        os.makedirs(_codearts_tasks_dir, exist_ok=True)
+        try:
+            os.chmod(_codearts_tasks_dir, 0o1777)
+        except PermissionError:
+            pass
+        log.info(f"created codearts tasks dir: {_codearts_tasks_dir}")
 
     from src.runtime.client import RuntimeClient
 

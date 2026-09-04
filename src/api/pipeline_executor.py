@@ -241,6 +241,13 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                 _scene_id = _scene_id or "default"
             except Exception:
                 pass
+            # scene_user_id=0 时兜底反查（Task Center 建 repo 级场景任务时可能漏写 scene_uid）
+            if not _scene_uid:
+                try:
+                    from src.runtime.engine_select import _repo_user_id
+                    _scene_uid = _repo_user_id(repo_key)
+                except Exception:
+                    pass
             _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0,
                                   scene_id=_scene_id, user_id=_scene_uid)
             if _picked is None:
