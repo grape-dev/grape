@@ -83,8 +83,8 @@ def get_devstage_config(user: dict = Depends(get_current_user)):
     return {
         "base_url": base_url,
         "configured": bool(base_url),
-        "ak_value": acc.get("huawei_cloud_ak", ""),
-        "sk_value": acc.get("huawei_cloud_sk", ""),
+        "ak_exists": bool(acc.get("huawei_cloud_ak", "")),
+        "sk_exists": bool(acc.get("huawei_cloud_sk", "")),
     }
 
 
@@ -177,6 +177,10 @@ def list_environments(user: dict = Depends(get_current_user)):
                 # template_id 也匹配不到，全部回退
                 log.warning(f"过滤后为空但原始列表有 {len(envs)} 个环境，回退返回全部")
                 filtered = envs
+
+        # 脱敏：_env_vars 含 GRAPE_DEV_TOKEN 等凭据，仅用于过滤，不返回前端
+        for e in filtered:
+            e.pop("_env_vars", None)
 
         # 附带 Worker 上线状态：环境创建时 --device {env.name}，所以
         # runtime_credentials.device_name == env.name 即为对应 Worker。

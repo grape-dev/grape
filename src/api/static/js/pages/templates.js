@@ -556,7 +556,7 @@ function doCreateFromTemplate(templateId) {
         var modal = document.getElementById('ptCreateModal');
         if (modal) setTimeout(function() { modal.remove(); }, 800);
         if (r.host_warning) {
-          app.showToast(I18N.t('templates.host_warning'), 10000);
+          app.showToast(r.host_warning, 10000);
         } else {
           app.showToast(I18N.t('templates.create_success', {msg: r.message || I18N.t('templates.create_success_default')}));
         }

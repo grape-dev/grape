@@ -1,5 +1,5 @@
 """Project Templates 路由：模板列表获取与一键创建"""
-import json, os, re
+import json, os, re, asyncio
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.api.deps import get_current_user, get_user_token
@@ -186,14 +186,16 @@ async def create_from_template(body: CreateTemplateRequest,
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但模板代码写入失败: {e}"})
 
     # 3. 自动加入托管（复用 /api/repos/host 全链路）
+    #    host_repo 是同步函数（含 GitCode HTTP 调用），用 to_thread 避免阻塞 event loop
     webhook_id = 0
     host_warning = ""
+    bot_username = ""
     try:
         from src.api.routes.repos import RepoAction, host_repo
-        host_result = await host_repo(RepoAction(full_name=full_name), user)
-        webhook_id = host_result.get("webhook_id", 0)
+        host_result = await asyncio.to_thread(host_repo, RepoAction(full_name=full_name), user)
+        webhook_id = host_result.get("webhook_id", 0) or 0
     except HTTPException as e:
-        # 托管失败（如 grace_bot 未成为维护者）— 不中断流程，返回提醒
+        # 托管失败（如 bot 未成为维护者）— 不中断流程，记录警告
         detail = e.detail if isinstance(e.detail, str) else (e.detail.get("message", "") if isinstance(e.detail, dict) else str(e.detail))
         log.warning(f"template host failed (non-fatal): {detail}")
         host_warning = detail or "托管配置失败"
@@ -201,11 +203,37 @@ async def create_from_template(body: CreateTemplateRequest,
         log.warning(f"template host failed (non-fatal): {e}")
         host_warning = str(e)
 
+    # 只有 webhook 真没建成功时才显示提醒；webhook_id 有值说明托管已成功
+    if webhook_id and host_warning:
+        log.info(f"template host: webhook_id={webhook_id} exists, suppressing host_warning: {host_warning}")
+        host_warning = ""
+
+    # 读取实际 bot 用户名（从 global-bot-token.json），用于提醒文案
+    _, bot_username = _load_global_bot_config()
+    if not bot_username:
+        bot_username = "grape_bot"
+
+    # 只有 webhook 真没建成功时才显示提醒；webhook_id 有值说明托管已成功
+    if webhook_id:
+        if host_warning:
+            log.info(f"template host: webhook_id={webhook_id} exists, suppressing host_warning: {host_warning}")
+        host_warning = ""
+        msg = f"项目 {full_name} 创建并托管成功"
+    else:
+        # 托管失败：构造用户友好的提醒文案（bot 名从各自环境配置读取）
+        msg = f"项目 {full_name} 创建成功"
+        if host_warning:
+            host_warning = f"托管配置失败：{host_warning}"
+        else:
+            host_warning = "托管配置失败"
+        msg += f"。⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（{bot_username}）添加为维护者，然后手动托管仓库以完成自动化配置。"
+
     # 4. 应用开发场景
+    #    apply_scene 同样是同步函数，用 to_thread 避免阻塞
     scene_id = tpl.get("scene_id") or ctx.get("scene_id") or "default"
     try:
         from src.api.routes.scenes import ApplySceneRequest, apply_scene
-        await apply_scene(gitcode_login, repo_name, ApplySceneRequest(scene_id=scene_id), user)
+        await asyncio.to_thread(apply_scene, gitcode_login, repo_name, ApplySceneRequest(scene_id=scene_id), user)
     except Exception as e:
         log.warning(f"template apply scene failed: {e}")
 
@@ -226,9 +254,6 @@ async def create_from_template(body: CreateTemplateRequest,
     except Exception as e:
         log.warning(f"template onboarding trigger failed: {e}")
 
-    msg = f"项目 {full_name} 创建成功"
-    if host_warning:
-        msg += "。⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（grace_bot）添加为维护者，然后手动托管仓库以完成自动化配置。"
     return {"full_name": full_name, "webhook_id": webhook_id, "scene_id": scene_id,
             "host_warning": host_warning,
             "message": msg}

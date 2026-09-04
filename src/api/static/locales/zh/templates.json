@@ -44,7 +44,7 @@
   "progress_applying_scene": "正在应用开发场景...",
   "progress_done": "✅ 创建成功！",
   "progress_failed": "❌ {{msg}}",
-  "host_warning": "⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（grace_bot）添加为维护者，然后手动托管仓库以完成自动化配置。",
+  "host_warning": "⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（grape_bot）添加为维护者，然后手动托管仓库以完成自动化配置。",
   "cat": {
     "Hello World 新手模板": "Hello World 新手模板",
     "Agent 最佳实践": "Agent 最佳实践",
