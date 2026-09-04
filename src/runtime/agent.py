@@ -87,6 +87,33 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
 
 
+def _worker_probe_once():
+    """同步执行一轮引擎探测，结果写入 _worker_probe_results。
+
+    注册成功后立即调用，确保第一次心跳上报时 probe_results 非空，
+    使服务端能及时纠正 healthy（ok→1 / fail→0）。
+    """
+    try:
+        engines = _discover_local_runtimes()
+        for eng in engines:
+            if not eng.get("installed"):
+                with _worker_probe_lock:
+                    _worker_probe_results[eng["name"]] = {
+                        "status": "skip", "latency": 0,
+                        "last_probe": _datetime.datetime.utcnow().isoformat() + "Z",
+                        "error": "not installed",
+                    }
+                continue
+            log.info(f"worker engine probe: testing {eng['name']}...")
+            result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
+            result["last_probe"] = _datetime.datetime.utcnow().isoformat() + "Z"
+            with _worker_probe_lock:
+                _worker_probe_results[eng["name"]] = result
+            log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
+    except Exception as e:
+        log.warning(f"worker engine probe (initial) error: {e}")
+
+
 def _worker_probe_loop():
     """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。"""
     global _worker_probe_started
@@ -1593,6 +1620,9 @@ def main():
                  f"poll={poll}s heartbeat={heartbeat}s max_concurrent={max_concurrent}")
         for rid in ids:
             await client.recover_orphans(rid)
+        # 注册成功后立即执行一轮引擎探测（线程池，不阻塞事件循环），
+        # 确保第一次心跳上报时 probe_results 非空，使服务端及时纠正 healthy（ok→升级 / fail→降级）。
+        await asyncio.to_thread(_worker_probe_once)
         try:
             await _run_loop(client, ids, poll, heartbeat, max_concurrent, engine_by_rid,
                             installed=installed, device_name=device)

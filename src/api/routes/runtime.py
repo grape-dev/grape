@@ -221,11 +221,26 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                     _platency = (_pdata.get("latency") or 0) if isinstance(_pdata, dict) else 0
                     _plast = (_pdata.get("last_probe") or now) if isinstance(_pdata, dict) else now
                     _perror = (_pdata.get("error") or "") if isinstance(_pdata, dict) else ""
-                    c.execute(
-                        "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=? "
-                        "WHERE name=? AND credential_id=?",
-                        (_pstatus, _platency, _plast, _perror, _pname, credential_id)
-                    )
+                    # probe_status 联动 healthy：ok→升级（纠正 --version 误判），fail→降级（实际不能干活）
+                    # skip/pending 不动 healthy，保留 --version 的结果
+                    if _pstatus == "ok":
+                        c.execute(
+                            "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=?, healthy=1 "
+                            "WHERE name=? AND credential_id=?",
+                            (_pstatus, _platency, _plast, _perror, _pname, credential_id)
+                        )
+                    elif _pstatus == "fail":
+                        c.execute(
+                            "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=?, healthy=0 "
+                            "WHERE name=? AND credential_id=?",
+                            (_pstatus, _platency, _plast, _perror, _pname, credential_id)
+                        )
+                    else:
+                        c.execute(
+                            "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=? "
+                            "WHERE name=? AND credential_id=?",
+                            (_pstatus, _platency, _plast, _perror, _pname, credential_id)
+                        )
             # 查该 worker 的已取消任务——通知 worker 立即杀进程
             ph2 = ",".join("?" for _ in body.runtime_ids)
             rows = c.execute(
