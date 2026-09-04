@@ -153,13 +153,27 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
     env = acp.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
 
-    # GitCode token 注入（与 stream_agent 一致）
-    if bot_token:
-        env["BOT_GITCODE_TOKEN"] = bot_token
-    if user_token:
-        env["USER_GITCODE_TOKEN"] = user_token
+    # GitCode token 互斥注入（与 stream_agent 一致）：
+    #   chat → 只 USER_GITCODE_TOKEN；事件任务 → 只 BOT_GITCODE_TOKEN（不同时注入）
+    if event_type == "chat":
+        if not user_token and user_id > 0:
+            try:
+                from src.user.db import get_user_gitcode_token
+                user_token = get_user_gitcode_token(user_id) or ""
+            except Exception as e:
+                log.warning(f"Fallback resolve user gitcode token failed: {e}")
+                user_token = ""
+        if user_token:
+            env["USER_GITCODE_TOKEN"] = user_token
+        else:
+            if bot_token:
+                log.error(f"{label}chat task lacks user token but bot_token provided: "
+                          f"will NOT impersonate user with bot token; GitCode API 401 for user write ops")
+            else:
+                log.warning(f"{label}NO token available for chat agent, GitCode API will 401")
     elif bot_token:
-        env["USER_GITCODE_TOKEN"] = bot_token
+        env["BOT_GITCODE_TOKEN"] = bot_token
+        log.info(f"{label}devops event task: using bot token (len={len(bot_token)})")
     if agent_name:
         env["AGENT_NAME"] = agent_name
     if env_extra:
@@ -228,7 +242,7 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
 
 
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
-                 event_type: str = "", backend_name: str = "opencode",
+                 event_type: str = "", backend_name: str = "",
                  account: str = "", user_id: int = 0,
                  env_extra: dict | None = None,
                  bot_token: str = "", user_token: str = "",
@@ -260,27 +274,31 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
     env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
-    # GitCode token 通过子进程环境变量注入（不写入 prompt，避免 token 进会话历史/日志）
-    if bot_token:
-        env["BOT_GITCODE_TOKEN"] = bot_token
-    if user_token:
-        env["USER_GITCODE_TOKEN"] = user_token
-    else:
-        # 用户 token 为空 → 兜底链路：
-        # 1) 用户登录 grape 时绑定的 GitCode token（user_accounts.gitcode_api_token）
-        # 2) 仓库 api token（bot_token 参数：worker 侧 repo_gitcode_token / 事件流水线仓库 bot token），
-        #    保证 chat agent 创建/查询 Issue 时 USER_GITCODE_TOKEN 非空，避免 401。
-        if user_id > 0:
+    # GitCode token 互斥注入（§十 写操作隔离）：
+    #   chat（用户身份）→ 只注入 USER_GITCODE_TOKEN；事件任务（仓库身份）→ 只注入 BOT_GITCODE_TOKEN。
+    #   BOT_GITCODE_TOKEN 与 USER_GITCODE_TOKEN 不同时注入，避免用户对话上下文暴露仓库 bot token。
+    #   判定严格以 event_type 为准（不依赖 user_token 兜底判断，防调用方误传导致误判 chat）。
+    if event_type == "chat":
+        # chat：仅用户 token（DB 兜底；若仍无则视为配置异常，不以 bot token 冒充用户身份）
+        if not user_token and user_id > 0:
             try:
                 from src.user.db import get_user_gitcode_token
                 user_token = get_user_gitcode_token(user_id) or ""
             except Exception as e:
                 log.warning(f"Fallback resolve user gitcode token failed: {e}")
+                user_token = ""
         if user_token:
             env["USER_GITCODE_TOKEN"] = user_token
-        elif bot_token:
-            env["USER_GITCODE_TOKEN"] = bot_token
-            log.warning(f"{label}USER_GITCODE_TOKEN empty, fallback to repo bot token (len={len(bot_token)})")
+        else:
+            if bot_token:
+                log.error(f"{label}chat task lacks user token but bot_token provided: "
+                          f"will NOT impersonate user with bot token; GitCode API 401 for user write ops")
+            else:
+                log.warning(f"{label}NO token available for chat agent, GitCode API will 401")
+    elif bot_token:
+        # devops 事件任务：只用仓库 bot token（prompt 只认 BOT_GITCODE_TOKEN），不注入 USER_GITCODE_TOKEN
+        env["BOT_GITCODE_TOKEN"] = bot_token
+        log.info(f"{label}devops event task: user token not applicable, using bot token (len={len(bot_token)})")
     # Agent 显示名（skill 中 [$AGENT_NAME] 使用，如 "Issue Agent" / "QA Agent"）
     if agent_name:
         env["AGENT_NAME"] = agent_name

@@ -520,6 +520,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
             for evt_type, data in stream_agent(
                 prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                 backend_name=backend_name, user_id=user["id"],
+                event_type="chat",
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                 agent_label=f"[Agent:chat|user:{user['username']}]",
             ):
@@ -754,8 +755,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             worker_error = ""
             try:
                 for evt_type, data in stream_agent(
-prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
+                    event_type="chat",
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                 ):
@@ -1360,6 +1362,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
                 for evt_type, data in stream_agent(
                     prompt=prompt, cwd=cwd, session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
+                    event_type="chat",
                     account=user["username"], user_token=gitcode_token,
                     agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
