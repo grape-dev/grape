@@ -45,7 +45,7 @@ import datetime as _datetime
 
 _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
-    "hermes": ["hermes", "chat", "-q", "hello", "--yolo"],
+    "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
     "cursor": ["cursor", "run", "hello"],
 }
@@ -59,7 +59,10 @@ _worker_probe_started = False
 
 
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
-    """对本机引擎发起 CLI 测试对话，返回探测结果。"""
+    """对本机引擎发起 CLI 测试对话，返回探测结果。
+
+    hermes 引擎探测后会删除 hello session，避免污染历史会话列表。
+    """
     cmd = _PROBE_COMMANDS.get(engine_name)
     if not cmd:
         return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
@@ -73,6 +76,9 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         )
         latency = round(_time_mod.time() - start, 1)
         if result.returncode == 0:
+            # hermes 探测：从输出中提取 session_id 并删除，避免 hello 污染历史会话
+            if engine_name == "hermes":
+                _cleanup_hermes_probe_session(result.stdout)
             return {"status": "ok", "latency": latency, "error": ""}
         else:
             err = (result.stderr or result.stdout or "").strip()[:200]
@@ -85,6 +91,26 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
+
+
+def _cleanup_hermes_probe_session(stdout: str):
+    """从 hermes chat -q -Q 的输出中提取 session_id 并删除，避免 hello 对话污染历史会话。"""
+    import re as _re
+    # -Q 模式输出: "session_id: 20260904_170115_9191ce\n..."
+    # 非 -Q 模式输出: "Session:        20260904_165247_4f270b\n..."
+    m = _re.search(r'session[_-]?(?:id)?:\s*(\S+)', stdout, _re.IGNORECASE)
+    if not m:
+        return
+    sid = m.group(1).strip()
+    if not sid:
+        return
+    try:
+        _subprocess.run(
+            ["hermes", "sessions", "delete", sid, "--yes"],
+            capture_output=True, text=True, timeout=10, stdin=_subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
 
 
 def _worker_probe_once():
