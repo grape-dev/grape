@@ -124,7 +124,7 @@ function loadAgentTypes() {
       $('mainView').style.position = 'fixed';
       $('mainView').style.inset = '0';
       $('mainView').style.zIndex = '100';
-      $('pageTitle').textContent = I18N.t('app.select_repo');
+      $('pageTitle').textContent = I18N.t('app.current_project');
       renderRepoSelection(repos);
       return;
     }
@@ -135,7 +135,7 @@ function loadAgentTypes() {
     $('mainView').style.position = '';
     $('mainView').style.inset = '';
     $('mainView').style.zIndex = '';
-    $('pageTitle').textContent = I18N.t('app.nav.scene_center');
+    $('pageTitle').textContent = I18N.t('app.current_project');
 
     if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
       const r = managedRepos[0];
@@ -208,7 +208,7 @@ function loadAgentTypes() {
       mv.style.position = 'fixed';
       mv.style.inset = '0';
       mv.style.zIndex = '100';
-      $('pageTitle').textContent = I18N.t('app.select_repo');
+      $('pageTitle').textContent = I18N.t('app.current_project');
       renderRepoSelection(d.repos || []);
     }).catch(e => {
       if (ov) ov.remove();
@@ -219,7 +219,7 @@ function loadAgentTypes() {
       mv.style.position = 'fixed';
       mv.style.inset = '0';
       mv.style.zIndex = '100';
-      $('pageTitle').textContent = I18N.t('app.select_repo');
+      $('pageTitle').textContent = I18N.t('app.current_project');
       const pc = $('pageContent');
       if (pc) pc.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div></div>';
     });
@@ -281,7 +281,7 @@ function loadAgentTypes() {
     }
 
     if (view === 'dash') {
-      title.textContent = I18N.t('app.nav.scene_center');
+      title.textContent = I18N.t('app.current_project');
       // 进入场景中心时无条件清除编辑标志（上一次操作异常退出时泄漏）
       window._dashboardEditing = false;
       const loadDash = () => Promise.all([
@@ -302,35 +302,35 @@ function loadAgentTypes() {
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
-      title.textContent = I18N.t('app.nav.pipeline');
+      title.textContent = I18N.t('app.current_project');
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
-      title.textContent = (_AGENT_TYPES[view] && _AGENT_TYPES[view].display_name) ? (function(){var k='agents.type.'+view+'.name';var v=I18N.t(k);return v!==k?v:_AGENT_TYPES[view].display_name;})() : view;
+      title.textContent = I18N.t('app.current_project');
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'event') {
-      title.textContent = I18N.t('app.nav.event_detail');
+      title.textContent = I18N.t('app.current_project');
       API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
       // 切换回事件详情时恢复活跃对话查询
       if (typeof resumeConvTask === 'function') setTimeout(resumeConvTask, 500);
     } else if (view === 'chat') {
-      title.textContent = I18N.t('app.nav.chat');
+      title.textContent = I18N.t('app.current_project');
       renderChat(param || null);
       // 切换回 Chat 页面时恢复活跃查询（不中断）
       if (typeof resumeChatTask === 'function') setTimeout(resumeChatTask, 500);
     } else if (view === 'tasks') {
-      title.textContent = I18N.t('app.nav.tasks');
+      title.textContent = I18N.t('app.current_project');
       renderTasks();
     } else if (view === 'settings') {
-      title.textContent = I18N.t('app.nav.settings');
+      title.textContent = I18N.t('app.current_project');
       renderSettings(param || 'credentials');
     } else if (view === 'skills') {
-      title.textContent = I18N.t('app.nav.skills');
+      title.textContent = I18N.t('app.current_project');
       renderSkills();
     } else if (view === 'knowledge') {
-      title.textContent = I18N.t('app.nav.knowledge');
+      title.textContent = I18N.t('app.current_project');
       renderKnowledge();
     } else if (view === 'runtimes') {
-      title.textContent = I18N.t('app.nav.runtimes');
+      title.textContent = I18N.t('app.current_project');
       if (typeof renderRuntimes !== 'function') {
         // runtimes.js failed to load (stale cache) — force reload to fetch latest
         window.location.reload();
@@ -338,25 +338,25 @@ function loadAgentTypes() {
       }
       API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'observability') {
-      title.textContent = I18N.t('app.nav.observability');
+      title.textContent = I18N.t('app.current_project');
       if (typeof renderObservability === 'function') renderObservability();
     } else if (view === 'repos') {
-      title.textContent = I18N.t('app.select_repo');
+      title.textContent = I18N.t('app.current_project');
       loadRepos();
     } else if (view === 'skill') {
-      title.textContent = I18N.t('app.nav.skill_detail');
+      title.textContent = I18N.t('app.current_project');
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
       API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'skill-sub') {
       // 技能包子技能详情（如 "38/huawei-ecs"）
-      title.textContent = I18N.t('app.nav.sub_skill_detail');
+      title.textContent = I18N.t('app.current_project');
       API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'scene-market') {
-      title.textContent = I18N.t('skills.scene_market_title');
+      title.textContent = I18N.t('app.current_project');
       renderSceneMarket();
     } else if (view === 'scene-detail') {
-      title.textContent = I18N.t('skills.scene_detail_title');
+      title.textContent = I18N.t('app.current_project');
       renderSceneDetail(param);
     }
   }
@@ -489,7 +489,7 @@ function loadAgentTypes() {
         $('mainView').style.position = 'fixed';
         $('mainView').style.inset = '0';
         $('mainView').style.zIndex = '100';
-        $('pageTitle').textContent = I18N.t('app.select_repo');
+        $('pageTitle').textContent = I18N.t('app.current_project');
       }
       showApp();
       // Remove token from URL without reload (preserve language prefix)
