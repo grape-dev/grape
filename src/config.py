@@ -377,3 +377,38 @@ def replace_skill_dir_placeholders(prompt: str, base_dir: str = "") -> str:
 
 # 延迟到 main.py 中显式调用，避免循环导入
 # _load_accounts()
+
+
+# ====== Agent 文件系统隔离（组件2：bwrap 锁）======
+# 默认开启（关 = 回滚，设 GRAPE_AGENT_SANDBOX=off）；bwrap 沙箱隔离 agent 子进程。
+# 启用后 agent 子进程套 bwrap：只挂「基础系统 + 引擎运行时 + 工位 cwd」，
+# 敏感路径（configs/、data/sessions.db、.env、/root、~/.grape、其他仓库/issue）天然不可见。
+GRAPE_AGENT_SANDBOX = os.environ.get("GRAPE_AGENT_SANDBOX", "on").lower() in ("1", "true", "on", "yes")
+
+# bwrap 白名单（只读）——基础系统：动态库 / CA 证书 / DNS / nsswitch / 基础命令。
+# 注意：/run 必须挂（/etc/resolv.conf 是 symlink → /run/systemd/resolve/stub-resolv.conf，
+# 缺 /run 则沙箱内 DNS 解析失败、出网全 000）。绝对不放行 configs/、data/、WORKSPACE 其他仓库、/root、~/.grape 等敏感/越界路径。
+BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/run")
+
+# bwrap 白名单（只读）——引擎运行时，按后端名展开；二进制 + 配置 + 运行时（~ 由 sandbox 模块展开）。
+# 三引擎白名单不同（§7 兼容性清单），分别覆盖；不存在目录自动跳过。
+# 注：codearts 是 opencode 的华为云定制版（Node 应用），依赖模型与 opencode 一致：
+#   ~/.nvm(Node 运行时) + ~/.local(codearts 二进制) + ~/.cache(Node 缓存) + ~/.codeartsdoer(专属配置)；
+#   未实测（当前环境无 codearts 引擎），目录按推断补齐，留待真实环境 K6 验证。
+BWRAP_RO_ENGINE_COMMON = ("/usr/local",)
+BWRAP_RO_ENGINE = {
+    "opencode": ("~/.nvm", "~/.config/opencode", "~/.cache", "~/.opencode"),
+    "codearts": ("~/.codeartsdoer", "~/.nvm", "~/.local", "~/.cache"),
+    "hermes": ("~/.local",),
+}
+
+# bwrap 白名单（读写）——引擎缓存；hermes overlay 由 sandbox 模块按 md5(cwd) 动态计算绑定。
+# 注意：hermes 的 ~/.hermes 必须 rw —— hermes_acp._build_overlay_home 把 ~/.hermes 的
+# logs/skills/plugins/cache 等子目录 symlink 进 overlay，hermes 运行时读写全落到 ~/.hermes 真身；
+# ro 会导致写 logs 报 [Errno 30] Read-only file system（2026-09-03 实测踩坑）。
+# codearts 底层同 opencode 用 bun，需 /var/cache/bun-compile 写权限（JIT .so 缓存）。
+BWRAP_RW_ENGINE = {
+    "opencode": ("/var/cache/bun-compile",),
+    "codearts": ("~/.codeartsdoer", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
+    "hermes": ("~/.hermes",),
+}

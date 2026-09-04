@@ -222,6 +222,46 @@ unset _key_name _key_value
 chmod 600 "$ENV_FILE" 2>/dev/null || true
 log "接入配置已写入 $ENV_FILE（token + 主控地址）"
 
+# ===== 5.5 安装 bwrap（agent 文件系统隔离锁；root 自动装，普通用户提示）=====
+# bwrap 用于给 agent 子进程套文件系统隔离（阶段二）。已装且可用 → 跳过；
+# root 模式 → 自动 apt install + setuid；普通用户 → 提示（无锁运行，不影响 worker）。
+# AppArmor（Ubuntu 24.04）限制非特权 userns，用 setuid 位绕过（Debian 官方推荐）。
+_bwrap_ok() {
+  command -v bwrap >/dev/null 2>&1 && bwrap --ro-bind / / --proc /proc --dev /dev sh -c 'exit 0' 2>/dev/null
+}
+install_bwrap() {
+  if _bwrap_ok; then
+    log "bwrap 已可用（agent 文件系统隔离锁就绪）"
+    return 0
+  fi
+  if [ "$ROOT_MODE" = "1" ]; then
+    log "安装 bwrap（bubblewrap）+ 解除 AppArmor 限制（setuid）..."
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update -qq >/dev/null 2>&1 || true
+      apt-get install -y -qq bubblewrap >/dev/null 2>&1 || log "警告: apt 安装 bwrap 失败"
+      if command -v bwrap >/dev/null 2>&1; then
+        chmod u+s /usr/bin/bwrap || log "警告: 设置 bwrap setuid 位失败"
+        dpkg-statoverride --add root root 4755 /usr/bin/bwrap >/dev/null 2>&1 || true
+      fi
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y -q bubblewrap >/dev/null 2>&1 || log "警告: yum 安装 bwrap 失败"
+      command -v bwrap >/dev/null 2>&1 && chmod u+s /usr/bin/bwrap
+    else
+      log "警告: 未找到 apt/yum，无法自动装 bwrap"
+    fi
+    if _bwrap_ok; then
+      log "bwrap 安装成功（agent 文件系统隔离锁就绪）"
+    else
+      log "警告: bwrap 仍不可用（AppArmor 严格限制），文件系统锁降级关闭（worker 照常运行）"
+    fi
+  else
+    log "提示: 未检测到可用的 bwrap（agent 文件系统隔离锁需要）。如需启用，请以 root 重跑本脚本（加 --root），或手动执行："
+    log "  sudo apt-get install -y bubblewrap && sudo dpkg-statoverride --add root root 4755 /usr/bin/bwrap"
+    log "  （未装 bwrap 时 worker 照常运行，仅文件系统隔离锁关闭）"
+  fi
+}
+install_bwrap
+
 # ===== 6. 生成启动脚本并启动 =====
 if [ "$ROOT_MODE" = "1" ]; then
   # ---- root：systemd 服务 ----

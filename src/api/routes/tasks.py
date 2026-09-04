@@ -658,9 +658,14 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             scene_uid = 0
             try:
                 from src.api.pipeline_config import _query_scene_by_id
+                from src.runtime.engine_select import _repo_user_id
                 scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key, user_id=user.get("id", 0))
-                if scene_obj and scene_obj.get("scope") == "user":
-                    scene_uid = user.get("id", 0)
+                if scene_obj:
+                    _scope = scene_obj.get("scope", "")
+                    if _scope == "user":
+                        scene_uid = user.get("id", 0)
+                    elif _scope == "repo":
+                        scene_uid = _repo_user_id(repo_key)
             except Exception:
                 pass
             set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)

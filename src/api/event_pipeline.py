@@ -457,6 +457,20 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
             return "issue"  # Issue Agent 审视
         if stage == "done":
             return ""
+        # PR updated 事件 + stage=coding：检查是否有 QA 历史记录
+        # 如果 QA 曾经审查过（说明 coding 是被 QA 回流后的修复），PR updated 应路由到 QA 复审
+        if event_type == "pull_request_updated" and stage == "coding":
+            try:
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? AND agent_type='qa' LIMIT 1",
+                        (repo_key, issue_id))
+                    if c.fetchone():
+                        return "qa"  # QA 有历史 → 路由到 QA 复审
+            except Exception:
+                pass
         return stage  # coding/qa/sre → 对应执行 Agent
 
 
@@ -1492,6 +1506,150 @@ def get_prompt_context(repo_key: str) -> str:
     return f"\n\n[Event History]\n{summary}\n"
 
 
+def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_name: str,
+                                evt: dict, issue_id: str, prompt: str) -> str:
+    """组件4：direct 端统一物化 project-info / skill / knowledge 到工位 ws 下。
+
+    替代旧的「占位符替换为服务端绝对路径（仓库级 project-info 原件 / 全局 SKILLS_DIR）」，
+    使 direct 端与 worker 端 cwd 布局一致（.project-info/.skills/.knowledge 均在 ws 内），
+    后续 bwrap 锁只需挂 ws，无需放行仓库级目录或全局 SKILLS_DIR。
+
+    与 worker 端 _execute_task 物化语义对齐：
+    - .project-info/  ← load_project_info + member_files_pi + agent_files（rel 相对 project-info）
+    - .skills/{skill}/ ← OBS zip 解压 或 本地技能目录 copytree
+    - .knowledge/      ← knowledge_files（rel 相对 WORKSPACE_DIR，与 worker 原样一致）
+
+    任一步失败仅告警并跳过（不抛异常、不阻断执行），保留其它占位符继续替换。
+    """
+    import shutil as _shutil
+
+    _issue = issue_id or evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or ""
+
+    # 1) project-info 物化（复用 enqueue_task 打包逻辑）
+    proj_dir = os.path.join(ws, ".project-info")
+    try:
+        from src.runtime.service import load_project_info
+        _pif, _pim = load_project_info(repo_key)
+        try:
+            from src.api.knowledge import member_files_pi, agent_files
+            for rel, content in (member_files_pi(repo_key) or {}).items():
+                _pif.setdefault(rel, content)
+            for rel, content in (agent_files(repo_key, agent_type) or {}).items():
+                _pif.setdefault(rel, content)
+        except Exception:
+            pass
+        for rel, content in (_pif or {}).items():
+            _dest = os.path.join(proj_dir, rel)
+            try:
+                os.makedirs(os.path.dirname(_dest), exist_ok=True)
+                with open(_dest, "w", encoding="utf-8") as f:
+                    f.write(content if isinstance(content, str) else str(content))
+            except Exception:
+                pass
+        prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
+    except Exception as e:
+        log.warning(f"direct project-info materialize failed for {repo_key}: {e}")
+
+    # 2) skill 物化（OBS zip 解压 / 本地技能 copytree 到 ws/.skills/{skill_name}/）
+    skill_dir = os.path.join(ws, ".skills")
+    try:
+        _skill_local = ""  # 本地技能根目录（非空则 copytree）
+        from src.user.db import get_skill_by_id, get_skill_path
+        _skill_id = evt.get("_skill_id") or 0
+        if _skill_id:
+            _sk = get_skill_by_id(_skill_id)
+            if _sk:
+                _okey = _sk.get("file_path") or ""
+                if _okey:
+                    # OBS 技能：zip 根 = {skill_name}/，解压到 ws/.skills/
+                    from src.storage import get_skill_zip_bytes
+                    _zip = get_skill_zip_bytes(_okey)
+                    if _zip:
+                        import zipfile as _zf, io as _io
+                        os.makedirs(skill_dir, exist_ok=True)
+                        with _zf.ZipFile(_io.BytesIO(_zip)) as zf:
+                            zf.extractall(skill_dir)
+                else:
+                    _full = get_skill_path(_skill_id)
+                    if _full and os.path.exists(_full):
+                        _skill_local = os.path.dirname(_full)
+        else:
+            from src.config import resolve_official_skill_path as _resolve_skill_path
+            _real_skill_md = _resolve_skill_path(skill_name or "")
+            if not _real_skill_md:
+                _sp = evt.get("_skill_path", "") or ""
+                if _sp and os.path.isfile(_sp):
+                    _real_skill_md = _sp
+                elif _sp and os.path.isfile(os.path.join(_sp, "SKILL.md")):
+                    _real_skill_md = os.path.join(_sp, "SKILL.md")
+            if _real_skill_md:
+                _skill_local = os.path.dirname(_real_skill_md)
+        if _skill_local and skill_name and os.path.isdir(_skill_local):
+            _dst = os.path.join(skill_dir, skill_name)
+            if not os.path.isdir(_dst):
+                try:
+                    _shutil.copytree(_skill_local, _dst)
+                except Exception:
+                    pass
+        prompt = prompt.replace("{{SKILL_DIR}}", skill_dir)
+    except Exception as e:
+        log.warning(f"direct skill materialize failed for {skill_name}: {e}")
+
+    # 3) knowledge 物化（对齐 worker 端 .knowledge，direct 补齐）
+    know_dir = os.path.join(ws, ".knowledge")
+    try:
+        from src.api.knowledge import knowledge_files as _know_files
+        from src.runtime.service import _issue_num as _svc_issue_num
+        _num = _svc_issue_num(_issue)
+        _know = _know_files(repo_key, agent_type=agent_type, issue_num=_num)
+        for rel, content in (_know or {}).items():
+            _dest = os.path.join(know_dir, rel)
+            try:
+                os.makedirs(os.path.dirname(_dest), exist_ok=True)
+                with open(_dest, "w", encoding="utf-8") as f:
+                    f.write(content if isinstance(content, str) else str(content))
+            except Exception:
+                pass
+        prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
+    except Exception as e:
+        log.warning(f"direct knowledge materialize failed for {repo_key}: {e}")
+
+    return prompt
+
+
+def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
+    """direct 端任务级工位清理：删轻文件（.skills/.project-info/.knowledge）+ 安全卸载 worktree。
+
+    在 _execute_agent 的 finally 中调用，覆盖正常/失败/异常全部路径且幂等。
+    清理失败只告警，不影响事件结果上报。
+    """
+    try:
+        ws = get_agent_workdir(repo_key, agent_type, issue_id or "")
+        import shutil as _shutil
+        for _sub in (".skills", ".project-info", ".knowledge"):
+            _p = os.path.join(ws, _sub)
+            try:
+                if os.path.isdir(_p):
+                    _shutil.rmtree(_p, ignore_errors=True)
+            except Exception:
+                pass
+        from src.runtime import repogit
+        _num = repogit.issue_num_from(issue_id or "")
+        if _num:
+            _token = ""
+            try:
+                from src.user.db import get_gitcode_token
+                _token = get_gitcode_token(repo_key=repo_key) or ""
+            except Exception:
+                pass
+            repogit.remove_issue_worktree_if_pushed(repo_key, agent_type, _num, token=_token)
+        # 连空 ws 目录一起删（non-git agent 删完物化文件后为空；git agent 的 worktree 已被整目录删掉）
+        if os.path.isdir(ws) and not os.listdir(ws):
+            _shutil.rmtree(ws, ignore_errors=True)
+    except Exception as e:
+        log.warning(f"direct workdir cleanup failed for {repo_key}/{agent_type}: {e}")
+
+
 def _execute_agent(repo_key: str, seq: int, agent_type: str,
                    backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
                    task_id: str = ""):
@@ -1523,6 +1681,14 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         # 清理 Future 记录
         with _DIRECT_FUTURES_LOCK:
             _DIRECT_FUTURES.pop(seq, None)
+        # 任务级工位清理（direct 端）：轻文件 + 确认已 push 的 worktree
+        try:
+            _cleanup_direct_workdir(
+                repo_key, agent_type,
+                evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or ""
+            )
+        except Exception:
+            pass
 
 
 def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
@@ -1595,57 +1761,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     try:
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
-        # 直接模式（direct）：project-info 服务端本地可达，替换占位符为权威路径
-        try:
-            from src.repo_key import split_owner_repo
-            _o, _r = split_owner_repo(repo_name)
-            _pi_path = os.path.join(WORKSPACE_DIR, _o, _r, "project-info")
-            prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _pi_path)
-        except Exception:
-            pass
-        # 直接模式（direct）：技能路径占位符替换
-        # skill_id 优先：按主键查 skill 表拿 file_path / get_skill_path
-        # - file_path 非空（OBS 技能）→ 从 OBS 拉 zip 解压到 .skills/ → 替换 {{SKILL_DIR}}
-        # - file_path 空（本地技能）→ get_skill_path 返回绝对路径 → 替换 {{SKILL_DIR}}
-        # - 无 skill_id / stale → 回退老逻辑（_skill_path dirname 或 executor SKILLS_DIR 兜底）
-        try:
-            from src.user.db import get_skill_by_id, get_skill_path
-            _skill_id = evt.get("_skill_id") or 0
-            if _skill_id:
-                _sk = get_skill_by_id(_skill_id)
-                if _sk:
-                    _okey = _sk.get("file_path") or ""
-                    if _okey:
-                        # OBS 技能：解压到 cwd/.skills/（zip 根 = {skill_name}/，落地 .skills/{skill_name}/SKILL.md）
-                        from src.storage import get_skill_zip_bytes
-                        _zip = get_skill_zip_bytes(_okey)
-                        if _zip:
-                            import zipfile as _zf, io as _io
-                            _skill_base = os.path.join(ws, ".skills")
-                            os.makedirs(_skill_base, exist_ok=True)
-                            with _zf.ZipFile(_io.BytesIO(_zip)) as zf:
-                                zf.extractall(_skill_base)
-                            prompt = prompt.replace("{{SKILL_DIR}}", _skill_base)
-                    else:
-                        # 本地技能：get_skill_path 返回 SKILLS_DIR/xxx/SKILL.md
-                        # dirname(dirname(...)) = SKILLS_DIR（prompt 拼成 SKILLS_DIR/xxx/SKILL.md）
-                        _full = get_skill_path(_skill_id)
-                        if _full and os.path.exists(_full):
-                            prompt = prompt.replace("{{SKILL_DIR}}", os.path.dirname(os.path.dirname(_full)))
-            else:
-                # 向后兼容：无 skill_id 时走老逻辑
-                from src.config import resolve_official_skill_path as _resolve_skill_path
-                _sp = evt.get("_skill_path", "") or ""
-                _skill_name_only = os.path.basename(_sp) if _sp else ""
-                _real_skill_md = _resolve_skill_path(_skill_name_only) if _skill_name_only else ""
-                if _real_skill_md:
-                    prompt = prompt.replace("{{SKILL_DIR}}", os.path.dirname(_real_skill_md))
-                else:
-                    _real_skill_dir = os.path.dirname(_sp) if _sp else ""
-                    if _real_skill_dir:
-                        prompt = prompt.replace("{{SKILL_DIR}}", _real_skill_dir)
-        except Exception:
-            pass
+        # 直接模式（direct）：组件4 统一物化 project-info / skill / knowledge 到 ws 内
+        # （替代旧的「占位符替换为服务端绝对路径：仓库级 project-info 原件 / 全局 SKILLS_DIR」），
+        # 使 direct 端与 worker 端 cwd 布局一致，后续 bwrap 锁只需挂 ws。
+        prompt = _materialize_direct_workdir(
+            ws, repo_key, agent_type, skill_name, evt, issue_id, prompt
+        )
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
         # 回写 prompt 到 agent_tasks（direct 模式创建时 prompt 为空，此处补写）
         log.info(f"Exec agent: prompt writeback check: task_id={task_id!r}, prompt_len={len(prompt)}")
