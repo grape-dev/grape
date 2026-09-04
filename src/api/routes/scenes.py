@@ -154,7 +154,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
     if not scene:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
 
-    # 解析 nodes_json，通过 scene_skill_ref 拿 skill_id，再关联 skill 表拿详情
+    # 解析 nodes_json，批量查 scene_skill_ref + skill 表（避免 N+1）
     skills_detail = []
     try:
         nodes = json.loads(scene["nodes_json"]) if scene["nodes_json"] else []
@@ -162,38 +162,59 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
         nodes = []
     with db_lock:
         c = db.cursor()
-        for node in nodes:
-            skill_name = node.get("skill", "")
-            if not skill_name:
-                continue
-            # 先从 scene_skill_ref 拿 skill_id（以 ID 为准）
+        skill_names = [n.get("skill", "") for n in nodes if n.get("skill")]
+        if skill_names:
+            # 批量查 scene_skill_ref（1 次查询）
+            ref_placeholders = ",".join("?" * len(skill_names))
             c.execute(
-                "SELECT skill_id FROM scene_skill_ref WHERE scene_id=? AND skill_name=? LIMIT 1",
-                (scene["id"], skill_name),
+                f"SELECT skill_name, skill_id FROM scene_skill_ref "
+                f"WHERE scene_id=? AND skill_name IN ({ref_placeholders})",
+                [scene["id"]] + skill_names,
             )
-            ref_row = c.fetchone()
-            skill_id = ref_row[0] if ref_row and ref_row[0] else 0
-            # 用 skill_id 查 skill 表拿详情；skill_id=0 时 fallback 用 skill_name 查
-            if skill_id:
+            ref_map = {r[0]: r[1] for r in c.fetchall()}
+
+            # 收集有效 skill_id，批量查 skill 表（1 次查询）
+            skill_ids = [sid for sid in ref_map.values() if sid]
+            skill_by_id = {}
+            if skill_ids:
+                id_placeholders = ",".join("?" * len(skill_ids))
                 c.execute(
-                    "SELECT id, display_name, agent_type, description FROM skill "
-                    "WHERE id=? AND is_active=1 LIMIT 1",
-                    (skill_id,),
+                    f"SELECT id, skill_name, display_name, agent_type, description FROM skill "
+                    f"WHERE id IN ({id_placeholders}) AND is_active=1",
+                    skill_ids,
                 )
-            else:
+                for row in c.fetchall():
+                    skill_by_id[row[0]] = row
+
+            # 对 skill_id=0 或未命中的，用 skill_name 批量查（1 次查询）
+            missing_names = [sn for sn, sid in ref_map.items() if not sid or sid not in skill_by_id]
+            skill_by_name = {}
+            if missing_names:
+                name_placeholders = ",".join("?" * len(missing_names))
                 c.execute(
-                    "SELECT id, display_name, agent_type, description FROM skill "
-                    "WHERE skill_name=? AND is_active=1 LIMIT 1",
-                    (skill_name,),
+                    f"SELECT id, skill_name, display_name, agent_type, description FROM skill "
+                    f"WHERE skill_name IN ({name_placeholders}) AND is_active=1",
+                    missing_names,
                 )
-            row = c.fetchone()
-            skills_detail.append({
-                "skill_id": (row[0] if row else skill_id),
-                "name": skill_name,
-                "display_name": (row[1] if row and row[1] else skill_name),
-                "agent_type": (row[2] if row else "") or node.get("tag", ""),
-                "role_desc": (row[3] if row else "") or "",
-            })
+                for row in c.fetchall():
+                    skill_by_name[row[1]] = row
+
+            # 组装结果
+            for node in nodes:
+                skill_name = node.get("skill", "")
+                if not skill_name:
+                    continue
+                skill_id = ref_map.get(skill_name, 0)
+                row = skill_by_id.get(skill_id) if skill_id else None
+                if not row:
+                    row = skill_by_name.get(skill_name)
+                skills_detail.append({
+                    "skill_id": (row[0] if row else skill_id),
+                    "name": skill_name,
+                    "display_name": (row[2] if row and row[2] else skill_name),
+                    "agent_type": (row[3] if row else "") or node.get("tag", ""),
+                    "role_desc": (row[4] if row else "") or "",
+                })
 
     # 查 recommended_template 对应的模板信息
     template_info = None
@@ -348,7 +369,6 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
             db.commit()
 
     # 调用现有 apply_scene 逻辑更新 devops_agent_session
-    from src.api.routes.scenes import apply_scene, ApplySceneRequest
     apply_scene(owner, repo, ApplySceneRequest(scene_id=scene_id), user)
 
     log.info(f"Market scene applied: market_id={market_id}, scene_id={scene_id}, repo={repo_key}")
@@ -572,7 +592,6 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
     # 调 apply_scene 应用场景配置到仓库的 agent_session
     _owner, _repo_name = full_name.split("/", 1) if "/" in full_name else (full_name, "")
     try:
-        from src.api.routes.scenes import apply_scene, ApplySceneRequest
         apply_scene(_owner, _repo_name, ApplySceneRequest(scene_id=scene_id), user)
     except Exception as e:
         log.warning(f"experience_market_scene: apply_scene failed: {e}")
