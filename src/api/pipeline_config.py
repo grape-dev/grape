@@ -359,10 +359,12 @@ def delete_custom_scene(scene_id: str, scope: str, repo_key: str, user_id: int):
 
 
 def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int):
-    """Auto-fork all official scenes to repo scope (idempotent).
+    """Auto-fork only the 'default' official scene to repo scope (idempotent).
 
-    Called by host_repo when a repo is first hosted. Creates repo-scoped copies
+    Called by host_repo when a repo is first hosted. Creates a repo-scoped copy
     with scene_id prefixed 'repo:' to avoid cross-scope collisions.
+    Only the 'default' scene is forked; other official scenes (cloud-native,
+    iac, etc.) remain available via official fallback but are not auto-forked.
     """
     db, lock = _db()
     official_ids = []
