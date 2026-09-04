@@ -53,6 +53,8 @@ function renderRuntimes(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   __runtimeData = data;
+  // 设置当前用户名供权限判断
+  try { window._grapeUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || ''; } catch(e) { window._grapeUsername = ''; }
   const devices = (data.devices && data.devices.length)
     ? data.devices
     : (data.runtimes || []).map(rt => ({ name: rt.worker_name || rt.name, device_name: I18N.t('runtimes.label.local'), health: rt.health || 'offline',
@@ -187,6 +189,7 @@ function renderWorkers(data, devices) {
     html += _scopeBar(sc, list.length);
     html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">`;
     list.forEach(d => {
+      const _isOwner = d.owner && window._grapeUsername && d.owner === window._grapeUsername;
       const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.name} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
       const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
       html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
@@ -194,14 +197,14 @@ function renderWorkers(data, devices) {
           ${_healthBadge(d.health, d.credential_id ? relTime(d.last_seen_at) : I18N.t('runtimes.label.local_direct'))}
           <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'}</span>
           <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span>
-          ${d.credential_id ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;margin-left:auto" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}
+          ${d.credential_id && _isOwner ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;margin-left:auto" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:12px;color:var(--t2)">
           <div style="display:flex;gap:16px;flex:1;min-width:0">
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${d.owner || '—'} ${d.credential_id === 0 ? `<span style="color:var(--t3);font-size:10px">(${I18N.t('runtimes.scope.global')})</span>` : ''}</div>
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.credential')}</span> <b style="color:${credColor}">${d.credential_status || ''}</b></div>
           </div>
-          ${d.credential_id ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">${I18N.t('runtimes.action.revoke')}</button>` : ''}
+          ${d.credential_id && _isOwner ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">${I18N.t('runtimes.action.revoke')}</button>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">
           <span style="color:var(--t3);white-space:nowrap;flex-shrink:0">${I18N.t('runtimes.label.hosted_engines')}</span>
