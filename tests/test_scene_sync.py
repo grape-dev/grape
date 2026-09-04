@@ -2,7 +2,7 @@
 
 覆盖：
 - _load_config() 配置加载优先级
-- _get_sync_token() token 获取三级链
+- _get_sync_token() token 获取两级链
 - _compute_scene_hash() hash 计算
 - _validate_scene_nodes() nodes 校验（tag/mode/handoff/next 链路）
 - _check_skills_exist() skill 引用预检
@@ -97,7 +97,7 @@ class TestGetSyncToken:
     def test_no_token_returns_empty(self):
         """无任何 token 配置时返回空串"""
         os.environ.pop("GRAPE_DEV_TOKEN", None)
-        # configs/scene-sync.json 和 global-bot-token.json 可能不存在
+        # configs/scene-sync.json 可能不存在
         # 只要环境变量没有，结果要么是配置文件的值要么是空串
         token = _get_sync_token()
         # 在测试环境里配置文件可能不存在，所以 token 可能是空串或有值
