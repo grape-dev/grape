@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -228,7 +228,7 @@ function loadAgentTypes() {
   let _refreshTimer = null;
   function nav(view, param) {
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -241,11 +241,22 @@ function loadAgentTypes() {
       _convStreamAbort = null;
     }
 
+    // 技能详情返回：记录来源视图（pushHistory 之前 history.state 还是上一个视图）
+    if (view === 'skill') {
+      const _prev = window.history.state;
+      window._skillDetailFrom = (_prev && _prev.view) ? {view: _prev.view, param: _prev.param || null} : null;
+    }
+
     _pushHistory(view, param);
 
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
     const navEl = $('nav-' + view);
     if (navEl) navEl.classList.add('act');
+    // 场景·技能页面内的 tab 切换（skills/skill/scene-detail）也高亮场景·技能菜单
+    if (!navEl && (view === 'skills' || view === 'skill' || view === 'scene-detail')) {
+      const marketNav = $('nav-scene-market');
+      if (marketNav) marketNav.classList.add('act');
+    }
     document.querySelectorAll('.sb-nav a').forEach(a => {
       const o = a.getAttribute('onclick') || '';
       if (param && o.includes("'" + param + "'")) a.classList.add('act');
@@ -341,6 +352,12 @@ function loadAgentTypes() {
       // 技能包子技能详情（如 "38/huawei-ecs"）
       title.textContent = I18N.t('app.nav.sub_skill_detail');
       API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+    } else if (view === 'scene-market') {
+      title.textContent = I18N.t('skills.scene_market_title');
+      renderSceneMarket();
+    } else if (view === 'scene-detail') {
+      title.textContent = I18N.t('skills.scene_detail_title');
+      renderSceneDetail(param);
     }
   }
 
@@ -357,7 +374,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event'];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail'];
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {
@@ -462,7 +479,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '8');
+      localStorage.setItem('app_cache_ver', '9');
       if (p.get('first_login') === '1') {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -485,7 +502,7 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '8') {
+    if (localStorage.getItem('app_cache_ver') !== '9') {
       const oldRepo = localStorage.getItem('currentRepo');
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
@@ -493,7 +510,7 @@ function loadAgentTypes() {
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
       if (oldRepo) localStorage.setItem('currentRepo', oldRepo);
-      localStorage.setItem('app_cache_ver', '8');
+      localStorage.setItem('app_cache_ver', '9');
     }
 
     const token = localStorage.getItem('token');
@@ -506,7 +523,7 @@ function loadAgentTypes() {
         const view = parts[0];
         const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
         // Views that don't require a repo
-        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event'];
+        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail'];
         if (noRepoViews.includes(view) || currentRepo()) {
           nav(view, param);
         } else {
