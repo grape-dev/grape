@@ -151,7 +151,7 @@ class TestSend:
         cid = _new_conv(_client)
         with patch("src.api.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent):
+             patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent):
             r = _client.post("/api/chat/send", json={"message": "hi", "conversation_id": cid})
         assert r.status_code == 200
         assert r.json()["reply"] == "联通成功"
@@ -166,7 +166,7 @@ class TestSend:
             db.commit()
         with patch("src.api.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent), \
+             patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent), \
              patch("src.prompt_builder.build_task_chat_prompt", return_value="task-prompt") as m_build:
             _client.post("/api/chat/send", json={"message": "hi", "conversation_id": cid})
         m_build.assert_called()
@@ -200,7 +200,7 @@ class TestSendStream:
         cid = _new_conv(_client)
         with patch("src.api.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_agent", side_effect=_fake_stream_agent):
+             patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent):
             r = _client.post("/api/chat/send/stream", json={"message": "hi", "conversation_id": cid})
         assert r.status_code == 200
         assert "联通成功" in _sse_done_text(r.text)
@@ -225,7 +225,7 @@ class TestSendStream:
 
         with patch("src.api.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_agent", side_effect=_fake_with_new_session):
+             patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_with_new_session):
             # 客户端在读 SSE 流前就 abort：仅发出请求即关闭连接（testclient 用 stream=True 断开前读第一段）
             with _client.stream("POST", "/api/chat/send/stream", json={"message": "hi", "conversation_id": cid}) as resp:
                 assert resp.status_code == 200

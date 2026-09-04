@@ -140,3 +140,65 @@ def test_chat_with_db_user_token_still_injected():
     env = _run_stream(user_token="", bot_token="BOT", user_id=3, db_user_token="DBUSR", event_type="chat")
     assert env["USER_GITCODE_TOKEN"] == "DBUSR"
     assert "BOT_GITCODE_TOKEN" not in env
+
+
+# ===================== stream_chat_agent / stream_devops_agent 隔离 =====================
+
+def _run_chat_fn(user_token="", bot_token="", user_id=0):
+    """直接调 stream_chat_agent（签名无 bot_token）"""
+    from src.runtime.executor import stream_chat_agent
+
+    fake_popen = _FakePopen()
+    with mock.patch("src.agent.executor.get_backend", return_value=_FakeBackend()), \
+         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
+         mock.patch("src.agent.executor.shutil.which", return_value="/usr/bin/fake"), \
+         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.user.db.get_credentials", return_value=[]), \
+         mock.patch("src.user.db.get_user_gitcode_token", return_value="DBUSR"):
+        list(stream_chat_agent(
+            prompt="hi", cwd="/tmp", session_id="", backend_name="fake",
+            account="u", user_id=user_id, user_token=user_token, max_exec_seconds=60,
+        ))
+    return fake_popen.captured
+
+
+def _run_devops_fn(bot_token="", user_token="", repo_user_id=0):
+    """直接调 stream_devops_agent（签名无 user_token）"""
+    from src.runtime.executor import stream_devops_agent
+
+    fake_popen = _FakePopen()
+    with mock.patch("src.agent.executor.get_backend", return_value=_FakeBackend()), \
+         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
+         mock.patch("src.agent.executor.shutil.which", return_value="/usr/bin/fake"), \
+         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.user.db.get_credentials", return_value=[]), \
+         mock.patch("src.user.db.get_user_gitcode_token", return_value="DBUSR"):
+        list(stream_devops_agent(
+            prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
+            backend_name="fake", account="u", repo_user_id=repo_user_id,
+            bot_token=bot_token, max_exec_seconds=60,
+        ))
+    return fake_popen.captured
+
+
+def test_chat_fn_only_user_token():
+    """stream_chat_agent：只要 user_token（用户身份），签名无 bot_token → 绝不注入 BOT。"""
+    env = _run_chat_fn(user_token="USR", user_id=3)
+    assert env["USER_GITCODE_TOKEN"] == "USR"
+    assert "BOT_GITCODE_TOKEN" not in env
+
+
+def test_devops_fn_only_bot_token():
+    """stream_devops_agent：只注入 BOT（仓库身份），签名无 user_token → 绝不注入 USER。"""
+    env = _run_devops_fn(bot_token="BOT_EVT", repo_user_id=7)
+    assert "USER_GITCODE_TOKEN" not in env
+    assert env["BOT_GITCODE_TOKEN"] == "BOT_EVT"
+
+
+def test_devops_fn_ignore_db_user_token():
+    """stream_devops_agent 即使 DB 有用户 token 也不注入（事件任务不以用户身份写 GitCode）。"""
+    env = _run_devops_fn(bot_token="BOT_EVT", repo_user_id=7)
+    assert "USER_GITCODE_TOKEN" not in env
+    assert env["BOT_GITCODE_TOKEN"] == "BOT_EVT"

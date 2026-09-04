@@ -509,7 +509,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
         return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data)
 
-    from src.runtime.executor import stream_agent
+    from src.runtime.executor import stream_chat_agent
     loop = asyncio.get_event_loop()
     collected = []
     new_runtime_session_id = ""
@@ -517,10 +517,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     def run_agent():
         nonlocal new_runtime_session_id
         with _CHAT_AGENT_SEMAPHORE:
-            for evt_type, data in stream_agent(
+            for evt_type, data in stream_chat_agent(
                 prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                 backend_name=backend_name, user_id=user["id"],
-                event_type="chat",
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                 agent_label=f"[Agent:chat|user:{user['username']}]",
             ):
@@ -737,7 +736,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
-    from src.runtime.executor import stream_agent
+    from src.runtime.executor import stream_chat_agent
 
     async def event_stream():
         q = asyncio.Queue()
@@ -754,10 +753,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             collected = []
             worker_error = ""
             try:
-                for evt_type, data in stream_agent(
+                for evt_type, data in stream_chat_agent(
                     prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
-                    event_type="chat",
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                 ):
@@ -1355,14 +1353,13 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
         # 本机直连：ChatTaskManager 启动 agent_fn
         def agent_fn():
             """agent generator — yield 事件 + finally 写 DB"""
-            from src.runtime.executor import stream_agent
+            from src.runtime.executor import stream_chat_agent
             _final_text = ""
             _new_sid = ""
             try:
-                for evt_type, data in stream_agent(
+                for evt_type, data in stream_chat_agent(
                     prompt=prompt, cwd=cwd, session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
-                    event_type="chat",
                     account=user["username"], user_token=gitcode_token,
                     agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
