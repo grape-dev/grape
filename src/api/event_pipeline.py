@@ -22,9 +22,9 @@ def is_plugin_mode() -> bool:
     """Check if pipeline is in plugin mode.
 
     plugin mode: uses pipelines.json + tag-based enqueue/claim
-    legacy mode (default): uses agent-skill-mapping.json + runtime_id binding
+    legacy mode: uses agent-skill-mapping.json + runtime_id binding
 
-    Priority: meta table `pipeline_mode` > env var GRAPE_PIPELINE_MODE > default (legacy)
+    Priority: meta table `pipeline_mode` > env var GRAPE_PIPELINE_MODE > default (plugin)
     """
     try:
         from src.user.db import get_meta_value
@@ -33,7 +33,7 @@ def is_plugin_mode() -> bool:
             return _mode == "plugin"
     except Exception:
         pass
-    return os.environ.get("GRAPE_PIPELINE_MODE", "").lower() == "plugin"
+    return os.environ.get("GRAPE_PIPELINE_MODE", "plugin").lower() == "plugin"
 
 
 def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "", user_id: int = 0) -> str:

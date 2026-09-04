@@ -16,6 +16,7 @@
   },
   "action": {
     "gen_credential": "＋ Generate Credential",
+    "add_device": "Add Device",
     "refresh": "⟳ Refresh",
     "rename": "Rename",
     "revoke": "Revoke",
@@ -168,6 +169,10 @@
     "find_env_connect": "Find the environment and click \"Connect\" to open terminal",
     "paste_in_terminal": "Paste the command in the terminal and execute",
     "ai_devspace_tooltip": "Not enough workers? Create a cloud dev environment!",
+    "sidebar_subtitle": "Choose a method to add a Worker device",
+    "cred_hint": "Generate a Token and run the one-click install command on the target machine",
+    "devspace_hint": "Create a Huawei Cloud AI dev environment and auto-register as a Worker",
+    "legend_label": "Legend:",
     "select_template": "-- Select Template --",
     "select_template_first": "Load after selecting a template",
     "select_flavor": "-- Select Flavor --",

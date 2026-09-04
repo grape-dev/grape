@@ -350,7 +350,25 @@ def get_agent_runtimes(user: dict = Depends(get_current_user)):
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
                 "agent_tags": rt.get("agent_tags", [])})
-        # 如果没匹配到设备，跳过（不创建单独的"本机"行）
+        else:
+            # 本机 hostname 未在 runtime_credentials 中注册 → 创建虚拟本机设备
+            _local_dev_key = "__local__"
+            if _local_dev_key not in _device_by_name:
+                _local_dev = {"credential_id": 0, "name": _hn or "本机直连",
+                    "device_name": _hn or "本机直连",
+                    "credential_status": "active", "last_seen_at": None,
+                    "worker_ip": "127.0.0.1", "scope": "local",
+                    "owner": "", "health": "online", "runtimes": []}
+                devices.append(_local_dev)
+                _device_by_name[_local_dev_key] = _local_dev
+            _device_by_name[_local_dev_key]["runtimes"].append({
+                "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
+                "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
+                "instance_name": rt.get("instance_name", rt.get("name", "")),
+                "health": rt.get("health", "offline"),
+                "local_skills": rt.get("local_skills", []),
+                "skill_scan_result": rt.get("skill_scan_result", []),
+                "agent_tags": rt.get("agent_tags", [])})
     # AI Devspace 创建的凭据：worker 尚未上线注册时没有 agent_runtimes 行，
     # 但用户需要在 Workers 列表看到这个待接入设备（凭据已生成，环境正在启动）。
     # 保留没有承载引擎但凭据 active 的设备，health=offline 让用户知道还没接入。

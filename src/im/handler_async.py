@@ -76,14 +76,44 @@ def _clear_pending_image(chat_id: str):
     _pending_image_desc.pop(chat_id, None)
 
 
+# repo 绑定缓存：{(chat_id, app_id): {"repo_key": str, "expires": float}}
+# 防止 DB 抖动（db_lock 竞争/瞬时错误）导致已绑定仓库查不到 → 误弹"选择仓库"卡片。
+# TTL 60s：绑定变更通过 /bind /_bind_repo 显式失效缓存，60s 仅兜底 DB 异常窗口。
+_repo_bind_cache: dict[tuple, dict] = {}
+_REPO_BIND_TTL = 60.0
+
+
+def _invalidate_repo_bind_cache(chat_id: str, app_id: str = ""):
+    """绑定变更时显式失效缓存（/bind /_bind_repo /_handle_selection 调用）。"""
+    _repo_bind_cache.pop((chat_id, app_id), None)
+    # app_id 为空时清除该 chat_id 下所有 app（兜底）
+    if not app_id:
+        keys = [k for k in _repo_bind_cache if k[0] == chat_id]
+        for k in keys:
+            _repo_bind_cache.pop(k, None)
+
+
 def _current_bound_repo(chat_id: str, account: str, db) -> str:
-    """当前飞书聊天绑定的仓库 repo_key（repo_im_group_binding）"""
+    """当前飞书聊天绑定的仓库 repo_key（repo_im_group_binding）
+
+    带内存缓存——DB 查询失败时回退到上次已知值，避免瞬时 DB 锁竞争导致误判"未绑定"。
+    """
+    cache_key = (chat_id, account)
+    now = time.time()
+    cached = _repo_bind_cache.get(cache_key)
+    if cached and cached.get("expires", 0) > now:
+        return cached.get("repo_key", "")
     try:
         c = db.cursor()
         c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
         row = c.fetchone()
-        return row[0] if row else ""
+        repo_key = row[0] if row else ""
+        _repo_bind_cache[cache_key] = {"repo_key": repo_key, "expires": now + _REPO_BIND_TTL}
+        return repo_key
     except Exception:
+        # DB 异常时回退到上次已知值（即使过期也用，总比弹"选择仓库"卡片好）
+        if cached:
+            return cached.get("repo_key", "")
         return ""
 
 
@@ -224,15 +254,10 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "")
     m = re.search(r'[\w.-]+/[\w.-]+', text)
     if m:
         return m.group(0)
-    # 3. 查询群绑定表（repo_key 带前缀）
-    try:
-        c = db.cursor()
-        c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
-        row = c.fetchone()
-        if row:
-            return row[0]
-    except Exception as e:
-        log.warning(f"Feishu: resolve_repo db error: {e}")
+    # 3. 查询群绑定表（repo_key 带前缀）——走 _current_bound_repo 缓存路径
+    bound = _current_bound_repo(chat_id, account, db)
+    if bound:
+        return bound
     return ""
 
 
@@ -479,6 +504,7 @@ async def _bind_repo(ctx, api, chat_id, msg_id, repo_key, uid_str):
                   (chat_id, repo_key, "gitcode", str(uid), ctx.app_id))
         c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
         db.commit()
+    _invalidate_repo_bind_cache(chat_id, ctx.app_id)
     await _send_bind_success_card(ctx, api, msg_id, repo_key)
 
 
@@ -559,6 +585,7 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
                 #（修复 2026-08-16 "群绑定仓库 ≠ 会话所属仓库" 发散 bug）
                 c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
                 db.commit()
+            _invalidate_repo_bind_cache(chat_id, ctx.app_id)
             _clear_pending_selection(chat_id)
             await _send_bind_success_card(ctx, api, msg_id, repo_key)
         elif action == "chat":
@@ -860,6 +887,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 db.commit()
             except Exception as e:
                 log.warning(f"Feishu: auto-bind failed: {e}")
+            _invalidate_repo_bind_cache(chat_id, account)
             await _send_bind_success_card(ctx, api, msg_id, repo_key)
             return
 
@@ -878,15 +906,15 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         sess, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
-        # 同仓库串行（asyncio.Lock，async with 不阻塞事件循环）。
-        # 旧实现同步 threading.Lock.acquire() 在事件循环里阻塞，同仓库并发消息会死锁整机
-        #（2026-08-16 事故，见 docs/new-version2/feishu-chat-event-loop-deadlock-fix.md）。
+        # 同仓库串行锁——仅 direct 模式（本机 opencode 子进程）需要，避免 cwd/session 冲突。
+        # 远端入队模式任务在 worker 上执行，不共享本机资源，无需阻塞同仓库后续消息。
+        # （2026-08-16 死锁修复的 asyncio.Lock 保留，但范围缩小到 direct 分支）
         lock = _acquire_repo_lock(repo_key)
-        async with lock:
-            await _process_chat_inner_async(ctx, api, parsed, text, repo_key, repository,
-                                            msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
-                                            bind_account=account, exec_account=repo_key,
-                                            image_description=image_description)
+        await _process_chat_inner_async(ctx, api, parsed, text, repo_key, repository,
+                                        msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
+                                        bind_account=account, exec_account=repo_key,
+                                        image_description=image_description,
+                                        repo_lock=lock)
 
     except Exception as e:
         import traceback
@@ -918,7 +946,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                                      parsed, text, repo_key, repository,
                                      msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
                                      bind_account="", exec_account="", conv_id="", conv=None,
-                                     image_description=""):
+                                     image_description="", repo_lock=None):
     """异步版内部处理逻辑
 
     bind_account: 用于 repo_im_group_binding 隔离（Chat Bot 场景 = bot app_id）
@@ -1140,17 +1168,25 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     final_text = ""
                     exit_code = -1
             else:
-                async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
-                                                                   backend_name=backend, account=exec_account,
-                                                                   user_token=user_token, agent_name="Chat Agent",
-                                                                   agent_label=f"[Agent:chat|repo:{repository}]"):
-                    if event_type == "done":
-                        d = data
-                        final_text = d["text"]
-                        exit_code = d.get("exit_code", 0)
-                        if exit_code == 0 and d.get("oc_session_id"):
-                            new_oc_session_id = d["oc_session_id"]
-                        log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
+                # direct 模式（本机 opencode 子进程）——持有 repo_lock 防止 cwd/session 冲突
+                async def _direct_exec():
+                    nonlocal final_text, exit_code, new_oc_session_id
+                    async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
+                                                                       backend_name=backend, account=exec_account,
+                                                                       user_token=user_token, agent_name="Chat Agent",
+                                                                       agent_label=f"[Agent:chat|repo:{repository}]"):
+                        if event_type == "done":
+                            d = data
+                            final_text = d["text"]
+                            exit_code = d.get("exit_code", 0)
+                            if exit_code == 0 and d.get("oc_session_id"):
+                                new_oc_session_id = d["oc_session_id"]
+                            log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
+                if repo_lock:
+                    async with repo_lock:
+                        await _direct_exec()
+                else:
+                    await _direct_exec()
 
         record = {
             "type": "chat", "time": datetime.utcnow().isoformat(),

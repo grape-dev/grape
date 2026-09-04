@@ -263,8 +263,14 @@ install_bwrap() {
 install_bwrap
 
 # ===== 6. 生成启动脚本并启动 =====
-if [ "$ROOT_MODE" = "1" ]; then
-  # ---- root：systemd 服务 ----
+# systemd 可用性检测：容器环境（如 DevSpace）通常无 systemd（PID 1 非 systemd），
+# 此时 root 模式也必须回退到 nohup/setsid，否则 systemctl restart 会 fail 退出。
+_has_systemd() {
+  [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')" = "systemd" ] && command -v systemctl >/dev/null 2>&1
+}
+
+if [ "$ROOT_MODE" = "1" ] && _has_systemd; then
+  # ---- root + systemd 可用：systemd 服务 ----
   SERVICE_FILE="/etc/systemd/system/runtime-agent.service"
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -290,7 +296,12 @@ EOF
   systemctl restart runtime-agent || fail "服务启动失败，请查看 journalctl -u runtime-agent"
   log "已通过 systemd 启动（runtime-agent）"
 else
-  # ---- 普通用户：nohup/setsid 后台启动（免 root，带 daemon 保护）----
+  # ---- 普通用户 或 容器环境（无 systemd）：nohup/setsid 后台启动 ----
+  if [ "$ROOT_MODE" = "1" ] && ! _has_systemd; then
+    log "root 模式但 systemd 不可用（容器环境？），回退到 nohup/setsid 启动"
+    # 容器内 root 也需要 start-worker.sh，路径用 INSTALL_DIR 而非 /opt/grape 硬编码
+    START_SCRIPT="$INSTALL_DIR/start-worker.sh"
+  fi
   cat > "$START_SCRIPT" <<EOF
 #!/usr/bin/env bash
 # Grape Worker 启动脚本（由 install-worker.sh 生成，支持崩溃自动重启）

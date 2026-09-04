@@ -1517,10 +1517,19 @@ class BotManager:
                     now = _time.time()
                     for app_id, success in renew_results.items():
                         if not success:
-                            # 问题 C：续约失败（CAS 失败）→ 宽限期 30 秒后断开
+                            # 续约失败可能是瞬时 DB 锁竞争——立即单条重试一次再决定是否开宽限期。
+                            # 避免单次 batch_renew CAS 失败（如其他 sweep 同时写 DB）就断连，
+                            # 导致用户登出等正常操作期间的 DB 短暂阻塞引发飞书 WS 断连。
+                            token = self._held_leases.get(app_id, "")
+                            if token:
+                                retry_ok = lease_store.renew(app_id, token)
+                                if retry_ok:
+                                    log.info(f"[lease] bot {app_id} renew retry succeeded (was transient)")
+                                    continue
+                            # 重试也失败 → 宽限期 30 秒后断开
                             if app_id not in self._grace_deadlines:
                                 self._grace_deadlines[app_id] = now + 30
-                                log.info(f"[lease] bot {app_id} renew failed, grace period 30s started")
+                                log.info(f"[lease] bot {app_id} renew failed (retry also failed), grace period 30s started")
                         else:
                             # 续约成功 → 清除宽限期
                             self._grace_deadlines.pop(app_id, None)
