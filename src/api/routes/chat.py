@@ -40,6 +40,7 @@ class ChatMessage(BaseModel):
     message: str
     repo_key: str = ""
     conversation_id: str = ""
+    image_data: str = ""  # JSON array of base64 strings, or single base64 string
 
 
 class FeedbackBody(BaseModel):
@@ -49,6 +50,46 @@ class FeedbackBody(BaseModel):
 
 
 # ====== Conversations ======
+
+@router.get("/image/{conv_id}/{filename}")
+def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")):
+    """Serve chat image file. No auth — images are referenced by unguessable timestamp filenames.
+
+    When thumb=1 is passed, serves a dynamically compressed thumbnail (max 300px, JPEG q75).
+    """
+    import os as _os
+    from fastapi.responses import FileResponse, Response
+    _grape_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
+    # Sanitize path — only allow alphanumeric/dash/underscore in conv_id and filename
+    import re as _re
+    if not _re.match(r'^[a-zA-Z0-9_\-]+$', conv_id) or not _re.match(r'^[a-zA-Z0-9_\-]+\.(png|jpg|jpeg)$', filename):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    fpath = _os.path.join(_grape_root, "data", "chat_images", conv_id, filename)
+    if not _os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Thumbnail mode: dynamically compress to small JPEG
+    if thumb == "1":
+        try:
+            from PIL import Image as _PILImg
+            import io as _io
+            pil_img = _PILImg.open(fpath)
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
+            max_dim = 300
+            w, h = pil_img.size
+            if max(w, h) > max_dim:
+                scale = max_dim / max(w, h)
+                pil_img = pil_img.resize((int(w * scale), int(h * scale)), getattr(_PILImg, 'Resampling', _PILImg).LANCZOS)
+            buf = _io.BytesIO()
+            pil_img.save(buf, format="JPEG", quality=75, optimize=True)
+            return Response(content=buf.getvalue(), media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=86400"})
+        except Exception:
+            pass  # fallback to original
+
+    _mt = "image/jpeg" if fpath.lower().endswith((".jpg", ".jpeg")) else "image/png"
+    return FileResponse(fpath, media_type=_mt, headers={"Cache-Control": "public, max-age=86400"})
 
 @router.get("/conversations")
 def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user)):
@@ -283,6 +324,127 @@ def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
         return ""
 
 
+def _save_chat_images(image_data: str, conv_id: str) -> list:
+    """Save image(s) from base64 data to filesystem, return list of URL paths."""
+    if not image_data:
+        return []
+    try:
+        import base64 as _b64, os as _os, time as _time
+        s = image_data.strip()
+        if s.startswith("["):
+            images = json.loads(s)
+        else:
+            images = [s]
+        # Save to grape project data/chat_images/
+        _grape_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
+        img_dir = _os.path.join(_grape_root, "data", "chat_images", conv_id)
+        _os.makedirs(img_dir, exist_ok=True)
+        urls = []
+        for i, b64 in enumerate(images):
+            if not b64:
+                continue
+            raw = b64
+            if raw.startswith("data:"):
+                raw = raw.split(",", 1)[-1]
+            try:
+                img_bytes = _b64.b64decode(raw)
+            except Exception:
+                continue
+            # Compress with PIL: resize max 800px, save as JPEG q85
+            try:
+                from PIL import Image as _PILImg
+                import io as _io
+                pil_img = _PILImg.open(_io.BytesIO(img_bytes))
+                # Convert RGBA/L/P → RGB for JPEG
+                if pil_img.mode in ("RGBA", "LA", "P"):
+                    pil_img = pil_img.convert("RGB")
+                elif pil_img.mode != "RGB":
+                    pil_img = pil_img.convert("RGB")
+                # Resize if larger than 800px
+                max_dim = 800
+                w, h = pil_img.size
+                if max(w, h) > max_dim:
+                    scale = max_dim / max(w, h)
+                    pil_img = pil_img.resize((int(w * scale), int(h * scale)), getattr(_PILImg, 'Resampling', _PILImg).LANCZOS)
+                buf = _io.BytesIO()
+                pil_img.save(buf, format="JPEG", quality=85, optimize=True)
+                img_bytes = buf.getvalue()
+            except Exception as e:
+                log.warning(f"Chat: image compress failed, using raw: {e}")
+            ts = int(_time.time() * 1000)
+            fname = f"{ts}_{i}.jpg"
+            fpath = _os.path.join(img_dir, fname)
+            with open(fpath, "wb") as f:
+                f.write(img_bytes)
+            urls.append(f"/api/chat/image/{conv_id}/{fname}")
+            log.info(f"Chat: saved image {fpath} ({len(img_bytes)} bytes)")
+        return urls
+    except Exception as e:
+        log.warning(f"Chat: save images failed: {e}")
+        return []
+
+
+def _build_image_markers(urls: list) -> str:
+    """Build [chat_img:url] markers for message content."""
+    if not urls:
+        return ""
+    return "\n" + "\n".join(f"[chat_img:{u}]" for u in urls)
+
+
+def _understand_image(image_data: str) -> str:
+    """Analyze image(s) from base64 data and return description for prompt injection.
+
+    Supports: JSON array of base64 strings (multi-image), or single base64 string.
+    """
+    if not image_data:
+        return ""
+
+    try:
+        import importlib.util as _ilu
+        import os as _os
+        _spec = _ilu.spec_from_file_location("image_understanding",
+            _os.path.join(_os.path.dirname(__file__), "..", "..", "agent", "image_understanding.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+
+        # Parse image_data: could be JSON array or single string
+        images = []
+        s = image_data.strip()
+        if s.startswith("["):
+            images = json.loads(s)
+        else:
+            images = [s]
+
+        parts = []
+        for i, b64 in enumerate(images):
+            if not b64:
+                continue
+            desc = _mod.understand_image_from_base64(b64)
+            if desc:
+                if len(images) > 1:
+                    parts.append(f"### 图片 {i+1}\n{desc}")
+                else:
+                    parts.append(desc)
+            else:
+                if len(images) > 1:
+                    parts.append(f"### 图片 {i+1}\n用户上传了一张图片，但未能提取有效信息。")
+                else:
+                    parts.append("用户上传了一张图片，但未能提取有效信息。")
+
+        if not parts:
+            return ""
+        result = "\n\n".join(parts)
+        if len(images) > 1:
+            result = f"## 用户上传了 {len(images)} 张图片\n\n{result}\n\n## 请基于以上图片信息回答用户问题"
+        else:
+            result = result + "\n\n## 请基于以上图片信息回答用户问题"
+        log.info(f"Web Chat: {len(images)} image(s) understood, {len(result)} chars total")
+        return result
+    except Exception as e:
+        log.warning(f"Web Chat: image understanding failed: {e}")
+        return f"用户上传了图片，但分析出错: {e}"
+
+
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
@@ -300,7 +462,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         conv_id = create_conversation(user["id"], body.repo_key, user_gitcode_token=user_token)
         conv = get_conversation(conv_id)
 
-    add_message(conv_id, "user", body.message)
+    add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)))
     # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
     mark_task_processing_by_conversation(conv_id)
 
@@ -330,6 +492,10 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     from src.config import log
     log.info(f"Chat send: backend={backend_name or '(none)'}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
+    # 图片理解注入
+    if body.image_data:
+        prompt += "\n\n" + _understand_image(body.image_data)
+
     # 无任何引擎（未配置本机直连/远端）→ 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
     if not backend_name:
         _warn = "⚠️ 无可用引擎（未配置本机直连或远端引擎）"
@@ -341,7 +507,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
     if kind != EXEC_MODE_DIRECT:
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
-        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token)
+        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data)
 
     from src.runtime.executor import stream_agent
     loop = asyncio.get_event_loop()
@@ -423,7 +589,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
     import uuid as _uuid
     chat_task_id = "chat_" + _uuid.uuid4().hex[:12]
-    add_message(conv_id, "user", body.message, task_id=chat_task_id, generate_status=1)
+    add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)), task_id=chat_task_id, generate_status=1)
     # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
     mark_task_processing_by_conversation(conv_id)
 
@@ -452,6 +618,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
 
     from src.config import log
     log.info(f"Chat send/stream: backend={backend_name or '(none)'}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+
+    # 图片理解注入
+    if body.image_data:
+        prompt += "\n\n" + _understand_image(body.image_data)
 
     # 无引擎 → 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
     if not backend_name:
@@ -556,7 +726,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             touch_conversation(conv_id)
             # web→飞书推送（feishu-web-chat-unified-design.md §3.2）
             await _push_reply_to_feishu(conv, user, final_text)
-            if new_sid and not runtime_session_id:
+            if new_sid and new_sid != runtime_session_id:
                 update_conversation(conv_id, runtime_session_id=new_sid)
             yield f"data: {json.dumps({'type': 'done', 'text': final_text, 'conversation_id': conv_id})}\n\n"
 
@@ -721,7 +891,7 @@ prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runt
     )
 
 
-def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token):
+def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token, image_data=""):
     """M2 D5：chat 入队 + 轮询任务状态（打字机效果降级，见 implementation-plan §三）。
 
     返回 {task_id, reply(占位), conversation_id}；前端轮询 GET /api/runtime/tasks/{id}/status。
@@ -776,6 +946,9 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     else:
         prompt = build_general_chat_prompt(message, repo_key, history, skill_name, skill_id,
                                            user_info=_build_web_user_info(user, acc), has_valid_session=has_valid_session)
+    # 图片理解注入
+    if image_data:
+        prompt += "\n\n" + _understand_image(image_data)
     tid = enqueue_task(
         agent_session_id=session.get("id") or "",
         runtime_id=runtime_id,
@@ -1104,7 +1277,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
 
     import uuid as _uuid
     chat_task_id = "chat_" + _uuid.uuid4().hex[:12]
-    add_message(conv_id, "user", body.message, task_id=chat_task_id, generate_status=1)
+    add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)), task_id=chat_task_id, generate_status=1)
     mark_task_processing_by_conversation(conv_id)
 
     cfg = _get_chat_config(user["id"])
@@ -1132,6 +1305,10 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
 
     log.info(f"Chat submit: backend={backend_name or '(none)'}, skill={skill_name}, "
              f"has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
+
+    # 图片理解注入
+    if body.image_data:
+        prompt += "\n\n" + _understand_image(body.image_data)
 
     # 无引擎 → 直接返回错误
     if not backend_name:
@@ -1439,7 +1616,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
 
     import uuid as _uuid
     chat_task_id = "chat_" + _uuid.uuid4().hex[:12]
-    add_message(conv_id, "user", body.message, task_id=chat_task_id, generate_status=1)
+    add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)), task_id=chat_task_id, generate_status=1)
     mark_task_processing_by_conversation(conv_id)
 
     cfg = _get_chat_config(user["id"])
@@ -1459,6 +1636,10 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
         prompt = build_task_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
     else:
         prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id, backend_name=backend_name, user_info=_build_web_user_info(user, acc), has_valid_session=has_valid_session)
+
+    # 图片理解注入
+    if body.image_data:
+        prompt += "\n\n" + _understand_image(body.image_data)
 
     rid = cfg.get("runtime_id") or 0
     if not rid:

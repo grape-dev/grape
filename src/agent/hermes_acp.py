@@ -107,8 +107,19 @@ class HermesACPBackend:
         if hasattr(os, "getpgid"):
             _popen_kwargs["start_new_session"] = True
 
+        # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
+        _acp_cmd = [agent_cmd, "acp"]
+        try:
+            from src.agent.sandbox import build_bwrap_cmd
+            _wrap = build_bwrap_cmd(cwd, backend_name="hermes")
+            if _wrap:
+                _acp_cmd = _wrap + _acp_cmd
+                log.info(f"{label}hermes ACP sandboxed via bwrap (cwd={cwd})")
+        except Exception as _bw_e:
+            log.warning(f"{label}hermes ACP bwrap wrap failed, running unsandboxed: {_bw_e}")
+
         proc = subprocess.Popen(
-            [agent_cmd, "acp"],
+            _acp_cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=cwd, env=proc_env, bufsize=0, **_popen_kwargs
         )
@@ -336,9 +347,9 @@ class HermesACPBackend:
                         _terminate_proc(proc, f"{label}hermes ACP")
                     reader_thread.join(timeout=3)
 
-                    # 启动新进程（复用 iso_home overlay）
+                    # 启动新进程（复用 iso_home overlay；_acp_cmd 含 bwrap 包装，见首次启动）
                     proc = subprocess.Popen(
-                        [agent_cmd, "acp"],
+                        _acp_cmd,
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         cwd=cwd, env=proc_env, bufsize=0, **_popen_kwargs
                     )

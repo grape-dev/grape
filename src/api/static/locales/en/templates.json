@@ -44,7 +44,7 @@
   "progress_applying_scene": "Applying development scene...",
   "progress_done": "✅ Created successfully!",
   "progress_failed": "❌ {{msg}}",
-  "host_warning": "⚠️ Important: Go to GitCode repository settings → Member management, add the bot account (grace_bot) as a maintainer, then manually host the repository to complete the automation setup.",
+  "host_warning": "⚠️ Important: Go to GitCode repository settings → Member management, add the bot account (grape_bot) as a maintainer, then manually host the repository to complete the automation setup.",
   "cat": {
     "Hello World 新手模板": "Hello World Starter",
     "Agent 最佳实践": "Agent Best Practices",

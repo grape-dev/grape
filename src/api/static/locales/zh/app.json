@@ -15,7 +15,7 @@
     "events": "事件",
     "repos": "仓库",
     "tasks": "任务中心",
-    "observability": "系统监控",
+    "observability": "设备监控",
     "event_detail": "事件详情",
     "skill_detail": "技能详情",
     "sub_skill_detail": "子技能详情",
@@ -30,6 +30,7 @@
     "devops_market": "DevOps 市场",
     "knowledge": "知识库",
     "account": "用户中心",
+    "device_center": "设备中心",
     "settings": "设置"
   },
   "login": {
@@ -60,6 +61,7 @@
     "devops_market": "DevOps 市场",
     "knowledge": "知识库",
     "account": "用户中心",
+    "device_center": "设备中心",
     "settings": "设置"
   },
   "loading": "加载中...",

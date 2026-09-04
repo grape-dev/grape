@@ -15,7 +15,7 @@
     "events": "Events",
     "repos": "Repos",
     "tasks": "Task Center",
-    "observability": "Observability",
+    "observability": "Device Monitor",
     "event_detail": "Event Detail",
     "skill_detail": "Skill Detail",
     "sub_skill_detail": "Sub Skill Detail",
@@ -30,6 +30,7 @@
     "devops_market": "DevOps Market",
     "knowledge": "Knowledge",
     "account": "User Center",
+    "device_center": "Device Center",
     "settings": "Settings"
   },
   "login": {
@@ -60,6 +61,7 @@
     "devops_market": "DevOps Market",
     "knowledge": "Knowledge",
     "account": "User Center",
+    "device_center": "Device Center",
     "settings": "Settings"
   },
   "loading": "Loading...",

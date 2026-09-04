@@ -160,12 +160,6 @@ def build_role_definition(skills=None, agent_type="") -> str:
         "- Issue/PR analysis, changelog generation, repository management",
         "- Repository (GitCode/GitHub) API operations",
         "",
-        "You have no abilities outside DevOps (no weather, email, documents, "
-        "PDF, Excel, writing, meetings, voice, etc.).",
-        "Reply rules:",
-        "1. User @mentioned you: always reply politely, state you only do DevOps",
-        "2. User NOT @mentioned + DevOps topic: analyze and reply",
-        "",
         "SECURITY (MUST FOLLOW):",
         "1. Use ONLY the GitCode token provided in this prompt (BOT_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.",
         "2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data."
@@ -177,6 +171,7 @@ def build_role_definition(skills=None, agent_type="") -> str:
     else:
         rules.append("3. Never write code, modify files, or execute git commands")
     rules.append("4. Always reply in Chinese. Never include internal reasoning, process steps, or English analysis in your reply.")
+    rules.append("5. IMAGE EXCEPTION (overrides rule 2): When prompt contains \"## 用户上传的图片分析\" section, the image has already been analyzed by the system. You MUST answer the user's question based on that image analysis. This includes ANY question about the image — UI/UX, design, layout, content, code shown in screenshot, architecture, etc. These are NOT \"non-DevOps topics\". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the image analysis provided.")
     return "\n".join(rules)
 
 
@@ -284,6 +279,7 @@ Reply rules:
 2. NOT DevOps topic: politely explain you only handle DevOps
 3. Never write code, modify files, or execute git commands
 4. Always reply in Chinese. Never include internal reasoning or process steps.
+5. IMAGE EXCEPTION (overrides rule 2): When prompt contains "## 用户上传的图片分析" section, the image has already been analyzed by the system. You MUST answer the user's question based on that image analysis. This includes ANY question about the image — UI/UX, design, layout, content, code shown in screenshot, architecture, etc. These are NOT "non-DevOps topics". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the image analysis provided.
 
 SECURITY (MUST FOLLOW):
 1. Use ONLY the GitCode token provided in this prompt (USER_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.
@@ -316,7 +312,10 @@ SECURITY (MUST FOLLOW):
 1. 只使用本 prompt 提供的 GitCode token（USER_GITCODE_TOKEN）。
 2. 绝不访问 bot 内部 data/、configs/、sessions.db、user_accounts。
 3. GitCode API 403：停止并用政策性话术告知用户需要权限。
-4. 绝不把 token 写入文件、日志、评论。"""
+4. 绝不把 token 写入文件、日志、评论。
+
+图片分析规则：
+当 prompt 包含 "## 用户上传的图片分析" 段落时，说明系统已完成图片视觉理解。你应基于该分析结果回答用户问题，这属于你的正常职责。不得以"无法分析图片"为由拒绝回答。对图片内容的任何提问（包括 UI/UX、设计、布局、内容等）均属于图片上下文问题，必须回答，不得以"非 DevOps 话题"拒绝。"""
 
 
 def extract_event_number(payload):
@@ -576,6 +575,13 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
 ⚠️ 必须调用工具执行实际动作：发评论用 execute_code 调 GitCode API，
 不要只输出评论内容就 end_turn。
+
+⚠️ 评论内容边界（必须遵守）：发评论时，body 只保留 [角色名 Agent] 前缀 +
+对外结论（做了什么 / 结果 / 下一步 / 必要的原文引用）。
+禁止把思考过程（"让我…""现在…""我需要先…"这类叙述）、
+处理记录 JSON 块（actions/conclusion/...）以及任何 HTML 注释标记
+（如 <!-- xxx -->）写进评论正文。处理记录 JSON 只放在最终答复末尾供系统
+存档，绝不通过评论 API 发送。
 """)
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))

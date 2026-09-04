@@ -415,9 +415,20 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             _proc_env["PYTHONPATH"] = _inject_dir + (":" + _old_pp if _old_pp else "")
             log.info(f"{label}hermes HERMES_HOME isolated: {_iso_home} (state.db=:memory: via .pth)")
 
+        # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
+        _cmd = [agent_cmd] + args
+        try:
+            from src.agent.sandbox import build_bwrap_cmd
+            _wrap = build_bwrap_cmd(cwd, backend_name=backend.name)
+            if _wrap:
+                _cmd = _wrap + _cmd
+                log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
+        except Exception as _bw_e:
+            log.warning(f"{label}{backend.name} bwrap wrap failed, running unsandboxed: {_bw_e}")
+
         # 纯管道启动（与 main 一致；script 包装为临时对照，已按分析移除）
         proc = subprocess.Popen(
-            [agent_cmd] + args,
+            _cmd,
             stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
         )
