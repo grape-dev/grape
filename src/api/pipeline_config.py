@@ -371,7 +371,7 @@ def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int):
         try:
             c.execute(
                 "SELECT scene_id FROM devops_pipeline_scene "
-                "WHERE is_active=1 AND scope='official' ORDER BY id")
+                "WHERE is_active=1 AND scope='official' AND scene_id='default'")
             official_ids = [r[0] for r in c.fetchall()]
         except Exception as e:
             log.warning(f"_auto_fork_official_scenes_to_repo: query failed: {e}")
