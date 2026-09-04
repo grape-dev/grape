@@ -9,9 +9,15 @@
 import os
 import json
 import random
+import time as _time
 from src.config import CONFIG_DIR, log
 
 _ENGINE_SELECTION_PATH = os.path.join(CONFIG_DIR, "engine-selection.json")
+
+# resolve_local_engine 结果缓存（30s TTL）——避免每条飞书消息都查 DB agent_runtimes 表
+# （handler_async + chat.py 两处各调一次，叠加 _remote_runtime_ready 再查，单条消息 5+ 次 DB 查询）
+_resolve_local_cache: dict = {}  # {"result": int|None, "expires": float}
+_RESOLVE_LOCAL_TTL = 30.0
 
 # 远端引擎心跳超时阈值（秒）：last_seen_at 超过此值视为死引擎（AI DevSpace 被删后残留 runtime）。
 # 与 service.py _RUNTIME_STALE_SECONDS 保持一致。
@@ -312,7 +318,13 @@ def resolve_local_engine() -> int | None:
     用于 chat 等未显式绑定时的本机兜底（engine-selection-design.md §8.2）。
     无本机直连时回退全局健康引擎（credential_id>0 的远端 worker，chat 走队列执行），
     避免"无可用引擎"硬失败（#60：清理设备后无 cred0 引擎，chat 全挂）。
+
+    结果缓存 30 秒——引擎列表不频繁变化，缓存可大幅减少 DB 查询。
     """
+    now = _time.time()
+    cached = _resolve_local_cache.get("expires", 0)
+    if cached > now:
+        return _resolve_local_cache.get("result")
     cand = query_engines("", "local")
     cand = _apply_filters([dict(m, scope="local") for m in cand], load_engine_selection())
     if not cand:
@@ -321,7 +333,10 @@ def resolve_local_engine() -> int | None:
         cand = _apply_filters([dict(m, scope="global") for m in cand], load_engine_selection())
     if not cand:
         return None
-    return min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
+    result = min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
+    _resolve_local_cache["result"] = result
+    _resolve_local_cache["expires"] = _time.time() + _RESOLVE_LOCAL_TTL
+    return result
 
 
 def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:

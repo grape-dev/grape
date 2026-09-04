@@ -1617,11 +1617,14 @@ def enqueue_async_report(kind: str, task_id: str, payload):
             report_progress(task_id, payload)
 
 
-async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interval: float = 3.0) -> dict:
+async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interval: float = 1.0) -> dict:
     """异步轮询任务直到终态（completed/failed/cancelled）。
 
     供 IM / web 等"入队 + 等结果"路径使用（见 multi-runtime-instance-design 配套）。
     超时抛 TimeoutError。返回终态 task dict（含 result_text / exit_code / usage_json.session_id）。
+
+    poll_interval 从 3s 降为 1s——远端任务完成后飞书/web 等待者感知延迟减少 2/3，
+    且不增加 DB 压力（单条 SELECT 查询 <1ms）。
     """
     import asyncio, time as _time
     deadline = _time.monotonic() + timeout

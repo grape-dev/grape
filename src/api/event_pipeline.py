@@ -22,9 +22,9 @@ def is_plugin_mode() -> bool:
     """Check if pipeline is in plugin mode.
 
     plugin mode: uses pipelines.json + tag-based enqueue/claim
-    legacy mode (default): uses agent-skill-mapping.json + runtime_id binding
+    legacy mode: uses agent-skill-mapping.json + runtime_id binding
 
-    Priority: meta table `pipeline_mode` > env var GRAPE_PIPELINE_MODE > default (legacy)
+    Priority: meta table `pipeline_mode` > env var GRAPE_PIPELINE_MODE > default (plugin)
     """
     try:
         from src.user.db import get_meta_value
@@ -33,7 +33,7 @@ def is_plugin_mode() -> bool:
             return _mode == "plugin"
     except Exception:
         pass
-    return os.environ.get("GRAPE_PIPELINE_MODE", "").lower() == "plugin"
+    return os.environ.get("GRAPE_PIPELINE_MODE", "plugin").lower() == "plugin"
 
 
 def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "", user_id: int = 0) -> str:
@@ -1695,7 +1695,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
                          task_id: str = ""):
     """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
-    from src.runtime.executor import stream_agent
+    from src.runtime.executor import stream_devops_agent
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
@@ -1850,7 +1850,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
 
     try:
-        for evt_type, data in stream_agent(
+        for evt_type, data in stream_devops_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
             backend_name=backend, account=exec_account, bot_token=repo_gitcode_token,
             agent_name=agent_name,

@@ -45,7 +45,7 @@ import datetime as _datetime
 
 _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
-    "hermes": ["hermes", "chat", "-q", "hello", "--yolo"],
+    "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
     "cursor": ["cursor", "run", "hello"],
 }
@@ -59,7 +59,10 @@ _worker_probe_started = False
 
 
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
-    """对本机引擎发起 CLI 测试对话，返回探测结果。"""
+    """对本机引擎发起 CLI 测试对话，返回探测结果。
+
+    hermes 引擎探测后会删除 hello session，避免污染历史会话列表。
+    """
     cmd = _PROBE_COMMANDS.get(engine_name)
     if not cmd:
         return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
@@ -73,6 +76,9 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         )
         latency = round(_time_mod.time() - start, 1)
         if result.returncode == 0:
+            # hermes 探测：从输出中提取 session_id 并删除，避免 hello 污染历史会话
+            if engine_name == "hermes":
+                _cleanup_hermes_probe_session(result.stdout)
             return {"status": "ok", "latency": latency, "error": ""}
         else:
             err = (result.stderr or result.stdout or "").strip()[:200]
@@ -85,6 +91,26 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
+
+
+def _cleanup_hermes_probe_session(stdout: str):
+    """从 hermes chat -q -Q 的输出中提取 session_id 并删除，避免 hello 对话污染历史会话。"""
+    import re as _re
+    # -Q 模式输出: "session_id: 20260904_170115_9191ce\n..."
+    # 非 -Q 模式输出: "Session:        20260904_165247_4f270b\n..."
+    m = _re.search(r'session[_-]?(?:id)?:\s*(\S+)', stdout, _re.IGNORECASE)
+    if not m:
+        return
+    sid = m.group(1).strip()
+    if not sid:
+        return
+    try:
+        _subprocess.run(
+            ["hermes", "sessions", "delete", sid, "--yes"],
+            capture_output=True, text=True, timeout=10, stdin=_subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
 
 
 def _worker_probe_once():
@@ -1059,7 +1085,8 @@ async def _execute_task(client, task, engine_name: str = ""):
     _engine = engine_name or ""
     if "codearts" in _engine.lower():
         try:
-            _data_dir = _os.path.join("/var/cache/codearts-tasks", tid)
+            _tasks_base = _os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
+            _data_dir = _os.path.join(_tasks_base, tid)
             _cli_data = _os.path.join(_data_dir, "cli-data")
             # 1. 预写 global.json (write/edit/external_directory_write=allow)
             _perm_dir = _os.path.join(_cli_data, "storage", "permission")
@@ -1088,7 +1115,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             # 4. 设置 KERNEL_DATA_DIR 到 env dict（局部变量，并发安全）
             env["KERNEL_DATA_DIR"] = _cli_data
             # 5. 注册清理：task 结束时删除临时目录
-            _res.track_tmp_pattern(f"/var/cache/codearts-tasks/{tid}")
+            _res.track_tmp_pattern(f"{_tasks_base}/{tid}")
             log.info(f"[Agent:{task.get('agent_type') or ''}] codearts data dir: {_cli_data}")
         except Exception as e:
             log.warning(f"codearts data dir setup failed: {e}")
@@ -1551,30 +1578,20 @@ def main():
 
     # 清理上次崩溃残留的 codearts 临时目录（方案 G: per-task 独立数据目录）
     import shutil as _sh
-    _codearts_tasks_dir = "/var/cache/codearts-tasks"
-    if os.path.isdir(_codearts_tasks_dir):
-        # 清理子目录（保留父目录权限，避免 rmtree+makedirs 重建后丢失 1777）
-        for _entry in os.listdir(_codearts_tasks_dir):
-            _child = os.path.join(_codearts_tasks_dir, _entry)
+    _codearts_tasks_dir = os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
+    # fallback：如果 /var/cache 不可写，改用用户目录
+    try:
+        if not os.path.isdir(_codearts_tasks_dir):
+            os.makedirs(_codearts_tasks_dir, exist_ok=True)
             try:
-                if os.path.isdir(_child):
-                    _sh.rmtree(_child, ignore_errors=True)
-                else:
-                    os.unlink(_child)
-            except Exception:
+                os.chmod(_codearts_tasks_dir, 0o1777)
+            except PermissionError:
                 pass
-        try:
-            os.chmod(_codearts_tasks_dir, 0o1777)
-        except PermissionError:
-            pass
-        log.info(f"cleaned codearts tasks dir: {_codearts_tasks_dir}")
-    else:
+            log.info(f"created codearts tasks dir: {_codearts_tasks_dir}")
+    except PermissionError:
+        _codearts_tasks_dir = os.path.expanduser("~/.cache/codearts-tasks")
         os.makedirs(_codearts_tasks_dir, exist_ok=True)
-        try:
-            os.chmod(_codearts_tasks_dir, 0o1777)
-        except PermissionError:
-            pass
-        log.info(f"created codearts tasks dir: {_codearts_tasks_dir}")
+        log.info(f"codearts tasks dir fallback (no /var/cache access): {_codearts_tasks_dir}")
 
     from src.runtime.client import RuntimeClient
 

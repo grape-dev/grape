@@ -6,7 +6,6 @@ function renderSettings(tab) {
     {id:'credentials', label:I18N.t('settings.tab.credentials')},
     {id:'notifications', label:I18N.t('settings.tab.notifications')},
     {id:'appearance', label:I18N.t('settings.tab.appearance')},
-    {id:'advanced', label:I18N.t('settings.tab.advanced')},
   ];
 
   let html = `<div class="cd"><div class="cd-h"><h2>${I18N.t('settings.page_title')}</h2></div>`;

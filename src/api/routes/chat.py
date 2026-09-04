@@ -509,7 +509,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
         return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data)
 
-    from src.runtime.executor import stream_agent
+    from src.runtime.executor import stream_chat_agent
     loop = asyncio.get_event_loop()
     collected = []
     new_runtime_session_id = ""
@@ -517,7 +517,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     def run_agent():
         nonlocal new_runtime_session_id
         with _CHAT_AGENT_SEMAPHORE:
-            for evt_type, data in stream_agent(
+            for evt_type, data in stream_chat_agent(
                 prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
@@ -736,7 +736,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
-    from src.runtime.executor import stream_agent
+    from src.runtime.executor import stream_chat_agent
 
     async def event_stream():
         q = asyncio.Queue()
@@ -753,8 +753,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             collected = []
             worker_error = ""
             try:
-                for evt_type, data in stream_agent(
-prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
+                for evt_type, data in stream_chat_agent(
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
@@ -1353,11 +1353,12 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
         # 本机直连：ChatTaskManager 启动 agent_fn
         def agent_fn():
             """agent generator — yield 事件 + finally 写 DB"""
-            from src.runtime.executor import stream_agent
+            from src.runtime.executor import stream_chat_agent
             _final_text = ""
             _new_sid = ""
+            _last_error = ""
             try:
-                for evt_type, data in stream_agent(
+                for evt_type, data in stream_chat_agent(
                     prompt=prompt, cwd=cwd, session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token,
@@ -1378,10 +1379,16 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
                             nsid = data.get("oc_session_id", "")
                             if nsid:
                                 _new_sid = nsid
+                        # session 重试后仍无文本 → 用 error 信息作为回复
+                        if not _final_text and _last_error:
+                            _final_text = _last_error
                         yield ("done", {"text": _final_text})
                     elif evt_type == "error":
+                        # 不 break — 让 stream_agent 继续，使 session 失效重试逻辑
+                        # (_stale_fail 检测 + _run_once("") 重跑) 有机会执行。
+                        # 记住 error，仅在 done 无有效文本时才作为最终结果。
+                        _last_error = str(data)
                         yield ("error", str(data))
-                        break
                     else:
                         yield (evt_type, data)
             finally:

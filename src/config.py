@@ -142,7 +142,7 @@ OBS_URL_EXPIRES = int(os.environ.get("OBS_URL_EXPIRES", "300"))
 
 # ── 飞书 Bot Lease（集群部署，保证同一 bot 同一时刻只有一个实例连 WebSocket）──
 BOT_LEASE_DISABLED = os.environ.get("BOT_LEASE_DISABLED", "false").lower() in ("1", "true", "yes")
-BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "60"))
+BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "90"))
 BOT_LEASE_RENEW_INTERVAL = int(os.environ.get("BOT_LEASE_RENEW_INTERVAL", "20"))
 BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 # 本地缓存根（磁盘 LRU zip 缓存；默认 data/cache/storage）
@@ -409,6 +409,6 @@ BWRAP_RO_ENGINE = {
 # codearts 底层同 opencode 用 bun，需 /var/cache/bun-compile 写权限（JIT .so 缓存）。
 BWRAP_RW_ENGINE = {
     "opencode": ("/var/cache/bun-compile",),
-    "codearts": ("~/.codeartsdoer", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
+    "codearts": ("~/.codeartsdoer", "~/.cache/codearts-tasks", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
     "hermes": ("~/.hermes",),
 }

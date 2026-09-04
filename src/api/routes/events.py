@@ -1081,8 +1081,8 @@ def _execute_conv_task(task_id: str, loop):
 
     try:
         evt = _load_event(seq)
-        # 直接用同步 stream_agent（在线程中运行，不阻塞主 loop）
-        from src.runtime.executor import stream_agent
+        # 直接用同步 stream_devops_agent（在线程中运行，不阻塞主 loop）
+        from src.runtime.executor import stream_devops_agent
         _worker_final_text = ""
         repo_key = evt["repo_key"]
         agent_type = evt["agent_type"]
@@ -1117,8 +1117,8 @@ def _execute_conv_task(task_id: str, loop):
         bot_token = get_gitcode_token(repo_key=repo_key) or ""
         repository = from_repo_key(repo_key)
         # 用 hermes 引擎（对齐 Chat Agent）
-        for evt_type, data in stream_agent(
-            prompt, cwd=ws, session_id=oc_session_id,
+        for evt_type, data in stream_devops_agent(
+            prompt, cwd=ws, session_id=oc_session_id, event_type="event_dialogue",
             backend_name="hermes", account=repository, bot_token=bot_token,
             agent_name="Event Dialogue Agent",
             agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",

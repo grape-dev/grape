@@ -147,12 +147,20 @@ class ChatTaskManager:
                         task.final_text = data.get("text", "")
                     elif isinstance(data, str):
                         task.final_text = data
-                    task.status = "done"
+                    # done 有有效文本 → 覆盖 error 状态；done 无文本但有 error → 保留 error
+                    if task.final_text:
+                        task.status = "done"
+                    elif task.error:
+                        task.status = "error"
+                    else:
+                        task.status = "done"
                     break
                 elif evt_type == "error":
+                    # 不 break — 让 agent_fn 继续执行到 done，
+                    # 使 stream_agent 内部的 session 失效重试逻辑有机会生效。
                     task.error = str(data)
-                    task.status = "error"
-                    break
+                    if task.status != "done":
+                        task.status = "error"
             # agent_fn 正常结束但未发 done → 收集到的文本作为结果
             if task.status == "running":
                 task.status = "done" if task.final_text else "error"
