@@ -2146,6 +2146,15 @@ def _migrate_tables():
         log.info("Added scene_user_id column to issue_state")
     except Exception as e:
         log.warning(f"Add issue_state.scene_user_id column failed: {e}")
+    # ===== VOD scene override switch: issue_state.allow_scene_override =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue_state", "allow_scene_override", "INTEGER DEFAULT 0")
+            db.commit()
+        log.info("Added allow_scene_override column to issue_state")
+    except Exception as e:
+        log.warning(f"Add issue_state.allow_scene_override column failed: {e}")
     # ===== Scene Center: agent_tasks.pool_engine_ids + 官方场景种子导入 =====
     try:
         with db_lock:
@@ -2188,3 +2197,34 @@ def _migrate_tables():
         log.info("Added content_hash column to skill")
     except Exception as e:
         log.warning(f"Add skill.content_hash column failed: {e}")
+    # ===== Scene scope downgrade: user → repo（每次启动自动迁移，幂等）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 1. 检查是否有 user scope 活跃记录
+            c.execute("SELECT COUNT(*) FROM devops_pipeline_scene WHERE scope='user' AND is_active=1")
+            _user_count = c.fetchone()[0]
+            if _user_count > 0:
+                # 2. 冲突处理：同 scene_id + repo_key 已有 repo scope 记录 → 软删除 repo 旧记录
+                c.execute("""
+                    SELECT r.id, r.scene_id, r.repo_key
+                    FROM devops_pipeline_scene u
+                    INNER JOIN devops_pipeline_scene r
+                      ON u.scene_id = r.scene_id
+                      AND COALESCE(u.repo_key,'') = COALESCE(r.repo_key,'')
+                    WHERE u.scope = 'user' AND u.is_active = 1
+                      AND r.scope = 'repo' AND r.is_active = 1
+                """)
+                _conflicts = c.fetchall()
+                for _r_id, _sid, _rk in _conflicts:
+                    c.execute("UPDATE devops_pipeline_scene SET is_active=0 WHERE id=?", (_r_id,))
+                    log.info(f"Scene migrate: conflict scene={_sid} repo_key={_rk} → soft-deleted repo record {_r_id}")
+                # 3. 迁移：user → repo
+                c.execute("UPDATE devops_pipeline_scene SET scope='repo', user_id=0 WHERE scope='user' AND is_active=1")
+                _migrated = c.rowcount
+                db.commit()
+                log.info(f"Scene migrate: {_migrated} user-scope scenes downgraded to repo-scope")
+            else:
+                log.info("Scene migrate: no user-scope scenes found, skip")
+    except Exception as e:
+        log.warning(f"Scene scope migration failed: {e}")

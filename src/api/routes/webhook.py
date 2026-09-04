@@ -456,15 +456,20 @@ async def a2a_endpoint(request: Request):
             except Exception as _de:
                 log.warning(f"A2A: duplicate check failed: {_de}")
 
-        # VOD A2A 交办时携带 recommended_scene → 持久化到 issue_state.scene_id
+        # VOD A2A 交办时携带 recommended_scene → 持久化到 issue_state.scene_id（受 allow_scene_override 开关控制）
         _recommended_scene = payload.get("recommended_scene", "")
         if _recommended_scene and issue_number:
             try:
-                from src.api.session_store import set_issue_scene
-                from src.runtime.engine_select import _repo_user_id
-                _scene_uid = _repo_user_id(repo_key)
-                set_issue_scene(repo_key, f"#{issue_number}", _recommended_scene, scene_user_id=_scene_uid)
-                log.info(f"A2A: scene_id={_recommended_scene} uid={_scene_uid} set for issue=#{issue_number}")
+                from src.api.session_store import get_scene_override_flag
+                _allow_override = get_scene_override_flag(repo_key, f"#{issue_number}")
+                if _allow_override:
+                    from src.api.session_store import set_issue_scene
+                    from src.runtime.engine_select import _repo_user_id
+                    _scene_uid = _repo_user_id(repo_key)
+                    set_issue_scene(repo_key, f"#{issue_number}", _recommended_scene, scene_user_id=_scene_uid)
+                    log.info(f"A2A: scene_id={_recommended_scene} uid={_scene_uid} set for issue=#{issue_number} (override enabled)")
+                else:
+                    log.info(f"A2A: scene override disabled for issue=#{issue_number}, skip recommended_scene")
             except Exception as _sce:
                 log.warning(f"A2A: set_issue_scene failed: {_sce}")
 
