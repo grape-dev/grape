@@ -359,10 +359,12 @@ def delete_custom_scene(scene_id: str, scope: str, repo_key: str, user_id: int):
 
 
 def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int):
-    """Auto-fork all official scenes to repo scope (idempotent).
+    """Auto-fork only the 'default' official scene to repo scope (idempotent).
 
-    Called by host_repo when a repo is first hosted. Creates repo-scoped copies
+    Called by host_repo when a repo is first hosted. Creates a repo-scoped copy
     with scene_id prefixed 'repo:' to avoid cross-scope collisions.
+    Only the 'default' scene is forked; other official scenes (cloud-native,
+    iac, etc.) remain available via official fallback but are not auto-forked.
     """
     db, lock = _db()
     official_ids = []
@@ -371,7 +373,7 @@ def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int):
         try:
             c.execute(
                 "SELECT scene_id FROM devops_pipeline_scene "
-                "WHERE is_active=1 AND scope='official' ORDER BY id")
+                "WHERE is_active=1 AND scope='official' AND scene_id='default'")
             official_ids = [r[0] for r in c.fetchall()]
         except Exception as e:
             log.warning(f"_auto_fork_official_scenes_to_repo: query failed: {e}")
