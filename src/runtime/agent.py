@@ -1059,7 +1059,8 @@ async def _execute_task(client, task, engine_name: str = ""):
     _engine = engine_name or ""
     if "codearts" in _engine.lower():
         try:
-            _data_dir = _os.path.join("/var/cache/codearts-tasks", tid)
+            _tasks_base = _os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
+            _data_dir = _os.path.join(_tasks_base, tid)
             _cli_data = _os.path.join(_data_dir, "cli-data")
             # 1. 预写 global.json (write/edit/external_directory_write=allow)
             _perm_dir = _os.path.join(_cli_data, "storage", "permission")
@@ -1088,7 +1089,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             # 4. 设置 KERNEL_DATA_DIR 到 env dict（局部变量，并发安全）
             env["KERNEL_DATA_DIR"] = _cli_data
             # 5. 注册清理：task 结束时删除临时目录
-            _res.track_tmp_pattern(f"/var/cache/codearts-tasks/{tid}")
+            _res.track_tmp_pattern(f"{_tasks_base}/{tid}")
             log.info(f"[Agent:{task.get('agent_type') or ''}] codearts data dir: {_cli_data}")
         except Exception as e:
             log.warning(f"codearts data dir setup failed: {e}")
@@ -1551,30 +1552,20 @@ def main():
 
     # 清理上次崩溃残留的 codearts 临时目录（方案 G: per-task 独立数据目录）
     import shutil as _sh
-    _codearts_tasks_dir = "/var/cache/codearts-tasks"
-    if os.path.isdir(_codearts_tasks_dir):
-        # 清理子目录（保留父目录权限，避免 rmtree+makedirs 重建后丢失 1777）
-        for _entry in os.listdir(_codearts_tasks_dir):
-            _child = os.path.join(_codearts_tasks_dir, _entry)
+    _codearts_tasks_dir = os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
+    # fallback：如果 /var/cache 不可写，改用用户目录
+    try:
+        if not os.path.isdir(_codearts_tasks_dir):
+            os.makedirs(_codearts_tasks_dir, exist_ok=True)
             try:
-                if os.path.isdir(_child):
-                    _sh.rmtree(_child, ignore_errors=True)
-                else:
-                    os.unlink(_child)
-            except Exception:
+                os.chmod(_codearts_tasks_dir, 0o1777)
+            except PermissionError:
                 pass
-        try:
-            os.chmod(_codearts_tasks_dir, 0o1777)
-        except PermissionError:
-            pass
-        log.info(f"cleaned codearts tasks dir: {_codearts_tasks_dir}")
-    else:
+            log.info(f"created codearts tasks dir: {_codearts_tasks_dir}")
+    except PermissionError:
+        _codearts_tasks_dir = os.path.expanduser("~/.cache/codearts-tasks")
         os.makedirs(_codearts_tasks_dir, exist_ok=True)
-        try:
-            os.chmod(_codearts_tasks_dir, 0o1777)
-        except PermissionError:
-            pass
-        log.info(f"created codearts tasks dir: {_codearts_tasks_dir}")
+        log.info(f"codearts tasks dir fallback (no /var/cache access): {_codearts_tasks_dir}")
 
     from src.runtime.client import RuntimeClient
 
