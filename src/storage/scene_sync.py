@@ -181,7 +181,7 @@ def _parse_version(v: str) -> tuple:
 
 
 def _get_sync_token() -> str:
-    """获取同步用 GitCode token，优先级：GRAPE_DEV_TOKEN 环境变量 → configs/scene-sync.json 的 gitcode_api_token → configs/global-bot-token.json 的 gitcode_api_token。"""
+    """获取同步用 GitCode token，优先级：GRAPE_DEV_TOKEN 环境变量 → configs/scene-sync.json 的 gitcode_api_token。"""
     # 1. 环境变量
     token = os.environ.get("GRAPE_DEV_TOKEN", "")
     if token:
@@ -196,26 +196,16 @@ def _get_sync_token() -> str:
                 return token
     except Exception:
         pass
-    # 3. configs/global-bot-token.json
-    try:
-        gbt_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "global-bot-token.json")
-        if os.path.exists(gbt_path):
-            with open(gbt_path, "r", encoding="utf-8") as f:
-                token = json.load(f).get("gitcode_api_token", "")
-            if token:
-                return token
-    except Exception:
-        pass
     return ""
 
 
 async def _api_list_dir(client: httpx.AsyncClient, path: str, token: str) -> list:
     """GitCode API v5 列目录，返回 [{type, name, path}, ...]。"""
     url = f"https://api.gitcode.com/api/v5/repos/{_OWNER_REPO}/contents/{path}"
-    params = {"ref": _REPO_BRANCH}
+    headers = {}
     if token:
-        params["access_token"] = token
-    resp = await client.get(url, params=params, timeout=15.0)
+        headers["Authorization"] = f"Bearer {token}"
+    resp = await client.get(url, params={"ref": _REPO_BRANCH}, headers=headers, timeout=15.0)
     resp.raise_for_status()
     return resp.json()
 
@@ -223,10 +213,10 @@ async def _api_list_dir(client: httpx.AsyncClient, path: str, token: str) -> lis
 async def _api_get_file(client: httpx.AsyncClient, path: str, token: str) -> bytes:
     """GitCode API v5 下载文件内容（base64 解码后返回 bytes）。"""
     url = f"https://api.gitcode.com/api/v5/repos/{_OWNER_REPO}/contents/{path}"
-    params = {"ref": _REPO_BRANCH}
+    headers = {}
     if token:
-        params["access_token"] = token
-    resp = await client.get(url, params=params, timeout=15.0)
+        headers["Authorization"] = f"Bearer {token}"
+    resp = await client.get(url, params={"ref": _REPO_BRANCH}, headers=headers, timeout=15.0)
     resp.raise_for_status()
     data = resp.json()
     if data.get("encoding") == "base64":
@@ -270,7 +260,7 @@ async def sync_official_scenes():
     try:
         bot_token = _get_sync_token()
         if not bot_token:
-            log.warning("Scene sync: no GitCode token configured (GRAPE_DEV_TOKEN env / configs/scene-sync.json / configs/global-bot-token.json), skip")
+            log.warning("Scene sync: no GitCode token configured (GRAPE_DEV_TOKEN env / configs/scene-sync.json), skip")
             return
 
         async with httpx.AsyncClient(timeout=30.0) as client:
