@@ -33,47 +33,82 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("")
-def list_skills(user: dict = Depends(get_current_user), repo: str = "", scope: str = ""):
+def list_skills(user: dict = Depends(get_current_user), repo: str = "", scope: str = "",
+                q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
+    q 参数：搜索词，按 skill_name / display_name / description 模糊匹配。
+    sort 参数：latest（默认顺序）/ hot（按 like_count 降序）。
+    page/page_size：分页参数，page_size=0 时不分页（返回全部，兼容旧逻辑）。
+    扩展返回字段：is_featured, like_count, liked_by_me, scene_count, repo_count, scenes
     """
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key
+    from src.user.db import (batch_skill_liked, get_skill_usage_stats,
+                             batch_skill_scenes)
 
     # repo 参数可能是 fullName（xiaowu2119/hello-skill），转成 repo_key（gitcode:xiaowu2119/hello-skill）
     repo_key = to_repo_key(repo) if repo else ""
 
+    # 构建查询条件
+    conditions = ["is_active=1"]
+    params = []
+    if scope == "official":
+        conditions.append("scope='official'")
+    elif scope == "repo":
+        if not repo:
+            return {"skills": [], "total": 0, "page": page, "page_size": page_size}
+        conditions.append("scope='repo'")
+        conditions.append("owner_id=?")
+        params.append(repo_key)
+    elif scope == "user":
+        conditions.append("scope='user'")
+        conditions.append("owner_id=?")
+        params.append(str(user["id"]))
+    elif repo:
+        # 官方 + 个人 + 指定仓库技能（兼容旧逻辑）
+        conditions.append("(scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))")
+        params.extend([str(user["id"]), repo_key])
+    else:
+        # 官方 + 个人（兼容旧逻辑）
+        conditions.append("(scope='official' OR (scope='user' AND owner_id=?))")
+        params.append(str(user["id"]))
+
+    # 搜索过滤
+    q = (q or "").strip()
+    if q:
+        conditions.append("(skill_name LIKE ? OR display_name LIKE ? OR description LIKE ?)")
+        kw = f"%{q}%"
+        params.extend([kw, kw, kw])
+
+    # 排序
+    order_by = "ORDER BY like_count DESC" if sort == "hot" else "ORDER BY agent_type, skill_name"
+
+    where_sql = " WHERE " + " AND ".join(conditions)
+
+    # 分页
+    use_paging = page_size and page_size > 0
+    total = 0
+
     skills = []
+    skill_ids: list[int] = []
     with db_lock:
         c = db.cursor()
         try:
-            if scope == "official":
+            if use_paging:
+                offset = (page - 1) * page_size
+                c.execute(f"SELECT COUNT(*) FROM skill{where_sql}", tuple(params))
+                total = c.fetchone()[0]
                 c.execute(
-                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND scope='official' ORDER BY agent_type, skill_name",
-                )
-            elif scope == "repo":
-                if not repo:
-                    return {"skills": []}
-                c.execute(
-                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND scope='repo' AND owner_id=? ORDER BY agent_type, skill_name",
-                    (repo_key,)
-                )
-            elif scope == "user":
-                c.execute(
-                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND scope='user' AND owner_id=? ORDER BY agent_type, skill_name",
-                    (str(user["id"]),)
-                )
-            elif repo:
-                # 官方 + 个人 + 指定仓库技能（兼容旧逻辑）
-                c.execute(
-                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) ORDER BY agent_type, skill_name",
-                    (str(user["id"]), repo_key)
+                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count "
+                    f"FROM skill{where_sql} {order_by} LIMIT {int(page_size)} OFFSET {int(offset)}",
+                    tuple(params)
                 )
             else:
-                # 官方 + 个人（兼容旧逻辑）
                 c.execute(
-                    "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id FROM skill WHERE is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?)) ORDER BY agent_type, skill_name",
-                    (str(user["id"]),)
+                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count "
+                    f"FROM skill{where_sql} {order_by}",
+                    tuple(params)
                 )
             for r in c.fetchall():
                 skills.append({
@@ -84,11 +119,164 @@ def list_skills(user: dict = Depends(get_current_user), repo: str = "", scope: s
                     "agent_type": r[4] or "",
                     "type": "official" if r[5] == "official" else "repo" if r[5] == "repo" else "user-uploaded",
                     "scope": r[5] or "",
+                    "is_featured": r[7] or 0,
+                    "like_count": r[8] or 0,
                 })
+                skill_ids.append(r[0])
         except Exception:
             pass
 
+    # 批量查 liked_by_me
+    liked_map = batch_skill_liked(user.get("id", 0), skill_ids) if skill_ids else {}
+    # 批量查使用统计（按本页 skill_ids 过滤）
+    usage_stats = get_skill_usage_stats(skill_ids) if skill_ids else {}
+    # 批量查所属场景
+    scenes_map = batch_skill_scenes(skill_ids) if skill_ids else {}
+
+    # 补充扩展字段
+    for s in skills:
+        s["liked_by_me"] = liked_map.get(s["id"], False)
+        stats = usage_stats.get(s["id"], {})
+        s["scene_count"] = stats.get("scene_count", 0)
+        s["repo_count"] = stats.get("repo_count", 0)
+        s["scenes"] = scenes_map.get(s["id"], [])
+
+    if use_paging:
+        return {"skills": skills, "total": total, "page": page, "page_size": page_size}
     return {"skills": skills}
+
+
+# ===== Skill Market API（技能市场）=====
+
+@router.post("/{skill_id}/like")
+def toggle_skill_like(skill_id: int, user: dict = Depends(get_current_user)):
+    """点赞 toggle：已赞→取消，未赞→点赞"""
+    from src.session_manager import db, db_lock
+    from src.user.db import toggle_skill_like as _toggle
+
+    # 校验技能存在
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM skill WHERE id=? AND is_active=1", (skill_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+
+    liked, like_count = _toggle(user.get("id", 0), skill_id)
+    return {"liked": liked, "like_count": like_count}
+
+
+@router.get("/featured")
+def list_featured_skills(user: dict = Depends(get_current_user), limit: int = 0):
+    """精选技能：is_featured=1 的 official 技能，按 like_count 降序。limit=0 时默认 5"""
+    from src.user.db import (get_featured_skills, batch_skill_liked,
+                             get_skill_usage_stats, batch_skill_scenes)
+
+    skills = get_featured_skills(limit=limit if limit > 0 else 5)
+    if not skills:
+        return {"skills": []}
+
+    skill_ids = [s["id"] for s in skills]
+    # 补充 liked_by_me
+    liked_map = batch_skill_liked(user.get("id", 0), skill_ids)
+    # 补充使用统计和所属场景（按 skill_id 关联）
+    usage_stats = get_skill_usage_stats(skill_ids) if skill_ids else {}
+    scenes_map = batch_skill_scenes(skill_ids) if skill_ids else {}
+    for s in skills:
+        s["name"] = s["skill_name"]  # 前端用 name 字段
+        s["scope"] = "official"
+        s["liked_by_me"] = liked_map.get(s["id"], False)
+        stats = usage_stats.get(s["id"], {})
+        s["scene_count"] = stats.get("scene_count", 0)
+        s["repo_count"] = stats.get("repo_count", 0)
+        s["scenes"] = scenes_map.get(s["id"], [])
+    return {"skills": skills}
+
+
+@router.get("/stats")
+def get_skill_stats(user: dict = Depends(get_current_user)):
+    """技能使用统计（通过 scene_skill_ref 关联表 SQL 聚合）。
+
+    返回 {skill_name: {scene_count: N, repo_count: N}}。
+    """
+    from src.user.db import get_skill_usage_stats
+    return {"stats": get_skill_usage_stats()}
+
+
+@router.get("/search")
+def search_skills(q: str = "", user: dict = Depends(get_current_user)):
+    """技能查找：根据任务描述推荐相关技能。
+
+    先按 skill_name 精确匹配，匹配到则按名称过滤；
+    匹配不到则按 description + display_name + agent_type 做关键词匹配。
+    不调 LLM（第一期简单实现）——分词后匹配技能描述。
+    返回 [{skill_id, name, display_name, description, match_reason}]
+    """
+    from src.session_manager import db, db_lock
+
+    q = (q or "").strip()
+    if not q:
+        return {"skills": []}
+
+    # 1. 先按 skill_name 精确匹配
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, skill_name, display_name, description, agent_type "
+            "FROM skill WHERE is_active=1 AND scope='official' "
+            "AND (skill_name=? OR display_name=?) ORDER BY skill_name",
+            (q, q),
+        )
+        exact_rows = c.fetchall()
+
+    if exact_rows:
+        return {"skills": [
+            {"skill_id": r[0], "name": r[1], "display_name": r[2] or r[1],
+             "description": r[3] or "", "match_reason": "名称精确匹配"}
+            for r in exact_rows
+        ]}
+
+    # 2. 关键词匹配：分词后匹配 description + display_name + agent_type
+    # 简单分词：按空格/中文常见分隔符拆分，过滤太短的词
+    import re as _re
+    keywords = [w for w in _re.split(r'[\s,，、/;；]+', q) if len(w) >= 2]
+    if not keywords:
+        # 整个 q 作为单个关键词
+        keywords = [q]
+
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, skill_name, display_name, description, agent_type "
+            "FROM skill WHERE is_active=1 AND scope='official' "
+            "ORDER BY agent_type, skill_name",
+        )
+        all_skills = c.fetchall()
+
+    results = []
+    for r in all_skills:
+        skill_id, name, display_name, desc, agent_type = r
+        display_name = display_name or name
+        desc = desc or ""
+        # 计算命中关键词
+        hit_keywords = []
+        searchable = f"{name} {display_name} {desc} {agent_type}".lower()
+        for kw in keywords:
+            if kw.lower() in searchable:
+                hit_keywords.append(kw)
+        if hit_keywords:
+            match_reason = f"匹配关键词：{', '.join(hit_keywords)}"
+            results.append({
+                "skill_id": skill_id, "name": name, "display_name": display_name,
+                "description": desc, "match_reason": match_reason,
+                "_hit_count": len(hit_keywords),
+            })
+
+    # 按命中数降序
+    results.sort(key=lambda x: x["_hit_count"], reverse=True)
+    for r in results:
+        del r["_hit_count"]
+
+    return {"skills": results}
 
 
 @router.post("/sync-official")
@@ -264,7 +452,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user)
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id FROM skill WHERE id=? AND is_active=1",
+            "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count FROM skill WHERE id=? AND is_active=1",
             (skill_id,)
         )
         row = c.fetchone()
@@ -274,6 +462,8 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user)
 
     scope = row[5]
     owner_id = row[6] or ""
+    is_featured = row[8] or 0
+    like_count = row[9] or 0
 
     # 归属校验
     if scope == "user" and owner_id != str(user["id"]):
@@ -284,6 +474,11 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user)
         user_repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) if user.get("id") else [])}
         if owner_id not in user_repo_keys:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该技能"})
+
+    # 扩展字段：liked_by_me + 所属场景
+    from src.user.db import is_skill_liked, get_skill_scenes
+    liked_by_me = is_skill_liked(user.get("id", 0), skill_id)
+    scenes = get_skill_scenes(row[7])  # row[7] = skill.id
 
     skill_dir = row[4] or row[0]
     current_id = row[7]
@@ -311,6 +506,10 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user)
             "content": content,
             "zip_url": zip_url,
             "is_obs": True,  # OBS/集群模式（skill_path 为对象键）
+            "is_featured": is_featured,
+            "like_count": like_count,
+            "liked_by_me": liked_by_me,
+            "scenes": scenes,
         }
     # ===== local 分支 =====
     if scope == "user":
@@ -335,6 +534,10 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user)
         "scope": scope or "",
         "content": content,
         "is_obs": False,
+        "is_featured": is_featured,
+        "like_count": like_count,
+        "liked_by_me": liked_by_me,
+        "scenes": scenes,
     }
 
 
@@ -470,10 +673,10 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-@router.delete("/{skill_name}")
-def delete_skill(skill_name: str, user: dict = Depends(get_current_user),
-                       scope: str = "user", repo: str = ""):
-    """删除技能——按 skill_name + scope 查到后做归属校验，再删除。
+@router.delete("/by-id/{skill_id}")
+def delete_skill_by_id(skill_id: int, user: dict = Depends(get_current_user),
+                        scope: str = "user", repo: str = ""):
+    """删除技能——按主键 id 精确查询，查到后做归属校验，再删除。
 
     权限校验：official 不允许删除；user 需本人；repo 需当前用户托管该仓库。
     """
@@ -482,30 +685,27 @@ def delete_skill(skill_name: str, user: dict = Depends(get_current_user),
 
     with db_lock:
         c = db.cursor()
-        # 按 skill_name + scope 查，owner_id 归一化匹配
-        if scope == "repo":
-            repo_key = to_repo_key(repo) if repo else ""
-            c.execute(
-                "SELECT id, owner_id, skill_path FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1",
-                (skill_name, repo_key)
-            )
-        else:
-            c.execute(
-                "SELECT id, owner_id, skill_path FROM skill WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1",
-                (skill_name, str(user["id"]))
-            )
+        c.execute(
+            "SELECT skill_name, owner_id, skill_path, scope FROM skill WHERE id=? AND is_active=1",
+            (skill_id,)
+        )
         row = c.fetchone()
 
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
-    skill_id = row[0]
+    skill_name = row[0]
     owner_id = row[1] or ""
+    skill_scope = row[3] or "user"
+
+    # official 不允许删除
+    if skill_scope == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方技能不允许删除"})
 
     # 归属校验
-    if scope == "user" and owner_id != str(user["id"]):
+    if skill_scope == "user" and owner_id != str(user["id"]):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权删除该技能"})
-    if scope == "repo":
+    if skill_scope == "repo":
         from src.user.db import get_user_repos
         user_repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) if user.get("id") else [])}
         if owner_id not in user_repo_keys:
@@ -522,7 +722,7 @@ def delete_skill(skill_name: str, user: dict = Depends(get_current_user),
         except Exception:
             pass
 
-    # 物理删除
+    # 物理删除（按主键 id）
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM skill WHERE id=?", (skill_id,))
@@ -533,10 +733,9 @@ def delete_skill(skill_name: str, user: dict = Depends(get_current_user),
         import shutil
         from src.config import SKILLS_DIR
         from src.repo_key import from_repo_key
-        if scope == "user":
+        if skill_scope == "user":
             local_dir = os.path.join(SKILLS_DIR, "custom", owner_id, skill_name)
-        elif scope == "repo":
-            # owner_id 可能带 gitcode: 前缀，目录路径用不带前缀的 owner/repo
+        elif skill_scope == "repo":
             local_dir = os.path.join(SKILLS_DIR, "repo", from_repo_key(owner_id), skill_name)
         else:
             local_dir = None

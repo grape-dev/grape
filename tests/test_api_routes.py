@@ -995,7 +995,7 @@ class TestSkills:
             shutil.rmtree(os.path.dirname(os.path.dirname(target)), ignore_errors=True)
 
     def test_skills_delete_nonexistent(self):
-        r = client.delete("/api/skills/nonexistent_skill", headers=_headers)
+        r = client.delete("/api/skills/by-id/999999", headers=_headers)
         assert r.status_code == 404
 
     def test_skills_convert_user_to_repo(self):

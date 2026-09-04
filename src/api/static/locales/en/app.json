@@ -20,11 +20,15 @@
     "skill_detail": "Skill Detail",
     "sub_skill_detail": "Sub Skill Detail",
     "gitcode_repo": "GitCode Repo",
-    "scene_center": "Scene Center"
+    "scene_center": "Scene Center",
+    "scene_skill_market": "Scenes & Skills",
+    "scene_market": "Scene Market",
+    "skill_market": "Skill Market"
   },
   "sidebar": {
     "workspace": "Workspace",
     "devops_agents": "DevOps Agents",
+    "devops_market": "DevOps Market",
     "knowledge": "Knowledge",
     "account": "User Center",
     "device_center": "Device Center",
@@ -55,6 +59,7 @@
   "nav_groups": {
     "workspace": "Workspace",
     "devops_agents": "DevOps Agents",
+    "devops_market": "DevOps Market",
     "knowledge": "Knowledge",
     "account": "User Center",
     "device_center": "Device Center",

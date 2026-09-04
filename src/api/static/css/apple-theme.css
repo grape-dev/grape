@@ -381,6 +381,19 @@
   color: var(--a);
   background: rgba(0,113,227,0.08);
 }
+/* 场景·技能市场分段控件（Apple segmented control） */
+.seg-bar{display:inline-flex;gap:2px;background:var(--bg);padding:3px;border-radius:10px;margin-top:16px}
+.seg-bar a{padding:6px 22px;font-size:13px;font-weight:500;color:var(--t3);cursor:pointer;border-radius:8px;transition:all .2s;white-space:nowrap}
+.seg-bar a:hover{color:var(--t)}
+.seg-bar a.ac{background:var(--c);color:var(--t);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+/* Apple 风格卡片：柔和阴影无边框 */
+.apple-card{background:var(--c);border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.apple-card .cd-h{margin-bottom:14px}
+.apple-card h2{font-size:15px;font-weight:600;letter-spacing:-.01em}
+/* Apple 风格搜索行 */
+.apple-search{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.apple-search input{padding:8px 14px;border:1px solid var(--b);border-radius:10px;font-size:12px;outline:none;background:var(--bg);color:var(--t);transition:border-color .2s;width:200px}
+.apple-search input:focus{border-color:var(--a);background:var(--c)}
 [data-theme="apple"] .srow input {
   border-radius: 10px;
   border: 1px solid var(--b);

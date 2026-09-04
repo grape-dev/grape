@@ -1841,3 +1841,346 @@ def get_agent_runtimes_age() -> float | None:
     import datetime
     updated = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
     return (datetime.datetime.now() - updated).total_seconds()
+
+
+# ====== Scene Market CRUD（场景市场）======
+
+def list_scene_categories() -> list[dict]:
+    """返回启用的场景分类列表，按 order_num 排序"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, name, slug, icon, order_num FROM scene_category "
+            "WHERE is_active=1 ORDER BY order_num"
+        )
+        return [{"id": r[0], "name": r[1], "slug": r[2] or "", "icon": r[3] or "", "order_num": r[4]}
+                for r in c.fetchall()]
+
+
+def get_scene_category(category_id: int) -> dict | None:
+    """按 id 查场景分类"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, name, icon FROM scene_category WHERE id=?", (category_id,))
+        row = c.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "icon": row[2] or ""}
+
+
+def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
+                      featured_only: int = 0, limit: int = 0,
+                      page: int = 1, page_size: int = 20) -> tuple[list[dict], int]:
+    """查询场景市场列表（is_active=1），支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页。
+
+    sort: latest（按 created_at 降序）/ hot（按 like_count 降序）。
+    featured_only: 1=只查精选场景，0=全部。
+    limit: >0 限制返回条数（精选场景用，不分页）。
+    page/page_size: 分页参数（limit=0 时生效），page 从 1 开始。
+    返回 (rows, total)。
+    """
+    where = ["is_active=1"]
+    params: list = []
+    if q:
+        where.append("(name LIKE ? OR market_description LIKE ? OR display_name LIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+    if category_id and category_id > 0:
+        where.append("category_id=?")
+        params.append(category_id)
+    if featured_only:
+        where.append("is_featured=1")
+    where_sql = " AND ".join(where)
+    order_by = "created_at DESC" if sort != "hot" else "like_count DESC"
+
+    with db_lock:
+        c = db.cursor()
+        # 总数
+        c.execute(f"SELECT COUNT(*) FROM scene_market WHERE {where_sql}", params)
+        total = c.fetchone()[0]
+
+        # 分页
+        if limit and limit > 0:
+            # 精选场景模式：不分页，直接 limit
+            limit_sql = f" LIMIT {int(limit)}"
+        else:
+            offset = (page - 1) * page_size
+            limit_sql = f" LIMIT {int(page_size)} OFFSET {int(offset)}"
+        c.execute(
+            f"SELECT id, name, display_name, version, description, market_description, "
+            f"icon, obs_icon_key, category_id, is_featured, like_count, source, recommended_template, "
+            f"nodes_json, onboarding, created_at "
+            f"FROM scene_market WHERE {where_sql} ORDER BY {order_by}{limit_sql}",
+            params,
+        )
+        rows = c.fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            "id": r[0], "name": r[1], "display_name": r[2] or r[1],
+            "version": r[3] or "1.0.0", "description": r[4] or "",
+            "market_description": r[5] or "", "icon": r[6] or "",
+            "obs_icon_key": r[7] or "",
+            "category_id": r[8], "is_featured": r[9], "like_count": r[10],
+            "source": r[11] or "official", "recommended_template": r[12] or "",
+            "nodes_json": r[13] or "[]", "onboarding": r[14] or "repo-onboarding",
+            "created_at": str(r[15] or ""),
+        })
+    return result, total
+
+
+def get_scene_market_by_id(market_id: int) -> dict | None:
+    """按主键 id 查场景市场详情"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, name, display_name, version, description, market_description, "
+            "icon, obs_icon_key, category_id, is_featured, like_count, source, source_user_id, "
+            "recommended_template, nodes_json, onboarding, is_active, created_at, updated_at "
+            "FROM scene_market WHERE id=?",
+            (market_id,),
+        )
+        row = c.fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0], "name": row[1], "display_name": row[2] or row[1],
+        "version": row[3] or "1.0.0", "description": row[4] or "",
+        "market_description": row[5] or "", "icon": row[6] or "",
+        "obs_icon_key": row[7] or "",
+        "category_id": row[8], "is_featured": row[9], "like_count": row[10],
+        "source": row[11] or "official", "source_user_id": row[12],
+        "recommended_template": row[13] or "", "nodes_json": row[14] or "[]",
+        "onboarding": row[15] or "repo-onboarding", "is_active": row[16],
+        "created_at": str(row[17] or ""), "updated_at": str(row[18] or ""),
+    }
+
+
+# ====== Scene Likes CRUD（场景点赞）======
+
+def is_scene_liked(user_id: int, scene_id: int) -> bool:
+    """检查用户是否已点赞某场景"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM scene_likes WHERE user_id=? AND scene_id=?", (user_id, scene_id))
+        return c.fetchone() is not None
+
+
+def toggle_scene_like(user_id: int, scene_id: int) -> tuple[bool, int]:
+    """场景点赞 toggle：已赞→取消，未赞→点赞。
+    返回 (liked, like_count)。在 db_lock 事务内原子执行。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM scene_likes WHERE user_id=? AND scene_id=?", (user_id, scene_id))
+        if c.fetchone():
+            c.execute("DELETE FROM scene_likes WHERE user_id=? AND scene_id=?", (user_id, scene_id))
+            c.execute("UPDATE scene_market SET like_count=like_count-1 WHERE id=?", (scene_id,))
+            db.commit()
+            c.execute("SELECT like_count FROM scene_market WHERE id=?", (scene_id,))
+            row = c.fetchone()
+            return (False, row[0] if row else 0)
+        else:
+            c.execute("INSERT INTO scene_likes (user_id, scene_id) VALUES (?, ?)", (user_id, scene_id))
+            c.execute("UPDATE scene_market SET like_count=like_count+1 WHERE id=?", (scene_id,))
+            db.commit()
+            c.execute("SELECT like_count FROM scene_market WHERE id=?", (scene_id,))
+            row = c.fetchone()
+            return (True, row[0] if row else 0)
+
+
+def batch_scene_liked(user_id: int, scene_ids: list[int]) -> dict[int, bool]:
+    """批量查询用户对多个场景的点赞状态，返回 {scene_id: bool}"""
+    if not scene_ids or not user_id:
+        return {}
+    placeholders = ",".join(["?"] * len(scene_ids))
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            f"SELECT scene_id FROM scene_likes WHERE user_id=? AND scene_id IN ({placeholders})",
+            [user_id] + scene_ids,
+        )
+        liked_ids = {r[0] for r in c.fetchall()}
+    return {sid: (sid in liked_ids) for sid in scene_ids}
+
+
+# ====== Skill Likes CRUD（技能点赞）======
+
+def is_skill_liked(user_id: int, skill_id: int) -> bool:
+    """检查用户是否已点赞某技能"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM skill_likes WHERE user_id=? AND skill_id=?", (user_id, skill_id))
+        return c.fetchone() is not None
+
+
+def toggle_skill_like(user_id: int, skill_id: int) -> tuple[bool, int]:
+    """技能点赞 toggle：已赞→取消，未赞→点赞。
+    返回 (liked, like_count)。在 db_lock 事务内原子执行。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM skill_likes WHERE user_id=? AND skill_id=?", (user_id, skill_id))
+        if c.fetchone():
+            c.execute("DELETE FROM skill_likes WHERE user_id=? AND skill_id=?", (user_id, skill_id))
+            c.execute("UPDATE skill SET like_count=like_count-1 WHERE id=?", (skill_id,))
+            db.commit()
+            c.execute("SELECT like_count FROM skill WHERE id=?", (skill_id,))
+            row = c.fetchone()
+            return (False, row[0] if row else 0)
+        else:
+            c.execute("INSERT INTO skill_likes (user_id, skill_id) VALUES (?, ?)", (user_id, skill_id))
+            c.execute("UPDATE skill SET like_count=like_count+1 WHERE id=?", (skill_id,))
+            db.commit()
+            c.execute("SELECT like_count FROM skill WHERE id=?", (skill_id,))
+            row = c.fetchone()
+            return (True, row[0] if row else 0)
+
+
+def batch_skill_liked(user_id: int, skill_ids: list[int]) -> dict[int, bool]:
+    """批量查询用户对多个技能的点赞状态，返回 {skill_id: bool}"""
+    if not skill_ids or not user_id:
+        return {}
+    placeholders = ",".join(["?"] * len(skill_ids))
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            f"SELECT skill_id FROM skill_likes WHERE user_id=? AND skill_id IN ({placeholders})",
+            [user_id] + skill_ids,
+        )
+        liked_ids = {r[0] for r in c.fetchall()}
+    return {sid: (sid in liked_ids) for sid in skill_ids}
+
+
+# ====== 技能统计查询（通过 scene_skill_ref 关联表）======
+
+def get_skill_usage_stats(skill_ids: list[int] | None = None) -> dict[int, dict]:
+    """返回技能的使用统计 {skill_id: {scene_count, repo_count}}。
+
+    skill_ids 不传时查全表（兼容）；传时只查指定技能（分页场景只聚合本页）。
+
+    scene_count: 被多少场景使用（scene_skill_ref 聚合）
+    repo_count:  被多少仓库间接使用（scene_skill_ref JOIN devops_pipeline_scene）
+    """
+    with db_lock:
+        c = db.cursor()
+        if skill_ids:
+            placeholders = ",".join(["?"] * len(skill_ids))
+            # 一条 SQL 同时拿 scene_count + repo_count
+            c.execute(
+                f"SELECT sr.skill_id, "
+                f"COUNT(DISTINCT sr.scene_id) AS scene_count, "
+                f"COUNT(DISTINCT d.id) AS repo_count "
+                f"FROM scene_skill_ref sr "
+                f"LEFT JOIN devops_pipeline_scene d ON sr.scene_id = d.market_scene_id "
+                f"WHERE sr.skill_id IN ({placeholders}) "
+                f"GROUP BY sr.skill_id",
+                skill_ids,
+            )
+            return {r[0]: {"scene_count": r[1], "repo_count": r[2]} for r in c.fetchall()}
+        # 全表聚合（兼容旧调用）
+        c.execute(
+            "SELECT sr.skill_id, "
+            "COUNT(DISTINCT sr.scene_id) AS scene_count, "
+            "COUNT(DISTINCT d.id) AS repo_count "
+            "FROM scene_skill_ref sr "
+            "LEFT JOIN devops_pipeline_scene d ON sr.scene_id = d.market_scene_id "
+            "GROUP BY sr.skill_id"
+        )
+        return {r[0]: {"scene_count": r[1], "repo_count": r[2]} for r in c.fetchall()}
+
+
+def get_skill_scenes(skill_id: int) -> list[dict]:
+    """返回某技能所属的场景列表 [{id, name, display_name}]"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT sm.id, sm.name, sm.display_name FROM scene_skill_ref sr "
+            "JOIN scene_market sm ON sr.scene_id = sm.id "
+            "WHERE sr.skill_id=? AND sm.is_active=1",
+            (skill_id,),
+        )
+        return [{"id": r[0], "name": r[1], "display_name": r[2] or r[1]} for r in c.fetchall()]
+
+
+def batch_skill_scenes(skill_ids: list[int]) -> dict[int, list[dict]]:
+    """批量查询多个技能所属的场景列表，返回 {skill_id: [{id, name, display_name}]}"""
+    if not skill_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(skill_ids))
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            f"SELECT sr.skill_id, sm.id, sm.name, sm.display_name FROM scene_skill_ref sr "
+            f"JOIN scene_market sm ON sr.scene_id = sm.id "
+            f"WHERE sr.skill_id IN ({placeholders}) AND sm.is_active=1",
+            skill_ids,
+        )
+        rows = c.fetchall()
+    result: dict[int, list[dict]] = {sid: [] for sid in skill_ids}
+    for r in rows:
+        sid = r[0]
+        if sid not in result:
+            result[sid] = []
+        result[sid].append({"id": r[1], "name": r[2], "display_name": r[3] or r[2]})
+    return result
+
+
+def get_scene_repo_count(market_scene_id: int) -> int:
+    """统计某场景的在用仓库数（devops_pipeline_scene WHERE market_scene_id=?）"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT COUNT(*) FROM devops_pipeline_scene WHERE market_scene_id=? AND is_active=1",
+            (market_scene_id,),
+        )
+        row = c.fetchone()
+    return row[0] if row else 0
+
+
+def batch_scene_repo_count(market_scene_ids: list[int]) -> dict[int, int]:
+    """批量统计多个场景的在用仓库数"""
+    if not market_scene_ids:
+        return {}
+    with db_lock:
+        c = db.cursor()
+        placeholders = ",".join(["?"] * len(market_scene_ids))
+        c.execute(
+            f"SELECT market_scene_id, COUNT(*) FROM devops_pipeline_scene "
+            f"WHERE market_scene_id IN ({placeholders}) AND is_active=1 "
+            f"GROUP BY market_scene_id",
+            market_scene_ids,
+        )
+        rows = {r[0]: r[1] for r in c.fetchall()}
+    return {mid: rows.get(mid, 0) for mid in market_scene_ids}
+
+
+def get_scene_repos(market_scene_id: int) -> list[dict]:
+    """返回某场景的在用仓库列表 [{repo_key, full_name}]"""
+    from src.repo_key import from_repo_key
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT repo_key FROM devops_pipeline_scene "
+            "WHERE market_scene_id=? AND is_active=1",
+            (market_scene_id,),
+        )
+        rows = c.fetchall()
+    return [{"repo_key": r[0], "full_name": from_repo_key(r[0])} for r in rows if r[0]]
+
+
+def get_featured_skills(limit: int = 5) -> list[dict]:
+    """精选技能列表：is_featured=1 的 official 技能，按 like_count 降序"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, skill_name, display_name, description, agent_type, "
+            "is_featured, like_count "
+            "FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
+            "ORDER BY like_count DESC LIMIT ?",
+            (limit,)
+        )
+        return [{"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
+                 "description": r[3] or "", "agent_type": r[4] or "",
+                 "is_featured": r[5], "like_count": r[6]}
+                for r in c.fetchall()]
+

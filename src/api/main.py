@@ -111,6 +111,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Skill sync scheduler start failed: {e}")
 
+    # 官方场景定时同步：每 30 分钟从 grape-skills 仓库同步场景到 DB
+    try:
+        from src.storage.scene_sync import start_scene_sync_scheduler
+        start_scene_sync_scheduler()
+    except Exception as e:
+        log.warning(f"Scene sync scheduler start failed: {e}")
+
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
     _probe_task = None
@@ -212,6 +219,12 @@ async def lifespan(app: FastAPI):
     try:
         from src.storage.skill_sync import stop_skill_sync_scheduler
         await stop_skill_sync_scheduler()
+    except Exception:
+        pass
+    # 官方场景同步：优雅关闭定时任务
+    try:
+        from src.storage.scene_sync import stop_scene_sync_scheduler
+        await stop_scene_sync_scheduler()
     except Exception:
         pass
     # 终止运行中的 agent 子进程（opencode），使 executor 线程尽快结束，
