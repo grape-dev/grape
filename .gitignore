@@ -94,3 +94,5 @@ skills/
 !.opencode/
 !.opencode/skills/
 trace_*.py
+configs/scene-sync.json
+.coverage

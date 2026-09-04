@@ -63,19 +63,21 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
 
 # ===== Scene Market API（场景市场）=====
 
-def _resolve_scene_icon(icon: str, category_id: int) -> str:
+def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> str:
     """解析场景图标为可访问的 URL 或 emoji。
-    icon 非空 → 用户上传的图片（OBS 签名 URL 或本地路径）。
-    icon 为空 → 查 scene_category 表拿分类 emoji 图标兜底。
+    obs_icon_key 非空 → OBS 模式，动态生成签名 URL。
+    icon 非空 → 本地路径（/static/ 开头）。
+    都为空 → 查 scene_category 表拿分类 emoji 图标兜底。
     """
-    if icon:
+    if obs_icon_key:
         try:
             from src.storage import get_storage
             storage = get_storage()
-            if storage is not None and not icon.startswith('/static/'):
-                return storage.temporary_url(icon)
+            if storage is not None:
+                return storage.temporary_url(obs_icon_key)
         except Exception:
             pass
+    if icon:
         return icon
     from src.user.db import get_scene_category
     cat = get_scene_category(category_id)
@@ -129,7 +131,7 @@ def list_scenes_market(user: dict = Depends(get_current_user),
             "display_name": s["display_name"],
             "version": s["version"],
             "market_description": s["market_description"],
-            "icon": _resolve_scene_icon(s["icon"], s["category_id"]),
+            "icon": _resolve_scene_icon(s["icon"], s["category_id"], s.get("obs_icon_key", "")),
             "category_id": s["category_id"],
             "is_featured": s["is_featured"],
             "like_count": s["like_count"],
@@ -235,7 +237,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
         "display_name": scene["display_name"],
         "version": scene["version"],
         "market_description": scene["market_description"],
-        "icon": _resolve_scene_icon(scene["icon"], scene["category_id"]),
+        "icon": _resolve_scene_icon(scene["icon"], scene["category_id"], scene.get("obs_icon_key", "")),
         "category_id": scene["category_id"],
         "category_name": category_name,
         "is_featured": scene["is_featured"],
@@ -246,6 +248,32 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
         "repos": repos,
         "recommended_template": scene["recommended_template"],
     }
+
+
+@router.get("/market/{market_id}/applied")
+def check_market_scene_applied(market_id: int, user: dict = Depends(get_current_user),
+                                owner: str = "", repo: str = ""):
+    """检查市场场景是否已应用到当前仓库。
+
+    返回: {"applied": bool, "scene_name": str}
+    """
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+
+    if not owner or not repo:
+        return {"applied": False, "scene_name": ""}
+
+    repo_key = to_repo_key(f"{owner}/{repo}")
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT name FROM devops_pipeline_scene "
+            "WHERE market_scene_id=? AND repo_key=? AND scope='repo' AND is_active=1 LIMIT 1",
+            (market_id, repo_key),
+        )
+        row = c.fetchone()
+
+    return {"applied": bool(row), "scene_name": row[0] if row else ""}
 
 
 @router.post("/market/{market_id}/apply")
@@ -325,6 +353,79 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
 
     log.info(f"Market scene applied: market_id={market_id}, scene_id={scene_id}, repo={repo_key}")
     return {"message": f"场景 '{scene['display_name']}' 已应用", "scene_id": scene_id}
+
+
+@router.get("/market/{market_id}/experience-check")
+async def check_market_scene_experience(market_id: int, user: dict = Depends(get_current_user)):
+    """体验前检查：项目仓库是否已存在 + 是否已应用过此场景。
+
+    返回: {"repo_exists": bool, "scene_applied": bool, "full_name": str, "scene_name": str}
+    """
+    from src.user.db import get_scene_market_by_id
+    from src.session_manager import db, db_lock
+    from src.repo_key import to_repo_key
+    from src.api.deps import get_user_token
+    from src.user.repo_manager import get_user_gitcode_login
+    from src.api.routes.templates import _find_template
+
+    scene = get_scene_market_by_id(market_id)
+    if not scene:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+
+    if not scene["recommended_template"]:
+        return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
+
+    tpl_ctx = _find_template(scene["recommended_template"])
+    if not tpl_ctx:
+        return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
+
+    tpl = tpl_ctx["template"]
+    repo_name = tpl.get("default_repo_name", tpl.get("id", ""))
+
+    api_token = get_user_token(user["username"])
+    if not api_token:
+        return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
+    gitcode_login = get_user_gitcode_login(api_token)
+    if not gitcode_login:
+        return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
+
+    full_name = f"{gitcode_login}/{repo_name}"
+    repo_key = to_repo_key(full_name)
+    user_id = user.get("id", 0)
+
+    repo_exists = False
+    scene_applied = False
+
+    with db_lock:
+        c = db.cursor()
+        # 仓库是否已托管
+        c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+        if c.fetchone():
+            repo_exists = True
+        else:
+            # user_repos 里有记录也算已存在
+            c.execute(
+                "SELECT 1 FROM user_repos WHERE user_id=? AND owner=? AND name=? LIMIT 1",
+                (user_id, gitcode_login, repo_name),
+            )
+            if c.fetchone():
+                repo_exists = True
+
+        # 该仓库是否已应用过此市场场景
+        c.execute(
+            "SELECT name FROM devops_pipeline_scene "
+            "WHERE market_scene_id=? AND repo_key=? AND scope='repo' AND is_active=1 LIMIT 1",
+            (market_id, repo_key),
+        )
+        row = c.fetchone()
+        if row:
+            scene_applied = True
+            scene_name = row[0]
+        else:
+            scene_name = ""
+
+    return {"repo_exists": repo_exists, "scene_applied": scene_applied,
+            "full_name": full_name, "scene_name": scene_name}
 
 
 @router.post("/market/{market_id}/experience")

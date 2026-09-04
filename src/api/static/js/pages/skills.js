@@ -22,9 +22,9 @@ let _activeAgentIdx = -1;    // -1=全部, 0+=第N个agent
 // _AGENT_META 定义在 scene-market.js 中，这里直接复用
 
 const _SCOPE_NAMES = {
-  official: '技能市场',
-  repo: '仓库技能',
-  user: '个人技能',
+  official: I18N.t('skills.scope_official')||'技能市场',
+  repo: I18N.t('skills.scope_repo')||'仓库技能',
+  user: I18N.t('skills.scope_user')||'个人技能',
 };
 
 function _skillsContainer() {
@@ -62,20 +62,9 @@ function _backFromSubSkill(pkgId) {
   });
 }
 
-// 从技能详情返回技能列表（不重新加载页面，直接渲染技能 tab）
+// 从技能详情返回技能列表（复用 _renderMarketTab 重建统一布局）
 function _backToSkillList() {
-  const pc = document.getElementById('pageContent');
-  if (!pc) return;
-  // 重建 tab 栏 + 容器
-  pc.innerHTML = `<div class="cd" style="margin-bottom:16px;padding:12px 16px;font-size:12px;color:var(--t2);line-height:1.7;display:flex;align-items:flex-start;gap:10px">
-    <span style="font-size:16px;flex-shrink:0">💡</span>
-    <div><b style="color:var(--a)">${I18N.t('skills.scenes_tab')||'场景'}</b> ${I18N.t('skills.market_intro_scene')||'是多个技能按开发流程组合的开发模式（如 VOD→Issue→Coding→QA→SRE），'}<b style="color:var(--a)">${I18N.t('skills.skills_tab')||'技能'}</b> ${I18N.t('skills.market_intro_skill')||'是单个 Agent 的能力包，完成具体动作。点击场景卡片查看完整流程，点击技能卡片查看能力详情。'}</div>
-  </div>
-  <div class="stabs" style="margin-bottom:16px">
-    <a onclick="_renderMarketTab('scenes')">🏪 ${I18N.t('skills.scenes_tab')||'场景'}</a>
-    <a class="ac" onclick="_renderMarketTab('skills')">⚙ ${I18N.t('skills.skills_tab')||'技能'}</a>
-  </div><div id="marketTabContent"></div>`;
-  renderSkills();
+  _renderMarketTab('skills');
 }
 
 function _currentRepo() {
@@ -154,17 +143,17 @@ function _renderSkillPage() {
 
   let html = '';
 
-  // 二级子页签
-  html += `<div class="sub-tabs">
-    <div class="sub-tab ${_skillTab==='official'?'act':''}" onclick="_switchSkillTab('official')">${_SCOPE_NAMES.official}</div>
-    <div class="sub-tab ${_skillTab==='repo'?'act':''}" onclick="_switchSkillTab('repo')">${_SCOPE_NAMES.repo}</div>
-    <div class="sub-tab ${_skillTab==='user'?'act':''}" onclick="_switchSkillTab('user')">${_SCOPE_NAMES.user}</div>
-  </div>`;
+  // 二级子页签（药丸分段控件，靠左）
+  html += `<div style="text-align:left;margin-bottom:20px"><div class="seg-bar" style="margin-top:0">
+    <a class="${_skillTab==='official'?'ac':''}" onclick="_switchSkillTab('official')">${_SCOPE_NAMES.official}</a>
+    <a class="${_skillTab==='repo'?'ac':''}" onclick="_switchSkillTab('repo')">${_SCOPE_NAMES.repo}</a>
+    <a class="${_skillTab==='user'?'ac':''}" onclick="_switchSkillTab('user')">${_SCOPE_NAMES.user}</a>
+  </div></div>`;
 
   // 精选技能（仅 official，独立加载，不受搜索影响）
   if (_skillTab === 'official' && _featuredSkills.length > 0) {
-    html += `<div id="featured-skills-section" style="margin-bottom:20px">
-      <div class="cd-h" style="margin-bottom:10px"><h2>🌟 ${I18N.t('skills.featured_skills')||'精选技能'}</h2></div>
+    html += `<div class="apple-card">
+      <div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_skills')||'精选技能'}</h2></div>
       <div class="scn-scroll-wrap">
         <div id="featured-skills" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-skills')">
           ${_featuredSkills.map(s => _renderSkillCard(s, true)).join('')}
@@ -176,23 +165,25 @@ function _renderSkillPage() {
     setTimeout(() => _updateScrollBtns('featured-skills'), 100);
   }
 
-  // 全部技能 — 标题行 + 搜索 + 查找 + 排序 + 上传
+  // 全部技能
+  html += `<div class="apple-card">`;
+  // 标题行 + 搜索 + 查找 + 排序 + 上传
   const scoped = _allSkills.filter(s => s.scope === _skillTab);
-  html += `<div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+  html += `<div class="cd-h apple-search" style="justify-content:flex-start">
     <h2>${I18N.t('skills.all_skills')||'全部技能'} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${_skillTotal}</span></h2>
-    <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
-      <input id="skillSearchInput" placeholder="${I18N.t('skills.skill_search_placeholder')||'搜索技能名称或描述'}" value="${_skillSearchQ}" onkeyup="if(event.key==='Enter'){_skillSearchQ=this.value;_skillPage=1;_reloadSkills()}" style="padding:7px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);color:var(--t);width:200px">
-      <button class="bt bt-o bt-s" onclick="_skillSearchQ=document.getElementById('skillSearchInput').value;_skillPage=1;_reloadSkills()">${I18N.t('skills.find_skill')||'查找技能'}</button>
-      <button class="bt ${_skillSort==='latest'?'bt-p':'bt-o'} bt-s" id="sort-latest" onclick="_switchSort('latest')">${I18N.t('skills.sort_latest')||'最新'}</button>
-      <button class="bt ${_skillSort==='hot'?'bt-p':'bt-o'} bt-s" id="sort-hot" onclick="_switchSort('hot')">${I18N.t('skills.sort_hot')||'最热'}</button>`;
+    <input id="skillSearchInput" placeholder="${I18N.t('skills.skill_search_placeholder')||'搜索技能名称或描述'}" value="${_skillSearchQ}" onkeyup="if(event.key==='Enter'){_skillSearchQ=this.value;_skillPage=1;_reloadSkills()}">
+    <button class="bt bt-o bt-s" onclick="_skillSearchQ=document.getElementById('skillSearchInput').value;_skillPage=1;_reloadSkills()">${I18N.t('skills.find_skill')||'查找技能'}</button>
+    <button class="bt ${_skillSort==='latest'?'bt-p':'bt-o'} bt-s" id="sort-latest" onclick="_switchSort('latest')">${I18N.t('skills.sort_latest')||'最新'}</button>
+    <button class="bt ${_skillSort==='hot'?'bt-p':'bt-o'} bt-s" id="sort-hot" onclick="_switchSort('hot')">${I18N.t('skills.sort_hot')||'最热'}</button>`;
   if (_skillTab === 'repo' || _skillTab === 'user') {
     html += `<button class="bt bt-p bt-s" onclick="showSkillUpload()" style="color:#fff;background:var(--g);border-color:var(--g)">⬆ ${I18N.t('skills.action.add_skill')||'上传技能'}</button>`;
   }
-  html += `</div></div>`;
+  html += `</div>`;
 
   // 仓库技能需当前仓库
   if (_skillTab === 'repo' && !_currentRepo()) {
     html += `<div class="ts t2" style="padding:12px">${I18N.t('skills.empty.no_repo_selected')||'请先选择仓库'}</div>`;
+    html += `</div>`;
     el.innerHTML = html;
     return;
   }
@@ -201,13 +192,14 @@ function _renderSkillPage() {
   _buildAgentGroups(scoped);
   if (_agentList.length === 0) {
     html += `<div class="ts t3" style="padding:20px;text-align:center">${I18N.t('skills.empty.no_skills')||'此范围暂无技能'}</div>`;
+    html += `</div>`;
     el.innerHTML = html;
     return;
   }
 
   html += `<div class="stabs" id="agent-tabs" style="margin-top:10px">`;
   // "全部" tab
-  html += `<a class="ac" onclick="_switchAgentTab(-1)">全部 <span class="c" style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:1px 6px;border-radius:8px;margin-left:2px">${scoped.length}</span></a>`;
+  html += `<a class="ac" onclick="_switchAgentTab(-1)">${I18N.t('skills.all_agents')||'全部'} <span class="c" style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:1px 6px;border-radius:8px;margin-left:2px">${scoped.length}</span></a>`;
   _agentList.forEach((at, i) => {
     const meta = _AGENT_META[at] || {};
     const count = (_agentGroups[at] || []).length;
@@ -225,14 +217,15 @@ function _renderSkillPage() {
   const nextDisabled = _skillPage >= totalPages ? ' disabled' : '';
   html += `<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;padding:12px 0">
     <button class="bt bt-o bt-s${prevDisabled}" ${prevDisabled ? 'disabled' : ''} onclick="_skillPage=${Math.max(1,_skillPage-1)};_reloadSkills()">‹</button>
-    <span style="font-size:12px;color:var(--t2)">${_skillPage} / ${totalPages} (${_skillTotal}条)</span>
+    <span style="font-size:12px;color:var(--t2)">${_skillPage} / ${totalPages} (${_skillTotal}${I18N.t('skills.items_count_suffix')||'条'})</span>
     <button class="bt bt-o bt-s${nextDisabled}" ${nextDisabled ? 'disabled' : ''} onclick="_skillPage=${Math.min(totalPages,_skillPage+1)};_reloadSkills()">›</button>
     <select onchange="_skillPageSize=parseInt(this.value);_skillPage=1;_reloadSkills()" style="padding:4px 8px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);color:var(--t);outline:none">
-      <option value="20" ${_skillPageSize===20?'selected':''}>20/页</option>
-      <option value="50" ${_skillPageSize===50?'selected':''}>50/页</option>
-      <option value="100" ${_skillPageSize===100?'selected':''}>100/页</option>
+      <option value="20" ${_skillPageSize===20?'selected':''}>20${I18N.t('skills.per_page_suffix')||'/页'}</option>
+      <option value="50" ${_skillPageSize===50?'selected':''}>50${I18N.t('skills.per_page_suffix')||'/页'}</option>
+      <option value="100" ${_skillPageSize===100?'selected':''}>100${I18N.t('skills.per_page_suffix')||'/页'}</option>
     </select>
   </div>`;
+  html += `</div>`;
 
   el.innerHTML = html;
 

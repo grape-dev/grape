@@ -37,6 +37,7 @@
 CREATE TABLE IF NOT EXISTS scene_category (
     id          INT NOT NULL AUTO_INCREMENT,               -- 主键自增
     name        VARCHAR(64) NOT NULL COMMENT '分类名称（通用/移动开发/基础设施/技能开发/AI应用/内容创作）',
+    slug        VARCHAR(64) DEFAULT '' COMMENT '分类slug（英文标识，如 general/mobile/iac，场景包 scene.json 的 category 用此字段引用）',
     icon        VARCHAR(32) DEFAULT '' COMMENT '分类图标（emoji）',
     order_num   INT DEFAULT 0 COMMENT '排序序号',
     is_active   INT DEFAULT 1 COMMENT '是否启用 0=否 1=是',
@@ -45,26 +46,27 @@ CREATE TABLE IF NOT EXISTS scene_category (
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     PRIMARY KEY (id),
-    UNIQUE KEY uk_name (name)
+    UNIQUE KEY uk_name (name),
+    UNIQUE KEY uk_slug (slug)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
 设计原则：
 - **独立管理**：分类有自己的元信息（图标、排序、启用/禁用），不依赖场景数据
-- **外键引用**：scene_market.category_id → scene_category.id，用户导入场景时从已有分类列表选择，不是自由输入字符串
+- **外键引用**：scene_market.category_id → scene_category.id。场景包 scene.json 中用 category slug（如 "general"）引用分类，后端根据 slug 查 scene_category 表拿 ID。第三方不需要知道数据库 ID
 - **和 agent_type 表模式一致**：agent_type 是独立表，skill 通过 agent_type 字段引用；scene_category 同样独立，scene_market 通过 category_id 引用
 - **可控扩展**：新增分类走独立流程，不会因场景导入意外产生垃圾分类
 
 初始 6 个分类数据：
 
-| id | name | icon | order_num |
-|----|------|------|-----------|
-| 1 | 通用 | ⚙ | 1 |
-| 2 | 移动开发 | 🍃 | 2 |
-| 3 | 基础设施 | ☁ | 3 |
-| 4 | 技能开发 | 🔧 | 4 |
-| 5 | AI应用 | 🤖 | 5 |
-| 6 | 内容创作 | 📝 | 6 |
+| id | name | slug | icon | order_num |
+|----|------|------|------|-----------|
+| 1 | 通用 | general | ⚙ | 1 |
+| 2 | 移动开发 | mobile | 🍃 | 2 |
+| 3 | 基础设施 | iac | ☁ | 3 |
+| 4 | 技能开发 | skill-dev | 🔧 | 4 |
+| 5 | AI应用 | ai | 🤖 | 5 |
+| 6 | 内容创作 | content | 📝 | 6 |
 
 ### 2.2 新建 scene_market 表（核心——完全独立，自包含）
 
@@ -75,7 +77,7 @@ CREATE TABLE IF NOT EXISTS scene_market (
     display_name VARCHAR(256) DEFAULT '' COMMENT '展示名称（通用开发 / IaC开发 / ...，市场卡片展示用）',
     version     VARCHAR(32) DEFAULT '1.0.0' COMMENT '版本号（语义化版本，用户贡献场景迭代用）',
     description TEXT COMMENT '简短描述',
-    market_description TEXT COMMENT '市场展示用的详细功能介绍（SCENE.md 正文解析而来）',
+    market_description TEXT COMMENT '市场展示用的详细功能介绍（README.md 正文解析而来，无 README.md 时取 description）',
     icon        VARCHAR(512) DEFAULT '' COMMENT '场景图标（用户上传的图片文件，OBS模式存对象key，本地模式存/static/img/scenes/xxx相对路径，空时用 scene_category.icon）',
     category_id INT DEFAULT 1 COMMENT '分类ID（外键 → scene_category.id）',
     is_featured INT DEFAULT 0 COMMENT '精选标记 0=否 1=是',
@@ -85,7 +87,11 @@ CREATE TABLE IF NOT EXISTS scene_market (
     recommended_template VARCHAR(191) DEFAULT '' COMMENT '推荐模板ID（体验按钮用此模板创建项目）',
     nodes_json  TEXT COMMENT '技能链路配置（完整nodes，自包含不依赖外部表）',
     onboarding  VARCHAR(191) DEFAULT 'repo-onboarding' COMMENT '首次托管引导技能名',
-    is_active   INT DEFAULT 1 COMMENT '是否启用 0=否 1=是',
+    tags        VARCHAR(256) DEFAULT '' COMMENT '标签，逗号分隔（如 build,deploy,ci。scene.json 的 tags 数组入库时转为逗号分隔字符串，搜索时首尾补逗号 LIKE 匹配）',
+    author      VARCHAR(64) DEFAULT '' COMMENT '场景包贡献者标识（official场景留空或grape-team，第三方上传时填作者名）',
+    content_hash VARCHAR(64) DEFAULT '' COMMENT '内容hash（定时同步增量检测用，SHA-256）',
+    obs_icon_key VARCHAR(256) DEFAULT '' COMMENT 'OBS桶icon对象key（查询时动态生成签名URL，非OBS模式为空）',
+    is_active   INT DEFAULT 1 COMMENT '是否启用 0=否 1=是（定时同步下架时置0）',
     created_by  VARCHAR(64) DEFAULT '' COMMENT '创建者',
     updated_by  VARCHAR(64) DEFAULT '' COMMENT '更新者',
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -333,9 +339,10 @@ def resolve_scene_icon(icon: str, category_id: int) -> str:
 @router.get("/market/categories")
 def list_scene_categories(user: dict = Depends(get_current_user)):
     """场景分类列表：按 order_num 排序，只返回 is_active=1 的"""
-    # SELECT id, name, icon, order_num FROM scene_category WHERE is_active=1 ORDER BY order_num
-    # 返回 [{id, name, icon, order_num}]
+    # SELECT id, name, slug, icon, order_num FROM scene_category WHERE is_active=1 ORDER BY order_num
+    # 返回 [{id, name, slug, icon, order_num}]
     # 注：分类禁用（is_active=0）时不显示 tab，但该分类下的场景仍在"全部"里展示
+    # slug 供场景包 scene.json 的 category 字段引用参考
 ```
 
 #### GET /api/scenes/market
@@ -880,12 +887,13 @@ scope 页签（技能市场/仓库技能/个人技能）
 # 使用统计单独批量查一次（不每个 skill 单独查）
 ```
 
-## 八、场景导入（后续迭代，一期不做）
+## 八、场景导入（后续迭代）
 
 一期不做场景上传/导入。official 场景通过 db_setup.py 初始化，后续迭代会有场景同步定时任务从官方仓库同步。
 以下设计保留供后续迭代参考。
 
-参考 skill 导入模式（ZIP + Markdown 定义文件 + 校验），支持外部用户贡献场景。
+参考 skill 导入模式（ZIP 包），支持外部用户和第三方贡献场景。
+场景包采用 **JSON 定义 + Markdown 描述分离** 的双文件格式：scene.json 负责结构化数据（解析和校验的唯一来源），README.md 负责对外展示文案（可选，富文本渲染）。
 
 ### 8.1 场景包格式
 
@@ -893,85 +901,166 @@ ZIP 包结构：
 ```
 my-custom-scene.zip
 └── my-custom-scene/
-    ├── SCENE.md          ← 场景定义文件（必须，YAML frontmatter + Markdown 正文）
-    └── icon.png          ← 场景图标图片（可选，支持 png/svg/jpg）
+    ├── scene.json        ← 场景定义文件（必须，JSON 格式，结构化数据的唯一来源）
+    ├── README.md         ← 场景展示文案（可选，Markdown 正文，存入 market_description）
+    ├── icon.png          ← 场景图标图片（可选，支持 png/svg/jpg）
+    └── references/       ← 可选，详细文档目录（按需加载展示，不入数据库）
+        ├── flow-detail.md
+        └── config-guide.md
 ```
 
-SCENE.md 格式（参考 SKILL.md 模式）：
-```yaml
----
-name: my-custom-scene
-display_name: 我的自定义场景
-description: 解决 xxx 问题的开发场景
-category_id: 1
-recommended_template: ""
-onboarding: repo-onboarding
-nodes:
-  - id: vod
-    tag: vod
-    skill: vod
-    mode: emit
-    next: issue
-    handoff: a2a
-  - id: issue
-    tag: issue
-    skill: issue-advance
-    mode: emit
-    next: coding
-    handoff: a2a
-  - id: coding
-    tag: coding
-    skill: implementation
-    mode: emit
-    next: qa
-    handoff: a2a
-  - id: qa
-    tag: qa
-    skill: pr
-    mode: emit
-    next: sre
-    handoff: a2a
-  - id: sre
-    tag: sre
-    skill: cloud-deploy
-    mode: emit
-    next: done
-    handoff: complete
----
+**设计原则：数据与展示分离**
+- scene.json：所有结构化数据，程序解析和校验的唯一来源
+- README.md：纯展示内容，正文存入 scene_market.market_description，前端渲染时 parse Markdown。可选——未提供时 market_description 取 scene.json 的 description 字段
+- references/：详细文档目录（借鉴 skill 包的 references 子目录），README.md 中可引用，前端按需加载展示。不入数据库，不强制
+- 第三方程序生成场景包时只需序列化 scene.json，README.md 和 references/ 可以不写
 
+**为什么选择 JSON 而非 YAML frontmatter（SCENE.md 方案）：**
+1. 场景包核心是 nodes 链路定义（id/tag/skill/mode/next/handoff），纯结构化数据，JSON 表达更准确紧凑
+2. 第三方程序生成——从已有 DevOps 系统导出流程定义直接序列化为 JSON，无需处理 YAML 缩进
+3. JSON Schema 可做严格结构校验 + IDE 自动补全，YAML 缩进错误难排查
+4. json.load 一步解析，无需 split("---") + yaml.safe_load 两步
+5. 数据与展示分离——JSON 只管数据结构，Markdown 只管展示文案，互不干扰
+
+**借鉴 skill 包的设计：**
+- version 字段：skill 包用 `version: 1.0.0` 做版本追踪，场景包同样需要——场景包升级覆盖时可做版本比对
+- references/ 子目录：skill 包用 references/ 放外部引用文档（如 API 参考、配置说明），技能执行时按需加载。场景包同样支持 references/ 目录放详细文档
+- author 字段：标识场景包贡献者，第三方上传时知道来源
+- tags 字段：补充 category_id 的不足，一个场景可同时属于多个标签（如 build + deploy），前端搜索时按标签匹配
+
+scene.json 格式：
+```json
+{
+  "name": "my-custom-scene",
+  "version": "1.0.0",
+  "display_name": "我的自定义场景",
+  "description": "解决 xxx 问题的开发场景",
+  "category": "general",
+  "recommended_template": "",
+  "onboarding": "repo-onboarding",
+  "tags": ["build", "deploy"],
+  "author": "zhangsan",
+  "nodes": [
+    {"id": "vod", "tag": "vod", "skill": "vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+    {"id": "issue", "tag": "issue", "skill": "issue-advance", "mode": "emit", "next": "coding", "handoff": "a2a"},
+    {"id": "coding", "tag": "coding", "skill": "implementation", "mode": "emit", "next": "qa", "handoff": "a2a"},
+    {"id": "qa", "tag": "qa", "skill": "pr", "mode": "emit", "next": "sre", "handoff": "a2a"},
+    {"id": "sre", "tag": "sre", "skill": "cloud-deploy", "mode": "emit", "next": "done", "handoff": "complete"}
+  ]
+}
+```
+
+> **技能清单参考**：nodes 里的 skill 字段值必须对应 grape-skills 仓库（https://gitcode.com/grape-dev/grape-skills）中已有的技能。可用技能清单见仓库根目录 `skill-description.json`，按 `agent_type/skill_name` 路径查找。例如 `issue-advance` 对应 `skills/issue/issue-advance/`。
+
+scene.json 字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| name | string | 是 | 仅小写字母数字连字符，必须和 ZIP 内目录名一致 |
+| version | string | 是 | 语义化版本号（如 1.0.0），场景包升级覆盖时做版本比对 |
+| display_name | string | 是 | 展示名称，不能为空 |
+| description | string | 是 | 简短描述，不超过 500 字。无 README.md 时作为 market_description |
+| category | string | 是 | 分类名称（slug，如 "general"/"harmony"/"iac"），入库时后端根据 slug 查 scene_category 表拿 ID。第三方不需要知道数据库 ID |
+| recommended_template | string | 否 | 关联模板 ID，空字符串表示无。仅 official 场景使用，第三方场景包留空 |
+| onboarding | string | 否 | 引导技能名，必须在 skill 表中存在 |
+| tags | string[] | 否 | 标签数组（如 ["build", "deploy"]），补充分类，用于搜索和筛选。scene.json 里用 JSON 数组格式（第三方生成方便），入库时转为逗号分隔字符串存储（如 "build,deploy"），搜索时首尾补逗号 `LIKE '%,build,%'` 精确匹配 |
+| author | string | 否 | 作者标识，第三方上传时标识贡献者。official 场景留空或写 "grape-team" |
+| nodes | array | 是 | 场景节点数组，至少 2 个节点 |
+
+nodes 节点字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| id | string | 是 | 节点唯一标识，同一场景内不能重复 |
+| tag | string | 是 | Agent 类型，决定此节点由哪个 Agent 执行。合法值：vod / issue / coding / qa / sre / chat。tag 与 skill 的关系：tag 决定"谁来执行"（Agent 类型），skill 决定"执行什么"（具体技能）。同一个 Agent 类型可以执行不同技能，如 tag=vod 可对应 skill=vod / iac-vod / blog-vod |
+| skill | string | 是 | 技能名，必须在 grape-skills 仓库中存在。参考 skill-description.json 获取完整技能清单 |
+| mode | string | 是 | 执行模式。合法值：emit（当前仅支持 emit） |
+| next | string | 是 | 下一节点 id，最后一个节点为 "done" |
+| handoff | string | 是 | 交接方式：a2a（节点间 A2A 交接）/ complete（最后一个节点，流程完成） |
+
+nodes 枚举值参考：
+
+**mode**
+| 值 | 说明 |
+|------|------|
+| emit | 触发执行模式，节点被激活后执行技能并产出结果。当前仅支持此值 |
+
+**next 取值规则**
+- 填下一个节点的 id（如 "issue"），当前节点完成后跳转到该节点
+- 最后一个节点填 "done" 表示流程结束
+- 必须形成完整链路：从第一个节点出发沿着 next 能走到 done，不能断链、不能循环
+
+**handoff**
+| 值 | 适用位置 | 说明 |
+|------|---------|------|
+| a2a | 链路中间节点 | Agent-to-Agent 交接，当前节点完成后通过 A2A 协议将上下文传递给下一个节点 |
+| complete | 最后一个节点 | 流程完成，表示场景执行结束。仅 next="done" 的节点使用 |
+
+**tag 合法值**
+| 值 | Agent | 职责 |
+|------|-------|------|
+| vod | VOD Agent | 开发者声音分析，需求收集与澄清 |
+| issue | Issue Agent | Issue 运营，需求拆分与分配 |
+| coding | Coding Agent | 代码实现 |
+| qa | QA Agent | 代码审查与质量验证 |
+| sre | SRE Agent | 构建部署与运维 |
+| chat | Chat Agent | 对话与 IM 通知 |
+
+**完整节点示例（带注释）：**
+```json
+{
+  "id": "vod",           // 节点唯一标识，同一场景内不能重复
+  "tag": "vod",          // Agent类型：此节点由 VOD Agent 执行
+  "skill": "vod",        // 技能名：执行 vod 技能（开发者声音分析）
+  "mode": "emit",        // 执行模式：emit
+  "next": "issue",       // 下一节点：完成后交给 id=issue 的节点
+  "handoff": "a2a"       // 交接方式：a2a=节点间A2A交接，complete=最后一个节点流程完成
+}
+```
+
+README.md 格式（可选）：
+```markdown
 # 我的自定义场景
 
 这里写场景的详细介绍，会作为 market_description 展示在场景市场。
-包括适用场景、解决的问题、开发流程等。
+支持 **Markdown** 语法，包括适用场景、解决的问题、开发流程等。
 ```
 
-### 8.2 校验规则（参考 validate_skill 模式）
+### 8.2 校验规则
 
 ```python
 def validate_scene(upload_dir: str, scene_name: str) -> list[str]:
     """校验自定义场景，返回错误列表。空列表表示通过。"""
     errors = []
 
-    # 1. 检查 SCENE.md 是否存在
-    scene_path = os.path.join(upload_dir, "SCENE.md")
+    # 1. 检查 scene.json 是否存在
+    scene_path = os.path.join(upload_dir, "scene.json")
     if not os.path.exists(scene_path):
-        return ["缺少 SCENE.md 文件"]
+        return ["缺少 scene.json 文件"]
 
-    # 2. 解析 YAML Front Matter（和 skill 一样用 split("---") + yaml.safe_load）
+    # 2. 解析 JSON（json.load 一步完成，无需 split + yaml.safe_load）
     # 3. 校验必填字段：
     #    - name：仅允许小写字母数字连字符，必须和目录名一致
+    #    - version：语义化版本号格式（X.Y.Z），必填
     #    - display_name：不能为空
     #    - description：不能为空，不超过 500 字
-    #    - category_id：必须在 scene_category 表中存在
+    #    - category：分类 slug，必须在 scene_category 表中存在（按 slug 查）
     #    - nodes：数组非空，至少 2 个节点
     # 4. 校验 nodes：
+    #    - 每个 node 的 tag 必须是合法值：vod / issue / coding / qa / sre / chat
     #    - 每个 node 的 skill 字段必须在 skill 表中存在（official 或当前用户可访问的）
+    #    - 每个 node 的 mode 必须是合法值：emit（当前仅支持）
     #    - next 链路完整性：从第一个节点出发能走到 done，不能断链、不能循环
     #    - handoff 字段合法值：a2a / complete
+    #    - handoff 和 next 一致性：handoff=complete 时 next 必须为 "done"；handoff=a2a 时 next 不能为 "done"
     # 5. 校验 onboarding 字段的技能名必须在 skill 表中存在
-    # 6. 校验 SCENE.md 文件大小不超过 1MB
-    # 7. 校验图标文件（如果存在）：icon.png / icon.svg / icon.jpg，不超过 2MB
-    # 8. 禁止可执行文件（复用 skill 的 FORBIDDEN_EXTS 校验）
+    # 6. 校验 tags（如果存在）：必须是字符串数组，每个标签不超过 20 字，总长度不超过 256 字符
+    #     入库时转为逗号分隔字符串（如 "build,deploy"），非 JSON
+    # 7. 校验 scene.json 文件大小不超过 1MB
+    # 8. 校验 README.md 文件（如果存在）：不超过 1MB，解析为 market_description
+    # 9. 校验 references/ 目录（如果存在）：每个 .md 文件不超过 1MB
+    # 10. 校验图标文件（如果存在）：icon.png / icon.svg / icon.jpg，不超过 2MB
+    # 11. 禁止可执行文件（复用 skill 的 FORBIDDEN_EXTS 校验）
 
     return errors
 ```
@@ -985,31 +1074,41 @@ async def upload_scene(file: UploadFile = File(...), user: dict = Depends(get_cu
     # 1. 读取文件，大小限制 10MB
     # 2. 解压 ZIP（zip 炸弹防护，复用 skill 的 MAX_EXTRACT_BYTES）
     # 3. 取第一个真实目录（过滤 __MACOSX/.DS_Store，和 skill 一样）
-    # 4. validate_scene 校验 SCENE.md
-    # 5. 解析 frontmatter → 拿 name/display_name/description/category_id/nodes/onboarding
-    # 6. 解析正文 Markdown → 作为 market_description
+    # 4. validate_scene 校验 scene.json
+    # 5. 解析 scene.json → 拿 name/version/display_name/description/category/nodes/onboarding/recommended_template/tags/author
+    # 6. 解析 README.md（如果存在）→ 作为 market_description；无 README.md 时 market_description 取 description
     # 7. 图标处理：
     #    - 有 icon 文件 → 存储到 OBS/本地，icon 存对象 key 或路径
     #    - 无 icon 文件 → icon 字段为空，展示时用 scene_category.icon 兜底
-    # 8. scene_market 表写一行：
+    # 8. 根据 scene.json 的 category（分类名称 slug）查 scene_category 表拿 category_id
+    # 9. scene_market 表写一行（幂等：同 name + source + source_user_id 视为更新）：
+    #    - 先查 SELECT id, version FROM scene_market WHERE name=? AND source='user' AND source_user_id=?
+    #    - 已存在 → 比对 version：新版本 > 旧版本时更新（覆盖 display_name/description/market_description/
+    #      category_id/nodes_json/onboarding/icon/tags/author/version），版本相同或更低时返回提示"版本未更新"
+    #    - 不存在 → INSERT 新行
     #    - source='user', source_user_id=用户id
-    #    - name/display_name/description/market_description/category_id/nodes_json/onboarding/icon
+    #    - name/version/display_name/description/market_description/category_id/nodes_json/onboarding/icon/tags/author
     #    - is_featured=0（用户上传的不自动精选）
-    # 9. 解析 nodes_json 拆出每个 skill_name，写入 scene_skill_ref 表（先 DELETE WHERE scene_id=? 再 INSERT）
-    # 10. 返回 {message: "场景 xxx 上传成功"}
+    # 10. 解析 nodes_json 拆出每个 skill_name，写入 scene_skill_ref 表（先 DELETE WHERE scene_id=? 再 INSERT）
+    # 11. 返回 {message: "场景 xxx 上传成功"}
 ```
 
 ### 8.4 和技能导入的关键区别
 
 | 维度 | 技能导入 | 场景导入 |
 |------|---------|---------|
-| 定义文件 | SKILL.md | SCENE.md |
+| 定义文件 | SKILL.md（YAML frontmatter + Markdown 正文，单文件自包含） | scene.json（结构化数据）+ README.md（展示文案，可选），数据与展示分离 |
 | 图标来源 | agent_type 表（不自己定义） | 用户上传 icon 文件，空时用分类 emoji |
 | 外部依赖 | 无（自包含） | 有（nodes 引用 skill 表的技能名，需校验存在） |
-| 文件存储 | 需存 OBS/本地（有脚本文件） | 只有图标文件需存储（SCENE.md 数据入 DB） |
+| 文件存储 | 需存 OBS/本地（有脚本文件） | 只有图标文件需存储（scene.json 数据入 DB） |
 | 重打包 | 需要（_normalize_skill_zip） | 不需要 |
 | 校验重点 | frontmatter 格式 + 文件类型 | nodes 链路完整性 + skill 引用合法性 + 图标文件 |
 | 精选标记 | 通过 db_setup.py 初始化 | 用户上传的 is_featured=0，不自动精选 |
+| 解析方式 | split("---") + yaml.safe_load 两步 | json.load 一步 |
+| version 追踪 | SKILL.md frontmatter version 字段 | scene.json version 字段，上传时做版本比对 |
+| tags | 无 | scene.json tags 数组，入库转逗号分隔字符串 |
+| author | 无 | scene.json author 字段，标识贡献者 |
+| 展示文案 | SKILL.md 正文 | README.md（可选），数据与展示分离 |
 
 ### 8.5 场景包下载模板
 
@@ -1018,9 +1117,136 @@ async def upload_scene(file: UploadFile = File(...), user: dict = Depends(get_cu
 ```
 scene-template.zip
 └── scene-template/
-    ├── SCENE.md          ← 模板示例（带注释说明每个字段）
+    ├── scene.json        ← 模板示例（带完整字段）
+    ├── README.md         ← 模板示例（Markdown 展示文案）
     └── icon.png          ← 示例图标
 ```
+
+### 8.6 官方场景定时同步
+
+**触发方式**：服务启动后 asyncio 定时任务，启动即执行一次，之后每 30 分钟同步一次。和 skill_sync_scheduler 模式完全对齐。
+
+**同步源**：grape-skills 仓库（https://gitcode.com/grape-dev/grape-skills）dev 分支的 scenes/ 目录。
+
+**拉取方式**：GitCode API v5 逐文件下载（`/api/v5/repos/{owner}/{repo}/contents/{path}?ref={branch}`）。用 bot token 认证，列 scenes/ 下子目录，每个子目录再列文件，下载 scene.json + README.md + icon 文件到临时目录。
+
+> 为什么选 API v5 逐文件下载而非 ZIP 归档下载：
+> - GitCode 的 ZIP 归档 URL（`/-/archive/{ref}/{repo}-{ref}.zip`）返回 HTML 页面而非 ZIP 文件，无法直接下载
+> - API v5 支持 `access_token` 参数认证，bot token 可直接使用
+> - 场景数量少（当前 8 个），每个场景 2-3 个文件，总请求数 20+ 完全可接受
+> - 不依赖 git 命令（生产环境 Docker 容器不装 git）
+
+**token 获取**：优先级：环境变量 `GRAPE_DEV_TOKEN` → `configs/scene-sync.json` 的 `gitcode_api_token` → `configs/global-bot-token.json` 的 `gitcode_api_token`。三个都没有时打 WARNING 跳过同步。不查 managed_repos 表。
+
+**仓库配置**：`configs/scene-sync.json`（模板见 `configs/scene-sync.example.json`，实际文件在 .gitignore 里不提交）。配置项：repo_url（仓库地址）、repo_branch（同步分支）、sync_interval（同步间隔秒数，默认 1800）、gitcode_api_token（GitCode API token，私有仓库认证用）。环境变量 `GRAPESKILLS_REPO_URL` / `GRAPESKILLS_REPO_BRANCH` / `SCENE_SYNC_INTERVAL` / `GRAPE_DEV_TOKEN` 优先覆盖配置文件。
+
+**同步流程**：
+
+```python
+async def sync_official_scenes():
+    """定时同步官方场景从 grape-skills 仓库到 scene_market 表。"""
+    # 0. 获取 token：优先 GRAPE_DEV_TOKEN 环境变量 → configs/scene-sync.json → configs/global-bot-token.json
+    #    - 三个都没有时打 WARNING 日志，return（不中断服务）
+    # 1. API v5 列 scenes/ 目录（GET /api/v5/repos/{owner}/{repo}/contents/scenes?ref=dev）
+    #    - 过滤 _template 和 third-party
+    # 2. 逐场景目录：API v5 列文件 → 下载 scene.json / README.md / icon.* 到临时目录
+    #    - 递归下载 references/ 子目录全部文件（深度限制 5 层）
+    # 3. 遍历下载到本地的场景目录：
+    #    a. 读 scene.json → 解析 + 校验
+    #       - 校验 tag 合法值（vod/issue/coding/qa/sre/chat）
+    #       - 校验 mode 合法值（emit）
+    #       - 校验 handoff/next 一致性（complete→next="done"，a2a→next≠"done"）
+    #       - 校验 next 链路完整性（从首节点能走到 done，不断链不循环）
+    #       - 预检 skill 引用：每个 node 的 skill 必须在 skill 表中存在（按 skill_name 查）
+    #         → 不存在打 WARNING 日志"场景 X 引用了不存在的技能 Y"，跳过此场景
+    #    b. 读 README.md（如有）→ market_description；无则取 description
+    #    c. 读 icon 文件（如有）→ OBS 模式上传到 OBS 桶（grape/scenes/icons/{name}{ext}），obs_icon_key 存对象 key（查询时 _resolve_scene_icon 动态生成签名 URL）；非 OBS 模式 copy 到 src/api/static/img/scenes/，icon 存 /static/img/scenes/{name}{ext} 路径
+    #       无 icon 文件 → icon 字段为空，前端展示用 scene_category.icon 兜底
+    #    d. 计算场景目录的 content_hash（SHA-256，遍历所有文件按文件名排序）
+    #    e. 根据 scene.json 的 category（slug）查 scene_category 表拿 category_id
+    #    f. 查 DB：SELECT id, version, content_hash FROM scene_market WHERE name=? AND source='official'
+    #       - 不存在 → INSERT 新行（source='official', is_featured=0）
+    #       - 存在且 content_hash 相同 → 跳过（无变更）
+    #       - 存在但 content_hash 不同：
+    #         → version 升了（新 version > 旧 version）→ UPDATE（正常更新）
+    #         → version 没升 → 打 WARNING 日志"场景 X 内容变更但版本号未更新"，仍然 UPDATE
+    #    g. 更新 scene_skill_ref 表（先 DELETE WHERE scene_id=? 再 INSERT，含 skill_id）
+    # 4. 处理下架：DB 中 source='official' 且 is_active=1 但本次仓库 scenes/ 里不存在的场景
+    #    → is_active 置 0（软删除/下架），不硬删（保留 like_count 等历史数据）
+    #    → 打 INFO 日志"场景 X 已从官方仓库移除，下架处理"
+    # 5. 打 INFO 日志总结：新增 N 条、更新 N 条、跳过 N 条、下架 N 条、失败 N 条
+    # 6. 初始化精选场景：如果 official 场景没有任何 is_featured=1 的，设置默认精选（default/cloud-native/iac）
+    #    - 只在首次（没有任何精选时）才设置，不覆盖管理员手动设的精选
+    # 7. 清理临时目录
+```
+
+**content_hash 计算**（复用 skill_sync 的 _compute_skill_hash 模式）：
+```python
+def _compute_scene_hash(scene_dir: str) -> str:
+    """计算场景目录的内容 hash（遍历所有文件，按文件名排序，取完整 SHA-256）。"""
+    h = hashlib.sha256()
+    for root, dirs, files in os.walk(scene_dir):
+        dirs[:] = [d for d in dirs if d not in ("__pycache__", "__MACOSX", ".git")]
+        for f in sorted(files):
+            rel = os.path.relpath(os.path.join(root, f), scene_dir)
+            h.update(rel.encode())
+            with open(os.path.join(root, f), "rb") as fp:
+                h.update(fp.read())
+    return h.hexdigest()
+```
+
+**关键设计点**：
+- **content_hash 做增量同步**：hash 不变就跳过，避免无谓 DB 写入
+- **version 比对**：hash 变了但 version 没升 → 打 WARNING 日志提醒，仍然更新（内容优先于版本号）
+- **skill 引用预检**：同步前校验 scene.json 的 nodes 里每个 skill 是否在 skill 表中存在，不存在打 WARNING 跳过此场景
+- **只同步 source='official'**：不动 user/third-party 的场景
+- **_template 和 third-party 目录不同步**
+- **下架处理**：仓库中不存在的 official 场景，DB 里 is_active 置 0（软删除），不硬删保留历史数据
+- **单个场景失败不中断整体**：try/catch 每个场景，失败打 WARNING 继续下一个
+- **同步失败不阻塞服务**：启动时 try/catch，失败只打 WARNING 日志
+- **优雅关闭**：lifespan shutdown 时 cancel 定时任务（和 skill_sync_scheduler 对齐）
+- **token 获取**：优先级：环境变量 `GRAPE_DEV_TOKEN` → `configs/scene-sync.json` 的 `gitcode_api_token` → `configs/global-bot-token.json` 的 `gitcode_api_token`。三个都没有时打 WARNING 跳过同步。不查 managed_repos 表。
+- **skill_id 回填**：更新 scene_skill_ref 时查 skill 表按 skill_name 拿 skill_id 一并写入
+- **默认精选场景**：同步完成后检查 official 场景是否有 is_featured=1 的，如果没有任何精选场景，把 default（通用开发）、cloud-native（云原生开发）、iac（IaC开发）设为精选。只在首次（没有任何精选时）才设置，不覆盖管理员手动设的精选
+
+**scene_market 表新增 content_hash 字段**：
+```sql
+ALTER TABLE scene_market ADD COLUMN content_hash VARCHAR(64) DEFAULT '';
+ALTER TABLE scene_market ADD COLUMN obs_icon_key VARCHAR(256) DEFAULT '';
+```
+
+**启动与关闭**（main.py lifespan，和 skill_sync_scheduler 并列）：
+```python
+# 官方场景定时同步：每 30 分钟从 grape-skills 仓库同步场景到 DB
+try:
+    from src.storage.scene_sync import start_scene_sync_scheduler
+    start_scene_sync_scheduler()
+except Exception as e:
+    log.warning(f"Scene sync scheduler start failed: {e}")
+
+# shutdown
+try:
+    from src.storage.scene_sync import stop_scene_sync_scheduler
+    await stop_scene_sync_scheduler()
+except Exception:
+    pass
+```
+
+**新建文件**：`src/storage/scene_sync.py`
+- `_load_config()` — 加载配置（优先环境变量，回退 configs/scene-sync.json）
+- `_get_sync_token()` — 获取 GitCode token（优先级：GRAPE_DEV_TOKEN 环境变量 → configs/scene-sync.json → configs/global-bot-token.json）
+- `_api_list_dir(client, path, token)` — GitCode API v5 列目录
+- `_api_get_file(client, path, token)` — GitCode API v5 下载文件（base64 解码）
+- `_download_dir_recursive(client, api_path, local_path, token, is_references, depth)` — 递归下载目录（根目录只下载 scene.json/README.md/icon.*，references/ 下全部下载，深度限制 5 层）
+- `_compute_scene_hash(scene_dir)` — 计算 content_hash
+- `_validate_scene_nodes(nodes)` — 校验 nodes 合法性（tag/mode/handoff/next）
+- `_check_skills_exist(nodes, scene_name)` — 预检 skill 引用是否在 skill 表中存在
+- `_parse_version(v)` — 语义化版本号转可比较元组（补齐到 3 位）
+- `_refresh_cat_cache()` — 刷新 category slug → id 缓存
+- `sync_official_scenes()` — 核心同步逻辑
+- `_scene_sync_worker(interval)` — 定时 worker（启动即执行，之后每 interval 秒）
+- `start_scene_sync_scheduler()` — 启动调度
+- `stop_scene_sync_scheduler()` — 优雅关闭
 
 ## 九、实现迭代记录（代码已落地）
 
@@ -1104,6 +1330,46 @@ scene_skill_ref 表已有 skill_id 字段但代码全用 skill_name 关联。改
 - 场景市场搜索框："搜索场景或技能..." → "搜索场景名称或描述"（场景市场只搜场景，不搜技能）
 - 技能市场搜索框："搜索技能或描述任务..." → "搜索技能名称或描述"（实际是关键词匹配，不是 AI 推荐）
 
+### 9.13 场景详情页去掉在用仓库列表（2026-09-04）
+
+- 场景详情页删除"在用仓库"列表区块（原 det-suite-card 网格）
+- 头部"X 仓库在用"计数和卡片列表的计数保留
+
+### 9.14 Apple 风格分段控件 + 卡片布局美化（2026-09-04）
+
+- 场景/技能 tab 改为 Apple segmented control（.seg-bar）：灰色容器 + 白色活跃药丸 + 阴影
+- 技能市场/仓库技能/个人技能 3 个子 tab 同样改为药丸形式
+- 去掉旧的 .stabs 下划线 tab 样式（.seg-bar 替代）
+- 顶部 tab + 提示文案用白色卡片包裹（圆角 + 柔和阴影）
+- 精选和全部（场景/技能）各自用独立 .apple-card 卡片（无边框 + 柔和阴影）
+- 搜索/排序按钮靠左对齐（justify-content:flex-start）
+- 搜索输入框用浅灰背景融入式设计（.apple-search）
+
+### 9.15 从技能详情返回时样式统一（2026-09-04）
+
+- skills.js 的 _backToSkillList() 原来硬编码了旧的 .stabs + 提示框模板
+- 改为复用 _renderMarketTab('skills')，确保返回时和首次进入的布局一致
+
+### 9.16 应用/体验前确认提示（2026-09-04）
+
+新增后端接口：
+- GET /api/scenes/market/{id}/applied — 检查场景是否已应用到当前仓库
+- GET /api/scenes/market/{id}/experience-check — 检查体验项目仓库是否存在 + 是否已应用场景
+
+前端逻辑（列表卡片 + 详情页共用）：
+- **应用按钮**：点击前先调 /applied 检查。已应用过 → 弹确认框"确认覆盖应用 / 当前仓库已应用过此场景（场景名），再次应用将覆盖更新已有的场景配置"。未应用过 → 直接执行
+- **体验按钮**：点击前先调 /experience-check 检查：
+  - 项目已存在且已应用过此场景 → 弹确认框"确认覆盖场景配置 / 项目 X 已存在且已应用过此场景，再次体验将覆盖已有的场景配置"
+  - 项目已存在但未应用过 → 弹提示框"项目已存在 / 项目 X 已存在，体验将在此项目上应用场景配置"
+  - 全新项目 → 直接体验
+- 检查接口失败时不阻塞，直接执行原流程
+
+i18n 新增 key（zh + en）：
+- apply_confirm_title / apply_confirm_desc / apply_confirm_warning / apply_confirm_btn
+- exp_confirm_overwrite_title / exp_confirm_overwrite_desc / exp_confirm_overwrite_warning
+- exp_confirm_exists_title / exp_confirm_exists_desc / exp_confirm_exists_warning
+- exp_confirm_btn
+
 ## 十、设计原则和注意事项
 
 1. **scene_market 表完全独立**：自包含全部场景信息，不依赖 devops_pipeline_scene。场景市场所有操作只碰 scene_market 一张表，高内聚低耦合
@@ -1115,4 +1381,4 @@ scene_skill_ref 表已有 skill_id 字段但代码全用 skill_name 关联。改
 7. **skills.js 重写风险**：现有 skills.js 500+ 行包含上传/删除/转仓库/华为云包/子技能等完整逻辑，重写时必须保留所有现有功能
 8. **场景体验的 create_from_template 复用**：现有 create_from_template 是 async 函数，experience_market_scene 也是 async，直接调用即可
 9. **SVG 缩略图**：苹果风格渐变+图标，7 个文件，纯静态资源不影响功能
-10. **DB 迁移**：2 个 ALTER + 5 个 CREATE TABLE（scene_category + scene_market + scene_likes + scene_skill_ref + skill_likes），按现有 _migrate_tables 模式追加，幂等执行
+10. **DB 迁移**：5 个 CREATE TABLE（scene_category + scene_market + scene_likes + scene_skill_ref + skill_likes）+ 多个 ALTER（scene_market 加 tags/author/content_hash、scene_category 加 slug、devops_pipeline_scene 加 market_scene_id、scene_skill_ref 加 skill_id、skill 加 is_featured/like_count），按现有 _migrate_tables 模式追加，幂等执行

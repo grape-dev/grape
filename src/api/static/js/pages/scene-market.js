@@ -48,23 +48,25 @@ function _renderMarketTab(tab) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   // 如果 tab 栏已存在且只是切换 tab，不重建整个 HTML（避免闪烁）
-  const existingTabs = el.querySelector('.stabs');
+  const existingTabs = el.querySelector('.seg-bar');
   if (existingTabs && el.querySelector('#marketTabContent')) {
     // 只更新 tab 高亮
-    el.querySelectorAll('.stabs a').forEach(a => a.classList.remove('ac'));
-    const tabs = el.querySelectorAll('.stabs a');
+    el.querySelectorAll('.seg-bar a').forEach(a => a.classList.remove('ac'));
+    const tabs = el.querySelectorAll('.seg-bar a');
     if (tab === 'scenes' && tabs[0]) tabs[0].classList.add('ac');
     if (tab === 'skills' && tabs[1]) tabs[1].classList.add('ac');
   } else {
-    // 首次渲染：提示框 + tab 栏 + 容器
-    el.innerHTML = `<div class="cd" style="margin-bottom:16px;padding:12px 16px;font-size:12px;color:var(--t2);line-height:1.7;display:flex;align-items:flex-start;gap:10px">
-      <span style="font-size:16px;flex-shrink:0">💡</span>
-      <div><b style="color:var(--a)">${I18N.t('skills.scenes_tab')||'场景'}</b> ${I18N.t('skills.market_intro_scene')||'是多个技能按开发流程组合的开发模式（如 VOD→Issue→Coding→QA→SRE），'}<b style="color:var(--a)">${I18N.t('skills.skills_tab')||'技能'}</b> ${I18N.t('skills.market_intro_skill')||'是单个 Agent 的能力包，完成具体动作。点击场景卡片查看完整流程，点击技能卡片查看能力详情。'}</div>
+    // 首次渲染：tab 栏 + 提示 + 容器
+    el.innerHTML = `<div style="margin-bottom:20px;background:var(--c);border-radius:14px;padding:20px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.06)">
+      <div class="seg-bar" style="margin-top:0">
+        <a class="${tab==='scenes'?'ac':''}" onclick="_renderMarketTab('scenes')">🏪 ${I18N.t('skills.scenes_tab')||'场景'}</a>
+        <a class="${tab==='skills'?'ac':''}" onclick="_renderMarketTab('skills')">⚙ ${I18N.t('skills.skills_tab')||'技能'}</a>
+      </div>
+      <div style="padding:14px 0 0;font-size:11px;color:var(--t3);line-height:1.6">
+        <b style="color:var(--a)">${I18N.t('skills.scenes_tab')||'场景'}</b> ${I18N.t('skills.market_intro_scene')||'是多个技能按开发流程组合的开发模式'} · <b style="color:var(--a)">${I18N.t('skills.skills_tab')||'技能'}</b> ${I18N.t('skills.market_intro_skill')||'是单个 Agent 的能力包'}
+      </div>
     </div>
-    <div class="stabs" style="margin-bottom:16px">
-      <a class="${tab==='scenes'?'ac':''}" onclick="_renderMarketTab('scenes')">🏪 ${I18N.t('skills.scenes_tab')||'场景'}</a>
-      <a class="${tab==='skills'?'ac':''}" onclick="_renderMarketTab('skills')">⚙ ${I18N.t('skills.skills_tab')||'技能'}</a>
-    </div><div id="marketTabContent"></div>`;
+    <div id="marketTabContent"></div>`;
   }
   if (tab === 'scenes') {
     _loadSceneMarket();
@@ -122,26 +124,28 @@ function _renderSceneMarketPage() {
 
   // 精选场景横向滚动
   if (featured.length > 0) {
-    html += `<div class="cd-h" style="margin-bottom:10px"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>`;
-    html += `<div class="scn-scroll-wrap" style="margin-bottom:20px">
-      <div id="featured-scenes" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-scenes')">
-        ${featured.map(s => _renderSceneCard(s)).join('')}
+    html += `<div class="apple-card">
+      <div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>
+      <div class="scn-scroll-wrap">
+        <div id="featured-scenes" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-scenes')">
+          ${featured.map(s => _renderSceneCard(s)).join('')}
+        </div>
+        <button class="scn-scroll-btn scn-scroll-prev" id="featured-scenes-prev" onclick="document.getElementById('featured-scenes').scrollBy({left:-314,behavior:'smooth'})">◀</button>
+        <button class="scn-scroll-btn scn-scroll-next" id="featured-scenes-next" onclick="document.getElementById('featured-scenes').scrollBy({left:314,behavior:'smooth'})">▶</button>
       </div>
-      <button class="scn-scroll-btn scn-scroll-prev" id="featured-scenes-prev" onclick="document.getElementById('featured-scenes').scrollBy({left:-314,behavior:'smooth'})">◀</button>
-      <button class="scn-scroll-btn scn-scroll-next" id="featured-scenes-next" onclick="document.getElementById('featured-scenes').scrollBy({left:314,behavior:'smooth'})">▶</button>
     </div>`;
     setTimeout(() => _updateScrollBtns('featured-scenes'), 100);
   }
 
-  // 全部场景 — 标题行 + 搜索 + 排序
-  html += `<div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+  // 全部场景
+  html += `<div class="apple-card">`;
+  // 标题行 + 搜索 + 排序
+  html += `<div class="cd-h apple-search" style="justify-content:flex-start">
     <h2>${I18N.t('skills.all_scenes')||'全部场景'} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${_sceneMarketTotal}</span></h2>
-    <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
-      <input id="sceneMarketSearch" placeholder="${I18N.t('skills.search_placeholder')||'搜索场景名称或描述'}" value="${_sceneMarketQ}" onkeyup="if(event.key==='Enter'){_sceneMarketQ=this.value;_sceneMarketPage=1;_loadSceneMarketList()}" style="padding:7px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);color:var(--t);width:180px">
+    <input id="sceneMarketSearch" placeholder="${I18N.t('skills.search_placeholder')||'搜索场景名称或描述'}" value="${_sceneMarketQ}" onkeyup="if(event.key==='Enter'){_sceneMarketQ=this.value;_sceneMarketPage=1;_loadSceneMarketList()}">
       <button class="bt bt-p bt-s" onclick="_sceneMarketQ=document.getElementById('sceneMarketSearch').value;_sceneMarketPage=1;_loadSceneMarketList()">${I18N.t('skills.query')||'查询'}</button>
       <button class="bt ${_sceneMarketSort==='latest'?'bt-p':'bt-o'} bt-s" onclick="_sceneMarketSort='latest';_sceneMarketPage=1;_loadSceneMarketList()">${I18N.t('skills.sort_latest')||'最新'}</button>
       <button class="bt ${_sceneMarketSort==='hot'?'bt-p':'bt-o'} bt-s" onclick="_sceneMarketSort='hot';_sceneMarketPage=1;_loadSceneMarketList()">${I18N.t('skills.sort_hot')||'最热'}</button>
-    </div>
   </div>`;
 
   // 分类 tab
@@ -167,14 +171,15 @@ function _renderSceneMarketPage() {
   const nextDisabled = _sceneMarketPage >= totalPages ? ' disabled' : '';
   html += `<div class="pager" style="display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;padding:12px 0">
     <button class="bt bt-o bt-s${prevDisabled}" ${prevDisabled ? 'disabled' : ''} onclick="_sceneMarketPage=${Math.max(1,_sceneMarketPage-1)};_loadSceneMarketList()">‹</button>
-    <span style="font-size:12px;color:var(--t2)">${_sceneMarketPage} / ${totalPages} (${_sceneMarketTotal}条)</span>
+    <span style="font-size:12px;color:var(--t2)">${_sceneMarketPage} / ${totalPages} (${_sceneMarketTotal}${I18N.t('skills.items_count_suffix')||'条'})</span>
     <button class="bt bt-o bt-s${nextDisabled}" ${nextDisabled ? 'disabled' : ''} onclick="_sceneMarketPage=${Math.min(totalPages,_sceneMarketPage+1)};_loadSceneMarketList()">›</button>
     <select onchange="_sceneMarketPageSize=parseInt(this.value);_sceneMarketPage=1;_loadSceneMarketList()" style="padding:4px 8px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);color:var(--t);outline:none">
-      <option value="20" ${_sceneMarketPageSize===20?'selected':''}>20/页</option>
-      <option value="50" ${_sceneMarketPageSize===50?'selected':''}>50/页</option>
-      <option value="100" ${_sceneMarketPageSize===100?'selected':''}>100/页</option>
+      <option value="20" ${_sceneMarketPageSize===20?'selected':''}>20${I18N.t('skills.per_page_suffix')||'/页'}</option>
+      <option value="50" ${_sceneMarketPageSize===50?'selected':''}>50${I18N.t('skills.per_page_suffix')||'/页'}</option>
+      <option value="100" ${_sceneMarketPageSize===100?'selected':''}>100${I18N.t('skills.per_page_suffix')||'/页'}</option>
     </select>
   </div>`;
+  html += `</div>`;
 
   el.innerHTML = html;
 }
@@ -249,7 +254,55 @@ function _applyScene(sceneId) {
     return;
   }
   const parts = repo.split('/');
-  API.post('/scenes/market/' + sceneId + '/apply?owner=' + encodeURIComponent(parts[0]) + '&repo=' + encodeURIComponent(parts[1])).then(r => {
+  const owner = encodeURIComponent(parts[0]);
+  const repoName = encodeURIComponent(parts[1]);
+
+  // 先检查是否已应用过
+  API.get('/scenes/market/' + sceneId + '/applied?owner=' + owner + '&repo=' + repoName).then(check => {
+    if (check.applied) {
+      // 已应用过 → 弹确认框提示会覆盖
+      _showApplyConfirm(sceneId, owner, repoName, check.scene_name);
+    } else {
+      // 未应用过 → 直接执行
+      _doApplyScene(sceneId, owner, repoName);
+    }
+  }).catch(() => {
+    // 查询失败 → 直接执行（不阻塞）
+    _doApplyScene(sceneId, owner, repoName);
+  });
+}
+
+function _showApplyConfirm(sceneId, owner, repoName, sceneName) {
+  var modal = document.createElement('div');
+  modal.id = 'applyConfirmModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px)';
+  modal.innerHTML = '<div class="cd" style="width:400px;padding:24px;border-radius:14px">' +
+    '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:14px">' +
+      '<span style="font-size:22px;flex-shrink:0">⚠️</span>' +
+      '<div>' +
+        '<h3 style="font-size:15px;font-weight:600;margin-bottom:6px">' + (I18N.t('skills.apply_confirm_title')||'确认覆盖应用') + '</h3>' +
+        '<div style="font-size:12px;color:var(--t2);line-height:1.6">' +
+          (I18N.t('skills.apply_confirm_desc')||'当前仓库已应用过此场景') + (sceneName ? '（' + sceneName + '）' : '') + '，' +
+          (I18N.t('skills.apply_confirm_warning')||'再次应用将覆盖更新已有的场景配置。') +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+      '<button class="bt bt-o bt-s" id="applyCancelBtn">' + (I18N.t('common.cancel')||'取消') + '</button>' +
+      '<button class="bt bt-p bt-s" id="applyConfirmBtn">' + (I18N.t('skills.apply_confirm_btn')||'确认覆盖') + '</button>' +
+    '</div>' +
+  '</div>';
+  document.body.appendChild(modal);
+
+  document.getElementById('applyCancelBtn').onclick = function() { modal.remove(); };
+  document.getElementById('applyConfirmBtn').onclick = function() {
+    modal.remove();
+    _doApplyScene(sceneId, owner, repoName);
+  };
+}
+
+function _doApplyScene(sceneId, owner, repoName) {
+  API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName).then(r => {
     if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.scene_applied')||'场景已应用');
   }).catch(e => {
     if (app && app.showToast) app.showToast((I18N.t('skills.toast.apply_failed')||'应用失败') + ': ' + (e.message||''));
@@ -258,6 +311,61 @@ function _applyScene(sceneId) {
 
 // ── 场景体验 ──
 function _experienceScene(sceneId) {
+  // 先检查项目仓库状态
+  API.get('/scenes/market/' + sceneId + '/experience-check').then(function(check) {
+    if (check.repo_exists && check.scene_applied) {
+      // 项目已存在且已应用过此场景 → 提示会覆盖
+      _showExperienceConfirm(sceneId, check.full_name, check.scene_name, true);
+    } else if (check.repo_exists) {
+      // 项目已存在但未应用过此场景 → 提示项目已存在，会应用场景配置
+      _showExperienceConfirm(sceneId, check.full_name, '', false);
+    } else {
+      // 全新项目 → 直接体验
+      _doExperienceScene(sceneId);
+    }
+  }).catch(function() {
+    // 检查失败 → 直接体验（不阻塞）
+    _doExperienceScene(sceneId);
+  });
+}
+
+function _showExperienceConfirm(sceneId, fullName, sceneName, sceneApplied) {
+  var modal = document.createElement('div');
+  modal.id = 'expConfirmModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px)';
+  var title, desc;
+  if (sceneApplied) {
+    title = I18N.t('skills.exp_confirm_overwrite_title')||'确认覆盖场景配置';
+    desc = (I18N.t('skills.exp_confirm_overwrite_desc')||'项目') + ' ' + fullName + ' ' +
+           (I18N.t('skills.exp_confirm_overwrite_warning')||'已存在且已应用过此场景，再次体验将覆盖已有的场景配置。');
+  } else {
+    title = I18N.t('skills.exp_confirm_exists_title')||'项目已存在';
+    desc = (I18N.t('skills.exp_confirm_exists_desc')||'项目') + ' ' + fullName + ' ' +
+           (I18N.t('skills.exp_confirm_exists_warning')||'已存在，体验将在此项目上应用场景配置。');
+  }
+  modal.innerHTML = '<div class="cd" style="width:420px;padding:24px;border-radius:14px">' +
+    '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:14px">' +
+      '<span style="font-size:22px;flex-shrink:0">⚠️</span>' +
+      '<div>' +
+        '<h3 style="font-size:15px;font-weight:600;margin-bottom:6px">' + title + '</h3>' +
+        '<div style="font-size:12px;color:var(--t2);line-height:1.6">' + desc + '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+      '<button class="bt bt-o bt-s" id="expConfirmCancelBtn">' + (I18N.t('common.cancel')||'取消') + '</button>' +
+      '<button class="bt bt-p bt-s" id="expConfirmOkBtn">' + (I18N.t('skills.exp_confirm_btn')||'继续体验') + '</button>' +
+    '</div>' +
+  '</div>';
+  document.body.appendChild(modal);
+
+  document.getElementById('expConfirmCancelBtn').onclick = function() { modal.remove(); };
+  document.getElementById('expConfirmOkBtn').onclick = function() {
+    modal.remove();
+    _doExperienceScene(sceneId);
+  };
+}
+
+function _doExperienceScene(sceneId) {
   // 进度弹框
   var modal = document.createElement('div');
   modal.id = 'expSceneModal';
@@ -372,7 +480,7 @@ function _renderSceneDetailPage(s) {
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
           <h2 style="font-size:20px;font-weight:700">${s.display_name || s.name}</h2>
-          ${s.is_featured?'<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:10px">🌟 精选</span>':''}
+          ${s.is_featured?`<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:10px">🌟 ${I18N.t('skills.featured_tag')||'精选'}</span>`:''}
           ${s.version?'<span class="tg tg-d" style="font-size:9px">v'+s.version+'</span>':''}
         </div>
         <div style="font-size:13px;color:var(--t2);line-height:1.6">${s.market_description || s.description || ''}</div>
@@ -484,8 +592,8 @@ function _renderSceneDetailPage(s) {
     const isRemote = tplSource === 'git' && tplRepo;
     const tplUrl = isRemote ? `https://gitcode.com/${tplRepo}` : '';
     const sourceBadge = isRemote
-      ? '<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:#34c75914;color:#34c759">GitCode 远程</span>'
-      : '<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--bg);color:var(--t3)">本地模板</span>';
+      ? `<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:#34c75914;color:#34c759">${I18N.t('skills.gitcode_remote')||'GitCode 远程'}</span>`
+      : `<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--bg);color:var(--t3)">${I18N.t('skills.local_template')||'本地模板'}</span>`;
     html += `<div class="cd-h" style="margin:20px 0 10px"><h2>${I18N.t('skills.sample_template')||'样例项目模板'}</h2></div>`;
     html += `<div class="det-card-wrap"${isRemote ? ` style="cursor:pointer" onclick="window.open('${tplUrl}','_blank')"` : ''}>
       <div style="display:flex;align-items:center;gap:16px;padding:8px 0">
@@ -499,42 +607,9 @@ function _renderSceneDetailPage(s) {
           </div>
           <div style="font-size:12px;color:#86868b;line-height:1.5">${tplDesc || (I18N.t('skills.template_desc')||'点击体验可基于此模板创建项目')}</div>
         </div>
-        ${isRemote ? `<span style="font-size:12px;color:#0071e3;font-weight:500;flex-shrink:0;padding:6px 14px;border:1px solid #0071e3;border-radius:8px;transition:all .15s" onmouseover="this.style.background='#0071e3';this.style.color='#fff'" onmouseout="this.style.background='';this.style.color='#0071e3'">查看项目 ↗</span>` : ''}
+        ${isRemote ? `<span style="font-size:12px;color:#0071e3;font-weight:500;flex-shrink:0;padding:6px 14px;border:1px solid #0071e3;border-radius:8px;transition:all .15s" onmouseover="this.style.background='#0071e3';this.style.color='#fff'" onmouseout="this.style.background='';this.style.color='#0071e3'">${I18N.t('skills.view_project')||'查看项目'} ↗</span>` : ''}
       </div>
     </div>`;
-  }
-
-  // 在用仓库列表
-  const repos = s.repos || [];
-  if (repos.length > 0) {
-    const REPO_PREVIEW = 6;
-    const hasMore = repos.length > REPO_PREVIEW;
-    const renderRepoCard = (r, idx) => {
-      const fullName = r.full_name || r.repo_key || '';
-      const accessible = r.accessible;
-      const cardStyle = accessible ? 'cursor:pointer' : 'cursor:default;opacity:0.6';
-      const clickAction = accessible ? ` onclick="window.open('https://gitcode.com/${fullName}','_blank')"` : '';
-      const badge = accessible
-        ? '<span class="det-suite-badge" style="background:#34c75914;color:#34c759">查看 ↗</span>'
-        : '<span class="det-suite-badge" style="background:var(--bg);color:var(--t3)">无权限</span>';
-      return `<div class="det-suite-card" data-repo-idx="${idx}"${clickAction} style="${cardStyle}">
-        <div class="det-suite-num" style="background:#34c759">📂</div>
-        <div class="det-suite-body">
-          <div class="det-suite-name">${fullName}</div>
-          <div class="det-suite-role">GitCode 仓库</div>
-        </div>
-        ${badge}
-      </div>`;
-    };
-    html += `<div class="cd-h" style="margin:20px 0 10px"><h2>${I18N.t('skills.repos_in_use_title')||'在用仓库'} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${repos.length}</span></h2></div>`;
-    html += `<div class="det-card-wrap"><div class="det-suite-grid" id="repoGrid">`;
-    repos.slice(0, REPO_PREVIEW).forEach((r, i) => { html += renderRepoCard(r, i); });
-    html += `</div></div>`;
-    if (hasMore) {
-      const restHtml = repos.slice(REPO_PREVIEW).map((r, i) => renderRepoCard(r, i + REPO_PREVIEW)).join('');
-      html += `<div id="repoRest" style="display:none"><div class="det-card-wrap" style="margin-top:8px"><div class="det-suite-grid">${restHtml}</div></div></div>`;
-      html += `<div style="text-align:center;margin-top:10px"><a onclick="(function(){document.getElementById('repoRest').style.display='block';document.getElementById('repoMore').style.display='none';})()" id="repoMore" style="font-size:12px;color:var(--a);cursor:pointer">查看全部 (${repos.length})</a></div>`;
-    }
   }
 
   el.innerHTML = html;

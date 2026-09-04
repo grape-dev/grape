@@ -506,6 +506,7 @@ _SCENE_CATEGORY_DDL = """
 CREATE TABLE IF NOT EXISTS scene_category (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
+    slug        VARCHAR(64) DEFAULT '',
     icon        TEXT DEFAULT '',
     order_num   INTEGER DEFAULT 0,
     is_active   INTEGER DEFAULT 1,
@@ -513,7 +514,8 @@ CREATE TABLE IF NOT EXISTS scene_category (
     updated_by  VARCHAR(64) DEFAULT '',
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (name)
+    UNIQUE (name),
+    UNIQUE (slug)
 )
 """
 
@@ -534,6 +536,10 @@ CREATE TABLE IF NOT EXISTS scene_market (
     recommended_template VARCHAR(191) DEFAULT '',
     nodes_json  TEXT DEFAULT '[]',
     onboarding  TEXT DEFAULT 'repo-onboarding',
+    tags        VARCHAR(256) DEFAULT '',  -- 标签，逗号分隔（如 build,deploy,ci）
+    author      VARCHAR(64) DEFAULT '',
+    content_hash VARCHAR(64) DEFAULT '',  -- 内容 hash（定时同步增量检测用）
+    obs_icon_key VARCHAR(256) DEFAULT '',  -- OBS 桶 icon 对象 key（查询时动态生成签名 URL）
     is_active   INTEGER DEFAULT 1,
     created_by  VARCHAR(64) DEFAULT '',
     updated_by  VARCHAR(64) DEFAULT '',
@@ -889,19 +895,19 @@ def _init_scene_category_data():
         if get_meta_value("scene_category_seeded") == "1":
             return
         categories = [
-            ("通用", "⚙", 1),
-            ("移动开发", "🍃", 2),
-            ("基础设施", "☁", 3),
-            ("技能开发", "🔧", 4),
-            ("AI应用", "🤖", 5),
-            ("内容创作", "📝", 6),
+            ("通用", "general", "⚙", 1),
+            ("移动开发", "mobile", "🍃", 2),
+            ("基础设施", "iac", "☁", 3),
+            ("技能开发", "skill-dev", "🔧", 4),
+            ("AI应用", "ai", "🤖", 5),
+            ("内容创作", "content", "📝", 6),
         ]
         with db_lock:
             c = db.cursor()
-            for name, icon, order_num in categories:
+            for name, slug, icon, order_num in categories:
                 c.execute(
-                    "INSERT OR IGNORE INTO scene_category (name, icon, order_num, is_active) VALUES (?,?,?,1)",
-                    (name, icon, order_num),
+                    "INSERT OR IGNORE INTO scene_category (name, slug, icon, order_num, is_active) VALUES (?,?,?,?,1)",
+                    (name, slug, icon, order_num),
                 )
             db.commit()
         set_meta_value("scene_category_seeded", "1")
@@ -1036,14 +1042,14 @@ def _init_scene_skill_ref():
 def _init_skill_featured():
     """初始化 skill 表的 is_featured 精选标记（幂等）。
 
-    技术方案 §3.1：6 个技能设 is_featured=1（vod/issue-advance/implementation/pr/cloud-deploy/skill-creator）。
+    4 个技能设 is_featured=1（vod/issue-advance/implementation/pr）。
     """
     try:
         from src.user.db import get_meta_value, set_meta_value
         if get_meta_value("skill_featured_seeded") == "1":
             return
         featured_skills = [
-            "vod", "issue-advance", "implementation", "pr", "cloud-deploy", "skill-creator",
+            "vod", "issue-advance", "implementation", "pr",
         ]
         with db_lock:
             c = db.cursor()
@@ -1451,7 +1457,26 @@ def _migrate_tables():
         "ALTER TABLE devops_pipeline_scene ADD COLUMN market_scene_id INTEGER DEFAULT NULL",
         # ===== Issue-11: scene_skill_ref 加 skill_id =====
         "ALTER TABLE scene_skill_ref ADD COLUMN skill_id INTEGER DEFAULT 0",
+        # ===== Issue-11: scene_market 加 tags/author/content_hash（场景包格式 + 定时同步） =====
+        "ALTER TABLE scene_market ADD COLUMN tags VARCHAR(256) DEFAULT ''",
+        "ALTER TABLE scene_market ADD COLUMN author VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE scene_market ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE scene_market ADD COLUMN obs_icon_key VARCHAR(256) DEFAULT ''",
+        # ===== Issue-11: scene_category 加 slug（场景包 category 用 slug 引用） =====
+        "ALTER TABLE scene_category ADD COLUMN slug VARCHAR(64) DEFAULT ''",
     ]
+    # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
+    _category_slugs = [
+        ("general", "通用"), ("mobile", "移动开发"), ("iac", "基础设施"),
+        ("skill-dev", "技能开发"), ("ai", "AI应用"), ("content", "内容创作"),
+    ]
+    for slug, name in _category_slugs:
+        try:
+            with db_lock:
+                db.execute("UPDATE scene_category SET slug=? WHERE name=? AND (slug='' OR slug IS NULL)", (slug, name))
+                db.commit()
+        except Exception:
+            pass
     for sql in migrations:
         try:
             with db_lock:
@@ -1988,6 +2013,15 @@ def _migrate_tables():
             log.info("Added gitcode_publish_repo / github_publish_repo columns to user_accounts")
     except Exception as e:
         log.warning(f"Add user_accounts publish repo columns failed: {e}")
+    # ===== managed_repos 部署URL列（weekly-01 合并） =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "managed_repos", "deploy_url", "VARCHAR(512) DEFAULT ''")
+            db.commit()
+            log.info("Added managed_repos.deploy_url column")
+    except Exception as e:
+        log.warning(f"Add managed_repos.deploy_url column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:

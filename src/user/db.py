@@ -1850,10 +1850,10 @@ def list_scene_categories() -> list[dict]:
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, name, icon, order_num FROM scene_category "
+            "SELECT id, name, slug, icon, order_num FROM scene_category "
             "WHERE is_active=1 ORDER BY order_num"
         )
-        return [{"id": r[0], "name": r[1], "icon": r[2] or "", "order_num": r[3]}
+        return [{"id": r[0], "name": r[1], "slug": r[2] or "", "icon": r[3] or "", "order_num": r[4]}
                 for r in c.fetchall()]
 
 
@@ -1907,7 +1907,7 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
             limit_sql = f" LIMIT {int(page_size)} OFFSET {int(offset)}"
         c.execute(
             f"SELECT id, name, display_name, version, description, market_description, "
-            f"icon, category_id, is_featured, like_count, source, recommended_template, "
+            f"icon, obs_icon_key, category_id, is_featured, like_count, source, recommended_template, "
             f"nodes_json, onboarding, created_at "
             f"FROM scene_market WHERE {where_sql} ORDER BY {order_by}{limit_sql}",
             params,
@@ -1919,10 +1919,11 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
             "id": r[0], "name": r[1], "display_name": r[2] or r[1],
             "version": r[3] or "1.0.0", "description": r[4] or "",
             "market_description": r[5] or "", "icon": r[6] or "",
-            "category_id": r[7], "is_featured": r[8], "like_count": r[9],
-            "source": r[10] or "official", "recommended_template": r[11] or "",
-            "nodes_json": r[12] or "[]", "onboarding": r[13] or "repo-onboarding",
-            "created_at": str(r[14] or ""),
+            "obs_icon_key": r[7] or "",
+            "category_id": r[8], "is_featured": r[9], "like_count": r[10],
+            "source": r[11] or "official", "recommended_template": r[12] or "",
+            "nodes_json": r[13] or "[]", "onboarding": r[14] or "repo-onboarding",
+            "created_at": str(r[15] or ""),
         })
     return result, total
 
@@ -1933,7 +1934,7 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
         c = db.cursor()
         c.execute(
             "SELECT id, name, display_name, version, description, market_description, "
-            "icon, category_id, is_featured, like_count, source, source_user_id, "
+            "icon, obs_icon_key, category_id, is_featured, like_count, source, source_user_id, "
             "recommended_template, nodes_json, onboarding, is_active, created_at, updated_at "
             "FROM scene_market WHERE id=?",
             (market_id,),
@@ -1945,11 +1946,12 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
         "id": row[0], "name": row[1], "display_name": row[2] or row[1],
         "version": row[3] or "1.0.0", "description": row[4] or "",
         "market_description": row[5] or "", "icon": row[6] or "",
-        "category_id": row[7], "is_featured": row[8], "like_count": row[9],
-        "source": row[10] or "official", "source_user_id": row[11],
-        "recommended_template": row[12] or "", "nodes_json": row[13] or "[]",
-        "onboarding": row[14] or "repo-onboarding", "is_active": row[15],
-        "created_at": str(row[16] or ""), "updated_at": str(row[17] or ""),
+        "obs_icon_key": row[7] or "",
+        "category_id": row[8], "is_featured": row[9], "like_count": row[10],
+        "source": row[11] or "official", "source_user_id": row[12],
+        "recommended_template": row[13] or "", "nodes_json": row[14] or "[]",
+        "onboarding": row[15] or "repo-onboarding", "is_active": row[16],
+        "created_at": str(row[17] or ""), "updated_at": str(row[18] or ""),
     }
 
 
