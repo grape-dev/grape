@@ -216,12 +216,12 @@
   transition: all var(--apple-transition);
 }
 [data-theme="apple"] .bt-p {
-  background: #0071e3;
-  color: #fff;
-  border: none;
+  background: rgba(0,113,227,0.08);
+  color: #0071e3;
+  border: 1px solid rgba(0,113,227,0.12);
 }
 [data-theme="apple"] .bt-p:hover {
-  background: #0077ed;
+  background: rgba(0,113,227,0.12);
 }
 [data-theme="apple"] .bt-o {
   background: var(--c);
@@ -231,6 +231,15 @@
 [data-theme="apple"] .bt-o:hover {
   background: rgba(0,113,227,0.04);
   border-color: var(--a);
+}
+/* Toggle selected — same tint as .stabs a.ac for visual consistency */
+[data-theme="apple"] .bt-tg {
+  background: rgba(0,113,227,0.08);
+  color: #0071e3;
+  border: 1px solid rgba(0,113,227,0.12);
+}
+[data-theme="apple"] .bt-tg:hover {
+  background: rgba(0,113,227,0.12);
 }
 [data-theme="apple"] .bt-s {
   font-size: 12px;

@@ -21,11 +21,14 @@ let _activeAgentIdx = -1;    // -1=全部, 0+=第N个agent
 
 // _AGENT_META 定义在 scene-market.js 中，这里直接复用
 
-const _SCOPE_NAMES = {
-  official: I18N.t('skills.scope_official')||'技能市场',
-  repo: I18N.t('skills.scope_repo')||'仓库技能',
-  user: I18N.t('skills.scope_user')||'个人技能',
-};
+function _scopeName(scope) {
+  var names = {
+    official: I18N.t('skills.scope_official')||'技能市场',
+    repo: I18N.t('skills.scope_repo')||'仓库技能',
+    user: I18N.t('skills.scope_user')||'个人技能',
+  };
+  return names[scope] || scope;
+}
 
 function _skillsContainer() {
   return document.getElementById('marketTabContent') || document.getElementById('pageContent');
@@ -145,9 +148,9 @@ function _renderSkillPage() {
 
   // 二级子页签（药丸分段控件，靠左）
   html += `<div style="text-align:left;margin-bottom:20px"><div class="seg-bar" style="margin-top:0">
-    <a class="${_skillTab==='official'?'ac':''}" onclick="_switchSkillTab('official')">${_SCOPE_NAMES.official}</a>
-    <a class="${_skillTab==='repo'?'ac':''}" onclick="_switchSkillTab('repo')">${_SCOPE_NAMES.repo}</a>
-    <a class="${_skillTab==='user'?'ac':''}" onclick="_switchSkillTab('user')">${_SCOPE_NAMES.user}</a>
+    <a class="${_skillTab==='official'?'ac':''}" onclick="_switchSkillTab('official')">${_scopeName('official')}</a>
+    <a class="${_skillTab==='repo'?'ac':''}" onclick="_switchSkillTab('repo')">${_scopeName('repo')}</a>
+    <a class="${_skillTab==='user'?'ac':''}" onclick="_switchSkillTab('user')">${_scopeName('user')}</a>
   </div></div>`;
 
   // 精选技能（仅 official，独立加载，不受搜索影响）
@@ -173,10 +176,10 @@ function _renderSkillPage() {
     <h2>${I18N.t('skills.all_skills')||'全部技能'} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${_skillTotal}</span></h2>
     <input id="skillSearchInput" placeholder="${I18N.t('skills.skill_search_placeholder')||'搜索技能名称或描述'}" value="${_skillSearchQ}" onkeyup="if(event.key==='Enter'){_skillSearchQ=this.value;_skillPage=1;_reloadSkills()}">
     <button class="bt bt-o bt-s" onclick="_skillSearchQ=document.getElementById('skillSearchInput').value;_skillPage=1;_reloadSkills()">${I18N.t('skills.find_skill')||'查找技能'}</button>
-    <button class="bt ${_skillSort==='latest'?'bt-p':'bt-o'} bt-s" id="sort-latest" onclick="_switchSort('latest')">${I18N.t('skills.sort_latest')||'最新'}</button>
-    <button class="bt ${_skillSort==='hot'?'bt-p':'bt-o'} bt-s" id="sort-hot" onclick="_switchSort('hot')">${I18N.t('skills.sort_hot')||'最热'}</button>`;
+    <button class="bt ${_skillSort==='latest'?'bt-tg':'bt-o'} bt-s" id="sort-latest" onclick="_switchSort('latest')">${I18N.t('skills.sort_latest')||'最新'}</button>
+    <button class="bt ${_skillSort==='hot'?'bt-tg':'bt-o'} bt-s" id="sort-hot" onclick="_switchSort('hot')">${I18N.t('skills.sort_hot')||'最热'}</button>`;
   if (_skillTab === 'repo' || _skillTab === 'user') {
-    html += `<button class="bt bt-p bt-s" onclick="showSkillUpload()" style="color:#fff;background:var(--g);border-color:var(--g)">⬆ ${I18N.t('skills.action.add_skill')||'上传技能'}</button>`;
+    html += `<button class="bt bt-p bt-s" onclick="showSkillUpload()" style="color:#fff;background:var(--g);border-color:var(--g)">${I18N.t('skills.action.add_skill')||'上传技能'}</button>`;
   }
   html += `</div>`;
 
@@ -418,7 +421,7 @@ function renderSkillDetail(data) {
                 <h3 style="font-size:15px;font-weight:600">${data.display_name || data.name}</h3>
                 ${featuredBadge}
               </div>
-              <span class="tg ${tagClass}" style="font-size:9px">${(meta.label||at)+' Agent'} · ${_SCOPE_NAMES[data.scope]||data.scope}</span>
+              <span class="tg ${tagClass}" style="font-size:9px">${(meta.label||at)+' Agent'} · ${_scopeName(data.scope)}</span>
             </div>
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
@@ -434,7 +437,7 @@ function renderSkillDetail(data) {
         <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">${I18N.t('skills.info_title')||'技能信息'}</h3>
         <div class="srow"><label>${I18N.t('skills.info_name')||'名称'}</label><span>${data.name}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_agent_type')||'Agent'}</label><span>${(meta.label||at)+' Agent'}</span></div>
-        <div class="srow"><label>${I18N.t('skills.info_type')||'类型'}</label><span>${_SCOPE_NAMES[data.scope]||data.scope}</span></div>
+        <div class="srow"><label>${I18N.t('skills.info_type')||'类型'}</label><span>${_scopeName(data.scope)}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_featured')||'精选'}</label><span>${data.is_featured ? I18N.t('skills.featured')||'是' : '—'}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_likes')||'点赞'}</label><span id="detailInfoLikes">${likedIcon} ${likeCount}</span></div>
         ${showScenes ? `<div class="srow"><label>${I18N.t('skills.info_scenes')||'场景'}</label><span class="t2">${scenesHtml}</span></div>` : ''}
