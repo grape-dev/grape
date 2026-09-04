@@ -500,12 +500,20 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     files_read = []
 
     def _match_repo(entry):
-        """检查日志条目是否匹配指定的 repo（精确匹配，不做子串模糊匹配）"""
+        """检查日志条目是否匹配指定的 repo。
+        HTTP 请求日志（有 status 字段）精确匹配 repo_key；
+        应用日志（无 status）模糊匹配 message 中是否包含仓库名。"""
         if not _repo_filter:
             return True
         entry_repo = entry.get("repo_key", "")
         if entry_repo and entry_repo == _repo_filter:
             return True
+        # 应用日志（非 HTTP 请求日志）没有 repo_key，检查 message
+        if not entry.get("status"):
+            msg = entry.get("message", "")
+            repo_short = _repo_filter.replace("gitcode:", "")
+            if repo_short in msg:
+                return True
         return False
 
     def _match_user(entry):
