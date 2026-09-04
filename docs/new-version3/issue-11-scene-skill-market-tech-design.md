@@ -1382,3 +1382,41 @@ i18n 新增 key（zh + en）：
 8. **场景体验的 create_from_template 复用**：现有 create_from_template 是 async 函数，experience_market_scene 也是 async，直接调用即可
 9. **SVG 缩略图**：苹果风格渐变+图标，7 个文件，纯静态资源不影响功能
 10. **DB 迁移**：5 个 CREATE TABLE（scene_category + scene_market + scene_likes + scene_skill_ref + skill_likes）+ 多个 ALTER（scene_market 加 tags/author/content_hash、scene_category 加 slug、devops_pipeline_scene 加 market_scene_id、scene_skill_ref 加 skill_id、skill 加 is_featured/like_count），按现有 _migrate_tables 模式追加，幂等执行
+
+## 十一、缺陷修复：scene_skill_ref 指向 inactive skill（2026-09-04）
+
+### 11.1 问题现象
+
+场景详情页点击技能卡片跳转 `/api/skills/by-id/{skill_id}` 返回 404。7 个场景中 21/34 条 scene_skill_ref 记录的 skill_id 指向了 `is_active=0` 的旧 skill 记录。
+
+### 11.2 根因
+
+skill 表的 UNIQUE 约束是 `(skill_name, scope, owner_id)`。同一个 skill_name 可以存在多条记录——例如 `('vod', '', '1')` 和 `('vod', 'official', '')` 是两个不同的 UNIQUE key，可以共存。
+
+历史原因导致 skill 表中存在 19 条 `scope='' is_active=0` 的脏记录（字段错位：file_path 被写成了 'official'，scope 为空）。后来 `_sync_official_skills` 用 `WHERE skill_name=? AND scope='official'` 查不到这些旧记录，于是 INSERT 了新的 `scope='official' is_active=1` 记录，旧记录留在表里。
+
+`scene_sync.py:481` 同步场景时查 skill_id 用的查询条件是：
+
+```python
+c.execute("SELECT id FROM skill WHERE skill_name=? LIMIT 1", (skill_name,))
+```
+
+缺少 `is_active=1` 和 `scope='official'` 过滤，MySQL 可能返回旧的无序记录（id=2585, is_active=0），而不是新的 active 记录（id=2609, is_active=1）。scene_skill_ref 写入了错误的 skill_id，后续 `scenes.py:179` 用 `WHERE id=? AND is_active=1` 查不到 → 404。
+
+### 11.3 修复方案
+
+一处代码修复 + 一次重新同步：
+
+**代码修复**：`scene_sync.py:481` 查询条件和 `db_setup.py:991/1024` 对齐，加 `is_active=1 AND scope='official'`：
+
+```python
+# 修复前
+c.execute("SELECT id FROM skill WHERE skill_name=? LIMIT 1", (skill_name,))
+
+# 修复后
+c.execute("SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='official' LIMIT 1", (skill_name,))
+```
+
+**重新同步**：本次修复通过临时让 skipped 场景也重建 scene_skill_ref 来一次性修正历史数据。修复完成后已移除该逻辑——正常情况下 hash 没变不重建，只保留查询条件修复防止未来再写错。
+
+不需要手动改 scene_skill_ref 数据、不需要删脏记录、不需要改 db_setup.py 的回填逻辑。scene_sync 每次同步都重建 ref，修了查询条件就不再写错。

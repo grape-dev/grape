@@ -21,7 +21,7 @@ function _getTask(convId) { return _chatTasks[convId] || null; }
 function _setTask(convId, task) { _chatTasks[convId] = task; if (convId) _setStoredTask(convId, task); }
 function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStoredTask(convId); }
 
-const _NO_REPLY = I18N.t('chat.no_reply');
+// _NO_REPLY: 内联 I18N.t('chat.no_reply')，不缓存（模块顶层缓存会在语言切换后失效）
 
 /**
  * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
@@ -512,7 +512,7 @@ function doSend(input, body) {
     const convId = r.conversation_id || _currentConvId;
     if (r.status === 'error') {
       const el = document.getElementById(tid);
-      if (el) el.innerHTML = renderMarkdown(r.error || _NO_REPLY);
+      if (el) el.innerHTML = renderMarkdown(r.error || I18N.t('chat.no_reply'));
       _clearTask(convId);
       loadConversations();
       return;
@@ -567,9 +567,9 @@ async function streamTask(taskId, elId, convId) {
             if (d.type === 'done') {
               // 完成 — 只显示最终结果
               finalText = d.text || finalText;
-              if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
+              if (el) el.innerHTML = renderMarkdown(finalText) || I18N.t('chat.no_reply');
             } else if (d.type === 'error') {
-              if (el) el.innerHTML = renderMarkdown(d.text || '') || _NO_REPLY;
+              if (el) el.innerHTML = renderMarkdown(d.text || '') || I18N.t('chat.no_reply');
             } else if (d.type === '思考中') {
               // 思考阶段 — 保持三点动画占位
               if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';

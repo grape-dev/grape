@@ -252,6 +252,41 @@ async def _download_dir_recursive(client: httpx.AsyncClient, api_path: str, loca
                 await _download_dir_recursive(client, epath, sub_local, token, is_references=True, depth=depth + 1)
 
 
+def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
+    """重建 scene_skill_ref：DELETE + INSERT，用 is_active=1 + scope='official' 查 skill_id。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
+        for n in nodes:
+            skill_name = n.get("skill", "")
+            if skill_name:
+                c.execute(
+                    "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='official' LIMIT 1",
+                    (skill_name,),
+                )
+                sk_row = c.fetchone()
+                skill_id = sk_row[0] if sk_row else 0
+                if skill_id == 0:
+                    logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active official skills, skill_id=0")
+                c.execute(
+                    "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
+                    (market_id, skill_id, skill_name),
+                )
+        db.commit()
+
+
+def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list):
+    """通过场景名查 market_id 后重建 scene_skill_ref。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
+        row = c.fetchone()
+    if row:
+        _rebuild_scene_skill_ref(row[0], nodes, scene_name)
+
+
 async def sync_official_scenes():
     """定时同步官方场景从 grape-skills 仓库到 scene_market 表。"""
     log.info(f"Scene sync started: {_REPO_URL} branch={_REPO_BRANCH} (API v5)")
@@ -456,28 +491,8 @@ async def sync_official_scenes():
 
                 synced_names.add(name)
 
-                # g. 更新 scene_skill_ref（含 skill_id）
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (name,))
-                    row = c.fetchone()
-                    if row:
-                        market_id = row[0]
-                        c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
-                        for n in nodes:
-                            skill_name = n.get("skill", "")
-                            if skill_name:
-                                # 查 skill 表拿 skill_id
-                                c.execute("SELECT id FROM skill WHERE skill_name=? LIMIT 1", (skill_name,))
-                                sk_row = c.fetchone()
-                                skill_id = sk_row[0] if sk_row else 0
-                                if skill_id == 0:
-                                    logger.warning(f"Scene sync: {name} skill '{skill_name}' exists in precheck but id not found, skill_id=0")
-                                c.execute(
-                                    "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
-                                    (market_id, skill_id, skill_name),
-                                )
-                        db.commit()
+                # g. 重建 scene_skill_ref（含 skill_id）
+                _rebuild_scene_skill_ref_by_name(name, nodes)
 
             except Exception as e:
                 logger.warning(f"Scene sync: {entry} failed: {e}", exc_info=True)
