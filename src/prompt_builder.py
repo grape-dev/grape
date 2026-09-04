@@ -603,7 +603,7 @@ def _append_chat_history(parts: list, history: list = None, has_valid_session: b
     """注入对话历史（chat-prompt-history-injection-design.md §3）。
 
     - 无有效 session → 注入完整「对话历史」（最近 10 条，每条截 500 字符）；
-    - 有 session → 普通对话历史由 opencode session 承载，**不再重复注入**；
+    - 有 session → 最近 3 条对话历史作为兜底上下文（防止远端 worker session 丢失）；
     - 无论 session，**含 [XXX Agent] 的 Issue 进展始终注入**为「Issue Agent 进展」段。
     """
     history = history or []
@@ -614,11 +614,14 @@ def _append_chat_history(parts: list, history: list = None, has_valid_session: b
         parts.append("\n## Issue Agent 进展")
         for m in agent_items[-10:]:
             parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
-    if not has_valid_session:
-        norm = [m for m in history if m.get("role") in ("user", "agent")]
-        if norm:
+    # 始终注入最近对话历史：has_valid_session 时只注入最近 3 条兜底，
+    # 无 session 时注入最近 10 条（与原逻辑一致）。
+    norm = [m for m in history if m.get("role") in ("user", "agent")]
+    if norm:
+        recent = norm[-3:] if has_valid_session else norm[-10:]
+        if recent:
             parts.append("\n## 对话历史")
-            for m in norm[-10:]:
+            for m in recent:
                 parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
 
 

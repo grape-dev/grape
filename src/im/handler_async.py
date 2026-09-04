@@ -54,7 +54,7 @@ def _clear_pending_selection(chat_id: str):
 # 最近图片描述缓存：chat_id -> {"desc": str, "expires": float}
 # 用户发图片后，后续追问在 TTL 窗口内自动注入图片描述，避免上下文丢失
 # 导致 opencode 以"非 DevOps 话题"拒绝回答图片相关问题。
-_PENDING_IMAGE_TTL = 300.0  # 5 分钟
+_PENDING_IMAGE_TTL = 1800.0  # 30 分钟（持久化到 DB 后内存缓存仅做近期加速）
 _pending_image_desc: dict[str, dict] = {}
 
 
@@ -1029,7 +1029,12 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     if user_token and not conv.get("user_gitcode_token"):
                         update_conversation(conv["id"], user_gitcode_token=user_token)
                 if conv_id:
-                    add_message(conv_id, "user", text)
+                    # 图片消息：把图片描述追加到用户消息里存入 DB，
+                    # 这样追问时 get_messages 历史里自然包含图片描述，不依赖内存缓存。
+                    if image_description:
+                        add_message(conv_id, "user", text + "\n\n" + image_description)
+                    else:
+                        add_message(conv_id, "user", text)
                     # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
                     from src.session_manager import mark_task_processing_by_conversation
                     mark_task_processing_by_conversation(conv_id)
