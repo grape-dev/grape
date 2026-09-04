@@ -156,11 +156,14 @@ DevOps Agents：VOD / Issue / Coding / QA / SRE
 - Agent 图标（卡片标题前，复用 _AGENT_TYPES 配色：VOD 🔍、Issue 📋、Coding 💻、QA 🧪、SRE ⚙️）
 - agent_type 标签（彩色）
 - 精选徽章（🌟，is_featured=true 的技能）
-- 描述（2-3 行，完整展示）
-- 所属场景（点击可跳转场景详情）
-- 使用统计（X 个场景在用，Y 个仓库在用）
-- 点赞按钮 + 数量（❤️ 12，点击 toggle）
+- 描述（最多 2 行截断，hover 看完整）
+- 所属场景（仅官方技能显示，超过 2 个显示前 2 个 + (+N)）
+- 使用统计（仅官方技能且 scene_count>0 或 repo_count>0 时显示）
+- 点赞按钮 + 数量（❤️ 12，点击 toggle，详情页顶部和信息栏同步更新）
 - 查看详情按钮
+
+卡片布局：flex column，高度一致，底部对齐。
+Agent tab：6 个固定显示（VOD/Issue/Coding/QA/SRE/Chat），count=0 隐藏数字不隐藏 tab。
 
 #### 3.3.2 精选推荐
 
@@ -190,8 +193,9 @@ DevOps Agents：VOD / Issue / Coding / QA / SRE
 - 描述
 - SKILL.md 全文内容
 - 下载技能包按钮（OBS 模式返回临时签名 URL）
-- 点赞数 + 精选标识
-- 所属场景标签（点击可跳转场景详情）
+- 点赞按钮 + 数量（顶部按钮和右侧信息栏同步更新）
+- 所属场景标签：仅官方技能显示，超过 3 个显示前 3 个 + (+N) 可点击展开
+- 返回按钮：智能返回来源页（技能列表 / 场景详情）
 
 ### 3.4 页面布局
 

@@ -499,6 +499,81 @@ CREATE TABLE IF NOT EXISTS login_whitelist (
 )
 """
 
+# ===== Issue-11: DevOps 市场（场景市场 + 技能市场）======
+# 技术方案：docs/new-version3/issue-11-scene-skill-market-tech-design.md 第二章
+
+_SCENE_CATEGORY_DDL = """
+CREATE TABLE IF NOT EXISTS scene_category (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    icon        TEXT DEFAULT '',
+    order_num   INTEGER DEFAULT 0,
+    is_active   INTEGER DEFAULT 1,
+    created_by  VARCHAR(64) DEFAULT '',
+    updated_by  VARCHAR(64) DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (name)
+)
+"""
+
+_SCENE_MARKET_DDL = """
+CREATE TABLE IF NOT EXISTS scene_market (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    display_name TEXT DEFAULT '',
+    version     TEXT DEFAULT '1.0.0',
+    description TEXT DEFAULT '',
+    market_description TEXT DEFAULT '',
+    icon        TEXT DEFAULT '',
+    category_id INTEGER DEFAULT 1,
+    is_featured INTEGER DEFAULT 0,
+    like_count  INTEGER DEFAULT 0,
+    source      TEXT DEFAULT 'official',
+    source_user_id INTEGER DEFAULT 0,
+    recommended_template VARCHAR(191) DEFAULT '',
+    nodes_json  TEXT DEFAULT '[]',
+    onboarding  TEXT DEFAULT 'repo-onboarding',
+    is_active   INTEGER DEFAULT 1,
+    created_by  VARCHAR(64) DEFAULT '',
+    updated_by  VARCHAR(64) DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (name, source, source_user_id)
+)
+"""
+
+_SCENE_LIKES_DDL = """
+CREATE TABLE IF NOT EXISTS scene_likes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    scene_id    INTEGER NOT NULL,
+    created_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (user_id, scene_id)
+)
+"""
+
+_SCENE_SKILL_REF_DDL = """
+CREATE TABLE IF NOT EXISTS scene_skill_ref (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_id    INTEGER NOT NULL,
+    skill_id    INTEGER DEFAULT 0,
+    skill_name  TEXT NOT NULL,
+    created_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (scene_id, skill_name)
+)
+"""
+
+_SKILL_LIKES_DDL = """
+CREATE TABLE IF NOT EXISTS skill_likes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    skill_id    INTEGER NOT NULL,
+    created_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (user_id, skill_id)
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
@@ -533,6 +608,12 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("devops_pipeline_scene", _PIPELINE_SCENE_DDL),
     ("featured_templates", _FEATURED_TEMPLATES_DDL),
     ("login_whitelist", _LOGIN_WHITELIST_DDL),
+    # ===== Issue-11: DevOps 市场表 =====
+    ("scene_category", _SCENE_CATEGORY_DDL),
+    ("scene_market", _SCENE_MARKET_DDL),
+    ("scene_likes", _SCENE_LIKES_DDL),
+    ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
+    ("skill_likes", _SKILL_LIKES_DDL),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -634,6 +715,13 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_issue_session ON agent_tasks(issue_session_id)",
         "CREATE INDEX IF NOT EXISTS idx_issue_agent_session_repo ON issue_agent_session(repo_key, agent_type, issue_id)",
         "CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id)",
+        # ===== Issue-11: DevOps 市场索引 =====
+        "CREATE INDEX IF NOT EXISTS idx_scene_market_category_id ON scene_market(category_id)",
+        "CREATE INDEX IF NOT EXISTS idx_scene_market_is_featured ON scene_market(is_featured)",
+        "CREATE INDEX IF NOT EXISTS idx_scene_market_source ON scene_market(source)",
+        "CREATE INDEX IF NOT EXISTS idx_scene_skill_ref_skill_name ON scene_skill_ref(skill_name)",
+        "CREATE INDEX IF NOT EXISTS idx_skill_is_featured ON skill(is_featured)",
+        "CREATE INDEX IF NOT EXISTS idx_market_scene_id ON devops_pipeline_scene(market_scene_id)",
     ]
     for idx in indexes:
         try:
@@ -791,6 +879,188 @@ def _migrate_whitelist_from_file():
         log.warning(f"Whitelist file migration skipped: {e}")
 
 
+def _init_scene_category_data():
+    """初始化 scene_category 表的 6 条分类数据（幂等）。
+
+    技术方案 §2.1：通用/移动开发/基础设施/技能开发/AI应用/内容创作
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        if get_meta_value("scene_category_seeded") == "1":
+            return
+        categories = [
+            ("通用", "⚙", 1),
+            ("移动开发", "🍃", 2),
+            ("基础设施", "☁", 3),
+            ("技能开发", "🔧", 4),
+            ("AI应用", "🤖", 5),
+            ("内容创作", "📝", 6),
+        ]
+        with db_lock:
+            c = db.cursor()
+            for name, icon, order_num in categories:
+                c.execute(
+                    "INSERT OR IGNORE INTO scene_category (name, icon, order_num, is_active) VALUES (?,?,?,1)",
+                    (name, icon, order_num),
+                )
+            db.commit()
+        set_meta_value("scene_category_seeded", "1")
+        log.info("Seeded scene_category with 6 categories")
+    except Exception as e:
+        log.warning(f"Init scene_category data failed: {e}")
+
+
+def _init_scene_market_data():
+    """初始化 scene_market 表的 8 条场景数据（幂等）。
+
+    技术方案 §3.2：从现有 devops_pipeline_scene official 场景复制 nodes_json + 补充展示字段。
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        if get_meta_value("scene_market_seeded") == "1":
+            return
+        with db_lock:
+            c = db.cursor()
+            # 检查已有数据
+            count = c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official'").fetchone()[0]
+            if count > 0:
+                set_meta_value("scene_market_seeded", "1")
+                return
+            # 从 devops_pipeline_scene 的 official 场景复制 nodes_json
+            c.execute("SELECT scene_id, name, description, nodes_json, onboarding FROM devops_pipeline_scene WHERE scope='official'")
+            rows = c.fetchall()
+            # 构建 scene_id → row 映射
+            scene_map = {r[0]: r for r in rows}
+            # 8 条初始场景：name, display_name, category_id, is_featured, recommended_template, market_description, source_scene_id
+            init_scenes = [
+                ("harmony", "鸿蒙开发", 2, 0, "harmony-ecommerce", "鸿蒙应用开发场景，适合 HarmonyOS 应用开发", None),
+                ("default", "通用开发", 1, 1, "hello-flask", "通用的全链路开发场景，从需求收集到部署运维，适合大多数项目", "default"),
+                ("iac", "IaC开发", 3, 1, "tf-infra", "IaC 基础设施即代码开发场景，使用 Terraform 管理云资源", "iac"),
+                ("skill-dev", "华为云Skill开发", 4, 1, "hello-skill", "华为云 Skill 开发场景，创建和发布华为云技能", "skill-dev"),
+                ("cloud-native", "云原生开发", 3, 0, "micro-svc", "云原生开发场景，适合微服务和容器化项目", "cloud-native"),
+                ("agent-dev", "Agent开发", 5, 0, "ai-interview-swarm", "Agent 开发场景，适合构建 AI Agent 项目", "agent-dev"),
+                ("api-skill-dev", "通用Skill开发", 4, 0, "hello-skill", "通用 Skill 开发场景，创建和发布通用技能", "api-skill-dev"),
+                ("blog-publish", "博客发布", 6, 0, "", "博客系统开发与发布场景", "blog-publish"),
+            ]
+            imported = 0
+            for name, display_name, cat_id, featured, template, mkt_desc, src_scene_id in init_scenes:
+                nodes_json = "[]"
+                onboarding = "repo-onboarding"
+                if src_scene_id and src_scene_id in scene_map:
+                    row = scene_map[src_scene_id]
+                    nodes_json = row[3] or "[]"
+                    onboarding = row[4] or "repo-onboarding"
+                c.execute(
+                    "INSERT OR IGNORE INTO scene_market "
+                    "(name, display_name, version, description, market_description, icon, category_id, "
+                    "is_featured, like_count, source, source_user_id, recommended_template, nodes_json, onboarding, is_active) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+                    (name, display_name, "1.0.0", mkt_desc, mkt_desc, "", cat_id,
+                     featured, 0, "official", 0, template, nodes_json, onboarding),
+                )
+                imported += 1
+            db.commit()
+        set_meta_value("scene_market_seeded", "1")
+        log.info(f"Seeded scene_market with {imported} scenes")
+    except Exception as e:
+        log.warning(f"Init scene_market data failed: {e}")
+
+
+def _init_scene_skill_ref():
+    """初始化 scene_skill_ref 表（幂等）+ 回填 skill_id。
+
+    技术方案 §3.3：遍历 scene_market 全部场景的 nodes_json，拆出每个 skill_name，
+    查 skill 表拿 skill_id，一起写入 scene_skill_ref。
+    幂等：已有记录补填 skill_id（旧数据可能 skill_id=0）。
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        with db_lock:
+            c = db.cursor()
+            # 回填：已有记录中 skill_id=0 的，从 skill 表查 id 补上
+            c.execute("SELECT id, skill_name FROM scene_skill_ref WHERE skill_id=0")
+            stale_rows = c.fetchall()
+            for ref_id, skill_name in stale_rows:
+                c.execute(
+                    "SELECT id FROM skill WHERE skill_name=? AND is_active=1 LIMIT 1",
+                    (skill_name,),
+                )
+                sk_row = c.fetchone()
+                if sk_row:
+                    c.execute(
+                        "UPDATE scene_skill_ref SET skill_id=? WHERE id=?",
+                        (sk_row[0], ref_id),
+                    )
+            if stale_rows:
+                db.commit()
+                log.info(f"Backfilled {len(stale_rows)} scene_skill_ref.skill_id")
+
+            # 首次初始化：未 seeded 时写入全部关联
+            if get_meta_value("scene_skill_ref_seeded") == "1":
+                return
+            c.execute("SELECT id, nodes_json FROM scene_market WHERE is_active=1")
+            rows = c.fetchall()
+            inserted = 0
+            for scene_id, nodes_json in rows:
+                if not nodes_json:
+                    continue
+                try:
+                    nodes = json.loads(nodes_json)
+                except Exception:
+                    continue
+                for node in (nodes or []):
+                    skill_name = (node or {}).get("skill", "")
+                    if not skill_name:
+                        continue
+                    # 查 skill 表拿 skill_id
+                    skill_id = 0
+                    c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 LIMIT 1",
+                        (skill_name,),
+                    )
+                    sk_row = c.fetchone()
+                    if sk_row:
+                        skill_id = sk_row[0]
+                    c.execute(
+                        "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
+                        (scene_id, skill_id, skill_name),
+                    )
+                    inserted += c.rowcount
+            db.commit()
+        set_meta_value("scene_skill_ref_seeded", "1")
+        log.info(f"Seeded scene_skill_ref with {inserted} skill references")
+    except Exception as e:
+        log.warning(f"Init scene_skill_ref failed: {e}")
+
+
+def _init_skill_featured():
+    """初始化 skill 表的 is_featured 精选标记（幂等）。
+
+    技术方案 §3.1：6 个技能设 is_featured=1（vod/issue-advance/implementation/pr/cloud-deploy/skill-creator）。
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        if get_meta_value("skill_featured_seeded") == "1":
+            return
+        featured_skills = [
+            "vod", "issue-advance", "implementation", "pr", "cloud-deploy", "skill-creator",
+        ]
+        with db_lock:
+            c = db.cursor()
+            updated = 0
+            for skill_name in featured_skills:
+                c.execute(
+                    "UPDATE skill SET is_featured=1 WHERE skill_name=? AND scope='official'",
+                    (skill_name,),
+                )
+                updated += c.rowcount
+            db.commit()
+        set_meta_value("skill_featured_seeded", "1")
+        log.info(f"Set is_featured=1 for {updated} official skills")
+    except Exception as e:
+        log.warning(f"Init skill featured failed: {e}")
+
+
 def init_database():
     """初始化所有新表(幂等),启动时调用"""
     # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
@@ -815,6 +1085,11 @@ def init_database():
                 _cleanup_stale_meta()
                 _cleanup_chat_shared_worker_runtime()
                 _migrate_whitelist_from_file()
+                # ===== Issue-11: DevOps 市场数据初始化 =====
+                _init_scene_category_data()
+                _init_scene_market_data()
+                _init_scene_skill_ref()
+                _init_skill_featured()
             finally:
                 c.execute("SELECT RELEASE_LOCK('grape_migrate')")
     else:
@@ -828,6 +1103,11 @@ def init_database():
         _cleanup_stale_meta()
         _cleanup_chat_shared_worker_runtime()
         _migrate_whitelist_from_file()
+        # ===== Issue-11: DevOps 市场数据初始化 =====
+        _init_scene_category_data()
+        _init_scene_market_data()
+        _init_scene_skill_ref()
+        _init_skill_featured()
     # MySQL with session_manager
 
 def _sync_official_skills():
@@ -1164,6 +1444,13 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN probe_latency INT DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_last VARCHAR(64) DEFAULT ''",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_error TEXT DEFAULT ''",
+        # ===== Issue-11: skill 表加 is_featured + like_count =====
+        "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
+        "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
+        # ===== Issue-11: devops_pipeline_scene 加 market_scene_id（单向关联） =====
+        "ALTER TABLE devops_pipeline_scene ADD COLUMN market_scene_id INTEGER DEFAULT NULL",
+        # ===== Issue-11: scene_skill_ref 加 skill_id =====
+        "ALTER TABLE scene_skill_ref ADD COLUMN skill_id INTEGER DEFAULT 0",
     ]
     for sql in migrations:
         try:

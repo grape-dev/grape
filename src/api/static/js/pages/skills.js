@@ -166,13 +166,14 @@ function _renderSkillPage() {
     html += `<div id="featured-skills-section" style="margin-bottom:20px">
       <div class="cd-h" style="margin-bottom:10px"><h2>🌟 ${I18N.t('skills.featured_skills')||'精选技能'}</h2></div>
       <div class="scn-scroll-wrap">
-        <div id="featured-skills" class="scn-scroll-track">
+        <div id="featured-skills" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-skills')">
           ${_featuredSkills.map(s => _renderSkillCard(s, true)).join('')}
         </div>
-        <button class="scn-scroll-btn scn-scroll-prev" onclick="document.getElementById('featured-skills').scrollBy({left:-314,behavior:'smooth'})">◀</button>
-        <button class="scn-scroll-btn scn-scroll-next" onclick="document.getElementById('featured-skills').scrollBy({left:314,behavior:'smooth'})">▶</button>
+        <button class="scn-scroll-btn scn-scroll-prev" id="featured-skills-prev" onclick="document.getElementById('featured-skills').scrollBy({left:-314,behavior:'smooth'})">◀</button>
+        <button class="scn-scroll-btn scn-scroll-next" id="featured-skills-next" onclick="document.getElementById('featured-skills').scrollBy({left:314,behavior:'smooth'})">▶</button>
       </div>
     </div>`;
+    setTimeout(() => _updateScrollBtns('featured-skills'), 100);
   }
 
   // 全部技能 — 标题行 + 搜索 + 查找 + 排序 + 上传
@@ -180,12 +181,12 @@ function _renderSkillPage() {
   html += `<div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
     <h2>${I18N.t('skills.all_skills')||'全部技能'} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${_skillTotal}</span></h2>
     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
-      <input id="skillSearchInput" placeholder="${I18N.t('skills.search_placeholder')||'搜索技能或描述任务...'}" value="${_skillSearchQ}" onkeyup="if(event.key==='Enter'){_skillSearchQ=this.value;_skillPage=1;_reloadSkills()}" style="padding:7px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);color:var(--t);width:200px">
+      <input id="skillSearchInput" placeholder="${I18N.t('skills.skill_search_placeholder')||'搜索技能名称或描述'}" value="${_skillSearchQ}" onkeyup="if(event.key==='Enter'){_skillSearchQ=this.value;_skillPage=1;_reloadSkills()}" style="padding:7px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);color:var(--t);width:200px">
       <button class="bt bt-o bt-s" onclick="_skillSearchQ=document.getElementById('skillSearchInput').value;_skillPage=1;_reloadSkills()">${I18N.t('skills.find_skill')||'查找技能'}</button>
       <button class="bt ${_skillSort==='latest'?'bt-p':'bt-o'} bt-s" id="sort-latest" onclick="_switchSort('latest')">${I18N.t('skills.sort_latest')||'最新'}</button>
       <button class="bt ${_skillSort==='hot'?'bt-p':'bt-o'} bt-s" id="sort-hot" onclick="_switchSort('hot')">${I18N.t('skills.sort_hot')||'最热'}</button>`;
   if (_skillTab === 'repo' || _skillTab === 'user') {
-    html += `<button class="bt bt-p bt-s" onclick="showSkillUpload()" style="margin-left:8px;color:#fff;background:var(--g);border-color:var(--g)">⬆ ${I18N.t('skills.action.add_skill')||'上传技能'}</button>`;
+    html += `<button class="bt bt-p bt-s" onclick="showSkillUpload()" style="color:#fff;background:var(--g);border-color:var(--g)">⬆ ${I18N.t('skills.action.add_skill')||'上传技能'}</button>`;
   }
   html += `</div></div>`;
 
@@ -297,7 +298,13 @@ function _renderSkillCard(s, fixedWidth) {
   const meta = _AGENT_META[at] || {};
   const tagClass = s.scope === 'official' ? 'tg-c' : s.scope === 'repo' ? 'tg-i' : 'tg-d';
   const scenesArr = (s.scenes || []).map(sc => sc.display_name || sc.name || sc);
-  const scenesStr = scenesArr.length ? scenesArr.join(' · ') : '';
+  const sceneCount = s.scene_count || scenesArr.length || 0;
+  const scenesStr = scenesArr.length > 0
+    ? (scenesArr.length <= 2
+        ? scenesArr.join(' · ')
+        : `${scenesArr.slice(0, 2).join(' · ')}(+${scenesArr.length - 2})`)
+    : '';
+  const scenesTitle = scenesArr.join(' · ');
   const likeIcon = s.liked_by_me ? '❤️' : '🤍';
   const likeCount = s.like_count || 0;
   const featuredBadge = s.is_featured ? '<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟</span>' : '';
@@ -337,9 +344,9 @@ function _renderSkillCard(s, fixedWidth) {
       <span class="rn">${s.display_name || s.name}</span>
       ${featuredBadge}
     </div>
-    <div class="rd" style="margin-bottom:8px">${s.description || ''}</div>
-    ${scenesStr ? `<div class="ro" style="color:var(--a)">${I18N.t('skills.info_scenes')||'所属场景'}：${scenesStr}</div>` : ''}
-    <div class="ro">${s.scene_count||0} ${I18N.t('skills.scenes_in_use_suffix')||'场景在用'}，${s.repo_count||0} ${I18N.t('skills.repos_in_use')||'仓库在用'}</div>
+    <div class="rd" style="margin-bottom:8px" title="${(s.description||'').replace(/"/g,'&quot;')}">${s.description || ''}</div>
+    ${scenesStr ? `<div class="ro" style="color:var(--a)" title="${scenesTitle.replace(/"/g,'&quot;')}">${I18N.t('skills.info_scenes')||'所属场景'}：${scenesStr}</div>` : ''}
+    ${sceneCount > 0 || (s.repo_count||0) > 0 ? `<div class="ro">${sceneCount} ${I18N.t('skills.scenes_in_use_suffix')||'场景在用'}，${s.repo_count||0} ${I18N.t('skills.repos_in_use')||'仓库在用'}</div>` : ''}
     <div class="rf">
       <span class="s" style="cursor:pointer" onclick="event.stopPropagation();toggleSkillLike(${s.id},this)">${likeIcon} ${likeCount}</span>
       <div class="sk-card-btns">
@@ -353,8 +360,16 @@ function _renderSkillCard(s, fixedWidth) {
 // ── 点赞 toggle ──
 function toggleSkillLike(skillId, el) {
   API.post('/skills/' + skillId + '/like', {}).then(r => {
+    const icon = r.liked ? '❤️' : '🤍';
+    const count = r.like_count || 0;
+    // 更新顶部按钮
     if (el) {
-      el.innerHTML = (r.liked ? '❤️' : '🤍') + ' ' + (r.like_count || 0);
+      el.innerHTML = icon + ' <span id="detailLikeCount">' + count + '</span>';
+    }
+    // 同步右侧信息栏点赞
+    const infoEl = document.getElementById('detailInfoLikes');
+    if (infoEl) {
+      infoEl.textContent = icon + ' ' + count;
     }
     // 更新缓存
     const s = _allSkills.find(x => x.id == skillId);
@@ -382,7 +397,18 @@ function renderSkillDetail(data) {
   const tagClass = data.scope === 'official' ? 'tg-c' : data.scope === 'repo' ? 'tg-i' : 'tg-d';
   const featuredBadge = data.is_featured ? `<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟 ${I18N.t('skills.featured')||'精选'}</span>` : '';
   const scenesArr = (data.scenes || []).map(sc => sc.display_name || sc.name || sc);
-  const scenesHtml = scenesArr.length ? scenesArr.map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('') : '—';
+  const showScenes = data.scope === 'official';
+  const SCENE_PREVIEW = 3;
+  let scenesHtml = '—';
+  if (showScenes && scenesArr.length) {
+    if (scenesArr.length <= SCENE_PREVIEW) {
+      scenesHtml = scenesArr.map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('');
+    } else {
+      const preview = scenesArr.slice(0, SCENE_PREVIEW).map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('');
+      const rest = scenesArr.slice(SCENE_PREVIEW).map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('');
+      scenesHtml = `${preview}<a onclick="(function(e){e.preventDefault();var r=document.getElementById('sceneRest');r.style.display='inline';var m=document.getElementById('sceneMore');m.style.display='none';})(event)" id="sceneMore" style="font-size:10px;color:var(--a);cursor:pointer;margin:2px">(+${scenesArr.length - SCENE_PREVIEW})</a><span id="sceneRest" style="display:none">${rest}</span>`;
+    }
+  }
   const likeCount = data.like_count || 0;
   const likedIcon = data.liked_by_me ? '❤️' : '🤍';
   const content = (data.content || '').replace(/`/g, '\\`').replace(/\${/g, '\\${');
@@ -417,8 +443,8 @@ function renderSkillDetail(data) {
         <div class="srow"><label>${I18N.t('skills.info_agent_type')||'Agent'}</label><span>${(meta.label||at)+' Agent'}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_type')||'类型'}</label><span>${_SCOPE_NAMES[data.scope]||data.scope}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_featured')||'精选'}</label><span>${data.is_featured ? I18N.t('skills.featured')||'是' : '—'}</span></div>
-        <div class="srow"><label>${I18N.t('skills.info_likes')||'点赞'}</label><span>${likedIcon} ${likeCount}</span></div>
-        <div class="srow"><label>${I18N.t('skills.info_scenes')||'场景'}</label><span class="t2">${scenesHtml}</span></div>
+        <div class="srow"><label>${I18N.t('skills.info_likes')||'点赞'}</label><span id="detailInfoLikes">${likedIcon} ${likeCount}</span></div>
+        ${showScenes ? `<div class="srow"><label>${I18N.t('skills.info_scenes')||'场景'}</label><span class="t2">${scenesHtml}</span></div>` : ''}
         <div class="srow"><label>${I18N.t('skills.info_description')||'描述'}</label><span class="t2">${data.description || '—'}</span></div>
       </div>
     </div>`;

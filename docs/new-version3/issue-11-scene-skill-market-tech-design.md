@@ -142,12 +142,16 @@ CREATE INDEX idx_market_scene_id ON devops_pipeline_scene (market_scene_id);
 scene_market（市场，独立完整，自包含）
   id=1  name=通用开发  nodes=[vod→issue→coding→qa→sre]  recommended_template=hello-flask  ...
     ↓ 用户点"应用"
-    ↓ 从 scene_market 复制配置到用户场景表
+    ↓ 从 scene_market 复制配置到用户场景表（scope='user'）
 devops_pipeline_scene（用户场景配置，记录来源）
-  market_scene_id=1  scope=user  nodes=[从市场复制的]  ← 从市场 id=1 复制来的
-  market_scene_id=1  scope=repo  ← 同一个场景应用到另一个仓库
-  market_scene_id=NULL            ← 用户自建场景（不走市场）
+  market_scene_id=1  scope=user  scene_id=custom-{uuid}  ← 从市场 id=1 复制来的（用户级，所有仓库共享）
+  market_scene_id=NULL  scope=user  scene_id=custom-{uuid}  ← 用户在场景中心自建的（不走市场）
 ```
+
+设计要点：
+- 市场应用（apply）和体验（experience）都创建 **scope='user'** 的场景，与场景中心创建自定义场景行为一致
+- scene_id 用 custom-{uuid}，不用 scene_market.name，避免与 official 场景自动 fork 的记录冲突（唯一键 scene_id+scope+repo_key+user_id）
+- apply_scene 只更新当前仓库的 devops_agent_session（agent 绑定是仓库级的），场景配置本身是用户级的
 
 ### 2.4 skill 表加字段
 
@@ -208,19 +212,21 @@ CREATE TABLE IF NOT EXISTS scene_likes (
 CREATE TABLE IF NOT EXISTS scene_skill_ref (
     id          INT NOT NULL AUTO_INCREMENT,               -- 主键自增
     scene_id    INT NOT NULL COMMENT '场景市场ID（scene_market.id）',
-    skill_name  VARCHAR(256) NOT NULL COMMENT '技能名（指向 skill.skill_name）',
+    skill_id    INT DEFAULT 0 COMMENT '技能ID（指向 skill.id，以 ID 为准）',
+    skill_name  VARCHAR(256) NOT NULL COMMENT '技能名（指向 skill.skill_name，冗余便于统计）',
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     PRIMARY KEY (id),
     UNIQUE KEY uk_scene_skill (scene_id, skill_name),
-    INDEX idx_skill_name (skill_name)
+    INDEX idx_skill_name (skill_name),
+    INDEX idx_skill_id (skill_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
 设计原则：
-- **预计算关联表**：场景初始化/上传时解析 nodes_json，拆出每个 skill_name 写入此表，避免每次统计都解析 JSON
-- **统计高性能**：技能使用统计直接 SQL 聚合，不解析 JSON 字符串
-  - 被多少场景使用：SELECT COUNT(DISTINCT scene_id) FROM scene_skill_ref WHERE skill_name=?
-  - 被多少仓库间接使用：SELECT COUNT(*) FROM scene_skill_ref sr JOIN devops_pipeline_scene d ON sr.scene_id=d.market_scene_id WHERE sr.skill_name=? AND d.market_scene_id IS NOT NULL
+- **预计算关联表**：场景初始化/上传时解析 nodes_json，拆出每个 skill_name + 查 skill 表拿 skill_id，一起写入此表，避免每次统计都解析 JSON
+- **以 skill_id 为准**：skill_name 是冗余字段（便于统计聚合），跳转和关联以 skill_id 为准。初始化时查 skill 表填入 skill_id；已有数据 skill_id=0 时启动回填
+- **统计高性能**：技能使用统计直接 SQL 聚合，不解析 JSON 字符串（2026-09-04 改为按 skill_id 关联）
+  - 被多少场景使用 + 被多少仓库间接使用（一条 LEFT JOIN SQL）：SELECT sr.skill_id, COUNT(DISTINCT sr.scene_id) AS scene_count, COUNT(DISTINCT d.id) AS repo_count FROM scene_skill_ref sr LEFT JOIN devops_pipeline_scene d ON sr.scene_id = d.market_scene_id WHERE sr.skill_id IN (...) GROUP BY sr.skill_id
 - **场景变更时同步**：场景 nodes_json 变更时（初始化/上传/同步），先 DELETE WHERE scene_id=? 再重新 INSERT
 - **和 skill 表的 skill_name 关联**：不存 skill_id，因为 nodes_json 里用的是 skill_name（如 "implementation"），直接对应
 - 与"在用仓库数"维度互补：点赞=主观认可（好不好用），在用仓库数=客观使用量（多少团队在用）
@@ -373,49 +379,46 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
 
 #### POST /api/scenes/market/{market_id}/apply
 
-应用场景：从 scene_market 复制配置到当前仓库的 devops_pipeline_scene。
+应用场景：从 scene_market 复制配置到用户级 devops_pipeline_scene（scope='user'），与场景中心创建自定义场景一致。
 
 ```python
 @router.post("/market/{market_id}/apply")
-def apply_market_scene(market_id: int, user: dict = Depends(get_current_user)):
-    """应用场景：从市场复制配置到当前仓库"""
-    # 1. 查 scene_market WHERE id=? 拿 name + nodes_json + onboarding
-    #    不存在 → 404 "场景不存在"
-    # 2. 前提：用户已选中已托管仓库（从 localStorage.currentRepo 读）
-    #    未选仓库 → 400 "请先选择仓库"
-    # 3. 幂等：先查 devops_pipeline_scene WHERE market_scene_id=? AND repo_key=? AND scope='repo'
-    #    已存在 → 更新 nodes_json/onboarding
-    #    不存在 → 新建，scene_id = UUID
-    # 4. 以上操作在 db_lock 事务内执行
-    # 5. 调现有 apply_scene 逻辑（更新 devops_agent_session 的 skill 配置）
-    # 6. 更新 managed_repos.dev_scene = scene_id
-    # 7. 返回 {message: "场景已应用"}
-    # 失败时返回 {code: 4xx, message: "应用失败：原因"}
-```
+def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
+                       owner: str = "", repo: str = ""):
+    """应用场景：从市场复制配置到仓库级 devops_pipeline_scene（scope='repo'）。
+    - scope='repo', repo_key=当前仓库, scene_id=custom-{uuid}
+    - 幂等：同一仓库同一市场场景不重复创建（按 market_scene_id + repo_key 查重）
+    - 同时调 apply_scene 更新当前仓库的 agent 配置
+    """
 
 #### POST /api/scenes/market/{market_id}/experience
 
-体验场景：一键创建项目。
+体验场景：基于场景关联的推荐模板创建/复用项目并应用场景，场景配置复制到用户级 devops_pipeline_scene（scope='user'）。
+
+前端交互流程：
+1. 点击"体验"→ 弹出进度弹框（6 步定时器推进：检查环境→创建仓库→下载模板→推送代码→托管→应用场景）
+2. API 返回成功（无论新建还是复用已有仓库）→ 800ms 后自动关闭弹框，跳转到仓库场景中心
+3. API 返回失败 → 显示错误信息，按钮变为"关闭"
+4. 请求超时 300 秒（体验流程含建仓库+推代码+托管，较长）
+
+后端逻辑：
+1. 查 scene_market 拿 recommended_template + nodes_json + onboarding
+2. 拿模板的 default_repo_name + 用户的 gitcode_login
+3. 查 user_repos 里是否已有 {gitcode_login}/{default_repo_name}
+   - 已有 → 检查是否已托管（managed_repos），未托管则调 host_repo 托管
+   - 没有 → 调 create_from_template 创建+托管
+4. 创建/复用用户级 devops_pipeline_scene（scope='user', scene_id=custom-{uuid}）
+   - 幂等：同一用户同一市场场景只创建一条 user scope 记录，已存在则更新
+5. 调 apply_scene 应用场景配置到仓库的 agent_session
+6. 返回 {full_name, scene_id, already_exists, message}
 
 ```python
 @router.post("/market/{market_id}/experience")
 async def experience_market_scene(market_id: int, user: dict = Depends(get_current_user)):
-    """体验场景：基于场景关联的推荐模板创建项目，每用户每场景限一次"""
-    # 1. 查 scene_market WHERE id=? 拿 recommended_template + nodes_json + onboarding
-    #    不存在 → 404 "场景不存在"
-    #    recommended_template 为空 → 400 "该场景暂无体验模板，无法体验"
-    #    前端：recommended_template 为空时禁用体验按钮
-    # 2. 检查去重：查 devops_pipeline_scene WHERE market_scene_id=?
-    #    AND user_id=用户id（或 repo_owner=用户 username）
-    #    已体验 → 返回 {already_experienced: true, full_name: "xxx/yyy"}
-    # 3. 未体验 → 调用现有 create_from_template（template_id=recommended_template）
-    #    建仓库 → 写代码 → 托管 → onboarding（触发首次托管引导，建立项目知识基线+创建体验任务）
-    # 4. 把 scene_market 的场景配置复制到新仓库的 devops_pipeline_scene：
-    #    - market_scene_id = market_id（记录来源）
-    #    - nodes_json = 从 scene_market 复制的
-    # 5. 调 apply_scene 应用场景配置到 agent_session
-    # 6. 返回 {full_name, message}
-    # 失败时返回 {code: 4xx/5xx, message: "体验失败：原因"}
+    """体验场景：基于场景关联的推荐模板创建/复用项目并应用场景。
+    - 创建 scope='repo' 的 devops_pipeline_scene，repo_key=体验创建的仓库
+    - 幂等：同一仓库同一市场场景不重复创建（按 market_scene_id + repo_key 查重）
+    """
 ```
 
 #### POST /api/scenes/market/{market_id}/like
@@ -457,7 +460,9 @@ def toggle_like(skill_id: int, user: dict = Depends(get_current_user)):
 ```python
 @router.get("/featured")
 def list_featured_skills(user: dict = Depends(get_current_user)):
-    """精选技能：is_featured=1 的 official 技能，按 like_count 降序"""
+    """精选技能：is_featured=1 的 official 技能，按 like_count 降序。
+    补充 scope/scenes/scene_count/repo_count/liked_by_me 字段（与 /skills 接口对齐）。
+    """
 ```
 
 #### GET /api/skills/stats
@@ -742,7 +747,7 @@ scope 页签（技能市场/仓库技能/个人技能）
 |---|------|------|
 | 1 | src/api/db_setup.py | 新建 _SCENE_CATEGORY_DDL + _SCENE_MARKET_DDL（含 category_id/like_count/display_name/version）+ _SCENE_LIKES_DDL + _SCENE_SKILL_REF_DDL + _SKILL_LIKES_DDL + _SKILL_DDL 加 is_featured/like_count + _PIPELINE_SCENE_DDL 加 market_scene_id + _init_scene_category_data 初始化 6 条分类 + _init_scene_market_data 初始化 8 条场景 + _init_scene_skill_ref 初始化关联关系 + _init_skill_featured 初始化精选标记 + migration 追加 |
 | 2 | src/api/routes/scenes.py | 新增 GET /market/categories、GET /market、GET /market/{id}、POST /market/{id}/apply、POST /market/{id}/experience、POST /market/{id}/like |
-| 3 | src/api/routes/skills.py | 新增 POST /{id}/like、GET /featured、GET /stats、GET /search。现有 sync-official 接口的 DB 同步逻辑移到 skill_sync.py（接口保留但不再被前端每次调用） |
+| 3 | src/api/routes/skills.py | 新增 POST /{id}/like、GET /featured、GET /stats、GET /search。现有 sync-official 接口的 DB 同步逻辑移到 skill_sync.py（接口保留但不再被前端每次调用）。现有 DELETE /skills/{skill_name} 改为 DELETE /skills/by-id/{skill_id}（按主键 id 删除，scope 从数据库读实际值不信任前端参数，新增 official 不允许删除校验） |
 | 4 | src/api/routes/templates.py | 可能微调，支持按 recommended_template 查模板详情 |
 | 5 | src/api/pipeline_config.py | 新增从 scene_market 复制配置到 devops_pipeline_scene 的函数 |
 | 6 | src/user/db.py | 新增点赞 CRUD 函数 + 技能统计查询函数 + scene_market CRUD 函数 + scene_category CRUD 函数 |
@@ -813,21 +818,19 @@ scope 页签（技能市场/仓库技能/个人技能）
 ### 7.3 技能使用统计查询
 
 ```python
-# 通过 scene_skill_ref 关联表直接 SQL 聚合，不解析 JSON
+# 通过 scene_skill_ref 关联表直接 SQL 聚合，按 skill_id 关联（2026-09-04 改）
 
-# 被多少场景使用：
-# SELECT skill_name, COUNT(DISTINCT scene_id) as scene_count
-# FROM scene_skill_ref GROUP BY skill_name
-
-# 被多少仓库间接使用：
-# SELECT sr.skill_name, COUNT(*) as repo_count
+# 一条 SQL 同时拿 scene_count + repo_count（按本页 skill_ids 过滤）：
+# SELECT sr.skill_id,
+#        COUNT(DISTINCT sr.scene_id) AS scene_count,
+#        COUNT(DISTINCT d.id) AS repo_count
 # FROM scene_skill_ref sr
-# JOIN devops_pipeline_scene d ON sr.scene_id = d.market_scene_id
-# WHERE d.market_scene_id IS NOT NULL
-# GROUP BY sr.skill_name
+# LEFT JOIN devops_pipeline_scene d ON sr.scene_id = d.market_scene_id
+# WHERE sr.skill_id IN (?, ?, ...)
+# GROUP BY sr.skill_id
 
-# 合并为 {skill_name: {scene_count: N, repo_count: N}}
-# list_skills 查出技能列表后，用这个字典补字段，不每个技能单独查
+# 合并为 {skill_id: {scene_count: N, repo_count: N}}
+# list_skills 查出技能列表后，用这个字典按 skill_id 补字段，不每个技能单独查
 ```
 
 ### 7.4 技能查找实现（第一期不调 LLM）
@@ -1019,7 +1022,89 @@ scene-template.zip
     └── icon.png          ← 示例图标
 ```
 
-## 九、设计原则和注意事项
+## 九、实现迭代记录（代码已落地）
+
+### 9.1 技能详情智能返回（2026-09-04）
+
+技能详情页返回按钮根据来源页决定返回目标，不固定返回技能列表：
+- 技能列表 → 技能详情 → 返回技能列表（_backToSkillList 直接渲染不 push history）
+- 场景详情 → 技能详情 → 返回场景详情（renderSceneDetail + replaceState 更新 history.state）
+- 无来源（直接 URL 进入）→ 兜底 app.nav('scene-market')
+- 华为云技能包和子技能详情页使用同样逻辑（_backFromSkillDetail / _backFromSubSkill）
+
+关键点：返回场景详情后用 history.replaceState 更新当前历史记录，否则连续两次进入技能详情时来源判断错误。
+
+### 9.2 Agent tab 固定显示（2026-09-04）
+
+_buildAgentGroups 不再 filter 掉 count=0 的 agent。6 个 Agent tab（VOD/Issue/Coding/QA/SRE/Chat）固定显示，count=0 时不显示数字徽章。
+
+### 9.3 卡片描述截断 + 底部对齐（2026-09-04）
+
+场景卡片（.scn-card-desc）和技能卡片（.rc .rd）描述统一 2 行截断（-webkit-line-clamp:2），hover title 看完整描述。
+卡片用 flex column 布局（.scn-card / .scn-card-body / .scn-card-foot margin-top:auto），所有卡片高度一致、底部对齐。
+
+### 9.4 技能卡片场景展示优化（2026-09-04）
+
+- 非官方技能（scope !== 'official'）不显示"所属场景"行和"场景在用/仓库在用"统计行
+- 场景超过 2 个时只显示前 2 个 + (+N)，hover title 看全部
+- scene_count=0 且 repo_count=0 时不显示统计行
+
+### 9.5 /featured 接口字段补全（2026-09-04）
+
+精选技能接口（GET /api/skills/featured）补充 scope/scenes/scene_count/repo_count 字段，与 /skills 接口对齐。前端精选卡片现在能正确显示所属场景和使用统计。
+
+### 9.6 场景-技能关联改用 skill_id（2026-09-04）
+
+scene_skill_ref 表已有 skill_id 字段但代码全用 skill_name 关联。改为以 skill_id 为准：
+- get_skill_usage_stats(skill_ids) — 按本页 skill_ids 过滤，不再全表聚合；两条 SQL 合并为一条 LEFT JOIN
+- batch_skill_scenes(skill_ids) — WHERE skill_id IN(...)
+- get_skill_scenes(skill_id) — WHERE skill_id=?
+- /skills 和 /featured 接口传 skill_ids 而不是 skill_names
+
+### 9.7 技能详情页场景展开 + 点赞同步（2026-09-04）
+
+- 所属场景超过 3 个时只显示前 3 个 + (+N) 可点击展开
+- 非官方技能不显示所属场景行
+- 点赞后顶部按钮和右侧信息栏同步更新（detailInfoLikes id 联动）
+
+### 9.8 上传按钮对齐 + 模板下载修复（2026-09-04）
+
+- 上传技能按钮去掉 margin-left:8px，和其他按钮统一 flex gap 间距
+- 下载技能模板 404 修复：创建 skills/_template/ 目录（含标准 SKILL.md + references/ + scripts/）
+
+### 9.9 apply/experience 改为 repo scope + 脏数据清理（2026-09-04）
+
+**问题**：apply 和 experience 接口创建 scope='user' 的场景配置，repo_key 写空字符串。user scope 是用户级配置，同一用户对同一市场场景只保留一条记录，不同仓库应用会覆盖不新建。导致：
+- "在用仓库数"统计不准（user scope 行 repo_key 为空被 COUNT 算进去）
+- 无法区分哪些仓库实际应用了场景
+
+**脏数据清理**：执行 `UPDATE devops_pipeline_scene SET is_active=0 WHERE scope='user' AND market_scene_id IS NOT NULL`，软删除 5 条 user scope 脏数据。
+
+**改动**：
+- apply 接口：幂等查重从 `market_scene_id + user_id + scope='user'` 改为 `market_scene_id + repo_key + scope='repo'`。INSERT 时 scope='repo'，repo_key 写实际仓库。
+- experience 接口：同样改为 scope='repo'，repo_key 写体验创建的仓库。
+- 统计函数：去掉 `repo_key!=''` 过滤（脏数据已清理，user scope 行已 is_active=0）。
+- 不影响：场景中心手动创建自定义场景（仍 user scope）、fork_official_scene（托管自动 fork，仍 repo scope）。
+- 幂等：同一仓库重复应用同一场景更新不新建，不同仓库各自独立记录。
+
+### 9.10 在用仓库列表权限标记 + 分页展示（2026-09-04）
+
+- 后端 `get_scene_market_detail` 返回 repos 时标记 `accessible: True/False`（当前用户是否有权限访问该仓库，通过 get_user_repos 集合匹配）
+- 前端：accessible 的仓库可点击跳转 GitCode，不可访问的显示"无权限"且不可点击
+- 超过 6 个仓库时默认显示前 6 个，"查看全部(N)"按钮展开剩余
+
+### 9.11 样例项目模板来源标识（2026-09-04）
+
+- git 模板（source='git' + source_repo 有值）显示"GitCode 远程"标识 + "查看项目 ↗"按钮可跳转
+- local 模板显示"本地模板"标识，不可跳转
+- 文案从"样例模板"改为"样例项目模板"
+
+### 9.12 搜索框文案优化（2026-09-04）
+
+- 场景市场搜索框："搜索场景或技能..." → "搜索场景名称或描述"（场景市场只搜场景，不搜技能）
+- 技能市场搜索框："搜索技能或描述任务..." → "搜索技能名称或描述"（实际是关键词匹配，不是 AI 推荐）
+
+## 十、设计原则和注意事项
 
 1. **scene_market 表完全独立**：自包含全部场景信息，不依赖 devops_pipeline_scene。场景市场所有操作只碰 scene_market 一张表，高内聚低耦合
 2. **单向关联**：devops_pipeline_scene.market_scene_id → scene_market.id，用户场景记录自己的市场来源。scene_market 不知道谁在用自己（统计时反向查）

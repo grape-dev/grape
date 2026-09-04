@@ -58,7 +58,7 @@ function _renderKnowledgeBoard(el, d) {
 
 function _renderProjectTab(d) {
   const meta = d.project.meta || {};
-  const degraded = meta.degraded ? '<span class="tr" style="font-size:10px">⚠ ' + I18N.t('knowledge.degraded') + '</span>' : '';
+  const degraded = meta.degraded ? '<span class="tr" style="font-size:10px">' + I18N.t('knowledge.degraded') + '</span>' : '';
   const updated = meta.last_updated ? (meta.last_updated || '').replace('T',' ').substring(0,19) : '—';
 
   let html = '<div class="grp-title" style="font-size:13px;font-weight:600;margin:14px 0 10px;color:var(--t)">' + I18N.t('knowledge.project_baseline_title') + '</div>';
