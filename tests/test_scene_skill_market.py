@@ -157,6 +157,115 @@ class TestSceneApply:
         assert resp.status_code == 400
 
 
+# ===== Scene Applied Check =====
+
+class TestSceneAppliedCheck:
+    def test_check_applied_no_repo(self):
+        """无 owner/repo 参数时返回 applied=False"""
+        resp = client.get("/api/scenes/market", headers=_headers)
+        scene_id = resp.json()["scenes"][0]["id"]
+        resp = client.get(f"/api/scenes/market/{scene_id}/applied", headers=_headers)
+        assert resp.status_code == 200
+        assert resp.json()["applied"] is False
+
+    def test_check_applied_with_repo_not_applied(self):
+        """有 owner/repo 但未应用时返回 applied=False"""
+        resp = client.get("/api/scenes/market", headers=_headers)
+        scene_id = resp.json()["scenes"][0]["id"]
+        resp = client.get(f"/api/scenes/market/{scene_id}/applied?owner=test&repo=test", headers=_headers)
+        assert resp.status_code == 200
+        assert resp.json()["applied"] is False
+
+    def test_check_applied_not_found(self):
+        """不存在的市场场景返回 404"""
+        resp = client.get("/api/scenes/market/99999/applied?owner=test&repo=test", headers=_headers)
+        assert resp.status_code == 404
+
+
+# ===== Scene Experience Check =====
+
+class TestSceneExperienceCheck:
+    def test_experience_check_not_found(self):
+        """不存在的市场场景返回 404"""
+        resp = client.get("/api/scenes/market/99999/experience-check", headers=_headers)
+        assert resp.status_code == 404
+
+    def test_experience_check_no_template(self):
+        """无推荐模板的场景返回空值"""
+        resp = client.get("/api/scenes/market", headers=_headers)
+        scenes = resp.json()["scenes"]
+        no_tpl_id = None
+        for s in scenes:
+            detail = client.get(f"/api/scenes/market/{s['id']}", headers=_headers).json()
+            if not detail.get("recommended_template"):
+                no_tpl_id = s["id"]
+                break
+        if no_tpl_id:
+            resp = client.get(f"/api/scenes/market/{no_tpl_id}/experience-check", headers=_headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["repo_exists"] is False
+            assert data["scene_applied"] is False
+            assert data["full_name"] == ""
+
+    def test_experience_check_success(self):
+        """有推荐模板的场景返回正确格式"""
+        resp = client.get("/api/scenes/market", headers=_headers)
+        scenes = resp.json()["scenes"]
+        tpl_id = None
+        for s in scenes:
+            detail = client.get(f"/api/scenes/market/{s['id']}", headers=_headers).json()
+            if detail.get("recommended_template"):
+                tpl_id = s["id"]
+                break
+        if tpl_id:
+            resp = client.get(f"/api/scenes/market/{tpl_id}/experience-check", headers=_headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "repo_exists" in data
+            assert "scene_applied" in data
+            assert "full_name" in data
+            assert "scene_name" in data
+
+
+# ===== Scene Experience =====
+
+class TestSceneExperience:
+    def test_experience_not_found(self):
+        """不存在的市场场景返回 404"""
+        resp = client.post("/api/scenes/market/99999/experience", headers=_headers)
+        assert resp.status_code == 404
+
+    def test_experience_no_template(self):
+        """无推荐模板的场景返回 400"""
+        resp = client.get("/api/scenes/market", headers=_headers)
+        scenes = resp.json()["scenes"]
+        no_tpl_id = None
+        for s in scenes:
+            detail = client.get(f"/api/scenes/market/{s['id']}", headers=_headers).json()
+            if not detail.get("recommended_template"):
+                no_tpl_id = s["id"]
+                break
+        if no_tpl_id:
+            resp = client.post(f"/api/scenes/market/{no_tpl_id}/experience", headers=_headers)
+            assert resp.status_code == 400
+
+    def test_experience_detail_skills_format(self):
+        """验证 get_scene_market_detail 的 skills_detail 批量查询结果格式正确"""
+        resp = client.get("/api/scenes/market", headers=_headers)
+        scene_id = resp.json()["scenes"][0]["id"]
+        resp = client.get(f"/api/scenes/market/{scene_id}", headers=_headers)
+        assert resp.status_code == 200
+        detail = resp.json()
+        skills = detail.get("skills", [])
+        for sk in skills:
+            assert "skill_id" in sk
+            assert "name" in sk
+            assert "display_name" in sk
+            assert "agent_type" in sk
+            assert "role_desc" in sk
+
+
 # ===== Skill Like =====
 
 class TestSkillLike:
