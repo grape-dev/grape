@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Grape Worker 启动脚本（支持崩溃自动重启 daemon 保护）
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/start-worker.sh"
+WORKER_DIR="${GRAPE_WORKER_DIR:-$SCRIPT_DIR}"
+PYTHON="${GRAPE_PYTHON:-$WORKER_DIR/.venv/bin/python}"
+MAX_RESTARTS=10
+RESTART_WINDOW=3600
+RESTART_DELAY=5
+
+if [ "$1" != "--no-daemon" ]; then
+  RESTART_COUNT=0
+  WINDOW_START=$(date +%s)
+  while true; do
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting worker (attempt $((RESTART_COUNT + 1)))..."
+    "$SCRIPT_PATH" --no-daemon &
+    WORKER_PID=$!
+    wait $WORKER_PID
+    EXIT_CODE=$?
+    NOW=$(date +%s)
+    ELAPSED=$((NOW - WINDOW_START))
+    if [ $ELAPSED -gt $RESTART_WINDOW ]; then
+      RESTART_COUNT=0
+      WINDOW_START=$NOW
+    fi
+    RESTART_COUNT=$((RESTART_COUNT + 1))
+    if [ $RESTART_COUNT -ge $MAX_RESTARTS ]; then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] CRITICAL: Worker crashed $RESTART_COUNT times, stopping daemon."
+      exit 1
+    fi
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Worker exited (code=$EXIT_CODE), restarting in ${RESTART_DELAY}s... ($RESTART_COUNT/$MAX_RESTARTS)"
+    sleep $RESTART_DELAY
+  done
+  exit 0
+fi
+
+cd "$WORKER_DIR"
+export PATH="$HOME/.local/bin:$HOME/.local/npm-global/bin:$PATH"
+ENV_FILE="$HOME/.grape/runtime.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a; . "$ENV_FILE"; set +a
+fi
+exec "$PYTHON" -m src.runtime.agent

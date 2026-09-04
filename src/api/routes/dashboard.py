@@ -218,24 +218,24 @@ def get_ops_overview(repo: str = ""):
                 pass
 
         # 查 worker（凭据），排除已注销（revoked）
-        # scope=repo 的 worker 只在所属仓库的监控页面显示，全局看板只看 global scope
+        # 显示所有 scope 的 worker（global+user+repo），repo scope 在仓库看板额外过滤
         try:
             if repo:
-                # 仓库级看板：显示 global + 该 repo 的 worker（repo_key 可能带 gitcode: 前缀也可能不带）
+                # 仓库级看板：显示 global + user + 该 repo 的 worker
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND (scope='global' OR repo_key=? OR repo_key=?) ORDER BY id",
-                    (repo_key, repo)
+                    "AND (scope IN ('global','user') OR repo_key=? OR repo_key=?) ORDER BY id",
+                    (repo_key, repo),
                 )
             else:
-                # 全局看板：只显示 global scope 的 worker
+                # 全局看板：显示 global + user scope 的 worker
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND scope='global' ORDER BY id"
+                    "AND scope IN ('global','user') ORDER BY id"
                 )
             for w in c.fetchall():
                 wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w
@@ -253,6 +253,37 @@ def get_ops_overview(repo: str = ""):
                     "load_avg": wload or "",
                     "owner_name": wowner or "",
                 })
+        except Exception:
+            pass
+
+        # 补充本机直连设备（credential_id=0 的引擎不在 runtime_credentials 表中）
+        try:
+            _local_hostname = ""
+            try:
+                import socket as _sock
+                _local_hostname = _sock.gethostname()
+            except Exception:
+                pass
+            c.execute(
+                "SELECT ar.id, ar.name, ar.status, ar.last_seen_at, ar.host_name, "
+                "ar.healthy, ar.busy_slots, ar.max_concurrent "
+                "FROM agent_runtimes ar WHERE ar.credential_id = 0"
+            )
+            _local_rts = c.fetchall()
+            if _local_rts:
+                _has_local_worker = any(w.get("device_name") == (_local_hostname or "本机直连") for w in worker_list)
+                if not _has_local_worker:
+                    worker_list.append({
+                        "id": 0, "name": _local_hostname or "本机直连",
+                        "device_name": _local_hostname or "本机直连",
+                        "status": "online", "health": "online",
+                        "last_seen_at": "", "last_ip": "127.0.0.1",
+                        "cpu_percent": _local_cpu, "memory_percent": _local_mem,
+                        "disk_percent": _local_disk, "tmp_percent": _local_tmp,
+                        "load_avg": _local_load, "owner_name": "",
+                    })
+                    worker_total += 1
+                    worker_online += 1
         except Exception:
             pass
 

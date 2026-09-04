@@ -409,6 +409,6 @@ BWRAP_RO_ENGINE = {
 # codearts 底层同 opencode 用 bun，需 /var/cache/bun-compile 写权限（JIT .so 缓存）。
 BWRAP_RW_ENGINE = {
     "opencode": ("/var/cache/bun-compile",),
-    "codearts": ("~/.codeartsdoer", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
+    "codearts": ("~/.codeartsdoer", "~/.cache/codearts-tasks", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
     "hermes": ("~/.hermes",),
 }
