@@ -1031,13 +1031,13 @@ def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
                 backends.append({"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）", "scope": "local", "owner": "", "runtime_id": _rid})
         except Exception:
             pass
-        # 个人引擎（scope=user）
+        # 个人引擎（scope=user，仅当前用户 + active）
         try:
             c.execute("""
                 SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id
                 FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-                WHERE rc.scope = 'user'
-            """)
+                WHERE rc.scope = 'user' AND rc.status='active' AND rc.owner_name = ?
+            """, (user["username"],))
             for r in c.fetchall():
                 _rid, ename, ver, dev, owner, cid = r
                 ins = instance_name(ename, dev or "", cid or 0)
