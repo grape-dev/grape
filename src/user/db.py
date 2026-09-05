@@ -364,7 +364,7 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     repo_name TEXT NOT NULL,
     full_name TEXT NOT NULL,               -- owner/repo（无前缀，兼容/展示）
     webhook_id INTEGER DEFAULT 0,
-    dev_scene TEXT DEFAULT 'default',      -- 开发场景（agent-skill-mapping.json 的 scene_id，模板创建时写入）
+    dev_scene TEXT DEFAULT '',      -- 开发场景（仓库已应用场景时写入 scene_id；默认置空=未配置，issue-39 方案 B）
     bot_gitcode_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
     bot_username TEXT DEFAULT '',
@@ -1025,13 +1025,16 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
 
 
 def set_repo_scene(repo_key: str, scene_id: str):
-    """写入仓库开发场景（managed_repos.dev_scene），幂等。"""
+    """写入仓库开发场景（managed_repos.dev_scene），幂等。
+
+    issue-39 方案 B：无「default」场景，scene_id 为空即清空（仓库未配置场景）。
+    """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE managed_repos SET dev_scene=? WHERE repo_key=?", (scene_id or "default", repo_key))
+            c.execute("UPDATE managed_repos SET dev_scene=? WHERE repo_key=?", (scene_id or "", repo_key))
             db.commit()
     except Exception as e:
         log.warning(f"Set repo scene failed: {e}")

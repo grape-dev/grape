@@ -75,7 +75,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
         if agent_type:
             lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
             lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
-        _inject_vod_scenes(lines, agent_type)
+        _inject_vod_scenes(lines, agent_type, repo_key)
         return "\n".join(lines)
     _meta = meta or {}
     if _meta.get("degraded"):
@@ -100,19 +100,28 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
 
 
 def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
-    """VOD 专属：注入可用开发场景列表（内置场景 + 成员上传的自定义场景）。"""
+    """VOD 专属：注入该仓库可用开发场景列表（issue-39 方案 B：场景只与仓库关联）。
+
+    - 场景候选 = get_scenes(repo_key)（scope 仅仓库级）
+    - 无「default」场景；仓库无任何场景时 VOD 需输出「未配置场景」终止信号。
+    """
     if agent_type != "vod":
         return
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
-        scenes = get_scenes()
+        scenes = get_scenes(repo_key=repo_key)
         if not scenes:
+            # 方案 B：仓库无任何配置场景 → VOD 直接终止
+            lines.append("")
+            lines.append("> ⚠️ 该仓库**未配置任何开发场景**：请立即终止处理。")
+            lines.append("> 在最终 JSON 产出块中输出：`{\"terminate\": true, \"reason\": \"未配置场景\"}`。")
+            lines.append("> 不要继续分析需求、不要给出 recommended_scene（没有 default 场景）。")
             return
-        lines.append("\n## 可用开发场景（请根据需求特征选择最匹配的场景）")
+        lines.append("\n## 可用开发场景（该仓库已配置，请根据需求特征从中选择）")
         lines.append("| scene_id | 名称 | 技能链 | 来源 |")
         lines.append("|----------|------|--------|------|")
         for s in scenes:
-            cfg = get_pipeline_config(s["id"])
+            cfg = get_pipeline_config(s["id"], repo_key=repo_key)
             if cfg:
                 chain = " → ".join(n.get("skill", "") for n in cfg.get("nodes", []))
                 lines.append(f"| {s['id']} | {s['name']} | {chain} | 内置 |")
@@ -144,9 +153,10 @@ def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
         lines.append("> 成员上传文档（project-info/member/）可能包含自定义场景定义（pipelines-user.json），")
         lines.append("> 如有自定义场景且与需求匹配，优先推荐自定义场景。")
         lines.append("⚠️ **必须**在最终 JSON 产出块中额外包含 `recommended_scene` 和 `scene_reason` 两个字段。")
-        lines.append("- `recommended_scene`：填写上表中最匹配的 scene_id（如 \"blog-publish\"、\"iac\"、\"default\"）。")
+        lines.append("- `recommended_scene`：**只能填写上表中该仓库的场景 scene_id**，不允许使用其它值。")
         lines.append("- `scene_reason`：一句话说明选择理由。")
-        lines.append("- 无法确定时 `recommended_scene` 填仓库当前默认场景，不得省略。")
+        lines.append("- **没有 `default` 场景**：禁止输出 `\"default\"`。")
+        lines.append("- 无法确定时 `recommended_scene` 填该仓库当前默认场景，不得省略。")
         lines.append("- 注意：系统会根据用户设置决定是否采纳你的推荐，未采纳时保持仓库默认场景不变。")
     except Exception as _e:
         from src.config import log as _log

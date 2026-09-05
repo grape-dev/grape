@@ -964,8 +964,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         if s in event_counts:
             event_counts[s] += 1
 
-    # 获取当前场景和场景列表（从 DB 读取）
-    dev_scene = "default"
+    # 获取当前场景和场景列表（从 DB 读取，方案 B：无 default 场景）
+    dev_scene = ""
     try:
         with db_lock:
             c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
@@ -979,13 +979,13 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
     scene_nodes = []
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
-        scenes = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
+        scenes = get_scenes(repo_key=repo_key)
         # dev_scene 必须在可见场景列表中才加载，否则自动选中第一个场景
         scene_ids = {s["id"] for s in scenes}
         if scenes:
             if not dev_scene or dev_scene not in scene_ids:
                 dev_scene = scenes[0]["id"]
-            cfg = get_pipeline_config(dev_scene, repo_key=repo_key, user_id=user.get("id", 0))
+            cfg = get_pipeline_config(dev_scene, repo_key=repo_key)
             if cfg:
                 scene_nodes = cfg.get("nodes", [])
         else:

@@ -635,7 +635,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         try:
             from src.api.pipeline_config import _query_scene_by_id
             from src.config import log as _log
-            _scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key, user_id=user.get("id", 0))
+            _scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key)
             if _scene_obj:
                 _nodes = _scene_obj.get("nodes", []) or []
                 _issue_skill = next((n.get("skill", "") for n in _nodes if n.get("id") == "issue"), "")
@@ -660,19 +660,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             # 用户指定场景：关闭开关，写入 scene_id
             set_scene_override_flag(repo_key, f"#{issue_num}", False)
             from src.api.session_store import set_issue_scene
-            scene_uid = 0
-            try:
-                from src.api.pipeline_config import _query_scene_by_id
-                from src.runtime.engine_select import _repo_user_id
-                scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key, user_id=user.get("id", 0))
-                if scene_obj:
-                    _scope = scene_obj.get("scope", "")
-                    if _scope == "user":
-                        scene_uid = user.get("id", 0)
-                    elif _scope == "repo":
-                        scene_uid = _repo_user_id(repo_key)
-            except Exception:
-                pass
+            # 方案 B：场景只与仓库关联，uid 用仓库归属用户
+            from src.runtime.engine_select import _repo_user_id
+            scene_uid = _repo_user_id(repo_key) or 0
             set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
         else:
             # 不选场景（含 vod-auto）：打开开关，用 dev_scene 默认，VOD 可覆盖

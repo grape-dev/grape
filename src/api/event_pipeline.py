@@ -39,7 +39,8 @@ def is_plugin_mode() -> bool:
 def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "", user_id: int = 0) -> str:
     """Look up skill name from DB (plugin mode).
 
-    scene_id 非空时优先使用（Issue 级场景），否则回退到仓库默认场景。
+    scene_id 非空时优先使用（Issue 级场景），否则回退到仓库默认场景（managed_repos.dev_scene）。
+    issue-39 方案 B：无「default」场景——仓库无场景时 scene_id 为空，返回空技能。
     user_id > 0 时可查用户级场景。
     Returns skill name or empty string.
     """
@@ -48,9 +49,11 @@ def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = 
         if not scene_id:
             try:
                 from src.user.db import get_repo_scene
-                scene_id = get_repo_scene(repo_key) or "default"
+                scene_id = get_repo_scene(repo_key) or ""
             except Exception:
-                scene_id = "default"
+                scene_id = ""
+        if not scene_id:
+            return ""
         node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
         if node:
             return node.get("skill", "")
@@ -889,7 +892,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         try:
             from src.api.session_store import get_issue_scene
             _issue_scene, _issue_scene_uid = get_issue_scene(repo_key, _early_issue_id)
-            _issue_scene = _issue_scene or "default"
+            _issue_scene = _issue_scene or ""   # 方案 B：无「default」场景，空=无场景
         except Exception:
             pass
     # scene_user_id=0 时兜底反查（旧数据 is_join=0 导致 scene_user_id 未写入）
@@ -1876,7 +1879,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 final_text = d.get("text", "")
                 new_oc_session_id = d.get("oc_session_id", "")
                 log.info(f"Agent done: [Agent:{agent_type}|repo:{repo_name}] exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
-                # VOD 场景推荐兜底：解析 JSON 中的 recommended_scene 并持久化（受 allow_scene_override 开关控制）
+                # VOD 场景推荐：解析 JSON 中的 recommended_scene / terminate（受 allow_scene_override 开关控制）
                 if agent_type == "vod" and final_text and issue_id:
                     try:
                         from src.api.session_store import get_scene_override_flag
@@ -1885,14 +1888,41 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             log.info(f"VOD done: scene override disabled for {issue_id}, skip recommended_scene")
                         else:
                             from src.api.event_store import parse_agent_output_json
-                            _scene_out = parse_agent_output_json(final_text)
-                            if _scene_out and _scene_out.get("recommended_scene"):
-                                _rec_scene = _scene_out["recommended_scene"]
+                            _scene_out = parse_agent_output_json(final_text) or {}
+                            # 宽松兜底：VOD 输出可能仅含 recommended_scene / terminate（不含 actions 等字段，
+                            # parse_agent_output_json 的 _is_valid_output 会过滤掉），用正则直接提取
+                            if "recommended_scene" not in _scene_out and _scene_out.get("terminate") is None:
+                                import re as _re
+                                _m_term = _re.search(r'"terminate"\s*:\s*true', final_text)
+                                _m_rec = _re.search(r'"recommended_scene"\s*:\s*"([^"]+)"', final_text)
+                                if _m_term:
+                                    _scene_out["terminate"] = True
+                                if _m_rec:
+                                    _scene_out["recommended_scene"] = _m_rec.group(1)
+                                _m_reason = _re.search(r'"reason"\s*:\s*"([^"]+)"', final_text)
+                                if _m_reason:
+                                    _scene_out["reason"] = _m_reason.group(1)
+                            # 方案 B：无场景终止信号——仓库未配置场景，VOD 不推荐场景（scene 清空，不触发场景流水线）
+                            if _scene_out.get("terminate") or _scene_out.get("reason") == "未配置场景":
+                                from src.api.session_store import set_issue_scene
+                                from src.runtime.engine_select import _repo_user_id
+                                _vod_uid = _repo_user_id(repo_key)
+                                set_issue_scene(repo_key, issue_id, "", scene_user_id=_vod_uid)
+                                log.info(f"VOD done: terminate (未配置场景) for {issue_id}, scene cleared (no pipeline)")
+                                _rec_scene = None   # 不进入正常场景覆写
+                            else:
+                                _rec_scene = _scene_out.get("recommended_scene", "") or ""
+                            if _rec_scene and _rec_scene == "default":
+                                # 方案 B：没有「default」场景，default 永不写入 issue_state.scene_id
+                                log.info(f"VOD done: rec='default' invalid (无 default 场景), skip override for {issue_id}")
+                            elif _rec_scene:
                                 from src.api.session_store import set_issue_scene
                                 from src.runtime.engine_select import _repo_user_id
                                 _vod_uid = _repo_user_id(repo_key)
                                 set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
                                 log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id} (override enabled)")
+                            else:
+                                log.info(f"VOD done: no recommended_scene for {issue_id}, keep issue scene")
                     except Exception as _se:
                         log.warning(f"VOD done: scene parse failed: {_se}")
             elif evt_type == "error":

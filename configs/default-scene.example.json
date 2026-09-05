@@ -1,0 +1,5 @@
+{
+  "default_scene_market_name": "default",
+  "default_scene_enabled": true,
+  "description": "新托管仓库自动应用的默认开发场景配置。default_scene_market_name：scene_market 中 source='official' 的场景 name（默认 'default'=通用开发）；default_scene_enabled=false 表示新托管仓库不自动配置场景（VOD 对无场景仓库输出「未配置场景」终止）。环境变量 DEFAULT_SCENE_MARKET_NAME 优先覆盖此文件配置。复制为 default-scene.json 使用。"
+}

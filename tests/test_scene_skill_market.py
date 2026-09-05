@@ -45,7 +45,6 @@ def teardown_module():
     with db_lock:
         db.execute("DELETE FROM scene_likes WHERE user_id=?", (_uid["id"],))
         db.execute("DELETE FROM skill_likes WHERE user_id=?", (_uid["id"],))
-        db.execute("DELETE FROM devops_pipeline_scene WHERE user_id=?", (_uid["id"],))
         db.commit()
 
 
