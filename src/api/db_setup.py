@@ -2367,15 +2367,16 @@ def _backfill_scene_display_names():
                     _map[r[0]] = r[1]
             except Exception as _e:
                 log.warning(f"_backfill_scene_display_names: read market failed: {_e}")
-            # 回填：display_name 为空的行按 scene_id/name 匹配 market
+            # 回填：display_name 为空的行按 scene_id 匹配 market 的 name（官方场景标识符）
             _upd = 0
             for r in c.execute(
                     "SELECT id, scene_id, name, display_name FROM devops_pipeline_scene"):
                 _row_id, _sid, _rname, _dn = r
                 if _dn:
                     continue
-                _target = _map.get(_sid) or _map.get(_rname)
-                if _target and _target != _sid and _target != _rname:
+                # scene_id 即官方场景标识符（如 default/iac），market.display_name 为其展示名
+                _target = _map.get(_sid)
+                if _target and _target != _sid:
                     c.execute("UPDATE devops_pipeline_scene SET display_name=? WHERE id=?", (_target, _row_id))
                     _upd += 1
             db.commit()
