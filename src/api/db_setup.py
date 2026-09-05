@@ -457,6 +457,7 @@ CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
     scene_id    TEXT NOT NULL,
     name        TEXT NOT NULL,
     description TEXT DEFAULT '',
+    display_name TEXT DEFAULT '',      -- 场景展示名（如「通用开发」），空时回落 name
     repo_key    TEXT NOT NULL DEFAULT '',
     nodes_json  TEXT DEFAULT '[]',
     onboarding  TEXT DEFAULT 'repo-onboarding',
@@ -2178,6 +2179,7 @@ def _migrate_tables():
     # 旧表含 scope 列 → 重建为新结构；场景只与仓库关联，官方场景走 scene_market
     try:
         _migrate_scene_table_to_repo_model()
+        _backfill_scene_display_names()
     except Exception as e:
         log.warning(f"Scene table repo-model migration failed: {e}")
     # 官方场景种子导入（从 pipelines.json → DB，仅首次）
@@ -2260,6 +2262,7 @@ CREATE TABLE devops_pipeline_scene_new (
     scene_id    TEXT NOT NULL,
     name        TEXT NOT NULL,
     description TEXT DEFAULT '',
+    display_name TEXT DEFAULT '',
     repo_key    TEXT NOT NULL DEFAULT '',
     nodes_json  TEXT DEFAULT '[]',
     onboarding  TEXT DEFAULT 'repo-onboarding',
@@ -2332,5 +2335,43 @@ def _seed_official_scene_market_from_pipelines():
         log.info(f"Seeded {_imported} official scenes from pipelines.json into scene_market")
     except Exception as e:
         log.warning(f"Scene market seed import failed: {e}")
+
+
+def _backfill_scene_display_names():
+    """场景表 display_name 回填：按 scene_id 从 scene_market(source='official') 匹配展示名（幂等）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 确保列存在（老库补充）
+            _cols = _scene_table_columns(c)
+            if _cols and "display_name" not in _cols:
+                c.execute("ALTER TABLE devops_pipeline_scene ADD COLUMN display_name TEXT DEFAULT ''")
+                db.commit()
+                log.info("Added display_name column to devops_pipeline_scene")
+            # market 映射 scene_id(name) -> display_name
+            _map = {}
+            try:
+                for r in c.execute(
+                        "SELECT DISTINCT name, display_name FROM scene_market "
+                        "WHERE source='official' AND is_active=1 AND display_name<>''"):
+                    _map[r[0]] = r[1]
+            except Exception as _e:
+                log.warning(f"_backfill_scene_display_names: read market failed: {_e}")
+            # 回填：display_name 为空的行按 scene_id/name 匹配 market
+            _upd = 0
+            for r in c.execute(
+                    "SELECT id, scene_id, name, display_name FROM devops_pipeline_scene"):
+                _row_id, _sid, _rname, _dn = r
+                if _dn:
+                    continue
+                _target = _map.get(_sid) or _map.get(_rname)
+                if _target and _target != _sid and _target != _rname:
+                    c.execute("UPDATE devops_pipeline_scene SET display_name=? WHERE id=?", (_target, _row_id))
+                    _upd += 1
+            db.commit()
+            if _upd:
+                log.info(f"Backfilled {_upd} scene display_name from scene_market")
+    except Exception as e:
+        log.warning(f"Scene display_name backfill failed: {e}")
 
 

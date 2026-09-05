@@ -162,6 +162,10 @@ def test_apply_default_scene_from_market():
     assert ok is True
     scenes = get_scenes(repo_key="gitcode:new/repo")
     assert any(s["id"] == "default" for s in scenes), f"default scene not applied: {scenes}"
+    # display_name 应展示为「通用开发」而非标识符 default（issue-39 display_name 修复）
+    _def = next((s for s in scenes if s["id"] == "default"), None)
+    assert _def, "default scene missing in get_scenes"
+    assert _def.get("display_name") == "通用开发", f"display_name should be 通用开发, got {_def.get('display_name')!r}"
     from src.user.db import get_repo_scene
     assert get_repo_scene("gitcode:new/repo") == "default"
 

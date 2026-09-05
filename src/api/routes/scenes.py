@@ -57,7 +57,8 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
     result = []
     for s in scene_list:
         cfg = get_pipeline_config(s["id"], repo_key=repo_key)
-        result.append({"id": s["id"], "name": s["name"], "pipeline": cfg})
+        result.append({"id": s["id"], "name": s["name"],
+                       "display_name": s.get("display_name") or s["name"], "pipeline": cfg})
     return {"scenes": result}
 
 

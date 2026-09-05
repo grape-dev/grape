@@ -124,7 +124,8 @@ def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
             cfg = get_pipeline_config(s["id"], repo_key=repo_key)
             if cfg:
                 chain = " → ".join(n.get("skill", "") for n in cfg.get("nodes", []))
-                lines.append(f"| {s['id']} | {s['name']} | {chain} | 内置 |")
+                _disp = s.get("display_name") or s.get("name") or s["id"]
+                lines.append(f"| {s['id']} | {_disp} | {chain} | 内置 |")
 
         # 加载成员上传的自定义场景（project-info/member/ 下的 pipelines-user.json）
         if repo_key:

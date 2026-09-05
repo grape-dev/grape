@@ -84,7 +84,7 @@ function renderDashboard(data) {
   }
 
   const sceneOpts = [
-    ...scenes.map(s => `<option value="${s.id}"${s.id === currentScene ? ' selected' : ''}>${s.name}</option>`),
+    ...scenes.map(s => `<option value="${s.id}"${s.id === currentScene ? ' selected' : ''}>${s.display_name || s.name}</option>`),
     `<option value="__create__">➕ ${I18N.t('dashboard.create_custom_scene')}</option>`,
   ].join('');
 
@@ -186,7 +186,7 @@ function renderDashboard(data) {
     if (scope === 'repo') return `<span class="ap-scene-opt-badge ap-scene-badge-repo">${I18N.t('dashboard.scope_repo_short')}</span>`;
     return '';
   };
-  const _currentSceneName = (currentSceneObj && currentSceneObj.name) || I18N.t('dashboard.no_scene_title');
+  const _currentSceneName = (currentSceneObj && (currentSceneObj.display_name || currentSceneObj.name)) || I18N.t('dashboard.no_scene_title');
   const _currentScopeBadge = currentSceneObj ? _scopeBadge(currentSceneObj.scope) : '';
 
   html += `
@@ -203,7 +203,7 @@ function renderDashboard(data) {
         <div class="ap-scene-dropdown" id="sceneDropdown" style="display:none">
           ${scenes.map(s => `
             <div class="ap-scene-opt ${s.id === currentScene ? 'active' : ''}" onclick="selectScene('${s.id}')">
-              <span class="ap-scene-opt-name">${s.name}</span>
+              <span class="ap-scene-opt-name">${s.display_name || s.name}</span>
               ${_scopeBadge(s.scope)}
             </div>
           `).join('')}

@@ -76,14 +76,15 @@ def _load_official_scene_from_market(scene_id: str) -> Optional[dict]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT name, description, nodes_json, onboarding FROM scene_market "
+                "SELECT name, display_name, description, nodes_json, onboarding FROM scene_market "
                 "WHERE name=? AND source='official' AND is_active=1 LIMIT 1", (scene_id,))
             row = c.fetchone()
             if row:
-                nodes = json.loads(row[2] or "[]") if row[2] else []
+                nodes = json.loads(row[3] or "[]") if row[3] else []
                 return {
-                    "scene_id": scene_id, "name": row[0], "description": row[1] or "",
-                    "nodes": nodes, "onboarding": row[3] or "repo-onboarding",
+                    "scene_id": scene_id, "name": row[0],
+                    "display_name": row[1] or row[0], "description": row[2] or "",
+                    "nodes": nodes, "onboarding": row[4] or "repo-onboarding",
                 }
         except Exception as e:
             log.warning(f"_load_official_scene_from_market failed: {e}")
@@ -101,8 +102,15 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
         c = db.cursor()
         try:
             if repo_key:
+                _has_dn = False
+                try:
+                    _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
+                    _has_dn = "display_name" in _cols
+                except Exception:
+                    pass
+                _dn_expr = ", display_name" if _has_dn else ""
                 c.execute(
-                    "SELECT scene_id, name, description, nodes_json, onboarding FROM devops_pipeline_scene "
+                    f"SELECT scene_id, name, description, nodes_json, onboarding{_dn_expr} FROM devops_pipeline_scene "
                     "WHERE is_active=1 AND repo_key=? ORDER BY id", (repo_key,))
                 rows.extend(c.fetchall())
         except Exception as e:
@@ -120,6 +128,7 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
             nodes = []
         result.append({
             "scene_id": scene_id, "name": r[1], "description": r[2],
+            "display_name": (r[5] if len(r) > 5 else "") or r[1],
             "nodes": nodes, "onboarding": r[4] or "repo-onboarding",
         })
     return result
@@ -134,8 +143,15 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
     with lock:
         c = db.cursor()
         try:
+            _has_dn = False
+            try:
+                _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
+                _has_dn = "display_name" in _cols
+            except Exception:
+                pass
+            _dn_expr = ", display_name" if _has_dn else ""
             c.execute(
-                "SELECT scene_id, name, description, nodes_json, onboarding FROM devops_pipeline_scene "
+                f"SELECT scene_id, name, description, nodes_json, onboarding{_dn_expr} FROM devops_pipeline_scene "
                 "WHERE is_active=1 AND scene_id=? AND repo_key=? LIMIT 1",
                 (scene_id, repo_key))
             row = c.fetchone()
@@ -143,6 +159,7 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
                 nodes = json.loads(row[3] or "[]") if row[3] else []
                 return {
                     "scene_id": row[0], "name": row[1], "description": row[2],
+                    "display_name": (row[5] if len(row) > 5 else "") or row[1],
                     "nodes": nodes, "onboarding": row[4] or "repo-onboarding",
                 }
         except Exception as e:
@@ -151,9 +168,14 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
 
 
 def get_scenes(repo_key: str = "") -> list[dict]:
-    """Return scene list [{id, name}] for this repo (repo-scoped only)."""
+    """Return scene list [{id, name, display_name, scope}] for this repo (repo-scoped only).
+
+    scope 恒为 'repo'（方案 B：场景只与仓库关联），供前端兼容展示。
+    """
     db_scenes = _query_scenes_from_db(repo_key=repo_key)
-    return [{"id": s["scene_id"], "name": s["name"]} for s in db_scenes]
+    return [{"id": s["scene_id"], "name": s["name"],
+             "display_name": s.get("display_name") or s["name"],
+             "scope": "repo"} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
@@ -246,7 +268,8 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
 # ===== Scene CRUD (for custom scenes) =====
 
 def create_custom_scene(scene_id: str, name: str, description: str,
-                        repo_key: str, nodes: list, onboarding: str = "repo-onboarding") -> int:
+                        repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
+                        display_name: str = "") -> int:
     """Create or reactivate a repo-scoped custom scene in DB. Returns DB id."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -264,6 +287,8 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             c.execute(
                 "UPDATE devops_pipeline_scene SET name=?, description=?, nodes_json=?, onboarding=?, is_active=1, updated_at=? WHERE id=?",
                 (name, description, nodes_json, onboarding, now, existing[0]))
+            # 更新 display_name（列存在时）
+            _try_set_display_name(c, existing[0], display_name or name)
             db.commit()
             return existing[0]
         # Insert new record
@@ -271,8 +296,17 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             "INSERT INTO devops_pipeline_scene (scene_id, name, description, repo_key, nodes_json, onboarding, is_active, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,1,?,?)",
             (scene_id, name, description, repo_key, nodes_json, onboarding, now, now))
+        _try_set_display_name(c, c.lastrowid, display_name or name)
         db.commit()
         return c.lastrowid
+
+
+def _try_set_display_name(c, row_id: int, display_name: str):
+    """幂等写入 display_name（列不存在时忽略，兼容旧库）。"""
+    try:
+        c.execute("UPDATE devops_pipeline_scene SET display_name=? WHERE id=?", (display_name, row_id))
+    except Exception:
+        pass
 
 
 def update_custom_scene(scene_id: str, repo_key: str,
@@ -341,6 +375,7 @@ def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
     try:
         create_custom_scene(
             scene_id=default_name, name=official["name"] or default_name,
+            display_name=official.get("display_name") or official["name"] or default_name,
             description=official.get("description", "") or "",
             repo_key=repo_key, nodes=official.get("nodes") or [],
             onboarding=official.get("onboarding", "repo-onboarding"))
@@ -373,6 +408,7 @@ def fork_official_scene(scene_id: str, user_id: int = 0, repo_key: str = "") -> 
     try:
         create_custom_scene(
             scene_id=scene_id, name=official["name"] or scene_id,
+            display_name=official.get("display_name") or official["name"] or scene_id,
             description=official.get("description", "") or "",
             repo_key=repo_key, nodes=official.get("nodes") or [],
             onboarding=official.get("onboarding", "repo-onboarding"))
