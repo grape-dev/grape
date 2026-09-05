@@ -1107,6 +1107,11 @@ def init_database():
                 _init_scene_market_data()
                 _init_scene_skill_ref()
                 _init_skill_featured()
+                # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
+                try:
+                    _backfill_scene_display_names()
+                except Exception as _e:
+                    log.warning(f"Scene display_name backfill failed: {_e}")
             finally:
                 c.execute("SELECT RELEASE_LOCK('grape_migrate')")
     else:
@@ -1125,6 +1130,11 @@ def init_database():
         _init_scene_market_data()
         _init_scene_skill_ref()
         _init_skill_featured()
+        # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
+        try:
+            _backfill_scene_display_names()
+        except Exception as _e:
+            log.warning(f"Scene display_name backfill failed: {_e}")
     # MySQL with session_manager
 
 def _sync_official_skills():
@@ -2177,9 +2187,9 @@ def _migrate_tables():
         log.warning(f"Add pool_engine_ids column failed: {e}")
     # ===== Issue-39 方案 B：场景表重建为仅 repo_key 关联（移除 scope/user_id）=====
     # 旧表含 scope 列 → 重建为新结构；场景只与仓库关联，官方场景走 scene_market
+    # display_name 回填在 _init_scene_market_data 之后（init_database 尾部）执行，此处只重建表结构
     try:
         _migrate_scene_table_to_repo_model()
-        _backfill_scene_display_names()
     except Exception as e:
         log.warning(f"Scene table repo-model migration failed: {e}")
     # 官方场景种子导入（从 pipelines.json → DB，仅首次）
