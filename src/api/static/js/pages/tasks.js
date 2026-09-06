@@ -7,6 +7,39 @@ let _taskQuery = '';          // 搜索关键字
 let _taskPage = 1;            // 当前页码
 const _TASKS_PER_PAGE = 15;   // 每页任务数
 let _taskPollTimer = null;    // 场景识别轮询定时器
+let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
+let _tasksMode = 'default';   // default=状态优先 / time=纯时间序（Issue #42）
+
+function _tasksSortPrefKey(repoKey) {
+  return 'task_sort_' + (repoKey || 'all');
+}
+function _loadTasksSortPref(repoKey) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(_tasksSortPrefKey(repoKey)) || '{}');
+    if (saved.order === 'asc' || saved.order === 'desc') _tasksSortOrder = saved.order;
+    if (saved.mode === 'time' || saved.mode === 'default') _tasksMode = saved.mode;
+  } catch (e) { /* ignore */ }
+}
+function _saveTasksSortPref(repoKey) {
+  try {
+    localStorage.setItem(_tasksSortPrefKey(repoKey),
+      JSON.stringify({order: _tasksSortOrder, mode: _tasksMode}));
+  } catch (e) { /* ignore */ }
+}
+function toggleTasksSort() {
+  _tasksSortOrder = (_tasksSortOrder === 'desc') ? 'asc' : 'desc';
+  const repo = app.currentRepo();
+  _saveTasksSortPref(repo ? repo.fullName : '');
+  _taskPage = 1;
+  loadTasks();
+}
+function toggleTasksMode() {
+  _tasksMode = (_tasksMode === 'default') ? 'time' : 'default';
+  const repo = app.currentRepo();
+  _saveTasksSortPref(repo ? repo.fullName : '');
+  _taskPage = 1;
+  loadTasks();
+}
 
 function renderTasks() {
   const el = document.getElementById('pageContent');
@@ -91,8 +124,10 @@ function loadTasks() {
   if (!el) return;
   const repo = app.currentRepo();
   const repoKey = repo ? repo.fullName : '';
+  _loadTasksSortPref(repoKey);
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
-  API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey)).then(d => {
+  API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
+          '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode).then(d => {
     _tasksAll = d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
     if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
@@ -148,20 +183,24 @@ function _render() {
     return `<button class="tsk-tab${act}" onclick="_tasksTab='${key}';_taskPage=1;_render()">${label} <span class="tsk-tab-cnt">${cnt}</span></button>`;
   };
 
-  // 分组列表（待处理/处理中在前，已完成在后）
-  const activeRows = filtered.filter(t => t.status === 'active');
-  const procRows = filtered.filter(t => t.status === 'processing');
-  const doneRows = filtered.filter(t => t.status === 'completed');
+  // 排序切换 UI（Issue #42）：方向（升/降）+ 模式（状态优先/纯时间序）
+  const _sortIcon = _tasksSortOrder === 'desc' ? '↓' : '↑';
+  const _sortPanel = `
+    <div style="display:inline-flex;align-items:center;gap:6px;margin-left:10px;flex-shrink:0">
+      <button class="tsk-tab" onclick="toggleTasksMode()" style="border:1px solid var(--b,var(--tg,#d0d7de));border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;background:${_tasksMode==='time' ? 'var(--bg, #fff)' : 'transparent'}" title="${I18N.t('tasks.sort.mode')}">${_tasksMode==='time' ? I18N.t('tasks.sort.time') : I18N.t('tasks.sort.priority')}</button>
+      <button class="tsk-tab" onclick="toggleTasksSort()" style="border:1px solid var(--b,var(--tg,#d0d7de));border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer" title="${I18N.t('tasks.sort.direction')}">${I18N.t('tasks.sort.order')} ${_sortIcon}</button>
+    </div>`;
 
-  // 分页：合并分组后按页切片
-  const allRows = [...activeRows, ...procRows, ...doneRows];
+  // 分页：后端已按 sort_order/mode 排序返回；mode=time 时纯时间序，default 时后端已状态优先
+  // （不再前端状态分组拼接，避免打乱时间序——Issue #42 根因）
+  const allRows = filtered;
   const totalPages = Math.ceil(allRows.length / _TASKS_PER_PAGE);
   if (_taskPage > totalPages) _taskPage = 1;
   if (_taskPage < 1) _taskPage = 1;
   const pageStart = (_taskPage - 1) * _TASKS_PER_PAGE;
   const pageRows = allRows.slice(pageStart, pageStart + _TASKS_PER_PAGE);
 
-  // 重新按分组拆分当前页
+  // 当前页分组（用于页面内分区展示，不再拼接到全量顺序中）
   const pageActive = pageRows.filter(t => t.status === 'active');
   const pageProc = pageRows.filter(t => t.status === 'processing');
   const pageDone = pageRows.filter(t => t.status === 'completed');
@@ -185,17 +224,23 @@ function _render() {
   };
 
   let listHtml = '';
-  if (pageActive.length > 0) {
-    listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.pending')} <span class="tsk-sec-n">${activeRows.length}</span></div>` +
-      pageActive.map(rowHtml).join('');
-  }
-  if (pageProc.length > 0) {
-    listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.processing')} <span class="tsk-sec-n">${procRows.length}</span></div>` +
-      pageProc.map(rowHtml).join('');
-  }
-  if (pageDone.length > 0) {
-    listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.completed')} <span class="tsk-sec-n">${doneRows.length}</span></div>` +
-      pageDone.map(rowHtml).join('');
+  if (_tasksMode === 'time') {
+    // 纯时间序：不按状态分区，直接按后端顺序平铺（Issue #42）
+    listHtml = pageRows.map(rowHtml).join('');
+  } else {
+    // default：状态优先（后端已按 active→processing→completed 排序），页内分区展示
+    if (pageActive.length > 0) {
+      listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.pending')} <span class="tsk-sec-n">${pageActive.length}</span></div>` +
+        pageActive.map(rowHtml).join('');
+    }
+    if (pageProc.length > 0) {
+      listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.processing')} <span class="tsk-sec-n">${pageProc.length}</span></div>` +
+        pageProc.map(rowHtml).join('');
+    }
+    if (pageDone.length > 0) {
+      listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.completed')} <span class="tsk-sec-n">${pageDone.length}</span></div>` +
+        pageDone.map(rowHtml).join('');
+    }
   }
   if (!listHtml) {
     listHtml = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
@@ -232,7 +277,7 @@ function _render() {
       <div id="deployLinkBar" style="margin-top:4px"></div>
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:10px">${I18N.t('tasks.create.btn_new')}</button>
-        ${tab('all', I18N.t('tasks.tab.all'), cntAll)}${tab('active', I18N.t('tasks.tab.active'), cntActive)}${tab('completed', I18N.t('tasks.tab.completed'), cntDone)}
+        ${tab('all', I18N.t('tasks.tab.all'), cntAll)}${tab('active', I18N.t('tasks.tab.active'), cntActive)}${tab('completed', I18N.t('tasks.tab.completed'), cntDone)}${_sortPanel}
         <div class="tsk-search"><span>🔍</span><input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_taskPage=1;_render()}" onchange="_taskQuery=this.value;_taskPage=1;_render()"></div>
       </div>
     </div>

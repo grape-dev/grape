@@ -865,8 +865,14 @@ async def close_tasks(body: TaskCloseBody, request: Request):
 @router.get("/mine")
 async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                    repo_key: str = Query("", description="按仓库过滤"),
+                   sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
+                   mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
                    user: dict = Depends(get_current_user)):
-    """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤）"""
+    """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤 / 按时间排序）。
+
+    sort_order: desc（默认，最新在前）/ asc（最早在前）
+    mode: default（状态优先 active→processing→completed，组内按时间）/ time（纯时间序）
+    """
     from src.repo_key import to_repo_key, from_repo_key
     if repo_key:
         repo_key = to_repo_key(repo_key)
@@ -879,6 +885,12 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
         clauses.append("repo_key=?")
         params.append(repo_key)
     where = " AND ".join(clauses)
+    # 排序：白名单已由 FastAPI pattern 约束（desc/asc/default/time），此处直接拼（防注入）
+    _order_dir = "DESC" if sort_order == "desc" else "ASC"
+    _order_by = f"created_at {_order_dir}"
+    if mode == "default":
+        # 状态优先：active → processing → completed，组内按时间
+        _order_by = f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 ELSE 2 END, created_at {_order_dir}"
     with db_lock:
         c = db.cursor()
         try:
@@ -886,7 +898,7 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                 f"SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
                 f"status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number "
                 f"FROM tasks WHERE {where} "
-                f"ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, created_at DESC",
+                f"ORDER BY {_order_by}",
                 params
             )
             rows = c.fetchall()
@@ -928,4 +940,4 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
             "scene_name": _scene_name,
             "scene_source": _scene_source,
         })
-    return {"tasks": tasks_out}
+    return {"tasks": tasks_out, "sort_order": sort_order, "mode": mode}
