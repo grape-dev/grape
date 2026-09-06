@@ -476,7 +476,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
     """
     from src.repo_key import to_repo_key
     from src.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission, find_existing_webhook, setup_webhook, _RateLimitedError
-    from src.user.db import get_global_bot_credential, get_webhook_url, set_host_status, get_user_token
+    from src.user.db import get_global_bot_credential, get_webhook_url, set_host_status
 
     repo_key = to_repo_key(f"{owner}/{repo}")
     api_token = get_user_token(user["username"])
