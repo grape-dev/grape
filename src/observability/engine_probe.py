@@ -18,7 +18,7 @@ log = logging.getLogger("devops-bot")
 # 引擎探测命令模板
 _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
-    "hermes": ["hermes", "chat", "-q", "hello", "--yolo"],
+    "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
 }
 
@@ -56,6 +56,10 @@ def _probe_engine(engine_name: str, cli_path: str) -> dict:
         latency = round(time.time() - start, 1)
         if result.returncode == 0:
             output = (result.stdout or "").strip()[:200]
+            # hermes 探测：从输出中提取 session_id 并删除，避免 hello 污染历史会话
+            # -Q 模式下 session_id 输出到 stderr
+            if engine_name == "hermes":
+                _cleanup_hermes_probe_session(result.stdout or "", result.stderr or "")
             return {"status": "ok", "latency": latency, "error": "", "output": output}
         else:
             err = (result.stderr or result.stdout or "").strip()[:200]
@@ -169,3 +173,24 @@ def probe_all_now():
     finally:
         with _probe_lock:
             _probing = False
+
+
+def _cleanup_hermes_probe_session(stdout: str = "", stderr: str = ""):
+    """从 hermes chat -q -Q 的输出中提取 session_id 并删除，避免 hello 对话污染历史会话。
+    -Q 模式下 session_id 输出到 stderr，格式为行首 'session_id: <timestamp_hex>'。"""
+    import re as _re
+    combined = (stdout or "") + "\n" + (stderr or "")
+    # 只匹配行首的 session_id: + hermes session ID 格式（YYYYMMDD_HHMMSS_xxxxxx）
+    m = _re.search(r'^session_id:\s*(\d{8}_\d{6}_[a-f0-9]{6})', combined, _re.MULTILINE)
+    if not m:
+        return
+    sid = m.group(1).strip()
+    if not sid:
+        return
+    try:
+        subprocess.run(
+            ["hermes", "sessions", "delete", sid, "--yes"],
+            capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass

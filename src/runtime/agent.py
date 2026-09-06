@@ -78,7 +78,7 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         if result.returncode == 0:
             # hermes 探测：从输出中提取 session_id 并删除，避免 hello 污染历史会话
             if engine_name == "hermes":
-                _cleanup_hermes_probe_session(result.stdout)
+                _cleanup_hermes_probe_session(result.stdout or "", result.stderr or "")
             return {"status": "ok", "latency": latency, "error": ""}
         else:
             err = (result.stderr or result.stdout or "").strip()[:200]
@@ -93,12 +93,13 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
 
 
-def _cleanup_hermes_probe_session(stdout: str):
-    """从 hermes chat -q -Q 的输出中提取 session_id 并删除，避免 hello 对话污染历史会话。"""
+def _cleanup_hermes_probe_session(stdout: str = "", stderr: str = ""):
+    """从 hermes chat -q -Q 的输出中提取 session_id 并删除，避免 hello 对话污染历史会话。
+    -Q 模式下 session_id 输出到 stderr，格式为行首 'session_id: <timestamp_hex>'。"""
     import re as _re
-    # -Q 模式输出: "session_id: 20260904_170115_9191ce\n..."
-    # 非 -Q 模式输出: "Session:        20260904_165247_4f270b\n..."
-    m = _re.search(r'session[_-]?(?:id)?:\s*(\S+)', stdout, _re.IGNORECASE)
+    combined = (stdout or "") + "\n" + (stderr or "")
+    # 只匹配行首的 session_id: + hermes session ID 格式（YYYYMMDD_HHMMSS_xxxxxx）
+    m = _re.search(r'^session_id:\s*(\d{8}_\d{6}_[a-f0-9]{6})', combined, _re.MULTILINE)
     if not m:
         return
     sid = m.group(1).strip()
