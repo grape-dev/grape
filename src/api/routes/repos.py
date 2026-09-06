@@ -515,8 +515,18 @@ def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
         hid = None
     if not hid:
         hid = setup_webhook(bot_token, owner, repo, webhook_url, webhook_password=bot_token)
+    if not hid:
+        set_host_status(repo_key, "webhook_missing")
+        return {"status": "error", "host_status": "webhook_missing",
+                "message": "未能创建 webhook，请检查 bot 权限后重试"}
 
-    # 3) 完成 → 清状态
+    # 3) 完成 → 回写 webhook_id（避免方案 X 下 webhook_id=0 反复误报）→ 清状态
+    try:
+        from src.user.db import add_managed_repo
+        add_managed_repo(repo_key, owner, repo, webhook_id=hid,
+                         gitcode_webhook_token=bot_token, bot_username=bot_username)
+    except Exception as _e:
+        log.warning(f"repair_host: write back webhook_id failed: {_e}")
     set_host_status(repo_key, "")
     return {"status": "ok", "host_status": "", "webhook_id": hid,
             "message": "托管已修复（bot 已加入成员，webhook 已就绪）"}
