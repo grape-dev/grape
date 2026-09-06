@@ -700,10 +700,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _body = _oa.get("description", "") or ""
                     if "## 父任务" in _body:
                         _allow_through = True
+                    # Issue #46：Onboarding 由 bot token 创建引导 Issue（description 以「首次托管引导」开头）
+                    # → issue_opened 放行，避免 bot 建引导 Issue 后流水线永不触发（见 issue-46 方案 §4.6）
+                    elif _body.startswith("首次托管引导"):
+                        _allow_through = True
                 except Exception:
                     pass
             if _allow_through:
-                log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
+                log.info(f"Pipeline: bot={actor} created onboarding/subtask issue, allow through")
             else:
                 log.info(f"Pipeline skip: self-comment from bot={actor}")
                 return result

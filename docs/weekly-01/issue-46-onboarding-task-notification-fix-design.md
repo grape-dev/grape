@@ -203,6 +203,46 @@ def create_standard_task(repo_key: str, assignee: str, title: str,
 
 > 说明：Spec v2 提及「event_pipeline.py 移除 onboarding 消息去重 hack / `_sync_issue_comments_to_conversation` onboarding 旁支」，经复核 `_sync_issue_comments_to_conversation` 本身无 onboarding 特判，无需改；真正要清理的是 onboarding 上下文注入（§4.5）与 `_post_result_to_issue` 内 add_message 重复同步。
 
+### 4.6 [P0] 修复：Onboarding 创建 Issue 被 self-comment 检测误杀（上线回归）
+
+**现象（生产验证，2026-09-06）**：`Jason7602/hello-calculator-11` onboarding 创建了 2 个任务（#151/#152，Issue #1/#2），但 **Pipeline 未触发**（events 空、issue_state 空）。手动任务 #153（`/api/tasks/create`）同仓库正常触发。
+
+**根因**：新机制 `create_standard_task` 用 **仓库 bot token** 调 GitCode API 建 Issue → GitCode 回推 `issue_opened` Webhook 的 actor=grape_bot → `run_pipeline` 命中 **self-comment 检测**（event_pipeline.py:693）→ 整事件跳过。手动路径用用户 token，actor=Jason7602，不受影响。
+
+**修复方案（方向 1：按事件类型豁免，最小改动）**：
+
+在 `run_pipeline` 自循环检测段（event_pipeline.py:687-709）**扩展 issue_opened 豁免**，复用现有「多任务子任务 bot 创建」豁免模式（L694-704，body 含 `## 父任务` 放行）：
+
+```python
+if actor in bot_usernames:
+    # 多任务模式豁免：bot 创建的子任务 issue_opened（body 含「## 父任务」）不跳过
+    _allow_through = False
+    if event_type == "issue_opened":
+        try:
+            _payload = evt.get("payload", {}) or {}
+            _oa = _payload.get("object_attributes", {}) or {}
+            _body = _oa.get("description", "") or ""
+            if "## 父任务" in _body:
+                _allow_through = True
+            # Issue #46：Onboarding 由 bot token 创建引导 Issue（模板 title 前缀）
+            # → issue_opened 同样放行（专项入口，避免 bot 建 Issue 后流水线永不触发）
+            elif _body.startswith("首次托管引导"):
+                _allow_through = True
+        except Exception:
+            pass
+    ...
+```
+
+- **判定依据**：onboarding 模板默认描述前缀为「首次托管引导」（`configs/onboarding-templates.json` 的 `experience`/`dev` description）。以该前缀豁免 bot 创建的 `issue_opened`。
+- **为何不整体豁免 `issue_opened`**：避免放开「用户手动用 bot 身份建 Issue」等其他场景的自回声防护；按 onboarding 专属标记收口，最小影响面。
+- **与 4.1 的协同**：`create_standard_task` 建 Issue 时 description 即模板 description（含「首次托管引导」前缀），天然满足豁免条件，无需额外传参。
+
+**对已建任务的处理（存量自愈）**：
+- #151/#152 已建档但流水线未触发 → 修复上线后需**清理 `onboarded_task:{repo}:experience/dev` 两个 meta 标记**并重放 2 条 GitCode Issue Hook（或删 meta 标记后重跑 `retry_onboarding_task`，因创建层按 title 幂等会复用 Issue、只补建 pipeline 事件）。
+- 具体运维步骤见部署后验证节。
+
+> 备选方向（不采用本轮）：方向 2「onboarding 建 Issue 带来源标记（X-Grape-Onboarding header / payload 标记）让 pipeline 显式放行」，实现面更大（涉及 HTTP 布尔、webhook 解析、payload 透传三处），且对已上线链路改动深；方向 1 与现有子任务豁免同构、改动 3 行内，优先选用。
+
 ### 4.5 [P2] 回归与测试
 
 - 新增 `tests/test_onboarding_standard_task.py`：
@@ -222,7 +262,10 @@ def create_standard_task(repo_key: str, assignee: str, title: str,
 | 4 | `configs/onboarding-templates.json` | 新增默认模板配置（+ example） | P1 |
 | 5 | 仓库级模板约定 | 根目录 `onboarding-tasks.json` 自定义覆盖（文档化 schema） | P1 |
 | 6 | `configs/agent-skill-mapping.json` | 移除各场景 `onboarding` 字段（重构后无消费方，`_scene_onboarding_skill` 同批删除） | P1 |
-| 7 | `tests/` | onboarding 标准任务 + event_pipeline 单写回归用例 | P2 |
+| 7 | `src/api/event_pipeline.py` §2 自循环检测 | issue_opened 对「首次托管引导」前缀描述豁免 self-comment（3 行内，方向 1） | P0 |
+| 8 | `tests/` | onboarding 标准任务 + event_pipeline 单写回归用例 | P2 |
+
+**存量自愈（部署后运维）**：清理 `hello-calculator-11` 的 `onboarded_task:*` 标记 → 重放 2 条 GitCode Issue Hook，让 #151/#152 关联的流水线补跑。
 
 **不包含**：手动创建任务流程改动、chat agent UI 改动、onboarding UI/UX 重设计（Spec v2 Out of Scope 对齐）。
 
@@ -236,6 +279,8 @@ def create_standard_task(repo_key: str, assignee: str, title: str,
 - [ ] `_onboarding_issue_id` / `_submit_onboarding_webhook` / `_await_event_and_finalize` / `_finalize_onboarding` 全部移除，无残留引用
 - [ ] `agent-skill-mapping.json` 各场景 `onboarding` 字段与 `_scene_onboarding_skill` 一并移除（随重构同步，避免单独删导致现有 onboarding 静默跳过）
 - [ ] `_post_result_to_issue` 不再写 task conversation（result_text 单写）
+- [ ] **onboarding 创建的 Issue（描述含「首次托管引导」前缀）能正常触发流水线**（不被 self-comment 跳过），`hello-calculator-11` #151/#152 使用例回归验证通过
+- [ ] 手动 `issue_opened`（非「首次托管引导」描述、非「## 父任务」）若由 bot 身份创建仍被 self-comment 跳过（豁免不扩散）
 - [ ] 现有任务相关测试全绿 + 新增用例通过
 
 ## 七、风险
@@ -248,12 +293,15 @@ def create_standard_task(repo_key: str, assignee: str, title: str,
 | `_post_result_to_issue` 去 add_message 影响非 onboarding 任务可见性 | Low | `_execute_agent` 收尾（2060-2076）仍是同会话单写 path，Chat 页可见性不变，仅去重 |
 | 真实 Issue 创建失败（bot token / 网络） | Med | 沿用 `_post_gitcode_issue` 错误处理；失败返回告警，`onboarded` 标记在**全部模板任务成功后**再置位 |
 | 仓库自定义模板字段非法（未知 type / 缺 title 等） | Low | 解析容错：缺 title/description 用 type 派生默认值；非法 JSON 降级到默认模板 |
+| **bot 建 Issue 的 issue_opened 被 self-comment 误杀（生产已现）** | High | §4.6 方向 1 豁免「首次托管引导」前缀描述；与既有子任务豁免同构，改动 ≤3 行 |
+| 豁免条件过宽（非 onboarding 描述也通过） | Low | 收口到「首次托管引导」精确前缀 + description 校验；专项描述可后续迁移到模板字段 |
 
 ## 八、处理流水线状态
 
 - ✅ VOD Agent：根因分析已结构化（两问题，3 写入点 / 预分配链路）
 - ✅ Issue Agent：深度分析 ready → **Spec v2（重构方案）已发布**（comment id=188337022，用户澄清后替代 v1 补丁方案），已打 `bug/triaged/spec-ready`，assignee=grape_bot
-- ⚠️ A2A coding 交办：已通知 coding via A2A（seq=0, status=ok, skipped=not_in_scene，scene `custom-411864e2` 未配置 coding 节点）→ **尚无人实际开发**，本方案即 coding 可直接落地的实施依据
+- ✅ **2026-09-06 上线后回归发现**：`hello-calculator-11` onboarding 任务创建成功但流水线未触发——根因 = bot token 建 Issue 后 Webhook 回推被 self-comment 检测跳过（§4.6）
+- ⚠️ 修复待实施：方向 1 豁免「首次托管引导」描述前缀 + 存量 #151/#152 的 meta 标记清理与 Issue Hook 重放
 
 ## 附：关键代码位置
 
@@ -262,5 +310,6 @@ def create_standard_task(repo_key: str, assignee: str, title: str,
 - 预分配落库点：`src/api/event_pipeline.py` L839 `ensure_issue_task`（issue_opened 事件建档）
 - onboarding 上下文注入：`src/api/event_pipeline.py` L954-990（§4.5）
 - result_text 双写：`src/api/event_pipeline.py` L2087 `_post_result_to_issue` 内 L2110-2123 add_message；`_execute_agent` 收尾 L2060-2076
+- self-comment 检测（修复点）：`src/api/event_pipeline.py` L687-709（`resolve_actor`(480) / actor in bot_usernames / issue_opened 子任务豁免 L694-704）；**需新增「首次托管引导」前缀豁免**
 - 评论补拉去重：`src/api/event_pipeline.py` `_sync_issue_comments_to_conversation`(2169)
 - 手动任务标准路径：`src/api/routes/tasks.py` `create_task_via_issue`(593) → `_post_gitcode_issue`(549) → `ensure_issue_task`(136) → `_ensure_task_conversation`(99-133)
