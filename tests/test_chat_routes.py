@@ -288,6 +288,40 @@ class TestConfig:
         data = r.json()
         assert "backend" in data and "_backends" in data and "_skills" in data and "im" in data
 
+    def test_get_config_filters_user_scope_engines(self, _client):
+        """Issue #37：get_chat_config 个人引擎必须只显示当前用户 + active。
+
+        构造 4 条 scope=user 凭据：当前用户 active / 当前用户 revoked / 他人 active / 他人 revoked，
+        以及全局 active 凭据（不应出现在 _backends 的 user scope 列表中）。
+        """
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'chat_cred%'")
+            c.execute("DELETE FROM agent_runtimes WHERE name LIKE 'chat_rt%'")
+            rows = [
+                ("h_u_act", "chat_cred_u_act", "chat-dev", "user", USERNAME, "active"),
+                ("h_u_rev", "chat_cred_u_rev", "chat-dev", "user", USERNAME, "revoked"),
+                ("h_o_act", "chat_cred_o_act", "chat-dev", "user", "other_user", "active"),
+                ("h_o_rev", "chat_cred_o_rev", "chat-dev", "user", "other_user", "revoked"),
+            ]
+            for tok, name, dev, scope, owner, status in rows:
+                c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) "
+                          "VALUES (?,?,?,?,?,?)", (tok, name, dev, scope, owner, status))
+                cid = c.lastrowid
+                c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, status, scope, owner_id, installed, healthy) "
+                          "VALUES (?, ?, ?, 'online', 'user', '', 1, 1)", (name, name, cid))
+            db.commit()
+
+        r = _client.get("/api/chat/config")
+        assert r.status_code == 200
+        user_backends = [b for b in r.json()["_backends"] if b.get("scope") == "user"]
+        names = [b.get("name") for b in user_backends]
+        # 只应出现：当前用户 + active 的那条
+        assert any("chat_cred_u_act" in n for n in names), f"缺少当前用户 active 引擎: {names}"
+        assert not any("chat_cred_u_rev" in n for n in names), f"当前用户 revoked 不应出现: {names}"
+        assert not any("chat_cred_o_act" in n for n in names), f"他人 active 不应出现: {names}"
+        assert not any("chat_cred_o_rev" in n for n in names), f"他人 revoked 不应出现: {names}"
+
     def test_put_config_vod_conflict(self, _client):
         with db_lock:
             c = db.cursor()

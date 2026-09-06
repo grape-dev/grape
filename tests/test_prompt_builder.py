@@ -241,3 +241,59 @@ class TestTaskEndInstruction:
         assert '"actions"' in prompt
         assert prompt.index("处理记录输出要求") < prompt.index("任务结束")
 
+
+class TestThinkingCommentSeparation:
+    """Issue #40：DevOps Agent 不得将思考过程/处理记录输出到评论。
+    issue-40-agent-comment-leak-fix-design.md §四（Prompt 修复与强化）。"""
+
+    @pytest.fixture
+    def base_evt(self):
+        return {
+            "type": "issue_opened",
+            "repository": "owner/repo",
+            "source": "gitcode",
+            "payload": {
+                "project": {"path_with_namespace": "owner/repo"},
+                "issue": {"number": 1, "title": "Bug: test", "body": "desc"}
+            }
+        }
+
+    def test_no_reverse_instruction_left(self, pb, base_evt):
+        """负向：反向指令（"说了 Let me…即判未完成"）必须被移除。"""
+        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        assert '禁止"分析完就结束"' not in prompt
+        assert "任务将被判定为未完成并重新执行" not in prompt
+
+    def test_thinking_banned_from_output(self, pb, base_evt):
+        """正向：思考过程禁止出现在对外输出。"""
+        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        assert "思考过程禁止出现在对外输出" in prompt
+        assert "绝不能出现在最终答复、报告或 GitCode 评论 body 中" in prompt
+
+    def test_example_section_present(self, pb, base_evt):
+        """正向：内部思考 vs 对外结论 正反例范本存在。"""
+        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        assert "## 内部思考 vs 对外结论（必须分清）" in prompt
+        assert '❌ "让我分析一下这个问题……"' in prompt
+        assert '❌ "Now I have a thorough understanding……"' in prompt
+        assert '✅ "完成：分类=bug，标签=bug/P1，已 A2A 交办 coding。"' in prompt
+
+    def test_four_banned_items_in_comment(self, pb, base_evt):
+        """正向：评论评论边界保留四类禁止项 + 发布前自检。"""
+        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        assert "评论内容边界（必须遵守）" in prompt
+        assert "处理记录 JSON 块（actions/conclusion/...）" in prompt
+        assert "任何 HTML 注释标记" in prompt
+        assert "发布前自检" in prompt
+        assert "对外发布文案" in prompt
+
+    def test_json_pure_structure_rule(self, pb, base_evt):
+        """正向：处理记录 JSON 纯结构约束存在。"""
+        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        assert "JSON 块必须保持纯 JSON 结构" in prompt
+
+    def test_must_execute_action_kept(self, pb, base_evt):
+        """正向：必执行工具动作纪律保留（未被误删）。"""
+        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        assert "必须调用工具执行实际动作" in prompt
+

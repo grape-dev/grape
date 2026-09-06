@@ -35,6 +35,13 @@
   "pager": {
     "summary": "共 {{total}} 条 · {{page}}/{{pages}} 页"
   },
+  "sort": {
+    "order": "时间",
+    "direction": "切换排序方向（升序/降序）",
+    "mode": "切换排序模式（状态优先/纯时间序）",
+    "priority": "状态优先",
+    "time": "纯时间序"
+  },
   "create": {
     "btn_new": "+ 新建任务",
     "modal_title": "+ 新建任务",

@@ -377,6 +377,47 @@ class TestMine:
         assert all(t["repo_key"] in ("org/repoA", "org/repoB") for t in r_all.json()["tasks"])
         assert len(r_all.json()["tasks"]) == 2
 
+    def test_mine_sort_order(self):
+        """Issue #42：sort_order desc/asc 控制创建时间排序方向；mode=time 走纯时间序。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            for i, st in enumerate(("active", "processing", "completed", "active")):
+                c.execute(
+                    "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) "
+                    "VALUES (?,?,?,?,?, datetime('now', ?))",
+                    (_uid["id"], "younger_eric", "gitcode:org/sort", 30 + i, st,
+                     f"-{i} minutes"))
+            db.commit()
+        r = client.get("/api/tasks/mine?mode=time&sort_order=desc", headers=_headers)
+        assert r.status_code == 200
+        got = [t["issue_number"] for t in r.json()["tasks"]]
+        # 4 个任务 issue=30,31,32,33，created_at 依次-0,-1,-2,-3 分钟 → desc 最新(30)在前
+        assert got == [30, 31, 32, 33], f"纯时间序 desc 应为 30,31,32,33，实际 {got}"
+        r2 = client.get("/api/tasks/mine?mode=time&sort_order=asc", headers=_headers)
+        got2 = [t["issue_number"] for t in r2.json()["tasks"]]
+        assert got2 == [33, 32, 31, 30], f"纯时间序 asc 应为 33,32,31,30，实际 {got2}"
+
+    def test_mine_sort_order_whitelist(self):
+        """sort_order 白名单校验：非法值 → 400（FastAPI pattern）。"""
+        r = client.get("/api/tasks/mine?sort_order=evil", headers=_headers)
+        assert r.status_code == 422  # Query pattern 校验失败
+
+    def test_mine_mode_default_priority_group(self):
+        """mode=default：状态优先（active→processing→completed），组内按 created_at desc。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            # 故意乱序插入：completed 最晚建，active 最早建
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'completed', datetime('now','-1 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 101))
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'active', datetime('now','-3 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 102))
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'processing', datetime('now','-2 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 103))
+            db.commit()
+        r = client.get("/api/tasks/mine?mode=default&sort_order=desc", headers=_headers)
+        got = [t["issue_number"] for t in r.json()["tasks"]]
+        # 状态优先：active(102) → processing(103) → completed(101)
+        assert got == [102, 103, 101], f"default 模式应按状态分组，实际 {got}"
+
 
 class TestUserMappingBackfill:
     """方案 B：GitCode OAuth 登录写映射 + 存量回填（notify 的 assignee→user_id 解析依赖 unified_user_mapping）"""

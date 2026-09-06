@@ -199,6 +199,56 @@ class TestPlanBMarkerSuppression:
         assert count >= 1, "issue_opened should not be affected by marker check"
 
 
+class TestOnboardingIssueSelfCommentExemption:
+    """Issue #46：Onboarding 由 bot token 创建的引导 Issue（description 以「首次托管引导」开头）
+    不被 self-comment 跳过；其它 bot 创建 issue_opened 仍跳过。
+    见 issue-46-onboarding-task-notification-fix-design.md §4.6。
+    """
+
+    def _make_issue_payload(self, description, actor="grape_dev_bot"):
+        raw = json.dumps({
+            "object_attributes": {
+                "action": "open", "title": "引导·快速部署体验",
+                "description": description, "state": "opened",
+            },
+            "issue": {"number": 1, "title": "引导·快速部署体验", "body": description},
+            "project": {"path_with_namespace": "owner/repo"},
+            "user_name": actor,
+            "user": {"username": actor},
+        }).encode()
+        headers = {"X-GitCode-Event": "Issue Hook"}
+        return raw, headers
+
+    def test_onboarding_desc_bot_issue_opened_allowed_through(self):
+        """bot 创建、description 以「首次托管引导」开头的 issue_opened → 放行（创建 event）。"""
+        import src.api.event_pipeline as ep
+        _clean()
+        _seed_managed_repo()
+        raw, headers = self._make_issue_payload("首次托管引导：体验本项目的快速部署流程。")
+        ep.run_pipeline(raw, headers, account="owner/repo")
+        with db_lock:
+            c = db.cursor()
+            count = c.execute("SELECT COUNT(*) FROM events WHERE event_type='issue_opened'").fetchone()[0]
+        assert count >= 1, "onboarding-bot issue_opened should pass self-comment check"
+
+    def test_plain_bot_issue_opened_still_skipped(self):
+        """bot 创建但 description 非 onboarding 前缀的 issue_opened → 仍被 self-comment 跳过。"""
+        import src.api.event_pipeline as ep
+        _clean()
+        # 清掉可能由其它用例留下的 issue_opened，保证 count==0 语义
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM events WHERE event_type='issue_opened'")
+            db.commit()
+        _seed_managed_repo()
+        raw, headers = self._make_issue_payload("普通任务描述")
+        ep.run_pipeline(raw, headers, account="owner/repo")
+        with db_lock:
+            c = db.cursor()
+            count = c.execute("SELECT COUNT(*) FROM events WHERE event_type='issue_opened'").fetchone()[0]
+        assert count == 0, "plain bot issue_opened should still be skipped"
+
+
 # ---------------------------------------------------------------------------
 # Plan B: marker added to system post functions
 # ---------------------------------------------------------------------------

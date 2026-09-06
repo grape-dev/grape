@@ -15,14 +15,13 @@ AGENT_TYPES = ["vod", "issue", "coding", "qa", "sre"]
 def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[int], user_id: int = 0):
     """更新当前场景 node 的 engine_runtime_ids。
 
-    查找仓库当前应用的场景（managed_repos.dev_scene），在 user scope 副本中
-    更对应 node 的 engine_runtime_ids。如果当前场景是 official 且用户没有 fork，
-    先 fork 再更新。
+    查找仓库当前应用的场景（managed_repos.dev_scene），更新对应 node 的 engine_runtime_ids。
+    方案 B：场景只与仓库关联，无 official/user fork 逻辑。
     """
     from src.session_manager import db, db_lock
-    from src.api.pipeline_config import _query_scene_by_id, fork_official_scene, update_custom_scene
+    from src.api.pipeline_config import _query_scene_by_id, update_custom_scene
     # 查当前场景
-    scene_id = "default"
+    scene_id = ""
     try:
         with db_lock:
             c = db.cursor()
@@ -32,19 +31,12 @@ def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[in
                 scene_id = row[0]
     except Exception:
         pass
-    # 查场景 scope
-    scene_info = _query_scene_by_id(scene_id, repo_key=repo_key, user_id=user_id)
+    if not scene_id:
+        return
+    # 查场景
+    scene_info = _query_scene_by_id(scene_id, repo_key=repo_key)
     if not scene_info:
         return
-    # official 场景先 fork
-    if scene_info["scope"] == "official":
-        fork_official_scene(scene_id, user_id, repo_key=repo_key)
-        # fork 后 scene_id 变成 'repo:{原id}'，需要查 fork 后的
-        forked_id = f"repo:{scene_id}"
-        scene_info = _query_scene_by_id(forked_id, repo_key=repo_key, user_id=user_id)
-        if not scene_info or scene_info["scope"] != "repo":
-            return  # fork 失败，跳过
-        scene_id = forked_id  # 后续更新用 fork 后的 id
     # 更新 node 的 engine_runtime_ids
     nodes = scene_info.get("nodes", [])
     updated = False
@@ -55,8 +47,7 @@ def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[in
             break
     if updated:
         update_custom_scene(
-            scene_id=scene_id, scope="repo", repo_key=repo_key,
-            user_id=user_id, nodes=nodes)
+            scene_id=scene_id, repo_key=repo_key, nodes=nodes)
 
 
 def _get_agent_type_meta(agent_type: str) -> dict | None:

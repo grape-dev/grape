@@ -34,7 +34,7 @@ def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
                 repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
-    scenes = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
+    scenes = get_scenes(repo_key=repo_key)
     return {"scenes": scenes}
 
 
@@ -53,11 +53,12 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
                 repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
-    scene_list = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
+    scene_list = get_scenes(repo_key=repo_key)
     result = []
     for s in scene_list:
-        cfg = get_pipeline_config(s["id"], repo_key=repo_key, user_id=user.get("id", 0))
-        result.append({"id": s["id"], "name": s["name"], "scope": s.get("scope", "official"), "pipeline": cfg})
+        cfg = get_pipeline_config(s["id"], repo_key=repo_key)
+        result.append({"id": s["id"], "name": s["name"],
+                       "display_name": s.get("display_name") or s["name"], "pipeline": cfg})
     return {"scenes": result}
 
 
@@ -289,7 +290,7 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(get_current_
         c = db.cursor()
         c.execute(
             "SELECT name FROM devops_pipeline_scene "
-            "WHERE market_scene_id=? AND repo_key=? AND scope='repo' AND is_active=1 LIMIT 1",
+            "WHERE market_scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
             (market_id, repo_key),
         )
         row = c.fetchone()
@@ -300,11 +301,11 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(get_current_
 @router.post("/market/{market_id}/apply")
 def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
                        owner: str = "", repo: str = ""):
-    """应用场景：从市场复制配置到用户级 devops_pipeline_scene。
+    """应用场景：从市场复制配置到仓库级 devops_pipeline_scene。
 
-    - scope='user', user_id=当前用户, scene_id=custom-{uuid}
-    - 幂等：同一用户同一市场场景不重复创建（按 market_scene_id + user_id 查重）
-    - scene_id 用 custom-{uuid}，不用 scene_market.name（会与 fork_official_scene 的 user scope 记录冲突）
+    - scope='repo'（方案 B：场景只与仓库关联，无 user 级）
+    - 幂等：同一仓库同一市场场景不重复创建（按 market_scene_id + repo_key 查重）
+    - scene_id 用 name 或 custom-{uuid}
     - 同时调 apply_scene 更新当前仓库的 agent 配置
     """
     import uuid
@@ -321,20 +322,19 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
 
     repo_key = to_repo_key(f"{owner}/{repo}")
-    user_id = user.get("id", 0)
     nodes_json = scene["nodes_json"]
     try:
         nodes = json.loads(nodes_json) if nodes_json else []
     except Exception:
         nodes = []
 
-    # 幂等：先查 devops_pipeline_scene WHERE market_scene_id=? AND repo_key=? AND scope='repo'
+    # 幂等：先查 devops_pipeline_scene WHERE market_scene_id=? AND repo_key=?
     existing_scene_id = ""
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT scene_id FROM devops_pipeline_scene "
-            "WHERE market_scene_id=? AND repo_key=? AND scope='repo' AND is_active=1 LIMIT 1",
+            "WHERE market_scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
             (market_id, repo_key),
         )
         row = c.fetchone()
@@ -344,29 +344,30 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
     if existing_scene_id:
         # 已存在 → 更新
         update_custom_scene(
-            scene_id=existing_scene_id, scope="repo", repo_key=repo_key,
-            user_id=user_id, nodes=nodes,
+            scene_id=existing_scene_id, repo_key=repo_key, nodes=nodes,
             name=scene["display_name"], description=scene["description"],
         )
         scene_id = existing_scene_id
     else:
-        # 不存在 → 新建（scope='repo'，scene_id 用 custom-uuid）
-        scene_id = f"custom-{uuid.uuid4().hex[:8]}"
-        with db_lock:
-            c = db.cursor()
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()
-            nodes_json_str = json.dumps(nodes, ensure_ascii=False)
-            c.execute(
-                "INSERT INTO devops_pipeline_scene "
-                "(scene_id, name, description, scope, repo_key, user_id, nodes_json, onboarding, "
-                "is_active, created_at, updated_at, market_scene_id) "
-                "VALUES (?,?,?,?,?,?,?,?,1,?,?,?)",
-                (scene_id, scene["display_name"], scene["description"],
-                 "repo", repo_key, user_id, nodes_json_str,
-                 scene["onboarding"], now, now, market_id),
-            )
-            db.commit()
+        # 不存在 → 新建（scope='repo'，scene_id 用 custom-uuid 或市场 name）
+        scene_id = scene["name"] or f"custom-{uuid.uuid4().hex[:8]}"
+        scene_id = create_custom_scene(
+            scene_id=scene_id, name=scene["display_name"] or scene_id,
+            description=scene["description"] or "",
+            repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding")
+        # 回写 market_scene_id 关联
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("UPDATE devops_pipeline_scene SET market_scene_id=? WHERE id=?", (market_id, scene_id))
+                db.commit()
+            # 取回 scene_id 字符串
+            with db_lock:
+                c = db.cursor()
+                _r = c.execute("SELECT scene_id FROM devops_pipeline_scene WHERE id=?", (scene_id,)).fetchone()
+                scene_id = _r[0] if _r else scene_id
+        except Exception as _e:
+            log.warning(f"apply_market_scene: link market_scene_id failed: {_e}")
 
     # 调用现有 apply_scene 逻辑更新 devops_agent_session
     apply_scene(owner, repo, ApplySceneRequest(scene_id=scene_id), user)
@@ -434,7 +435,7 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(get
         # 该仓库是否已应用过此市场场景
         c.execute(
             "SELECT name FROM devops_pipeline_scene "
-            "WHERE market_scene_id=? AND repo_key=? AND scope='repo' AND is_active=1 LIMIT 1",
+            "WHERE market_scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
             (market_id, repo_key),
         )
         row = c.fetchone()
@@ -544,14 +545,14 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
             else:
                 raise
 
-    # 创建/复用仓库级 devops_pipeline_scene（scope='repo'）
+    # 创建/复用仓库级 devops_pipeline_scene（只与仓库关联，方案 B）
     # 幂等：同一仓库同一市场场景不重复创建（按 market_scene_id + repo_key 查重）
     experience_repo_key = to_repo_key(full_name) if full_name else ""
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT scene_id FROM devops_pipeline_scene "
-            "WHERE market_scene_id=? AND repo_key=? AND scope='repo' AND is_active=1 LIMIT 1",
+            "WHERE market_scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
             (market_id, experience_repo_key),
         )
         existing = c.fetchone()
@@ -563,12 +564,11 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
     nodes_json_str = json.dumps(nodes, ensure_ascii=False)
 
     if existing:
-        # 已有 repo scope 场景 → 更新
+        # 已有 repo 场景 → 更新
         scene_id = existing[0]
         from src.api.pipeline_config import update_custom_scene
         update_custom_scene(
-            scene_id=scene_id, scope="repo", repo_key=experience_repo_key,
-            user_id=user_id, nodes=nodes,
+            scene_id=scene_id, repo_key=experience_repo_key, nodes=nodes,
             name=scene["display_name"], description=scene["description"],
         )
     else:
@@ -580,11 +580,11 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
             now = datetime.now(timezone.utc).isoformat()
             c.execute(
                 "INSERT INTO devops_pipeline_scene "
-                "(scene_id, name, description, scope, repo_key, user_id, nodes_json, onboarding, "
+                "(scene_id, name, description, repo_key, nodes_json, onboarding, "
                 "is_active, created_at, updated_at, market_scene_id) "
-                "VALUES (?,?,?,?,?,?,?,?,1,?,?,?)",
+                "VALUES (?,?,?,?,?,?,1,?,?,?)",
                 (scene_id, scene["display_name"], scene["description"],
-                 "repo", experience_repo_key, user_id, nodes_json_str,
+                 experience_repo_key, nodes_json_str,
                  scene["onboarding"], now, now, market_id),
             )
             db.commit()
@@ -629,7 +629,7 @@ def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)):
             repo_key = to_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
     except Exception:
         pass
-    cfg = get_pipeline_config(scene_id, repo_key=repo_key, user_id=user.get("id", 0))
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
     return {"id": scene_id, "name": cfg["name"], "nodes": cfg["nodes"], "onboarding": cfg.get("onboarding", "")}
@@ -687,30 +687,28 @@ class ApplySceneRequest(BaseModel):
 
 @router.post("")
 def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
-    """创建自定义场景"""
+    """创建自定义场景（方案 B：场景只与仓库关联，无 user 级）"""
     from src.api.pipeline_config import create_custom_scene
     from src.repo_key import to_repo_key
     import uuid
 
     if body.scope == "official":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "不可创建官方场景"})
-    # 强制 repo scope（user scope 已废弃）
-    if body.scope == "user":
-        body.scope = "repo"
+    # 方案 B：user scope 已废弃，强制 repo
+    if body.scope != "repo":
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持仓库级场景"})
 
-    repo_key = ""
-    if body.scope == "repo":
-        if repo:
-            repo_key = to_repo_key(repo)
-        else:
-            try:
-                _repo = app_current_repo()
-                if _repo:
-                    repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
-            except Exception:
-                pass
-        if not repo_key:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库级场景需要先选择仓库"})
+    if repo:
+        repo_key = to_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            repo_key = ""
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库级场景需要先选择仓库"})
 
     scene_id = body.scene_id or f"custom-{uuid.uuid4().hex[:8]}"
     nodes_json = [n.model_dump() for n in body.nodes]
@@ -718,14 +716,13 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
     try:
         db_id = create_custom_scene(
             scene_id=scene_id, name=body.name, description=body.description,
-            scope=body.scope, repo_key=repo_key, user_id=user.get("id", 0),
-            nodes=nodes_json)
+            repo_key=repo_key, nodes=nodes_json)
     except Exception as e:
         if "UNIQUE" in str(e).upper():
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 ID '{scene_id}' 已存在"})
         raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
 
-    log.info(f"Scene created: id={scene_id} scope={body.scope} by user={user.get('id')}")
+    log.info(f"Scene created: id={scene_id} repo={repo_key} by user={user.get('id')}")
     return {"scene_id": scene_id, "db_id": db_id, "message": "场景创建成功"}
 
 
@@ -746,20 +743,16 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(g
         except Exception:
             pass
 
-    existing = _query_scene_by_id(scene_id, repo_key=repo_key, user_id=user.get("id", 0))
+    existing = _query_scene_by_id(scene_id, repo_key=repo_key)
     if not existing:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
 
-    if existing["scope"] == "official":
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可修改，请先创建自定义场景"})
-
     nodes_json = [n.model_dump() for n in body.nodes]
     update_custom_scene(
-        scene_id=scene_id, scope=existing["scope"], repo_key=repo_key,
-        user_id=user.get("id", 0), nodes=nodes_json,
+        scene_id=scene_id, repo_key=repo_key, nodes=nodes_json,
         name=body.name, description=body.description)
 
-    log.info(f"Scene updated: id={scene_id} scope={existing['scope']} by user={user.get('id')}")
+    log.info(f"Scene updated: id={scene_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}
 
 
@@ -780,14 +773,11 @@ def delete_scene(scene_id: str, user: dict = Depends(get_current_user), repo: st
         except Exception:
             pass
 
-    existing = _query_scene_by_id(scene_id, repo_key=repo_key, user_id=user.get("id", 0))
+    existing = _query_scene_by_id(scene_id, repo_key=repo_key)
     if not existing:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
-    if existing["scope"] == "official":
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可删除"})
 
-    delete_custom_scene(scene_id=scene_id, scope=existing["scope"],
-                        repo_key=repo_key, user_id=user.get("id", 0))
+    delete_custom_scene(scene_id=scene_id, repo_key=repo_key)
 
     log.info(f"Scene deleted: id={scene_id} by user={user.get('id')}")
     return {"message": "场景已删除"}
@@ -804,7 +794,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.api.session_store import upsert_agent_session
 
     repo_key = to_repo_key(f"{owner}/{repo}")
-    cfg = get_pipeline_config(body.scene_id, repo_key=repo_key, user_id=user.get("id", 0))
+    cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{body.scene_id}' 不存在"})
 

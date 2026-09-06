@@ -189,7 +189,10 @@ function loadSideConfig() {
 }
 
 function loadConversations(autoSelect) {
-  // 去对话指定会话时，不过滤 repo，确保任务会话可被定位
+  // Issue #47：首渲染即按目标仓库过滤，避免"先全局后过滤"导致串库闪烁。
+  //  - 任务中心跳转(issue:N:repoKey)：用任务自带仓库过滤（该仓库即目标，正确露出）
+  //  - 直连 conv_id：不过滤（定位既有会话）
+  //  - 普通进入：按当前仓库过滤
   const repo = app.currentRepo();
   // 解析 issue:N:repoKey 格式的 _openConvId（Task Center 跳转，会话可能已删除需重建）
   let _issueParam = null;
@@ -198,7 +201,9 @@ function loadConversations(autoSelect) {
     if (parts.length >= 3) _issueParam = {num: parts[1], repo: parts.slice(2).join(':')};
     _openConvId = null;
   }
-  const repoKey = (_openConvId || _issueParam ? '' : (repo ? repo.fullName : ''));
+  const repoKey = _issueParam && _issueParam.repo
+    ? _issueParam.repo
+    : (_openConvId ? '' : (repo ? repo.fullName : ''));
   API.get('/chat/conversations' + (repoKey ? '?repo_key=' + encodeURIComponent(repoKey) : '')).then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');

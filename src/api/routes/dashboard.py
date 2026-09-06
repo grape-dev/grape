@@ -862,6 +862,37 @@ async def get_a2a_health():
     return result
 
 
+def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
+    """方案 X（F-2 落地）：纯本地判定托管状态，零 GitCode API 调用。
+
+    - webhook 检测：读本地 managed_repos.webhook_id，>0 即视为存在（不远程比对 URL，杜绝 URL 漂移误报）。
+    - bot 检测：读本地已落库的 host_status；仅当原值为 bot_missing/partial 且 bot 实际应存在时
+      维持原值（不额外远程查权限，避免限流）。
+    - 不调用任何远程 API，避免 429；真实"webhook 被手动删除"的漏报由 repair-host 手动确认兜底。
+    """
+    from src.config import log as _log
+    try:
+        from src.user.db import get_host_status, set_host_status, _get_managed_webhook_id
+        webhook_id = _get_managed_webhook_id(repo_key)
+        cur = get_host_status(repo_key)
+        if not webhook_id:
+            # webhook 从未建立 → webhook_missing
+            if cur != "webhook_missing":
+                set_host_status(repo_key, "webhook_missing")
+            return "webhook_missing"
+        # webhook 存在：
+        if cur in ("bot_missing", "partial"):
+            # bot 缺失/部分是托管时落库的明确标记，保留（不远程复查）
+            return cur
+        # 正常（含曾误标 webhook_missing → 现在 webhook_id>0 存在 → 清掉误报）
+        if cur != "":
+            set_host_status(repo_key, "")
+        return ""
+    except Exception as e:
+        _log.warning(f"Dashboard: host status check failed: {e}")
+        return ""
+
+
 @router.get("/{owner}/{repo}")
 def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
@@ -964,8 +995,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         if s in event_counts:
             event_counts[s] += 1
 
-    # 获取当前场景和场景列表（从 DB 读取）
-    dev_scene = "default"
+    # 获取当前场景和场景列表（从 DB 读取，方案 B：无 default 场景）
+    dev_scene = ""
     try:
         with db_lock:
             c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
@@ -979,13 +1010,13 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
     scene_nodes = []
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
-        scenes = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
+        scenes = get_scenes(repo_key=repo_key)
         # dev_scene 必须在可见场景列表中才加载，否则自动选中第一个场景
         scene_ids = {s["id"] for s in scenes}
         if scenes:
             if not dev_scene or dev_scene not in scene_ids:
                 dev_scene = scenes[0]["id"]
-            cfg = get_pipeline_config(dev_scene, repo_key=repo_key, user_id=user.get("id", 0))
+            cfg = get_pipeline_config(dev_scene, repo_key=repo_key)
             if cfg:
                 scene_nodes = cfg.get("nodes", [])
         else:
@@ -1085,6 +1116,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
 
     metrics["active_agents"] = sum(1 for a in agent_sessions if a["status"] == "running")
 
+    # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
+    host_status = _check_host_status(owner, repo, repo_key)
+
     return {
         "repo": repo_key,
         "role": role,
@@ -1094,4 +1128,5 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         "agents": agent_sessions,
         "agent_engines": agent_engines,
         "scene_nodes": scene_nodes,
+        "host_status": host_status,
     }

@@ -39,7 +39,8 @@ def is_plugin_mode() -> bool:
 def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "", user_id: int = 0) -> str:
     """Look up skill name from DB (plugin mode).
 
-    scene_id 非空时优先使用（Issue 级场景），否则回退到仓库默认场景。
+    scene_id 非空时优先使用（Issue 级场景），否则回退到仓库默认场景（managed_repos.dev_scene）。
+    issue-39 方案 B：无「default」场景——仓库无场景时 scene_id 为空，返回空技能。
     user_id > 0 时可查用户级场景。
     Returns skill name or empty string.
     """
@@ -48,9 +49,11 @@ def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = 
         if not scene_id:
             try:
                 from src.user.db import get_repo_scene
-                scene_id = get_repo_scene(repo_key) or "default"
+                scene_id = get_repo_scene(repo_key) or ""
             except Exception:
-                scene_id = "default"
+                scene_id = ""
+        if not scene_id:
+            return ""
         node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
         if node:
             return node.get("skill", "")
@@ -697,10 +700,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _body = _oa.get("description", "") or ""
                     if "## 父任务" in _body:
                         _allow_through = True
+                    # Issue #46：Onboarding 由 bot token 创建引导 Issue（description 以「首次托管引导」开头）
+                    # → issue_opened 放行，避免 bot 建引导 Issue 后流水线永不触发（见 issue-46 方案 §4.6）
+                    elif _body.startswith("首次托管引导"):
+                        _allow_through = True
                 except Exception:
                     pass
             if _allow_through:
-                log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
+                log.info(f"Pipeline: bot={actor} created onboarding/subtask issue, allow through")
             else:
                 log.info(f"Pipeline skip: self-comment from bot={actor}")
                 return result
@@ -889,7 +896,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         try:
             from src.api.session_store import get_issue_scene
             _issue_scene, _issue_scene_uid = get_issue_scene(repo_key, _early_issue_id)
-            _issue_scene = _issue_scene or "default"
+            _issue_scene = _issue_scene or ""   # 方案 B：无「default」场景，空=无场景
         except Exception:
             pass
     # scene_user_id=0 时兜底反查（旧数据 is_join=0 导致 scene_user_id 未写入）
@@ -948,45 +955,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.warning(f"Pipeline: failed to load default skill config: {e}")
                 return result
 
-    # 4.5 onboarding 引导上下文（§11 v1.5）：模板一键创建模拟 issue_opened webhook 提交 run_pipeline，
-    #     完全走普通链路（广播模式靠 pool_tag 认领，不依赖仓库 runtime_id 绑定）。
-    #     事件体 payload 携带 _onboarding={"target","skill","scene","result_path"} → 覆盖技能 + 注入 ONBOARDING_* 环境变量。
-    try:
-        _onb = (evt.get("payload") or {}).get("_onboarding")
-    except Exception:
-        _onb = None
-    if isinstance(_onb, dict) and (_onb.get("target") or _onb.get("skill")):
-        _ob_skill = str(_onb.get("skill", "") or "").strip() or skill_name
-        log.info(f"Pipeline onboarding ctx: skill={_ob_skill} target={_onb.get('target')} scene={_onb.get('scene')}")
-        if _ob_skill:
-            try:
-                from src.user.db import resolve_skill_id, get_skill_by_id
-                _ob_sid = resolve_skill_id(_ob_skill)
-                if _ob_sid:
-                    skill_id = _ob_sid
-                    _ob_sk = get_skill_by_id(_ob_sid)
-                    skill_name = (_ob_sk.get("skill_name") or _ob_skill) if _ob_sk else _ob_skill
-                    skill_path = (_ob_sk.get("skill_path") or skill_name) if _ob_sk else skill_name
-                else:
-                    skill_name = _ob_skill
-                    skill_path = _ob_skill
-            except Exception as e:
-                log.warning(f"Pipeline onboarding skill resolve failed: {e}")
-                skill_name = _ob_skill
-                skill_path = _ob_skill
-        # 环境变量注入（repo-onboarding skill 读取 ONBOARDING_RESULT/TARGET）
-        _ob_ext = dict(evt.get("_env_extra") or {})
-        if _onb.get("target"):
-            _ob_ext["ONBOARDING_TARGET"] = str(_onb["target"])
-        if _onb.get("result_path"):
-            _ob_ext["ONBOARDING_RESULT"] = str(_onb["result_path"])
-        if _onb.get("scene"):
-            _ob_ext["ONBOARDING_SCENE"] = str(_onb["scene"])
-        evt["_env_extra"] = _ob_ext
-        backend = backend or ""
-        log.info(f"Pipeline: onboarding ctx applied, skill={skill_name} env={list(_ob_ext.keys())}")
-
-    # 5. 提取 Issue ID
+    # 4. 查找 Agent 配置（backend + skill），找不到则不处理
     payload = evt.get("payload", {})
     if event_type in ("note_hook_pr", "pull_request_opened", "pull_request_updated", "pull_request_merged"):
         # PR 类事件：仅用 resolve_pr_issue_id（title/分支/issues 列表/PR 详情 API）。
@@ -1335,12 +1304,13 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                 db.commit()
         except Exception:
             pass
-    oc_session_id = session.get("runtime_session_id") or ""
+    oc_session_id = ""
     issue_session_id = ""
     if _issue_num_from(issue_id):
         _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
         issue_session_id = _isess.get("id") or ""
         oc_session_id = _isess.get("runtime_session_id") or ""
+    # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回退读取。
 
     repo_gitcode_token = ""
     try:
@@ -1367,7 +1337,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     _inject_cloud_credentials(env_extra, repo_key)
-    # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT/TARGET，§11 v1.5）
+    # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
         env_extra.update(_evt_ext)
@@ -1734,13 +1704,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
             issue_session_id = _isess.get("id") or ""
             oc_session_id = _isess.get("runtime_session_id") or ""
-        if not _has_issue and not oc_session_id:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
-                row = c.fetchone()
-                if row and row[0]:
-                    oc_session_id = row[0]
+        # 无关联 Issue 任务不执行（push 忽略），不再回退读 repo 级 runtime_session_id。
     except Exception:
         pass
 
@@ -1876,7 +1840,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 final_text = d.get("text", "")
                 new_oc_session_id = d.get("oc_session_id", "")
                 log.info(f"Agent done: [Agent:{agent_type}|repo:{repo_name}] exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
-                # VOD 场景推荐兜底：解析 JSON 中的 recommended_scene 并持久化（受 allow_scene_override 开关控制）
+                # VOD 场景推荐：解析 JSON 中的 recommended_scene / terminate（受 allow_scene_override 开关控制）
                 if agent_type == "vod" and final_text and issue_id:
                     try:
                         from src.api.session_store import get_scene_override_flag
@@ -1885,14 +1849,41 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             log.info(f"VOD done: scene override disabled for {issue_id}, skip recommended_scene")
                         else:
                             from src.api.event_store import parse_agent_output_json
-                            _scene_out = parse_agent_output_json(final_text)
-                            if _scene_out and _scene_out.get("recommended_scene"):
-                                _rec_scene = _scene_out["recommended_scene"]
+                            _scene_out = parse_agent_output_json(final_text) or {}
+                            # 宽松兜底：VOD 输出可能仅含 recommended_scene / terminate（不含 actions 等字段，
+                            # parse_agent_output_json 的 _is_valid_output 会过滤掉），用正则直接提取
+                            if "recommended_scene" not in _scene_out and _scene_out.get("terminate") is None:
+                                import re as _re
+                                _m_term = _re.search(r'"terminate"\s*:\s*true', final_text)
+                                _m_rec = _re.search(r'"recommended_scene"\s*:\s*"([^"]+)"', final_text)
+                                if _m_term:
+                                    _scene_out["terminate"] = True
+                                if _m_rec:
+                                    _scene_out["recommended_scene"] = _m_rec.group(1)
+                                _m_reason = _re.search(r'"reason"\s*:\s*"([^"]+)"', final_text)
+                                if _m_reason:
+                                    _scene_out["reason"] = _m_reason.group(1)
+                            # 方案 B：无场景终止信号——仓库未配置场景，VOD 不推荐场景（scene 清空，不触发场景流水线）
+                            if _scene_out.get("terminate") or _scene_out.get("reason") == "未配置场景":
+                                from src.api.session_store import set_issue_scene
+                                from src.runtime.engine_select import _repo_user_id
+                                _vod_uid = _repo_user_id(repo_key)
+                                set_issue_scene(repo_key, issue_id, "", scene_user_id=_vod_uid)
+                                log.info(f"VOD done: terminate (未配置场景) for {issue_id}, scene cleared (no pipeline)")
+                                _rec_scene = None   # 不进入正常场景覆写
+                            else:
+                                _rec_scene = _scene_out.get("recommended_scene", "") or ""
+                            if _rec_scene and _rec_scene == "default":
+                                # 方案 B：没有「default」场景，default 永不写入 issue_state.scene_id
+                                log.info(f"VOD done: rec='default' invalid (无 default 场景), skip override for {issue_id}")
+                            elif _rec_scene:
                                 from src.api.session_store import set_issue_scene
                                 from src.runtime.engine_select import _repo_user_id
                                 _vod_uid = _repo_user_id(repo_key)
                                 set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
                                 log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id} (override enabled)")
+                            else:
+                                log.info(f"VOD done: no recommended_scene for {issue_id}, keep issue scene")
                     except Exception as _se:
                         log.warning(f"VOD done: scene parse failed: {_se}")
             elif evt_type == "error":
@@ -1911,20 +1902,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent failed: [Agent:{agent_type}|repo:{repo_name}] {e}")
 
-    # 更新 oc_session_id（持久化对话上下文）——Issue 级执行会话优先，回退 repo 级
+    # 更新 oc_session_id（持久化对话上下文）——仅写回 Issue 级执行会话
+    # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
     if new_oc_session_id and new_oc_session_id != oc_session_id:
         try:
             if issue_session_id:
                 from src.api.session_store import update_issue_session
                 update_issue_session(issue_session_id, runtime_session_id=new_oc_session_id)
-            # 本函数内其他分支有局部 import db_lock（1157 行）→ 会遮蔽模块级名；
-            # 此处必须局部重新绑定，否则 NameError（2026-08-20 修复 e7a93a5b 副作用）
-            from src.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
-                          (new_oc_session_id, repo_name, agent_type))
-                db.commit()
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
@@ -2055,7 +2039,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
 
 
 def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str):
-    """Agent 执行完成后，将结果作为评论发回 GitCode Issue，并同步写入任务会话（去对话可见）。"""
+    """Agent 执行完成后，将结果作为评论发回 GitCode Issue。
+
+    Issue #46 重构：不再在此同步任务会话（原 add_message 与 _execute_agent 收尾的
+    result_text 同步重复写入，造成冗余通知）；task conversation 的 result_text 同步
+    统一由 _execute_agent 收尾（event_pipeline.py:2020 附近）作为唯一写入路径。
+    """
     if not repository or not issue_number or not bot_token:
         return
     try:
@@ -2076,21 +2065,6 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
         log.info(f"Exec agent: posted result comment to {repository}/issues/{issue_number}")
     except Exception as e:
         log.warning(f"Exec agent: failed to post result comment: {e}")
-    # 同步写入任务会话：用户「去对话」时可见 agent 澄清/报告
-    try:
-        from src.repo_key import to_repo_key
-        from src.session_manager import db, db_lock, add_message
-        rk = to_repo_key(repository)
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
-                      (rk, issue_number))
-            row = c.fetchone()
-        if row and row[0]:
-            add_message(row[0], "agent", f"[{agent_type.upper()} Agent] {result_text[:3000]}")
-            log.info(f"Exec agent: synced result to task conversation {row[0]}")
-    except Exception as e:
-        log.warning(f"Exec agent: sync to task conversation failed: {e}")
 
 
 

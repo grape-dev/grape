@@ -35,6 +35,13 @@
   "pager": {
     "summary": "{{total}} items · {{page}}/{{pages}} pages"
   },
+  "sort": {
+    "order": "Time",
+    "direction": "Toggle sort direction (desc/asc)",
+    "mode": "Toggle sort mode (priority/time)",
+    "priority": "Priority",
+    "time": "Time"
+  },
   "create": {
     "btn_new": "+ New Task",
     "modal_title": "+ New Task",

@@ -449,21 +449,22 @@ CREATE TABLE IF NOT EXISTS engine_capabilities (
 """
 
 # ===== Scene Center: 场景配置表（替代 configs/pipelines.json 运行时读取）=====
+# 场景只与仓库（repo_key）关联，无 scope/user_id 来源区分（issue-39 方案 B）
+# 官方场景不存于此表，由 scene_market(source='official') 承载（scene_sync 同步）
 _PIPELINE_SCENE_DDL = """
 CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     scene_id    TEXT NOT NULL,
     name        TEXT NOT NULL,
     description TEXT DEFAULT '',
-    scope       TEXT DEFAULT 'official',
-    repo_key    TEXT DEFAULT '',
-    user_id     INTEGER DEFAULT 0,
+    display_name TEXT DEFAULT '',      -- 场景展示名（如「通用开发」），空时回落 name
+    repo_key    TEXT NOT NULL DEFAULT '',
     nodes_json  TEXT DEFAULT '[]',
     onboarding  TEXT DEFAULT 'repo-onboarding',
     is_active   INTEGER DEFAULT 1,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (scene_id, scope, repo_key, user_id)
+    UNIQUE (scene_id, repo_key)
 )
 """
 
@@ -932,11 +933,21 @@ def _init_scene_market_data():
             if count > 0:
                 set_meta_value("scene_market_seeded", "1")
                 return
-            # 从 devops_pipeline_scene 的 official 场景复制 nodes_json
-            c.execute("SELECT scene_id, name, description, nodes_json, onboarding FROM devops_pipeline_scene WHERE scope='official'")
-            rows = c.fetchall()
-            # 构建 scene_id → row 映射
-            scene_map = {r[0]: r for r in rows}
+            # 从 scene_market(source='official') 复制 nodes_json（官方场景模板已种入 market；旧流程兼容 devops_pipeline_scene official）
+            scene_map = {}
+            try:
+                c.execute("SELECT DISTINCT name, display_name, description, nodes_json, onboarding FROM scene_market WHERE source='official' AND is_active=1")
+                for r in c.fetchall():
+                    scene_map[r[0]] = r
+            except Exception:
+                pass
+            if not scene_map:
+                try:
+                    c.execute("SELECT scene_id, name, description, nodes_json, onboarding FROM devops_pipeline_scene WHERE scope='official'")
+                    for r in c.fetchall():
+                        scene_map[r[0]] = r
+                except Exception:
+                    pass
             # 8 条初始场景：name, display_name, category_id, is_featured, recommended_template, market_description, source_scene_id
             init_scenes = [
                 ("harmony", "鸿蒙开发", 2, 0, "harmony-ecommerce", "鸿蒙应用开发场景，适合 HarmonyOS 应用开发", None),
@@ -1096,6 +1107,11 @@ def init_database():
                 _init_scene_market_data()
                 _init_scene_skill_ref()
                 _init_skill_featured()
+                # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
+                try:
+                    _backfill_scene_display_names()
+                except Exception as _e:
+                    log.warning(f"Scene display_name backfill failed: {_e}")
             finally:
                 c.execute("SELECT RELEASE_LOCK('grape_migrate')")
     else:
@@ -1114,6 +1130,11 @@ def init_database():
         _init_scene_market_data()
         _init_scene_skill_ref()
         _init_skill_featured()
+        # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
+        try:
+            _backfill_scene_display_names()
+        except Exception as _e:
+            log.warning(f"Scene display_name backfill failed: {_e}")
     # MySQL with session_manager
 
 def _sync_official_skills():
@@ -2022,6 +2043,15 @@ def _migrate_tables():
             log.info("Added managed_repos.deploy_url column")
     except Exception as e:
         log.warning(f"Add managed_repos.deploy_url column failed: {e}")
+    # ===== managed_repos 托管状态列（issue-host-repo-429 方案 F） =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "managed_repos", "host_status", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added managed_repos.host_status column")
+    except Exception as e:
+        log.warning(f"Add managed_repos.host_status column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:
@@ -2164,28 +2194,16 @@ def _migrate_tables():
         log.info("Added pool_engine_ids column to agent_tasks")
     except Exception as e:
         log.warning(f"Add pool_engine_ids column failed: {e}")
+    # ===== Issue-39 方案 B：场景表重建为仅 repo_key 关联（移除 scope/user_id）=====
+    # 旧表含 scope 列 → 重建为新结构；场景只与仓库关联，官方场景走 scene_market
+    # display_name 回填在 _init_scene_market_data 之后（init_database 尾部）执行，此处只重建表结构
+    try:
+        _migrate_scene_table_to_repo_model()
+    except Exception as e:
+        log.warning(f"Scene table repo-model migration failed: {e}")
     # 官方场景种子导入（从 pipelines.json → DB，仅首次）
     try:
-        from src.user.db import get_meta_value, set_meta_value
-        if get_meta_value("scenes_seeded") != "1":
-            import json as _json
-            _pp = os.path.join(_CONFIG_DIR, "pipelines.json")
-            if os.path.exists(_pp):
-                with open(_pp, "r", encoding="utf-8") as _f:
-                    _pdata = _json.load(_f)
-                _imported = 0
-                with db_lock:
-                    c = db.cursor()
-                    for _sid, _scene in (_pdata.get("scenes") or {}).items():
-                        _nodes = _json.dumps(_scene.get("nodes", []), ensure_ascii=False)
-                        c.execute(
-                            "INSERT OR IGNORE INTO devops_pipeline_scene (scene_id, name, description, scope, nodes_json, onboarding, is_active) "
-                            "VALUES (?,?, '', 'official', ?, ?, 1)",
-                            (_sid, _scene.get("name", _sid), _nodes, _scene.get("onboarding", "repo-onboarding")))
-                        _imported += 1
-                    db.commit()
-                set_meta_value("scenes_seeded", "1")
-                log.info(f"Seeded {_imported} official scenes from pipelines.json into devops_pipeline_scene")
+        _seed_official_scene_market_from_pipelines()
     except Exception as e:
         log.warning(f"Scene seed import failed: {e}")
     # ===== 官方技能 OBS 同步：skill 表新增 content_hash 字段（official-skill-obs-sync-design.md §4.4）=====
@@ -2197,34 +2215,183 @@ def _migrate_tables():
         log.info("Added content_hash column to skill")
     except Exception as e:
         log.warning(f"Add skill.content_hash column failed: {e}")
-    # ===== Scene scope downgrade: user → repo（每次启动自动迁移，幂等）=====
+    # ===== Scene scope downgrade 已在 _migrate_scene_table_to_repo_model 中处理（Issue-39 方案 B）=====
+
+
+def _scene_table_columns(c) -> set[str]:
+    try:
+        return {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
+    except Exception:
+        return set()
+
+
+def _cols_old_scene() -> bool:
+    """是否仍是旧结构（含 scope / user_id 列）→ 需要重建为 repo 模型。"""
+    with db_lock:
+        c = db.cursor()
+        _cols = _scene_table_columns(c)
+    return _cols and ("scope" in _cols or "user_id" in _cols)
+
+
+def _strip_repo_prefix(scene_id: str) -> str:
+    """去掉 scene_id 的 'repo:' 前缀。"""
+    return scene_id[len("repo:"):] if scene_id.startswith("repo:") else scene_id
+
+
+def _insert_repo_scene(c, scene_id: str, name: str, description: str, repo_key: str,
+                       nodes_json: str, onboarding: str = "repo-onboarding"):
+    try:
+        c.execute(
+            "INSERT OR IGNORE INTO devops_pipeline_scene_new (scene_id, name, description, repo_key, nodes_json, onboarding, is_active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,1, datetime('now'), datetime('now'))",
+            (scene_id, name, description, repo_key, nodes_json, onboarding))
+    except Exception as _e:
+        log.warning(f"Scene migrate: insert repo scene {scene_id}@{repo_key} failed: {_e}")
+
+
+def _migrate_scene_table_to_repo_model():
+    """Issue-39 方案 B：devops_pipeline_scene 重建为「场景只与仓库关联」模型（幂等）。
+
+    - 旧表含 scope/user_id 列 → 重建为新表（无 scope/user_id，UNIQUE(scene_id, repo_key)）
+    - 存量数据搬移：
+      * scope='repo'：保留，scene_id 去 'repo:' 前缀，repo_key 保留
+      * scope='user'：经 user_repos 反查所属仓库（repo_key）并入；孤儿（查不到仓库）丢弃
+      * scope='official'：官方模板不保留在场景表（官方场景走 scene_market），跳过
+    - 幂等：新表已重建（无 scope 列）则跳过
+    """
+    if not _cols_old_scene():
+        return
+    with db_lock:
+        c = db.cursor()
+        old_rows = c.execute(
+            "SELECT scene_id, name, description, scope, repo_key, user_id, nodes_json, onboarding, is_active "
+            "FROM devops_pipeline_scene").fetchall()
+        # user scope → repo_key 反查（user_repos）
+        repo_of_user = {}
+        try:
+            for ur in c.execute("SELECT user_id, repo_key FROM user_repos").fetchall():
+                repo_of_user.setdefault(ur[0], set()).add(ur[1])
+        except Exception:
+            pass
+        # 建新表（临时名 → 数据搬移 → 替换）
+        c.execute("DROP TABLE IF EXISTS devops_pipeline_scene_new")
+        c.execute("""
+CREATE TABLE devops_pipeline_scene_new (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_id    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    display_name TEXT DEFAULT '',
+    repo_key    TEXT NOT NULL DEFAULT '',
+    nodes_json  TEXT DEFAULT '[]',
+    onboarding  TEXT DEFAULT 'repo-onboarding',
+    is_active   INTEGER DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (scene_id, repo_key)
+)""")
+        _moved_repo = 0
+        _moved_user = 0
+        _dropped = 0
+        for sid, name, desc, scope, rk, uid, nodes, onboarding, active in old_rows:
+            nodes = nodes or "[]"
+            onboarding = onboarding or "repo-onboarding"
+            if scope == "repo":
+                _insert_repo_scene(c, _strip_repo_prefix(sid), name, desc, rk or "", nodes, onboarding)
+                _moved_repo += 1
+            elif scope == "user":
+                _rk_set = repo_of_user.get(uid) or set()
+                if _rk_set:
+                    for _rk in _rk_set:
+                        _insert_repo_scene(c, _strip_repo_prefix(sid), name, desc, _rk, nodes, onboarding)
+                    _moved_user += 1
+                else:
+                    _dropped += 1  # 孤儿 user 场景（无归属仓库），丢弃
+            else:  # official：官方模板不保留
+                _dropped += 1
+        # 替换旧表
+        c.execute("DROP TABLE devops_pipeline_scene")
+        c.execute("ALTER TABLE devops_pipeline_scene_new RENAME TO devops_pipeline_scene")
+        db.commit()
+        log.info(
+            f"Scene table migrated to repo model: repo_in={_moved_repo} user_in={_moved_user} dropped={_dropped}")
+
+
+def _seed_official_scene_market_from_pipelines():
+    """官方场景种子导入 scene_market（从 configs/pipelines.json，仅首次）。
+
+    官方场景不再写入 devops_pipeline_scene（场景只与仓库关联）。
+    这里把官方场景作为模板种入 scene_market(source='official')，供场景市场展示与仓库应用复刻。
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        if get_meta_value("scene_market_seeded") == "1":
+            return
+        _pp = os.path.join(_CONFIG_DIR, "pipelines.json")
+        if not os.path.exists(_pp):
+            return
+        import json as _json
+        with open(_pp, "r", encoding="utf-8") as _f:
+            _pdata = _json.load(_f)
+        _imported = 0
+        with db_lock:
+            c = db.cursor()
+            for _sid, _scene in (_pdata.get("scenes") or {}).items():
+                _nodes = _json.dumps(_scene.get("nodes", []), ensure_ascii=False)
+                try:
+                    c.execute(
+                        "INSERT OR IGNORE INTO scene_market "
+                        "(name, display_name, version, description, market_description, category_id, is_featured, like_count, source, source_user_id, recommended_template, nodes_json, onboarding, is_active) "
+                        "VALUES (?,?, '1.0.0', '', ?, 1, 0, 0, 'official', 0, '', ?, ?, 1)",
+                        (_sid, _scene.get("name", _sid), _scene.get("name", _sid),
+                         _nodes, _scene.get("onboarding", "repo-onboarding")))
+                    _imported += 1
+                except Exception:
+                    pass
+            db.commit()
+        if _imported:
+            set_meta_value("scene_market_seeded", "1")
+        log.info(f"Seeded {_imported} official scenes from pipelines.json into scene_market")
+    except Exception as e:
+        log.warning(f"Scene market seed import failed: {e}")
+
+
+def _backfill_scene_display_names():
+    """场景表 display_name 回填：按 scene_id 从 scene_market(source='official') 匹配展示名（幂等）。"""
     try:
         with db_lock:
             c = db.cursor()
-            # 1. 检查是否有 user scope 活跃记录
-            c.execute("SELECT COUNT(*) FROM devops_pipeline_scene WHERE scope='user' AND is_active=1")
-            _user_count = c.fetchone()[0]
-            if _user_count > 0:
-                # 2. 冲突处理：同 scene_id + repo_key 已有 repo scope 记录 → 软删除 repo 旧记录
-                c.execute("""
-                    SELECT r.id, r.scene_id, r.repo_key
-                    FROM devops_pipeline_scene u
-                    INNER JOIN devops_pipeline_scene r
-                      ON u.scene_id = r.scene_id
-                      AND COALESCE(u.repo_key,'') = COALESCE(r.repo_key,'')
-                    WHERE u.scope = 'user' AND u.is_active = 1
-                      AND r.scope = 'repo' AND r.is_active = 1
-                """)
-                _conflicts = c.fetchall()
-                for _r_id, _sid, _rk in _conflicts:
-                    c.execute("UPDATE devops_pipeline_scene SET is_active=0 WHERE id=?", (_r_id,))
-                    log.info(f"Scene migrate: conflict scene={_sid} repo_key={_rk} → soft-deleted repo record {_r_id}")
-                # 3. 迁移：user → repo
-                c.execute("UPDATE devops_pipeline_scene SET scope='repo', user_id=0 WHERE scope='user' AND is_active=1")
-                _migrated = c.rowcount
+            # 确保列存在（老库补充）
+            _cols = _scene_table_columns(c)
+            if _cols and "display_name" not in _cols:
+                c.execute("ALTER TABLE devops_pipeline_scene ADD COLUMN display_name TEXT DEFAULT ''")
                 db.commit()
-                log.info(f"Scene migrate: {_migrated} user-scope scenes downgraded to repo-scope")
-            else:
-                log.info("Scene migrate: no user-scope scenes found, skip")
+                log.info("Added display_name column to devops_pipeline_scene")
+            # market 映射 scene_id(name) -> display_name
+            _map = {}
+            try:
+                for r in c.execute(
+                        "SELECT DISTINCT name, display_name FROM scene_market "
+                        "WHERE source='official' AND is_active=1 AND display_name<>''"):
+                    _map[r[0]] = r[1]
+            except Exception as _e:
+                log.warning(f"_backfill_scene_display_names: read market failed: {_e}")
+            # 回填：display_name 为空的行按 scene_id 匹配 market 的 name（官方场景标识符）
+            _upd = 0
+            for r in c.execute(
+                    "SELECT id, scene_id, name, display_name FROM devops_pipeline_scene"):
+                _row_id, _sid, _rname, _dn = r
+                if _dn:
+                    continue
+                # scene_id 即官方场景标识符（如 default/iac），market.display_name 为其展示名
+                _target = _map.get(_sid)
+                if _target and _target != _sid:
+                    c.execute("UPDATE devops_pipeline_scene SET display_name=? WHERE id=?", (_target, _row_id))
+                    _upd += 1
+            db.commit()
+            if _upd:
+                log.info(f"Backfilled {_upd} scene display_name from scene_market")
     except Exception as e:
-        log.warning(f"Scene scope migration failed: {e}")
+        log.warning(f"Scene display_name backfill failed: {e}")
+
+
