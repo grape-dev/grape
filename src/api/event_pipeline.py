@@ -951,45 +951,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.warning(f"Pipeline: failed to load default skill config: {e}")
                 return result
 
-    # 4.5 onboarding 引导上下文（§11 v1.5）：模板一键创建模拟 issue_opened webhook 提交 run_pipeline，
-    #     完全走普通链路（广播模式靠 pool_tag 认领，不依赖仓库 runtime_id 绑定）。
-    #     事件体 payload 携带 _onboarding={"target","skill","scene","result_path"} → 覆盖技能 + 注入 ONBOARDING_* 环境变量。
-    try:
-        _onb = (evt.get("payload") or {}).get("_onboarding")
-    except Exception:
-        _onb = None
-    if isinstance(_onb, dict) and (_onb.get("target") or _onb.get("skill")):
-        _ob_skill = str(_onb.get("skill", "") or "").strip() or skill_name
-        log.info(f"Pipeline onboarding ctx: skill={_ob_skill} target={_onb.get('target')} scene={_onb.get('scene')}")
-        if _ob_skill:
-            try:
-                from src.user.db import resolve_skill_id, get_skill_by_id
-                _ob_sid = resolve_skill_id(_ob_skill)
-                if _ob_sid:
-                    skill_id = _ob_sid
-                    _ob_sk = get_skill_by_id(_ob_sid)
-                    skill_name = (_ob_sk.get("skill_name") or _ob_skill) if _ob_sk else _ob_skill
-                    skill_path = (_ob_sk.get("skill_path") or skill_name) if _ob_sk else skill_name
-                else:
-                    skill_name = _ob_skill
-                    skill_path = _ob_skill
-            except Exception as e:
-                log.warning(f"Pipeline onboarding skill resolve failed: {e}")
-                skill_name = _ob_skill
-                skill_path = _ob_skill
-        # 环境变量注入（repo-onboarding skill 读取 ONBOARDING_RESULT/TARGET）
-        _ob_ext = dict(evt.get("_env_extra") or {})
-        if _onb.get("target"):
-            _ob_ext["ONBOARDING_TARGET"] = str(_onb["target"])
-        if _onb.get("result_path"):
-            _ob_ext["ONBOARDING_RESULT"] = str(_onb["result_path"])
-        if _onb.get("scene"):
-            _ob_ext["ONBOARDING_SCENE"] = str(_onb["scene"])
-        evt["_env_extra"] = _ob_ext
-        backend = backend or ""
-        log.info(f"Pipeline: onboarding ctx applied, skill={skill_name} env={list(_ob_ext.keys())}")
-
-    # 5. 提取 Issue ID
+    # 4. 查找 Agent 配置（backend + skill），找不到则不处理
     payload = evt.get("payload", {})
     if event_type in ("note_hook_pr", "pull_request_opened", "pull_request_updated", "pull_request_merged"):
         # PR 类事件：仅用 resolve_pr_issue_id（title/分支/issues 列表/PR 详情 API）。
@@ -1370,7 +1332,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     _inject_cloud_credentials(env_extra, repo_key)
-    # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT/TARGET，§11 v1.5）
+    # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
         env_extra.update(_evt_ext)
@@ -2085,7 +2047,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
 
 
 def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str):
-    """Agent 执行完成后，将结果作为评论发回 GitCode Issue，并同步写入任务会话（去对话可见）。"""
+    """Agent 执行完成后，将结果作为评论发回 GitCode Issue。
+
+    Issue #46 重构：不再在此同步任务会话（原 add_message 与 _execute_agent 收尾的
+    result_text 同步重复写入，造成冗余通知）；task conversation 的 result_text 同步
+    统一由 _execute_agent 收尾（event_pipeline.py:2020 附近）作为唯一写入路径。
+    """
     if not repository or not issue_number or not bot_token:
         return
     try:
@@ -2106,21 +2073,6 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
         log.info(f"Exec agent: posted result comment to {repository}/issues/{issue_number}")
     except Exception as e:
         log.warning(f"Exec agent: failed to post result comment: {e}")
-    # 同步写入任务会话：用户「去对话」时可见 agent 澄清/报告
-    try:
-        from src.repo_key import to_repo_key
-        from src.session_manager import db, db_lock, add_message
-        rk = to_repo_key(repository)
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
-                      (rk, issue_number))
-            row = c.fetchone()
-        if row and row[0]:
-            add_message(row[0], "agent", f"[{agent_type.upper()} Agent] {result_text[:3000]}")
-            log.info(f"Exec agent: synced result to task conversation {row[0]}")
-    except Exception as e:
-        log.warning(f"Exec agent: sync to task conversation failed: {e}")
 
 
 

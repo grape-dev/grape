@@ -1,72 +1,26 @@
 """首次托管引导（Onboarding）触发与后台执行。
 
-仅在「模板一键创建并托管」的项目上异步触发一次：
-- 读取仓库开发场景（managed_repos.dev_scene）→ 按场景查 agent-skill-mapping.json 的 onboarding 技能
-- 模拟 GitCode `issue_opened` webhook 等价体 → 提交 run_pipeline 完全走普通事件链路（§11 v1.5）
-- experience / explore 各执行一次，各创建一个对应类型的引导 Issue
-- 广播（plugin）模式靠 pool_tag 认领，不依赖仓库 runtime_id 绑定
-- issue_state：新 Issue 处于 vod 阶段（stage=vod, owner=vod），由 VOD 先收敛需求（阶段矩阵 D8）
-- 幂等：meta 表 `onboarded:{repo_key}` 标记 + target 级完成自愈
+Issue #46 重构：移除「模拟 issue_opened 事件 + 预分配 Issue 号」整套机制，
+改为按模板任务定义列表，直接在任务中心创建标准任务（真实 GitCode Issue → ensure_issue_task 建档），
+与手动创建任务完全一致（issue-46-onboarding-task-notification-fix-design.md §四）。
+
+- 任务集合由 `onboarding-tasks.json` 模板决定：仓库根目录自定义优先，无则用 configs/onboarding-templates.json 默认
+- 创建层幂等：按 title（同仓库同 open title 不重复建 Issue）
+- 完成层自愈：`onboarded:{repo_key}` 总闸 + `onboarded_task:{repo_key}:{type}` 按任务类型记录
+- 触发点：templates.create_from_template（/repos/host 手动托管不触发）
 """
 import os
 import json
-import threading
 
 from src.config import log, CONFIG_DIR
 from src.session_manager import db, db_lock
 
-# 引导目标类型：experience（快速部署体验）/ explore（探索方向引导），各执行一次
-ONBOARDING_TARGETS = ("experience", "explore")
 
-# target → 主事件类型 映射
-ONBOARDING_EVENT_TYPE = {"experience": "onboarding_exp", "explore": "onboarding_explore"}
-
-
-def _target_main_event_done(repo_key: str, target: str) -> bool:
-    """该 target 主事件是否已成功完成（status=completed 且已产出对应引导 Issue）。
-
-    用于 target 级幂等：不因 `onboarded:*` 全量标记一次性放弃两个 target
-    （§5.3 引导状态自愈，见 agent-tasks-direct-create-binding-fix-design.md）。
-    """
-    if target not in ONBOARDING_EVENT_TYPE:
-        return False
-    _expected = ONBOARDING_TARGETS.index(target) + 1
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT seq FROM events WHERE repo_key=? AND event_type=? AND status='completed' "
-                "ORDER BY seq DESC LIMIT 1",
-                (repo_key, ONBOARDING_EVENT_TYPE[target]),
-            )
-            if not c.fetchone():
-                return False
-            c.execute(
-                "SELECT 1 FROM events WHERE repo_key=? AND event_type='onboarding_issue' AND issue_id=? LIMIT 1",
-                (repo_key, f"#{_expected}"),
-            )
-            return c.fetchone() is not None
-    except Exception as e:
-        log.warning(f"[Onboarding|repo:{repo_key}] target done check failed: {e}")
-        return False
-
-
-def _scene_onboarding_skill(scene_id: str) -> str:
-    """读 agent-skill-mapping.json，返回场景的 onboarding 技能 key；无则空串。
-
-    plugin 模式下 dev_scene 可能为 `repo:{scene}`（scope 前缀），此处剥离后查配置。
-    """
-    _lookup = (scene_id or "").strip()
-    if _lookup.startswith("repo:") or _lookup.startswith("user:"):
-        _lookup = _lookup.split(":", 1)[1]
-    try:
-        _path = os.path.join(CONFIG_DIR, "agent-skill-mapping.json")
-        with open(_path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("scenes", {}).get(_lookup, {}).get("onboarding", "") or ""
-    except Exception as e:
-        log.warning(f"onboarding: load scene skill failed: {e}")
-        return ""
+# 引导任务类型（模板配置可扩展，此处仅作默认标题派生/兜底说明，不写全量枚举）
+_DEFAULT_TITLES = {
+    "experience": "引导·快速部署体验",
+    "dev": "引导·二次开发",
+}
 
 
 def _is_onboarded(repo_key: str) -> bool:
@@ -79,8 +33,19 @@ def _mark_onboarding_started(repo_key: str):
     set_meta_value(f"onboarded:{repo_key}", "1")
 
 
+def _mark_task_done(repo_key: str, task_type: str):
+    """按任务 type 记录完成态（稳定键，不随标题变更丢失）。"""
+    from src.user.db import set_meta_value
+    set_meta_value(f"onboarded_task:{repo_key}:{task_type}", "1")
+
+
+def _task_done(repo_key: str, task_type: str) -> bool:
+    from src.user.db import get_meta_value
+    return get_meta_value(f"onboarded_task:{repo_key}:{task_type}") == "1"
+
+
 def clear_onboarding_mark(repo_key: str):
-    """清除 onboarding 幂等标记（带/不带 gitcode: 前缀两种 key）。
+    """清除 onboarding 幂等标记（带/不带 gitcode: 前缀两种 key，含 task 级标记）。
 
     用于模板一键创建新仓库场景：仓库是全新创建的（GitCode 上此前不存在），
     残留的 onboarded 标记必然来自被删除的旧仓库（如用户直接在 GitCode 网页
@@ -110,8 +75,6 @@ def cleanup_stale_repo_data(repo_key: str):
     新仓库的 repo_key 与旧仓库完全相同，前端查到旧数据导致界面混乱。
 
     在 trigger_onboarding 之前调用（repo_created=True 时），确保新仓库干净启动。
-    与 _cleanup_repo_data 的区别：不删 managed_repos / workspace / skill 目录
-    （新仓库刚托管，managed_repos 是刚写入的；workspace 可能含新模板代码）。
     """
     try:
         from src.session_manager import db, db_lock
@@ -168,10 +131,16 @@ def cleanup_stale_repo_data(repo_key: str):
                 pass
             # 5. onboarding 幂等标记
             try:
-                _ob_keys = [f"onboarded:{k}" for k in keys]
+                _ob_keys = []
+                for k in keys:
+                    _ob_keys.append(f"onboarded:{k}")
+                    # task 级完成标记：onboarded_task:{repo}:{type}
+                    c.execute("SELECT `key` FROM meta WHERE `key` LIKE ?", (f"onboarded_task:{k}:%",))
+                    _ob_keys += [r[0] for r in c.fetchall()]
                 _ob_ph = ",".join("?" for _ in _ob_keys)
-                c.execute(f"DELETE FROM meta WHERE `key` IN ({_ob_ph})", _ob_keys)
-                total += c.rowcount
+                if _ob_keys:
+                    c.execute(f"DELETE FROM meta WHERE `key` IN ({_ob_ph})", _ob_keys)
+                    total += c.rowcount
             except Exception:
                 pass
             db.commit()
@@ -181,239 +150,168 @@ def cleanup_stale_repo_data(repo_key: str):
         log.warning(f"cleanup_stale_repo_data: failed for {repo_key}: {e}")
 
 
-def _onboarding_issue_id(target: str) -> str:
-    """引导预分配 Issue 号（与主事件 issue_id 预分配一致）：experience→#1, explore→#2。"""
-    try:
-        return f"#{ONBOARDING_TARGETS.index(target) + 1}"
-    except ValueError:
-        return ""
+def _load_completed_tasks(repo_key: str, tasks: list) -> list:
+    """返回 tasks 列表中已完成（不必再创建）的任务 type 集合。"""
+    return [t.get("type", "") for t in tasks if t.get("type") and _task_done(repo_key, t["type"])]
 
 
-def _onboarding_workdir(repo_key: str, target: str) -> str:
-    """引导工作目录（按 Issue 统一隔离，见 workdir-issue-centric-design.md §2.1）。
+def _load_onboarding_template(repo_key: str, scene_id: str = "") -> list:
+    """读取 onboarding 任务模板，返回任务定义列表。
 
-    onboarding 是 vod agent 的特殊执行，cwd 与真实 Issue 共用：
-    experience→ {repo}/issues/1/vod/，explore→ {repo}/issues/2/vod/
+    解析规则：
+    1. 仓库根目录 `onboarding-tasks.json`（若存在）优先；支持 `{"tasks": [...]}` 简写
+       或 `{"default": {...}, "<scene_id>": {...}}` 结构（scene_id 键命中则优先，否则用 default）。
+    2. 无仓库自定义 → `configs/onboarding-templates.json`，同样 scene_id 优先、default 兜底。
+    3. 返回任务定义列表；空列表 / 缺文件 → 返回 []（调用方跳过，不报错）。
+
+    任务项合法化：缺 title/description 时从 `_DEFAULT_TITLES` 派生兜底，忽略非法项。
     """
-    from src.api.event_pipeline import get_agent_workdir
-    return get_agent_workdir(repo_key, "vod", _onboarding_issue_id(target))
+    def _extract(data: dict) -> list:
+        if not isinstance(data, dict):
+            return []
+        if scene_id and isinstance(data.get(scene_id), dict):
+            seg = data[scene_id]
+        elif isinstance(data.get("default"), dict):
+            seg = data["default"]
+        elif isinstance(data.get("tasks"), list):
+            seg = data
+        else:
+            seg = {}
+        seg = seg or {}
+        return seg.get("tasks", []) if isinstance(seg.get("tasks"), list) else []
 
+    def _normalize(raw_tasks: list) -> list:
+        out = []
+        for t in raw_tasks:
+            if not isinstance(t, dict):
+                continue
+            _type = str(t.get("type", "") or "").strip()
+            _title = str(t.get("title", "") or "").strip()
+            _desc = str(t.get("description", "") or "").strip()
+            if not _type:
+                continue
+            if not _title:
+                _title = _DEFAULT_TITLES.get(_type, "")
+            if not _title:
+                continue
+            labels = t.get("labels") or []
+            if not isinstance(labels, list):
+                labels = []
+            out.append({"type": _type, "title": _title, "description": _desc,
+                        "labels": [str(x) for x in labels if str(x).strip()]})
+        return out
 
-def _finalize_onboarding(repo_key: str, seq: int, owner: str, result_path: str = ""):
-    """单次引导完成补库：读技能产出 → 该次引导创建的 1 个 Issue 建 vod 阶段 + 独立事件。
-
-    主事件（onboarding_exp/explore）已由 _execute_agent 收尾；本函数补充：
-    主事件 issue_id 校准 + Issue 阶段 + 子事件。
-    """
-    from src.api.event_store import append_event, update_event_issue_id
-    from src.api.session_store import set_issue_stage
-    if not (result_path and os.path.exists(result_path)):
-        log.warning(f"[Onboarding|repo:{repo_key}] result not found: {result_path}")
-        return
+    # 1. 仓库根目录自定义模板
+    #    repository 物化根目录 = {WORKSPACE_DIR}/{owner}/{repo}（与 repogit codebase mirror 同基）
     try:
-        with open(result_path, "r", encoding="utf-8") as f:
+        from src.repo_key import split_owner_repo
+        from src.config import WORKSPACE_DIR
+        _owner, _rname = split_owner_repo(repo_key)
+        if _owner and _rname:
+            _repo_root = os.path.join(WORKSPACE_DIR, _owner, _rname)
+            _p = os.path.join(_repo_root, "onboarding-tasks.json")
+            if os.path.isfile(_p):
+                try:
+                    with open(_p, encoding="utf-8") as f:
+                        data = json.load(f)
+                    tasks = _normalize(_extract(data))
+                    if tasks:
+                        log.info(f"[Onboarding|repo:{repo_key}] use repo custom template: {_p}")
+                        return tasks
+                except Exception as e:
+                    log.warning(f"[Onboarding|repo:{repo_key}] repo template parse failed ({_p}): {e}")
+    except Exception as e:
+        log.warning(f"[Onboarding|repo:{repo_key}] repo custom template check failed: {e}")
+
+    # 2. 配置默认模板
+    try:
+        _path = os.path.join(CONFIG_DIR, "onboarding-templates.json")
+        with open(_path, encoding="utf-8") as f:
             data = json.load(f)
+        return _normalize(_extract(data))
     except Exception as e:
-        log.warning(f"[Onboarding|repo:{repo_key}] read result failed: {e}")
-        return
-
-    num = str(data.get("number", "")).strip()
-    title = data.get("title", "") or f"Issue #{num}"
-    if not num or num in ("0",):
-        log.warning(f"[Onboarding|repo:{repo_key}] invalid issue number in result: {data}")
-        return
-    # 【校准】主事件 issue_id 预分配（#1/#2）可能与实际不符 → 回写纠正
-    try:
-        update_event_issue_id(seq, f"#{num}")
-        log.info(f"[Onboarding|repo:{repo_key}] master event seq={seq} issue_id calibrated to #{num}")
-    except Exception as e:
-        log.warning(f"[Onboarding|repo:{repo_key}] master event issue_id calibration failed: {e}")
-    # 新 Issue 处于 vod 阶段：VOD 需先收敛用户需求（阶段矩阵 D8），收敛后 A2A 再推进
-    set_issue_stage(repo_key, f"#{num}", "vod", "vod",
-                    assignee=(data.get("assignee") or owner or ""))
-    append_event(
-        repo_key=repo_key, event_type="onboarding_issue",
-        title=title, issue_id=f"#{num}", agent_type="vod",
-        source="template", actor=owner or "",
-        summary=f"VOD 引导创建的 Issue #{num}：{title}（待 VOD 收敛需求）",
-        status="completed",
-    )
-    log.info(f"[Onboarding|repo:{repo_key}] issue_state=vod for #{num} ({title})")
+        log.warning(f"[Onboarding|repo:{repo_key}] default template load failed: {e}")
+        return []
 
 
-def _submit_onboarding_webhook(repo_key: str, owner: str, scene_id: str, skill: str,
-                               skill_path: str, skill_id: int, target: str):
-    """单 target 引导：构造 GitCode `issue_opened` webhook 等价体 → 提交 run_pipeline（§11 v1.5）。
+def _create_onboarding_tasks(repo_key: str, owner: str):
+    """按模板任务列表创建 onboarding 标准任务（真实 Issue 先创建 → ensure_issue_task 建档）。
 
-    完全走普通事件链路：
-    - route: issue_opened → vod（原生路由，无需注册 onboarding_*）
-    - enable 检查 / 会话查找 / 引擎门禁 / 任务登记（_create_direct_task|enqueue）/ sweeper 保护全部复用
-    - 广播（plugin）模式：engine_id=0 → pool_tag 认领，**不依赖仓库 runtime_id 绑定**
-    - payload._onboarding 上下文（target/skill/scene/result_path）供 run_pipeline 覆盖技能并注入 ONBOARDING_* 环境变量
+    - 任务集合由模板决定（默认：体验部署 + 二次开发）
+    - 创建层幂等：create_standard_task 内按 title 查重，不重复建 Issue
+    - 完成层自愈：仅创建 `onboarded_task:{repo}:{type}` 未完成的任务；全部成功后置位总闸
+    - 全部任务同步创建（同请求内完成），每个任务仅 1 条任务上下文消息
     """
-    import json as _json
-    from src.repo_key import from_repo_key
-    from src.api.event_pipeline import run_pipeline
-
-    repository = from_repo_key(repo_key)
-    _expected_issue = ONBOARDING_TARGETS.index(target) + 1  # experience→#1, explore→#2
-    _title = "引导·快速部署体验" if target == "experience" else "引导·探索方向"
-    _result_path = os.path.join(_onboarding_workdir(repo_key, target), f"onboarding-result-{target}.json")
-
-    # 构造 GitCode issue_opened 等价 webhook 体（object_attributes.open → normalize → issue_opened → vod）
-    body = _json.dumps({
-        "object_kind": "issue",
-        "project": {"path_with_namespace": repository, "name": repository.split("/")[-1]},
-        "repository": {"full_name": repository, "name": repository.split("/")[-1]},
-        "object_attributes": {
-            "action": "open",
-            "iid": _expected_issue, "number": _expected_issue,
-            "title": _title, "state": "opened", "description": f"首次托管引导·{target}",
-            "labels": [], "assignee_id": None, "updated_at": _json.dumps(None),
-        },
-        "user": {"username": owner or ""},
-        "user_name": owner or "",
-        "_onboarding": {
-            "target": target, "skill": skill, "skill_id": skill_id,
-            "scene": scene_id, "result_path": _result_path,
-        },
-    }).encode("utf-8")
-    headers = {
-        "X-GitCode-Event": "Issue Hook",
-        "X-GitCode-Delivery": "onboarding-sim",
-        "User-Agent": "grape-onboarding-sim",
-        "Content-Type": "application/json",
-    }
-    # 与 webhook.py:115 同路径：account=仓库真名、repo_key_override=带前缀 repo_key
-    _rp = run_pipeline(body, headers, account=repository, repo_key_override=repo_key)
-    _seq = (_rp or {}).get("seq", 0) or 0
-    log.info(f"[Onboarding|repo:{repo_key}] simulated issue webhook submitted, target={target}, seq={_seq}")
-    # 终态兜底补库：等待事件终态后 _finalize_onboarding 补 issue_state + 子事件
-    if _seq > 0:
-        threading.Thread(target=_await_event_and_finalize, args=(
-            repo_key, _seq, owner, target, _result_path,
-        ), daemon=True, name=f"onboarding-fin-{target}-{_seq}").start()
-    return _seq
-
-
-def _await_event_and_finalize(repo_key: str, seq: int, owner: str, target: str, result_path: str):
-    """轮询主事件终态（completed/failed）→ 触发 _finalize_onboarding 兜底补库。
-
-    事件由 run_pipeline 正常执行并回报终态（direct: _execute_agent 更新；queue: worker 上报），
-    此处仅在完成后做引导专属补库（issue_state + onboarding_issue 子事件），不做状态机判定。
-    """
-    import time as _t
-    for _ in range(600):  # 最长 60min
+    from src.user.db import get_gitcode_token
+    from src.api.routes.tasks import create_standard_task
+    task_defs = _load_onboarding_template(repo_key)
+    if not task_defs:
+        log.info(f"[Onboarding|repo:{repo_key}] 无 onboarding 任务模板，跳过")
+        return
+    bot_token = get_gitcode_token(repo_key=repo_key) or ""
+    if not bot_token:
+        log.warning(f"[Onboarding|repo:{repo_key}] 无仓库 bot token，跳过 onboarding 任务创建")
+        return
+    pending = [t for t in task_defs if not _task_done(repo_key, t["type"])]
+    if not pending:
+        log.info(f"[Onboarding|repo:{repo_key}] 全部 onboarding 任务已完成，跳过")
+        return
+    _mark_onboarding_started(repo_key)
+    ok_count = 0
+    for t in pending:
+        _type, _title, _desc, _labels = t["type"], t["title"], t["description"], t["labels"]
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT status FROM events WHERE seq=?", (seq,))
-                row = c.fetchone()
-            if not row:
-                log.warning(f"[Onboarding|repo:{repo_key}] event {seq} disappeared, skip finalize")
-                return
+            r = create_standard_task(repo_key, _title, _desc, bot_token, assignee=owner, labels=_labels)
         except Exception as e:
-            log.warning(f"[Onboarding|repo:{repo_key}] event poll failed: {e}")
-            return
-        if row[0] in ("completed",):
-            _finalize_onboarding(repo_key, seq, owner, result_path)
-            return
-        if row[0] in ("failed", "cancelled", "terminated"):
-            log.warning(f"[Onboarding|repo:{repo_key}] target={target} event {seq} -> {row[0]}, no finalize")
-            return
-        _t.sleep(6)
-    log.warning(f"[Onboarding|repo:{repo_key}] target={target} event {seq} poll timeout")
-    # 轮询结束后事件仍在 running：不擅动（sweeper 会兜底），仅告警
+            log.warning(f"[Onboarding|repo:{repo_key}] create task type={_type} failed: {e}")
+            continue
+        if r and r.get("ok"):
+            _mark_task_done(repo_key, _type)
+            ok_count += 1
+            log.info(f"[Onboarding|repo:{repo_key}] 任务已创建 type={_type} issue=#{r.get('issue_number')} "
+                     f"created={'yes' if r.get('created') else 'reuse'}")
+        else:
+            log.warning(f"[Onboarding|repo:{repo_key}] task type={_type} create failed: {r}")
+    if ok_count == len(task_defs):
+        log.info(f"[Onboarding|repo:{repo_key}] 全部 {ok_count} 个 onboarding 任务就绪")
 
 
 def trigger_onboarding(repo_key: str, owner: str):
-    """模板一键创建完成后调用：触发引导（target 级幂等，支持单 target 自愈）。
+    """模板一键创建完成后调用：触发引导（按模板任务列表创建，任务级幂等自愈）。
 
     仅在 templates.create_from_template 中调用（手动托管 /repos/host 不调用）。
-    场景从 managed_repos.dev_scene 读取（不依赖请求参数）。
-
-    §11 v1.5：构造 `issue_opened` webhook 等价体 → `run_pipeline` 完全走普通事件链路。
-    广播（plugin）模式靠 pool_tag 认领，**无需仓库绑定 runtime_id**；引擎门禁/任务登记/
-    sweeper/重派全部复用普通事件，不隐式 opencode。
-
-    引导状态自愈（§5.3）：不因 `onboarded:*` 全量标记一次性放弃两个 target——
-    已 failed 且未产出对应 Issue 的 target 会在此重试（补齐），已完成的不重复。
+    场景信息不再用于选技能（模拟事件机制已移除），任务集完全由模板决定。
     """
     try:
-        from src.user.db import get_repo_scene
-        scene_id = get_repo_scene(repo_key) or "default"
-        skill_path, skill_id = "", 0
-        skill = _scene_onboarding_skill(scene_id)
-        if not skill:
-            log.info(f"[Onboarding|repo:{repo_key}] scene='{scene_id}' 无 onboarding 技能，跳过")
-            return
-        # skill_id/skill_path 解析（与普通事件取技能一致）：已发布技能查库，未发布用名
-        try:
-            from src.user.db import resolve_skill_id, get_skill_by_id
-            _sid = resolve_skill_id(skill)
-            if _sid:
-                skill_id = _sid
-                _sk = get_skill_by_id(_sid)
-                skill_path = (_sk.get("skill_path") or skill) if _sk else skill
-        except Exception as e:
-            log.warning(f"[Onboarding|repo:{repo_key}] skill resolve failed: {e}")
-        if not skill_path:
-            try:
-                from src.config import resolve_official_skill_path as _resolve_skill
-                skill_path = _resolve_skill(skill) or skill
-            except Exception:
-                skill_path = skill
-        if _is_onboarded(repo_key) and all(_target_main_event_done(repo_key, t) for t in ONBOARDING_TARGETS):
-            log.info(f"[Onboarding|repo:{repo_key}] 已引导且双 target 均完成，跳过")
-            return
-        _mark_onboarding_started(repo_key)  # 防并发重复
-
-        # 逐 target：构造 webhook → run_pipeline（已完成的不重复提交）
-        for target in ONBOARDING_TARGETS:
-            if _target_main_event_done(repo_key, target):
-                log.info(f"[Onboarding|repo:{repo_key}] target={target} 已完成，跳过")
-                continue
-            _submit_onboarding_webhook(repo_key, owner, scene_id, skill,
-                                       skill_path, skill_id, target)
+        _create_onboarding_tasks(repo_key, owner)
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] trigger failed: {e}")
 
 
-def retry_onboarding_target(repo_key: str, owner: str, target: str) -> dict:
-    """target 级引导自愈：主事件 failed 且未产出对应 Issue → 重新触发该 target。
+def retry_onboarding_task(repo_key: str, owner: str, task_type: str) -> dict:
+    """任务级引导自愈：按 type 补建未完成的 onboarding 任务。
 
     供重派（events redispatch）调用，避免依赖 `onboarded:*` 全量标记。
-    §11 v1.5：复用 _submit_onboarding_webhook（模拟 issue_opened → run_pipeline），广播模式不需绑定引擎。
-    返回 {"ok": bool, "seq": int, "reason": str}。
+    仅当该 type 在模板中存在且尚未完成时创建。
     """
-    if target not in ONBOARDING_TARGETS:
-        return {"ok": False, "reason": f"unknown target: {target}"}
-    if _target_main_event_done(repo_key, target):
-        return {"ok": True, "seq": 0, "reason": "target already complete, no retry needed"}
-    if _is_onboarded(repo_key):
-        # 全量标记已置位且该 target 未完成 → 允许补做（否则历史 failed 的 target 永远救不回）
-        log.info(f"[Onboarding|repo:{repo_key}] onboarded=1 but target={target} incomplete, retry")
+    task_defs = _load_onboarding_template(repo_key)
+    target = next((t for t in task_defs if t.get("type") == task_type), None)
+    if not target:
+        return {"ok": False, "reason": f"task type not in template: {task_type}"}
+    if _task_done(repo_key, task_type):
+        return {"ok": True, "reason": "task already complete, no retry needed"}
+    from src.user.db import get_gitcode_token
+    from src.api.routes.tasks import create_standard_task
+    bot_token = get_gitcode_token(repo_key=repo_key) or ""
+    if not bot_token:
+        return {"ok": False, "reason": "no repo bot token"}
     try:
-        from src.user.db import get_repo_scene
-        scene_id = get_repo_scene(repo_key) or "default"
-        skill = _scene_onboarding_skill(scene_id)
-        if not skill:
-            return {"ok": False, "reason": f"scene='{scene_id}' 无 onboarding 技能"}
-        skill_path = skill
-        skill_id = 0
-        try:
-            from src.user.db import resolve_skill_id, get_skill_by_id
-            _sid = resolve_skill_id(skill)
-            if _sid:
-                skill_id = _sid
-                _sk = get_skill_by_id(_sid)
-                skill_path = (_sk.get("skill_path") or skill) if _sk else skill
-        except Exception:
-            pass
-        _mark_onboarding_started(repo_key)
-        seq = _submit_onboarding_webhook(repo_key, owner, scene_id, skill,
-                                         skill_path, skill_id, target)
-        return {"ok": True, "seq": seq, "reason": ""}
+        r = create_standard_task(repo_key, target["title"], target["description"],
+                                 bot_token, assignee=owner, labels=target["labels"])
     except Exception as e:
-        log.warning(f"[Onboarding|repo:{repo_key}] retry target={target} failed: {e}")
+        log.warning(f"[Onboarding|repo:{repo_key}] retry type={task_type} failed: {e}")
         return {"ok": False, "reason": str(e)}
+    if r and r.get("ok"):
+        _mark_task_done(repo_key, task_type)
+        return {"ok": True, "issue_number": r.get("issue_number"), "reason": ""}
+    return {"ok": False, "reason": str(r)}

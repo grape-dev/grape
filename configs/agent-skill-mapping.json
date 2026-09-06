@@ -8,8 +8,7 @@
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
-   },
-   "onboarding": "repo-onboarding"
+   }
   },
   "cloud-native": {
    "name": "云原生开发",
@@ -19,8 +18,7 @@
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
-   },
-   "onboarding": "repo-onboarding"
+   }
   },
   "iac": {
    "name": "IaC开发",
@@ -30,8 +28,7 @@
     "coding": "iac-coding",
     "qa": "iac-qa",
     "sre": "iac-sre"
-   },
-   "onboarding": "repo-onboarding"
+   }
   },
   "agent-dev": {
    "name": "Agent开发",
@@ -41,8 +38,7 @@
     "coding": "implementation",
     "qa": "pr",
     "sre": "cloud-deploy"
-   },
-   "onboarding": "repo-onboarding"
+   }
   },
   "skill-dev": {
    "name": "华为云Skill开发",
@@ -52,8 +48,7 @@
     "coding": "skill-creator",
     "qa": "skill-tester",
     "sre": "skill-publish"
-   },
-   "onboarding": "repo-onboarding"
+   }
   },
   "api-skill-dev": {
    "name": "通用Skill开发",
@@ -63,8 +58,7 @@
     "coding": "rest-api-skill-creator",
     "qa": "rest-api-skill-tester",
     "sre": "skill-publish"
-   },
-   "onboarding": "repo-onboarding"
+   }
   },
   "blog-publish": {
    "name": "博客发布",
@@ -74,8 +68,7 @@
     "coding": "ai-blog-generation",
     "qa": "pr",
     "sre": "blog-publish"
-   },
-   "onboarding": "repo-onboarding"
+   }
   }
  }
 }

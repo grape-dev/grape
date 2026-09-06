@@ -590,6 +590,48 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
         raise
 
 
+def create_standard_task(repo_key: str, title: str, description: str,
+                         bot_token: str, assignee: str = "", labels=None) -> dict:
+    """真实 GitCode Issue 创建 + 标准任务建档（onboarding 模块调用，与手动创建任务同一原子路径）。
+
+    - 幂等：同仓库同标题 open Issue 已存在 → 不重复创建（复用 _find_open_issue_by_title）
+    - 建档：ensure_issue_task（幂等，天然单条任务上下文消息）
+    - token：bot_token 注入（onboarding 无登录用户上下文，用仓库 bot token）
+    - 不额外写入任何消息：任务上下文消息只由 ensure_issue_task → _ensure_task_conversation 产生 1 条
+    """
+    from src.repo_key import to_repo_key, split_owner_repo
+    repo_key = to_repo_key(repo_key)
+    owner, rname = split_owner_repo(repo_key)
+    if not title or not title.strip():
+        return {"ok": False, "code": 400, "message": "任务标题必填"}
+    if not bot_token:
+        return {"ok": False, "code": 400, "message": "GitCode bot token 缺失"}
+    if not assignee:
+        assignee = owner or ""
+    issue_num = _find_open_issue_by_title(bot_token, owner, rname, title.strip())
+    created = False
+    if issue_num is not None:
+        # 已有同标题 open Issue → 直接建档（幂等：不再重复创建 Issue）
+        issue_num = int(issue_num)
+    else:
+        resp = _post_gitcode_issue(bot_token, owner, rname, title.strip(),
+                                   (description or "").strip(), assignee=assignee)
+        n = None
+        if isinstance(resp, dict):
+            n = resp.get("number") or resp.get("iid") or resp.get("id")
+        if not n:
+            return {"ok": False, "code": 502,
+                    "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"}
+        issue_num = int(n)
+        created = True
+    task_id = ensure_issue_task(repo_key, issue_num, title.strip(), description or "",
+                                assignee=assignee, event_type="onboarding")
+    if not task_id:
+        return {"ok": False, "code": 500, "message": "任务建档失败"}
+    return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
+            "message": "任务已创建（Issue 已同步）" if created else "任务已创建（复用已有 Issue）"}
+
+
 @router.post("/create")
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
