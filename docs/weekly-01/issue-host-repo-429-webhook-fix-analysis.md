@@ -232,15 +232,28 @@ ALTER TABLE managed_repos ADD COLUMN host_status TEXT DEFAULT '';   -- ''=正常
 |----|------|------|
 | `''`（空） | 托管完整（默认，旧数据视为完整） | bot 已是维护者 + webhook 存在 |
 | `bot_missing` | bot 未成功加入成员 | `get_member_permission(bot)` 非 maintainer |
-| `webhook_missing` | webhook 未创建/失效 | `find_existing_webhook` 无结果 |
+| `webhook_missing` | webhook 未创建/失效 | 本地 `managed_repos.webhook_id` 为 0/空 |
 
 - host_repo 各阶段写状态：邀请前置 `partial`；bot 确认后置空（完整）；任一步失败记录失败态。
 - 迁移幂等：`ALTER TABLE` try/except 沿用现有模式；存量行默认 `''`。
 
-**F-2. 进入项目异步检查**（`GET /api/dashboard/{owner}/{repo}` 响应携带 `host_status`）
+**⚠️ webhook 误报根因（2026-09-06 生产）**：
+- 部署后接入 host_status，进项目时 `_check_host_status` 用 `find_existing_webhook` 远程按 **URL 字符串比对**。
+- 但 `get_webhook_url()` 优先返回 `server-config.json` 的 **https://grape.example.com/webhook/gitcode**，
+  而仓库实际注册的 hook URL 是 meta 表遗留的 **http://203.0.113.2:8080/webhook/gitcode** → URL 永不相等 → 全部误判 `webhook_missing`。
+- 66 个仓库 DB 的 `webhook_id` 全部 >0（真实存在），仅少数进过项目被检查标为 `webhook_missing`。
+- **结论：webhook 检测不应依赖远程 URL 比对，应改用本地 `webhook_id>0`（方案 X）。**
 
-- dashboard 路由异步检查该 repo 的实时托管状态（bot 是否维护者 + webhook 是否存在），更新 `managed_repos.host_status`。
-- 返回体增加 `host_status` 字段，前端据此显示告警横幅。
+**F-2. 进入项目异步检查（方案 X：纯本地，零 API 调用）**
+
+- **webhook 检测只用本地 `managed_repos.webhook_id > 0`**，不再调用 GitCode API、不比对 URL。
+  - webhook_id 在托管成功时由 GitCode 返回的真实 hook id 落库，>0 即表示"托管时已建立"。
+- **bot 检测**：bot_missing 已在托管失败时由 host_repo 写库；dashboard 仅读取已落库的 `host_status`，
+  若为 `bot_missing` 保持显示，否则视为正常（不额外远程查权限，避免限流）。
+- dashboard 异步（后台线程或轻量）读取 `managed_repos.host_status` 直接作为返回字段，前端据此渲染横幅。
+- **代价权衡**：纯本地无法发现"托管后 webhook 被手动删除"（漏报），但漏报危害远小于误报——
+  webhook 真删时事件静默丢失，功能日志会暴露；而误报会让所有项目显示告警，干扰使用。
+  如需真删检测，仅保留在「重检修复」（repair-host，用户手动触发）时远程确认一次。
 
 **F-3. 页面顶部告警横幅（前端 dashboard view）**
 
@@ -267,6 +280,8 @@ ALTER TABLE managed_repos ADD COLUMN host_status TEXT DEFAULT '';   -- ''=正常
 
 - 全程用 bot token（见方案 A/C 原则）；owner token 仅 F-4.1 邀请用。
 - 幂等：重复点「重检」不重复邀请/建 webhook；某步已满足则跳过。
+- **API 调用说明**：repair-host 是**用户主动触发**（点横幅「重检修复」），此时允许远程确认（查 hooks 按
+  webhook_id 比对 + 必要时 setup_webhook），不违反"进入项目零调用"的原则。
 
 ## 六、验收标准
 
@@ -282,7 +297,8 @@ ALTER TABLE managed_repos ADD COLUMN host_status TEXT DEFAULT '';   -- ''=正常
 - [ ] 前端错误展示能区分「限流重试」与「确认无权限（请设维护者）」
 - [ ] **`managed_repos` 有 `host_status` 列**，托管中断时正确标记 `bot_missing` / `webhook_missing` / `partial`
 - [ ] **托管失败后仍能进入项目页面，页面最上方显示告警横幅**（bot 未加入 / webhook 缺失对应文案）
-- [ ] **每次进入项目异步检查托管状态**并更新 `host_status`
+- [ ] **进入项目检查托管状态零 GitCode API 调用**：webhook 判定仅读本地 `managed_repos.webhook_id`，绝不做远程 URL 比对
+- [ ] **全部已托管仓库（webhook_id>0）不再显示 webhook_missing 误报**（URL 漂移不再导致误判）
 - [ ] **横幅「立即重检」按钮调 `POST /repair-host` 自愈**：已加入+webhook 已建 → 状态置空；未加入 → 重新邀请并校验
 - [ ] 自愈接口幂等：重复调用不重复邀请/建 webhook
 - [ ] 自愈成功横幅消失，项目功能完整可用

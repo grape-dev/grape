@@ -863,45 +863,33 @@ async def get_a2a_health():
 
 
 def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
-    """方案 F-2：实时复查仓库托管状态，返回并回写 managed_repos.host_status。
+    """方案 X（F-2 落地）：纯本地判定托管状态，零 GitCode API 调用。
 
-    - bot 非维护者 → 'bot_missing'
-    - webhook 缺失 → 'webhook_missing'
-    - 均正常 → ''（并清空历史异常标记）
-    用全局 bot token 自查，避免 owner 限流；任何异常降级为维持原状态（不抛错）。
+    - webhook 检测：读本地 managed_repos.webhook_id，>0 即视为存在（不远程比对 URL，杜绝 URL 漂移误报）。
+    - bot 检测：读本地已落库的 host_status；仅当原值为 bot_missing/partial 且 bot 实际应存在时
+      维持原值（不额外远程查权限，避免限流）。
+    - 不调用任何远程 API，避免 429；真实"webhook 被手动删除"的漏报由 repair-host 手动确认兜底。
     """
+    from src.config import log as _log
     try:
-        from src.user.repo_manager import get_member_permission, _RateLimitedError
-        from src.user.db import get_global_bot_credential, set_host_status
-        bot_token, bot_username = get_global_bot_credential()
-        if not bot_token or not bot_username:
-            return ""
-        # 1) bot 是否维护者（用 bot token 自查）
-        bot_ok = False
-        try:
-            perm = get_member_permission(bot_token, owner, repo, bot_username)
-            bot_ok = bool(perm and (perm.get("access_level") or 0) >= 40)
-        except _RateLimitedError:
-            bot_ok = False  # 限流未判定：维持现状，不误报
-        # 2) webhook 是否存在
-        from src.user.repo_manager import find_existing_webhook
-        from src.user.db import get_webhook_url
-        webhook_url = get_webhook_url()
-        try:
-            hid = find_existing_webhook(bot_token, owner, repo, webhook_url)
-        except Exception:
-            hid = None
-        if not bot_ok:
-            status = "bot_missing"
-        elif not hid:
-            status = "webhook_missing"
-        else:
-            status = ""
-        set_host_status(repo_key, status)
-        return status
+        from src.user.db import get_host_status, set_host_status, _get_managed_webhook_id
+        webhook_id = _get_managed_webhook_id(repo_key)
+        cur = get_host_status(repo_key)
+        if not webhook_id:
+            # webhook 从未建立 → webhook_missing
+            if cur != "webhook_missing":
+                set_host_status(repo_key, "webhook_missing")
+            return "webhook_missing"
+        # webhook 存在：
+        if cur in ("bot_missing", "partial"):
+            # bot 缺失/部分是托管时落库的明确标记，保留（不远程复查）
+            return cur
+        # 正常（含曾误标 webhook_missing → 现在 webhook_id>0 存在 → 清掉误报）
+        if cur != "":
+            set_host_status(repo_key, "")
+        return ""
     except Exception as e:
-        from src.config import log
-        log.warning(f"Dashboard: host status check failed: {e}")
+        _log.warning(f"Dashboard: host status check failed: {e}")
         return ""
 
 

@@ -1087,6 +1087,21 @@ def get_host_status(repo_key: str) -> str:
         return ""
 
 
+def _get_managed_webhook_id(repo_key: str) -> int:
+    """读取仓库本地记录的 webhook_id（方案 X：以本地 >0 判定 webhook 存在，不远程查）。"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT webhook_id FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            return (row[0] or 0) if row else 0
+    except Exception as e:
+        log.warning(f"Get managed webhook id failed: {e}")
+        return 0
+
+
 def get_global_bot_credential() -> tuple[str, str]:
     """读取全局 bot 配置，返回 (bot_token, bot_username)。"""
     import json, os as _os
