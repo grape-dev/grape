@@ -862,6 +862,49 @@ async def get_a2a_health():
     return result
 
 
+def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
+    """方案 F-2：实时复查仓库托管状态，返回并回写 managed_repos.host_status。
+
+    - bot 非维护者 → 'bot_missing'
+    - webhook 缺失 → 'webhook_missing'
+    - 均正常 → ''（并清空历史异常标记）
+    用全局 bot token 自查，避免 owner 限流；任何异常降级为维持原状态（不抛错）。
+    """
+    try:
+        from src.user.repo_manager import get_member_permission, _RateLimitedError
+        from src.user.db import get_global_bot_credential, set_host_status
+        bot_token, bot_username = get_global_bot_credential()
+        if not bot_token or not bot_username:
+            return ""
+        # 1) bot 是否维护者（用 bot token 自查）
+        bot_ok = False
+        try:
+            perm = get_member_permission(bot_token, owner, repo, bot_username)
+            bot_ok = bool(perm and (perm.get("access_level") or 0) >= 40)
+        except _RateLimitedError:
+            bot_ok = False  # 限流未判定：维持现状，不误报
+        # 2) webhook 是否存在
+        from src.user.repo_manager import find_existing_webhook
+        from src.user.db import get_webhook_url
+        webhook_url = get_webhook_url()
+        try:
+            hid = find_existing_webhook(bot_token, owner, repo, webhook_url)
+        except Exception:
+            hid = None
+        if not bot_ok:
+            status = "bot_missing"
+        elif not hid:
+            status = "webhook_missing"
+        else:
+            status = ""
+        set_host_status(repo_key, status)
+        return status
+    except Exception as e:
+        from src.config import log
+        log.warning(f"Dashboard: host status check failed: {e}")
+        return ""
+
+
 @router.get("/{owner}/{repo}")
 def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
@@ -1085,6 +1128,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
 
     metrics["active_agents"] = sum(1 for a in agent_sessions if a["status"] == "running")
 
+    # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
+    host_status = _check_host_status(owner, repo, repo_key)
+
     return {
         "repo": repo_key,
         "role": role,
@@ -1094,4 +1140,5 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         "agents": agent_sessions,
         "agent_engines": agent_engines,
         "scene_nodes": scene_nodes,
+        "host_status": host_status,
     }

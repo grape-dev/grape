@@ -164,7 +164,23 @@ function renderDashboard(data) {
     .ap-chat-ic{width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,#5ac8fa,#0071e3);display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px;flex-shrink:0}
     .ap-chat-t{font-size:13px;font-weight:600;color:#1d1d1f}
     .ap-chat-s{font-size:11px;color:#86868b;margin-top:2px}
+    .host-banner{display:flex;align-items:center;gap:10px;background:#fff3cd;border:1px solid #ffc107;border-radius:12px;padding:10px 14px;margin-bottom:12px;font-size:13px;color:#7a5b00}
+    .host-banner.error{background:#fdecea;border-color:#ff3b30;color:#c31f1e}
+    .host-banner button{margin-left:auto;background:#ff9500;color:#fff;border:none;border-radius:8px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:600}
+    .host-banner.error button{background:#ff3b30}
   </style>
+
+  ${(function () {
+    const hs = data.host_status || '';
+    if (!hs) return '';
+    if (hs === 'bot_missing') {
+      return '<div class="host-banner error">⚠️ 该项目 grape_bot 未成功加入项目，请手动添加 bot 至项目，或点击「重检修复」自动处理<bR> <button onclick="window._repairHost()">重检修复</button></div>';
+    }
+    if (hs === 'webhook_missing') {
+      return '<div class="host-banner">⚠️ 项目 webhook 缺失，Grape 无法接收仓库事件<bR> <button onclick="window._repairHost()">补建 webhook</button></div>';
+    }
+    return '<div class="host-banner">⚠️ 该项目托管流程未完成，Grape 部分功能不可用<bR> <button onclick="window._repairHost()">重检修复</button></div>';
+  })()}
 
   <div class="ap-hero">
     <div class="ap-hero-row">
@@ -836,3 +852,25 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
   });
   return html;
 }
+
+// 方案 F-3：托管自愈（告警横幅「重检修复」按钮）
+window._repairHost = function () {
+  let owner = '', name = '';
+  try {
+    const cr = app.currentRepo();
+    if (cr) { owner = cr.owner; name = cr.name; }
+  } catch (e) {}
+  if (!owner || !name) return;
+  API.post('/repos/' + owner + '/' + name + '/repair-host', {})
+    .then(function (d) {
+      if (d && d.status === 'ok') {
+        app.showToast && app.showToast('托管已修复');
+        location.reload();
+      } else {
+        app.showToast && app.showToast((d && d.message) || '修复失败，请稍后手动重试');
+      }
+    })
+    .catch(function (e) {
+      app.showToast && app.showToast('修复请求失败：' + (e && (e.detail && e.detail.message || e.message) || '未知错误'));
+    });
+};

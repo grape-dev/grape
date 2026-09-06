@@ -353,11 +353,10 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     except Exception:
         pass
 
-    # webhook 创建优先使用个人 token（用户已授权全权限）；repo bot token / 全局 bot token 兜底
-    bot_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
-    webhook_token = api_token or bot_token or global_bot_token
-    if not webhook_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，无法创建 webhook"})
+    # webhook 统一用全局 bot token 创建/查（方案 C：webhook 归 bot 管辖，个人 token 避免限流）
+    if not global_bot_token:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "全局 Bot Token 未配置，无法创建 webhook（请联系管理员检查 configs/global-bot-token.json）"})
+    webhook_token = global_bot_token
 
     from src.user.repo_manager import _check_collaborator_admin, _req
     try:
@@ -379,46 +378,61 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"权限验证失败: {e}"})
 
     try:
-        from src.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission
-        # 全局 bot（configs/global-bot-token.json）作为维护者加入（用 owner token，GitCode 拒绝 bot 邀请自己）
-        # GitCode 为邀请制：owner 发起邀请（permission=maintainer→admin）→ bot 用 invite 接口同意 → 校验权限
-        # 失败则拒绝托管
-        if api_token and global_bot_username:
+        from src.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission, _RateLimitedError
+        repo_key = to_repo_key(body.full_name)
+        from src.user.db import set_host_status
+
+        def _mark(status: str):
+            try:
+                set_host_status(repo_key, status)
+            except Exception as _e:
+                log.warning(f"host_repo: set host_status={status} failed: {_e}")
+
+        # 1) 邀请 bot 为维护者（owner token 必需）→ 2) bot 接受 → 3) bot 自查权限
+        # 原则：凡能查/能建一律 bot token；owner token 仅 L363 身份确认 + 本步邀请
+        if api_token and global_bot_username and global_bot_token:
+            _mark("partial")
             ok = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
             if not ok:
-                # 兜底：add_collaborator 失败可能是 GitCode 返回了未纳入幂等列表的错误
-                # （如 400"组织不存在"），此时 bot 可能早已是维护者——查实际权限确认
-                bot_perm = get_member_permission(api_token, owner, repo_name, global_bot_username)
-                access_level = (bot_perm or {}).get("access_level", 0) or 0
+                # 兜底：add_collaborator 失败可能是已成员/已邀请，用 bot token 自查确认
+                try:
+                    bot_perm = get_member_permission(global_bot_token, owner, repo_name, global_bot_username)
+                    access_level = (bot_perm or {}).get("access_level", 0) or 0
+                except _RateLimitedError as _rl:
+                    log.warning(f"host: perm check rate-limited (non-fatal), mark bot_missing: {_rl}")
+                    _mark("bot_missing")
+                    raise HTTPException(status_code=503, detail={"code": 503, "message": "托管暂时失败：GitCode API 调用过于频繁，请稍后重试"})
                 if access_level >= 40:
-                    log.info(f"host: add_collaborator failed but bot {global_bot_username} already maintainer "
-                             f"(access_level={access_level}) in {owner}/{repo_name}, continue")
+                    log.info(f"host: add_collaborator failed but bot {global_bot_username} already maintainer (access_level={access_level}) in {owner}/{repo_name}, continue")
                 else:
-                    raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 无法将全局 Bot（{global_bot_username}）加入仓库维护者"})
+                    _mark("bot_missing")
+                    raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 无法将全局 Bot（{global_bot_username}）加入仓库维护者，请手动在仓库成员中添加"})
 
-            # 用全局 bot token 自动接受项目邀请（invite 定制接口仅 grape_bot 可用）
-            if global_bot_token:
-                if not accept_invite_for_repo(global_bot_token, owner, repo_name):
-                    log.warning(f"host: no invite to accept for {owner}/{repo_name}, bot may already be member")
+            # bot 接受邀请
+            if not accept_invite_for_repo(global_bot_token, owner, repo_name):
+                log.warning(f"host: no invite to accept for {owner}/{repo_name}, bot may already be member")
 
-                # 校验 bot 已是维护者（access_level>=40），否则托管失败
-                bot_perm = get_member_permission(api_token, owner, repo_name, global_bot_username)
+            # 校验 bot 已是维护者（access_level>=40）——用 bot token；限流/失败允许降级继续（方案 B）
+            try:
+                bot_perm = get_member_permission(global_bot_token, owner, repo_name, global_bot_username)
                 access_level = (bot_perm or {}).get("access_level", 0) or 0
                 if access_level < 40:
                     role_name = (bot_perm or {}).get("role_name", "")
-                    raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: 全局 Bot（{global_bot_username}）当前为{role_name or access_level}，未成为仓库维护者（Maintainer）。请在 GitCode 仓库成员中将 {global_bot_username} 权限设为维护者后重试"})
+                    _mark("bot_missing")
+                    log.warning(f"host: bot perm check inconclusive (level={access_level}), invite path succeeded, mark bot_missing")
+                    raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管部分完成: 全局 Bot（{global_bot_username}）权限={role_name or f'level {access_level}'}，未成为仓库维护者（Maintainer）。请在 GitCode 仓库成员中将 {global_bot_username} 权限设为维护者，或点击页面提示的「重检」自动修复"})
+            except _RateLimitedError as _rl:
+                # 限流：权限未判定，继续 webhook（不阻塞），host_status 待 dashboard 复查
+                log.warning(f"host: perm check rate-limited (continue): {_rl}")
 
+        # 4) webhook：统一用 bot token 查/建（方案 C）
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
-            repo_key = to_repo_key(body.full_name)
-            # 清理同名旧仓库残留的 DB 数据（用户可能直接在 GitCode 删仓库后重建同名，旧数据残留导致前端混乱）
-            from src.api.onboarding import cleanup_stale_repo_data
-            cleanup_stale_repo_data(repo_key)
             user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
-            # Fork official scenes to repo scope
+            _mark("")
             try:
                 from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
                 _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
@@ -427,7 +441,6 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
         hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=webhook_token)
-        repo_key = to_repo_key(body.full_name)
         # 清理同名旧仓库残留的 DB 数据（同上）
         from src.api.onboarding import cleanup_stale_repo_data
         cleanup_stale_repo_data(repo_key)
@@ -435,7 +448,7 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
         from src.api.session_store import ensure_default_agent_sessions
         ensure_default_agent_sessions(repo_key)
-        # Fork official scenes to repo scope
+        _mark("")
         try:
             from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
             _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
@@ -445,7 +458,68 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
     except HTTPException:
         raise
     except Exception as e:
+        # 兜底：失败但 webhook 可能已建，标记状态避免死循环，仍可进入项目
+        try:
+            _rk = to_repo_key(body.full_name)
+            _mark("partial")
+        except Exception:
+            pass
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
+
+
+@router.post("/{owner}/{repo}/repair-host")
+def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
+    """方案 F-4：自愈未完成的托管流程（bot 未加入 / webhook 未创建），幂等。
+
+    流程：需要 owner token 邀请 + bot token 建 webhook；判定 bot 已是维护者则跳过邀请；
+    返回修复后的 host_status。
+    """
+    from src.repo_key import to_repo_key
+    from src.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission, find_existing_webhook, setup_webhook, _RateLimitedError
+    from src.user.db import get_global_bot_credential, get_webhook_url, set_host_status, get_user_token
+
+    repo_key = to_repo_key(f"{owner}/{repo}")
+    api_token = get_user_token(user["username"])
+    bot_token, bot_username = get_global_bot_credential()
+    if not api_token or not bot_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "缺少 API Token，无法自愈"})
+    webhook_url = get_webhook_url()
+
+    # 1) bot 是否已是维护者（bot token 自查）
+    bot_ok = False
+    try:
+        perm = get_member_permission(bot_token, owner, repo, bot_username)
+        bot_ok = bool(perm and (perm.get("access_level") or 0) >= 40)
+    except _RateLimitedError:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "GitCode API 调用过于频繁，请稍后重试"})
+
+    if not bot_ok:
+        # 邀请 + 接受
+        add_collaborator(api_token, owner, repo, bot_username, "maintainer")
+        accept_invite_for_repo(bot_token, owner, repo)
+        try:
+            perm2 = get_member_permission(bot_token, owner, repo, bot_username)
+            bot_ok = bool(perm2 and (perm2.get("access_level") or 0) >= 40)
+        except _RateLimitedError:
+            bot_ok = False
+        if not bot_ok:
+            set_host_status(repo_key, "bot_missing")
+            return {"status": "error", "host_status": "bot_missing",
+                    "message": f"未能自动将 {bot_username} 加入为维护者，请手动在仓库成员中添加"}
+
+    # 2) webhook 是否存在，缺失则补建（bot token）
+    hid = None
+    try:
+        hid = find_existing_webhook(bot_token, owner, repo, webhook_url)
+    except Exception:
+        hid = None
+    if not hid:
+        hid = setup_webhook(bot_token, owner, repo, webhook_url, webhook_password=bot_token)
+
+    # 3) 完成 → 清状态
+    set_host_status(repo_key, "")
+    return {"status": "ok", "host_status": "", "webhook_id": hid,
+            "message": "托管已修复（bot 已加入成员，webhook 已就绪）"}
 
 
 @router.get("/managed")

@@ -365,6 +365,7 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     full_name TEXT NOT NULL,               -- owner/repo（无前缀，兼容/展示）
     webhook_id INTEGER DEFAULT 0,
     dev_scene TEXT DEFAULT '',      -- 开发场景（仓库已应用场景时写入 scene_id；默认置空=未配置，issue-39 方案 B）
+    host_status TEXT DEFAULT '',     -- 托管状态（方案 F：''=完整 / bot_missing / webhook_missing / partial）
     bot_gitcode_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
     bot_username TEXT DEFAULT '',
@@ -1053,6 +1054,55 @@ def get_repo_scene(repo_key: str) -> str:
     except Exception as e:
         log.warning(f"Get repo scene failed: {e}")
         return ""
+
+
+def set_host_status(repo_key: str, status: str = ""):
+    """写入仓库托管状态（managed_repos.host_status），幂等（方案 F）。
+
+    空串=托管完整；bot_missing=bot 未成功加入；webhook_missing=webhook 未创建；partial=流程部分执行。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE managed_repos SET host_status=? WHERE repo_key=?", (status or "", repo_key))
+            db.commit()
+    except Exception as e:
+        log.warning(f"Set host status failed: {e}")
+
+
+def get_host_status(repo_key: str) -> str:
+    """读取仓库托管状态（managed_repos.host_status），无记录返回空串。"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT host_status FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            return (row[0] or "") if row else ""
+    except Exception as e:
+        log.warning(f"Get host status failed: {e}")
+        return ""
+
+
+def get_global_bot_credential() -> tuple[str, str]:
+    """读取全局 bot 配置，返回 (bot_token, bot_username)。"""
+    import json, os as _os
+    _gbt_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+                              "configs", "global-bot-token.json")
+    try:
+        if _os.path.exists(_gbt_path):
+            with open(_gbt_path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            tok = d.get("gitcode_api_token", "") or ""
+            us = (d.get("bot_usernames") or [])
+            user = us[0] if us else ""
+            return tok, user
+    except Exception as e:
+        log.warning(f"get_global_bot_credential failed: {e}")
+    return "", ""
 
 
 def get_managed_repos(user_id: int) -> list[dict]:
