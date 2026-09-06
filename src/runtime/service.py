@@ -1358,7 +1358,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
                        exit_code=exit_code, result_text=result_text or "",
                        usage_json=json.dumps(usage or {}))
-    # 新会话续接指针回写（Issue 级优先，repo 级兼容，见 multi-issue-isolation-design.md §3.3/§3.5）
+    # 新会话续接指针回写——仅写回 Issue 级执行会话
+    # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
     _new_sid = (usage or {}).get("session_id") or ""
     if _new_sid:
         try:
@@ -1367,15 +1368,6 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                 update_issue_session(task["issue_session_id"], runtime_session_id=_new_sid)
         except Exception as e:
             log.warning(f"complete_task update issue session failed: {e}")
-        try:
-            with db_lock:
-                c = db.cursor()
-                if task and task.get("agent_session_id"):
-                    c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE id=?",
-                              (_new_sid, task["agent_session_id"]))
-                    db.commit()
-        except Exception as e:
-            log.warning(f"complete_task update repo session failed: {e}")
     log.info(f"Task completed: {task_id} exit={exit_code}")
     # remote worker 模式下 _execute_agent 不执行，系统回帖 + 会话同步在此补触发
     if exit_code == 0 and task and task.get("issue_id"):

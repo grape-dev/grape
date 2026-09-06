@@ -1304,12 +1304,13 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                 db.commit()
         except Exception:
             pass
-    oc_session_id = session.get("runtime_session_id") or ""
+    oc_session_id = ""
     issue_session_id = ""
     if _issue_num_from(issue_id):
         _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
         issue_session_id = _isess.get("id") or ""
         oc_session_id = _isess.get("runtime_session_id") or ""
+    # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回退读取。
 
     repo_gitcode_token = ""
     try:
@@ -1703,13 +1704,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
             issue_session_id = _isess.get("id") or ""
             oc_session_id = _isess.get("runtime_session_id") or ""
-        if not _has_issue and not oc_session_id:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
-                row = c.fetchone()
-                if row and row[0]:
-                    oc_session_id = row[0]
+        # 无关联 Issue 任务不执行（push 忽略），不再回退读 repo 级 runtime_session_id。
     except Exception:
         pass
 
@@ -1907,20 +1902,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent failed: [Agent:{agent_type}|repo:{repo_name}] {e}")
 
-    # 更新 oc_session_id（持久化对话上下文）——Issue 级执行会话优先，回退 repo 级
+    # 更新 oc_session_id（持久化对话上下文）——仅写回 Issue 级执行会话
+    # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
     if new_oc_session_id and new_oc_session_id != oc_session_id:
         try:
             if issue_session_id:
                 from src.api.session_store import update_issue_session
                 update_issue_session(issue_session_id, runtime_session_id=new_oc_session_id)
-            # 本函数内其他分支有局部 import db_lock（1157 行）→ 会遮蔽模块级名；
-            # 此处必须局部重新绑定，否则 NameError（2026-08-20 修复 e7a93a5b 副作用）
-            from src.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
-                          (new_oc_session_id, repo_name, agent_type))
-                db.commit()
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
