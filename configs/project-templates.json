@@ -810,29 +810,6 @@
           }
         },
         {
-          "id": "gitcode-gmyyds-cloud-native-library",
-          "name": "cloud-native-library",
-          "description": "云原生资料库 - https://jimmysong.io/book/",
-          "recommend_reason": "SCSS · 云原生核心 · 云原生资料库 - https://jimmysong.io/book/",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gmyyds/cloud-native-library",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gmyyds/cloud-native-library.git",
-          "html_url": "https://gitcode.com/gmyyds/cloud-native-library",
-          "default_repo_name": "cloud-native-library",
-          "tags": [
-            "SCSS"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "SCSS",
-            "platform": "gitcode"
-          }
-        },
-        {
           "id": "gitcode-openairymax-cloudnative",
           "name": "cloudnative",
           "description": "可在云原生基础设施上打包、调度并运维 agentrt-liunx 智能体，提供 Kubernetes CRD、agent 感知的 containerd shim、OCI 镜像规范、CNI 网络、agentctl CLI 与超节点 OS 镜像",
@@ -852,6 +829,29 @@
             "show": true,
             "stars": 6,
             "language": "Markdown",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gmyyds-cloud-native-library",
+          "name": "cloud-native-library",
+          "description": "云原生资料库 - https://jimmysong.io/book/",
+          "recommend_reason": "SCSS · 云原生核心 · 云原生资料库 - https://jimmysong.io/book/",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gmyyds/cloud-native-library",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gmyyds/cloud-native-library.git",
+          "html_url": "https://gitcode.com/gmyyds/cloud-native-library",
+          "default_repo_name": "cloud-native-library",
+          "tags": [
+            "SCSS"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "SCSS",
             "platform": "gitcode"
           }
         },
@@ -879,6 +879,29 @@
           }
         },
         {
+          "id": "gitcode-gmyyds-cloud-native-travel",
+          "name": "cloud-native-travel",
+          "description": "云原生学习旅程，如网络、计算、社区等",
+          "recommend_reason": "Go 语言 · 云原生核心",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gmyyds/cloud-native-travel",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gmyyds/cloud-native-travel.git",
+          "html_url": "https://gitcode.com/gmyyds/cloud-native-travel",
+          "default_repo_name": "cloud-native-travel",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
           "id": "gitcode-alibaba-org-cloud-native-app-initializer",
           "name": "cloud-native-app-initializer",
           "description": "",
@@ -902,17 +925,17 @@
           }
         },
         {
-          "id": "gitcode-gmyyds-cloud-native-travel",
-          "name": "cloud-native-travel",
-          "description": "云原生学习旅程，如网络、计算、社区等",
-          "recommend_reason": "Go 语言 · 云原生核心",
+          "id": "gitcode-gh_mirrors-my-myapp",
+          "name": "myapp",
+          "description": "A production-grade microservice boilerplate featuring GORM, Goose, Swag, Zerolog, Validator.v10, GitOps, Kubernetes, Kus",
+          "recommend_reason": "Go 语言 · 云原生核心 · A production-grade microservice boilerplate featuring GORM, ",
           "icon": "📦",
           "source": "git",
-          "source_repo": "gmyyds/cloud-native-travel",
+          "source_repo": "gh_mirrors/my/myapp",
           "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gmyyds/cloud-native-travel.git",
-          "html_url": "https://gitcode.com/gmyyds/cloud-native-travel",
-          "default_repo_name": "cloud-native-travel",
+          "clone_url": "https://gitcode.com/gh_mirrors/my/myapp.git",
+          "html_url": "https://gitcode.com/gh_mirrors/my/myapp",
+          "default_repo_name": "myapp",
           "tags": [
             "Go"
           ],
@@ -966,29 +989,6 @@
           "stats": {
             "show": true,
             "stars": 43,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-my-myapp",
-          "name": "myapp",
-          "description": "A production-grade microservice boilerplate featuring GORM, Goose, Swag, Zerolog, Validator.v10, GitOps, Kubernetes, Kus",
-          "recommend_reason": "Go 语言 · 云原生核心 · A production-grade microservice boilerplate featuring GORM, ",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/my/myapp",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/my/myapp.git",
-          "html_url": "https://gitcode.com/gh_mirrors/my/myapp",
-          "default_repo_name": "myapp",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
             "language": "Go",
             "platform": "gitcode"
           }
@@ -1178,29 +1178,6 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-ku-kubernetes-learning",
-          "name": "kubernetes-learning",
-          "description": "《从Docker到Kubernetes进阶课程》在线文档",
-          "recommend_reason": "值得关注（1 ⭐） · Dockerfile · Kubernetes 生态",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/ku/kubernetes-learning",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-learning.git",
-          "html_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-learning",
-          "default_repo_name": "kubernetes-learning",
-          "tags": [
-            "Dockerfile"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 1,
-            "language": "Dockerfile",
-            "platform": "gitcode"
-          }
-        },
-        {
           "id": "gitcode-gh_mirrors-ku-kubernetes-mcp-server",
           "name": "kubernetes-mcp-server",
           "description": "Model Context Protocol (MCP) server for Kubernetes and OpenShift",
@@ -1224,6 +1201,29 @@
           }
         },
         {
+          "id": "gitcode-gh_mirrors-ku-kubernetes-learning",
+          "name": "kubernetes-learning",
+          "description": "《从Docker到Kubernetes进阶课程》在线文档",
+          "recommend_reason": "值得关注（1 ⭐） · Dockerfile · Kubernetes 生态",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/ku/kubernetes-learning",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-learning.git",
+          "html_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-learning",
+          "default_repo_name": "kubernetes-learning",
+          "tags": [
+            "Dockerfile"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 1,
+            "language": "Dockerfile",
+            "platform": "gitcode"
+          }
+        },
+        {
           "id": "gitcode-gh_mirrors-ku-kubernetes-security-best-practice",
           "name": "kubernetes-security-best-practice",
           "description": "Kubernetes Security - Best Practice Guide",
@@ -1241,29 +1241,6 @@
             "show": true,
             "stars": 1,
             "language": "",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-di-dify-kubernetes",
-          "name": "dify-kubernetes",
-          "description": "Deploy Dify on Kubernetes",
-          "recommend_reason": "值得关注（1 ⭐） · Markdown · Kubernetes 生态",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/di/dify-kubernetes",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/di/dify-kubernetes.git",
-          "html_url": "https://gitcode.com/gh_mirrors/di/dify-kubernetes",
-          "default_repo_name": "dify-kubernetes",
-          "tags": [
-            "Markdown"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 1,
-            "language": "Markdown",
             "platform": "gitcode"
           }
         },
@@ -1312,48 +1289,25 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-ku-kubernetes-reflector",
-          "name": "kubernetes-reflector",
-          "description": "Custom Kubernetes controller that can be used to replicate secrets, configmaps and certificates.",
-          "recommend_reason": "C# · Kubernetes 生态 · Custom Kubernetes controller that can be used to replicate s",
+          "id": "gitcode-gh_mirrors-di-dify-kubernetes",
+          "name": "dify-kubernetes",
+          "description": "Deploy Dify on Kubernetes",
+          "recommend_reason": "值得关注（1 ⭐） · Markdown · Kubernetes 生态",
           "icon": "📦",
           "source": "git",
-          "source_repo": "gh_mirrors/ku/kubernetes-reflector",
+          "source_repo": "gh_mirrors/di/dify-kubernetes",
           "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-reflector.git",
-          "html_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-reflector",
-          "default_repo_name": "kubernetes-reflector",
+          "clone_url": "https://gitcode.com/gh_mirrors/di/dify-kubernetes.git",
+          "html_url": "https://gitcode.com/gh_mirrors/di/dify-kubernetes",
+          "default_repo_name": "dify-kubernetes",
           "tags": [
-            "C#"
+            "Markdown"
           ],
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 0,
-            "language": "C#",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-ku-kubernetes-handbook",
-          "name": "kubernetes-handbook",
-          "description": "Kubernetes 架构与生态：从云原生到 AI 原生基础设施的构建指南",
-          "recommend_reason": "Shell 脚本 · Kubernetes 生态 · Kubernetes 架构与生态：从云原生到 AI 原生基础设施的构建指南",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/ku/kubernetes-handbook",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-handbook.git",
-          "html_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-handbook",
-          "default_repo_name": "kubernetes-handbook",
-          "tags": [
-            "Shell"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Shell",
+            "stars": 1,
+            "language": "Markdown",
             "platform": "gitcode"
           }
         },
@@ -1404,25 +1358,48 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-ku-kubernetes-ingress",
-          "name": "kubernetes-ingress",
-          "description": "NGINX and  NGINX Plus Ingress Controllers for Kubernetes",
-          "recommend_reason": "Go 语言 · Kubernetes 生态 · NGINX and  NGINX Plus Ingress Controllers for Kubernetes",
+          "id": "gitcode-gh_mirrors-ku-kubernetes-reflector",
+          "name": "kubernetes-reflector",
+          "description": "Custom Kubernetes controller that can be used to replicate secrets, configmaps and certificates.",
+          "recommend_reason": "C# · Kubernetes 生态 · Custom Kubernetes controller that can be used to replicate s",
           "icon": "📦",
           "source": "git",
-          "source_repo": "gh_mirrors/ku/kubernetes-ingress",
+          "source_repo": "gh_mirrors/ku/kubernetes-reflector",
           "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-ingress.git",
-          "html_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-ingress",
-          "default_repo_name": "kubernetes-ingress",
+          "clone_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-reflector.git",
+          "html_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-reflector",
+          "default_repo_name": "kubernetes-reflector",
           "tags": [
-            "Go"
+            "C#"
           ],
           "scene_id": "default",
           "stats": {
             "show": true,
             "stars": 0,
-            "language": "Go",
+            "language": "C#",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-ku-kubernetes-handbook",
+          "name": "kubernetes-handbook",
+          "description": "Kubernetes 架构与生态：从云原生到 AI 原生基础设施的构建指南",
+          "recommend_reason": "Shell 脚本 · Kubernetes 生态 · Kubernetes 架构与生态：从云原生到 AI 原生基础设施的构建指南",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/ku/kubernetes-handbook",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-handbook.git",
+          "html_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-handbook",
+          "default_repo_name": "kubernetes-handbook",
+          "tags": [
+            "Shell"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Shell",
             "platform": "gitcode"
           }
         },
@@ -1446,6 +1423,29 @@
             "show": true,
             "stars": 1,
             "language": "Shell",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-ku-kubernetes-ingress",
+          "name": "kubernetes-ingress",
+          "description": "NGINX and  NGINX Plus Ingress Controllers for Kubernetes",
+          "recommend_reason": "Go 语言 · Kubernetes 生态 · NGINX and  NGINX Plus Ingress Controllers for Kubernetes",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/ku/kubernetes-ingress",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-ingress.git",
+          "html_url": "https://gitcode.com/gh_mirrors/ku/kubernetes-ingress",
+          "default_repo_name": "kubernetes-ingress",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
             "platform": "gitcode"
           }
         },
@@ -1655,6 +1655,29 @@
           }
         },
         {
+          "id": "gitcode-gh_mirrors-k8s-k8s",
+          "name": "k8s",
+          "description": "A simple Kubernetes Go client",
+          "recommend_reason": "Go 语言 · K8s 编排 · A simple Kubernetes Go client",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/k8s/k8s",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/k8s/k8s.git",
+          "html_url": "https://gitcode.com/gh_mirrors/k8s/k8s",
+          "default_repo_name": "k8s",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
           "id": "gitcode-gh_mirrors-k8s1-k8s",
           "name": "k8s",
           "description": "NATS on Kubernetes with Helm Charts",
@@ -1697,29 +1720,6 @@
             "show": true,
             "stars": 0,
             "language": "Batchfile",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-k8s-k8s",
-          "name": "k8s",
-          "description": "A simple Kubernetes Go client",
-          "recommend_reason": "Go 语言 · K8s 编排 · A simple Kubernetes Go client",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/k8s/k8s",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/k8s/k8s.git",
-          "html_url": "https://gitcode.com/gh_mirrors/k8s/k8s",
-          "default_repo_name": "k8s",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
             "platform": "gitcode"
           }
         },
@@ -1837,29 +1837,6 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-k8s-k8s-sidecar",
-          "name": "k8s-sidecar",
-          "description": "This is a docker container intended to run inside a kubernetes cluster to collect config maps with a specified label and",
-          "recommend_reason": "Python · K8s 编排 · This is a docker container intended to run inside a kubernet",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/k8s/k8s-sidecar",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/k8s/k8s-sidecar.git",
-          "html_url": "https://gitcode.com/gh_mirrors/k8s/k8s-sidecar",
-          "default_repo_name": "k8s-sidecar",
-          "tags": [
-            "Python"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Python",
-            "platform": "gitcode"
-          }
-        },
-        {
           "id": "gitcode-gh_mirrors-k8s-k8s-on-raspbian",
           "name": "k8s-on-raspbian",
           "description": "Kubernetes on Raspbian (Raspberry Pi)",
@@ -1879,6 +1856,29 @@
             "show": true,
             "stars": 0,
             "language": "Shell",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-k8s-k8s-sidecar",
+          "name": "k8s-sidecar",
+          "description": "This is a docker container intended to run inside a kubernetes cluster to collect config maps with a specified label and",
+          "recommend_reason": "Python · K8s 编排 · This is a docker container intended to run inside a kubernet",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/k8s/k8s-sidecar",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/k8s/k8s-sidecar.git",
+          "html_url": "https://gitcode.com/gh_mirrors/k8s/k8s-sidecar",
+          "default_repo_name": "k8s-sidecar",
+          "tags": [
+            "Python"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Python",
             "platform": "gitcode"
           }
         },
@@ -2113,6 +2113,52 @@
           }
         },
         {
+          "id": "gitcode-gh_mirrors-te-terraform-aws-rds",
+          "name": "terraform-aws-rds",
+          "description": "Terraform module to create AWS RDS resources 🇺🇦",
+          "recommend_reason": "HCL · 基础设施即代码 · Terraform module to create AWS RDS resources 🇺🇦",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-aws-rds",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-rds.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-rds",
+          "default_repo_name": "terraform-aws-rds",
+          "tags": [
+            "HCL"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "HCL",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-ter-terraform-provider-proxmox",
+          "name": "terraform-provider-proxmox",
+          "description": "Terraform / OpenTofu Provider for Proxmox VE",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform / OpenTofu Provider for Proxmox VE",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/ter/terraform-provider-proxmox",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/ter/terraform-provider-proxmox.git",
+          "html_url": "https://gitcode.com/gh_mirrors/ter/terraform-provider-proxmox",
+          "default_repo_name": "terraform-provider-proxmox",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
           "id": "gitcode-gh_mirrors-te-terraform-guides",
           "name": "terraform-guides",
           "description": "Example usage of HashiCorp Terraform",
@@ -2124,6 +2170,29 @@
           "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-guides.git",
           "html_url": "https://gitcode.com/gh_mirrors/te/terraform-guides",
           "default_repo_name": "terraform-guides",
+          "tags": [
+            "HCL"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "HCL",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-aws-github-runner",
+          "name": "terraform-aws-github-runner",
+          "description": "Terraform module for scalable GitHub action runners on AWS",
+          "recommend_reason": "HCL · 基础设施即代码 · Terraform module for scalable GitHub action runners on AWS",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-aws-github-runner",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-github-runner.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-github-runner",
+          "default_repo_name": "terraform-aws-github-runner",
           "tags": [
             "HCL"
           ],
@@ -2159,17 +2228,17 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-te-terraform-aws-rds",
-          "name": "terraform-aws-rds",
-          "description": "Terraform module to create AWS RDS resources 🇺🇦",
-          "recommend_reason": "HCL · 基础设施即代码 · Terraform module to create AWS RDS resources 🇺🇦",
+          "id": "gitcode-gh_mirrors-te-terraform-aws-vpc",
+          "name": "terraform-aws-vpc",
+          "description": "Terraform module to create AWS VPC resources 🇺🇦",
+          "recommend_reason": "HCL · 基础设施即代码 · Terraform module to create AWS VPC resources 🇺🇦",
           "icon": "📦",
           "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-aws-rds",
+          "source_repo": "gh_mirrors/te/terraform-aws-vpc",
           "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-rds.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-rds",
-          "default_repo_name": "terraform-aws-rds",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-vpc.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-vpc",
+          "default_repo_name": "terraform-aws-vpc",
           "tags": [
             "HCL"
           ],
@@ -2178,29 +2247,6 @@
             "show": true,
             "stars": 0,
             "language": "HCL",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-provider-dominos",
-          "name": "terraform-provider-dominos",
-          "description": "The Terraform plugin for the Dominos Pizza provider.",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · The Terraform plugin for the Dominos Pizza provider.",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-provider-dominos",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-dominos.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-dominos",
-          "default_repo_name": "terraform-provider-dominos",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
             "platform": "gitcode"
           }
         },
@@ -2228,6 +2274,52 @@
           }
         },
         {
+          "id": "gitcode-gh_mirrors-te-terraform-provider-dominos",
+          "name": "terraform-provider-dominos",
+          "description": "The Terraform plugin for the Dominos Pizza provider.",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · The Terraform plugin for the Dominos Pizza provider.",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-provider-dominos",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-dominos.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-dominos",
+          "default_repo_name": "terraform-provider-dominos",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-tui",
+          "name": "terraform-tui",
+          "description": "Terraform textual UI",
+          "recommend_reason": "Python · 基础设施即代码",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-tui",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-tui.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-tui",
+          "default_repo_name": "terraform-tui",
+          "tags": [
+            "Python"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Python",
+            "platform": "gitcode"
+          }
+        },
+        {
           "id": "gitcode-GitHub_Trending-te-terraform-provider-azurerm",
           "name": "terraform-provider-azurerm",
           "description": "Terraform provider for Azure Resource Manager",
@@ -2239,6 +2331,29 @@
           "clone_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-azurerm.git",
           "html_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-azurerm",
           "default_repo_name": "terraform-provider-azurerm",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-provider-google",
+          "name": "terraform-provider-google",
+          "description": "Terraform Provider for Google Cloud Platform",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform Provider for Google Cloud Platform",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-provider-google",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-google.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-google",
+          "default_repo_name": "terraform-provider-google",
           "tags": [
             "Go"
           ],
@@ -2274,40 +2389,17 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-te-terraform-landscape",
-          "name": "terraform-landscape",
-          "description": "Improve Terraform's plan output to be easier to read and understand",
-          "recommend_reason": "Ruby · 基础设施即代码 · Improve Terraform's plan output to be easier to read and und",
+          "id": "gitcode-gh_mirrors-te-terraform-ls",
+          "name": "terraform-ls",
+          "description": "Terraform Language Server",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform Language Server",
           "icon": "📦",
           "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-landscape",
+          "source_repo": "gh_mirrors/te/terraform-ls",
           "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-landscape.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-landscape",
-          "default_repo_name": "terraform-landscape",
-          "tags": [
-            "Ruby"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Ruby",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-ter-terraform-provider-proxmox",
-          "name": "terraform-provider-proxmox",
-          "description": "Terraform / OpenTofu Provider for Proxmox VE",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform / OpenTofu Provider for Proxmox VE",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/ter/terraform-provider-proxmox",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/ter/terraform-provider-proxmox.git",
-          "html_url": "https://gitcode.com/gh_mirrors/ter/terraform-provider-proxmox",
-          "default_repo_name": "terraform-provider-proxmox",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-ls.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-ls",
+          "default_repo_name": "terraform-ls",
           "tags": [
             "Go"
           ],
@@ -2316,98 +2408,6 @@
             "show": true,
             "stars": 0,
             "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-cost-estimation",
-          "name": "terraform-cost-estimation",
-          "description": "Anonymized, secure, and free Terraform cost estimation based on Terraform plan (0.12+) or Terraform state (any version)",
-          "recommend_reason": "jq · 基础设施即代码 · Anonymized, secure, and free Terraform cost estimation based",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-cost-estimation",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-cost-estimation.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-cost-estimation",
-          "default_repo_name": "terraform-cost-estimation",
-          "tags": [
-            "jq"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "jq",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-switcher",
-          "name": "terraform-switcher",
-          "description": "A command line tool to switch between different versions of terraform  (install with homebrew and more)",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · A command line tool to switch between different versions of ",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-switcher",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-switcher.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-switcher",
-          "default_repo_name": "terraform-switcher",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-aws-github-runner",
-          "name": "terraform-aws-github-runner",
-          "description": "Terraform module for scalable GitHub action runners on AWS",
-          "recommend_reason": "HCL · 基础设施即代码 · Terraform module for scalable GitHub action runners on AWS",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-aws-github-runner",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-github-runner.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-github-runner",
-          "default_repo_name": "terraform-aws-github-runner",
-          "tags": [
-            "HCL"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "HCL",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-aws-vpc",
-          "name": "terraform-aws-vpc",
-          "description": "Terraform module to create AWS VPC resources 🇺🇦",
-          "recommend_reason": "HCL · 基础设施即代码 · Terraform module to create AWS VPC resources 🇺🇦",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-aws-vpc",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-vpc.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-vpc",
-          "default_repo_name": "terraform-aws-vpc",
-          "tags": [
-            "HCL"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "HCL",
             "platform": "gitcode"
           }
         },
@@ -2665,29 +2665,6 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-do-docker_mirror",
-          "name": "docker_mirror",
-          "description": "查找最快的docker镜像",
-          "recommend_reason": "值得关注（3 ⭐） · Python · 容器化",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/do/docker_mirror",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/do/docker_mirror.git",
-          "html_url": "https://gitcode.com/gh_mirrors/do/docker_mirror",
-          "default_repo_name": "docker_mirror",
-          "tags": [
-            "Python"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 3,
-            "language": "Python",
-            "platform": "gitcode"
-          }
-        },
-        {
           "id": "gitcode-gh_mirrors-docke-docker-wechat",
           "name": "docker-wechat",
           "description": "在docker里运行wechat，可以通过web或者VNC访问wechat",
@@ -2730,6 +2707,52 @@
             "show": true,
             "stars": 3,
             "language": "Shell",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-do-docker_mirror",
+          "name": "docker_mirror",
+          "description": "查找最快的docker镜像",
+          "recommend_reason": "值得关注（3 ⭐） · Python · 容器化",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/do/docker_mirror",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/do/docker_mirror.git",
+          "html_url": "https://gitcode.com/gh_mirrors/do/docker_mirror",
+          "default_repo_name": "docker_mirror",
+          "tags": [
+            "Python"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 3,
+            "language": "Python",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-do-docker-wechatbot-webhook",
+          "name": "docker-wechatbot-webhook",
+          "description": "轻量、可部署的微信机器人webhook服务，使用http接口收发微信消息, 用它作为个人通知、AIGC 应用或者 coze、n8n等自动化工作流的消息节点",
+          "recommend_reason": "值得关注（7 ⭐） · JavaScript · 容器化",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/do/docker-wechatbot-webhook",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/do/docker-wechatbot-webhook.git",
+          "html_url": "https://gitcode.com/gh_mirrors/do/docker-wechatbot-webhook",
+          "default_repo_name": "docker-wechatbot-webhook",
+          "tags": [
+            "JavaScript"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 7,
+            "language": "JavaScript",
             "platform": "gitcode"
           }
         },
@@ -2780,29 +2803,6 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-do-docker-wechatbot-webhook",
-          "name": "docker-wechatbot-webhook",
-          "description": "轻量、可部署的微信机器人webhook服务，使用http接口收发微信消息, 用它作为个人通知、AIGC 应用或者 coze、n8n等自动化工作流的消息节点",
-          "recommend_reason": "值得关注（7 ⭐） · JavaScript · 容器化",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/do/docker-wechatbot-webhook",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/do/docker-wechatbot-webhook.git",
-          "html_url": "https://gitcode.com/gh_mirrors/do/docker-wechatbot-webhook",
-          "default_repo_name": "docker-wechatbot-webhook",
-          "tags": [
-            "JavaScript"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 7,
-            "language": "JavaScript",
-            "platform": "gitcode"
-          }
-        },
-        {
           "id": "gitcode-gh_mirrors-do-docker-images",
           "name": "docker-images",
           "description": "Official source of container configurations, images, and examples for Oracle products and projects",
@@ -2849,24 +2849,24 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-docker44-docker",
-          "name": "docker",
-          "description": "LibreNMS Docker image",
-          "recommend_reason": "Shell 脚本 · 容器化 · LibreNMS Docker image",
+          "id": "gitcode-Ascend-ascend-docker-image",
+          "name": "ascend-docker-image",
+          "description": "提供Ascend相关的Dockerfile示例，展示如何创建docker镜像。",
+          "recommend_reason": "值得关注（61 ⭐） · Shell 脚本 · 容器化",
           "icon": "📦",
           "source": "git",
-          "source_repo": "gh_mirrors/docker44/docker",
+          "source_repo": "Ascend/ascend-docker-image",
           "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/docker44/docker.git",
-          "html_url": "https://gitcode.com/gh_mirrors/docker44/docker",
-          "default_repo_name": "docker",
+          "clone_url": "https://gitcode.com/Ascend/ascend-docker-image.git",
+          "html_url": "https://gitcode.com/Ascend/ascend-docker-image",
+          "default_repo_name": "ascend-docker-image",
           "tags": [
             "Shell"
           ],
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 0,
+            "stars": 61,
             "language": "Shell",
             "platform": "gitcode"
           }
@@ -2886,7 +2886,7 @@
           "id": "github-n8n-io-n8n",
           "name": "n8n",
           "description": "Fair-code workflow automation platform with native AI capabilities. Combine visual building with custom code, self-host ",
-          "recommend_reason": "热门项目（203,235 ⭐） · TypeScript · 云原生核心",
+          "recommend_reason": "热门项目（203,540 ⭐） · TypeScript · 云原生核心",
           "icon": "📦",
           "source": "git",
           "source_repo": "n8n-io/n8n",
@@ -2904,7 +2904,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 203235,
+            "stars": 203540,
             "language": "TypeScript",
             "platform": "github"
           }
@@ -2913,7 +2913,7 @@
           "id": "github-ohmyzsh-ohmyzsh",
           "name": "ohmyzsh",
           "description": "🙃   A delightful community-driven (with 2,500+ contributors) framework for managing your zsh configuration. Includes 300",
-          "recommend_reason": "热门项目（189,527 ⭐） · Shell 脚本 · 容器化",
+          "recommend_reason": "热门项目（189,589 ⭐） · Shell 脚本 · 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "ohmyzsh/ohmyzsh",
@@ -2931,7 +2931,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 189527,
+            "stars": 189589,
             "language": "Shell",
             "platform": "github"
           }
@@ -2940,7 +2940,7 @@
           "id": "github-Stirling-Tools-Stirling-PDF",
           "name": "Stirling-PDF",
           "description": "#1 PDF Application on GitHub that lets you edit PDFs on any device anywhere",
-          "recommend_reason": "热门项目（91,237 ⭐） · Java · 容器化",
+          "recommend_reason": "热门项目（91,390 ⭐） · Java · 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "Stirling-Tools/Stirling-PDF",
@@ -2958,7 +2958,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 91237,
+            "stars": 91390,
             "language": "Java",
             "platform": "github"
           }
@@ -2967,7 +2967,7 @@
           "id": "github-louislam-uptime-kuma",
           "name": "uptime-kuma",
           "description": "A fancy self-hosted monitoring tool",
-          "recommend_reason": "热门项目（90,933 ⭐） · JavaScript · 容器化",
+          "recommend_reason": "热门项目（91,046 ⭐） · JavaScript · 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "louislam/uptime-kuma",
@@ -2985,7 +2985,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 90933,
+            "stars": 91046,
             "language": "JavaScript",
             "platform": "github"
           }
@@ -2994,7 +2994,7 @@
           "id": "github-macrozheng-mall",
           "name": "mall",
           "description": "mall项目是一套电商系统，包括前台商城系统及后台管理系统，基于Spring Boot+MyBatis实现，采用Docker容器化部署。 前台商城系统包含首页门户、商品推荐、商品搜索、商品展示、购物车、订单流程、会员中心、客户服务、帮助中心",
-          "recommend_reason": "热门项目（84,703 ⭐） · Java · 容器化",
+          "recommend_reason": "热门项目（84,721 ⭐） · Java · 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "macrozheng/mall",
@@ -3012,7 +3012,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 84703,
+            "stars": 84721,
             "language": "Java",
             "platform": "github"
           }
@@ -3021,7 +3021,7 @@
           "id": "github-bregman-arie-devops-exercises",
           "name": "devops-exercises",
           "description": "Linux, Jenkins, AWS, SRE, Prometheus, Docker, Python, Ansible, Git, Kubernetes, Terraform, OpenStack, SQL, NoSQL, Azure,",
-          "recommend_reason": "热门项目（84,352 ⭐） · Python · Kubernetes 生态 / 容器化 / 监控告警",
+          "recommend_reason": "热门项目（84,381 ⭐） · Python · Kubernetes 生态 / 容器化 / 监控告警",
           "icon": "📦",
           "source": "git",
           "source_repo": "bregman-arie/devops-exercises",
@@ -3039,7 +3039,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 84352,
+            "stars": 84381,
             "language": "Python",
             "platform": "github"
           }
@@ -3048,7 +3048,7 @@
           "id": "github-netdata-netdata",
           "name": "netdata",
           "description": "The fastest path to AI-powered full stack observability, even for lean teams.",
-          "recommend_reason": "热门项目（80,421 ⭐） · Go 语言 · Kubernetes 生态 / 容器化 / 可视化仪表盘",
+          "recommend_reason": "热门项目（80,444 ⭐） · Go 语言 · Kubernetes 生态 / 容器化 / 可视化仪表盘",
           "icon": "📦",
           "source": "git",
           "source_repo": "netdata/netdata",
@@ -3066,7 +3066,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 80421,
+            "stars": 80444,
             "language": "Go",
             "platform": "github"
           }
@@ -3075,7 +3075,7 @@
           "id": "github-moby-moby",
           "name": "moby",
           "description": "The Moby Project - a collaborative project for the container ecosystem to assemble container-based systems",
-          "recommend_reason": "热门项目（72,034 ⭐） · Go 语言 · 容器化",
+          "recommend_reason": "热门项目（72,070 ⭐） · Go 语言 · 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "moby/moby",
@@ -3092,7 +3092,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 72034,
+            "stars": 72070,
             "language": "Go",
             "platform": "github"
           }
@@ -3101,7 +3101,7 @@
           "id": "github-dani-garcia-vaultwarden",
           "name": "vaultwarden",
           "description": "Unofficial Bitwarden compatible server written in Rust, formerly known as bitwarden_rs",
-          "recommend_reason": "热门项目（66,772 ⭐） · Rust · 容器化",
+          "recommend_reason": "热门项目（66,936 ⭐） · Rust · 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "dani-garcia/vaultwarden",
@@ -3119,7 +3119,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 66772,
+            "stars": 66936,
             "language": "Rust",
             "platform": "github"
           }
@@ -3128,7 +3128,7 @@
           "id": "github-usememos-memos",
           "name": "memos",
           "description": "Open-source, self-hosted note-taking tool built for quick capture. Markdown-native, lightweight, and fully yours.",
-          "recommend_reason": "热门项目（62,751 ⭐） · Go 语言 · 容器化",
+          "recommend_reason": "热门项目（62,801 ⭐） · Go 语言 · 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "usememos/memos",
@@ -3146,7 +3146,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 62751,
+            "stars": 62801,
             "language": "Go",
             "platform": "github"
           }
@@ -3182,7 +3182,7 @@
           "id": "github-etcd-io-etcd",
           "name": "etcd",
           "description": "Distributed reliable key-value store for the most critical data of a distributed system",
-          "recommend_reason": "热门项目（52,225 ⭐） · Go 语言 · Kubernetes 生态",
+          "recommend_reason": "热门项目（52,238 ⭐） · Go 语言 · Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "etcd-io/etcd",
@@ -3200,7 +3200,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 52225,
+            "stars": 52238,
             "language": "Go",
             "platform": "github"
           }
@@ -3209,7 +3209,7 @@
           "id": "github-GitHubDaily-GitHubDaily",
           "name": "GitHubDaily",
           "description": "坚持分享 GitHub 上高质量、有趣实用的开源技术教程、开发者工具、编程网站、技术资讯。A list cool, interesting projects of GitHub.",
-          "recommend_reason": "高星项目（47,819 ⭐） · Kubernetes 生态 · 坚持分享 GitHub 上高质量、有趣实用的开源技术教程、开发者工具、编程网站、技术资讯。A list cool, in",
+          "recommend_reason": "高星项目（47,842 ⭐） · Kubernetes 生态 · 坚持分享 GitHub 上高质量、有趣实用的开源技术教程、开发者工具、编程网站、技术资讯。A list cool, in",
           "icon": "📦",
           "source": "git",
           "source_repo": "GitHubDaily/GitHubDaily",
@@ -3227,7 +3227,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 47819,
+            "stars": 47842,
             "language": "",
             "platform": "github"
           }
@@ -3236,7 +3236,7 @@
           "id": "github-LeCoupa-awesome-cheatsheets",
           "name": "awesome-cheatsheets",
           "description": "👩‍💻👨‍💻 Awesome cheatsheets for popular programming languages, frameworks and development tools. They include everything ",
-          "recommend_reason": "高星项目（46,424 ⭐） · JavaScript · Kubernetes 生态 / 容器化",
+          "recommend_reason": "高星项目（46,427 ⭐） · JavaScript · Kubernetes 生态 / 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "LeCoupa/awesome-cheatsheets",
@@ -3254,7 +3254,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 46424,
+            "stars": 46427,
             "language": "JavaScript",
             "platform": "github"
           }
@@ -3263,7 +3263,7 @@
           "id": "github-Kong-kong",
           "name": "kong",
           "description": "🦍 The API and AI Gateway",
-          "recommend_reason": "高星项目（44,080 ⭐） · Lua · Kubernetes 生态 / 微服务架构 / Serverless 架构",
+          "recommend_reason": "高星项目（44,093 ⭐） · Lua · Kubernetes 生态 / 微服务架构 / Serverless 架构",
           "icon": "📦",
           "source": "git",
           "source_repo": "Kong/kong",
@@ -3281,7 +3281,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 44080,
+            "stars": 44093,
             "language": "Lua",
             "platform": "github"
           }
@@ -3290,7 +3290,7 @@
           "id": "github-opentofu-manifesto",
           "name": "manifesto",
           "description": "The OpenTF Manifesto expresses concern over HashiCorp's switch of the Terraform license from open-source to the Business",
-          "recommend_reason": "高星项目（35,661 ⭐） · 前端 · 基础设施即代码",
+          "recommend_reason": "高星项目（35,659 ⭐） · 前端 · 基础设施即代码",
           "icon": "📦",
           "source": "git",
           "source_repo": "opentofu/manifesto",
@@ -3304,7 +3304,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 35661,
+            "stars": 35659,
             "language": "HTML",
             "platform": "github"
           }
@@ -3313,7 +3313,7 @@
           "id": "github-derailed-k9s",
           "name": "k9s",
           "description": "🐶 Kubernetes CLI To Manage Your Clusters In Style!",
-          "recommend_reason": "高星项目（34,494 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
+          "recommend_reason": "高星项目（34,521 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "derailed/k9s",
@@ -3331,7 +3331,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 34494,
+            "stars": 34521,
             "language": "Go",
             "platform": "github"
           }
@@ -3340,7 +3340,7 @@
           "id": "github-k3s-io-k3s",
           "name": "k3s",
           "description": "Lightweight Kubernetes",
-          "recommend_reason": "高星项目（33,878 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
+          "recommend_reason": "高星项目（33,893 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "k3s-io/k3s",
@@ -3355,7 +3355,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 33878,
+            "stars": 33893,
             "language": "Go",
             "platform": "github"
           }
@@ -3364,7 +3364,7 @@
           "id": "github-zeromicro-go-zero",
           "name": "go-zero",
           "description": "A cloud-native Go microservices framework with cli tool for productivity.",
-          "recommend_reason": "高星项目（33,303 ⭐） · Go 语言 · 云原生核心 / 微服务架构",
+          "recommend_reason": "高星项目（33,310 ⭐） · Go 语言 · 云原生核心 / 微服务架构",
           "icon": "📦",
           "source": "git",
           "source_repo": "zeromicro/go-zero",
@@ -3382,7 +3382,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 33303,
+            "stars": 33310,
             "language": "Go",
             "platform": "github"
           }
@@ -3391,7 +3391,7 @@
           "id": "github-cockroachdb-cockroach",
           "name": "cockroach",
           "description": "CockroachDB — the cloud native, distributed SQL database designed for high availability, effortless scale, and control o",
-          "recommend_reason": "高星项目（32,434 ⭐） · Go 语言 · 云原生核心",
+          "recommend_reason": "高星项目（32,442 ⭐） · Go 语言 · 云原生核心",
           "icon": "📦",
           "source": "git",
           "source_repo": "cockroachdb/cockroach",
@@ -3409,7 +3409,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 32434,
+            "stars": 32442,
             "language": "Go",
             "platform": "github"
           }
@@ -3418,7 +3418,7 @@
           "id": "github-SigNoz-signoz",
           "name": "signoz",
           "description": "SigNoz is an open-source, OpenTelemetry-native observability platform for your team and their AI agents. Get logs, metri",
-          "recommend_reason": "高星项目（32,008 ⭐） · TypeScript · 云原生核心 / 监控告警",
+          "recommend_reason": "高星项目（32,028 ⭐） · TypeScript · 云原生核心 / 监控告警",
           "icon": "📦",
           "source": "git",
           "source_repo": "SigNoz/signoz",
@@ -3436,7 +3436,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 32008,
+            "stars": 32028,
             "language": "TypeScript",
             "platform": "github"
           }
@@ -3445,7 +3445,7 @@
           "id": "github-abiosoft-colima",
           "name": "colima",
           "description": "Container runtimes on macOS (and Linux) with minimal setup",
-          "recommend_reason": "高星项目（30,622 ⭐） · Go 语言 · K8s 编排 / 容器运行时 / 容器化",
+          "recommend_reason": "高星项目（30,663 ⭐） · Go 语言 · K8s 编排 / 容器运行时 / 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "abiosoft/colima",
@@ -3463,7 +3463,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 30622,
+            "stars": 30663,
             "language": "Go",
             "platform": "github"
           }
@@ -3472,7 +3472,7 @@
           "id": "github-helm-helm",
           "name": "helm",
           "description": "The Kubernetes Package Manager",
-          "recommend_reason": "高星项目（30,214 ⭐） · Go 语言 · Helm 包管理 / Kubernetes 生态",
+          "recommend_reason": "高星项目（30,219 ⭐） · Go 语言 · Helm 包管理 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "helm/helm",
@@ -3490,7 +3490,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 30214,
+            "stars": 30219,
             "language": "Go",
             "platform": "github"
           }
@@ -3499,7 +3499,7 @@
           "id": "github-MichaelCade-90DaysOfDevOps",
           "name": "90DaysOfDevOps",
           "description": "This repository started out as a learning in public project for myself and has now become a structured learning map for ",
-          "recommend_reason": "高星项目（29,697 ⭐） · Shell 脚本 · 基础设施即代码 / Kubernetes 生态",
+          "recommend_reason": "高星项目（29,708 ⭐） · Shell 脚本 · 基础设施即代码 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "MichaelCade/90DaysOfDevOps",
@@ -3517,7 +3517,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 29697,
+            "stars": 29708,
             "language": "Shell",
             "platform": "github"
           }
@@ -3526,7 +3526,7 @@
           "id": "github-goharbor-harbor",
           "name": "harbor",
           "description": "An open source trusted cloud native registry project that stores, signs, and scans content.",
-          "recommend_reason": "高星项目（29,304 ⭐） · Go 语言 · 云原生核心 / 容器化 / Helm 包管理",
+          "recommend_reason": "高星项目（29,320 ⭐） · Go 语言 · 云原生核心 / 容器化 / Helm 包管理",
           "icon": "📦",
           "source": "git",
           "source_repo": "goharbor/harbor",
@@ -3544,7 +3544,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 29304,
+            "stars": 29320,
             "language": "Go",
             "platform": "github"
           }
@@ -3553,7 +3553,7 @@
           "id": "github-envoyproxy-envoy",
           "name": "envoy",
           "description": "Cloud-native high-performance edge/middle/service proxy",
-          "recommend_reason": "高星项目（28,856 ⭐） · C++ · 云原生核心",
+          "recommend_reason": "高星项目（28,865 ⭐） · C++ · 云原生核心",
           "icon": "📦",
           "source": "git",
           "source_repo": "envoyproxy/envoy",
@@ -3571,7 +3571,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 28856,
+            "stars": 28865,
             "language": "C++",
             "platform": "github"
           }
@@ -3580,7 +3580,7 @@
           "id": "github-openfaas-faas",
           "name": "faas",
           "description": "OpenFaaS - Serverless Functions Made Simple",
-          "recommend_reason": "高星项目（26,234 ⭐） · Go 语言 · K8s 编排 / 容器化 / Kubernetes 生态",
+          "recommend_reason": "高星项目（26,231 ⭐） · Go 语言 · K8s 编排 / 容器化 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "openfaas/faas",
@@ -3598,7 +3598,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 26234,
+            "stars": 26231,
             "language": "Go",
             "platform": "github"
           }
@@ -3634,7 +3634,7 @@
           "id": "github-eip-work-kuboard-press",
           "name": "kuboard-press",
           "description": "Kuboard 是基于 Kubernetes 的微服务管理界面。同时提供 Kubernetes 免费中文教程，入门教程，最新版本的 Kubernetes v1.23.4 安装手册，(k8s install) 在线答疑，持续更新。",
-          "recommend_reason": "高星项目（25,201 ⭐） · 前端 · K8s 编排 / 容器化 / Kubernetes 生态",
+          "recommend_reason": "高星项目（25,204 ⭐） · 前端 · K8s 编排 / 容器化 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "eip-work/kuboard-press",
@@ -3651,7 +3651,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 25201,
+            "stars": 25204,
             "language": "HTML",
             "platform": "github"
           }
@@ -3660,7 +3660,7 @@
           "id": "github-cilium-cilium",
           "name": "cilium",
           "description": "eBPF-based Networking, Security, and Observability",
-          "recommend_reason": "高星项目（25,057 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
+          "recommend_reason": "高星项目（25,084 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "cilium/cilium",
@@ -3678,7 +3678,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 25057,
+            "stars": 25084,
             "language": "Go",
             "platform": "github"
           }
@@ -3687,7 +3687,7 @@
           "id": "github-argoproj-argo-cd",
           "name": "argo-cd",
           "description": "Declarative Continuous Deployment for Kubernetes",
-          "recommend_reason": "高星项目（24,072 ⭐） · Go 语言 · Helm 包管理 / 容器化 / Kubernetes 生态",
+          "recommend_reason": "高星项目（24,087 ⭐） · Go 语言 · Helm 包管理 / 容器化 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "argoproj/argo-cd",
@@ -3705,7 +3705,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 24072,
+            "stars": 24087,
             "language": "Go",
             "platform": "github"
           }
@@ -3714,7 +3714,7 @@
           "id": "github-GoogleCloudPlatform-microservices-demo",
           "name": "microservices-demo",
           "description": "Sample cloud-first application with 10 microservices showcasing Kubernetes, Istio, and gRPC.",
-          "recommend_reason": "高星项目（20,891 ⭐） · Go 语言 · 基础设施即代码 / 服务网格 / Kubernetes 生态",
+          "recommend_reason": "高星项目（20,905 ⭐） · Go 语言 · 基础设施即代码 / 服务网格 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "GoogleCloudPlatform/microservices-demo",
@@ -3732,7 +3732,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 20891,
+            "stars": 20905,
             "language": "Go",
             "platform": "github"
           }
@@ -3741,7 +3741,7 @@
           "id": "github-verdaccio-verdaccio",
           "name": "verdaccio",
           "description": "A lightweight Node.js private proxy registry",
-          "recommend_reason": "高星项目（17,855 ⭐） · TypeScript · Helm 包管理 / 容器化 / Kubernetes 生态",
+          "recommend_reason": "高星项目（17,867 ⭐） · TypeScript · Helm 包管理 / 容器化 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "verdaccio/verdaccio",
@@ -3759,7 +3759,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 17855,
+            "stars": 17867,
             "language": "TypeScript",
             "platform": "github"
           }
@@ -3768,7 +3768,7 @@
           "id": "github-nfl-react-helmet",
           "name": "react-helmet",
           "description": "A document head manager for React",
-          "recommend_reason": "高星项目（17,457 ⭐） · JavaScript · Helm 包管理",
+          "recommend_reason": "高星项目（17,456 ⭐） · JavaScript · Helm 包管理",
           "icon": "📦",
           "source": "git",
           "source_repo": "nfl/react-helmet",
@@ -3784,7 +3784,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 17457,
+            "stars": 17456,
             "language": "JavaScript",
             "platform": "github"
           }
@@ -3793,7 +3793,7 @@
           "id": "github-argoproj-argo-workflows",
           "name": "argo-workflows",
           "description": "Workflow Engine for Kubernetes",
-          "recommend_reason": "高星项目（16,955 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
+          "recommend_reason": "高星项目（16,956 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "argoproj/argo-workflows",
@@ -3811,7 +3811,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 16955,
+            "stars": 16956,
             "language": "Go",
             "platform": "github"
           }
@@ -3820,7 +3820,7 @@
           "id": "github-kubernetes-kops",
           "name": "kops",
           "description": "Kubernetes Operations (kOps) - Production Grade k8s Installation, Upgrades and Management",
-          "recommend_reason": "高星项目（16,672 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
+          "recommend_reason": "高星项目（16,669 ⭐） · Go 语言 · K8s 编排 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "kubernetes/kops",
@@ -3838,7 +3838,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 16672,
+            "stars": 16669,
             "language": "Go",
             "platform": "github"
           }
@@ -3847,7 +3847,7 @@
           "id": "github-mikefarah-yq",
           "name": "yq",
           "description": "yq is a portable command-line YAML, JSON, XML, CSV, TOML, HCL  and properties processor",
-          "recommend_reason": "高星项目（15,917 ⭐） · Go 语言 · 基础设施即代码",
+          "recommend_reason": "高星项目（15,927 ⭐） · Go 语言 · 基础设施即代码",
           "icon": "📦",
           "source": "git",
           "source_repo": "mikefarah/yq",
@@ -3865,7 +3865,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 15917,
+            "stars": 15927,
             "language": "Go",
             "platform": "github"
           }
@@ -3874,7 +3874,7 @@
           "id": "github-helm-charts",
           "name": "charts",
           "description": "⚠️(OBSOLETE) Curated applications for Kubernetes",
-          "recommend_reason": "高星项目（15,404 ⭐） · Go 语言 · Helm 包管理 / Kubernetes 生态",
+          "recommend_reason": "高星项目（15,403 ⭐） · Go 语言 · Helm 包管理 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "helm/charts",
@@ -3890,7 +3890,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 15404,
+            "stars": 15403,
             "language": "Go",
             "platform": "github"
           }
@@ -3899,7 +3899,7 @@
           "id": "github-xpipe-io-xpipe",
           "name": "xpipe",
           "description": "Access your entire server infrastructure from your local desktop",
-          "recommend_reason": "高星项目（14,483 ⭐） · Java · K8s 编排 / 容器化 / Kubernetes 生态",
+          "recommend_reason": "高星项目（14,499 ⭐） · Java · K8s 编排 / 容器化 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "xpipe-io/xpipe",
@@ -3917,7 +3917,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 14483,
+            "stars": 14499,
             "language": "Java",
             "platform": "github"
           }
@@ -3926,7 +3926,7 @@
           "id": "github-coder-coder",
           "name": "coder",
           "description": "Secure environments for developers and their agents",
-          "recommend_reason": "高星项目（14,352 ⭐） · Go 语言 · 基础设施即代码",
+          "recommend_reason": "高星项目（14,384 ⭐） · Go 语言 · 基础设施即代码",
           "icon": "📦",
           "source": "git",
           "source_repo": "coder/coder",
@@ -3944,7 +3944,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 14352,
+            "stars": 14384,
             "language": "Go",
             "platform": "github"
           }
@@ -3953,7 +3953,7 @@
           "id": "github-semaphoreui-semaphore",
           "name": "semaphore",
           "description": "Modern UI and powerful API for Ansible, Terraform/OpenTofu/Terragrunt, PowerShell and other DevOps tools.",
-          "recommend_reason": "高星项目（14,094 ⭐） · Go 语言 · 基础设施即代码 / 容器化",
+          "recommend_reason": "高星项目（14,103 ⭐） · Go 语言 · 基础设施即代码 / 容器化",
           "icon": "📦",
           "source": "git",
           "source_repo": "semaphoreui/semaphore",
@@ -3971,7 +3971,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 14094,
+            "stars": 14103,
             "language": "Go",
             "platform": "github"
           }
@@ -3980,7 +3980,7 @@
           "id": "github-loft-sh-vcluster",
           "name": "vcluster",
           "description": "vCluster creates tenant clusters: fully isolated environments delivered as managed Kubernetes, or as the foundation for ",
-          "recommend_reason": "高星项目（11,289 ⭐） · Go 语言 · Helm 包管理 / K8s 编排 / Kubernetes 生态",
+          "recommend_reason": "高星项目（11,295 ⭐） · Go 语言 · Helm 包管理 / K8s 编排 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "loft-sh/vcluster",
@@ -3998,7 +3998,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 11289,
+            "stars": 11295,
             "language": "Go",
             "platform": "github"
           }
@@ -4007,7 +4007,7 @@
           "id": "github-helmetjs-helmet",
           "name": "helmet",
           "description": "Help secure Express apps with various HTTP headers",
-          "recommend_reason": "高星项目（10,729 ⭐） · TypeScript · Helm 包管理",
+          "recommend_reason": "高星项目（10,731 ⭐） · TypeScript · Helm 包管理",
           "icon": "📦",
           "source": "git",
           "source_repo": "helmetjs/helmet",
@@ -4025,7 +4025,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 10729,
+            "stars": 10731,
             "language": "TypeScript",
             "platform": "github"
           }
@@ -4034,7 +4034,7 @@
           "id": "github-bitnami-charts",
           "name": "charts",
           "description": "Bitnami Helm Charts",
-          "recommend_reason": "高星项目（10,408 ⭐） · Go Template · Helm 包管理 / Kubernetes 生态",
+          "recommend_reason": "高星项目（10,410 ⭐） · Go Template · Helm 包管理 / Kubernetes 生态",
           "icon": "📦",
           "source": "git",
           "source_repo": "bitnami/charts",
@@ -4052,7 +4052,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 10408,
+            "stars": 10410,
             "language": "Go Template",
             "platform": "github"
           }
@@ -4061,7 +4061,7 @@
           "id": "github-khuedoan-homelab",
           "name": "homelab",
           "description": "Fully automated homelab from empty disk to running services with a single command.",
-          "recommend_reason": "社区活跃（9,574 ⭐） · Python · Helm 包管理 / 容器化 / K8s 编排",
+          "recommend_reason": "社区活跃（9,581 ⭐） · Python · Helm 包管理 / 容器化 / K8s 编排",
           "icon": "📦",
           "source": "git",
           "source_repo": "khuedoan/homelab",
@@ -4079,7 +4079,7 @@
           "scene_id": "default",
           "stats": {
             "show": true,
-            "stars": 9574,
+            "stars": 9581,
             "language": "Python",
             "platform": "github"
           }
