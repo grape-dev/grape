@@ -41,6 +41,7 @@ class ChatMessage(BaseModel):
     repo_key: str = ""
     conversation_id: str = ""
     image_data: str = ""  # JSON array of base64 strings, or single base64 string
+    video_data: str = ""  # base64 encoded video data
 
 
 class FeedbackBody(BaseModel):
@@ -445,6 +446,32 @@ def _understand_image(image_data: str) -> str:
         return f"用户上传了图片，但分析出错: {e}"
 
 
+def _understand_video(video_data: str) -> str:
+    """Analyze video from base64 data and return description for prompt injection."""
+    if not video_data:
+        return ""
+    try:
+        import importlib.util as _ilu
+        import os as _os
+        _spec = _ilu.spec_from_file_location("image_understanding",
+            _os.path.join(_os.path.dirname(__file__), "..", "..", "agent", "image_understanding.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+
+        raw = video_data
+        if raw.startswith("data:"):
+            raw = raw.split(",", 1)[-1]
+        import base64 as _b64
+        desc = _mod.understand_video_from_bytes(_b64.b64decode(raw))
+        if desc:
+            log.info(f"Web Chat: video understood, {len(desc)} chars")
+            return desc
+        return "用户上传了一个视频，但未能提取有效信息。"
+    except Exception as e:
+        log.warning(f"Web Chat: video understanding failed: {e}")
+        return f"用户上传了视频，但分析出错: {e}"
+
+
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
@@ -496,6 +523,10 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     if body.image_data:
         prompt += "\n\n" + _understand_image(body.image_data)
 
+    # 视频理解注入
+    if body.video_data:
+        prompt += "\n\n" + _understand_video(body.video_data)
+
     # 无任何引擎（未配置本机直连/远端）→ 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
     if not backend_name:
         _warn = "⚠️ 无可用引擎（未配置本机直连或远端引擎）"
@@ -507,7 +538,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
     if kind != EXEC_MODE_DIRECT:
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
-        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data)
+        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data, body.video_data)
 
     from src.runtime.executor import stream_chat_agent
     loop = asyncio.get_event_loop()
@@ -622,6 +653,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     # 图片理解注入
     if body.image_data:
         prompt += "\n\n" + _understand_image(body.image_data)
+
+    # 视频理解注入
+    if body.video_data:
+        prompt += "\n\n" + _understand_video(body.video_data)
 
     # 无引擎 → 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
     if not backend_name:
@@ -891,7 +926,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     )
 
 
-def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token, image_data=""):
+def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token, image_data="", video_data=""):
     """M2 D5：chat 入队 + 轮询任务状态（打字机效果降级，见 implementation-plan §三）。
 
     返回 {task_id, reply(占位), conversation_id}；前端轮询 GET /api/runtime/tasks/{id}/status。
@@ -949,6 +984,9 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     # 图片理解注入
     if image_data:
         prompt += "\n\n" + _understand_image(image_data)
+    # 视频理解注入
+    if video_data:
+        prompt += "\n\n" + _understand_video(video_data)
     tid = enqueue_task(
         agent_session_id=session.get("id") or "",
         runtime_id=runtime_id,
@@ -1310,6 +1348,10 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
     if body.image_data:
         prompt += "\n\n" + _understand_image(body.image_data)
 
+    # 视频理解不在 submit 同步执行（耗时 30-60s 会导致前端 timeout），
+    # 改为在 agent_fn 内部执行，通过 SSE 推送"正在分析视频"步骤
+    _video_data = body.video_data
+
     # 无引擎 → 直接返回错误
     if not backend_name:
         _reply = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
@@ -1357,9 +1399,20 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
             _final_text = ""
             _new_sid = ""
             _last_error = ""
+            # 视频理解在 agent_fn 内部异步执行（避免 submit 同步阻塞导致前端 timeout）
+            if _video_data:
+                yield ("step_start", "正在分析视频，可能需要 30-60 秒...")
+                _vdesc = _understand_video(_video_data)
+                if _vdesc:
+                    prompt_with_video = prompt + "\n\n" + _vdesc
+                else:
+                    prompt_with_video = prompt
+                yield ("step_finish", "视频分析完成")
+            else:
+                prompt_with_video = prompt
             try:
                 for evt_type, data in stream_chat_agent(
-                    prompt=prompt, cwd=cwd, session_id=runtime_session_id,
+                    prompt=prompt_with_video, cwd=cwd, session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token,
                     agent_name="Chat Agent",
@@ -1647,6 +1700,10 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     # 图片理解注入
     if body.image_data:
         prompt += "\n\n" + _understand_image(body.image_data)
+
+    # 视频理解注入
+    if body.video_data:
+        prompt += "\n\n" + _understand_video(body.video_data)
 
     rid = cfg.get("runtime_id") or 0
     if not rid:
