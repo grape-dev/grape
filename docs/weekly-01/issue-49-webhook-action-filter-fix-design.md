@@ -19,10 +19,12 @@ GitCode 的 Webhook 事件只要属于 issue/PR（无论 action 是 `open`/`upda
 |---------|--------|--------------|
 | Issue Hook | `open`/`create` | `issue_opened` |
 | Issue Hook | 其他（update/close/reopen/assign/label/edit） | `issue_updated` |
-| Note Hook | noteable=Issue | `issue_comment` |
-| Note Hook | noteable=MergeRequest | `note_hook_pr` |
+| Note Hook | noteable=Issue | `issue_comment` ① |
+| Note Hook | noteable=MergeRequest | `note_hook_pr` ① |
 | Merge Request Hook | `merge` | `pull_request_merged` |
 | Merge Request Hook | 非 merge（open/update/close/reopen） | `pull_request_opened` |
+
+> ① **comment/PR 评论 = 独立事件类型（Note Hook），无 `action` 字段** → 不在 L1 action 过滤范围内（no_rule 放行），仅受 L2 阶段路由约束；评论作为需求澄清/变更入口必须保留触发。
 
 **关键**：GitCode 的 Issue Hook 对 `assign`/`label`/`edit`/`reopen`/`close` 的 action **全部归一化为 `issue_updated`**，action 细节只保留在 `payload.object_attributes.action` / `payload.changes`。
 
@@ -52,18 +54,31 @@ if event_type == "issue_updated":
 
 ## 三、定界确认（开发者已确认 Q1-Q3，2026-09-06）
 
-### Q1：Issue 事件过滤范围（已确认）
+### Q1：Issue 事件过滤范围（已确认，按真实 payload 修正）
 
-| action | 是否触发 Grape | 理由 |
-|--------|---------------|------|
-| `open` | ✅ 保留 | 新需求审视（issue_opened → VOD） |
-| `close` | ⚠️ 保留副作用 | **仅关闭任务（`close_issue_tasks`），无需 agent 执行**——handle 副作用但**不进入 agent 流水线** |
-| `assign`（责任人变更） | ❌ 过滤 | 无流水线意义 |
-| `label`（标签变更） | ❌ 过滤 | 已有 label-only 跳过，进一步全量过滤 |
-| `edit`（正文编辑） | ✅ **保留（需处理）** | **可能存在需求的补充和变更 → 仍需 Grape 处理**。但需结合 `changes.description` 判定：仅当 description 实质变更（需求补充/修改）才视为有效事件触发，纯 metadata 编辑仍可过滤 |
-| `reopen` | ❌ 过滤 | 无流水线意义 |
+> 此表针对 **Issue Hook**（`issue_opened`/`issue_updated`）的 action 过滤。`issue_comment` 来自 **Note Hook**（`object_kind: note`），是独立事件类型，见下方「comment 事件」。
+> ⚠️ **2026-09-07 修正**：GitCode 真实 payload 中 `assign`/`label`/`edit` 均以 **`action='update'` + `changes` 表达**，不存在 `action='assign'/'label'/'edit'`。下表按实际动作语义过滤，实现时通过 `action + changes` 组合判定（§4.1）。
 
-> **edit 的细粒度**：`changes` 里有 `description` 变更 → 有效（VOD/Issue 可能需重新审视需求）；仅 title/label/其他 metadata 变更 → 过滤。
+| 实际动作（payload 表达） | 是否触发 Grape | 理由 |
+|-------------------------|---------------|------|
+| `open`（action='open'） | ✅ 保留 | 新需求审视（issue_opened → VOD） |
+| `close`（action='close'） | ⚠️ 保留副作用 | **仅关闭任务（`close_issue_tasks`），无需 agent 执行** |
+| 责任人变更（update + changes.assignees） | ❌ 过滤 | 无流水线意义 |
+| 标签变更（update + changes.labels） | ❌ 过滤 | 已有 label-only 跳过，进一步全量过滤 |
+| 正文编辑（update + changes.description） | ✅ **保留** | **需求补充/变更需处理**；仅 description 实质变更才有效 |
+| 标题编辑（update + changes.title） | ✅ 保留 | 需求标题调整视为有效 |
+| `reopen`（action='reopen'） | ❌ 过滤 | 无流水线意义 |
+
+**comment 事件（独立于上表的 action）**：
+
+| 事件类型 | 是否触发 Grape | 说明 |
+|----------|---------------|------|
+| `issue_comment`（Note Hook） | ✅ **保留** | **评论是需求澄清/变更的重要入口**：用户/开发者对 Issue 的评论必须触发对应 Agent（L2 按 stage 路由到 vod/issue）。不做 action 过滤（Note Hook 无 action 字段） |
+| `note_hook_pr`（PR 评论） | ✅ **保留** | PR 讨论/QA 评论需触发审查（L2 按 stage 路由）。不做 action 过滤 |
+
+> **comment 的过滤只发生在既有层面**：① self-comment（bot 回声，`<!-- grape-auto-comment -->` 标记）跳过；② label_only 之类不适用注释场景。comment 本身 **不在 `_EVENT_ACTION_RULE` 过滤**（无 action 键 → no_rule 放行），仅受 L2 阶段路由约束。
+
+> **edit 的细粒度**：`update` 时 `changes` 有 `description` → 有效（重新审视需求）；仅 assignees/labels/updated_at → 过滤；同时有 description 与 assignees → 内容变更优先放行。
 
 ### Q2：PR 事件是否同步过滤（已确认）
 
@@ -93,9 +108,11 @@ if event_type == "issue_updated":
 在现有 `self-comment`（bot 回声，L690-714）检测之后、路由判定之前，插入统一过滤：
 
 ```python
-# 2.2a 无意义 action 过滤（Issue #49，可配置化）：按 action + 操作者 + changes 判定
+# 2.2a 无意义 action 过滤（Issue #49，按真实 payload：action + changes 组合判定）
 _EVENT_ACTION_RULE = load_event_action_rule()   # 从 DB event_action_filter 读取（Q3=可配置）
-# 结构：{event_type: {action: {allow: bool, actor: 'user|bot|any', require_changes: [...]}}} 
+# 结构：{event_type: {action: {allow, actor, require_changes, block_changes, handle_side_effect}}}
+#  - require_changes: 命中这些 changes 键才放行（如 description 编辑）
+#  - block_changes:   命中这些 changes 键即过滤（如 assignees/labels 变更）
 _skip_reason = ""
 if event_type in _EVENT_ACTION_RULE:
     try:
@@ -103,12 +120,19 @@ if event_type in _EVENT_ACTION_RULE:
         _act = str(_oa.get("action", "") or "").lower()
         _rule = _EVENT_ACTION_RULE[event_type].get(_act)
         if _rule is not None:
-            # actor 细化：bot 操作（机器人回声）→ 前面 self-comment 已处理；此处针对 user 操作
-            _act_ok = _rule.get("allow", False)
-            if _rule.get("require_changes"):   # 如 edit 需 description 变更
-                _changes = payload.get("changes", {}) or {}
-                _act_ok = _act_ok and all(k in _changes for k in _rule["require_changes"])
-            if not _act_ok:
+            _changes = (payload.get("changes") or {}) if isinstance(payload, dict) else {}
+            _act_ok = bool(_rule.get("allow", False))
+            _blocked = _rule.get("block_changes") or []
+            # 1) block_changes 命中即拦（assignees/labels 变更）
+            if _blocked and any(k in _changes for k in _blocked):
+                _skip_reason = f"block_changes:{_act}"
+            # 2) require_changes：需命中指定键才放行
+            elif _rule.get("require_changes"):
+                _req = _rule["require_changes"]
+                if not (isinstance(_changes, dict) and all(k in _changes for k in _req)):
+                    _skip_reason = f"changes_not_met:{_act}"
+            # 3) 未跳过但 allow=0
+            if not _skip_reason and not _act_ok:
                 _skip_reason = f"action_not_allowed:{_act}"
     except Exception:
         pass
@@ -119,18 +143,27 @@ if _skip_reason:
     return result
 ```
 
-**默认规则（Q1/Q2 确认后，写入 DB `event_action_filter`）**：
+**默认规则（按真实 payload 审计后重写，写入 DB `event_action_filter`）**：
 
-| event_type | action | allow | 附加条件 |
-|------------|--------|-------|----------|
-| `issue_updated` | `open`/`create` | ✅ | — |
-| `issue_updated` | `close` | ⚠️ 副作用-only | **handle 关闭任务副作用（`close_issue_tasks`），不进入 agent 执行** |
-| `issue_updated` | `edit` | ✅ | `require_changes: [description]`（需求补充/变更才有效） |
-| `issue_updated` | `assign`/`label`/`reopen` | ❌ | — |
-| `pull_request_opened` | `open` | ✅ | — |
-| `pull_request_opened` | `update` | ⚠️ 按操作者 | user → allow（新 commit 需审查）；bot → skip |
-| `pull_request_opened` | `close`/`reopen` | ❌ | — |
-| `pull_request_merged` | `merge` | ✅ | — |
+> **审计结论（2026-09-07 生产样本，53 条 issue_updated）**：
+> - `issue_updated.action` 实际只出现 `update`/`close`/`reopen`（**没有 `assign`/`label`/`edit`/`open` 这类 action**）
+> - `assign` 变更 = `update` + `changes.assignees`；`label` 变更 = `update` + `changes.labels`；内容编辑 = `update` + `changes.description`/`title`
+> - `issue_comment`/`note_hook_pr` 无 `action`（靠 note + noteable_type）→ 规则表外
+> - 因此 **判定需基于 action + changes 组合，不复依赖假想的 action 名**
+
+| event_type | action | allow | 判定依据 | 说明 |
+|------------|--------|-------|----------|------|
+| `issue_updated` | `update` | ✅ | `require_changes: [description]`，`block_changes: [assignees, labels]` | 内容编辑放行；**assign/label 变更过滤**（若同时有 description 变更则放行） |
+| `issue_updated` | `update` | ✅ | `require_changes: [title]`，`block_changes: [assignees, labels]` | 标题编辑（可选独立行） |
+| `issue_updated` | `close` | ⚠️ 副作用-only | — | 任务关闭副作用，不进入 agent |
+| `issue_updated` | `reopen` | ❌ | — | 无流水线意义 |
+| `pull_request_opened` | `open` | ✅ | — | 新 PR 审查 |
+| `pull_request_opened` | `update` | ⚠️ 按操作者 | actor=user → allow；bot → skip | 新 commit 审查 |
+| `pull_request_opened` | `close`/`reopen` | ❌ | — | 无流水线意义 |
+| `pull_request_merged` | `merge` | ✅ | — | 合并触发 QA→SRE |
+
+> **assign/label 过滤实现**：真实 action 是 `update`，故用 **`block_changes: [assignees]` / `block_changes: [labels]`** 判定，不再依赖 `action=assign`。若 changes 同时含 description，说明"改内容顺带换人"，允许放行（取内容变更优先）。
+> **comment/note_hook_pr**：无 action → 规则表外（no_rule 放行），仅 L2 阶段路由 + self-comment 拦截。
 
 - **位置**：紧挨现有 2.1 `label-only` 检测，保持过滤逻辑集中。
 - **close 语义（Q1 已确认）**：仅关闭任务副作用（`close_issue_tasks`），**不路由到任何 agent 执行**——事件虽被"准入"（走副作用路径），但直接短路，不触发流水线 agent。
@@ -194,9 +227,9 @@ PR 类事件（opened/updated/merged/note_hook_pr）：
 ```
 Webhook 到达
   │
-  ├─ L1 事件准入过滤（§四，action 过滤器，可配置）：无意义 action / 无变化的 edit / bot 无意义
-  │     update → event_skipped，不进入 L2/L3（assign/label/reopen 丢弃；open/close/effective-edit 放行；
-  │     PR update 按操作者：user+新 commit 有效，bot 丢弃）
+  ├─ L1 事件准入过滤（§四，可配置 action+changes 判定）：无意义变化 / 纯 metadata 变更 → event_skipped，
+  │     不进入 L2/L3（assign/label 变更（update+assignees/labels）与 reopen 丢弃；
+  │     close 走副作用短路；description/title 编辑、open 放行；PR update 按操作者：user+新 commit 有效，bot 丢弃）
   │
   ├─ L2 阶段归属分派（分阶段模型，本节核心）：
   │     读 issue_state.stage → 查「阶段 × 事件类型 → Agent」映射表 → 确定目标 Agent
@@ -256,9 +289,9 @@ Webhook 到达
 
 ## 七、验收标准
 
-- [ ] L1：`issue_updated` 的 `assign`/`label`/`reopen` action 不再触发 agent（event_skipped 带 reason）
+- [ ] L1：`issue_updated` 的 **assign（update+changes.assignees）/ label（update+changes.labels）/ reopen** 变化不再触发 agent（event_skipped 带 reason）
 - [ ] **L1：`close` 仅执行任务关闭副作用（`close_issue_tasks`），不路由任何 agent 执行（各阶段均不分派）**
-- [ ] L1：`edit` 仅当 `changes.description` 变更时触发（需求补充/变更被保留）；纯 metadata 编辑被过滤
+- [ ] L1：`update` 仅当 `changes.description`/`title` 变更时触发（需求补充/变更被保留）；纯 assignees/labels/updated_at 变更被过滤
 - [ ] L1：PR `update` 按操作者——user 且有新 commit → 触发审查；bot 操作 → 过滤不回环
 - [ ] L2：同一 `issue_comment`/`PR updated` 在不同 stage 下路由到对应 Agent（vod/issue/coding/qa/sre/done 各验证）
 - [ ] L2：`issue` 阶段的 Issue 事件只给 issue，不误触 coding/qa/sre（现状语义保持）
@@ -283,7 +316,8 @@ Webhook 到达
 
 - ✅ VOD Agent：已完成代码追踪（3 事件路径确认）并结构化总结
 - ✅ **开发者已确认 Q1-Q3**（2026-09-06）：edit 保留（需求变更需处理）/ PR update 按操作者细分 / 采用可配置；并确认 self-comment = bot 自发起事件
-- ⏳ A2A 交办 Issue Agent 出 Spec → coding 实施（本方案含 L1 规则表 + L2 阶段模型 + 配置入口）
+- ✅ **2026-09-07 真实 payload 审计修正**：初版规则含假想的 `action=assign/label/edit`；实证 GitCode 统一用 `action=update` + `changes.assignees/labels/description/title` 表达 → 判定改为 **action + changes 组合**（图 §4.1 已重写）。生产时间线：hello-calculator-10 assign 变更（seq 2071，action=update）证实此前 assign 未被过滤的根因
+- ⏳ coding 实施（按审计后规则：L1 用 block_changes 拦 assign/label，L2 阶段模型，配置入口）
 
 ## 附：关键代码位置
 

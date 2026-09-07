@@ -462,7 +462,8 @@ CREATE TABLE IF NOT EXISTS event_action_filter (
     action        TEXT NOT NULL,
     allow         INTEGER NOT NULL DEFAULT 0,   -- 0=过滤 1=放行 2=副作用-only
     actor         TEXT DEFAULT 'any',           -- user / bot / any
-    require_changes TEXT DEFAULT '',            -- JSON 数组，如 ["description"]；空=不需要
+    require_changes TEXT DEFAULT '',            -- JSON 数组，命中这些 changes 键才放行，如 ["description"]
+    block_changes   TEXT DEFAULT '',            -- JSON 数组，命中这些 changes 键即过滤，如 ["assignees","labels"]
     handle_side_effect TEXT DEFAULT '',         -- 副作用标识（如 close_issue_tasks）；空=无副作用
     priority      INTEGER DEFAULT 0,
     enabled       INTEGER DEFAULT 1,
@@ -827,42 +828,40 @@ def _seed_from_json():
 
 
 def _seed_event_action_filter():
-    """Issue #49：Webhook 事件 action 过滤默认规则（Q1/Q2/Q3 已确认，可配置）。
+    """Issue #49：Webhook 事件 action 过滤默认规则（按真实 payload 审计修正，2026-09-07）。
 
     allow: 0=过滤 1=放行 2=副作用-only（close）→ 不进入 agent 执行。
-    private 各个 event_type×action 组合默认规则，见 issue-49 方案 §4.1。
+    审计结论：GitCode issue_updated.action 只出现 update/close/reopen；
+    assign 变更 = update + changes.assignees；label 变更 = update + changes.labels；
+    内容编辑 = update + changes.description/title。判定用 action + changes 组合。
     """
     default_rules = [
-        # issue_updated
-        ("issue_updated", "open",   1, "any", "", ""),
-        ("issue_updated", "create", 1, "any", "", ""),
+        # issue_updated —— 真实 action 只有 update/close/reopen
+        # update：title/description 任一变更 → 内容编辑放行；纯 assignees/labels 变更 → 过滤
+        ("issue_updated", "update", 1, "user", '["description","title"]', '["assignees","labels"]', ""),
         # close：副作用-only（close_issue_tasks），不进入 agent
-        ("issue_updated", "close",  2, "any", "", "close_issue_tasks"),
-        # edit：仅 description 变更才有效（需求补充/变更）
-        ("issue_updated", "edit",   1, "user", '["description"]', ""),
-        # 无意义动作
-        ("issue_updated", "assign", 0, "any", "", ""),
-        ("issue_updated", "label",  0, "any", "", ""),
-        ("issue_updated", "reopen", 0, "any", "", ""),
+        ("issue_updated", "close", 2, "any", "", "", "close_issue_tasks"),
+        # reopen：无流水线意义
+        ("issue_updated", "reopen", 0, "any", "", "", ""),
         # pull_request_opened
-        ("pull_request_opened", "open",   1, "any", "", ""),
-        # PR update 按操作者：user 有新 commit → 放行；bot 自操作过滤（self-comment 已前置拦截，此处 bot 明确过滤）
-        ("pull_request_opened", "update", 1, "user", "", ""),
-        ("pull_request_opened", "close",  0, "any", "", ""),
-        ("pull_request_opened", "reopen", 0, "any", "", ""),
-        ("pull_request_opened", "merge",  1, "any", "", ""),
+        ("pull_request_opened", "open",   1, "any", "", "", ""),
+        # PR update 按操作者：user 有新 commit → 放行；bot 自操作过滤（self-comment 已前置拦截）
+        ("pull_request_opened", "update", 1, "user", "", "", ""),
+        ("pull_request_opened", "close",  0, "any", "", "", ""),
+        ("pull_request_opened", "reopen", 0, "any", "", "", ""),
+        ("pull_request_opened", "merge",  1, "any", "", "", ""),
         # pull_request_merged
-        ("pull_request_merged", "merge",  1, "any", "", ""),
+        ("pull_request_merged", "merge",  1, "any", "", "", ""),
     ]
     with db_lock:
         c = db.cursor()
-        for evt, act, allow, actor, req_changes, side_effect in default_rules:
+        for evt, act, allow, actor, req_changes, block_changes, side_effect in default_rules:
             try:
                 c.execute(
                     "INSERT OR IGNORE INTO event_action_filter "
-                    "(event_type, action, allow, actor, require_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,0,1,datetime('now'),datetime('now'))",
-                    (evt, act, allow, actor, req_changes, side_effect))
+                    "(event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,0,1,datetime('now'),datetime('now'))",
+                    (evt, act, allow, actor, req_changes, block_changes, side_effect))
             except Exception as e:
                 log.warning(f"event_action_filter seed failed ({evt}:{act}): {e}")
         db.commit()
@@ -2194,6 +2193,15 @@ def _migrate_tables():
         log.info("Added tags/pool_tag columns for engine tagging")
     except Exception as e:
         log.warning(f"Add engine tagging columns failed: {e}")
+    # ===== Issue #49: event_action_filter.block_changes（按真实 payload 判定 assign/label 变更）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "event_action_filter", "block_changes", "TEXT DEFAULT ''")
+            db.commit()
+        log.info("Added event_action_filter.block_changes column")
+    except Exception as e:
+        log.warning(f"Add event_action_filter.block_changes column failed: {e}")
     # ===== Phase 2: user_accounts.last_scene (event-dispatch-redesign-v2.md 3.1) =====
     try:
         with db_lock:

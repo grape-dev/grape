@@ -793,6 +793,7 @@ class EventActionFilterBody(BaseModel):
     allow: int = 0              # 0=过滤 1=放行 2=副作用-only
     actor: str = "any"          # user / bot / any
     require_changes: str = ""   # JSON 数组字符串，如 '["description"]'
+    block_changes: str = ""     # JSON 数组字符串，命中即过滤，如 '["assignees","labels"]'
     handle_side_effect: str = ""
     priority: int = 0
     enabled: int = 1
@@ -802,6 +803,7 @@ class EventActionFilterUpdateBody(BaseModel):
     allow: int | None = None
     actor: str | None = None
     require_changes: str | None = None
+    block_changes: str | None = None
     handle_side_effect: str | None = None
     priority: int | None = None
     enabled: int | None = None
@@ -814,15 +816,21 @@ def list_event_action_filters(user: dict = Depends(get_current_user)):
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT id, event_type, action, allow, actor, require_changes, handle_side_effect, "
-                      "priority, enabled FROM event_action_filter ORDER BY event_type, action")
+            # 兼容旧表（无 block_changes）
+            cols = [r[1] for r in c.execute("PRAGMA table_info(event_action_filter)").fetchall()]
+            if "block_changes" in cols:
+                c.execute("SELECT id, event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, "
+                          "priority, enabled FROM event_action_filter ORDER BY event_type, action")
+            else:
+                c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
+                          "priority, enabled FROM event_action_filter ORDER BY event_type, action")
             rows = c.fetchall()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"rules": [
         {"id": r[0], "event_type": r[1], "action": r[2], "allow": r[3], "actor": r[4] or "any",
-         "require_changes": r[5] or "", "handle_side_effect": r[6] or "",
-         "priority": r[7], "enabled": r[8]}
+         "require_changes": r[5] or "", "block_changes": r[6] or "", "handle_side_effect": r[7] or "",
+         "priority": r[8], "enabled": r[9]}
         for r in rows
     ]}
 
@@ -840,10 +848,10 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(get_
             if c.fetchone():
                 raise HTTPException(status_code=409, detail={"code": 409, "message": "该事件/动作规则已存在"})
             c.execute(
-                "INSERT INTO event_action_filter (event_type, action, allow, actor, require_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO event_action_filter (event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (body.event_type, body.action, body.allow, body.actor, body.require_changes,
-                 body.handle_side_effect, body.priority, body.enabled, now, now))
+                 body.block_changes, body.handle_side_effect, body.priority, body.enabled, now, now))
             db.commit()
         except HTTPException:
             raise
@@ -861,7 +869,7 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     sets, params = [], []
-    for field in ("allow", "actor", "require_changes", "handle_side_effect", "priority", "enabled"):
+    for field in ("allow", "actor", "require_changes", "block_changes", "handle_side_effect", "priority", "enabled"):
         val = getattr(body, field)
         if val is not None:
             sets.append(f"{field}=?")

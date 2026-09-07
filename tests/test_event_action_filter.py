@@ -23,16 +23,15 @@ def _clean_event_rules():
         c = db.cursor()
         c.execute("DELETE FROM event_action_filter")
         cur = c
-        def _ins(evt, act, allow, actor="any", req="", se=""):
+        def _ins(evt, act, allow, actor="any", req="", block="", se=""):
             cur.execute(
-                "INSERT INTO event_action_filter (event_type, action, allow, actor, require_changes, handle_side_effect, priority, enabled) "
-                "VALUES (?,?,?,?,?,?,0,1)",
-                (evt, act, allow, actor, req, se))
-        _ins("issue_updated", "open", 1)
+                "INSERT INTO event_action_filter (event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, priority, enabled) "
+                "VALUES (?,?,?,?,?,?,?,0,1)",
+                (evt, act, allow, actor, req, block, se))
+        # 真实 payload：issue_updated.action 只有 update/close/reopen
+        # update：title/description 任一变更 → 放行；纯 assignees/labels 变更 → 过滤
+        _ins("issue_updated", "update", 1, actor="user", req='["description","title"]', block='["assignees","labels"]')
         _ins("issue_updated", "close", 2, se="close_issue_tasks")
-        _ins("issue_updated", "edit", 1, actor="user", req='["description"]')
-        _ins("issue_updated", "assign", 0)
-        _ins("issue_updated", "label", 0)
         _ins("issue_updated", "reopen", 0)
         _ins("pull_request_opened", "open", 1)
         _ins("pull_request_opened", "update", 1, actor="user")
@@ -61,14 +60,59 @@ class TestEvaluateEventAction:
         from src.api.event_rule import evaluate_event_action
         _monkey_actor(monkeypatch, "user")
         d = evaluate_event_action("issue_updated", {"object_attributes": {"action": "open"}})
-        assert d["decision"] == "allow"
+        assert d["decision"] == "no_rule"  # open action 在真实 payload 中不出现（not issue_updated）
 
-    def test_assign_filter(self, monkeypatch):
+    def test_update_assign_blocked(self, monkeypatch):
+        """真实 payload：assign 变更 = update + changes.assignees → 过滤。"""
         from src.api.event_rule import evaluate_event_action
         _monkey_actor(monkeypatch, "user")
-        d = evaluate_event_action("issue_updated", {"object_attributes": {"action": "assign"}})
+        d = evaluate_event_action("issue_updated", {
+            "object_attributes": {"action": "update"},
+            "changes": {"assignees": [{"username": "b"}], "updated_at": "t"},
+        })
         assert d["decision"] == "skip"
-        assert "assign" in d["reason"]
+        assert "assignees" in d["reason"]
+
+    def test_update_label_blocked(self, monkeypatch):
+        """真实 payload：label 变更 = update + changes.labels → 过滤。"""
+        from src.api.event_rule import evaluate_event_action
+        _monkey_actor(monkeypatch, "user")
+        d = evaluate_event_action("issue_updated", {
+            "object_attributes": {"action": "update"},
+            "changes": {"labels": ["bug"], "updated_at": "t"},
+        })
+        assert d["decision"] == "skip"
+        assert "labels" in d["reason"]
+
+    def test_update_description_allowed(self, monkeypatch):
+        """update + changes.description → 放行（内容编辑/需求补充）。"""
+        from src.api.event_rule import evaluate_event_action
+        _monkey_actor(monkeypatch, "user")
+        d = evaluate_event_action("issue_updated", {
+            "object_attributes": {"action": "update"},
+            "changes": {"description": {"from": "a", "to": "b"}, "updated_at": "t"},
+        })
+        assert d["decision"] == "allow"
+
+    def test_update_title_allowed(self, monkeypatch):
+        """update + changes.title → 放行（标题编辑保留）。"""
+        from src.api.event_rule import evaluate_event_action
+        _monkey_actor(monkeypatch, "user")
+        d = evaluate_event_action("issue_updated", {
+            "object_attributes": {"action": "update"},
+            "changes": {"title": {"from": "a", "to": "b"}, "updated_at": "t"},
+        })
+        assert d["decision"] == "allow"
+
+    def test_update_desc_plus_assign_allowed(self, monkeypatch):
+        """update 同时改 description 和 assignees → 内容变更优先，放行。"""
+        from src.api.event_rule import evaluate_event_action
+        _monkey_actor(monkeypatch, "user")
+        d = evaluate_event_action("issue_updated", {
+            "object_attributes": {"action": "update"},
+            "changes": {"description": {"from": "a", "to": "b"}, "assignees": [{"username": "b"}]},
+        })
+        assert d["decision"] == "allow"
 
     def test_close_side_effect(self, monkeypatch):
         from src.api.event_rule import evaluate_event_action
@@ -77,24 +121,12 @@ class TestEvaluateEventAction:
         assert d["decision"] == "side_effect"
         assert d["side_effect"] == "close_issue_tasks"
 
-    def test_edit_requires_description_change(self, monkeypatch):
+    def test_edit_no_action_rule(self, monkeypatch):
+        """真实 payload 无 action='edit'；fallback 为 no_rule（放行）而非误杀。"""
         from src.api.event_rule import evaluate_event_action
         _monkey_actor(monkeypatch, "user")
-        # 无 changes → 过滤
-        d1 = evaluate_event_action("issue_updated", {"object_attributes": {"action": "edit"}})
-        assert d1["decision"] == "skip"
-        # 有 description 变更 → 放行
-        d2 = evaluate_event_action("issue_updated", {
-            "object_attributes": {"action": "edit"},
-            "changes": {"description": {"from": "a", "to": "b"}},
-        })
-        assert d2["decision"] == "allow"
-        # 仅 title 变更 → 过滤
-        d3 = evaluate_event_action("issue_updated", {
-            "object_attributes": {"action": "edit"},
-            "changes": {"title": {"from": "a", "to": "b"}},
-        })
-        assert d3["decision"] == "skip"
+        d = evaluate_event_action("issue_updated", {"object_attributes": {"action": "edit"}, "changes": {}})
+        assert d["decision"] == "no_rule"
 
     def test_pr_update_actor_split(self, monkeypatch):
         from src.api.event_rule import evaluate_event_action
