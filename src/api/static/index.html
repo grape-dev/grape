@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Grape — Multi-Agent DevOps</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=40">
-<link rel="stylesheet" href="/static/css/apple-theme.css?v=7">
+<link rel="stylesheet" href="/static/css/app.css?v=43">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=11">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
 // Reads localStorage 'grapeTheme' before DOM renders. Default: Liquid Glass (apple).
@@ -15,7 +15,7 @@
 </head>
 <body>
 
-<div class="ln" id="loginView">
+<div class="ln hid" id="loginView">
 <div class="lbox">
 <img class="logo" src="/static/logo-128.png" alt="Grape">
 <h1>Grape</h1>
@@ -45,7 +45,7 @@
 <div class="sb-nav">
 <div class="grp" data-i18n="app.sidebar.workspace">工作区</div>
 <a id="nav-tasks" onclick="app.nav('tasks')"><span class="ic">📋</span><span data-i18n="app.nav.tasks">任务中心</span></a>
-<a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span><span data-i18n="app.nav.scene_center">场景中心</span></a>
+<a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span><span data-i18n="app.nav.scene_center">项目场景</span></a>
 <a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span><span data-i18n="app.nav.pipeline">流水线</span></a>
 
 <div class="grp" data-i18n="app.sidebar.devops_agents">DevOps Agents</div>
@@ -55,18 +55,21 @@
 <a id="nav-qa" onclick="app.nav('qa')"><span class="ic" style="color:var(--pu)">●</span><span data-i18n="app.nav.qa">QA Agent</span></a>
 <a id="nav-sre" onclick="app.nav('sre')"><span class="ic" style="color:var(--or)">●</span><span data-i18n="app.nav.sre">SRE Agent</span></a>
 
+<div class="grp" data-i18n="app.sidebar.devops_market">场景中心</div>
+<a id="nav-scene-market" class="act" onclick="app.nav('scene-market')"><span class="ic">◈</span><span data-i18n="app.nav.scene_skill_market">场景·技能</span></a>
 <div class="grp" data-i18n="app.sidebar.knowledge">知识库</div>
-<a id="nav-skills" onclick="app.nav('skills')"><span class="ic">◈</span><span data-i18n="app.nav.skills">DevOps 技能</span></a>
 <a id="nav-knowledge" onclick="app.nav('knowledge')"><span class="ic">❖</span><span data-i18n="app.nav.knowledge">项目知识库</span></a>
 
 <div class="grp" data-i18n="app.sidebar.account">用户中心</div>
 <a id="nav-chat" onclick="app.nav('chat')"><span class="ic">☎</span><span data-i18n="app.nav.chat">Chat Agent</span></a>
 
+<div class="grp" data-i18n="app.sidebar.device_center">设备中心</div>
+<a id="nav-runtimes" onclick="app.nav('runtimes')"><span class="ic">⚡</span><span data-i18n="app.nav.runtimes">Agent 运行时</span></a>
+<a id="nav-observability" onclick="app.nav('observability')"><span class="ic">📊</span><span data-i18n="app.nav.observability">设备监控</span></a>
+
 <div class="grp" data-i18n="app.sidebar.settings">设置</div>
 <a id="nav-settings-credentials" onclick="app.nav('settings','credentials')"><span class="ic">⚙</span><span data-i18n="app.nav.settings">通用设置</span></a>
 <a id="nav-settings-gitcode" onclick="app.nav('settings','gitcode')"><span class="ic">⎘</span><span data-i18n="app.nav.gitcode_repo">GitCode 仓库</span></a>
-<a id="nav-runtimes" onclick="app.nav('runtimes')"><span class="ic">⚡</span><span data-i18n="app.nav.runtimes">Agent 运行时</span></a>
-<a id="nav-observability" onclick="app.nav('observability')"><span class="ic">📊</span><span data-i18n="app.nav.observability">系统监控</span></a>
 </div>
 <div class="sb-ft">
 <div class="av" id="userAvatar">U</div>
@@ -91,24 +94,25 @@
 </div>
 
 <script src="/static/js/i18n.js?v=1"></script>
-<script>I18N.init('6');</script>
+<script>I18N.init('7');</script>
 <script src="/static/js/vendor/marked.min.js?v=1"></script>
 <script src="/static/js/vendor/qrcode.min.js?v=1"></script>
-<script src="/static/js/api.js?v=16"></script>
-<script src="/static/js/pages/dashboard.js?v=15"></script>
+<script src="/static/js/api.js?v=18"></script>
+<script src="/static/js/pages/dashboard.js?v=24"></script>
 <script src="/static/js/pages/pipeline.js?v=34"></script>
 <script src="/static/js/pages/agents.js?v=21"></script>
-<script src="/static/js/pages/events.js?v=37"></script>
-<script src="/static/js/pages/chat.js?v=24"></script>
+<script src="/static/js/pages/events.js?v=38"></script>
+<script src="/static/js/pages/chat.js?v=26"></script>
 <script src="/static/js/pages/repos.js?v=32"></script>
-<script src="/static/js/pages/templates.js?v=17"></script>
-<script src="/static/js/pages/tasks.js?v=32"></script>
+<script src="/static/js/pages/templates.js?v=18"></script>
+<script src="/static/js/pages/tasks.js?v=40"></script>
 <script src="/static/js/pages/settings.js?v=13"></script>
-<script src="/static/js/pages/skills.js?v=15"></script>
-<script src="/static/js/pages/knowledge.js?v=8"></script>
-<script src="/static/js/pages/runtimes.js?v=24"></script>
-<script src="/static/js/pages/observability.js?v=60"></script>
-<script src="/static/js/app.js?v=44"></script>
+<script src="/static/js/pages/scene-market.js?v=12"></script>
+<script src="/static/js/pages/skills.js?v=31"></script>
+<script src="/static/js/pages/knowledge.js?v=9"></script>
+<script src="/static/js/pages/runtimes.js?v=29"></script>
+<script src="/static/js/pages/observability.js?v=61"></script>
+<script src="/static/js/app.js?v=51"></script>
 
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>

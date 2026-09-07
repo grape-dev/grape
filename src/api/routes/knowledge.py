@@ -344,7 +344,7 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
 
 
 @router.get("")
-async def list_knowledge(user: dict = Depends(get_current_user),
+def list_knowledge(user: dict = Depends(get_current_user),
                          repo: str = Query("", description="repo_key，如 gitcode:org/test 或 org/test")):
     """聚合返回项目级 + Agent 维度知识清单。"""
     if not repo:
@@ -404,7 +404,7 @@ async def list_knowledge(user: dict = Depends(get_current_user),
 
 
 @router.get("/content")
-async def read_knowledge_content(repo: str = Query(""),
+def read_knowledge_content(repo: str = Query(""),
                                  file: str = Query(""),
                                  obs_key: str = Query(""),
                                  user: dict = Depends(get_current_user)):
@@ -440,7 +440,7 @@ async def read_knowledge_content(repo: str = Query(""),
 
 
 @router.get("/context")
-async def knowledge_context(repo: str = Query(""),
+def knowledge_context(repo: str = Query(""),
                             agent_type: str = "",
                             issue_num: int = 0,
                             user: dict = Depends(get_current_user)):
@@ -595,7 +595,7 @@ async def upload_knowledge(file: UploadFile = File(...),
 
 
 @router.delete("")
-async def delete_knowledge(repo: str = Query(""),
+def delete_knowledge(repo: str = Query(""),
                            file: str = Query(""),
                            user: dict = Depends(get_current_user)):
     """删除成员上传的知识文档（仅限本人上传）。"""

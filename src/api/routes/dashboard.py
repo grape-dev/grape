@@ -13,13 +13,13 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/ops/overview")
-async def get_ops_overview(repo: str = ""):
+def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
 
     参考 multica BusinessSampler（metrics/business_sampler.go）的实时采样设计，
     但通过 Dashboard API 暴露给前端看板，无需 Prometheus 基础设施。
 
-    无认证：运维只读数据，不涉及敏感信息（与 /health/realtime 同级）。
+    需登录：user scope worker 按当前用户过滤（与 Agent 运行时页面可见性一致）。
     数据全部来自 agent_tasks / agent_runtimes 表的实时 SQL 查询。
     repo 参数：仓库名（requiredsa/hello-flask），过滤仅该仓库的任务。
     """
@@ -218,24 +218,26 @@ async def get_ops_overview(repo: str = ""):
                 pass
 
         # 查 worker（凭据），排除已注销（revoked）
-        # scope=repo 的 worker 只在所属仓库的监控页面显示，全局看板只看 global scope
+        # worker 可见性：global 全部可见 + user scope 只看自己的 + repo scope 看仓库的
+        _uname = user.get("username") or ""
         try:
             if repo:
-                # 仓库级看板：显示 global + 该 repo 的 worker（repo_key 可能带 gitcode: 前缀也可能不带）
+                # 仓库级看板：global + 自己的 user + 该 repo 的 worker
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND (scope='global' OR repo_key=? OR repo_key=?) ORDER BY id",
-                    (repo_key, repo)
+                    "AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key=? OR repo_key=?) ORDER BY id",
+                    (_uname, repo_key, repo),
                 )
             else:
-                # 全局看板：只显示 global scope 的 worker
+                # 全局看板：global + 自己的 user scope worker
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND scope='global' ORDER BY id"
+                    "AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
+                    (_uname,),
                 )
             for w in c.fetchall():
                 wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w
@@ -253,6 +255,37 @@ async def get_ops_overview(repo: str = ""):
                     "load_avg": wload or "",
                     "owner_name": wowner or "",
                 })
+        except Exception:
+            pass
+
+        # 补充本机直连设备（credential_id=0 的引擎不在 runtime_credentials 表中）
+        try:
+            _local_hostname = ""
+            try:
+                import socket as _sock
+                _local_hostname = _sock.gethostname()
+            except Exception:
+                pass
+            c.execute(
+                "SELECT ar.id, ar.name, ar.status, ar.last_seen_at, ar.host_name, "
+                "ar.healthy, ar.busy_slots, ar.max_concurrent "
+                "FROM agent_runtimes ar WHERE ar.credential_id = 0"
+            )
+            _local_rts = c.fetchall()
+            if _local_rts:
+                _has_local_worker = any(w.get("device_name") == (_local_hostname or "本机直连") for w in worker_list)
+                if not _has_local_worker:
+                    worker_list.append({
+                        "id": 0, "name": _local_hostname or "本机直连",
+                        "device_name": _local_hostname or "本机直连",
+                        "status": "online", "health": "online",
+                        "last_seen_at": "", "last_ip": "127.0.0.1",
+                        "cpu_percent": _local_cpu, "memory_percent": _local_mem,
+                        "disk_percent": _local_disk, "tmp_percent": _local_tmp,
+                        "load_avg": _local_load, "owner_name": "",
+                    })
+                    worker_total += 1
+                    worker_online += 1
         except Exception:
             pass
 
@@ -421,7 +454,7 @@ async def get_ops_overview(repo: str = ""):
 
 
 @router.get("/ops/probe-now")
-async def probe_engines_now():
+def probe_engines_now():
     """手动触发引擎探测（60s 防抖：窗口内重复请求返回上次结果，不重新探测）。"""
     from src.observability.engine_probe import get_probe_results, _last_probe_time
     import time, threading
@@ -500,18 +533,30 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     files_read = []
 
     def _match_repo(entry):
-        """检查日志条目是否匹配指定的 repo"""
+        """检查日志条目是否匹配指定的 repo。
+        - 无 repo 过滤条件：全部返回
+        - 日志有 repo_key：必须精确匹配
+        - 日志无 repo_key 但 message 含 owner/repo 格式仓库名：
+          匹配当前仓库则展示，含其他仓库则不展示
+        - 日志不含任何仓库名：始终展示（系统级日志）"""
         if not _repo_filter:
             return True
         entry_repo = entry.get("repo_key", "")
-        if entry_repo and entry_repo == _repo_filter:
-            return True
-        # 旧格式日志无 repo_key 字段，检查 message 中是否包含仓库名
+        if entry_repo:
+            return entry_repo == _repo_filter
         msg = entry.get("message", "")
         repo_short = _repo_filter.replace("gitcode:", "")
         if repo_short in msg:
             return True
-        return False
+        # 检查 message 中是否含其他仓库名（owner/repo 格式，排除路径段如 api/v5）
+        import re as _re2
+        _repo_pattern = _re2.compile(r'\b([a-zA-Z0-9_-]+)/([a-zA-Z0-9_.-]+)\b')
+        for m in _repo_pattern.finditer(msg):
+            candidate = f"{m.group(1)}/{m.group(2)}"
+            if candidate != repo_short and not m.group(1).startswith("api"):
+                return False  # 含其他仓库名，不展示
+        # 不含任何仓库名，系统级日志，始终展示
+        return True
 
     def _match_user(entry):
         """检查日志条目是否匹配指定的 user_id"""
@@ -537,7 +582,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                     continue
                 try:
                     entry = _json.loads(line)
-                    if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry):
+                    if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry) and not _is_http_noise(entry):
                         entries.append(entry)
                         if len(entries) >= limit:
                             return
@@ -545,6 +590,22 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                     continue
         except Exception:
             pass
+
+    def _is_http_noise(entry):
+        """过滤掉正常行为的 HTTP 请求日志（非真正错误）。
+        保留 runtime/worker 凭据失败的 401（运维需感知 worker 掉线）。"""
+        msg = entry.get("message", "")
+        path = entry.get("path", "")
+        status = entry.get("status")
+        # 401：非 runtime 的是 token 过期刷新，过滤
+        if status == 401 or "status=401" in msg:
+            if "/api/runtime/" in path or "/api/runtime/" in msg:
+                return False  # runtime 401 保留
+            return True
+        # 403/404：health 限制、favicon、SPA 路由等，过滤
+        if status in (403, 404) or "status=403" in msg or "status=404" in msg:
+            return True
+        return False
 
     def _parse_text_log(filepath):
         """解析旧纯文本格式日志（正则提取 level + message）"""
@@ -573,7 +634,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                 if _re_json.match(line):
                     try:
                         entry = _json.loads(line)
-                        if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry):
+                        if entry.get("level", "") in allowed_levels and _match_repo(entry) and _match_user(entry) and not _is_http_noise(entry):
                             entries.append(entry)
                             if len(entries) >= limit:
                                 return
@@ -590,7 +651,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                         _e = {"ts": m.group(1), "level": lvl,
                             "component": m.group(3), "request_id": "-",
                             "message": m.group(4)[:500]}
-                        if _match_repo(_e) and _match_user(_e):
+                        if _match_repo(_e) and _match_user(_e) and not _is_http_noise(_e):
                             entries.append(_e)
                             if len(entries) >= limit:
                                 return
@@ -603,7 +664,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
                     if lvl in allowed_levels:
                         _e = {"ts": "", "level": lvl, "component": "",
                             "request_id": "-", "message": m2.group(2)[:500]}
-                        if _match_repo(_e) and _match_user(_e):
+                        if _match_repo(_e) and _match_user(_e) and not _is_http_noise(_e):
                             entries.append(_e)
                         if len(entries) >= limit:
                             return
@@ -801,8 +862,39 @@ async def get_a2a_health():
     return result
 
 
+def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
+    """方案 X（F-2 落地）：纯本地判定托管状态，零 GitCode API 调用。
+
+    - webhook 检测：读本地 managed_repos.webhook_id，>0 即视为存在（不远程比对 URL，杜绝 URL 漂移误报）。
+    - bot 检测：读本地已落库的 host_status；仅当原值为 bot_missing/partial 且 bot 实际应存在时
+      维持原值（不额外远程查权限，避免限流）。
+    - 不调用任何远程 API，避免 429；真实"webhook 被手动删除"的漏报由 repair-host 手动确认兜底。
+    """
+    from src.config import log as _log
+    try:
+        from src.user.db import get_host_status, set_host_status, _get_managed_webhook_id
+        webhook_id = _get_managed_webhook_id(repo_key)
+        cur = get_host_status(repo_key)
+        if not webhook_id:
+            # webhook 从未建立 → webhook_missing
+            if cur != "webhook_missing":
+                set_host_status(repo_key, "webhook_missing")
+            return "webhook_missing"
+        # webhook 存在：
+        if cur in ("bot_missing", "partial"):
+            # bot 缺失/部分是托管时落库的明确标记，保留（不远程复查）
+            return cur
+        # 正常（含曾误标 webhook_missing → 现在 webhook_id>0 存在 → 清掉误报）
+        if cur != "":
+            set_host_status(repo_key, "")
+        return ""
+    except Exception as e:
+        _log.warning(f"Dashboard: host status check failed: {e}")
+        return ""
+
+
 @router.get("/{owner}/{repo}")
-async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 
@@ -903,8 +995,8 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         if s in event_counts:
             event_counts[s] += 1
 
-    # 获取当前场景和场景列表（从 DB 读取）
-    dev_scene = "default"
+    # 获取当前场景和场景列表（从 DB 读取，方案 B：无 default 场景）
+    dev_scene = ""
     try:
         with db_lock:
             c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
@@ -918,11 +1010,17 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
     scene_nodes = []
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
-        scenes = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
-        # 获取当前场景的 nodes（含 skill / enabled / engine_runtime_ids）
-        cfg = get_pipeline_config(dev_scene, repo_key=repo_key, user_id=user.get("id", 0))
-        if cfg:
-            scene_nodes = cfg.get("nodes", [])
+        scenes = get_scenes(repo_key=repo_key)
+        # dev_scene 必须在可见场景列表中才加载，否则自动选中第一个场景
+        scene_ids = {s["id"] for s in scenes}
+        if scenes:
+            if not dev_scene or dev_scene not in scene_ids:
+                dev_scene = scenes[0]["id"]
+            cfg = get_pipeline_config(dev_scene, repo_key=repo_key)
+            if cfg:
+                scene_nodes = cfg.get("nodes", [])
+        else:
+            dev_scene = ""
     except Exception as e:
         log.warning(f"Dashboard: scene load failed: {e}")
 
@@ -958,14 +1056,23 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
     try:
         from src.runtime.engine_select import query_engines
         from src.runtime.instances import instance_name
+        _uname = user.get("username") or ""
         for atype in all_types:
             engines = (query_engines(repo_key, "global", agent_type=atype)
-                       + query_engines(repo_key, "user", agent_type=atype)
-                       + query_engines(repo_key, "local", agent_type=atype))
+                       + query_engines(repo_key, "user", agent_type=atype, username=_uname)
+                       + query_engines(repo_key, "repo", agent_type=atype)
+                       + query_engines(repo_key, "local", agent_type=atype, username=_uname))
+            _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
+            from src.runtime.health import derive_runtime_health
+            import time as _time
+            _now = _time.time()
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
-                                     "status": e["status"], "tags": e.get("tags", [])}
+                                     "status": derive_runtime_health(e["status"], e.get("last_seen_at"), _now),
+                                     "tags": e.get("tags", []),
+                                     "scope": e.get("scope", "global"),
+                                     "scope_label": _scope_labels.get(e.get("scope", "global"), "")}
                                     for e in engines]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")
@@ -1009,6 +1116,9 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
 
     metrics["active_agents"] = sum(1 for a in agent_sessions if a["status"] == "running")
 
+    # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
+    host_status = _check_host_status(owner, repo, repo_key)
+
     return {
         "repo": repo_key,
         "role": role,
@@ -1018,4 +1128,5 @@ async def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_
         "agents": agent_sessions,
         "agent_engines": agent_engines,
         "scene_nodes": scene_nodes,
+        "host_status": host_status,
     }

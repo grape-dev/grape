@@ -45,7 +45,7 @@ import datetime as _datetime
 
 _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
-    "hermes": ["hermes", "chat", "-q", "hello", "--yolo"],
+    "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
     "cursor": ["cursor", "run", "hello"],
 }
@@ -59,7 +59,10 @@ _worker_probe_started = False
 
 
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
-    """对本机引擎发起 CLI 测试对话，返回探测结果。"""
+    """对本机引擎发起 CLI 测试对话，返回探测结果。
+
+    hermes 引擎探测后会删除 hello session，避免污染历史会话列表。
+    """
     cmd = _PROBE_COMMANDS.get(engine_name)
     if not cmd:
         return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
@@ -73,6 +76,9 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         )
         latency = round(_time_mod.time() - start, 1)
         if result.returncode == 0:
+            # hermes 探测：从输出中提取 session_id 并删除，避免 hello 污染历史会话
+            if engine_name == "hermes":
+                _cleanup_hermes_probe_session(result.stdout)
             return {"status": "ok", "latency": latency, "error": ""}
         else:
             err = (result.stderr or result.stdout or "").strip()[:200]
@@ -85,6 +91,53 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
+
+
+def _cleanup_hermes_probe_session(stdout: str):
+    """从 hermes chat -q -Q 的输出中提取 session_id 并删除，避免 hello 对话污染历史会话。"""
+    import re as _re
+    # -Q 模式输出: "session_id: 20260904_170115_9191ce\n..."
+    # 非 -Q 模式输出: "Session:        20260904_165247_4f270b\n..."
+    m = _re.search(r'session[_-]?(?:id)?:\s*(\S+)', stdout, _re.IGNORECASE)
+    if not m:
+        return
+    sid = m.group(1).strip()
+    if not sid:
+        return
+    try:
+        _subprocess.run(
+            ["hermes", "sessions", "delete", sid, "--yes"],
+            capture_output=True, text=True, timeout=10, stdin=_subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def _worker_probe_once():
+    """同步执行一轮引擎探测，结果写入 _worker_probe_results。
+
+    注册成功后立即调用，确保第一次心跳上报时 probe_results 非空，
+    使服务端能及时纠正 healthy（ok→1 / fail→0）。
+    """
+    try:
+        engines = _discover_local_runtimes()
+        for eng in engines:
+            if not eng.get("installed"):
+                with _worker_probe_lock:
+                    _worker_probe_results[eng["name"]] = {
+                        "status": "skip", "latency": 0,
+                        "last_probe": _datetime.datetime.utcnow().isoformat() + "Z",
+                        "error": "not installed",
+                    }
+                continue
+            log.info(f"worker engine probe: testing {eng['name']}...")
+            result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
+            result["last_probe"] = _datetime.datetime.utcnow().isoformat() + "Z"
+            with _worker_probe_lock:
+                _worker_probe_results[eng["name"]] = result
+            log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
+    except Exception as e:
+        log.warning(f"worker engine probe (initial) error: {e}")
 
 
 def _worker_probe_loop():
@@ -812,6 +865,41 @@ async def _materialize_files(client, tid, files_dict, file_urls, dest_dir, tag="
             pass
 
 
+def _cleanup_task_workdir(task: dict):
+    """任务结束后清理工位：删轻文件（.skills/.project-info/.knowledge）+ 安全卸载 worktree。
+
+    轻文件直接删（下次派单重新物化）；worktree 走 remove_issue_worktree_if_pushed（确认已 push）。
+    清理失败只告警，不影响任务结果上报与后续流水线。
+    """
+    import os as _os
+    import shutil as _shutil
+    cwd = task.get("cwd") or ""
+    if not cwd or not _os.path.isdir(cwd):
+        return
+    for _sub in (".skills", ".project-info", ".knowledge"):
+        _p = _os.path.join(cwd, _sub)
+        try:
+            if _os.path.isdir(_p):
+                _shutil.rmtree(_p, ignore_errors=True)
+        except Exception:
+            pass
+    try:
+        from src.runtime import repogit
+        _num = repogit.issue_num_from(task.get("issue_id") or "")
+        if _num and task.get("issue_session_id"):
+            repogit.remove_issue_worktree_if_pushed(
+                task.get("repo_key") or "", task.get("agent_type") or "",
+                _num, token=task.get("repo_gitcode_token") or "")
+    except Exception as e:
+        log.warning(f"workdir cleanup failed for task {task.get('id')}: {e}")
+    # 连空 cwd 目录一起删（non-git agent 删完物化文件后为空；git agent 的 worktree 已被整目录删掉）
+    try:
+        if _os.path.isdir(cwd) and not _os.listdir(cwd):
+            _shutil.rmtree(cwd, ignore_errors=True)
+    except Exception:
+        pass
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -867,6 +955,21 @@ async def _execute_task(client, task, engine_name: str = ""):
             env.update(_fresh_env)
     except Exception:
         pass
+    # 本机 worker 修正对外服务地址：任务入队时 plugin 广播 runtime_id=0，server_url 被写成
+    # 公网 server_base_url（如 http://123.249.19.227）。本机 worker 抢到任务后，agent 内部
+    # A2A/tasks 等调用若走公网会 NAT 回环不通（超时）；必须覆盖为 localhost 直连。
+    # 远程 worker 的 RUNTIME_SERVER_URL 是公网，不受影响（保持原 server_url）。
+    _rts = os.environ.get("RUNTIME_SERVER_URL", "") or ""
+    _is_local_worker = ("localhost" in _rts) or ("127.0.0.1" in _rts) or _rts.startswith("127.")
+    _local_base = ""
+    _old_server_url = task.get("server_url") or ""
+    if _is_local_worker:
+        _local_base = _rts.rstrip("/") if _rts else "http://127.0.0.1:3000"
+        if "://" in _local_base and ":" not in _local_base.split("://", 1)[1]:
+            _local_base = _local_base + ":3000"
+        env["GRAPE_SERVER_URL"] = _local_base
+        task["server_url"] = _local_base
+        log.info(f"local worker: override GRAPE_SERVER_URL/server_url -> {_local_base}")
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
     # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
@@ -878,12 +981,18 @@ async def _execute_task(client, task, engine_name: str = ""):
             _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
                                                 _num, token=task.get("repo_gitcode_token") or "")
             if _wt:
-                env["GIT_ASKPASS"] = _os.path.join(_wt, ".git-askpass.sh")
+                env["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     skill_dir = _os.path.join(cwd, ".skills")
     prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
                                        .replace("{{SERVER_URL}}", task.get("server_url") or "")
+    # 本机 worker：prompt 里 build_prompt 已把 {{SERVER_URL}} 替换成公网 server_base_url
+    # （worker 端此处 .replace("{{SERVER_URL}}") 是空操作），需把 prompt 里已硬编码的公网
+    # 地址回改为 localhost，否则本机 worker 的 A2A 走公网 NAT 回环不通（超时）。
+    if _is_local_worker and _old_server_url and _local_base and _old_server_url != _local_base:
+        prompt = prompt.replace(_old_server_url, _local_base)
+        log.info(f"local worker: rewrote prompt server_url {_old_server_url} -> {_local_base}")
     try:
         # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
         # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
@@ -976,7 +1085,8 @@ async def _execute_task(client, task, engine_name: str = ""):
     _engine = engine_name or ""
     if "codearts" in _engine.lower():
         try:
-            _data_dir = _os.path.join("/var/cache/codearts-tasks", tid)
+            _tasks_base = _os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
+            _data_dir = _os.path.join(_tasks_base, tid)
             _cli_data = _os.path.join(_data_dir, "cli-data")
             # 1. 预写 global.json (write/edit/external_directory_write=allow)
             _perm_dir = _os.path.join(_cli_data, "storage", "permission")
@@ -1005,7 +1115,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             # 4. 设置 KERNEL_DATA_DIR 到 env dict（局部变量，并发安全）
             env["KERNEL_DATA_DIR"] = _cli_data
             # 5. 注册清理：task 结束时删除临时目录
-            _res.track_tmp_pattern(f"/var/cache/codearts-tasks/{tid}")
+            _res.track_tmp_pattern(f"{_tasks_base}/{tid}")
             log.info(f"[Agent:{task.get('agent_type') or ''}] codearts data dir: {_cli_data}")
         except Exception as e:
             log.warning(f"codearts data dir setup failed: {e}")
@@ -1085,6 +1195,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                     log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
                     _kill_stale_engine(task, _backend_for_engine(engine_name))
                     _res.dispose()
+                    _cleanup_task_workdir(task)
                     return {"_error": "task terminated by server (aborted during execution)", "_started": started}
                 batch = []
                 _last_flush = _now
@@ -1094,13 +1205,16 @@ async def _execute_task(client, task, engine_name: str = ""):
                 log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
                 _kill_stale_engine(task, _backend_for_engine(engine_name))
                 _res.dispose()
+                _cleanup_task_workdir(task)
                 return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
         # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
         _res.dispose()
+        _cleanup_task_workdir(task)
         return done
     except Exception as e:
         log.warning(f"task {tid} stream failed: {e}")
         _res.dispose()
+        _cleanup_task_workdir(task)
         return {"_error": str(e), "_started": started}
 
 
@@ -1464,11 +1578,20 @@ def main():
 
     # 清理上次崩溃残留的 codearts 临时目录（方案 G: per-task 独立数据目录）
     import shutil as _sh
-    _codearts_tasks_dir = "/var/cache/codearts-tasks"
-    if os.path.isdir(_codearts_tasks_dir):
-        _sh.rmtree(_codearts_tasks_dir, ignore_errors=True)
+    _codearts_tasks_dir = os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
+    # fallback：如果 /var/cache 不可写，改用用户目录
+    try:
+        if not os.path.isdir(_codearts_tasks_dir):
+            os.makedirs(_codearts_tasks_dir, exist_ok=True)
+            try:
+                os.chmod(_codearts_tasks_dir, 0o1777)
+            except PermissionError:
+                pass
+            log.info(f"created codearts tasks dir: {_codearts_tasks_dir}")
+    except PermissionError:
+        _codearts_tasks_dir = os.path.expanduser("~/.cache/codearts-tasks")
         os.makedirs(_codearts_tasks_dir, exist_ok=True)
-        log.info(f"cleaned codearts tasks dir: {_codearts_tasks_dir}")
+        log.info(f"codearts tasks dir fallback (no /var/cache access): {_codearts_tasks_dir}")
 
     from src.runtime.client import RuntimeClient
 
@@ -1514,6 +1637,9 @@ def main():
                  f"poll={poll}s heartbeat={heartbeat}s max_concurrent={max_concurrent}")
         for rid in ids:
             await client.recover_orphans(rid)
+        # 注册成功后立即执行一轮引擎探测（线程池，不阻塞事件循环），
+        # 确保第一次心跳上报时 probe_results 非空，使服务端及时纠正 healthy（ok→升级 / fail→降级）。
+        await asyncio.to_thread(_worker_probe_once)
         try:
             await _run_loop(client, ids, poll, heartbeat, max_concurrent, engine_by_rid,
                             installed=installed, device_name=device)

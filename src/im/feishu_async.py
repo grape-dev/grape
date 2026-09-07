@@ -332,6 +332,48 @@ class FeishuAsync:
             log.warning(f"[{ctx.name}] reply_card failed: {e}")
         return ""
 
+    async def download_image(self, ctx: BotContext, image_key: str, message_id: str = "") -> bytes:
+        """Download image from Feishu API. Returns raw bytes.
+
+        优先用消息资源 API（GET /im/v1/messages/{msg_id}/resources/{file_key}?type=image），
+        降级用图片 API（GET /im/v1/images/{image_key}?image_type=message）。
+        """
+        token = await self._ensure_token(ctx)
+        if not token:
+            return b""
+        session = await self._get_session()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 方法1：消息资源 API（需要 message_id，更可靠）
+        if message_id and message_id.startswith("om_"):
+            url1 = f"{FEISHU_BASE}/im/v1/messages/{message_id}/resources/{image_key}?type=image"
+            try:
+                async with session.get(url1, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        log.info(f"[{ctx.name}] downloaded image via resources API: {len(data)} bytes")
+                        return data
+                    else:
+                        log.warning(f"[{ctx.name}] resources API download: HTTP {resp.status}, trying images API")
+            except Exception as e:
+                log.warning(f"[{ctx.name}] resources API error: {e}, trying images API")
+
+        # 方法2：图片 API（降级方案）
+        url2 = f"{FEISHU_BASE}/im/v1/images/{image_key}?image_type=message"
+        try:
+            async with session.get(url2, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    log.info(f"[{ctx.name}] downloaded image via images API: {len(data)} bytes")
+                    return data
+                else:
+                    body_text = await resp.text()
+                    log.warning(f"[{ctx.name}] download image failed: HTTP {resp.status} - {body_text[:200]}")
+                    return b""
+        except Exception as e:
+            log.warning(f"[{ctx.name}] download image error: {e}")
+            return b""
+
     async def send_card_to_chat(self, ctx: BotContext, chat_id: str, text: str,
                                     title: str = "DevOps Bot", template: str = "blue",
                                     fallback_open_id: str = "") -> str:
@@ -830,6 +872,7 @@ def _parse_event(event_data: dict) -> dict | None:
     msg_type = message.get("message_type", "text") or "text"
 
     text = ""
+    image_key = ""
     if msg_type == "text":
         try:
             text = json.loads(msg_content).get("text", "")
@@ -856,6 +899,16 @@ def _parse_event(event_data: dict) -> dict | None:
         except (json.JSONDecodeError, KeyError, TypeError):
             text = msg_content
 
+    elif msg_type == "image":
+        # 图片消息：提取 image_key，后续由 handler 下载并理解
+        try:
+            img_data = json.loads(msg_content)
+            image_key = img_data.get("image_key", "")
+            if image_key:
+                text = "[图片]"
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+
     text = re.sub(r'@_?\w+\s*', '', text).strip()
 
     sender_id = ""
@@ -874,6 +927,7 @@ def _parse_event(event_data: dict) -> dict | None:
         "sender_open_id": sender_open_id,
         "message_id": message.get("message_id", ""),
         "message_type": msg_type,
+        "image_key": image_key if msg_type == "image" else "",
     }
 
 
@@ -1463,10 +1517,19 @@ class BotManager:
                     now = _time.time()
                     for app_id, success in renew_results.items():
                         if not success:
-                            # 问题 C：续约失败（CAS 失败）→ 宽限期 30 秒后断开
+                            # 续约失败可能是瞬时 DB 锁竞争——立即单条重试一次再决定是否开宽限期。
+                            # 避免单次 batch_renew CAS 失败（如其他 sweep 同时写 DB）就断连，
+                            # 导致用户登出等正常操作期间的 DB 短暂阻塞引发飞书 WS 断连。
+                            token = self._held_leases.get(app_id, "")
+                            if token:
+                                retry_ok = lease_store.renew(app_id, token)
+                                if retry_ok:
+                                    log.info(f"[lease] bot {app_id} renew retry succeeded (was transient)")
+                                    continue
+                            # 重试也失败 → 宽限期 30 秒后断开
                             if app_id not in self._grace_deadlines:
                                 self._grace_deadlines[app_id] = now + 30
-                                log.info(f"[lease] bot {app_id} renew failed, grace period 30s started")
+                                log.info(f"[lease] bot {app_id} renew failed (retry also failed), grace period 30s started")
                         else:
                             # 续约成功 → 清除宽限期
                             self._grace_deadlines.pop(app_id, None)

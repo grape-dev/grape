@@ -152,6 +152,13 @@ if [ ! -x "$VENV/bin/python" ]; then
   log "创建 venv ($PY)"
   "$PY" -m venv "$VENV"
 fi
+# 确保 venv 内有 pip（某些系统 ensurepip 缺失导致 venv 无 pip）
+if [ ! -x "$VENV/bin/pip" ]; then
+  log "venv 缺 pip, 手动安装 ensurepip..."
+  "$VENV/bin/python" -m ensurepip --upgrade 2>/dev/null || \
+    "$VENV/bin/python" -m pip install --upgrade pip 2>/dev/null || \
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>/dev/null || true
+fi
 if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
   PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
@@ -222,9 +229,55 @@ unset _key_name _key_value
 chmod 600 "$ENV_FILE" 2>/dev/null || true
 log "接入配置已写入 $ENV_FILE（token + 主控地址）"
 
+# ===== 5.5 安装 bwrap（agent 文件系统隔离锁；root 自动装，普通用户提示）=====
+# bwrap 用于给 agent 子进程套文件系统隔离（阶段二）。已装且可用 → 跳过；
+# root 模式 → 自动 apt install + setuid；普通用户 → 提示（无锁运行，不影响 worker）。
+# AppArmor（Ubuntu 24.04）限制非特权 userns，用 setuid 位绕过（Debian 官方推荐）。
+_bwrap_ok() {
+  command -v bwrap >/dev/null 2>&1 && bwrap --ro-bind / / --proc /proc --dev /dev sh -c 'exit 0' 2>/dev/null
+}
+install_bwrap() {
+  if _bwrap_ok; then
+    log "bwrap 已可用（agent 文件系统隔离锁就绪）"
+    return 0
+  fi
+  if [ "$ROOT_MODE" = "1" ]; then
+    log "安装 bwrap（bubblewrap）+ 解除 AppArmor 限制（setuid）..."
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update -qq >/dev/null 2>&1 || true
+      apt-get install -y -qq bubblewrap >/dev/null 2>&1 || log "警告: apt 安装 bwrap 失败"
+      if command -v bwrap >/dev/null 2>&1; then
+        chmod u+s /usr/bin/bwrap || log "警告: 设置 bwrap setuid 位失败"
+        dpkg-statoverride --add root root 4755 /usr/bin/bwrap >/dev/null 2>&1 || true
+      fi
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y -q bubblewrap >/dev/null 2>&1 || log "警告: yum 安装 bwrap 失败"
+      command -v bwrap >/dev/null 2>&1 && chmod u+s /usr/bin/bwrap
+    else
+      log "警告: 未找到 apt/yum，无法自动装 bwrap"
+    fi
+    if _bwrap_ok; then
+      log "bwrap 安装成功（agent 文件系统隔离锁就绪）"
+    else
+      log "警告: bwrap 仍不可用（AppArmor 严格限制），文件系统锁降级关闭（worker 照常运行）"
+    fi
+  else
+    log "提示: 未检测到可用的 bwrap（agent 文件系统隔离锁需要）。如需启用，请以 root 重跑本脚本（加 --root），或手动执行："
+    log "  sudo apt-get install -y bubblewrap && sudo dpkg-statoverride --add root root 4755 /usr/bin/bwrap"
+    log "  （未装 bwrap 时 worker 照常运行，仅文件系统隔离锁关闭）"
+  fi
+}
+install_bwrap
+
 # ===== 6. 生成启动脚本并启动 =====
-if [ "$ROOT_MODE" = "1" ]; then
-  # ---- root：systemd 服务 ----
+# systemd 可用性检测：容器环境（如 DevSpace）通常无 systemd（PID 1 非 systemd），
+# 此时 root 模式也必须回退到 nohup/setsid，否则 systemctl restart 会 fail 退出。
+_has_systemd() {
+  [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')" = "systemd" ] && command -v systemctl >/dev/null 2>&1
+}
+
+if [ "$ROOT_MODE" = "1" ] && _has_systemd; then
+  # ---- root + systemd 可用：systemd 服务 ----
   SERVICE_FILE="/etc/systemd/system/runtime-agent.service"
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -250,7 +303,12 @@ EOF
   systemctl restart runtime-agent || fail "服务启动失败，请查看 journalctl -u runtime-agent"
   log "已通过 systemd 启动（runtime-agent）"
 else
-  # ---- 普通用户：nohup/setsid 后台启动（免 root，带 daemon 保护）----
+  # ---- 普通用户 或 容器环境（无 systemd）：nohup/setsid 后台启动 ----
+  if [ "$ROOT_MODE" = "1" ] && ! _has_systemd; then
+    log "root 模式但 systemd 不可用（容器环境？），回退到 nohup/setsid 启动"
+    # 容器内 root 也需要 start-worker.sh，路径用 INSTALL_DIR 而非 /opt/grape 硬编码
+    START_SCRIPT="$INSTALL_DIR/start-worker.sh"
+  fi
   cat > "$START_SCRIPT" <<EOF
 #!/usr/bin/env bash
 # Grape Worker 启动脚本（由 install-worker.sh 生成，支持崩溃自动重启）

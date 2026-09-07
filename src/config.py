@@ -142,7 +142,7 @@ OBS_URL_EXPIRES = int(os.environ.get("OBS_URL_EXPIRES", "300"))
 
 # ── 飞书 Bot Lease（集群部署，保证同一 bot 同一时刻只有一个实例连 WebSocket）──
 BOT_LEASE_DISABLED = os.environ.get("BOT_LEASE_DISABLED", "false").lower() in ("1", "true", "yes")
-BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "60"))
+BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "90"))
 BOT_LEASE_RENEW_INTERVAL = int(os.environ.get("BOT_LEASE_RENEW_INTERVAL", "20"))
 BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
 # 本地缓存根（磁盘 LRU zip 缓存；默认 data/cache/storage）
@@ -281,12 +281,26 @@ def read_server_config() -> dict:
 def is_gitcode_user_allowed(gitcode_login: str) -> bool:
     """白名单判定（GitCode 用户名，非昵称）。
 
-    - 配置文件缺失 / whitelist 为空 → 全部放行（默认开放）
+    优先查 DB（login_whitelist 表），降级读 login-whitelist.json 文件。
+    - DB 表存在且有数据 → gitcode_login 必须在表中
+    - DB 不可用 → 降级文件逻辑
+    - 文件缺失 / whitelist 为空 → 全部放行（默认开放）
     - 读取异常 → 保守放行（避免误锁所有用户）
-    - 否则 gitcode_login 必须在 whitelist 内才放行
     """
     if not gitcode_login:
         return False
+    # 优先查 DB
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
+            if count > 0:
+                row = c.execute("SELECT 1 FROM login_whitelist WHERE gitcode_username=?", (gitcode_login,)).fetchone()
+                return row is not None
+    except Exception:
+        pass  # DB 不可用，降级文件
+    # 降级：读文件
     try:
         if not os.path.exists(LOGIN_WHITELIST_PATH):
             return True
@@ -363,3 +377,38 @@ def replace_skill_dir_placeholders(prompt: str, base_dir: str = "") -> str:
 
 # 延迟到 main.py 中显式调用，避免循环导入
 # _load_accounts()
+
+
+# ====== Agent 文件系统隔离（组件2：bwrap 锁）======
+# 默认开启（关 = 回滚，设 GRAPE_AGENT_SANDBOX=off）；bwrap 沙箱隔离 agent 子进程。
+# 启用后 agent 子进程套 bwrap：只挂「基础系统 + 引擎运行时 + 工位 cwd」，
+# 敏感路径（configs/、data/sessions.db、.env、/root、~/.grape、其他仓库/issue）天然不可见。
+GRAPE_AGENT_SANDBOX = os.environ.get("GRAPE_AGENT_SANDBOX", "on").lower() in ("1", "true", "on", "yes")
+
+# bwrap 白名单（只读）——基础系统：动态库 / CA 证书 / DNS / nsswitch / 基础命令。
+# 注意：/run 必须挂（/etc/resolv.conf 是 symlink → /run/systemd/resolve/stub-resolv.conf，
+# 缺 /run 则沙箱内 DNS 解析失败、出网全 000）。绝对不放行 configs/、data/、WORKSPACE 其他仓库、/root、~/.grape 等敏感/越界路径。
+BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/run")
+
+# bwrap 白名单（只读）——引擎运行时，按后端名展开；二进制 + 配置 + 运行时（~ 由 sandbox 模块展开）。
+# 三引擎白名单不同（§7 兼容性清单），分别覆盖；不存在目录自动跳过。
+# 注：codearts 是 opencode 的华为云定制版（Node 应用），依赖模型与 opencode 一致：
+#   ~/.nvm(Node 运行时) + ~/.local(codearts 二进制) + ~/.cache(Node 缓存) + ~/.codeartsdoer(专属配置)；
+#   未实测（当前环境无 codearts 引擎），目录按推断补齐，留待真实环境 K6 验证。
+BWRAP_RO_ENGINE_COMMON = ("/usr/local",)
+BWRAP_RO_ENGINE = {
+    "opencode": ("~/.nvm", "~/.config/opencode", "~/.cache", "~/.opencode"),
+    "codearts": ("~/.codeartsdoer", "~/.nvm", "~/.local", "~/.cache"),
+    "hermes": ("~/.local",),
+}
+
+# bwrap 白名单（读写）——引擎缓存；hermes overlay 由 sandbox 模块按 md5(cwd) 动态计算绑定。
+# 注意：hermes 的 ~/.hermes 必须 rw —— hermes_acp._build_overlay_home 把 ~/.hermes 的
+# logs/skills/plugins/cache 等子目录 symlink 进 overlay，hermes 运行时读写全落到 ~/.hermes 真身；
+# ro 会导致写 logs 报 [Errno 30] Read-only file system（2026-09-03 实测踩坑）。
+# codearts 底层同 opencode 用 bun，需 /var/cache/bun-compile 写权限（JIT .so 缓存）。
+BWRAP_RW_ENGINE = {
+    "opencode": ("/var/cache/bun-compile",),
+    "codearts": ("~/.codeartsdoer", "~/.cache/codearts-tasks", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
+    "hermes": ("~/.hermes",),
+}

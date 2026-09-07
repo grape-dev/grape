@@ -35,6 +35,13 @@
   "pager": {
     "summary": "{{total}} items · {{page}}/{{pages}} pages"
   },
+  "sort": {
+    "order": "Time",
+    "direction": "Toggle sort direction (desc/asc)",
+    "mode": "Toggle sort mode (priority/time)",
+    "priority": "Priority",
+    "time": "Time"
+  },
   "create": {
     "btn_new": "+ New Task",
     "modal_title": "+ New Task",
@@ -49,6 +56,7 @@
     "scene_label": "Dev Scenario",
     "scene_hint": "If not selected, VOD will auto-detect during review",
     "scene_none": "Not specified (auto-detected by VOD)",
+    "scene_vod_auto": "VOD Auto Recommend",
     "assignee_hint": "Issue assignee = Account in General Settings (current logged-in account)",
     "subtask_mode_label": "Multi-Task Mode",
     "subtask_mode_hint": "When enabled, Issue Agent will split the task into multiple subtasks for separate execution",

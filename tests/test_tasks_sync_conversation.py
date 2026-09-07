@@ -1,4 +1,8 @@
-"""Agent 澄清消息同步到任务会话测试：_post_result_to_issue 发评论后 conversation 可见。"""
+"""Agent 澄清消息同步到任务会话测试（Issue #46 重构后）：
+
+- _post_result_to_issue 职责收敛为「发 GitCode 评论」，不再写 task conversation
+  （result_text 单写，统一由 _execute_agent 收尾承担，见 issue-46-onboarding-task-notification-fix-design.md §4.4）。
+"""
 import os
 from unittest.mock import patch
 
@@ -38,10 +42,9 @@ def setup_module():
         _task_id = c.lastrowid
 
 
-def test_post_result_syncs_to_conversation():
-    """_post_result_to_issue 发 Issue 评论后，task conversation 出现 agent 消息。"""
+def test_post_result_does_not_write_conversation():
+    """Issue #46：_post_result_to_issue 只发 GitCode 评论，不再写 task conversation（单写）。"""
     from src.api.event_pipeline import _post_result_to_issue
-    # mock GitCode API POST（不真实发评论）
     def _fake_urlopen(req, timeout=15):
         class _R:
             def read(self): return b'{"id":1}'
@@ -53,11 +56,15 @@ def test_post_result_syncs_to_conversation():
     with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
         _post_result_to_issue("tc_sync/demo", 99, result_text, "fake_bot_token", "vod")
     after = get_messages(_conv_id, limit=50)
-    assert len(after) > before, "应新增一条 agent 消息"
-    last = after[-1]
-    assert last["role"] == "agent"
-    assert "需要确认" in last["content"]
-    assert "[VOD Agent]" in last["content"]
+    assert len(after) == before, "不应新增任务会话消息（result_text 单写，同步由 _execute_agent 收尾承担）"
+
+
+def test_post_result_syncs_to_conversation_via_exec_tail():
+    """result_text 写入任务会话由 _execute_agent 收尾承担（单写路径仍可用）。"""
+    from src.session_manager import add_message
+    add_message(_conv_id, "agent", "[VOD Agent] 需要确认：目标云服务是 ECS 还是 CCE？")
+    messages = get_messages(_conv_id, limit=50)
+    assert any("需要确认" in m["content"] and "[VOD Agent]" in m["content"] for m in messages)
 
 
 def test_post_result_no_conversation_no_error():

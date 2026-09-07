@@ -51,14 +51,69 @@ def _clear_pending_selection(chat_id: str):
     _pending_selections.pop(chat_id, None)
 
 
+# 最近图片描述缓存：chat_id -> {"desc": str, "expires": float}
+# 用户发图片后，后续追问在 TTL 窗口内自动注入图片描述，避免上下文丢失
+# 导致 opencode 以"非 DevOps 话题"拒绝回答图片相关问题。
+_PENDING_IMAGE_TTL = 1800.0  # 30 分钟（持久化到 DB 后内存缓存仅做近期加速）
+_pending_image_desc: dict[str, dict] = {}
+
+
+def _set_pending_image(chat_id: str, desc: str):
+    _pending_image_desc[chat_id] = {"desc": desc, "expires": time.time() + _PENDING_IMAGE_TTL}
+
+
+def _get_pending_image(chat_id: str) -> str:
+    p = _pending_image_desc.get(chat_id)
+    if not p:
+        return ""
+    if p.get("expires", 0) < time.time():
+        _pending_image_desc.pop(chat_id, None)
+        return ""
+    return p.get("desc", "")
+
+
+def _clear_pending_image(chat_id: str):
+    _pending_image_desc.pop(chat_id, None)
+
+
+# repo 绑定缓存：{(chat_id, app_id): {"repo_key": str, "expires": float}}
+# 防止 DB 抖动（db_lock 竞争/瞬时错误）导致已绑定仓库查不到 → 误弹"选择仓库"卡片。
+# TTL 60s：绑定变更通过 /bind /_bind_repo 显式失效缓存，60s 仅兜底 DB 异常窗口。
+_repo_bind_cache: dict[tuple, dict] = {}
+_REPO_BIND_TTL = 60.0
+
+
+def _invalidate_repo_bind_cache(chat_id: str, app_id: str = ""):
+    """绑定变更时显式失效缓存（/bind /_bind_repo /_handle_selection 调用）。"""
+    _repo_bind_cache.pop((chat_id, app_id), None)
+    # app_id 为空时清除该 chat_id 下所有 app（兜底）
+    if not app_id:
+        keys = [k for k in _repo_bind_cache if k[0] == chat_id]
+        for k in keys:
+            _repo_bind_cache.pop(k, None)
+
+
 def _current_bound_repo(chat_id: str, account: str, db) -> str:
-    """当前飞书聊天绑定的仓库 repo_key（repo_im_group_binding）"""
+    """当前飞书聊天绑定的仓库 repo_key（repo_im_group_binding）
+
+    带内存缓存——DB 查询失败时回退到上次已知值，避免瞬时 DB 锁竞争导致误判"未绑定"。
+    """
+    cache_key = (chat_id, account)
+    now = time.time()
+    cached = _repo_bind_cache.get(cache_key)
+    if cached and cached.get("expires", 0) > now:
+        return cached.get("repo_key", "")
     try:
         c = db.cursor()
         c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
         row = c.fetchone()
-        return row[0] if row else ""
+        repo_key = row[0] if row else ""
+        _repo_bind_cache[cache_key] = {"repo_key": repo_key, "expires": now + _REPO_BIND_TTL}
+        return repo_key
     except Exception:
+        # DB 异常时回退到上次已知值（即使过期也用，总比弹"选择仓库"卡片好）
+        if cached:
+            return cached.get("repo_key", "")
         return ""
 
 
@@ -199,15 +254,10 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "")
     m = re.search(r'[\w.-]+/[\w.-]+', text)
     if m:
         return m.group(0)
-    # 3. 查询群绑定表（repo_key 带前缀）
-    try:
-        c = db.cursor()
-        c.execute("SELECT repo_key FROM repo_im_group_binding WHERE im_chat_id=? AND im_app_id=?", (chat_id, account))
-        row = c.fetchone()
-        if row:
-            return row[0]
-    except Exception as e:
-        log.warning(f"Feishu: resolve_repo db error: {e}")
+    # 3. 查询群绑定表（repo_key 带前缀）——走 _current_bound_repo 缓存路径
+    bound = _current_bound_repo(chat_id, account, db)
+    if bound:
+        return bound
     return ""
 
 
@@ -454,6 +504,7 @@ async def _bind_repo(ctx, api, chat_id, msg_id, repo_key, uid_str):
                   (chat_id, repo_key, "gitcode", str(uid), ctx.app_id))
         c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
         db.commit()
+    _invalidate_repo_bind_cache(chat_id, ctx.app_id)
     await _send_bind_success_card(ctx, api, msg_id, repo_key)
 
 
@@ -484,7 +535,16 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
             conv_history = []
         body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info, has_valid_session=has_valid_session)
     else:
-        body = build_chat_prompt(text, repo_key, history, skills=skills,
+        # general chat：用 chat_messages 表的历史（格式 {role, content}），与 task 会话一致；
+        # 不用 event_history（格式 {type, stdout}，与 _append_chat_history 的 role/content 不匹配）
+        conv_history = []
+        if conv_id:
+            try:
+                from src.session_manager import get_messages
+                conv_history = get_messages(conv_id, limit=20)
+            except Exception:
+                pass
+        body = build_chat_prompt(text, repo_key, conv_history, skills=skills,
                                  runtime_id=chat_runtime_id, user_info=user_info,
                                  has_valid_session=has_valid_session)
     return body
@@ -525,6 +585,7 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
                 #（修复 2026-08-16 "群绑定仓库 ≠ 会话所属仓库" 发散 bug）
                 c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
                 db.commit()
+            _invalidate_repo_bind_cache(chat_id, ctx.app_id)
             _clear_pending_selection(chat_id)
             await _send_bind_success_card(ctx, api, msg_id, repo_key)
         elif action == "chat":
@@ -629,6 +690,45 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         text = parsed["text"]
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
+        image_key = parsed.get("image_key", "")
+
+        # 图片消息：下载图片并理解
+        image_description = ""
+        if image_key:
+            try:
+                image_bytes = await api.download_image(ctx, image_key, message_id=msg_id)
+                if image_bytes:
+                    import importlib.util as _ilu
+                    _spec = _ilu.spec_from_file_location("image_understanding",
+                        os.path.join(os.path.dirname(__file__), "..", "agent", "image_understanding.py"))
+                    _mod = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)
+                    image_description = _mod.understand_image_from_bytes(image_bytes)
+                    log.info(f"[Chat:{ctx.name}] image understood: {len(image_description)} chars desc")
+                    if not image_description:
+                        image_description = "用户发送了一张图片，但未能提取有效信息（可能无文字或图片分析失败）。"
+                    # 缓存图片描述，后续追问在 TTL 窗口内自动注入
+                    _set_pending_image(chat_id, image_description)
+                    # 图片消息无文本，用描述作为"文本"
+                    if not text or text == "[图片]":
+                        text = "请帮我分析这张图片"
+                else:
+                    log.warning(f"[Chat:{ctx.name}] image download failed: {image_key}")
+                    image_description = "用户发送了一张图片，但下载失败，无法分析。"
+                    if not text or text == "[图片]":
+                        text = "请帮我分析这张图片"
+            except Exception as e:
+                log.warning(f"[Chat:{ctx.name}] image understanding failed: {e}")
+                image_description = f"用户发送了一张图片，但分析出错: {e}"
+                if not text or text == "[图片]":
+                    text = "请帮我分析这张图片"
+        else:
+            # 非图片消息：检查是否有近期图片上下文，自动注入供追问使用
+            # （修复：用户发图片后追问图片相关问题，图片描述丢失导致 opencode 拒答）
+            cached = _get_pending_image(chat_id)
+            if cached:
+                image_description = cached
+                log.info(f"[Chat:{ctx.name}] reused cached image desc ({len(image_description)} chars) for follow-up")
         # 快捷菜单/card action 没有真实 message_id，优先用 _reply_id（卡片 open_message_id）
         if not msg_id or not msg_id.startswith("om_"):
             _reply_id = parsed.get("_reply_id", "")
@@ -787,6 +887,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 db.commit()
             except Exception as e:
                 log.warning(f"Feishu: auto-bind failed: {e}")
+            _invalidate_repo_bind_cache(chat_id, account)
             await _send_bind_success_card(ctx, api, msg_id, repo_key)
             return
 
@@ -805,14 +906,15 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         sess, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
-        # 同仓库串行（asyncio.Lock，async with 不阻塞事件循环）。
-        # 旧实现同步 threading.Lock.acquire() 在事件循环里阻塞，同仓库并发消息会死锁整机
-        #（2026-08-16 事故，见 docs/new-version2/feishu-chat-event-loop-deadlock-fix.md）。
+        # 同仓库串行锁——仅 direct 模式（本机 opencode 子进程）需要，避免 cwd/session 冲突。
+        # 远端入队模式任务在 worker 上执行，不共享本机资源，无需阻塞同仓库后续消息。
+        # （2026-08-16 死锁修复的 asyncio.Lock 保留，但范围缩小到 direct 分支）
         lock = _acquire_repo_lock(repo_key)
-        async with lock:
-            await _process_chat_inner_async(ctx, api, parsed, text, repo_key, repository,
-                                            msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
-                                            bind_account=account, exec_account=repo_key)
+        await _process_chat_inner_async(ctx, api, parsed, text, repo_key, repository,
+                                        msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
+                                        bind_account=account, exec_account=repo_key,
+                                        image_description=image_description,
+                                        repo_lock=lock)
 
     except Exception as e:
         import traceback
@@ -843,7 +945,8 @@ def _resolve_oc_sid(conv: dict | None, repo_oc_sid: str) -> str:
 async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                                      parsed, text, repo_key, repository,
                                      msg_id, chat_id, sess, history, oc_sid, cc_sid, is_new,
-                                     bind_account="", exec_account="", conv_id="", conv=None):
+                                     bind_account="", exec_account="", conv_id="", conv=None,
+                                     image_description="", repo_lock=None):
     """异步版内部处理逻辑
 
     bind_account: 用于 repo_im_group_binding 隔离（Chat Bot 场景 = bot app_id）
@@ -926,7 +1029,12 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     if user_token and not conv.get("user_gitcode_token"):
                         update_conversation(conv["id"], user_gitcode_token=user_token)
                 if conv_id:
-                    add_message(conv_id, "user", text)
+                    # 图片消息：把图片描述追加到用户消息里存入 DB，
+                    # 这样追问时 get_messages 历史里自然包含图片描述，不依赖内存缓存。
+                    if image_description:
+                        add_message(conv_id, "user", text + "\n\n" + image_description)
+                    else:
+                        add_message(conv_id, "user", text)
                     # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
                     from src.session_manager import mark_task_processing_by_conversation
                     mark_task_processing_by_conversation(conv_id)
@@ -943,10 +1051,22 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         except Exception:
             chat_runtime_id = 0
 
+        # 引擎类型感知的 has_valid_session：提前解析引擎类型，
+        # codearts 忽略 session_id；只有 opencode/hermes 才真正使用 session 续接。
+        from src.runtime.engine_select import resolve_local_engine, engine_name
+        _rid = chat_runtime_id or (resolve_local_engine() or 0)
+        _engine_name = engine_name(_rid) if _rid else ""
+        _conv_sid = (conv or {}).get("runtime_session_id", "").strip()
+        has_valid_session = bool(_conv_sid) and _engine_name in ("opencode", "hermes")
+
         prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
                                            chat_runtime_id, conv_id, user_info=user_info,
-                                           has_valid_session=bool((oc_sid or "").startswith("ses_")))
-        log.info(f"Chat prompt ({len(prompt)} chars, repo={repository})")
+                                           has_valid_session=has_valid_session)
+        # 图片理解描述注入 prompt
+        if image_description:
+            prompt = prompt + "\n\n" + image_description
+            log.info(f"Chat prompt with image desc injected ({len(prompt)} chars total)")
+        log.info(f"Chat prompt ({len(prompt)} chars, repo={repository}, engine={_engine_name}, has_session={has_valid_session})")
 
         # 与 Web Chat 严格一致：同一 conv_id 同一目录 WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}
         # （web-chat-no-response-cwd-fix.md §4；去掉原 feishu/ 段与 sess 尾巴）
@@ -961,15 +1081,13 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         final_text = ""
         exit_code = 0
         backend = ""
-        # engine-selection-design.md v2：无引擎（本机直连/远端均未配置）→ 明确不可用，不隐式 opencode
-        from src.runtime.engine_select import resolve_local_engine, engine_name
-        _rid = chat_runtime_id or (resolve_local_engine() or 0)
+        # 引擎类型已在上方提前解析（_rid, _engine_name）；此处复用
         if not _rid:
             log.warning(f"[Chat:{ctx.name}] no available engine for user, task skipped")
             final_text = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
             exit_code = -1
         else:
-            backend = engine_name(_rid) or ""
+            backend = _engine_name
             oc_sid = {"opencode": oc_sid, "cc_sid": cc_sid}.get(backend, "")
             # 优先 conversation 会话（与 web 同源）；空则回退 repo 级
             oc_sid = _resolve_oc_sid(conv, oc_sid)
@@ -991,12 +1109,31 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     _orig_rid = _rid
                     from src.session_manager import _resolve_chat_runtime_id
                     _rid2 = _resolve_chat_runtime_id(backend) or 0
-                    if _rid2 and _remote_runtime_ready(_rid2):
+                    # queue_remote 模式下必须找远端引擎（credential_id>0），本机直连行无 claim 方
+                    if (_rid2 and (runtime_credential_id(_rid2) or 0) > 0
+                            and _remote_runtime_ready(_rid2)):
                         _rid = _rid2
                         kind = runtime_execution_kind(_rid)
                         log.info(f"[Chat:{ctx.name}] engine fallback: {_orig_rid}->{_rid} (original offline/local-direct)")
                     else:
-                        log.warning(f"[Chat:{ctx.name}] engine fallback failed: no online remote engine for backend={backend}")
+                        # 按名找的引擎仍为本机直连 → 扫描在线远端 worker 引擎兜底
+                        from src.session_manager import db as _sdb, db_lock as _slock
+                        _found = 0
+                        with _slock:
+                            _c = _sdb.cursor()
+                            _c.execute(
+                                "SELECT id FROM agent_runtimes "
+                                "WHERE credential_id > 0 AND status = 'online' AND name = ? "
+                                "ORDER BY id LIMIT 1", (backend,))
+                            _row = _c.fetchone()
+                            if _row:
+                                _found = _row[0]
+                        if _found and _remote_runtime_ready(_found):
+                            _rid = _found
+                            kind = runtime_execution_kind(_rid)
+                            log.info(f"[Chat:{ctx.name}] engine fallback (scan): {_orig_rid}->{_rid} (remote {backend})")
+                        else:
+                            log.warning(f"[Chat:{ctx.name}] engine fallback failed: no online remote engine for backend={backend}")
             if kind != EXEC_MODE_DIRECT:
                 # 入队 + 轮询：任务由远端 RuntimeAgent claim 执行（见 multi-runtime-instance-design）
                 import json as _json
@@ -1036,17 +1173,25 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     final_text = ""
                     exit_code = -1
             else:
-                async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
-                                                                   backend_name=backend, account=exec_account,
-                                                                   user_token=user_token, agent_name="Chat Agent",
-                                                                   agent_label=f"[Agent:chat|repo:{repository}]"):
-                    if event_type == "done":
-                        d = data
-                        final_text = d["text"]
-                        exit_code = d.get("exit_code", 0)
-                        if exit_code == 0 and d.get("oc_session_id"):
-                            new_oc_session_id = d["oc_session_id"]
-                        log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
+                # direct 模式（本机 opencode 子进程）——持有 repo_lock 防止 cwd/session 冲突
+                async def _direct_exec():
+                    nonlocal final_text, exit_code, new_oc_session_id
+                    async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
+                                                                       backend_name=backend, account=exec_account,
+                                                                       user_token=user_token, agent_name="Chat Agent",
+                                                                       agent_label=f"[Agent:chat|repo:{repository}]"):
+                        if event_type == "done":
+                            d = data
+                            final_text = d["text"]
+                            exit_code = d.get("exit_code", 0)
+                            if exit_code == 0 and d.get("oc_session_id"):
+                                new_oc_session_id = d["oc_session_id"]
+                            log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
+                if repo_lock:
+                    async with repo_lock:
+                        await _direct_exec()
+                else:
+                    await _direct_exec()
 
         record = {
             "type": "chat", "time": datetime.utcnow().isoformat(),

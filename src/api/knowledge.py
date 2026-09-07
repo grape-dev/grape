@@ -273,6 +273,28 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0) -> 
     return files
 
 
+_CREDENTIAL_SUBSTRINGS = (
+    "credential", "token", "secret", "password", "passwd",
+    "apikey", "api_key", "api-key",
+    "private_key", "private-key",
+    "access_key", "access-key",
+)
+_CREDENTIAL_EXTENSIONS = (".pem", ".key", ".env", ".p12", ".pfx")
+
+
+def _is_credential_file(rel_path: str) -> bool:
+    """按文件名判断是否凭证类文件（token/密钥/password 等），用于知识库物化前过滤。
+
+    仅匹配文件名（basename），布尔子串 + 敏感扩展名；不拦普通文档与 pipelines-user.json。
+    """
+    if not rel_path:
+        return False
+    name = os.path.basename(rel_path).lower()
+    if name.endswith(_CREDENTIAL_EXTENSIONS):
+        return True
+    return any(sub in name for sub in _CREDENTIAL_SUBSTRINGS)
+
+
 def member_files(repo_key: str) -> dict:
     """成员上传文档快照：{rel_path: content}（project-info/member/ 下 md/txt/json）。
 
@@ -299,6 +321,8 @@ def member_files(repo_key: str) -> dict:
                 ext = os.path.splitext(fp)[1].lower()
                 if ext not in (".md", ".txt", ".json"):
                     continue
+                if _is_credential_file(fp):
+                    continue
                 seen.add(fp)
                 try:
                     data = storage.read_bytes(ok)
@@ -316,6 +340,8 @@ def member_files(repo_key: str) -> dict:
         for n in sorted(names):
             ext = os.path.splitext(n)[1].lower()
             if ext not in (".md", ".txt", ".json"):
+                continue
+            if _is_credential_file(n):
                 continue
             p = os.path.join(root, n)
             try:
@@ -355,6 +381,8 @@ def member_files_pi(repo_key: str) -> dict:
                 ext = os.path.splitext(fp)[1].lower()
                 if ext not in (".md", ".txt", ".json"):
                     continue
+                if _is_credential_file(fp):
+                    continue
                 seen.add(fp)
                 try:
                     data = storage.read_bytes(ok)
@@ -373,6 +401,8 @@ def member_files_pi(repo_key: str) -> dict:
         for n in sorted(names):
             ext = os.path.splitext(n)[1].lower()
             if ext not in (".md", ".txt", ".json"):
+                continue
+            if _is_credential_file(n):
                 continue
             p = os.path.join(root, n)
             try:
@@ -411,6 +441,8 @@ def agent_files(repo_key: str, agent_type: str = "") -> dict:
                 ext = os.path.splitext(fp)[1].lower()
                 if ext not in (".md", ".txt", ".json"):
                     continue
+                if _is_credential_file(fp):
+                    continue
                 seen.add(fp)
                 try:
                     data = storage.read_bytes(ok)
@@ -428,6 +460,8 @@ def agent_files(repo_key: str, agent_type: str = "") -> dict:
         for n in sorted(names):
             ext = os.path.splitext(n)[1].lower()
             if ext not in (".md", ".txt", ".json"):
+                continue
+            if _is_credential_file(n):
                 continue
             p = os.path.join(root, n)
             try:

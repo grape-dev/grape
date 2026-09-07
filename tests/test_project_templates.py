@@ -185,9 +185,11 @@ class TestCreate:
             assert data["full_name"] == "test_tmpl/hello-skill"
             assert data["webhook_id"] == 123
             assert data["scene_id"] == "skill-dev"
+            assert not data["host_warning"]  # 托管成功时不应有提醒
+            assert "托管成功" in data["message"]  # 成功消息应包含"托管成功"
 
     def test_host_failure(self):
-        """仓库已创建但托管失败 → 502 + 提示"""
+        """仓库已创建但托管失败 → 200 + host_warning 提醒（非致命）"""
         with patch.object(templates_mod, "_find_template",
                           return_value={"template": {"id": "hello-skill", "source": "local",
                                                      "default_repo_name": "hello-skill", "scene_id": "skill-dev"},
@@ -199,15 +201,18 @@ class TestCreate:
             r = client.post("/api/project-templates/create",
                             json={"template_id": "hello-skill", "repo_name": ""},
                             headers=_headers)
-            assert r.status_code == 502
-            assert "托管失败" in r.json()["detail"]["message"]
+            assert r.status_code == 200
+            data = r.json()
+            assert data["webhook_id"] == 0
+            assert data["host_warning"]  # 托管失败时有提醒
+            assert "webhook boom" in data["host_warning"]  # 包含原始错误信息
 
 
-async def _fake_host(body, user):
+def _fake_host(body, user):
     return {"message": "仓库托管成功", "webhook_id": 123}
 
 
-async def _fake_apply_scene(owner, repo, body, user):
+def _fake_apply_scene(owner, repo, body, user):
     return {"message": "ok", "updated": 5}
 
 

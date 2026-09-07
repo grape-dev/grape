@@ -1,0 +1,569 @@
+"""官方场景定时同步模块（issue-11-scene-skill-market-tech-design.md §8.6）。
+
+职责：
+1. 每 30 分钟从 grape-skills 仓库通过 GitCode API v5 逐文件下载 scenes/ 目录
+2. 遍历每个场景目录，读 scene.json + README.md
+3. 校验 nodes 合法性 + 预检 skill 引用
+4. content_hash 增量比对：hash 不变跳过，变了按 version 比对更新
+5. 仓库中不存在的 official 场景 → is_active 置 0（下架）
+
+触发方式：
+- asyncio 定时任务（启动即执行，之后每 30 分钟）
+- 失败不阻塞服务，打 WARNING 日志
+"""
+import asyncio
+import base64
+import hashlib
+import json
+import logging
+import os
+import shutil
+import tempfile
+from datetime import datetime, timezone
+
+import httpx
+from src.config import log
+from src.session_manager import db, db_lock
+
+logger = logging.getLogger(__name__)
+_bg_tasks: set[asyncio.Task] = set()
+
+def _load_config():
+    """加载场景同步配置：优先环境变量，回退 configs/scene-sync.json。"""
+    repo_url = os.environ.get("GRAPESKILLS_REPO_URL", "")
+    repo_branch = os.environ.get("GRAPESKILLS_REPO_BRANCH", "")
+    sync_interval = os.environ.get("SCENE_SYNC_INTERVAL", "")
+
+    # 读 configs/scene-sync.json（环境变量优先覆盖）
+    try:
+        cfg_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "scene-sync.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if not repo_url:
+                repo_url = cfg.get("repo_url", "")
+            if not repo_branch:
+                repo_branch = cfg.get("repo_branch", "")
+            if not sync_interval:
+                sync_interval = str(cfg.get("sync_interval", ""))
+    except Exception:
+        pass
+
+    # 兜底默认值
+    if not repo_url:
+        repo_url = "https://gitcode.com/grape-dev/grape-skills"
+    if not repo_branch:
+        repo_branch = "dev"
+
+    return repo_url, repo_branch, float(sync_interval) if sync_interval else 1800.0
+
+
+_REPO_URL, _REPO_BRANCH, _SYNC_INTERVAL = _load_config()
+_OWNER_REPO = _REPO_URL.replace("https://gitcode.com/", "").rstrip("/")
+
+_VALID_TAGS = {"vod", "issue", "coding", "qa", "sre", "chat"}
+_VALID_MODES = {"emit"}
+
+# category slug → id 缓存（每次同步刷新）
+_cat_cache: dict[str, int] = {}
+
+
+def _compute_scene_hash(scene_dir: str) -> str:
+    """计算场景目录的内容 hash（遍历所有文件，按文件名排序，取完整 SHA-256）。"""
+    if not os.path.isdir(scene_dir):
+        return ""
+    h = hashlib.sha256()
+    for root, dirs, files in os.walk(scene_dir):
+        dirs[:] = [d for d in dirs if d not in ("__pycache__", "__MACOSX", ".git")]
+        for f in sorted(files):
+            rel = os.path.relpath(os.path.join(root, f), scene_dir)
+            h.update(rel.encode())
+            try:
+                with open(os.path.join(root, f), "rb") as fp:
+                    h.update(fp.read())
+            except Exception:
+                pass
+    return h.hexdigest()
+
+
+def _refresh_cat_cache():
+    """刷新 category slug → id 缓存。"""
+    _cat_cache.clear()
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, slug FROM scene_category WHERE is_active=1")
+        for row in c.fetchall():
+            if row[1]:
+                _cat_cache[row[1]] = row[0]
+
+
+def _validate_scene_nodes(nodes: list) -> list[str]:
+    """校验 nodes 合法性，返回错误列表。空列表表示通过。"""
+    errors = []
+    if not nodes or len(nodes) < 2:
+        return ["nodes 至少 2 个节点"]
+
+    node_ids = set()
+    for n in nodes:
+        nid = n.get("id", "")
+        if not nid:
+            errors.append("node 缺少 id")
+        if nid in node_ids:
+            errors.append(f"node id 重复: {nid}")
+        node_ids.add(nid)
+
+        tag = n.get("tag", "")
+        if tag not in _VALID_TAGS:
+            errors.append(f"node {nid}: tag 不合法 '{tag}'，合法值: {', '.join(sorted(_VALID_TAGS))}")
+
+        mode = n.get("mode", "")
+        if mode not in _VALID_MODES:
+            errors.append(f"node {nid}: mode 不合法 '{mode}'，合法值: {', '.join(sorted(_VALID_MODES))}")
+
+        handoff = n.get("handoff", "")
+        nxt = n.get("next", "")
+        if handoff == "complete" and nxt != "done":
+            errors.append(f"node {nid}: handoff=complete 但 next='{nxt}'，应为 'done'")
+        if handoff == "a2a" and nxt == "done":
+            errors.append(f"node {nid}: handoff=a2a 但 next='done'，应使用 handoff=complete")
+
+    # 链路完整性
+    first = nodes[0].get("id", "")
+    current = first
+    visited = set()
+    while current != "done":
+        if current in visited:
+            errors.append("next 链路存在循环")
+            break
+        visited.add(current)
+        node = next((n for n in nodes if n.get("id") == current), None)
+        if not node:
+            errors.append(f"next 链路断链: 找不到节点 '{current}'")
+            break
+        current = node.get("next", "")
+        if not current:
+            errors.append(f"节点 '{node.get('id')}' 缺少 next")
+            break
+    else:
+        if current != "done":
+            errors.append("next 链路未走到 done")
+
+    return errors
+
+
+def _check_skills_exist(nodes: list, scene_name: str) -> list[str]:
+    """预检 skill 引用是否在 skill 表中存在。返回不存在的 skill 名列表。"""
+    missing = []
+    skill_names = set(n.get("skill", "") for n in nodes if n.get("skill", ""))
+    if not skill_names:
+        return missing
+    with db_lock:
+        c = db.cursor()
+        placeholders = ",".join("?" * len(skill_names))
+        c.execute(f"SELECT DISTINCT skill_name FROM skill WHERE skill_name IN ({placeholders})", list(skill_names))
+        existing = set(r[0] for r in c.fetchall())
+    for sn in skill_names:
+        if sn and sn not in existing:
+            missing.append(sn)
+            logger.warning(f"场景 {scene_name} 引用了不存在的技能: {sn}")
+    return missing
+
+
+def _parse_version(v: str) -> tuple:
+    """将语义化版本号转为可比较的元组（补齐到 3 位）。"""
+    try:
+        parts = [int(x) for x in v.split(".")]
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts)
+    except Exception:
+        return (0, 0, 0)
+
+
+def _get_sync_token() -> str:
+    """获取同步用 GitCode token，优先级：GRAPE_DEV_TOKEN 环境变量 → configs/scene-sync.json 的 gitcode_api_token。"""
+    # 1. 环境变量
+    token = os.environ.get("GRAPE_DEV_TOKEN", "")
+    if token:
+        return token
+    # 2. configs/scene-sync.json
+    try:
+        cfg_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "scene-sync.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                token = json.load(f).get("gitcode_api_token", "")
+            if token:
+                return token
+    except Exception:
+        pass
+    return ""
+
+
+async def _api_list_dir(client: httpx.AsyncClient, path: str, token: str) -> list:
+    """GitCode API v5 列目录，返回 [{type, name, path}, ...]。"""
+    url = f"https://api.gitcode.com/api/v5/repos/{_OWNER_REPO}/contents/{path}"
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = await client.get(url, params={"ref": _REPO_BRANCH}, headers=headers, timeout=15.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _api_get_file(client: httpx.AsyncClient, path: str, token: str) -> bytes:
+    """GitCode API v5 下载文件内容（base64 解码后返回 bytes）。"""
+    url = f"https://api.gitcode.com/api/v5/repos/{_OWNER_REPO}/contents/{path}"
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = await client.get(url, params={"ref": _REPO_BRANCH}, headers=headers, timeout=15.0)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("encoding") == "base64":
+        return base64.b64decode(data["content"])
+    return data.get("content", "").encode("utf-8")
+
+
+async def _download_dir_recursive(client: httpx.AsyncClient, api_path: str, local_path: str, token: str, is_references: bool = False, depth: int = 0):
+    """递归下载目录：遍历 API 列出的文件/子目录，文件直接下载，子目录递归。
+
+    - 根目录（is_references=False）：只下载 scene.json / README.md / icon.*
+    - references 子目录（is_references=True）：下载全部文件，递归所有子目录
+    """
+    if depth > 5:
+        logger.warning(f"Scene sync: recursive depth limit exceeded at {api_path}, skip")
+        return
+    entries = await _api_list_dir(client, api_path, token)
+    for entry in entries:
+        etype = entry.get("type", "")
+        ename = entry.get("name", "")
+        epath = entry.get("path", "")
+        if etype == "file":
+            # 根目录只下载需要的文件；references 子目录下载全部
+            if is_references or ename in ("scene.json", "README.md") or ename.startswith("icon."):
+                content = await _api_get_file(client, epath, token)
+                with open(os.path.join(local_path, ename), "wb") as f:
+                    f.write(content)
+        elif etype == "dir":
+            if ename == "references" or is_references:
+                # references 目录或 references 内的子目录：递归下载全部
+                sub_local = os.path.join(local_path, ename)
+                os.makedirs(sub_local, exist_ok=True)
+                await _download_dir_recursive(client, epath, sub_local, token, is_references=True, depth=depth + 1)
+
+
+def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
+    """重建 scene_skill_ref：DELETE + INSERT，用 is_active=1 + scope='official' 查 skill_id。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
+        for n in nodes:
+            skill_name = n.get("skill", "")
+            if skill_name:
+                c.execute(
+                    "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='official' LIMIT 1",
+                    (skill_name,),
+                )
+                sk_row = c.fetchone()
+                skill_id = sk_row[0] if sk_row else 0
+                if skill_id == 0:
+                    logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active official skills, skill_id=0")
+                c.execute(
+                    "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
+                    (market_id, skill_id, skill_name),
+                )
+        db.commit()
+
+
+def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list):
+    """通过场景名查 market_id 后重建 scene_skill_ref。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
+        row = c.fetchone()
+    if row:
+        _rebuild_scene_skill_ref(row[0], nodes, scene_name)
+
+
+async def sync_official_scenes():
+    """定时同步官方场景从 grape-skills 仓库到 scene_market 表。"""
+    log.info(f"Scene sync started: {_REPO_URL} branch={_REPO_BRANCH} (API v5)")
+
+    tmp_dir = tempfile.mkdtemp(prefix="scene_sync_")
+    try:
+        bot_token = _get_sync_token()
+        if not bot_token:
+            log.warning("Scene sync: no GitCode token configured (GRAPE_DEV_TOKEN env / configs/scene-sync.json), skip")
+            return
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # 1. 列 scenes/ 目录
+            try:
+                entries = await _api_list_dir(client, "scenes", bot_token)
+            except Exception as e:
+                log.warning(f"Scene sync: list scenes/ failed: {e}")
+                return
+
+            scene_dirs = [e for e in entries if e.get("type") == "dir"
+                          and e["name"] not in ("_template", "third-party")]
+            if not scene_dirs:
+                log.warning("Scene sync: no scene directories found")
+                return
+
+            # 2. 逐场景下载
+            local_scenes_dir = os.path.join(tmp_dir, "scenes")
+            os.makedirs(local_scenes_dir, exist_ok=True)
+
+            for sdir in scene_dirs:
+                scene_name = sdir["name"]
+                scene_path = os.path.join(local_scenes_dir, scene_name)
+                os.makedirs(scene_path, exist_ok=True)
+
+                try:
+                    # 列场景目录里的文件，递归下载（含 references/ 子目录）
+                    await _download_dir_recursive(client, f"scenes/{scene_name}", scene_path, bot_token)
+                except Exception as e:
+                    logger.warning(f"Scene sync: download {scene_name} failed: {e}")
+                    continue
+
+        # 3. 定位 scenes/ 目录
+        scenes_dir = local_scenes_dir
+        if not os.path.isdir(scenes_dir):
+            log.warning("Scene sync: scenes/ directory not found")
+            return
+
+        # 4. 刷新 category 缓存
+        _refresh_cat_cache()
+        if not _cat_cache:
+            log.warning("Scene sync: scene_category slug cache is empty, category_id will be 0 (unclassified)")
+
+        stats = {"added": 0, "updated": 0, "skipped": 0, "failed": 0, "delisted": 0}
+        synced_names = set()
+
+        # 5. 遍历场景目录
+        for entry in sorted(os.listdir(scenes_dir)):
+            if entry in ("_template", "third-party", "__MACOSX", ".DS_Store", ".git"):
+                continue
+            scene_path = os.path.join(scenes_dir, entry)
+            if not os.path.isdir(scene_path):
+                continue
+
+            try:
+                # a. 读 scene.json
+                json_path = os.path.join(scene_path, "scene.json")
+                if not os.path.exists(json_path):
+                    logger.warning(f"Scene sync: {entry} missing scene.json, skip")
+                    stats["failed"] += 1
+                    continue
+                with open(json_path, encoding="utf-8") as f:
+                    scene_data = json.load(f)
+
+                name = scene_data.get("name", "")
+                if not name or name != entry:
+                    logger.warning(f"Scene sync: {entry} name mismatch or empty, skip")
+                    stats["failed"] += 1
+                    continue
+
+                nodes = scene_data.get("nodes", [])
+                errors = _validate_scene_nodes(nodes)
+                if errors:
+                    logger.warning(f"Scene sync: {name} validation failed: {errors}")
+                    stats["failed"] += 1
+                    continue
+
+                # 预检 skill 引用
+                missing = _check_skills_exist(nodes, name)
+                if missing:
+                    logger.warning(f"Scene sync: {name} has missing skills: {missing}, skip")
+                    stats["failed"] += 1
+                    continue
+
+                # b. 读 README.md
+                readme_path = os.path.join(scene_path, "README.md")
+                if os.path.exists(readme_path):
+                    with open(readme_path, encoding="utf-8") as f:
+                        market_desc = f.read()
+                else:
+                    market_desc = scene_data.get("description", "")
+
+                # c. icon（OBS 模式上传到 OBS 桶，obs_icon_key 存对象 key；非 OBS 模式 copy 到本地静态目录，icon 存路径。无 icon 文件留空，前端用 category.icon 兜底）
+                icon_val = ""
+                obs_icon_key = ""
+                for ext in (".png", ".svg", ".jpg"):
+                    icon_file = os.path.join(scene_path, "icon" + ext)
+                    if os.path.exists(icon_file):
+                        try:
+                            from src.storage import get_storage
+                            storage = get_storage()
+                            if storage:
+                                # OBS 模式：上传到 OBS 桶，obs_icon_key 存对象 key
+                                obs_icon_key = f"grape/scenes/icons/{name}{ext}"
+                                with open(icon_file, "rb") as f:
+                                    storage.save_bytes(obs_icon_key, f.read())
+                            else:
+                                # 非 OBS 模式：copy 到本地静态目录
+                                static_dir = os.path.join(os.path.dirname(__file__), "..", "api", "static", "img", "scenes")
+                                os.makedirs(static_dir, exist_ok=True)
+                                dest = os.path.join(static_dir, name + ext)
+                                shutil.copy2(icon_file, dest)
+                                icon_val = f"/static/img/scenes/{name}{ext}"
+                        except Exception as e:
+                            logger.warning(f"Scene sync: {name} icon storage failed: {e}, icon will be empty")
+                            icon_val = ""
+                            obs_icon_key = ""
+                        break
+
+                # d. content_hash
+                content_hash = _compute_scene_hash(scene_path)
+
+                # e. category slug → id
+                category_slug = scene_data.get("category", "general")
+                category_id = _cat_cache.get(category_slug, 0)
+                if category_id == 0:
+                    logger.warning(f"Scene sync: {name} category slug '{category_slug}' not found in scene_category, using 0 (unclassified)")
+
+                # f. 查 DB
+                version = scene_data.get("version", "1.0.0")
+                display_name = scene_data.get("display_name", "")
+                description = scene_data.get("description", "")
+                recommended_template = scene_data.get("recommended_template", "")
+                onboarding = scene_data.get("onboarding", "repo-onboarding")
+                tags_str = ",".join(scene_data.get("tags", []))
+                author = scene_data.get("author", "")
+                nodes_json = json.dumps(nodes, ensure_ascii=False)
+
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT id, version, content_hash FROM scene_market "
+                        "WHERE name=? AND source='official' LIMIT 1",
+                        (name,),
+                    )
+                    row = c.fetchone()
+
+                    if row:
+                        scene_id, old_version, old_hash = row
+                        if old_hash == content_hash:
+                            stats["skipped"] += 1
+                            synced_names.add(name)
+                            continue
+
+                        # hash 变了
+                        if _parse_version(version) <= _parse_version(old_version or "0.0.0"):
+                            logger.warning(
+                                f"Scene sync: {name} content changed but version not updated "
+                                f"(old={old_version}, new={version}), updating anyway"
+                            )
+
+                        c.execute(
+                            "UPDATE scene_market SET "
+                            "display_name=?, version=?, description=?, market_description=?, "
+                            "icon=?, obs_icon_key=?, category_id=?, recommended_template=?, nodes_json=?, "
+                            "onboarding=?, tags=?, author=?, content_hash=?, "
+                            "is_active=1, updated_at=? "
+                            "WHERE id=?",
+                            (display_name, version, description, market_desc,
+                             icon_val, obs_icon_key, category_id, recommended_template, nodes_json,
+                             onboarding, tags_str, author, content_hash,
+                             datetime.now(timezone.utc).isoformat(), scene_id),
+                        )
+                        db.commit()
+                        stats["updated"] += 1
+                        log.info(f"Scene sync: updated '{name}' v{version}")
+                    else:
+                        now = datetime.now(timezone.utc).isoformat()
+                        c.execute(
+                            "INSERT INTO scene_market "
+                            "(name, display_name, version, description, market_description, icon, obs_icon_key, "
+                            "category_id, is_featured, like_count, source, source_user_id, "
+                            "recommended_template, nodes_json, onboarding, tags, author, "
+                            "content_hash, is_active, created_at, updated_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,1,?,?)",
+                            (name, display_name, version, description, market_desc,
+                             icon_val, obs_icon_key, category_id, recommended_template, nodes_json,
+                             onboarding, tags_str, author, content_hash, now, now),
+                        )
+                        db.commit()
+                        stats["added"] += 1
+                        log.info(f"Scene sync: added '{name}' v{version}")
+
+                synced_names.add(name)
+
+                # g. 重建 scene_skill_ref（含 skill_id）
+                _rebuild_scene_skill_ref_by_name(name, nodes)
+
+            except Exception as e:
+                logger.warning(f"Scene sync: {entry} failed: {e}", exc_info=True)
+                stats["failed"] += 1
+
+        # 6. 下架处理
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT name FROM scene_market WHERE source='official' AND is_active=1")
+            db_names = set(r[0] for r in c.fetchall())
+            for db_name in db_names - synced_names:
+                c.execute(
+                    "UPDATE scene_market SET is_active=0, updated_at=? "
+                    "WHERE name=? AND source='official'",
+                    (datetime.now(timezone.utc).isoformat(), db_name),
+                )
+                stats["delisted"] += 1
+                log.info(f"Scene sync: delisted '{db_name}' (not in repo anymore)")
+            db.commit()
+
+        log.info(
+            f"Scene sync done: added={stats['added']}, updated={stats['updated']}, "
+            f"skipped={stats['skipped']}, delisted={stats['delisted']}, failed={stats['failed']}"
+        )
+
+        # 7. 初始化精选场景：如果 official 场景没有任何 is_featured=1 的，设置默认精选
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
+            featured_count = c.fetchone()[0]
+            if featured_count == 0:
+                default_featured = ("default", "cloud-native", "iac")
+                placeholders = ",".join("?" * len(default_featured))
+                c.execute(
+                    f"UPDATE scene_market SET is_featured=1, updated_at=? "
+                    f"WHERE name IN ({placeholders}) AND source='official' AND is_active=1",
+                    (datetime.now(timezone.utc).isoformat(), *default_featured),
+                )
+                db.commit()
+                log.info(f"Scene sync: initialized featured scenes: {', '.join(default_featured)}")
+            else:
+                log.info(f"Scene sync: {featured_count} featured scenes already exist, skip init")
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def _scene_sync_worker(interval: float = 1800.0):
+    """定时同步 worker：启动即执行，之后每 interval 秒。"""
+    while True:
+        try:
+            await sync_official_scenes()
+        except asyncio.CancelledError:
+            logger.info("scene sync worker cancelled")
+            raise
+        except Exception:
+            logger.exception("scene sync run failed")
+        await asyncio.sleep(interval)
+
+
+def start_scene_sync_scheduler():
+    """启动定时同步调度。"""
+    t = asyncio.create_task(_scene_sync_worker(_SYNC_INTERVAL), name="scene-sync")
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    log.info(f"scene sync scheduler started (interval={_SYNC_INTERVAL}s, repo={_REPO_URL}, branch={_REPO_BRANCH})")
+
+
+async def stop_scene_sync_scheduler():
+    """优雅关闭：cancel 所有定时任务并等待退出。"""
+    for t in _bg_tasks:
+        t.cancel()
+    await asyncio.gather(*_bg_tasks, return_exceptions=True)
+    log.info("scene sync scheduler stopped")

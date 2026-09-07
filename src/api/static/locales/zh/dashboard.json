@@ -47,7 +47,7 @@
   "scene_api_skill_dev": "通用Skill开发",
   "scene_blog_publish": "博客发布",
   "create_custom_scene": "创建自定义场景",
-  "scene_center_title": "场景中心",
+  "scene_center_title": "项目场景",
   "edit_scene": "编辑场景",
   "config_engine": "配置引擎",
   "apply_scene": "应用",
@@ -73,8 +73,10 @@
   "desc_optional": "描述（可选）",
   "desc_placeholder": "场景描述...",
   "visibility": "可见范围",
-  "scope_user": "个人级（所有仓库可见）",
+  "scope_user": "用户级（所有仓库可见）",
   "scope_repo": "仓库级（仅当前仓库可见）",
+  "scope_user_short": "用户级",
+  "scope_repo_short": "仓库级",
   "select_skill": "选择 Skill...",
   "change_engine": "更改",
   "engine_count": "{{count}} 个引擎",
@@ -91,5 +93,10 @@
   "stat_failed": "失败",
   "confirm_delete_scene": "确认删除场景",
   "scene_deleted": "场景已删除",
-  "delete_failed": "删除失败: {{msg}}"
+  "delete_failed": "删除失败: {{msg}}",
+  "no_scene_title": "暂无场景",
+  "no_scene_desc": "当前未设置开发场景，请创建新场景",
+  "no_scene_create": "创建新场景",
+  "skill_empty_warning": "以下 Agent 未选择 Skill：{{agents}}",
+  "edit_info": "修改信息"
 }

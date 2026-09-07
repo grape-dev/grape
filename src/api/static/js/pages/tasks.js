@@ -7,6 +7,39 @@ let _taskQuery = '';          // 搜索关键字
 let _taskPage = 1;            // 当前页码
 const _TASKS_PER_PAGE = 15;   // 每页任务数
 let _taskPollTimer = null;    // 场景识别轮询定时器
+let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
+let _tasksMode = 'default';   // default=状态优先 / time=纯时间序（Issue #42）
+
+function _tasksSortPrefKey(repoKey) {
+  return 'task_sort_' + (repoKey || 'all');
+}
+function _loadTasksSortPref(repoKey) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(_tasksSortPrefKey(repoKey)) || '{}');
+    if (saved.order === 'asc' || saved.order === 'desc') _tasksSortOrder = saved.order;
+    if (saved.mode === 'time' || saved.mode === 'default') _tasksMode = saved.mode;
+  } catch (e) { /* ignore */ }
+}
+function _saveTasksSortPref(repoKey) {
+  try {
+    localStorage.setItem(_tasksSortPrefKey(repoKey),
+      JSON.stringify({order: _tasksSortOrder, mode: _tasksMode}));
+  } catch (e) { /* ignore */ }
+}
+function toggleTasksSort() {
+  _tasksSortOrder = (_tasksSortOrder === 'desc') ? 'asc' : 'desc';
+  const repo = app.currentRepo();
+  _saveTasksSortPref(repo ? repo.fullName : '');
+  _taskPage = 1;
+  loadTasks();
+}
+function toggleTasksMode() {
+  _tasksMode = (_tasksMode === 'default') ? 'time' : 'default';
+  const repo = app.currentRepo();
+  _saveTasksSortPref(repo ? repo.fullName : '');
+  _taskPage = 1;
+  loadTasks();
+}
 
 function renderTasks() {
   const el = document.getElementById('pageContent');
@@ -39,13 +72,62 @@ function _stopScenePoll() {
   if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
 }
 
+let _deployUrl = '';
+let _deployEditing = false;
+
+function _loadDeployLink() {
+  const repo = app.currentRepo();
+  if (!repo) return;
+  const bar = document.getElementById('deployLinkBar');
+  if (!bar) return;
+  API.get('/repos/deploy-url/' + repo.owner + '/' + repo.name).then(d => {
+    _deployUrl = (d && d.deploy_url) || '';
+    _renderDeployLink();
+  }).catch(() => { _deployUrl = ''; _renderDeployLink(); });
+}
+
+function _renderDeployLink() {
+  const bar = document.getElementById('deployLinkBar');
+  if (!bar) return;
+  if (_deployEditing) {
+    bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
+      <input id="deployUrlInput" value="${_deployUrl}" placeholder="输入部署访问 URL（如 http://1.2.3.4:5000）" style="flex:1;max-width:400px;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:12px;background:#fff">
+      <button class="tsk-btn tsk-btn-primary" style="padding:4px 10px;font-size:12px" onclick="_saveDeployUrl()">保存</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;font-size:12px" onclick="_deployEditing=false;_renderDeployLink()">取消</button>
+    </div>`;
+  } else if (_deployUrl) {
+    bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
+      <a href="${_deployUrl}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="访问部署的业务系统">🌐 访问应用 ↗</a>
+      <span onclick="_deployEditing=true;_renderDeployLink()" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.6" title="编辑部署 URL" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">✎</span>
+    </div>`;
+  } else {
+    bar.innerHTML = '';
+  }
+}
+
+window._saveDeployUrl = function() {
+  const input = document.getElementById('deployUrlInput');
+  if (!input) return;
+  const repo = app.currentRepo();
+  if (!repo) return;
+  const url = input.value.trim();
+  API.put('/repos/deploy-url', {full_name: repo.fullName, deploy_url: url}).then(() => {
+    _deployUrl = url;
+    _deployEditing = false;
+    _renderDeployLink();
+    app.showToast('部署 URL 已保存');
+  }).catch(e => { app.showToast('保存失败: ' + (e.detail?.message || e.message)); });
+};
+
 function loadTasks() {
   const el = document.getElementById('pageContent');
   if (!el) return;
   const repo = app.currentRepo();
   const repoKey = repo ? repo.fullName : '';
+  _loadTasksSortPref(repoKey);
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
-  API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey)).then(d => {
+  API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
+          '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode).then(d => {
     _tasksAll = d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
     if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
@@ -61,14 +143,23 @@ function _filteredTasks() {
   if (_tasksTab === 'active') list = list.filter(t => t.status === 'active' || t.status === 'processing');
   else if (_tasksTab === 'completed') list = list.filter(t => t.status === 'completed');
   if (_taskQuery) {
-    const q = _taskQuery.toLowerCase();
-    list = list.filter(t =>
-      String(t.id).includes(q) ||
-      (t.title || '').toLowerCase().includes(q) ||
-      (t.task_description || '').toLowerCase().includes(q) ||
-      String(t.issue_number).includes(q) ||
-      (t.repo_key || '').toLowerCase().includes(q)
-    );
+    const q = _taskQuery.toLowerCase().trim();
+    if (q) {
+      list = list.filter(t => {
+        const _haystack = [
+          String(t.id || ''),
+          (t.title || ''),
+          (t.task_description || ''),
+          String(t.issue_number || ''),
+          (t.repo_key || ''),
+          (t.assignee || ''),
+          (t.scene_name || ''),
+          (t.status || ''),
+          (t.repo_display || ''),
+        ].join(' ').toLowerCase();
+        return _haystack.includes(q);
+      });
+    }
   }
   return list;
 }
@@ -92,20 +183,24 @@ function _render() {
     return `<button class="tsk-tab${act}" onclick="_tasksTab='${key}';_taskPage=1;_render()">${label} <span class="tsk-tab-cnt">${cnt}</span></button>`;
   };
 
-  // 分组列表（待处理/处理中在前，已完成在后）
-  const activeRows = filtered.filter(t => t.status === 'active');
-  const procRows = filtered.filter(t => t.status === 'processing');
-  const doneRows = filtered.filter(t => t.status === 'completed');
+  // 排序切换 UI（Issue #42）：方向（升/降）+ 模式（状态优先/纯时间序）
+  const _sortIcon = _tasksSortOrder === 'desc' ? '↓' : '↑';
+  const _sortPanel = `
+    <div style="display:inline-flex;align-items:center;gap:6px;margin-left:10px;flex-shrink:0">
+      <button class="tsk-tab" onclick="toggleTasksMode()" style="border:1px solid var(--b,var(--tg,#d0d7de));border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;background:${_tasksMode==='time' ? 'var(--bg, #fff)' : 'transparent'}" title="${I18N.t('tasks.sort.mode')}">${_tasksMode==='time' ? I18N.t('tasks.sort.time') : I18N.t('tasks.sort.priority')}</button>
+      <button class="tsk-tab" onclick="toggleTasksSort()" style="border:1px solid var(--b,var(--tg,#d0d7de));border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer" title="${I18N.t('tasks.sort.direction')}">${I18N.t('tasks.sort.order')} ${_sortIcon}</button>
+    </div>`;
 
-  // 分页：合并分组后按页切片
-  const allRows = [...activeRows, ...procRows, ...doneRows];
+  // 分页：后端已按 sort_order/mode 排序返回；mode=time 时纯时间序，default 时后端已状态优先
+  // （不再前端状态分组拼接，避免打乱时间序——Issue #42 根因）
+  const allRows = filtered;
   const totalPages = Math.ceil(allRows.length / _TASKS_PER_PAGE);
   if (_taskPage > totalPages) _taskPage = 1;
   if (_taskPage < 1) _taskPage = 1;
   const pageStart = (_taskPage - 1) * _TASKS_PER_PAGE;
   const pageRows = allRows.slice(pageStart, pageStart + _TASKS_PER_PAGE);
 
-  // 重新按分组拆分当前页
+  // 当前页分组（用于页面内分区展示，不再拼接到全量顺序中）
   const pageActive = pageRows.filter(t => t.status === 'active');
   const pageProc = pageRows.filter(t => t.status === 'processing');
   const pageDone = pageRows.filter(t => t.status === 'completed');
@@ -129,17 +224,23 @@ function _render() {
   };
 
   let listHtml = '';
-  if (pageActive.length > 0) {
-    listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.pending')} <span class="tsk-sec-n">${activeRows.length}</span></div>` +
-      pageActive.map(rowHtml).join('');
-  }
-  if (pageProc.length > 0) {
-    listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.processing')} <span class="tsk-sec-n">${procRows.length}</span></div>` +
-      pageProc.map(rowHtml).join('');
-  }
-  if (pageDone.length > 0) {
-    listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.completed')} <span class="tsk-sec-n">${doneRows.length}</span></div>` +
-      pageDone.map(rowHtml).join('');
+  if (_tasksMode === 'time') {
+    // 纯时间序：不按状态分区，直接按后端顺序平铺（Issue #42）
+    listHtml = pageRows.map(rowHtml).join('');
+  } else {
+    // default：状态优先（后端已按 active→processing→completed 排序），页内分区展示
+    if (pageActive.length > 0) {
+      listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.pending')} <span class="tsk-sec-n">${pageActive.length}</span></div>` +
+        pageActive.map(rowHtml).join('');
+    }
+    if (pageProc.length > 0) {
+      listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.processing')} <span class="tsk-sec-n">${pageProc.length}</span></div>` +
+        pageProc.map(rowHtml).join('');
+    }
+    if (pageDone.length > 0) {
+      listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.completed')} <span class="tsk-sec-n">${pageDone.length}</span></div>` +
+        pageDone.map(rowHtml).join('');
+    }
   }
   if (!listHtml) {
     listHtml = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
@@ -173,10 +274,11 @@ function _render() {
   <div class="tsk-page">
     <div class="tsk-top">
       <h1>${I18N.t('tasks.page_title')}</h1>
+      <div id="deployLinkBar" style="margin-top:4px"></div>
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:10px">${I18N.t('tasks.create.btn_new')}</button>
-        ${tab('all', I18N.t('tasks.tab.all'), cntAll)}${tab('active', I18N.t('tasks.tab.active'), cntActive)}${tab('completed', I18N.t('tasks.tab.completed'), cntDone)}
-        <div class="tsk-search"><span>🔍</span><input placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" oninput="_taskQuery=this.value;_taskPage=1;if(_taskQuery.length>1||!_taskQuery){_render()}" onkeyup="if(event.key==='Enter')_render()"></div>
+        ${tab('all', I18N.t('tasks.tab.all'), cntAll)}${tab('active', I18N.t('tasks.tab.active'), cntActive)}${tab('completed', I18N.t('tasks.tab.completed'), cntDone)}${_sortPanel}
+        <div class="tsk-search"><span>🔍</span><input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_taskPage=1;_render()}" onchange="_taskQuery=this.value;_taskPage=1;_render()"></div>
       </div>
     </div>
     <div class="tsk-layout" style="height:calc(100vh - 200px)">
@@ -184,6 +286,9 @@ function _render() {
       <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}</div>
     </div>
   </div>`;
+
+  // 加载部署 URL 到任务中心顶部
+  _loadDeployLink();
 
   // 建立 id → task 映射供行点击
   window._tasksById = {};
@@ -254,7 +359,7 @@ function openTaskCreateModal() {
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
   // 异步加载可用场景列表
-  let _sceneOptions = '<option value="">' + I18N.t('tasks.create.scene_none') + '</option>';
+  let _sceneOptions = '<option value="">' + I18N.t('tasks.create.scene_vod_auto') + '</option>';
 
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
@@ -283,15 +388,16 @@ function openTaskCreateModal() {
   document.body.appendChild(ov);
   _taskCreateModal = ov;
 
-  // 异步加载场景列表填充下拉框
-  API.get('/scenes/with-pipeline').then(function(d) {
+  // 异步加载场景列表填充下拉框（带 repo 参数获取仓库级场景）
+  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
     const sel = document.getElementById('tcCreateScene');
     if (!sel) return;
     const scenes = d.scenes || [];
     scenes.forEach(function(s) {
       const opt = document.createElement('option');
       opt.value = s.id;
-      opt.textContent = s.name || s.id;
+      const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
+      opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
       sel.appendChild(opt);
     });
   }).catch(function(){});

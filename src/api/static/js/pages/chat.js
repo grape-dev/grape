@@ -21,7 +21,7 @@ function _getTask(convId) { return _chatTasks[convId] || null; }
 function _setTask(convId, task) { _chatTasks[convId] = task; if (convId) _setStoredTask(convId, task); }
 function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStoredTask(convId); }
 
-const _NO_REPLY = I18N.t('chat.no_reply');
+// _NO_REPLY: 内联 I18N.t('chat.no_reply')，不缓存（模块顶层缓存会在语言切换后失效）
 
 /**
  * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
@@ -62,7 +62,8 @@ function renderChat(openConvId) {
       <div class="chat-body" id="chatBody">
         <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
-      <div class="chat-in"><input id="chatInput" placeholder="${I18N.t('chat.placeholder')}" style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
+      <div id="chatImgPreview" style="display:none;padding:6px 12px;border-top:1px solid var(--b);flex-wrap:wrap;gap:6px"></div>
+      <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><input id="chatInput" placeholder="${I18N.t('chat.placeholder')}" style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
     </div>
     <div class="chat-side" id="chatSide"></div>
   </div>`;
@@ -188,7 +189,10 @@ function loadSideConfig() {
 }
 
 function loadConversations(autoSelect) {
-  // 去对话指定会话时，不过滤 repo，确保任务会话可被定位
+  // Issue #47：首渲染即按目标仓库过滤，避免"先全局后过滤"导致串库闪烁。
+  //  - 任务中心跳转(issue:N:repoKey)：用任务自带仓库过滤（该仓库即目标，正确露出）
+  //  - 直连 conv_id：不过滤（定位既有会话）
+  //  - 普通进入：按当前仓库过滤
   const repo = app.currentRepo();
   // 解析 issue:N:repoKey 格式的 _openConvId（Task Center 跳转，会话可能已删除需重建）
   let _issueParam = null;
@@ -197,7 +201,9 @@ function loadConversations(autoSelect) {
     if (parts.length >= 3) _issueParam = {num: parts[1], repo: parts.slice(2).join(':')};
     _openConvId = null;
   }
-  const repoKey = (_openConvId || _issueParam ? '' : (repo ? repo.fullName : ''));
+  const repoKey = _issueParam && _issueParam.repo
+    ? _issueParam.repo
+    : (_openConvId ? '' : (repo ? repo.fullName : ''));
   API.get('/chat/conversations' + (repoKey ? '?repo_key=' + encodeURIComponent(repoKey) : '')).then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
@@ -329,7 +335,11 @@ function switchConversation(convId) {
 
     // 渲染消息列表
     body.innerHTML = msgs.map(m => {
-      const rendered = renderMarkdown(m.content);
+      let rendered = renderMarkdown(m.content);
+      // 将 [chat_img:url] 标记替换为图片缩略图
+      rendered = rendered.replace(/\[chat_img:([^\]]+)\]/g, function(match, url) {
+        return '<img src="' + url + '?thumb=1" style="max-width:140px;max-height:140px;border-radius:6px;margin-top:4px;display:inline-block;cursor:pointer" onclick="window.open(\'' + url + '\',\'_blank\')">';
+      });
       return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, conv.repo_key || '')}</div>`;
     }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_new') + '</div>';
     body.scrollTop = body.scrollHeight;
@@ -382,10 +392,84 @@ function setupChatStream() {
   if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') sendChatStream(); });
 }
 
+const _MAX_IMAGES = 9;
+let _pendingImages = [];  // array of {data: dataURL, name: string}
+
+function _renderImgPreview() {
+  var pv = document.getElementById('chatImgPreview');
+  if (!pv) return;
+  if (_pendingImages.length === 0) {
+    pv.style.display = 'none';
+    pv.innerHTML = '';
+    return;
+  }
+  pv.style.display = 'flex';
+  var html = '';
+  for (var i = 0; i < _pendingImages.length; i++) {
+    var img = _pendingImages[i];
+    html += '<div style="position:relative;display:inline-block">' +
+      '<img src="' + img.data + '" style="width:56px;height:56px;border-radius:4px;object-fit:cover;cursor:pointer" onclick="window.open(this.src,\'_blank\')">' +
+      '<button onclick="_removeChatImage(' + i + ')" style="position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;border:none;cursor:pointer;font-size:12px;line-height:18px;text-align:center;padding:0" title="' + I18N.t('chat.remove_image') + '">&#10005;</button>' +
+      '</div>';
+  }
+  if (_pendingImages.length < _MAX_IMAGES) {
+    var cnt = _pendingImages.length + '/' + _MAX_IMAGES;
+    html += '<span style="font-size:11px;color:var(--t3);align-self:center">' + cnt + '</span>';
+  }
+  pv.innerHTML = html;
+}
+
+function _onChatImageSelect(fileInput) {
+  var files = fileInput.files;
+  if (!files || files.length === 0) return;
+  var remaining = _MAX_IMAGES - _pendingImages.length;
+  if (remaining <= 0) {
+    app.showToast(I18N.t('chat.image_max_reached', {max: _MAX_IMAGES}));
+    fileInput.value = '';
+    return;
+  }
+  var toLoad = Math.min(files.length, remaining);
+  if (files.length > remaining) {
+    app.showToast(I18N.t('chat.image_max_exceeded', {max: _MAX_IMAGES}));
+  }
+  var loaded = 0;
+  for (var i = 0; i < toLoad; i++) {
+    (function(file) {
+      if (file.size > 5 * 1024 * 1024) {
+        app.showToast(I18N.t('chat.image_too_large') + ': ' + (file.name || ''));
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        _pendingImages.push({data: e.target.result, name: file.name || '图片'});
+        loaded++;
+        if (loaded === toLoad || _pendingImages.length === _MAX_IMAGES) {
+          _renderImgPreview();
+          var input = document.getElementById('chatInput');
+          if (input) input.focus();
+        }
+      };
+      reader.readAsDataURL(file);
+    })(files[i]);
+  }
+  fileInput.value = '';
+}
+
+function _removeChatImage(idx) {
+  _pendingImages.splice(idx, 1);
+  _renderImgPreview();
+}
+
+function _clearAllImages() {
+  _pendingImages = [];
+  _renderImgPreview();
+}
+
 function sendChatStream() {
   const input = document.getElementById('chatInput');
   const body = document.getElementById('chatBody');
-  if (!input || !input.value.trim()) return;
+  if (!input) return;
+  if (!input.value.trim() && _pendingImages.length === 0) return;
   if (!_currentConvId) {
     const repo = app.currentRepo();
     API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
@@ -401,8 +485,21 @@ function sendChatStream() {
 // v31: doSend — submit/stream 分离（学习 Admin AI runQueryAsync）
 function doSend(input, body) {
   const msg = input.value.trim();
+  const imgs = _pendingImages.slice();  // copy array
+  if (!msg && imgs.length === 0) return;
   input.value = '';
-  body.innerHTML += '<div class="msg l">' + msg.replace(/</g,'&lt;') + '</div>';
+  _clearAllImages();
+  // 显示用户消息（图片直接显示缩略图）
+  var displayMsg = msg.replace(/</g,'&lt;');
+  var imgHtml = '';
+  if (imgs.length > 0) {
+    imgHtml = '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">';
+    for (var i = 0; i < imgs.length; i++) {
+      imgHtml += '<img src="' + imgs[i].data + '" style="max-width:140px;max-height:140px;border-radius:6px;cursor:pointer" onclick="window.open(this.src,\'_blank\')">';
+    }
+    imgHtml += '</div>';
+  }
+  body.innerHTML += '<div class="msg l">' + displayMsg + imgHtml + '</div>';
   const tid = 't' + Date.now();
   body.innerHTML += '<div class="msg r" id="' + tid + '">'
     + '<span class="chat-dots"><span></span><span></span><span></span></span>'
@@ -412,14 +509,15 @@ function doSend(input, body) {
   const repo = app.currentRepo();
   // 1. submit → 立即获取 task_id
   API.post('/chat/submit', {
-    message: msg,
+    message: msg || '请帮我分析这些图片',
     repo_key: repo ? repo.fullName : '',
     conversation_id: _currentConvId,
+    image_data: imgs.length > 0 ? JSON.stringify(imgs.map(function(i) { return i.data })) : '',
   }).then(r => {
     const convId = r.conversation_id || _currentConvId;
     if (r.status === 'error') {
       const el = document.getElementById(tid);
-      if (el) el.innerHTML = renderMarkdown(r.error || _NO_REPLY);
+      if (el) el.innerHTML = renderMarkdown(r.error || I18N.t('chat.no_reply'));
       _clearTask(convId);
       loadConversations();
       return;
@@ -474,9 +572,9 @@ async function streamTask(taskId, elId, convId) {
             if (d.type === 'done') {
               // 完成 — 只显示最终结果
               finalText = d.text || finalText;
-              if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
+              if (el) el.innerHTML = renderMarkdown(finalText) || I18N.t('chat.no_reply');
             } else if (d.type === 'error') {
-              if (el) el.innerHTML = renderMarkdown(d.text || '') || _NO_REPLY;
+              if (el) el.innerHTML = renderMarkdown(d.text || '') || I18N.t('chat.no_reply');
             } else if (d.type === '思考中') {
               // 思考阶段 — 保持三点动画占位
               if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
@@ -566,11 +664,18 @@ function renderChatMessages(messages) {
   if (!body) return;
   body.innerHTML = '';
   messages.forEach(m => {
-    const escaped = (m.content || '').replace(/</g, '&lt;');
+    let content = m.content || '';
+    // 将 [chat_img:url] 标记替换为图片缩略图
+    const imgHtml = content.replace(/\[chat_img:([^\]]+)\]/g, function(match, url) {
+      return '<img src="' + url + '?thumb=1" style="max-width:140px;max-height:140px;border-radius:6px;margin-top:4px;display:inline-block;cursor:pointer" onclick="window.open(\'' + url + '\',\'_blank\')">';
+    });
+    // 移除标记后的纯文本（用于 escaped 显示）
+    const textOnly = content.replace(/\[chat_img:[^\]]+\]/g, '').trim();
     if (m.role === 'user') {
-      body.innerHTML += '<div class="msg l">' + escaped + '</div>';
+      const escaped = textOnly.replace(/</g, '&lt;');
+      body.innerHTML += '<div class="msg l">' + escaped + (imgHtml !== content ? imgHtml : '') + '</div>';
     } else {
-      body.innerHTML += '<div class="msg r">' + renderMarkdown(m.content || '') + '</div>';
+      body.innerHTML += '<div class="msg r">' + renderMarkdown(content) + '</div>';
     }
   });
   body.scrollTop = body.scrollHeight;

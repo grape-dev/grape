@@ -1358,7 +1358,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
                        exit_code=exit_code, result_text=result_text or "",
                        usage_json=json.dumps(usage or {}))
-    # 新会话续接指针回写（Issue 级优先，repo 级兼容，见 multi-issue-isolation-design.md §3.3/§3.5）
+    # 新会话续接指针回写——仅写回 Issue 级执行会话
+    # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
     _new_sid = (usage or {}).get("session_id") or ""
     if _new_sid:
         try:
@@ -1367,16 +1368,72 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                 update_issue_session(task["issue_session_id"], runtime_session_id=_new_sid)
         except Exception as e:
             log.warning(f"complete_task update issue session failed: {e}")
-        try:
-            with db_lock:
-                c = db.cursor()
-                if task and task.get("agent_session_id"):
-                    c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE id=?",
-                              (_new_sid, task["agent_session_id"]))
-                    db.commit()
-        except Exception as e:
-            log.warning(f"complete_task update repo session failed: {e}")
     log.info(f"Task completed: {task_id} exit={exit_code}")
+    # remote worker 模式下 _execute_agent 不执行，系统回帖 + 会话同步在此补触发
+    if exit_code == 0 and task and task.get("issue_id"):
+        try:
+            from src.api.event_pipeline import (
+                _post_result_to_issue, _issue_num_from,
+                _sync_issue_comments_to_conversation,
+                _post_subtask_completion_to_parent, _post_all_subtasks_done,
+            )
+            from src.repo_key import from_repo_key
+            _issue_id = task["issue_id"]
+            _issue_num = _issue_num_from(_issue_id)
+            _repo = from_repo_key(task["repo_key"]) or task.get("account") or ""
+            _token = task.get("repo_gitcode_token") or ""
+            _agent_type = task.get("agent_type") or ""
+            _repo_key = task["repo_key"]
+            _result_text = result_text or ""
+            # 0. 多任务模式：父 Issue Agent 完成 → stage=done
+            if _agent_type == "issue":
+                try:
+                    from src.api.session_store import is_subtask_mode_enabled, set_issue_stage
+                    if is_subtask_mode_enabled(_repo_key, _issue_id):
+                        set_issue_stage(_repo_key, _issue_id, "done", "issue")
+                        log.info(f"Multi-task mode: parent issue {_issue_id} stage=done (subtasks will trigger independently)")
+                except Exception as _se:
+                    log.warning(f"complete_task multi-task stage=done failed: {_se}")
+            # 1. 系统回帖（含 grape-auto-comment 标记）
+            if _issue_num and _repo and _token:
+                _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type)
+            # 2. 子任务 SRE 完成 → 登记到父 Issue
+            if _agent_type == "sre" and _issue_num and _token:
+                try:
+                    from src.api.session_store import get_parent_issue, get_subtask_issues
+                    _parent = get_parent_issue(_repo_key, _issue_id)
+                    if _parent:
+                        _parent_num = _issue_num_from(_parent)
+                        _sub_num = _issue_num
+                        if _parent_num and _sub_num and _repo:
+                            _post_subtask_completion_to_parent(_repo, _sub_num, _parent_num, _result_text, _token)
+                            _subs = get_subtask_issues(_repo_key, _parent)
+                            _all_done = all(s.get("stage") == "done" or s.get("issue_id") == _issue_id for s in _subs)
+                            if _all_done and len(_subs) > 0:
+                                _post_all_subtasks_done(_repo, _parent_num, _subs, _token)
+                except Exception as _se:
+                    log.warning(f"complete_task subtask post failed: {_se}")
+            # 3. 同步结果到任务会话
+            if _issue_num and _result_text:
+                try:
+                    from src.session_manager import db as _db, db_lock as _dl, add_message as _am
+                    with _dl:
+                        _c = _db.cursor()
+                        _c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                                   (_repo_key, _issue_num))
+                        _row = _c.fetchone()
+                    if _row and _row[0]:
+                        _am(_row[0], "agent", f"[{_agent_type.upper()} Agent] {_result_text[:3000]}")
+                except Exception as _se:
+                    log.warning(f"complete_task sync to conversation failed: {_se}")
+            # 4. 拉取 Issue 评论同步到会话
+            if _issue_num and _repo and _token:
+                try:
+                    _sync_issue_comments_to_conversation(_repo_key, _issue_num, _token, _agent_type, _repo)
+                except Exception as _se:
+                    log.warning(f"complete_task sync issue comments failed: {_se}")
+        except Exception as _pe:
+            log.warning(f"complete_task post-completion hooks failed: {_pe}")
     # 可观察性埋点：任务到达终态
     try:
         from src.observability import record_task_terminal
@@ -1552,11 +1609,14 @@ def enqueue_async_report(kind: str, task_id: str, payload):
             report_progress(task_id, payload)
 
 
-async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interval: float = 3.0) -> dict:
+async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interval: float = 1.0) -> dict:
     """异步轮询任务直到终态（completed/failed/cancelled）。
 
     供 IM / web 等"入队 + 等结果"路径使用（见 multi-runtime-instance-design 配套）。
     超时抛 TimeoutError。返回终态 task dict（含 result_text / exit_code / usage_json.session_id）。
+
+    poll_interval 从 3s 降为 1s——远端任务完成后飞书/web 等待者感知延迟减少 2/3，
+    且不增加 DB 压力（单条 SELECT 查询 <1ms）。
     """
     import asyncio, time as _time
     deadline = _time.monotonic() + timeout
@@ -1647,3 +1707,57 @@ def heartbeat_consolidated(credential_id: int, runtime_ids: list[int], client_ip
     # Opportunistic stale recovery (every call, but batch is cheap)
     # In production, this would be rate-limited to every N seconds
     return {"status": "ok", "timestamp": now}
+
+
+def reap_stale_runtimes() -> dict:
+    """清理僵尸 runtime：把 last_seen_at 过期（> _RUNTIME_STALE_SECONDS）的远端引擎标 offline，
+    并把绑定到这些 runtime 上的 dispatched 任务回收为 queued（防任务永久卡死）。
+
+    场景：AI DevSpace 被删后 runtime 行残留 status=online 但 worker 不再心跳。
+    由 main.py 每 60 秒调用一次（_reap_stale_loop）。
+    """
+    from src.runtime.health import parse_dt
+    now = time.time()
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(seconds=_RUNTIME_STALE_SECONDS)).isoformat()
+    reaped = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            # 查找远端引擎（credential_id>0）status=online 但心跳过期的行
+            c.execute(
+                "SELECT id, name, credential_id FROM agent_runtimes "
+                "WHERE status='online' AND credential_id > 0 AND last_seen_at IS NOT NULL "
+                "AND last_seen_at < ?",
+                (cutoff_iso,)
+            )
+            stale = c.fetchall()
+            for row in stale:
+                rid, rname, cid = row[0], row[1], row[2]
+                # 标记 offline
+                c.execute(
+                    "UPDATE agent_runtimes SET status='offline' WHERE id=?",
+                    (rid,)
+                )
+                # 回收该 runtime 上的 dispatched 任务 → queued
+                c.execute(
+                    "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=NULL "
+                    "WHERE runtime_id=? AND status IN ('dispatched','running')",
+                    (rid,)
+                )
+                recovered = c.rowcount
+                if recovered > 0:
+                    c.execute(
+                        "UPDATE agent_runtimes SET busy_slots=0 WHERE id=?",
+                        (rid,)
+                    )
+                reaped.append({"runtime_id": rid, "name": rname, "recovered_tasks": recovered})
+            if stale:
+                db.commit()
+        except Exception as e:
+            log.warning(f"reap_stale_runtimes failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return {"reaped": 0, "error": str(e)}
+    return {"reaped": len(reaped), "details": reaped}

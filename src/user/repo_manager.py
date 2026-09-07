@@ -182,19 +182,48 @@ def accept_invite_for_repo(token: str, owner: str, repo: str) -> bool:
     return False
 
 
-def get_member_permission(api_token: str, owner: str, repo: str, username: str) -> dict | None:
+def _extract_http_code(err: Exception) -> int:
+    """从 RuntimeError('...failed (429):...') 提取 HTTP 状态码。"""
+    import re
+    m = re.search(r"\((\d{3})\)", str(err))
+    return int(m.group(1)) if m else 0
+
+
+# 可重试的限流/服务端瞬时错误
+_RETRYABLE_CODES = {429, 500, 502, 503, 504}
+
+
+def get_member_permission(token: str, owner: str, repo: str, username: str,
+                          _retries: int = 3) -> dict | None:
     """查看仓库成员权限详情（GET /collaborators/{username}/permission）。
 
-    返回含 access_level（30=Developer，40=Maintainer）、role_name、permission 等，失败返回 None。
+    token 传全局 bot token（grape_bot 自查自身权限）。
+    返回含 access_level（30=Developer，40=Maintainer）、role_name、permission 等。
+    429/5xx 退避重试（1s/2s/4s）；确定性失败（403/404 等）返回 None。
     """
-    if not username or not api_token:
+    if not username or not token:
         return None
+    import time
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}/permission"
-    try:
-        return _req("GET", url, api_token)
-    except RuntimeError as e:
-        log.warning(f"get_member_permission failed: {e}")
-        return None
+    last = None
+    for i in range(_retries):
+        try:
+            return _req("GET", url, token)
+        except RuntimeError as e:
+            code = _extract_http_code(e) or 0
+            if code in _RETRYABLE_CODES or "too large" in str(e) or "429" in str(e):
+                log.warning(f"get_member_permission rate-limited (code={code}), retry {i + 1}/{_retries}: {e}")
+                last = e
+                time.sleep(2 ** i)
+                continue
+            log.warning(f"get_member_permission failed: {e}")
+            return None
+    # 重试耗尽：抛限流标记，供调用方区分「未判定」vs「确认无权限」
+    raise _RateLimitedError(f"GitCode API rate limited: {last}")
+
+
+class _RateLimitedError(RuntimeError):
+    """GitCode API 限流标记（重试耗尽后抛出），调用方可捕获以提示"稍后重试"。"""
 
 
 def fetch_repos_with_role(api_token: str) -> list[dict]:
@@ -455,27 +484,37 @@ def _git_has_changes(workdir: str) -> bool:
         return True
 
 
-def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int | None:
-    """检查仓库是否已有指向 webhook_url 的 webhook，有则返回 webhook_id"""
+def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                          _retries: int = 3) -> int | None:
+    """检查仓库是否已有指向 webhook_url 的 webhook，有则返回 webhook_id（429/5xx 退避重试）。"""
     if not webhook_url:
         return None
+    import time
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
-    try:
-        hooks = _req("GET", url, api_token)
-        if isinstance(hooks, list):
-            for h in hooks:
-                if h.get("url") == webhook_url:
-                    return h.get("id")
-    except RuntimeError:
-        pass
+    for i in range(_retries):
+        try:
+            hooks = _req("GET", url, api_token)
+            if isinstance(hooks, list):
+                for h in hooks:
+                    if h.get("url") == webhook_url:
+                        return h.get("id")
+            return None
+        except RuntimeError as e:
+            code = _extract_http_code(e) or 0
+            if code in _RETRYABLE_CODES or "too large" in str(e) or "429" in str(e):
+                time.sleep(2 ** i)
+                continue
+            return None
     return None
 
 
-def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_password: str = "") -> int:
-    """在指定仓库上创建 DevOps Bot webhook，返回 webhook_id。"""
+def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_password: str = "",
+                  _retries: int = 3) -> int:
+    """在指定仓库上创建 DevOps Bot webhook，返回 webhook_id（429/5xx 退避重试）。"""
     if not webhook_password:
         from src.user.db import get_bot_token_by_repo
         webhook_password = get_bot_token_by_repo(owner, repo) or api_token
+    import time
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     body = {
         "url": webhook_url,
@@ -490,11 +529,23 @@ def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webho
         "wiki_events": True,
         "release_events": True,
     }
-    result = _req("POST", url, api_token, body)
-    hook_id = result.get("id", 0)
-    if not hook_id:
-        raise RuntimeError(f"Created webhook but got no id: {json.dumps(result, ensure_ascii=False)[:200]}")
-    return hook_id
+    last = None
+    for i in range(_retries):
+        try:
+            result = _req("POST", url, api_token, body)
+            hook_id = result.get("id", 0)
+            if not hook_id:
+                raise RuntimeError(f"Created webhook but got no id: {json.dumps(result, ensure_ascii=False)[:200]}")
+            return hook_id
+        except RuntimeError as e:
+            code = _extract_http_code(e) or 0
+            if code in _RETRYABLE_CODES or "too large" in str(e) or "429" in str(e):
+                log.warning(f"setup_webhook rate-limited (code={code}), retry {i + 1}/{_retries}: {e}")
+                last = e
+                time.sleep(2 ** i)
+                continue
+            raise
+    raise RuntimeError(f"setup_webhook failed after retries: {last}")
 
 
 def _get_managed_webhook(repo_key: str) -> int | None:

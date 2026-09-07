@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -124,7 +124,7 @@ function loadAgentTypes() {
       $('mainView').style.position = 'fixed';
       $('mainView').style.inset = '0';
       $('mainView').style.zIndex = '100';
-      $('pageTitle').textContent = I18N.t('app.select_repo');
+      $('pageTitle').textContent = I18N.t('app.current_project');
       renderRepoSelection(repos);
       return;
     }
@@ -135,7 +135,7 @@ function loadAgentTypes() {
     $('mainView').style.position = '';
     $('mainView').style.inset = '';
     $('mainView').style.zIndex = '';
-    $('pageTitle').textContent = I18N.t('app.nav.scene_center');
+    $('pageTitle').textContent = I18N.t('app.current_project');
 
     if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
       const r = managedRepos[0];
@@ -208,7 +208,7 @@ function loadAgentTypes() {
       mv.style.position = 'fixed';
       mv.style.inset = '0';
       mv.style.zIndex = '100';
-      $('pageTitle').textContent = I18N.t('app.select_repo');
+      $('pageTitle').textContent = I18N.t('app.current_project');
       renderRepoSelection(d.repos || []);
     }).catch(e => {
       if (ov) ov.remove();
@@ -219,16 +219,30 @@ function loadAgentTypes() {
       mv.style.position = 'fixed';
       mv.style.inset = '0';
       mv.style.zIndex = '100';
-      $('pageTitle').textContent = I18N.t('app.select_repo');
+      $('pageTitle').textContent = I18N.t('app.current_project');
       const pc = $('pageContent');
       if (pc) pc.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div></div>';
     });
   }
 
   let _refreshTimer = null;
+  let _currentView = '';
+  let _currentParam = null;
+  let _hiddenSince = 0;
+  // 页面从后台回到前台时，若隐藏超过 30 秒才刷新（避免短时间切换标签页频繁刷新）
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden') {
+      _hiddenSince = Date.now();
+    } else if (document.visibilityState === 'visible' && _currentView && _hiddenSince) {
+      if (Date.now() - _hiddenSince > 60000) {
+        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(_currentView, _currentParam); }, 300);
+      }
+      _hiddenSince = 0;
+    }
+  });
   function nav(view, param) {
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -241,11 +255,24 @@ function loadAgentTypes() {
       _convStreamAbort = null;
     }
 
+    // 技能详情返回：记录来源视图（pushHistory 之前 history.state 还是上一个视图）
+    if (view === 'skill') {
+      const _prev = window.history.state;
+      window._skillDetailFrom = (_prev && _prev.view) ? {view: _prev.view, param: _prev.param || null} : null;
+    }
+
+    _currentView = view;
+    _currentParam = param;
     _pushHistory(view, param);
 
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
     const navEl = $('nav-' + view);
     if (navEl) navEl.classList.add('act');
+    // 场景·技能页面内的 tab 切换（skills/skill/scene-detail）也高亮场景·技能菜单
+    if (!navEl && (view === 'skills' || view === 'skill' || view === 'scene-detail')) {
+      const marketNav = $('nav-scene-market');
+      if (marketNav) marketNav.classList.add('act');
+    }
     document.querySelectorAll('.sb-nav a').forEach(a => {
       const o = a.getAttribute('onclick') || '';
       if (param && o.includes("'" + param + "'")) a.classList.add('act');
@@ -270,12 +297,12 @@ function loadAgentTypes() {
     }
 
     if (view === 'dash') {
-      title.textContent = I18N.t('app.nav.scene_center');
+      title.textContent = I18N.t('app.current_project');
       // 进入场景中心时无条件清除编辑标志（上一次操作异常退出时泄漏）
       window._dashboardEditing = false;
       const loadDash = () => Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
-        API.get('/scenes'),
+        API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
       ]).then(([dashData, scenesData]) => {
         // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;
@@ -291,35 +318,35 @@ function loadAgentTypes() {
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
-      title.textContent = I18N.t('app.nav.pipeline');
+      title.textContent = I18N.t('app.current_project');
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
-      title.textContent = (_AGENT_TYPES[view] && _AGENT_TYPES[view].display_name) ? (function(){var k='agents.type.'+view+'.name';var v=I18N.t(k);return v!==k?v:_AGENT_TYPES[view].display_name;})() : view;
+      title.textContent = I18N.t('app.current_project');
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'event') {
-      title.textContent = I18N.t('app.nav.event_detail');
+      title.textContent = I18N.t('app.current_project');
       API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
       // 切换回事件详情时恢复活跃对话查询
       if (typeof resumeConvTask === 'function') setTimeout(resumeConvTask, 500);
     } else if (view === 'chat') {
-      title.textContent = I18N.t('app.nav.chat');
+      title.textContent = I18N.t('app.current_project');
       renderChat(param || null);
       // 切换回 Chat 页面时恢复活跃查询（不中断）
       if (typeof resumeChatTask === 'function') setTimeout(resumeChatTask, 500);
     } else if (view === 'tasks') {
-      title.textContent = I18N.t('app.nav.tasks');
+      title.textContent = I18N.t('app.current_project');
       renderTasks();
     } else if (view === 'settings') {
-      title.textContent = I18N.t('app.nav.settings');
+      title.textContent = I18N.t('app.current_project');
       renderSettings(param || 'credentials');
     } else if (view === 'skills') {
-      title.textContent = I18N.t('app.nav.skills');
+      title.textContent = I18N.t('app.current_project');
       renderSkills();
     } else if (view === 'knowledge') {
-      title.textContent = I18N.t('app.nav.knowledge');
+      title.textContent = I18N.t('app.current_project');
       renderKnowledge();
     } else if (view === 'runtimes') {
-      title.textContent = I18N.t('app.nav.runtimes');
+      title.textContent = I18N.t('app.current_project');
       if (typeof renderRuntimes !== 'function') {
         // runtimes.js failed to load (stale cache) — force reload to fetch latest
         window.location.reload();
@@ -327,20 +354,26 @@ function loadAgentTypes() {
       }
       API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'observability') {
-      title.textContent = I18N.t('app.nav.observability');
+      title.textContent = I18N.t('app.current_project');
       if (typeof renderObservability === 'function') renderObservability();
     } else if (view === 'repos') {
-      title.textContent = I18N.t('app.select_repo');
+      title.textContent = I18N.t('app.current_project');
       loadRepos();
     } else if (view === 'skill') {
-      title.textContent = I18N.t('app.nav.skill_detail');
+      title.textContent = I18N.t('app.current_project');
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
       API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
     } else if (view === 'skill-sub') {
       // 技能包子技能详情（如 "38/huawei-ecs"）
-      title.textContent = I18N.t('app.nav.sub_skill_detail');
+      title.textContent = I18N.t('app.current_project');
       API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+    } else if (view === 'scene-market') {
+      title.textContent = I18N.t('app.current_project');
+      renderSceneMarket();
+    } else if (view === 'scene-detail') {
+      title.textContent = I18N.t('app.current_project');
+      renderSceneDetail(param);
     }
   }
 
@@ -357,7 +390,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event'];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail'];
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {
@@ -462,7 +495,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '7');
+      localStorage.setItem('app_cache_ver', '9');
       if (p.get('first_login') === '1') {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -472,7 +505,7 @@ function loadAgentTypes() {
         $('mainView').style.position = 'fixed';
         $('mainView').style.inset = '0';
         $('mainView').style.zIndex = '100';
-        $('pageTitle').textContent = I18N.t('app.select_repo');
+        $('pageTitle').textContent = I18N.t('app.current_project');
       }
       showApp();
       // Remove token from URL without reload (preserve language prefix)
@@ -485,7 +518,7 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '7') {
+    if (localStorage.getItem('app_cache_ver') !== '9') {
       const oldRepo = localStorage.getItem('currentRepo');
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
@@ -493,7 +526,7 @@ function loadAgentTypes() {
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
       if (oldRepo) localStorage.setItem('currentRepo', oldRepo);
-      localStorage.setItem('app_cache_ver', '7');
+      localStorage.setItem('app_cache_ver', '9');
     }
 
     const token = localStorage.getItem('token');
@@ -506,7 +539,7 @@ function loadAgentTypes() {
         const view = parts[0];
         const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
         // Views that don't require a repo
-        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event'];
+        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail'];
         if (noRepoViews.includes(view) || currentRepo()) {
           nav(view, param);
         } else {

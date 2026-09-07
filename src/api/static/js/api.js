@@ -75,6 +75,8 @@ const API = (() => {
   // 并发 401 时所有请求等待同一个 Promise——避免重复 refresh
   function doRefresh() {
     if (_refreshPromise) return _refreshPromise;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
     _refreshPromise = fetch(BASE + '/auth/refresh', {
       method: 'POST',
       headers: {
@@ -82,6 +84,7 @@ const API = (() => {
         'X-Requested-With': 'XMLHttpRequest',  // CSRF 保护——跨站伪造无法加自定义 header
       },
       credentials: 'same-origin',  // 自动带 HttpOnly cookie 里的 refresh_token
+      signal: controller.signal,
     }).then(r => {
       if (!r.ok) throw new Error('refresh failed');
       return r.json();
@@ -93,8 +96,12 @@ const API = (() => {
       }
       throw new Error('no token in refresh response');
     }).catch(e => {
+      // 超时/abort/网络错误 → 清 token 跳登录页
+      localStorage.removeItem('token');
+      if (location.pathname !== '/login') location.href = '/login';
       throw e;
     }).finally(() => {
+      clearTimeout(timer);
       _refreshPromise = null;
     });
     return _refreshPromise;
@@ -134,12 +141,19 @@ const API = (() => {
   }
 
   // fetch 超时封装：30s 后 abort，防止后端 hang 导致前端永久 loading
+  // 网络错误自动重试：fetch 报 TypeError（TCP 连接过期/网络抖动）时延迟 500ms 重试一次
   const _DEFAULT_TIMEOUT = 30000;
-  function _fetchWithTimeout(url, opts, timeout) {
+  function _fetchWithTimeout(url, opts, timeout, _retried) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout || _DEFAULT_TIMEOUT);
     opts = Object.assign({}, opts, { signal: controller.signal });
-    return fetch(url, opts).finally(() => clearTimeout(timer));
+    return fetch(url, opts).finally(() => clearTimeout(timer)).catch(e => {
+      // 网络层错误（TypeError: Failed to fetch）——首次重试一次，避免 TCP 连接过期偶发失败
+      if (!_retried && e instanceof TypeError) {
+        return new Promise(r => setTimeout(r, 500)).then(() => _fetchWithTimeout(url, opts, timeout, true));
+      }
+      throw e;
+    });
   }
 
   function _get(path, timeout) {

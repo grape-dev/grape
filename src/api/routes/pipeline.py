@@ -259,7 +259,7 @@ def _running_issue_ids(repo_key: str) -> set[str]:
 
 
 @router.get("/{owner}/{repo}")
-async def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 

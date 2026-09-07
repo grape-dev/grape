@@ -80,9 +80,16 @@ class HermesACPBackend:
             return
 
         # ── 准备 HERMES_HOME overlay（学习 multica 的 per-task overlay 机制）──
-        # 每个 task 独立的 HERMES_HOME，state.db 按 conversation 隔离
+        # state.db 按 cwd 隔离（per-conversation 独立文件），不同会话间不争锁。
+        # 使用基于 cwd 的稳定路径（非随机临时目录），使 state.db 在任务结束后持久化，
+        # 下次同一 cwd 执行时 session/resume 能找到历史会话数据（chat-ctx-fix §方向一）。
+        import hashlib
+        _cwd_hash = hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
         import tempfile
-        iso_home = tempfile.mkdtemp(prefix="hermes-acp-")
+        _hermes_homes_root = os.path.join(tempfile.gettempdir(), "hermes-acp-homes")
+        os.makedirs(_hermes_homes_root, exist_ok=True)
+        iso_home = os.path.join(_hermes_homes_root, _cwd_hash)
+        os.makedirs(iso_home, exist_ok=True)
         src_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
 
         # symlink 镜像共享 home 的内容（学习 multica mirrorSharedHermesHome）
@@ -100,8 +107,19 @@ class HermesACPBackend:
         if hasattr(os, "getpgid"):
             _popen_kwargs["start_new_session"] = True
 
+        # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
+        _acp_cmd = [agent_cmd, "acp"]
+        try:
+            from src.agent.sandbox import build_bwrap_cmd
+            _wrap = build_bwrap_cmd(cwd, backend_name="hermes")
+            if _wrap:
+                _acp_cmd = _wrap + _acp_cmd
+                log.info(f"{label}hermes ACP sandboxed via bwrap (cwd={cwd})")
+        except Exception as _bw_e:
+            log.warning(f"{label}hermes ACP bwrap wrap failed, running unsandboxed: {_bw_e}")
+
         proc = subprocess.Popen(
-            [agent_cmd, "acp"],
+            _acp_cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=cwd, env=proc_env, bufsize=0, **_popen_kwargs
         )
@@ -329,9 +347,9 @@ class HermesACPBackend:
                         _terminate_proc(proc, f"{label}hermes ACP")
                     reader_thread.join(timeout=3)
 
-                    # 启动新进程（复用 iso_home overlay）
+                    # 启动新进程（复用 iso_home overlay；_acp_cmd 含 bwrap 包装，见首次启动）
                     proc = subprocess.Popen(
-                        [agent_cmd, "acp"],
+                        _acp_cmd,
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         cwd=cwd, env=proc_env, bufsize=0, **_popen_kwargs
                     )
@@ -679,7 +697,10 @@ class HermesACPBackend:
                 pass
             if proc.poll() is None:
                 _terminate_proc(proc, f"{label}hermes ACP")
-            _res.dispose(kill_procs=False)  # proc already terminated above
+            # 不再 dispose overlay 目录：iso_home 现在是稳定路径（基于 cwd hash），
+            # state.db 需要持久化供下次 session/resume 使用（chat-ctx-fix §方向一）。
+            # 只杀进程，不删目录。
+            _res.dispose(kill_procs=False, keep_overlays=True)
 
 
 # ══════════════════════════════════════════════════════════════

@@ -9,6 +9,6 @@ router = APIRouter()
 
 
 @router.get("/api/health")
-async def health():
+def health():
     """免鉴权健康端点——只返回服务是否在线。"""
     return {"server": "ok"}

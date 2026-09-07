@@ -191,6 +191,32 @@ class TestNotify:
             ).fetchall()
         assert len(rows) == 1, rows
 
+    def test_notify_no_background_chat_agent(self):
+        """§十：任务分配 notify 不得触发后台 ChatAgent / 不注入用户 token 执行 opencode。
+
+        回归看护：agent-tasks-direct-create-binding-fix-design.md §10.4。
+        """
+        _clean_tasks()
+
+        import asyncio as _aio
+
+        async def _run():
+            await tasks_mod._run_notify(
+                ctx=None, api=None, user_id=_uid["id"], conv_id="conv-no-agent",
+                open_id="", task_description="处理登录超时", repo_key="gitcode:org/test",
+                issue_number=5, cfg={"backend": "opencode"})
+
+        # 断言：不调用 consume_stream_async、不产生 agent LLM 回复（静态模板消息落会话）
+        with patch("src.runtime.executor.consume_stream_async") as m_evict, \
+             patch("src.api.routes.tasks.add_message") as m_add:
+            _aio.run(_run())
+        m_evict.assert_not_called(), "notify 不得触发 LLM/opencode 执行"
+        m_add.assert_called_once(), "应写入一条静态模板 agent 消息"
+        _args = m_add.call_args[0]
+        assert _args[0] == "conv-no-agent" and _args[1] == "agent"
+        assert "任务已分配" in _args[2]
+        assert "处理登录超时" not in _args[2], "模板不应重复完整任务描述（已在会话上下文）"
+
     def test_notify_prewrite_role_is_agent(self):
         """任务分配预写入消息应为 agent（bot 下发），而非 user；任务描述只出现一次。
 
@@ -350,6 +376,47 @@ class TestMine:
         r_all = client.get("/api/tasks/mine", headers=_headers)
         assert all(t["repo_key"] in ("org/repoA", "org/repoB") for t in r_all.json()["tasks"])
         assert len(r_all.json()["tasks"]) == 2
+
+    def test_mine_sort_order(self):
+        """Issue #42：sort_order desc/asc 控制创建时间排序方向；mode=time 走纯时间序。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            for i, st in enumerate(("active", "processing", "completed", "active")):
+                c.execute(
+                    "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) "
+                    "VALUES (?,?,?,?,?, datetime('now', ?))",
+                    (_uid["id"], "younger_eric", "gitcode:org/sort", 30 + i, st,
+                     f"-{i} minutes"))
+            db.commit()
+        r = client.get("/api/tasks/mine?mode=time&sort_order=desc", headers=_headers)
+        assert r.status_code == 200
+        got = [t["issue_number"] for t in r.json()["tasks"]]
+        # 4 个任务 issue=30,31,32,33，created_at 依次-0,-1,-2,-3 分钟 → desc 最新(30)在前
+        assert got == [30, 31, 32, 33], f"纯时间序 desc 应为 30,31,32,33，实际 {got}"
+        r2 = client.get("/api/tasks/mine?mode=time&sort_order=asc", headers=_headers)
+        got2 = [t["issue_number"] for t in r2.json()["tasks"]]
+        assert got2 == [33, 32, 31, 30], f"纯时间序 asc 应为 33,32,31,30，实际 {got2}"
+
+    def test_mine_sort_order_whitelist(self):
+        """sort_order 白名单校验：非法值 → 400（FastAPI pattern）。"""
+        r = client.get("/api/tasks/mine?sort_order=evil", headers=_headers)
+        assert r.status_code == 422  # Query pattern 校验失败
+
+    def test_mine_mode_default_priority_group(self):
+        """mode=default：状态优先（active→processing→completed），组内按 created_at desc。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            # 故意乱序插入：completed 最晚建，active 最早建
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'completed', datetime('now','-1 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 101))
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'active', datetime('now','-3 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 102))
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'processing', datetime('now','-2 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 103))
+            db.commit()
+        r = client.get("/api/tasks/mine?mode=default&sort_order=desc", headers=_headers)
+        got = [t["issue_number"] for t in r.json()["tasks"]]
+        # 状态优先：active(102) → processing(103) → completed(101)
+        assert got == [102, 103, 101], f"default 模式应按状态分组，实际 {got}"
 
 
 class TestUserMappingBackfill:

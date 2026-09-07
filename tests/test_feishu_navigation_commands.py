@@ -2,6 +2,7 @@
 import os
 import sys
 import asyncio
+import pytest
 from unittest.mock import AsyncMock, patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -12,6 +13,15 @@ from src.session_manager import (
     db, db_lock,
     create_conversation, get_conversation_by_im, join_feishu_chat, get_conversation,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_repo_bind_cache():
+    """每个测试前清除 _repo_bind_cache，防止跨测试缓存污染。"""
+    from src.im.handler_async import _repo_bind_cache
+    _repo_bind_cache.clear()
+    yield
+    _repo_bind_cache.clear()
 
 
 def _ctx(app_id="cli_nav"):
@@ -505,7 +515,7 @@ def test_feishu_general_conversation_uses_chat_prompt():
     cid = create_conversation(1, "gitcode:navuser/repo-a", title="普通")
     prompt = _build_prompt(cid)
     assert "## 场景: task" not in prompt
-    assert "User asks about" in prompt
+    assert "DevOps topic: analyze and reply" in prompt
     _clean()
 
 

@@ -35,6 +35,13 @@
   "pager": {
     "summary": "共 {{total}} 条 · {{page}}/{{pages}} 页"
   },
+  "sort": {
+    "order": "时间",
+    "direction": "切换排序方向（升序/降序）",
+    "mode": "切换排序模式（状态优先/纯时间序）",
+    "priority": "状态优先",
+    "time": "纯时间序"
+  },
   "create": {
     "btn_new": "+ 新建任务",
     "modal_title": "+ 新建任务",
@@ -49,6 +56,7 @@
     "scene_label": "开发场景",
     "scene_hint": "不选则由 VOD 审视时自动识别",
     "scene_none": "不指定（由 VOD 自动识别）",
+    "scene_vod_auto": "VOD 智能推荐",
     "assignee_hint": "Issue 责任人 = 系统 General Settings 的 Account（当前登录账号）",
     "subtask_mode_label": "多任务模式",
     "subtask_mode_hint": "启用后，Issue Agent 会将任务拆分为多个子任务分别执行",

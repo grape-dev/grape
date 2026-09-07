@@ -12,7 +12,10 @@ from src.runtime import engine_select as es
 
 
 @pytest.fixture(autouse=True)
-def _clean_tables():
+def _clean_tables(monkeypatch):
+    # 远端 a1f4a450 将默认 pipeline mode 改为 plugin（pick_engine 统一返回 0 广播）。
+    # TestPickEngine 测的是 legacy 模式的优先级逻辑，需强制 legacy。
+    monkeypatch.setenv("GRAPE_PIPELINE_MODE", "legacy")
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM agent_tasks")
@@ -147,6 +150,9 @@ class TestResolveDefaultEngine:
 
 
 class TestResolveLocalEngine:
+    def setup_method(self):
+        es._resolve_local_cache.clear()
+
     def test_resolve_local_engine_returns_healthy_local(self):
         loc_eng = _mk_engine("opencode", credential_id=0)
         assert es.resolve_local_engine() == loc_eng

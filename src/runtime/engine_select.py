@@ -9,9 +9,19 @@
 import os
 import json
 import random
+import time as _time
 from src.config import CONFIG_DIR, log
 
 _ENGINE_SELECTION_PATH = os.path.join(CONFIG_DIR, "engine-selection.json")
+
+# resolve_local_engine 结果缓存（30s TTL）——避免每条飞书消息都查 DB agent_runtimes 表
+# （handler_async + chat.py 两处各调一次，叠加 _remote_runtime_ready 再查，单条消息 5+ 次 DB 查询）
+_resolve_local_cache: dict = {}  # {"result": int|None, "expires": float}
+_RESOLVE_LOCAL_TTL = 30.0
+
+# 远端引擎心跳超时阈值（秒）：last_seen_at 超过此值视为死引擎（AI DevSpace 被删后残留 runtime）。
+# 与 service.py _RUNTIME_STALE_SECONDS 保持一致。
+_RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "300"))
 
 # 默认优先级档位（小=高优先）
 _PRIO_REPO = 10
@@ -86,11 +96,25 @@ def _member_scope(m: dict, repo: str) -> str:
 
 
 def _health_ok(m: dict) -> bool:
-    """健康判定：远端按 status='online'；本机按 installed+healthy（settings._runtime_health 同口径）。"""
+    """健康判定：远端按 status='online' + last_seen_at 新鲜；本机按 installed+healthy。
+
+    远端引擎（credential_id>0）必须 last_seen_at 在 _RUNTIME_STALE_SECONDS 内才算健康，
+    防止 AI DevSpace 环境被删后 runtime 行残留 status=online 但实际不可达（模式 QQ）。
+    """
     cid = m.get("credential_id") or 0
     if cid == 0:
         return bool(m.get("installed")) and bool(m.get("healthy"))
-    return (m.get("status") or "") == "online"
+    if (m.get("status") or "") != "online":
+        return False
+    # 远端引擎检查心跳新鲜度
+    last_seen = m.get("last_seen_at") or ""
+    if last_seen:
+        from src.runtime.health import parse_dt
+        import time as _time
+        ts = parse_dt(last_seen)
+        if ts is not None and _time.time() - ts > _RUNTIME_STALE_SECONDS:
+            return False
+    return True
 
 
 def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
@@ -294,7 +318,13 @@ def resolve_local_engine() -> int | None:
     用于 chat 等未显式绑定时的本机兜底（engine-selection-design.md §8.2）。
     无本机直连时回退全局健康引擎（credential_id>0 的远端 worker，chat 走队列执行），
     避免"无可用引擎"硬失败（#60：清理设备后无 cred0 引擎，chat 全挂）。
+
+    结果缓存 30 秒——引擎列表不频繁变化，缓存可大幅减少 DB 查询。
     """
+    now = _time.time()
+    cached = _resolve_local_cache.get("expires", 0)
+    if cached > now:
+        return _resolve_local_cache.get("result")
     cand = query_engines("", "local")
     cand = _apply_filters([dict(m, scope="local") for m in cand], load_engine_selection())
     if not cand:
@@ -303,7 +333,10 @@ def resolve_local_engine() -> int | None:
         cand = _apply_filters([dict(m, scope="global") for m in cand], load_engine_selection())
     if not cand:
         return None
-    return min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
+    result = min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
+    _resolve_local_cache["result"] = result
+    _resolve_local_cache["expires"] = _time.time() + _RESOLVE_LOCAL_TTL
+    return result
 
 
 def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
@@ -328,11 +361,29 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
 
 # ===== 候选引擎查询（供绑定配置下拉 / 展示）=====
 
-def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]:
+def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str = "") -> list[dict]:
     """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。
-    agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。"""
+    agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。
+    username 非空时，user scope 只返回该用户的个人引擎。
+    repo scope 返回用户加入的所有仓库的仓库级引擎（不只当前仓库）。"""
     repo = _norm_repo(repo_key)
     db, lock = _db()
+    # 收集用户加入的仓库列表（用于 repo scope 过滤）
+    user_repos = set()
+    if username and scope == "repo":
+        try:
+            from src.session_manager import db as _udb, db_lock as _ulock
+            from src.repo_key import from_repo_key
+            with _ulock:
+                uc = _udb.cursor()
+                uc.execute(
+                    "SELECT ur.repo_key FROM user_repos ur "
+                    "JOIN user_accounts ua ON ua.id = ur.user_id "
+                    "WHERE ua.username = ? AND ur.is_join = 1", (username,))
+                for row in uc.fetchall():
+                    user_repos.add(from_repo_key(row[0] or ""))
+        except Exception as _e:
+            log.warning(f"query_engines: get_user_repos failed: {_e}")
     with lock:
         c = db.cursor()
         try:
@@ -344,17 +395,26 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
+                # 本机引擎（credential_id=0）对所有人可见
                 c.execute(
                     "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
                     " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             elif scope == "user":
-                c.execute(
-                    "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
-                    "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
+                if username:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' AND rc.owner_name=? ORDER BY r.id", (username,))
+                else:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
             else:
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
@@ -370,7 +430,9 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
     for r in rows:
         if scope == "repo":
             from src.repo_key import from_repo_key
-            if from_repo_key(r[9] or "") != repo:
+            _repo_owner = from_repo_key(r[9] or "")
+            # 只返回用户加入的仓库的仓库级引擎
+            if username and user_repos and _repo_owner not in user_repos:
                 continue
         # agent_type 标签过滤（r[10] = GROUP_CONCAT(tag) from engine_capabilities, e.g. "all" or "all,coding"）
         if agent_type:
@@ -382,6 +444,8 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "") -> list[dict]
             "runtime_id": r[0], "name": r[1], "status": r[2] or "offline", "healthy": bool(r[3]),
             "installed": bool(r[4]), "credential_id": r[5] or 0, "last_seen_at": r[6] or "",
             "device_name": r[7] or "", "owner_name": r[8] or "",
+            "owner_id": r[9] or "",
+            "scope": scope,
             "tags": [t.strip() for t in (r[10] or "").split(",") if t.strip()],
         })
     return out

@@ -34,6 +34,41 @@ def _get_ak_sk(user: dict) -> tuple:
     return ak, sk
 
 
+def _annotate_worker_online(envs: list) -> None:
+    """为每个环境附带 worker_online 字段。
+    环境创建时凭据 name = env.name（见 _genCredForEnv / create_environment），
+    所以 runtime_credentials.name == env.name 即为对应 Worker。
+    用该凭据的 status + last_seen_at 判断 worker 是否真正上线（心跳 <5min）。
+    """
+    if not envs:
+        return
+    from src.session_manager import db, db_lock
+    from src.runtime.health import derive_runtime_health
+    from datetime import datetime, timezone
+    now_ts = datetime.now(timezone.utc).timestamp()
+    # 一次性查出所有 active 凭据的 name → health
+    cred_map: dict[str, str] = {}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT name, status, last_seen_at FROM runtime_credentials "
+                "WHERE status != 'revoked'"
+            )
+            for cname, cstatus, last_seen in c.fetchall():
+                if not cname:
+                    continue
+                h = derive_runtime_health(cstatus or "offline", last_seen, now_ts)
+                cred_map[cname] = h
+    except Exception as e:
+        log.warning(f"_annotate_worker_online: DB query failed: {e}")
+    # 注入到每个环境对象
+    for e in envs:
+        env_name = e.get("name") or ""
+        health = cred_map.get(env_name, "offline")
+        e["worker_online"] = (health == "online")
+
+
 class CreateEnvBody(BaseModel):
     name: str
     grape_server: str = ""
@@ -41,20 +76,20 @@ class CreateEnvBody(BaseModel):
 
 
 @router.get("/config")
-async def get_devstage_config(user: dict = Depends(get_current_user)):
+def get_devstage_config(user: dict = Depends(get_current_user)):
     """获取 DevStage 配置状态"""
     base_url = _resolve_base_url()
     acc = user_db.get_user_account(user["username"]) or {}
     return {
         "base_url": base_url,
         "configured": bool(base_url),
-        "ak_value": acc.get("huawei_cloud_ak", ""),
-        "sk_value": acc.get("huawei_cloud_sk", ""),
+        "ak_exists": bool(acc.get("huawei_cloud_ak", "")),
+        "sk_exists": bool(acc.get("huawei_cloud_sk", "")),
     }
 
 
 @router.put("/config")
-async def update_devstage_config(body: dict = {}, user: dict = Depends(get_current_user)):
+def update_devstage_config(body: dict = {}, user: dict = Depends(get_current_user)):
     """更新 DevStage 配置"""
     url = (body.get("base_url") or "").strip().rstrip("/")
     if url:
@@ -74,7 +109,7 @@ async def update_devstage_config(body: dict = {}, user: dict = Depends(get_curre
 
 
 @router.get("/templates")
-async def list_templates(user: dict = Depends(get_current_user)):
+def list_templates(user: dict = Depends(get_current_user)):
     """查询可用模板列表"""
     ak, sk = _get_ak_sk(user)
     import json
@@ -100,7 +135,7 @@ async def list_templates(user: dict = Depends(get_current_user)):
 
 
 @router.get("/specs")
-async def list_specs(template_id: str = "", user: dict = Depends(get_current_user)):
+def list_specs(template_id: str = "", user: dict = Depends(get_current_user)):
     """查询可用规格"""
     ak, sk = _get_ak_sk(user)
     try:
@@ -114,8 +149,10 @@ GRAPE_AI_DEVSPACE_TEMPLATE = "4ef59a2b4d3d4909aacd80f6007c00b2"
 
 
 @router.get("/environments")
-async def list_environments(user: dict = Depends(get_current_user)):
-    """查询所有 DevStage 开发环境（仅返回 Grape AI Devspace 模板创建的环境）"""
+def list_environments(user: dict = Depends(get_current_user)):
+    """查询所有 DevStage 开发环境（仅返回 Grape AI Devspace 模板创建的环境）
+    附带 worker_online 字段：环境对应的 Worker（device_name=env.name）是否已上线。
+    """
     ak, sk = _get_ak_sk(user)
     try:
         envs = _list_envs(ak, sk)
@@ -135,17 +172,27 @@ async def list_environments(user: dict = Depends(get_current_user)):
             tpl_only = [e for e in envs if (e.get("template_id") or "").strip() == GRAPE_AI_DEVSPACE_TEMPLATE]
             if tpl_only:
                 log.warning(f"GRAPE_DEV_SERVER 过滤后为空，回退到仅按 template_id 过滤，匹配 {len(tpl_only)} 个")
-                return {"environments": tpl_only}
-            # template_id 也匹配不到，全部回退
-            log.warning(f"过滤后为空但原始列表有 {len(envs)} 个环境，回退返回全部")
-            return {"environments": envs}
+                filtered = tpl_only
+            else:
+                # template_id 也匹配不到，全部回退
+                log.warning(f"过滤后为空但原始列表有 {len(envs)} 个环境，回退返回全部")
+                filtered = envs
+
+        # 脱敏：_env_vars 含 GRAPE_DEV_TOKEN 等凭据，仅用于过滤，不返回前端
+        for e in filtered:
+            e.pop("_env_vars", None)
+
+        # 附带 Worker 上线状态：环境创建时 --device {env.name}，所以
+        # runtime_credentials.device_name == env.name 即为对应 Worker。
+        _annotate_worker_online(filtered)
+
         return {"environments": filtered}
     except DevStageError as e:
         raise HTTPException(status_code=502, detail={"code": e.code, "message": str(e)})
 
 
 @router.post("/environments")
-async def create_environment(body: CreateEnvBody, user: dict = Depends(get_current_user)):
+def create_environment(body: CreateEnvBody, user: dict = Depends(get_current_user)):
     """创建开发环境（默认 AI DEVSPACE 模板，自动查规格，自动开机，自动注入凭据）"""
     ak, sk = _get_ak_sk(user)
     # 默认 AI DEVSPACE 模板
@@ -165,19 +212,22 @@ async def create_environment(body: CreateEnvBody, user: dict = Depends(get_curre
             env_vars = {
                 "GRAPE_DEV_SERVER": body.grape_server,
                 "GRAPE_DEV_TOKEN": body.grape_token,
+                "AK": ak,
+                "SK": sk,
             }
-            # init_script：DevSpace 环境为 root 用户，用 --root 走 systemd 管理进程；
-            # --device 用环境名作为设备名（比 hostname 更可识别）。
-            init_scripts = [{
-                "command": (
-                    f"curl -fsSL {body.grape_server}/api/runtime/install"
-                    f" -o /tmp/install.sh && "
+            # init_script：DevStage 不允许命令含 && ; | > < 等 shell 操作符（HD.32821013），
+            # 所以拆成两条独立命令：先下载安装脚本，再执行。
+            # DevSpace 容器为 root 用户，安装脚本自动检测 systemd 可用性
+            # （容器无 systemd 时回退 nohup/setsid，不再强制 --root）。
+            init_scripts = [
+                {"command": f"curl -fsSL {body.grape_server}/api/runtime/install -o /tmp/install.sh"},
+                {"command": (
                     f"bash /tmp/install.sh --token {body.grape_token}"
                     f" --server {body.grape_server}"
                     f" --device {body.name}"
                     f" --root"
-                )
-            }]
+                )},
+            ]
         devstage_id = _create_env(
             ak, sk, name=body.name, cores=cores,
             arch="ARM", memory=memory,
@@ -194,7 +244,7 @@ async def create_environment(body: CreateEnvBody, user: dict = Depends(get_curre
 
 
 @router.post("/environments/{action}")
-async def environment_action(action: str, body: dict = {}, user: dict = Depends(get_current_user)):
+def environment_action(action: str, body: dict = {}, user: dict = Depends(get_current_user)):
     """开机/关机"""
     if action not in ("start", "stop"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "action must be start/stop"})
@@ -212,7 +262,7 @@ async def environment_action(action: str, body: dict = {}, user: dict = Depends(
 
 
 @router.delete("/environments/{devstage_id}")
-async def delete_environment(devstage_id: str, user: dict = Depends(get_current_user)):
+def delete_environment(devstage_id: str, user: dict = Depends(get_current_user)):
     """删除开发环境，同时删除对应的 Worker 凭据"""
     ak, sk = _get_ak_sk(user)
     # 先查环境名（用于匹配凭据）

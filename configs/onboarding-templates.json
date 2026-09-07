@@ -1,0 +1,18 @@
+{
+  "default": {
+    "tasks": [
+      {
+        "type": "experience",
+        "title": "引导·快速部署体验",
+        "description": "首次托管引导：体验本项目的快速部署流程。",
+        "labels": []
+      },
+      {
+        "type": "dev",
+        "title": "引导·二次开发",
+        "description": "首次托管引导：基于本项目进行二次开发，探索扩展方向。",
+        "labels": []
+      }
+    ]
+  }
+}

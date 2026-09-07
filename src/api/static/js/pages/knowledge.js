@@ -58,7 +58,7 @@ function _renderKnowledgeBoard(el, d) {
 
 function _renderProjectTab(d) {
   const meta = d.project.meta || {};
-  const degraded = meta.degraded ? '<span class="tr" style="font-size:10px">⚠ ' + I18N.t('knowledge.degraded') + '</span>' : '';
+  const degraded = meta.degraded ? '<span class="tr" style="font-size:10px">' + I18N.t('knowledge.degraded') + '</span>' : '';
   const updated = meta.last_updated ? (meta.last_updated || '').replace('T',' ').substring(0,19) : '—';
 
   let html = '<div class="grp-title" style="font-size:13px;font-weight:600;margin:14px 0 10px;color:var(--t)">' + I18N.t('knowledge.project_baseline_title') + '</div>';
@@ -155,7 +155,7 @@ function _renderAgentTab(d) {
     const ico = meta.icon || '◈';
     const entries = agents[at] || [];
     html += `<div class="skill-group" style="margin-bottom:18px">
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${label} · ${I18N.t('knowledge.agent_knowledge_count', {label: label, count: entries.length})}</h3>`;
+      <h3 style="font-size:13px;font-weight:600;margin-bottom:10px;color:${color}">${ico} ${I18N.t('knowledge.agent_knowledge_count', {label: label, count: entries.length})}</h3>`;
     entries.forEach(k => {
       const preview = (k.content || '').split('\n').filter(l => l.trim()).slice(-2).map(l => l.replace(/^- \[[^\]]*\]\s*/, '')).join(' · ');
       const scopeLabel = k.scope === 'member_agent' ? I18N.t('knowledge.scope_member') : (k.scope === 'issue_agent' ? I18N.t('knowledge.scope_issue_agent') : I18N.t('knowledge.scope_issue'));

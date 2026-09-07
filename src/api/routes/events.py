@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/events", tags=["events"])
 
 
 @router.get("/detail/{seq}")
-async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
+def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -177,7 +177,7 @@ async def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
 
 
 @router.post("/{seq}/terminate")
-async def terminate_event(seq: int, user: dict = Depends(get_current_user)):
+def terminate_event(seq: int, user: dict = Depends(get_current_user)):
     """强行终止正在运行的事件任务。
 
     - 有关联 task_id（worker 模式）→ 调 fail_task（更新 task+event 状态为 failed）
@@ -243,7 +243,7 @@ async def terminate_event(seq: int, user: dict = Depends(get_current_user)):
 
 
 @router.post("/{seq}/redispatch")
-async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
+def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
 
     见 event-redispatch-design.md §4.1.2：
@@ -273,6 +273,36 @@ async def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
         pass
 
     evt = _load_event(seq)
+
+    # 1.5）onboarding 主事件重派 → 任务级自愈（Issue #46 重构后兼容）：
+    #     历史 onboarding_exp/onboarding_explore 事件仍可能被 redispatch；onboarding 后端已改为「按模板创建标准任务」，
+    #     旧事件映射到新任务 type（onboarding_exp→experience，onboarding_explore→dev）后走 retry_onboarding_task 补建。
+    _onb_target = (
+        "experience" if evt.get("event_type") == "onboarding_exp"
+        else "dev" if evt.get("event_type") == "onboarding_explore" else ""
+    )
+    if _onb_target:
+        from src.repo_key import split_owner_repo
+        from src.api.onboarding import retry_onboarding_task
+        _owner, _repo = split_owner_repo(evt.get("repo_key", "") or "")
+        log.info(f"[redispatch] seq={seq} onboarding {_onb_target}: task-level retry, repo={evt.get('repo_key')}")
+        _res = retry_onboarding_task(evt.get("repo_key", "") or "", _owner, _onb_target)
+        # 原 seq 标记 failed（保持历史记录），新 seq 接管
+        try:
+            update_event_status(seq, "failed")
+        except Exception:
+            pass
+        try:
+            from src.user.db import set_meta_value as _smv
+            import time as _time
+            _smv(f"redispatch:{seq}", str(_time.time()))
+        except Exception:
+            pass
+        if not (_res or {}).get("ok"):
+            raise HTTPException(status_code=409, detail={"code": 409,
+                "message": f"引导重派失败：{(_res or {}).get('reason', 'unknown')}"})
+        return {"status": "redispatched", "task_id": "(new)", "event_seq": (_res or {}).get("seq", 0),
+                "original_seq": seq}
 
     # 2) 查关联任务
     task_id = ""
@@ -923,7 +953,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
 
 
 @router.get("/{seq}/thread")
-async def get_event_thread(seq: int, user: dict = Depends(get_current_user)):
+def get_event_thread(seq: int, user: dict = Depends(get_current_user)):
     evt = _load_event(seq)
     from src.api.knowledge import read_knowledge, _issue_num_from
     issue_num = _issue_num_from(evt["issue_id"])
@@ -1051,8 +1081,8 @@ def _execute_conv_task(task_id: str, loop):
 
     try:
         evt = _load_event(seq)
-        # 直接用同步 stream_agent（在线程中运行，不阻塞主 loop）
-        from src.runtime.executor import stream_agent
+        # 直接用同步 stream_devops_agent（在线程中运行，不阻塞主 loop）
+        from src.runtime.executor import stream_devops_agent
         _worker_final_text = ""
         repo_key = evt["repo_key"]
         agent_type = evt["agent_type"]
@@ -1087,8 +1117,8 @@ def _execute_conv_task(task_id: str, loop):
         bot_token = get_gitcode_token(repo_key=repo_key) or ""
         repository = from_repo_key(repo_key)
         # 用 hermes 引擎（对齐 Chat Agent）
-        for evt_type, data in stream_agent(
-            prompt, cwd=ws, session_id=oc_session_id,
+        for evt_type, data in stream_devops_agent(
+            prompt, cwd=ws, session_id=oc_session_id, event_type="event_dialogue",
             backend_name="hermes", account=repository, bot_token=bot_token,
             agent_name="Event Dialogue Agent",
             agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",
@@ -1157,7 +1187,7 @@ def _push_conv_event(task_id: str, evt_type: str, data):
 
 
 @router.get("/chat/task/{task_id}/status")
-async def conv_task_status(task_id: str, user: dict = Depends(get_current_user)):
+def conv_task_status(task_id: str, user: dict = Depends(get_current_user)):
     """查询对话任务状态（内存优先 → DB 兜底）。"""
     # 1. 内存
     with _conv_tasks_lock:
@@ -1243,7 +1273,7 @@ async def conv_task_stream(task_id: str, user: dict = Depends(get_current_user))
 
 
 @router.post("/{seq}/knowledge")
-async def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
+def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
     """agent 沉淀共享知识（bot token）：写工作区文件 + 登记索引 + 线程留痕，见 event-conversation-design.md §3.1.1。"""
     evt = _load_event(seq)
     _require_event_bot_token(request, evt["repo_key"])
@@ -1263,7 +1293,7 @@ async def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
 
 
 @router.post("/{seq}/flow/reset")
-async def flow_reset(seq: int, body: FlowResetBody, request: Request):
+def flow_reset(seq: int, body: FlowResetBody, request: Request):
     """agent 流程控制（bot token）：取消该 issue 任务 + 回退阶段 + 线程留痕。见 event-conversation-design.md §3.3③。"""
     evt = _load_event(seq)
     _require_event_bot_token(request, evt["repo_key"])
@@ -1287,7 +1317,7 @@ async def flow_reset(seq: int, body: FlowResetBody, request: Request):
 
 
 @router.get("/{owner}/{repo}")
-async def list_events(owner: str, repo: str,
+def list_events(owner: str, repo: str,
                       page: int = Query(1, ge=1),
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),

@@ -582,3 +582,44 @@ class TestRedispatchRuntimeZero:
             c.execute("DELETE FROM issue_agent_session WHERE id='iss-dead'")
             c.execute("DELETE FROM agent_tasks WHERE issue_session_id='iss-dead'")
             db.commit()
+
+
+class TestRedispatchOnboarding:
+    """引导（onboarding_*）事件重派 → target 级自愈：不再因 repository='' 被静默跳过。
+
+    见 agent-tasks-direct-create-binding-fix-design.md §5.2/§5.3/§11。
+    """
+
+    def test_redispatch_onboarding_carries_repo(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_tasks WHERE id LIKE 't_redisp_onb%'")
+            c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
+            c.execute(
+                "INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, source, status, result) "
+                "VALUES (?, 'onboarding_explore', 'vod', '引导·探索方向', '#2', '{}', 'template', 'failed', '')",
+                (_REPO_KEY,))
+            seq = c.lastrowid
+            db.commit()
+        from src.user.db import set_meta_value
+        set_meta_value(f"redispatch:{seq}", "")
+
+        # 断言：重派 onboarding 事件 → 调用 onboarding.retry_onboarding_target(repo, owner, explore)
+        calls = []
+        with patch("src.api.onboarding.retry_onboarding_target", side_effect=lambda *a, **k: calls.append((a, k)) or {"ok": True, "seq": 9009}):
+            r = client.post(f"/api/events/{seq}/redispatch", headers=_headers)
+        assert r.status_code == 200, r.text
+        assert calls, "重派 onboarding 事件应调用 retry_onboarding_target"
+        repo_arg, target_arg = calls[0][0][0], calls[0][0][2]
+        assert repo_arg == _REPO_KEY, "应透传完整 repo_key（含平台前缀，非空 repository）"
+        assert target_arg == "explore"
+        assert r.json().get("event_seq") == 9009
+
+        # 原事件保持 failed（历史记录），不因重派被置回 running 假象
+        with db_lock:
+            st = db.cursor().execute("SELECT status FROM events WHERE seq=?", (seq,)).fetchone()
+        assert st and st[0] == "failed"
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
+            db.cursor().execute("DELETE FROM agent_tasks WHERE id LIKE 't_redisp_onb%'")
+            db.commit()

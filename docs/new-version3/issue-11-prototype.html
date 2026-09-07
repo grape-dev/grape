@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="apple">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>场景&技能市场 — 原型</title>
+<link rel="stylesheet" href="/static/css/app.css?v=40">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=7">
+<style>
+.scn-ic{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px;color:#fff;flex-shrink:0;box-shadow:0 4px 12px rgba(0,0,0,.12)}
+.scn-ic-lg{width:64px;height:64px;border-radius:16px;font-size:32px}
+.bg-default{background:linear-gradient(135deg,#0071e3,#5ac8fa)}
+.bg-cloud{background:linear-gradient(135deg,#5ac8fa,#0071e3)}
+.bg-iac{background:linear-gradient(135deg,#ff9f0a,#ff2d92)}
+.bg-agent{background:linear-gradient(135deg,#af52de,#0071e3)}
+.bg-skill{background:linear-gradient(135deg,#34c759,#5ac8fa)}
+.bg-api{background:linear-gradient(135deg,#af52de,#ff9f0a)}
+.bg-blog{background:linear-gradient(135deg,#ff2d92,#ff9f0a)}
+.bg-harmony{background:linear-gradient(135deg,#5ac8fa,#34c759)}
+/* 场景卡片 — 苹果风格 */
+.scn-card{flex-shrink:0;width:300px;background:var(--c);border:1px solid var(--b);border-radius:18px;overflow:hidden;cursor:pointer;transition:all .3s cubic-bezier(.25,.1,.25,1);box-shadow:var(--sh)}
+.scn-card:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08);border-color:rgba(0,113,227,.15)}
+.scn-card-bar{height:4px;width:100%}
+.scn-card-body{padding:20px}
+.scn-card-head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.scn-card-title{font-size:17px;font-weight:600;letter-spacing:-.01em;color:var(--t);flex:1}
+.scn-star{font-size:14px}
+.scn-card-desc{font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:14px;min-height:38px}
+.scn-chain{display:flex;align-items:center;gap:3px;flex-wrap:wrap;margin-bottom:16px}
+.scn-tag{font-size:10px;padding:3px 8px;border-radius:6px;background:var(--bg);color:var(--t2);font-weight:500}
+.scn-arr{font-size:9px;color:var(--t3)}
+.scn-card-foot{display:flex;align-items:center;justify-content:space-between;padding-top:14px;border-top:1px solid var(--b)}
+.scn-meta{font-size:10px;color:var(--t3)}
+.scn-card-btns{display:flex;gap:6px}
+/* 场景滚动区 — 隐藏滚动条 + 悬浮按钮 */
+.scn-scroll-wrap{position:relative}
+.scn-scroll-track{display:flex;gap:14px;overflow-x:auto;scroll-behavior:smooth;scrollbar-width:none;-ms-overflow-style:none}
+.scn-scroll-track::-webkit-scrollbar{display:none}
+.scn-scroll-btn{position:absolute;top:50%;transform:translateY(-50%);z-index:10;width:32px;height:32px;border-radius:50%;border:1px solid var(--b);background:rgba(255,255,255,.9);backdrop-filter:blur(8px);color:var(--t2);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.scn-scroll-btn:hover{background:var(--a);color:#fff;border-color:var(--a);box-shadow:0 4px 16px rgba(0,113,227,.3)}
+.scn-scroll-prev{left:-16px}
+.scn-scroll-next{right:-16px}
+.sk-chain{display:flex;align-items:center;gap:3px;flex-wrap:wrap}
+.sk-chain .arr{font-size:9px;color:var(--t3)}
+.det-skill-row{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg);border-radius:8px;transition:background .15s}
+.det-skill-row:hover{background:rgba(0,113,227,.04)}
+.det-skill-num{width:22px;height:22px;border-radius:50%;background:var(--a);color:#fff;font-size:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-weight:600}
+.det-skill-name{font-size:12px;font-weight:600;cursor:pointer;color:var(--a)}
+.det-skill-role{font-size:11px;color:var(--t2);flex:1;line-height:1.5}
+/* 执行流程图 — 参考场景中心 ap-nd 卡片风格 */
+.det-flow{display:flex;align-items:stretch;gap:0;padding:8px 0;overflow-x:auto;scrollbar-width:none}
+.det-flow::-webkit-scrollbar{display:none}
+.det-flow-step{flex:1 1 0;min-width:0;max-width:200px;min-height:180px;background:var(--bg);border:1px solid var(--b);border-radius:14px;padding:14px;display:flex;flex-direction:column;transition:all .2s;position:relative}
+.det-flow-step:hover{background:var(--c);box-shadow:0 4px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
+.det-flow-top{width:32px;height:4px;border-radius:2px;margin-bottom:10px}
+.det-flow-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.det-flow-num{width:22px;height:22px;border-radius:6px;color:#fff;font-size:11px;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0}
+.det-flow-name{font-size:12px;font-weight:600;color:var(--t);line-height:1.3}
+.det-flow-role{font-size:10px;color:var(--t3);line-height:1.4;margin-bottom:10px;flex:1}
+.det-flow-io{display:flex;flex-direction:column;gap:4px;padding-top:8px;border-top:1px solid var(--b)}
+.det-flow-io-row{display:flex;align-items:baseline;gap:4px}
+.det-flow-io-label{font-size:8px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;min-width:24px;flex-shrink:0}
+.det-flow-io-val{font-size:10px;font-weight:500;color:var(--t);word-break:break-all}
+.det-flow-out{font-size:10px;font-weight:600;color:var(--g);margin-top:4px}
+.det-flow-arrow{font-size:18px;color:var(--a);font-weight:700;align-self:center;margin:0 4px;flex-shrink:0}
+/* 技能 IO */
+.det-skill-io{display:flex;gap:12px;margin-top:6px;flex-wrap:wrap}
+.det-io-item{font-size:10px;color:var(--t3);display:flex;align-items:center;gap:3px}
+.det-io-item b{font-weight:600;color:var(--t2)}
+.det-io-del{color:var(--g)}
+</style>
+</head>
+<body>
+
+<div class="sb" id="sidebar">
+<div class="sb-h">
+<div class="logo-s"><img class="sq" src="/static/logo-64.png" alt="A"><h1>Grape</h1></div>
+<div class="tagline">Multi-Agent DevOps</div>
+</div>
+<div class="sb-nav">
+<div class="grp">工作区</div>
+<a><span class="ic">📋</span> 任务中心</a>
+<a><span class="ic">■</span> 场景中心</a>
+<a><span class="ic">▶</span> 流水线</a>
+<div class="grp">DevOps Agents</div>
+<a><span class="ic" style="color:var(--pk)">●</span> VOD Agent</a>
+<a><span class="ic" style="color:var(--r)">●</span> Issue Agent</a>
+<a><span class="ic" style="color:var(--a)">●</span> Coding Agent</a>
+<a><span class="ic" style="color:var(--pu)">●</span> QA Agent</a>
+<a><span class="ic" style="color:var(--or)">●</span> SRE Agent</a>
+<div class="grp">DevOps 市场</div>
+<a class="act"><span class="ic">◈</span> 场景&技能市场</a>
+<div class="grp">知识库</div>
+<a><span class="ic">❖</span> 项目知识库</a>
+<div class="grp">设置</div>
+<a><span class="ic">⚙</span> 通用设置</a>
+<a><span class="ic">⎘</span> GitCode 仓库</a>
+<a><span class="ic">⚡</span> Agent 运行时</a>
+<a><span class="ic">📊</span> 系统监控</a>
+</div>
+</div>
+
+<div class="mn">
+<div class="ct">
+
+<!-- 场景详情页 -->
+<div id="scene-detail-page" class="hidden">
+  <button class="bt bt-o bt-s" onclick="backToMarket()" style="margin-bottom:12px">← 返回场景&技能市场</button>
+  <div id="detail-content"></div>
+</div>
+
+<!-- ========== 场景&技能市场（含场景） ========== -->
+<div id="market-page">
+  <div class="cd" style="margin-bottom:16px;padding:10px 14px;font-size:12px;color:var(--t2);line-height:1.6">
+    💡 <b style="color:var(--a)">场景</b> 是多个技能按开发流程组合的开发模式（如 VOD→Issue→Coding→QA→SRE），<b style="color:var(--a)">技能</b> 是单个 Agent 的能力包，完成具体动作。
+  </div>
+
+  <!-- 场景/精选 tab 切换 -->
+  <div class="stabs" style="margin-bottom:16px">
+    <a class="ac" id="tab-scenes" onclick="switchMarketTab('scenes')">🏪 开发场景</a>
+    <a id="tab-featured" onclick="switchMarketTab('featured')">🌟 精选技能</a>
+  </div>
+
+  <!-- 场景区 -->
+  <div id="scenes-section">
+    <div class="stabs" id="scene-cats" style="margin-bottom:12px"></div>
+    <div class="scn-scroll-wrap" style="margin-bottom:20px">
+      <div id="scene-list" class="scn-scroll-track"></div>
+      <button class="scn-scroll-btn scn-scroll-prev" onclick="scrollScenes(-1)">◀</button>
+      <button class="scn-scroll-btn scn-scroll-next" onclick="scrollScenes(1)">▶</button>
+    </div>
+  </div>
+
+  <!-- 精选技能区 -->
+  <div id="featured-section" class="hidden" style="margin-bottom:20px">
+    <div class="scn-scroll-wrap">
+      <div id="featured-skills" class="scn-scroll-track"></div>
+      <button class="scn-scroll-btn scn-scroll-prev" onclick="scrollFeatured(-1)">◀</button>
+      <button class="scn-scroll-btn scn-scroll-next" onclick="scrollFeatured(1)">▶</button>
+    </div>
+  </div>
+
+  <!-- 全部技能 -->
+  <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between">
+    <h2>全部技能</h2>
+    <div style="display:flex;gap:4px">
+      <button class="bt bt-p bt-s" id="sort-latest" onclick="switchSort('latest')">最新</button>
+      <button class="bt bt-o bt-s" id="sort-hot" onclick="switchSort('hot')">最热</button>
+    </div>
+  </div>
+  <div class="srow" style="margin-bottom:10px;flex-wrap:wrap">
+    <input placeholder="搜索技能..." onkeyup="filterSkills(this)" style="padding:7px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);color:var(--t);width:200px">
+    <button class="bt bt-o bt-s" onclick="alert('弹窗输入任务描述，系统推荐相关技能')">🔍 查找技能</button>
+    <button class="bt bt-p bt-s" id="scope-official" onclick="switchScope('official')">官方</button>
+    <button class="bt bt-o bt-s" id="scope-repo" onclick="switchScope('repo')">仓库</button>
+    <button class="bt bt-o bt-s" id="scope-user" onclick="switchScope('user')">个人</button>
+    <button class="bt bt-o bt-s" id="upload-btn" onclick="alert('上传技能 ZIP 包')" style="margin-left:auto;color:var(--a);border-color:var(--a)">上传技能</button>
+  </div>
+  <div class="stabs" id="agent-tabs"></div>
+  <div id="all-skills"></div>
+</div>
+
+</div>
+</div>
+
+<script>
+const SCENES = [
+  {id:'harmony',name:'鸿蒙开发',icon:'🍃',bg:'bg-harmony',featured:true,cat:'移动开发',desc:'解决 HarmonyOS 应用的 ArkTS 编码、分布式能力开发和 hap 上架问题',tpl:'Harmony 电商应用',repoCount:0,skills:['HM-VOD','HM-Issue','HM-Coding','HM-QA','HM-Deploy']},
+  {id:'default',name:'通用开发',icon:'⚙',bg:'bg-default',featured:true,cat:'通用',desc:'从需求收集到部署运维的全链路开发，适合大多数 Python/Go 项目',tpl:'Hello Flask',repoCount:5,skills:['VOD','Issue','Coding','QA','SRE']},
+  {id:'iac',name:'IaC 开发',icon:'🏗',bg:'bg-iac',featured:true,cat:'基础设施',desc:'用 Terraform 管理云资源，解决基础设施即代码的编写和部署问题',tpl:'Terraform Infra',repoCount:3,skills:['IaC-VOD','IaC-Issue','IaC-Coding','IaC-QA','IaC-SRE']},
+  {id:'skill-dev',name:'华为云 Skill 开发',icon:'🔧',bg:'bg-skill',featured:true,cat:'技能开发',desc:'自动创建、测试并发布华为云技能到 ClawHub 平台',tpl:'Hello Skill',repoCount:2,skills:['VOD','Skill-Issue','Creator','Tester','Publish']},
+  {id:'cloud-native',name:'云原生开发',icon:'☁',bg:'bg-cloud',featured:false,cat:'基础设施',desc:'容器化微服务开发，解决 Docker 打包和 K8s 部署问题',tpl:'Micro Service',repoCount:1,skills:['VOD','Issue','Coding','QA','SRE']},
+  {id:'agent-dev',name:'Agent 开发',icon:'🤖',bg:'bg-agent',featured:false,cat:'AI 应用',desc:'构建多 Agent 协同项目，解决 AI Agent 的编排和部署问题',tpl:'AI 面试天团',repoCount:0,skills:['VOD','Issue','Coding','QA','SRE']},
+  {id:'api-skill-dev',name:'通用 Skill 开发',icon:'🔗',bg:'bg-api',featured:false,cat:'技能开发',desc:'从 OpenAPI 文档自动生成 REST API 技能，解决接口技能化问题',tpl:'Hello Skill',repoCount:0,skills:['VOD','Skill-Issue','API-Creator','API-Tester','Publish']},
+  {id:'blog-publish',name:'博客发布',icon:'📝',bg:'bg-blog',featured:false,cat:'内容创作',desc:'AI 自动生成博客内容并发布到博客系统，解决内容生产和上线问题',tpl:'待补',repoCount:2,skills:['Blog-VOD','Blog-Issue','AI-Blog','Blog-Publish']},
+];
+
+const SCENE_ROLES = {
+  'default':['需求收集','需求管理','代码实现','质量审查','部署运维'],
+  'iac':['需求分析','Issue管理','Terraform编码','质量审查','部署运维'],
+  'skill-dev':['需求收集','Issue管理','技能创建','技能测试','技能发布'],
+  'harmony':['需求分析','Issue分发','ArkTS实现','编译检查','部署上架'],
+  'cloud-native':['需求收集','Issue管理','代码实现','代码审查','容器部署'],
+  'agent-dev':['需求收集','Issue管理','Agent实现','代码审查','部署上线'],
+  'api-skill-dev':['需求收集','Issue管理','API技能生成','技能测试','技能发布'],
+  'blog-publish':['博客需求','Issue管理','AI博客生成','博客发布'],
+};
+
+// ===== 场景卡片（横向排列，左右滑动） =====
+let _scnCat = '全部';
+function renderSceneCats() {
+  const cats = ['全部', ...new Set(SCENES.map(s=>s.cat))];
+  document.getElementById('scene-cats').innerHTML = cats.map(c=>`<a class="${c===_scnCat?'ac':''}" onclick="switchSceneCat('${c}')">${c}</a>`).join('');
+}
+function switchSceneCat(cat) { _scnCat = cat; renderSceneCats(); renderSceneCards(); }
+function renderSceneCards() {
+  let filtered = _scnCat === '全部' ? SCENES : SCENES.filter(s=>s.cat===_scnCat);
+  let html = filtered.map((s,idx)=>{
+    let chain = s.skills.map((sk,i)=>`${i>0?'<span class="scn-arr">→</span>':''}<span class="scn-tag">${sk}</span>`).join('');
+    return `<div class="scn-card" data-idx="${idx}" onclick="showSceneDetail('${s.id}')">
+      <div class="scn-card-bar ${s.bg}"></div>
+      <div class="scn-card-body">
+        <div class="scn-card-head">
+          <div class="scn-ic ${s.bg}">${s.icon}</div>
+          <div class="scn-card-title">${s.name}</div>
+          ${s.featured?'<span class="scn-star">🌟</span>':''}
+        </div>
+        <div class="scn-card-desc">${s.desc}</div>
+        <div class="scn-chain">${chain}</div>
+        <div class="scn-card-foot">
+          <span class="scn-meta">${s.skills.length} 技能 · ${s.repoCount} 仓库在用</span>
+          <div class="scn-card-btns">
+            <button class="bt bt-o bt-s" onclick="event.stopPropagation();alert('应用到当前仓库')">应用</button>
+            <button class="bt bt-p bt-s" onclick="event.stopPropagation();alert('一键体验')">体验</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  document.getElementById('scene-list').innerHTML = html;
+}
+function scrollScenes(dir) {
+  const el = document.getElementById('scene-list');
+  el.scrollBy({left: dir * 314, behavior: 'smooth'});
+}
+function scrollFeatured(dir) {
+  const el = document.getElementById('featured-skills');
+  el.scrollBy({left: dir * 314, behavior: 'smooth'});
+}
+
+// ===== 技能 =====
+const SKILLS = [
+  {name:'鸿蒙代码实现',agent:'Coding',tag:'tg-c',scope:'official',featured:true,desc:'解决 ArkTS 不会写、ArkUI 页面搭不出来的问题，自动生成 Stage 模型代码和分布式能力',likes:5,liked:false,scenes:['鸿蒙开发'],sceneCount:1,repoCount:0},
+  {name:'代码实现',agent:'Coding',tag:'tg-c',scope:'official',featured:true,desc:'解决从需求到代码的落地问题：自动分析 Issue、制定方案、编码实现并提交 PR',likes:12,liked:true,scenes:['通用开发','云原生','Agent开发'],sceneCount:3,repoCount:8},
+  {name:'开发者声音分析',agent:'VOD',tag:'tg-v',scope:'official',featured:true,desc:'解决需求不清晰的问题：从 Issue/飞书收集反馈，多轮引导收敛为可开发需求',likes:8,liked:false,scenes:['通用开发','IaC开发'],sceneCount:5,repoCount:11},
+  {name:'云部署',agent:'SRE',tag:'tg-s',scope:'official',featured:true,desc:'解决部署难、运维缺人的问题：自动创建云资源、配置服务、设置监控',likes:5,liked:false,scenes:['通用开发','云原生'],sceneCount:2,repoCount:6},
+  {name:'PR 管理',agent:'QA',tag:'tg-q',scope:'official',featured:true,desc:'解决 PR 审查效率低的问题：自动关联 Issue、代码审查、安全扫描、一键合并',likes:6,liked:false,scenes:['通用开发'],sceneCount:3,repoCount:8},
+  {name:'Issue 高级运营',agent:'Issue',tag:'tg-i',scope:'official',featured:true,desc:'解决 Issue 堆积没人管的问题：自动分析可开发性、分类打标签、分配负责人、生成 Spec',likes:4,liked:false,scenes:['通用开发'],sceneCount:3,repoCount:8},
+  {name:'华为云 Skill 创建生成器',agent:'Coding',tag:'tg-c',scope:'official',featured:true,desc:'解决从零写技能太慢的问题：查重→读 Spec→三级调研→骨架生成→自测→PR 全自动',likes:3,liked:false,scenes:['华为云Skill开发'],sceneCount:1,repoCount:2},
+  {name:'鸿蒙部署发布',agent:'SRE',tag:'tg-s',scope:'official',featured:true,desc:'解决 hap 包不会打、真机不会装、上架流程不熟的问题',likes:2,liked:false,scenes:['鸿蒙开发'],sceneCount:1,repoCount:0},
+  {name:'自定义部署脚本',agent:'SRE',tag:'tg-s',scope:'repo',featured:false,desc:'解决多环境部署配置不统一的问题，仓库级自定义部署流程',likes:1,liked:false,scenes:['通用开发'],sceneCount:1,repoCount:1},
+  {name:'我的代码规范检查',agent:'QA',tag:'tg-q',scope:'user',featured:false,desc:'解决团队代码规范不统一的问题，个人自定义检查规则',likes:0,liked:false,scenes:[],sceneCount:0,repoCount:0},
+];
+
+const AGENT_LABELS = {VOD:'VOD Agent',Issue:'Issue Agent',Coding:'Coding Agent',QA:'QA Agent',SRE:'SRE Agent',Chat:'Chat Agent'};
+
+function renderSkillCard(s) {
+  return `<div class="rc" style="flex-shrink:0;width:300px">
+    <div class="rh">
+      <span class="tg ${s.tag}" style="font-size:9px">${s.agent}</span>
+      <span class="rn" style="flex:1">${s.name}</span>
+      ${s.featured?'<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟</span>':''}
+    </div>
+    <div class="rd" style="margin-bottom:8px">${s.desc}</div>
+    <div class="ro">所属场景：${s.scenes.length?s.scenes.map(sc=>`<span style="color:var(--a);cursor:pointer" onclick="showSceneDetail('${sc==='鸿蒙开发'?'harmony':sc==='通用开发'?'default':sc==='IaC开发'?'iac':sc==='云原生'?'cloud-native':sc==='Agent开发'?'agent-dev':sc==='华为云Skill开发'?'skill-dev':'default'}')">${sc}</span>`).join(' · '):'<span class="t3">未关联场景</span>'}</div>
+    <div class="ro">${s.sceneCount} 个场景在用，${s.repoCount} 个仓库在用</div>
+    <div class="rf">
+      <span class="s" style="cursor:pointer" onclick="toggleLike(this)">${s.liked?'❤️':'🤍'} ${s.likes}</span>
+      <button class="bt bt-o bt-s" onclick="alert('查看技能详情')">查看详情</button>
+    </div>
+  </div>`;
+}
+
+function renderSkills() {
+  const scope = window._skillScope || 'official';
+  const scoped = SKILLS.filter(s => s.scope === scope);
+  // 精选技能：官方 scope 时渲染内容，tab 控制显隐
+  const featuredSection = document.getElementById('featured-section');
+  if (scope === 'official') {
+    const featured = scoped.filter(s=>s.featured).sort((a,b)=>(b.likes||0)-(a.likes||0));
+    document.getElementById('featured-skills').innerHTML = featured.map(s=>renderSkillCard(s)).join('');
+  } else {
+    document.getElementById('featured-skills').innerHTML = '<div class="ts t3" style="padding:20px;text-align:center">仅官方技能支持精选</div>';
+  }
+  let groups = {};
+  scoped.forEach(s=>{if(!groups[s.agent])groups[s.agent]=[];groups[s.agent].push(s)});
+  const agentOrder = ['VOD','Issue','Coding','QA','SRE','Chat'];
+  const agents = agentOrder.filter(a=>groups[a]);
+  if (agents.length === 0) {
+    document.getElementById('agent-tabs').innerHTML = '';
+    document.getElementById('all-skills').innerHTML = '<div class="ts t3" style="padding:20px;text-align:center">此范围暂无技能</div>';
+    return;
+  }
+  let tabsHtml = agents.map((a,i)=>`<a class="${i===0?'ac':''}" onclick="switchAgentTab(${i})">${AGENT_LABELS[a]||a} <span class="c" style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:1px 6px;border-radius:8px;margin-left:2px">${groups[a].length}</span></a>`).join('');
+  document.getElementById('agent-tabs').innerHTML = tabsHtml;
+  window._agentGroups = groups;
+  window._agentList = agents;
+  renderAgentSkills(0);
+}
+
+function renderAgentSkills(idx) {
+  const agents = window._agentList || [];
+  if (idx < 0 || idx >= agents.length) return;
+  document.querySelectorAll('#agent-tabs a').forEach((a,i)=>a.classList.toggle('ac', i===idx));
+  const agent = agents[idx];
+  let skills = (window._agentGroups||{})[agent] || [];
+  if (window._skillSort === 'hot') skills = [...skills].sort((a,b)=>(b.likes||0)-(a.likes||0));
+  document.getElementById('all-skills').innerHTML = `<div class="rgrid">${skills.map(s=>renderSkillCard(s)).join('')}</div>`;
+}
+function switchAgentTab(idx) { renderAgentSkills(idx); }
+function switchScope(scope) {
+  window._skillScope = scope;
+  ['official','repo','user'].forEach(s=>{
+    const btn = document.getElementById('scope-'+s);
+    if (btn) btn.className = s===scope ? 'bt bt-p bt-s' : 'bt bt-o bt-s';
+  });
+  const uploadBtn = document.getElementById('upload-btn');
+  if (uploadBtn) uploadBtn.style.display = scope === 'official' ? 'none' : '';
+  renderSkills();
+}
+
+function switchMarketTab(tab) {
+  document.getElementById('tab-scenes').classList.toggle('ac', tab==='scenes');
+  document.getElementById('tab-featured').classList.toggle('ac', tab==='featured');
+  document.getElementById('scenes-section').classList.toggle('hidden', tab!=='scenes');
+  document.getElementById('featured-section').classList.toggle('hidden', tab!=='featured');
+}
+function switchSort(mode) {
+  window._skillSort = mode;
+  document.getElementById('sort-latest').className = mode==='latest'?'bt bt-p bt-s':'bt bt-o bt-s';
+  document.getElementById('sort-hot').className = mode==='hot'?'bt bt-p bt-s':'bt bt-o bt-s';
+  // 重新渲染当前选中 tab
+  const activeTab = document.querySelector('#agent-tabs a.ac');
+  if (activeTab) {
+    const tabs = Array.from(document.querySelectorAll('#agent-tabs a'));
+    renderAgentSkills(tabs.indexOf(activeTab));
+  }
+}
+
+function toggleLike(el) {
+  let count = parseInt(el.textContent.match(/\d+/)?.[0]||'0');
+  el.innerHTML = el.textContent.includes('🤍') ? `❤️ ${count+1}` : `🤍 ${count-1}`;
+}
+
+// ===== 场景详情 =====
+const SCENE_DATA = {
+  'harmony':{name:'鸿蒙开发',icon:'🍃',bg:'bg-harmony',featured:true,desc:'HarmonyOS 鸿蒙应用开发场景，基于 ArkTS/ArkUI 构建分布式跨端应用。覆盖从需求分析、Issue 运营、ArkTS 代码实现、编译质量审查到 hap 包构建部署、AGC 上架的全流程，适合开发 HarmonyOS 原生应用。',tpl:{name:'Harmony 电商应用',desc:'基于 HarmonyOS ArkTS 的分布式电商应用',lang:'ArkTS',stars:0},repos:[],skills:[
+    {display:'鸿蒙需求分析',agent:'VOD',tag:'tg-v',role:'鸿蒙需求收集与分析：判定 ArkUI/分布式/Ability 等能力方向，收敛为可开发需求',input:'Issue 反馈 / 飞书需求',output:'结构化需求文档',deliverable:'需求 Spec + 能力清单'},
+    {display:'鸿蒙 Issue 运营',agent:'Issue',tag:'tg-i',role:'鸿蒙 Issue 分发：UI 组件/分布式能力/Stage 模型分类与 Spec 生成',input:'需求 Spec',output:'分类标签 + 开发任务',deliverable:'Issue 看板 + Spec 文档'},
+    {display:'鸿蒙代码实现',agent:'Coding',tag:'tg-c',role:'ArkTS 代码实现 + ArkUI 页面开发 + 分布式能力开发（跨端迁移/协同）',input:'Issue + Spec',output:'ArkTS 代码 + ArkUI 页面',deliverable:'feat 分支 + PR'},
+    {display:'鸿蒙质量审查',agent:'QA',tag:'tg-q',role:'ArkTS 编译检查 + hvigw 安全扫描 + UI 自检',input:'PR 代码',output:'审查报告 + 修复建议',deliverable:'质量报告 + 合并'},
+    {display:'鸿蒙部署发布',agent:'SRE',tag:'tg-s',role:'hap 包构建 + hdc 安装部署 + 模拟器/真机调试 + AGC 上架',input:'合并代码',output:'hap 安装包',deliverable:'上架 AGC + 版本发布'},
+  ]},
+  'default':{name:'通用开发',icon:'⚙',bg:'bg-default',featured:true,desc:'通用的全链路开发场景，从需求收集到部署运维，适合大多数项目。包含 VOD→Issue→Coding→QA→SRE 完整链路。',tpl:{name:'Hello Flask',desc:'一个简单的 Flask Web 应用模板',lang:'Python',stars:128},repos:['gcw_3FZApeLT/hello-flask2','gcw_3FZApeLT/hello-todo','gcw_3FZApeLT/redbook-operate'],skills:[
+    {display:'开发者声音分析',agent:'VOD',tag:'tg-v',role:'构建项目知识基线，从 Issue/飞书收集反馈，多轮引导收敛为清晰需求',input:'Issue 反馈 / 飞书讨论',output:'结构化需求',deliverable:'需求 Spec 文档'},
+    {display:'Issue 高级运营',agent:'Issue',tag:'tg-i',role:'深度可开发性分析 → 分类/标签/分配 → Spec 文档生成',input:'需求 Spec',output:'分类 Issue + 任务分配',deliverable:'Issue 看板 + Spec'},
+    {display:'代码实现',agent:'Coding',tag:'tg-c',role:'分析问题、制定方案、编码实现、提交 PR',input:'Issue + Spec',output:'代码实现',deliverable:'feat 分支 + PR'},
+    {display:'PR 管理',agent:'QA',tag:'tg-q',role:'Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并',input:'PR 代码',output:'审查结果',deliverable:'质量报告 + 合并 PR'},
+    {display:'云部署',agent:'SRE',tag:'tg-s',role:'云资源部署与运维：创建、配置、监控云服务',input:'合并代码',output:'线上服务',deliverable:'部署成功 + 监控配置'},
+  ]},
+  'iac':{name:'IaC 开发',icon:'🏗',bg:'bg-iac',featured:true,desc:'IaC 基础设施即代码开发场景，使用 Terraform 管理云资源。',tpl:{name:'Terraform Infra',desc:'Terraform 基础设施模板',lang:'HCL',stars:45},repos:['gcw_3FZApeLT/Terraform-Infra'],skills:[
+    {display:'IaC 需求分析',agent:'VOD',tag:'tg-v',role:'IaC 场景需求收集与分析',input:'资源需求反馈',output:'IaC 需求 Spec',deliverable:'资源规划文档'},
+    {display:'IaC Issue 运营',agent:'Issue',tag:'tg-i',role:'IaC Issue 分类、Spec 生成',input:'IaC 需求',output:'分类任务',deliverable:'Issue + Spec'},
+    {display:'IaC 代码实现',agent:'Coding',tag:'tg-c',role:'Terraform/HCL 编码实现，资源编排',input:'Issue + Spec',output:'Terraform 代码',deliverable:'HCL 文件 + PR'},
+    {display:'IaC 质量审查',agent:'QA',tag:'tg-q',role:'IaC 配置审查、安全扫描、合规检查',input:'PR 代码',output:'审查报告',deliverable:'合规报告 + 合并'},
+    {display:'IaC 部署运维',agent:'SRE',tag:'tg-s',role:'基础设施部署、状态管理、资源监控',input:'合并代码',output:'云资源实例',deliverable:'terraform apply + 监控'},
+  ]},
+  'skill-dev':{name:'华为云 Skill 开发',icon:'🔧',bg:'bg-skill',featured:true,desc:'华为云 Skill 开发场景，创建和发布华为云技能。',tpl:{name:'Hello Skill',desc:'华为云 Skill 模板',lang:'Python',stars:22},repos:['gcw_3FZApeLT/huaweicloud-operations-skill'],skills:[
+    {display:'开发者声音分析',agent:'VOD',tag:'tg-v',role:'需求收集，确定要创建什么 Skill',input:'用户需求',output:'Skill 需求',deliverable:'需求 Spec'},
+    {display:'Skill Issue 运营',agent:'Issue',tag:'tg-i',role:'Skill Issue 管理、Spec 生成',input:'Skill 需求',output:'开发任务',deliverable:'Issue + Spec'},
+    {display:'华为云 Skill 创建生成器',agent:'Coding',tag:'tg-c',role:'查重→读 Spec→三级调研→骨架生成→PR',input:'Issue + Spec',output:'Skill 代码骨架',deliverable:'SKILL.md + PR'},
+    {display:'华为云 Skill 测试验证',agent:'QA',tag:'tg-q',role:'功能验证+规范脚本化检查',input:'PR 代码',output:'测试报告',deliverable:'测试通过 + 合并'},
+    {display:'skill 发布',agent:'SRE',tag:'tg-s',role:'技能发布到 ClawHub 平台，版本管理',input:'合并代码',output:'已发布 Skill',deliverable:'ClawHub 上架'},
+  ]},
+  'cloud-native':{name:'云原生开发',icon:'☁',bg:'bg-cloud',featured:false,desc:'云原生开发场景，适合微服务和容器化项目。',tpl:{name:'Micro Service',desc:'微服务模板',lang:'Go',stars:89},repos:['gcw_3FZApeLT/PracticeHub2'],skills:[
+    {display:'开发者声音分析',agent:'VOD',tag:'tg-v',role:'需求收集与分析',input:'Issue 反馈',output:'微服务需求',deliverable:'需求 Spec'},
+    {display:'Issue 高级运营',agent:'Issue',tag:'tg-i',role:'Issue 管理、Spec 生成',input:'需求 Spec',output:'开发任务',deliverable:'Issue + Spec'},
+    {display:'代码实现',agent:'Coding',tag:'tg-c',role:'微服务代码实现',input:'Issue + Spec',output:'Go 代码',deliverable:'feat 分支 + PR'},
+    {display:'PR 管理',agent:'QA',tag:'tg-q',role:'代码审查、合并',input:'PR 代码',output:'审查结果',deliverable:'质量报告 + 合并'},
+    {display:'云部署',agent:'SRE',tag:'tg-s',role:'容器化部署、K8s 配置',input:'合并代码',output:'K8s 部署',deliverable:'Docker 镜像 + K8s 部署'},
+  ]},
+  'agent-dev':{name:'Agent 开发',icon:'🤖',bg:'bg-agent',featured:false,desc:'Agent 开发场景，适合构建 AI Agent 项目。',tpl:{name:'AI 面试天团',desc:'AI 面试助手项目',lang:'Python',stars:56},repos:[],skills:[
+    {display:'开发者声音分析',agent:'VOD',tag:'tg-v',role:'需求收集',input:'用户需求',output:'Agent 需求',deliverable:'需求 Spec'},
+    {display:'Issue 高级运营',agent:'Issue',tag:'tg-i',role:'Issue 管理',input:'需求 Spec',output:'开发任务',deliverable:'Issue + Spec'},
+    {display:'代码实现',agent:'Coding',tag:'tg-c',role:'Agent 代码实现',input:'Issue + Spec',output:'Agent 代码',deliverable:'feat 分支 + PR'},
+    {display:'PR 管理',agent:'QA',tag:'tg-q',role:'代码审查',input:'PR 代码',output:'审查结果',deliverable:'质量报告 + 合并'},
+    {display:'云部署',agent:'SRE',tag:'tg-s',role:'部署上线',input:'合并代码',output:'线上服务',deliverable:'部署成功'},
+  ]},
+  'api-skill-dev':{name:'通用 Skill 开发',icon:'🔗',bg:'bg-api',featured:false,desc:'通用 Skill 开发场景，基于 OpenAPI 自动生成 REST API 技能。',tpl:{name:'Hello Skill',desc:'通用 Skill 模板',lang:'Python',stars:22},repos:[],skills:[
+    {display:'开发者声音分析',agent:'VOD',tag:'tg-v',role:'需求收集',input:'用户需求',output:'API Skill 需求',deliverable:'需求 Spec'},
+    {display:'Skill Issue 运营',agent:'Issue',tag:'tg-i',role:'Issue 管理',input:'需求 Spec',output:'开发任务',deliverable:'Issue + Spec'},
+    {display:'通用 Skill 创建生成器',agent:'Coding',tag:'tg-c',role:'从 OpenAPI 文档自动生成 REST API 技能',input:'Issue + OpenAPI 文档',output:'API Skill 代码',deliverable:'SKILL.md + PR'},
+    {display:'通用 Skill 测试验证',agent:'QA',tag:'tg-q',role:'功能验证+规范检查',input:'PR 代码',output:'测试报告',deliverable:'测试通过 + 合并'},
+    {display:'skill 发布',agent:'SRE',tag:'tg-s',role:'技能发布',input:'合并代码',output:'已发布 Skill',deliverable:'ClawHub 上架'},
+  ]},
+  'blog-publish':{name:'博客发布',icon:'📝',bg:'bg-blog',featured:false,desc:'博客系统开发与发布场景。',tpl:{name:'待补充',desc:'博客系统模板（待补）',lang:'',stars:0},repos:['gcw_3FZApeLT/BLOG-SYS-test3'],skills:[
+    {display:'博客需求精细化引导',agent:'VOD',tag:'tg-v',role:'博客需求精细化，从粗略需求到可执行 Spec',input:'博客主题需求',output:'博客文章 Spec',deliverable:'文章大纲 + Spec'},
+    {display:'博客 Issue 运营',agent:'Issue',tag:'tg-i',role:'博客 Issue 管理',input:'博客 Spec',output:'写作任务',deliverable:'Issue + Spec'},
+    {display:'AI 博客生成',agent:'Coding',tag:'tg-c',role:'AI 自动生成博客内容',input:'Issue + Spec',output:'博客文章内容',deliverable:'Markdown 文章 + PR'},
+    {display:'博客系统发布',agent:'SRE',tag:'tg-s',role:'博客系统部署与发布',input:'合并代码',output:'已发布博客',deliverable:'线上博客更新'},
+  ]},
+};
+
+function showSceneDetail(id) {
+  const s = SCENE_DATA[id]; if(!s) return;
+  document.getElementById('market-page').classList.add('hidden');
+  document.getElementById('scene-detail-page').classList.remove('hidden');
+  // 执行流程：参考场景中心 ap-nd 卡片风格，每个技能一个垂直卡片
+  const FLOW_COLORS = {VOD:'#ff2d92',Issue:'#ff3b30',Coding:'#0071e3',QA:'#af52de',SRE:'#ff9f0a'};
+  let flowHtml = s.skills.map((sk,i)=>{
+    let color = FLOW_COLORS[sk.agent] || 'var(--a)';
+    let arrow = i < s.skills.length-1 ? '<div class="det-flow-arrow">→</div>' : '';
+    return `<div class="det-flow-step">
+      <div class="det-flow-top" style="background:${color}"></div>
+      <div class="det-flow-head">
+        <div class="det-flow-num" style="background:${color}">${i+1}</div>
+        <span class="tg ${sk.tag}" style="font-size:9px">${sk.agent}</span>
+      </div>
+      <div class="det-flow-name">${sk.display}</div>
+      <div class="det-flow-role">${sk.role}</div>
+      <div class="det-flow-io">
+        <div class="det-flow-io-row"><span class="det-flow-io-label">输入</span><span class="det-flow-io-val">${sk.input||'—'}</span></div>
+        <div class="det-flow-io-row"><span class="det-flow-io-label">输出</span><span class="det-flow-io-val">${sk.output||'—'}</span></div>
+        <div class="det-flow-out">📦 ${sk.deliverable||'—'}</div>
+      </div>
+    </div>${arrow}`;
+  }).join('');
+  // 技能详解：每个技能展开输入/输出/产出
+  let skillsHtml = s.skills.map((sk,i)=>`<div class="det-skill-row">
+    <div class="det-skill-num">${i+1}</div>
+    <div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span class="tg ${sk.tag}" style="font-size:9px">${sk.agent}</span>
+        <span class="det-skill-name">${sk.display}</span>
+      </div>
+      <div class="det-skill-role">${sk.role}</div>
+      <div class="det-skill-io">
+        <span class="det-io-item"><b>输入</b> ${sk.input||'—'}</span>
+        <span class="det-io-item"><b>输出</b> ${sk.output||'—'}</span>
+        <span class="det-io-item det-io-del"><b>产出</b> ${sk.deliverable||'—'}</span>
+      </div>
+    </div>
+  </div>`).join('');
+  let reposHtml = s.repos.length>0 ? s.repos.map(r=>`<span class="tg tg-d" style="margin:2px">${r}</span>`).join('') : '<span class="ts t3">暂无仓库在用</span>';
+  document.getElementById('detail-content').innerHTML = `
+    <div class="cd" style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px">
+        <div class="scn-ic scn-ic-lg ${s.bg}">${s.icon}</div>
+        <div style="flex:1">
+          <div style="font-size:18px;font-weight:700;color:var(--t)">${s.name} ${s.featured?'<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y)">🌟 精选</span>':''}</div>
+          <div class="ts t2" style="margin-top:4px;line-height:1.6">${s.desc}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="bt bt-o bt-s" onclick="alert('应用到当前仓库')">应用</button>
+        <button class="bt bt-p bt-s" onclick="alert('一键体验')">体验</button>
+      </div>
+    </div>
+    <div class="cd" style="margin-bottom:14px">
+      <div class="cd-h"><h2>执行流程</h2></div>
+      <div class="det-flow">${flowHtml}</div>
+    </div>
+    <div class="cd" style="margin-bottom:14px">
+      <div class="cd-h"><h2>技能详解</h2></div>
+      <div style="display:flex;flex-direction:column;gap:8px">${skillsHtml}</div>
+    </div>
+    <div class="cd" style="margin-bottom:14px">
+      <div class="cd-h"><h2>推荐模板</h2></div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:20px">📦</span>
+        <div><div style="font-size:13px;font-weight:600">${s.tpl.name}</div><div class="tx t3">${s.tpl.desc}</div></div>
+        <span class="tg tg-d" style="margin-left:auto">${s.tpl.lang?s.tpl.lang+' · ⭐ '+s.tpl.stars:''}</span>
+      </div>
+    </div>
+    <div class="cd">
+      <div class="cd-h"><h2>在用仓库 (${s.repos.length})</h2></div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${reposHtml}</div>
+    </div>`;
+}
+
+function backToMarket() {
+  document.getElementById('scene-detail-page').classList.add('hidden');
+  document.getElementById('market-page').classList.remove('hidden');
+}
+
+function filterSkills(input) {
+  const q=input.value.toLowerCase();
+  document.querySelectorAll('#all-skills .rc').forEach(c=>{
+    const n=c.querySelector('.rn')?.textContent.toLowerCase()||'';
+    const d=c.querySelector('.rd')?.textContent.toLowerCase()||'';
+    c.style.display=(n.includes(q)||d.includes(q))?'':'none';
+  });
+}
+
+renderSceneCats();
+renderSceneCards();
+window._skillSort = 'latest';
+window._skillScope = 'official';
+document.getElementById('upload-btn').style.display = 'none';
+renderSkills();
+</script>
+</body>
+</html>

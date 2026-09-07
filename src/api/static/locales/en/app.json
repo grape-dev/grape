@@ -1,4 +1,5 @@
 {
+  "current_project": "Current Project",
   "nav": {
     "dashboard": "Dashboard",
     "pipeline": "Pipeline",
@@ -15,18 +16,23 @@
     "events": "Events",
     "repos": "Repos",
     "tasks": "Task Center",
-    "observability": "Observability",
+    "observability": "Device Monitor",
     "event_detail": "Event Detail",
     "skill_detail": "Skill Detail",
     "sub_skill_detail": "Sub Skill Detail",
     "gitcode_repo": "GitCode Repo",
-    "scene_center": "Scene Center"
+    "scene_center": "Project Scenes",
+    "scene_skill_market": "Scenes & Skills",
+    "scene_market": "Scene Market",
+    "skill_market": "Skill Market"
   },
   "sidebar": {
     "workspace": "Workspace",
     "devops_agents": "DevOps Agents",
+    "devops_market": "Scene Center",
     "knowledge": "Knowledge",
     "account": "User Center",
+    "device_center": "Device Center",
     "settings": "Settings"
   },
   "login": {
@@ -54,8 +60,10 @@
   "nav_groups": {
     "workspace": "Workspace",
     "devops_agents": "DevOps Agents",
+    "devops_market": "Scene Center",
     "knowledge": "Knowledge",
     "account": "User Center",
+    "device_center": "Device Center",
     "settings": "Settings"
   },
   "loading": "Loading...",

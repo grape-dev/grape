@@ -1,32 +1,31 @@
-# examples
+# grape-template
 
-`examples/` 目录用于存放 Grape 官方项目模板（Hello World 系列示例），供「项目模板」一键创建使用。
+Grape 官方项目模板独立仓库。内容由 grape 主仓库在构建/部署阶段通过 `scripts/sync_templates.sh`
+拉取到部署根 `examples/` 与 `configs/project-templates.json`。
 
-## 来源
+## 目录约定
 
-官方项目模板已迁移至独立仓库 **https://gitcode.com/grape-dev/grape-template**，本目录在**部署期**由
+| 目录/文件 | 说明 |
+|---|---|
+| `hello-*` | 官方项目模板，目录名即模板 `id`，与 `project-templates.json` 中 `source: "local"` 的模板一一对应 |
+| `project-templates.json` | 官方模板注册表（含 local 与 git 模板全量条目），随本仓库独立发版 |
+
+> 新增模板时，必须同时满足：新建同名模板目录 **且** 在 `project-templates.json` 中登记对应 `id`
+>（`source: "local"`）。两者不一致会导致 grape 侧 `test_local_template_dir_exists` 门禁失败。
+
+## 模板列表
+
+- `hello-flask` — 极简 Flask Web 应用（default 场景）
+- `hello-fastapi` — 极简 FastAPI 服务（default 场景）
+- `hello-todo` — 命令行待办清单（default 场景）
+- `hello-calculator` — 计算器 + 单元测试（default 场景）
+- `hello-html` — 静态网页前端三件套（default 场景）
+- `hello-blog` — Flask 多页博客骨架（default 场景）
+- `hello-skill` — 最小 Skill 项目模板（skill-dev 场景）
+
+## 使用
 
 ```bash
+# 在 grape 主仓库部署时同步模板
 bash scripts/sync_templates.sh
 ```
-
-从独立仓拉取铺入 `examples/`（示例工程）与 `configs/project-templates.json`（模板注册清单）。
-
-> `git pull` / 部署后必须执行 `sync_templates.sh`，否则官方模板缺失（首次部署同理）。
-
-## 部署后本目录应包含
-
-| 模板 | 说明 |
-|------|------|
-| `hello-blog/` | 极简博客应用 |
-| `hello-calculator/` | 计算器示例（含单测） |
-| `hello-fastapi/` | FastAPI 服务示例 |
-| `hello-flask/` | Flask 服务示例 |
-| `hello-html/` | 静态 HTML 示例 |
-| `hello-skill/` | 技能（Skill）示例 |
-| `hello-todo/` | Todo 应用示例 |
-
-## 说明
-
-- 本地开发期本目录可为空（仅保留 `.gitkeep` / 本 README），模板由部署链路提供；
-- 自定义/本地模板继续放在本目录渲染 `configs/project-templates.json` 时引用即可（详见 `docs/new-version3/project-templates-standalone-repo-design.md`）。

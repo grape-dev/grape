@@ -1,21 +1,89 @@
 /* Agent Runtime 管理页（M4 双视图）：Engines / Workers 两个子页，各按 scope 分区展示。
    见 runtime-admin-two-view-design.md。卡片式布局：状态徽章置顶，异常引擎优先捕捉。 */
 const RUNTIME_ICON = { online: '●', recently_lost: '◐', offline: '○', about_to_gc: '⚠' };
-const RUNTIME_COLOR = { online: 'var(--g)', recently_lost: 'var(--or)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
+const RUNTIME_COLOR = { online: 'var(--g)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
 const SCOPE_NAMES = { global: 'global', repo: 'repo', user: 'user' };
 const SCOPE_ORDER = ['global', 'repo', 'user'];
 const HEALTH_NAMES = { online: 'online', recently_lost: 'recently_lost', offline: 'offline', about_to_gc: 'about_to_gc' };
 const HEALTH_BADGE = {
   online: { color: 'var(--g)', bg: '#dcfce7' },
-  recently_lost: { color: 'var(--or)', bg: '#fef3c7' },
+  recently_lost: { color: 'var(--y)', bg: '#fef3c7' },
   offline: { color: 'var(--t3)', bg: '#eef0f3' },
   about_to_gc: { color: 'var(--r)', bg: '#fee2e2' },
 };
 
 let _runtimeTab = 'engines';
+let _runtimeSearch = '';
+let _rtFilterType = '';
+let _rtFilterScope = '';
 let __runtimeData = null;
 let __runtimeDevices = null;
 let _skillScanDirty = false;  // skills 扫描成功后标记，关闭弹窗时刷新引擎列表
+let _scopeCollapse = { global: false, repo: true, user: true };  // scope 分组折叠状态：global 默认展开，repo/user 默认折叠
+
+function _toggleScope(sc) {
+  // 互斥：展开一个时自动折叠其他
+  if (_scopeCollapse[sc]) {
+    // 当前折叠 → 即将展开 → 先折叠所有其他
+    Object.keys(_scopeCollapse).forEach(k => { if (k !== sc) _scopeCollapse[k] = true; });
+  }
+  _scopeCollapse[sc] = !_scopeCollapse[sc];
+  renderRuntimes(__runtimeData);
+}
+
+// 健康状态排序：在线 → 刚失联 → 离线 → 待回收
+const _HEALTH_ORDER = { online: 0, recently_lost: 1, offline: 2, about_to_gc: 3 };
+function _sortByHealth(list) {
+  return list.sort((a, b) => {
+    const ha = _HEALTH_ORDER[a.health || a.status || 'offline'] ?? 9;
+    const hb = _HEALTH_ORDER[b.health || b.status || 'offline'] ?? 9;
+    return ha - hb;
+  });
+}
+
+// 按名称排序（字母数字从小到大）
+function _sortByName(list) {
+  return list.sort((a, b) => {
+    const na = (a.instance_name || a.name || a.device_name || '').toLowerCase();
+    const nb = (b.instance_name || b.name || b.device_name || '').toLowerCase();
+    return na.localeCompare(nb);
+  });
+}
+
+// 健康子分组 Tab（scope 展开后，点击切换不同状态的卡片）
+const _HEALTH_SECTIONS = [
+  { key: 'online', label: '在线', color: 'var(--g)', icon: '●' },
+  { key: 'recently_lost', label: '刚失联', color: 'var(--y)', icon: '◐' },
+  { key: 'offline', label: '离线', color: 'var(--t3)', icon: '○' },
+  { key: 'about_to_gc', label: '待回收', color: 'var(--r)', icon: '⚠' },
+];
+let _healthTab = {};  // { scope: current_tab_key }，默认 'online'
+
+function _healthTabBar(sc, list) {
+  const counts = {};
+  _HEALTH_SECTIONS.forEach(sec => { counts[sec.key] = 0; });
+  list.forEach(e => { const h = e.health || e.status || 'offline'; if (counts[h] !== undefined) counts[h]++; });
+  const active = _healthTab[sc] || 'online';
+  return `<div style="display:flex;align-items:center;gap:0;margin:8px 0 12px;border-bottom:1px solid var(--b)">
+    ${_HEALTH_SECTIONS.map(sec => {
+      const n = counts[sec.key] || 0;
+      const isActive = active === sec.key;
+      return `<span onclick="_healthTab['${sc}']='${sec.key}';renderRuntimes(__runtimeData)" style="display:inline-flex;align-items:center;gap:5px;padding:6px 14px;font-size:12px;font-weight:${isActive?'600':'400'};color:${isActive ? sec.color : 'var(--t3)'};cursor:pointer;border-bottom:2px solid ${isActive ? sec.color : 'transparent'};transition:all .15s;user-select:none" onmouseover="if(!${isActive})this.style.color='var(--t2)'" onmouseout="if(!${isActive})this.style.color='var(--t3)'">${sec.icon} ${sec.label} <span style="font-size:10px;opacity:.7">${n}</span></span>`;
+    }).join('')}
+  </div>`;
+}
+
+// 健康状态统计摘要（折叠时显示在标题栏）
+function _healthSummary(list) {
+  const counts = { online: 0, recently_lost: 0, offline: 0, about_to_gc: 0 };
+  list.forEach(e => { counts[e.health || e.status || 'offline'] = (counts[e.health || e.status || 'offline'] || 0) + 1; });
+  const parts = [];
+  if (counts.online) parts.push(`<span style="color:var(--g)">●${counts.online}</span>`);
+  if (counts.recently_lost) parts.push(`<span style="color:var(--y)">◐${counts.recently_lost}</span>`);
+  if (counts.offline) parts.push(`<span style="color:var(--t3)">○${counts.offline}</span>`);
+  if (counts.about_to_gc) parts.push(`<span style="color:var(--r)">⚠${counts.about_to_gc}</span>`);
+  return parts.length ? parts.join(' · ') : '';
+}
 
 function _currentUser() {
   try {
@@ -28,19 +96,58 @@ function _healthDot(h) { return `<span style="color:${RUNTIME_COLOR[h] || 'var(-
 function _healthLabel(h) { return I18N.t('runtimes.health.' + (HEALTH_NAMES[h] || 'offline')); }
 function _scopeLabel(s) { return I18N.t('runtimes.scope.' + (SCOPE_NAMES[s] || 'global')); }
 
+// 汇总统计栏：在过滤标签和卡片网格之间显示总体健康分布
+function _summaryStatsBar(data, devices) {
+  const list = _runtimeTab === 'engines' ? (data.runtimes || []) : devices;
+  if (!list || !list.length) return '';
+  const counts = { online: 0, recently_lost: 0, offline: 0, about_to_gc: 0 };
+  list.forEach(e => { counts[e.health || e.status || 'offline'] = (counts[e.health || e.status || 'offline'] || 0) + 1; });
+  const total = list.length;
+  const parts = [
+    `<span style="color:var(--t2);font-weight:500">共 ${total} 台</span>`,
+    counts.online ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--g)"></span>在线 ${counts.online}</span>` : '',
+    counts.recently_lost ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--y)"></span>刚失联 ${counts.recently_lost}</span>` : '',
+    counts.offline ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--t3)"></span>离线 ${counts.offline}</span>` : '',
+    counts.about_to_gc ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--r)"></span>待回收 ${counts.about_to_gc}</span>` : '',
+  ].filter(Boolean);
+  return `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;margin-bottom:10px;font-size:12px;color:var(--t2);background:var(--bg);border-radius:8px">${parts.join('<span style="color:var(--t3)">·</span>')}</div>`;
+}
+
+// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts）
+function _engineWatermark(name) {
+  const n = (name || '').toLowerCase();
+  if (n.includes('opencode')) {
+    return `<img src="/static/img/engines/opencode.png" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
+  }
+  if (n.includes('hermes')) {
+    return `<img src="/static/img/engines/Hermes.png" style="position:absolute;right:-18px;bottom:-30px;width:130px;height:130px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
+  }
+  if (n.includes('codearts')) {
+    return `<img src="/static/img/engines/codearts.jpg" style="position:absolute;right:12px;bottom:8px;width:50px;height:50px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
+  }
+  return '';
+}
+
 function _healthBadge(h, suffix) {
   const st = HEALTH_BADGE[h] || HEALTH_BADGE.offline;
   return `<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:${st.color};background:${st.bg};padding:3px 10px;border-radius:999px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:${st.color}"></span>${_healthLabel(h)}${suffix ? ' · ' + suffix : ''}</span>`;
 }
 
-function _scopeBar(sc, n, localN) {
-  // global 分组额外标注本机直连/远端数量（engine-selection-design.md §4.3）
+function _scopeBar(sc, n, localN, healthSummary, collapsed) {
+  const _SCOPE_BORDER = { global: '#3168e0', repo: '#8b5cf6', user: '#1ca44c' };
+  const arrow = collapsed ? '▸' : '▾';
+  const arrowRot = collapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
   const sub = (sc === 'global' && localN) ? ` <span style="color:#0e7490;font-weight:600">· ${I18N.t('runtimes.label.local_direct')} ${localN} / ${I18N.t('runtimes.label.remote')} ${(n || 0) - localN}</span>` : '';
-  return `<div style="display:inline-flex;align-items:center;gap:8px;background:#e3edfd;color:#235ec7;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;margin:16px 0 10px">${_scopeLabel(sc)} <span style="background:rgba(35,94,199,.12);border-radius:10px;padding:0 8px;font-size:11px">${n}</span>${sub}</div>`;
+  const health = healthSummary ? ` <span style="font-weight:400;font-size:11px;color:var(--t2);margin-left:4px">${healthSummary}</span>` : '';
+  return `<div onclick="_toggleScope('${sc}')" style="display:flex;align-items:center;gap:8px;background:#e3edfd;color:#235ec7;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600;margin:16px 0 10px;cursor:pointer;user-select:none;transition:background .15s;border-left:3px solid ${_SCOPE_BORDER[sc] || 'var(--a)'}" onmouseover="this.style.background='#d4e3fc'" onmouseout="this.style.background='#e3edfd'">
+    <span style="font-size:14px;width:14px;flex-shrink:0;display:inline-block;transition:transform .25s ease;transform:${arrowRot}">${arrow}</span>
+    ${_scopeLabel(sc)} <span style="background:rgba(35,94,199,.12);border-radius:10px;padding:0 8px;font-size:11px">${n}</span>${sub}${health}
+  </div>`;
 }
 
 function _legendHtml() {
-  return `<div style="display:flex;gap:14px;flex-wrap:wrap;padding:12px 0;font-size:11px;color:var(--t3);border-top:1px dashed var(--b)">
+  return `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 0;font-size:11px;color:var(--t3);border-top:1px dashed var(--b)">
+    <span style="font-weight:500;color:var(--t2)">${I18N.t('runtimes.devspace.legend_label')}</span>
     ${Object.entries(HEALTH_NAMES).map(([k, v]) =>
       `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:${(HEALTH_BADGE[k] || {}).color || 'var(--t3)'}"></span>${I18N.t('runtimes.health.' + v)}${k === 'recently_lost' ? '(<5min)' : k === 'about_to_gc' ? '(>6d)' : ''}</span>`).join('')}
   </div>`;
@@ -50,6 +157,8 @@ function renderRuntimes(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   __runtimeData = data;
+  // 设置当前用户名供权限判断
+  try { window._grapeUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || ''; } catch(e) { window._grapeUsername = ''; }
   const devices = (data.devices && data.devices.length)
     ? data.devices
     : (data.runtimes || []).map(rt => ({ name: rt.worker_name || rt.name, device_name: I18N.t('runtimes.label.local'), health: rt.health || 'offline',
@@ -60,13 +169,45 @@ function renderRuntimes(data) {
     const active = _runtimeTab === t;
     return `<button class="bt ${active ? 'bt-p' : 'bt-o'}" onclick="_runtimeTab='${t}';renderRuntimes(__runtimeData)">${I18N.t('runtimes.tab.' + t)}</button>`;
   };
-  let html = `<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
+  let html = `<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
       ${tabBtn('engines')}${tabBtn('workers')}
       <div class="sp"></div>
-      ${_runtimeTab === 'workers' ? `<button class="bt bt-p" onclick="openGenCredential()">${I18N.t('runtimes.action.gen_credential')}</button>` : ''}
-      ${_runtimeTab === 'workers' ? `<button class="bt bt-p" onclick="openAiDevspace()" data-tooltip="${I18N.t('runtimes.devspace.ai_devspace_tooltip')}" style="background:linear-gradient(135deg,#60a5fa,#a78bfa);border:none;position:relative;box-shadow:0 2px 8px rgba(96,165,250,.3)">☁ AI Devspace</button>` : ''}
       <button class="bt bt-o" onclick="refreshRuntimes()">⟳ ${I18N.t('runtimes.refresh')}</button>
+      <div style="display:flex;align-items:center;flex:1;max-width:300px">
+        <input id="runtimeSearchInput" placeholder="搜索名称、设备、标签..." value="${_runtimeSearch}" onkeyup="if(event.key==='Enter'){_runtimeSearch=this.value;renderRuntimes(__runtimeData)}" onchange="_runtimeSearch=this.value;renderRuntimes(__runtimeData)" style="flex:1;padding:7px 12px 7px 14px;border:1px solid var(--b);border-radius:10px 0 0 10px;font-size:13px;background:var(--bg);color:var(--t1);transition:border-color .2s;outline:none" onfocus="this.style.borderColor='#0071e3';this.style.background='var(--c)'" onblur="this.style.borderColor='var(--b)';this.style.background='var(--bg)'">
+        <button onclick="var i=document.getElementById('runtimeSearchInput');_runtimeSearch=i.value;renderRuntimes(__runtimeData)" style="padding:7px 14px;border:1px solid var(--b);border-left:none;border-radius:0 10px 10px 0;background:var(--bg);color:var(--t3);font-size:13px;cursor:pointer;flex-shrink:0;transition:all .15s" onmouseover="this.style.background='#0071e3';this.style.color='#fff'" onmouseout="this.style.background='var(--bg)';this.style.color='var(--t3)'"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></button>
+      </div>
+      <button onclick="openAddDevicePanel()" style="margin-left:auto;display:inline-flex;align-items:center;gap:7px;padding:8px 18px;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 12px rgba(59,130,246,.35);transition:all .2s;position:relative;overflow:hidden" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 20px rgba(59,130,246,.45)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 2px 12px rgba(59,130,246,.35)'><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M12 5v14M5 12h14"/></svg>${I18N.t('runtimes.action.add_device')}</button>
     </div>`;
+  // 过滤标签栏
+  const _availTypes = [...new Set((_runtimeTab === 'engines' ? (data.runtimes||[]) : devices).map(e => {
+    const n = ((e.instance_name || e.name || '')).toLowerCase();
+    if (n.includes('hermes')) return 'hermes';
+    if (n.includes('opencode')) return 'opencode';
+    if (n.includes('codearts')) return 'codearts';
+    return '';
+  }).filter(Boolean))];
+  const _allScopes = ['local','user','repo','global'];
+  const _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
+  const _hasScope = (sc) => {
+    const list = _runtimeTab === 'engines' ? (data.runtimes||[]) : devices;
+    return list.some(e => (e.scope || (e.is_local ? 'local' : 'global')) === sc || (sc === 'local' && e.is_local));
+  };
+  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b' };
+  html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+    <span style="font-size:11px;color:var(--t3);font-weight:500;margin-right:2px">筛选</span>
+    ${_availTypes.map(t => {
+      const act = _rtFilterType === t;
+      return `<span onclick="_rtToggleType('${t}')" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0071e3':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0071e3':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px"><span style="width:7px;height:7px;border-radius:50%;background:${_ENGINE_DOT[t]||'#999'};flex-shrink:0"></span>${t}</span>`;
+    }).join('')}
+    ${_availTypes.length > 0 ? '<span style="width:1px;background:var(--b);margin:2px 4px;height:18px"></span>' : ''}
+    ${_allScopes.filter(_hasScope).map(s => {
+      const act = _rtFilterScope === s;
+      return `<span onclick="_rtToggleScope('${s}')" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0071e3':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0071e3':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px">${_SCOPE_LABELS[s]||s}</span>`;
+    }).join('')}
+    ${(_rtFilterType || _rtFilterScope || _runtimeSearch) ? `<span onclick="_rtClearFilters()" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;color:#86868b;font-weight:400" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">✕ 清除</span>` : ''}
+  </div>`;
+  html += _summaryStatsBar(data, devices);
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);
   html += '<style>[data-tooltip]{position:relative}[data-tooltip]:hover::after{content:attr(data-tooltip);position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#1e2940;color:#fff;padding:6px 14px;border-radius:8px;font-size:11px;font-weight:500;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}[data-tooltip]:hover::before{content:"";position:absolute;top:calc(100% + 3px);left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:#1e2940;z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}@keyframes tipIn{to{opacity:1}}</style>';
   html += _legendHtml();
@@ -75,33 +216,64 @@ function renderRuntimes(data) {
 
 function renderEngines(data, devices) {
   const runtimes = data.runtimes || [];
+  // 搜索 + 类型 + scope 过滤
+  const q = (_runtimeSearch || '').toLowerCase().trim();
+  const filtered = runtimes.filter(rt => {
+    if (q) {
+      const hay = [rt.instance_name, rt.name, rt.worker_name, rt.owner, rt.host_name, (rt.tags||[]).join(' '), (rt.local_skills||[]).join(' ')].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (_rtFilterType) {
+      const ename = (rt.instance_name || rt.name || '').toLowerCase();
+      if (!ename.includes(_rtFilterType)) return false;
+    }
+    if (_rtFilterScope) {
+      const sc = rt.is_local ? 'local' : (rt.scope || 'global');
+      if (sc !== _rtFilterScope) return false;
+    }
+    return true;
+  });
   const groups = { global: [], repo: [], user: [] };
-  runtimes.forEach(rt => { (groups[rt.scope] || groups.global).push(rt); });
+  filtered.forEach(rt => { (groups[rt.scope] || groups.global).push(rt); });
   let html = '';
   SCOPE_ORDER.forEach(sc => {
     const list = groups[sc];
     if (!list.length) return;
-    // 本机直连引擎（credential_id=0）恒排分组最前，与远端 worker 引擎区分（engine-selection-design.md §4.3）
+    // 排序：本机直连优先 → 按健康状态（在线→刚失联→离线→待回收）
     list.sort((a, b) => (b.is_local ? 1 : 0) - (a.is_local ? 1 : 0));
+    _sortByHealth(list);
     const localN = list.filter(r => r.is_local).length;
-    html += _scopeBar(sc, list.length, localN);
-    html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">`;
-    list.forEach(rt => {
+    const collapsed = _scopeCollapse[sc];
+    html += _scopeBar(sc, list.length, localN, _healthSummary(list), collapsed);
+    if (collapsed) return;  // 折叠时不渲染卡片网格
+    // 健康 Tab 切换栏
+    html += _healthTabBar(sc, list);
+    const activeTab = _healthTab[sc] || 'online';
+    const secList = list.filter(rt => (rt.health || rt.status || 'offline') === activeTab);
+    _sortByName(secList);
+    html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px;max-height:440px;overflow-y:auto">`;
+    secList.forEach(rt => {
       const localBadge = rt.is_local
         ? `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle">${I18N.t('runtimes.label.local_direct')}</span>`
         : '';
-      const hostTag = rt.is_local && rt.host_name ? `<span style="font-size:10px;color:var(--t3);margin-left:4px">${rt.host_name}</span>` : '';
-      html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh);cursor:pointer" onclick="openEngineDetail(${rt.id})">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+      const hostTag = '';
+      const _hStatus = rt.health || rt.status || 'offline';
+      const _cardLeftBorder = RUNTIME_COLOR[_hStatus] || 'var(--t3)';
+      html += `<div style="background:var(--c);border:1px solid var(--b);border-left:3px solid ${_cardLeftBorder};border-radius:0 var(--r2) var(--r2) 0;padding:14px 16px;box-shadow:var(--sh);cursor:pointer;position:relative;overflow:hidden;display:flex;flex-direction:column" onclick="openEngineDetail(${rt.id})">
+        ${_engineWatermark(rt.name)}
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;min-height:24px">
           ${_healthBadge(rt.health)}
-          <span style="font-weight:600;font-size:14px">${rt.instance_name || rt.name} ${localBadge}${hostTag}</span>
-          <span style="font-weight:400;color:var(--t3);font-size:12px;margin-left:auto">${rt.name} v${rt.version || ''}</span>
+          <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
+            <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rt.instance_name || rt.name}</span>
+            <svg onclick="event.stopPropagation();copyText('${(rt.instance_name || rt.name || '').replace(/'/g, "\\'")}');this.style.color='var(--g)';var _t=this;setTimeout(function(){_t.style.color='var(--t3)'},1500)" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;cursor:pointer;transition:color .2s"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            ${localBadge}${hostTag}
+          </span>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px;color:var(--t2)">
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.worker')}</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'} ${rt.is_local ? `<span style="color:var(--t3);font-size:10px">(${I18N.t('runtimes.scope.global')})</span>` : ''}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:12px;color:var(--t2);flex:1">
+          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.worker')}</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
+          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'} ${rt.is_local ? `<span style="color:var(--t3);font-size:10px">(${I18N.t('runtimes.scope.global')})</span>` : ''}</div>
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.skills_label')}</span> ${I18N.t('runtimes.label.skills_count', {count: (rt.local_skills || []).length})}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
+          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
         </div>
       </div>`;
     });
@@ -111,35 +283,62 @@ function renderEngines(data, devices) {
 }
 
 function renderWorkers(data, devices) {
+  // 搜索 + 类型 + scope 过滤
+  const q = (_runtimeSearch || '').toLowerCase().trim();
+  const fDevices = devices.filter(d => {
+    if (q) {
+      const hay = [d.name, d.device_name, d.owner, d.worker_ip, (d.runtimes||[]).map(r=>r.name).join(' ')].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (_rtFilterType) {
+      const names = (d.runtimes||[]).map(r => (r.name||'').toLowerCase()).join(' ');
+      if (!names.includes(_rtFilterType)) return false;
+    }
+    if (_rtFilterScope) {
+      const sc = d.credential_id === 0 ? 'local' : (d.scope || 'global');
+      if (sc !== _rtFilterScope) return false;
+    }
+    return true;
+  });
   const groups = { global: [], repo: [], user: [] };
-  devices.forEach(d => { (groups[d.scope] || groups.global).push(d); });
+  fDevices.forEach(d => { (groups[d.scope] || groups.global).push(d); });
   let html = '';
   SCOPE_ORDER.forEach(sc => {
     const list = groups[sc];
     if (!list.length) return;
-    html += _scopeBar(sc, list.length);
-    html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">`;
-    list.forEach(d => {
+    const collapsed = _scopeCollapse[sc];
+    _sortByHealth(list);
+    html += _scopeBar(sc, list.length, 0, _healthSummary(list), collapsed);
+    if (collapsed) return;  // 折叠时不渲染卡片网格
+    // 健康 Tab 切换栏
+    html += _healthTabBar(sc, list);
+    const activeTab = _healthTab[sc] || 'online';
+    const secList = list.filter(d => (d.health || d.status || 'offline') === activeTab);
+    _sortByName(secList);
+    html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px;max-height:440px;overflow-y:auto">`;
+    secList.forEach(d => {
+      const _isOwner = d.owner && window._grapeUsername && d.owner === window._grapeUsername;
       const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.name} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
       const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
-      html += `<div style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
+      const _wStatus = d.health || 'offline';
+      const _wCardLeftBorder = _wStatus === 'online' ? 'none' : (RUNTIME_COLOR[_wStatus] || 'var(--t3)');
+      html += `<div style="background:var(--c);border:1px solid var(--b);border-left:${_wCardLeftBorder === 'none' ? '1px solid var(--b)' : '3px solid ' + _wCardLeftBorder};border-radius:0 var(--r2) var(--r2) 0;padding:12px 14px;box-shadow:var(--sh)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
           ${_healthBadge(d.health, d.credential_id ? relTime(d.last_seen_at) : I18N.t('runtimes.label.local_direct'))}
           <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'}</span>
           <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span>
-          ${d.credential_id ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;margin-left:auto" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}
+          ${d.credential_id && _isOwner ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;margin-left:auto" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:12px;color:var(--t2)">
           <div style="display:flex;gap:16px;flex:1;min-width:0">
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${d.owner || '—'} ${d.credential_id === 0 ? `<span style="color:var(--t3);font-size:10px">(${I18N.t('runtimes.scope.global')})</span>` : ''}</div>
             <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.credential')}</span> <b style="color:${credColor}">${d.credential_status || ''}</b></div>
           </div>
-          ${d.credential_id ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">${I18N.t('runtimes.action.revoke')}</button>` : ''}
+          ${d.credential_id && _isOwner ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">${I18N.t('runtimes.action.revoke')}</button>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">
           <span style="color:var(--t3);white-space:nowrap;flex-shrink:0">${I18N.t('runtimes.label.hosted_engines')}</span>
           <span style="flex:1;min-width:0;word-break:break-all">${clis || '—'}</span>
-          ${d.credential_id ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="openDeviceTasks(${d.credential_id})">${I18N.t('runtimes.action.tasks')}</button>` : ''}
         </div>
       </div>`;
     });
@@ -158,57 +357,249 @@ function relTime(iso) {
   } catch (e) { return iso; }
 }
 
-function openGenCredential() {
-  const el = document.getElementById('pageContent');
-  if (!el) return;
-  const cur = _currentUser();
-  const html = `<div class="cd" id="genCredPanel" style="margin-bottom:12px;padding:14px 18px">
-    <h3 style="font-size:14px;margin-bottom:10px">${I18N.t('runtimes.credential.gen_title')}</h3>
-    <div class="srow"><label>${I18N.t('runtimes.label.cred_name')}</label><input id="credName" placeholder="${I18N.t('runtimes.label.cred_name_placeholder')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
-    <div class="srow"><label>${I18N.t('runtimes.label.owner_user')}</label><input value="${cur}" disabled style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:#f1f5f9"></div>
-    <div class="srow"><label>${I18N.t('runtimes.label.scope')}</label><select id="credScope" onchange="toggleRepoKey()" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"><option value="user">${I18N.t('runtimes.scope.user')}</option><option value="repo">${I18N.t('runtimes.scope.repo')}</option><option value="global">${I18N.t('runtimes.scope.global')}</option></select></div>
-    <div class="srow" id="repoKeyRow" style="display:none"><label>${I18N.t('runtimes.label.repo_key')}</label><input id="credRepoKey" placeholder="owner/repo" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)"></div>
-    <div class="flex gap6" style="margin-top:12px"><button class="bt bt-p" onclick="doCreateCredential()">${I18N.t('runtimes.action.generate')}</button><button class="bt bt-o" onclick="closeGenCredential()">${I18N.t('runtimes.action.cancel')}</button></div>
-  </div>`;
-  el.insertAdjacentHTML('afterbegin', html);
+// ====== 添加设备侧边栏 ======
+
+function openAddDevicePanel() {
+  var existing = document.getElementById('addDeviceOverlay');
+  if (existing) { existing.remove(); return; }
+  _stopDevspaceAutoRefresh();
+
+  var overlay = document.createElement('div');
+  overlay.id = 'addDeviceOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9998;display:flex;justify-content:flex-end;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);background:rgba(0,0,0,.3);opacity:0;transition:opacity .3s ease';
+
+  overlay.onclick = function(e) { if (e.target === overlay) closeAddDevicePanel(); };
+
+  var sidebar = document.createElement('div');
+  sidebar.id = 'addDeviceSidebar';
+  sidebar.style.cssText = 'width:520px;max-width:92vw;height:100vh;background:var(--c);box-shadow:-12px 0 40px rgba(0,0,0,.15);overflow-y:auto;transform:translateX(100%);transition:transform .35s cubic-bezier(.22,.61,.36,1);display:flex;flex-direction:column';
+
+  sidebar.innerHTML =
+    // ── 头部 ──
+    '<div style="padding:20px 24px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--b);position:sticky;top:0;background:var(--c);z-index:2">' +
+      '<div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+        '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>' +
+      '</div>' +
+      '<div style="flex:1;min-width:0">' +
+        '<h3 style="font-size:17px;font-weight:700;margin:0;line-height:1.2">' + I18N.t('runtimes.action.add_device') + '</h3>' +
+        '<p style="font-size:12px;color:var(--t3);margin:3px 0 0;line-height:1.3">' + I18N.t('runtimes.devspace.sidebar_subtitle') + '</p>' +
+      '</div>' +
+      '<button onclick="closeAddDevicePanel()" style="width:32px;height:32px;border-radius:8px;border:1px solid var(--b);background:var(--bg);cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--t2);font-size:16px;flex-shrink:0;transition:all .15s" onmouseover="this.style.background=\'#fee2e2\';this.style.color=\'#dc2626\';this.style.borderColor=\'#fecaca\'" onmouseout="this.style.background=\'var(--bg)\';this.style.color=\'var(--t2)\';this.style.borderColor=\'var(--b)\'">✕</button>' +
+    '</div>' +
+
+    // ── 内容区 ──
+    '<div style="padding:24px;flex:1">' +
+
+      // 选项一：生成凭据
+      '<div style="margin-bottom:16px">' +
+        '<div onclick="toggleAddDeviceCred()" style="display:flex;align-items:center;gap:14px;padding:16px 18px;background:var(--bg);border:1px solid var(--b);border-radius:12px;cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'#3b82f6\';this.style.boxShadow=\'0 2px 12px rgba(59,130,246,.08)\'" onmouseout="this.style.borderColor=\'var(--b)\';this.style.boxShadow=\'none\'">' +
+          '<div style="width:42px;height:42px;border-radius:10px;background:#dbeafe;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:15px;font-weight:600;color:var(--t1);line-height:1.3">' + I18N.t('runtimes.action.gen_credential') + '</div>' +
+            '<div style="font-size:12px;color:var(--t3);margin-top:2px">' + I18N.t('runtimes.devspace.cred_hint') + '</div>' +
+          '</div>' +
+          '<svg id="credChevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;transition:transform .3s"><path d="M6 9l6 6 6-6"/></svg>' +
+        '</div>' +
+        '<div id="addDeviceCredArea" style="display:none;max-height:0;overflow:hidden;transition:max-height .35s ease,margin-top .35s ease,opacity .25s ease;opacity:0;margin-top:0"></div>' +
+      '</div>' +
+
+      // 选项二：AI Devspace
+      '<div style="margin-bottom:16px">' +
+        '<div onclick="toggleAddDeviceDev()" style="display:flex;align-items:center;gap:14px;padding:16px 18px;background:linear-gradient(135deg,rgba(96,165,250,.08),rgba(167,139,250,.08));border:1px solid rgba(96,165,250,.2);border-radius:12px;cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'rgba(96,165,250,.5)\';this.style.boxShadow=\'0 2px 12px rgba(96,165,250,.12)\'" onmouseout="this.style.borderColor=\'rgba(96,165,250,.2)\';this.style.boxShadow=\'none\'">' +
+          '<div style="width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,#60a5fa,#a78bfa);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.41-8.78 7 7 0 1 0-13.09 3.78A4.5 4.5 0 0 0 6.5 19z"/></svg>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:15px;font-weight:600;color:var(--t1);line-height:1.3">☁ AI Devspace</div>' +
+            '<div style="font-size:12px;color:var(--t3);margin-top:2px">' + I18N.t('runtimes.devspace.devspace_hint') + '</div>' +
+          '</div>' +
+          '<svg id="devChevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;transition:transform .3s"><path d="M6 9l6 6 6-6"/></svg>' +
+        '</div>' +
+        '<div id="addDeviceDevArea" style="display:none;max-height:0;overflow:hidden;transition:max-height .35s ease,margin-top .35s ease,opacity .25s ease;opacity:0;margin-top:0"></div>' +
+      '</div>' +
+
+    '</div>';
+
+  overlay.appendChild(sidebar);
+  document.body.appendChild(overlay);
+
+  setTimeout(function() {
+    overlay.style.opacity = '1';
+    sidebar.style.transform = 'translateX(0)';
+  }, 10);
+}
+
+function closeAddDevicePanel() {
+  _stopDevspaceAutoRefresh();
+  var overlay = document.getElementById('addDeviceOverlay');
+  if (!overlay) return;
+  var sidebar = overlay.firstElementChild;
+  if (sidebar) sidebar.style.transform = 'translateX(100%)';
+  overlay.style.opacity = '0';
+  setTimeout(function() {
+    var el = document.getElementById('addDeviceOverlay');
+    if (el) el.remove();
+  }, 300);
+}
+
+function toggleAddDeviceCred() {
+  var area = document.getElementById('addDeviceCredArea');
+  var chevron = document.getElementById('credChevron');
+  if (!area) return;
+  if (area.style.display === 'none') {
+    _collapseAddDeviceDev();
+    if (!area.innerHTML.trim()) _renderAddDeviceCredForm();
+    area.style.display = 'block';
+    requestAnimationFrame(function() {
+      area.style.maxHeight = '800px';
+      area.style.opacity = '1';
+      area.style.marginTop = '12px';
+    });
+    if (chevron) chevron.style.transform = 'rotate(180deg)';
+  } else {
+    _collapseAddDeviceCred();
+  }
+}
+
+function _collapseAddDeviceCred() {
+  var area = document.getElementById('addDeviceCredArea');
+  var chevron = document.getElementById('credChevron');
+  if (!area || area.style.display === 'none') { if (chevron) chevron.style.transform = ''; return; }
+  area.style.maxHeight = '0';
+  area.style.opacity = '0';
+  area.style.marginTop = '0';
+  if (chevron) chevron.style.transform = '';
+  setTimeout(function() { if (area) area.style.display = 'none'; }, 350);
+}
+
+function _renderAddDeviceCredForm() {
+  var area = document.getElementById('addDeviceCredArea');
+  if (!area) return;
+  var cur = _currentUser();
+  area.innerHTML = '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
+    '<div style="font-size:13px;font-weight:600;margin-bottom:14px;color:var(--t1)">' + I18N.t('runtimes.credential.gen_title') + '</div>' +
+    // 凭据名称
+    '<div style="margin-bottom:12px">' +
+      '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">' + I18N.t('runtimes.label.cred_name') + '</label>' +
+      '<input id="credName" placeholder="' + I18N.t('runtimes.label.cred_name_placeholder') + '" style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t1);transition:border-color .2s" onfocus="this.style.borderColor=\'#3b82f6\'" onblur="this.style.borderColor=\'var(--b)\'">' +
+    '</div>' +
+    // 归属用户
+    '<div style="margin-bottom:12px">' +
+      '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">' + I18N.t('runtimes.label.owner_user') + '</label>' +
+      '<input value="' + cur + '" disabled style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:#f1f5f9;color:var(--t2)">' +
+    '</div>' +
+    // 范围
+    '<div style="margin-bottom:12px">' +
+      '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">' + I18N.t('runtimes.label.scope') + '</label>' +
+      '<select id="credScope" onchange="toggleRepoKey()" style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t1)"><option value="user">' + I18N.t('runtimes.scope.user') + '</option><option value="repo">' + I18N.t('runtimes.scope.repo') + '</option><option value="global">' + I18N.t('runtimes.scope.global') + '</option></select>' +
+    '</div>' +
+    // 仓库（条件显示）
+    '<div id="repoKeyRow" style="display:none;margin-bottom:12px">' +
+      '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">' + I18N.t('runtimes.label.repo_key') + '</label>' +
+      '<input id="credRepoKey" placeholder="owner/repo" style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t1)">' +
+    '</div>' +
+    // 按钮
+    '<div style="display:flex;gap:8px;margin-top:16px">' +
+      '<button class="bt bt-p" onclick="doCreateCredentialInPanel()" style="flex:1;justify-content:center">' + I18N.t('runtimes.action.generate') + '</button>' +
+      '<button class="bt bt-o" onclick="_collapseAddDeviceCred()" style="padding:8px 18px">' + I18N.t('runtimes.action.cancel') + '</button>' +
+    '</div>' +
+    '</div>';
+}
+
+function doCreateCredentialInPanel() {
+  var name = (document.getElementById('credName') || {}).value || '';
+  if (!name) { app.showToast(I18N.t('runtimes.credential.toast_name_required')); return; }
+  var scope = document.getElementById('credScope').value;
+  var repo_key = (scope === 'repo' || scope === 'user') ? ((document.getElementById('credRepoKey') || {}).value || '').trim() : '';
+  if (scope === 'repo' && !repo_key) { app.showToast(I18N.t('runtimes.credential.toast_repo_required')); return; }
+  var area = document.getElementById('addDeviceCredArea');
+  if (area) area.innerHTML = '<div style="padding:32px;text-align:center"><div style="display:inline-block;width:24px;height:24px;border:2.5px solid rgba(59,130,246,.2);border-top-color:#3b82f6;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:12px"></div><div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.toast.refreshing') + '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></div>';
+  API.post('/settings/runtime-credentials', { name, scope, repo_key }).then(d => {
+    var token = d.token || '';
+    var oneCmd = 'curl -fsSL ' + window.location.origin + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + window.location.origin;
+    var runCmd = 'RUNTIME_TOKEN=' + token + ' python -m runtime.agent';
+    if (area) area.innerHTML =
+      '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
+        // 警告
+        '<div style="display:flex;align-items:flex-start;gap:8px;padding:10px 12px;background:#fef3c7;border-radius:8px;margin-bottom:14px">' +
+          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' +
+          '<span style="font-size:12px;color:#92400e;line-height:1.5">' + I18N.t('runtimes.credential.token_warning', {name: name, scope: _scopeLabel(scope)}) + '</span>' +
+        '</div>' +
+        // Token
+        '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">Token</label>' +
+        '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:12px;margin-bottom:14px">' + token + '</code>' +
+        // 一键安装
+        '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">' + I18N.t('runtimes.credential.install_hint') + '</div>' +
+        '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:11px;margin-bottom:6px">' + oneCmd + '</code>' +
+        '<button class="bt bt-p" style="width:100%;justify-content:center;margin-bottom:12px" onclick="copyText(\'' + oneCmd.replace(/'/g, "\\'") + '\')">' + I18N.t('runtimes.action.copy_one_cmd') + '</button>' +
+        '<div style="font-size:11px;color:var(--t2);margin-bottom:14px;line-height:1.5">' + I18N.t('runtimes.credential.install_desc') + '</div>' +
+        // 手动启动
+        '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">' + I18N.t('runtimes.credential.manual_start') + '</div>' +
+        '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:11px;margin-bottom:6px">' + runCmd + '</code>' +
+        '<button class="bt bt-o" style="width:100%;justify-content:center" onclick="copyText(\'' + token + '\')">' + I18N.t('runtimes.action.copy_token') + '</button>' +
+      '</div>';
+    app.showToast(I18N.t('runtimes.credential.toast_generated'));
+  }).catch(e => {
+    app.showToast(I18N.t('runtimes.credential.toast_gen_failed', {msg: e.message}));
+    _renderAddDeviceCredForm();
+  });
+}
+
+function toggleAddDeviceDev() {
+  var area = document.getElementById('addDeviceDevArea');
+  var chevron = document.getElementById('devChevron');
+  if (!area) return;
+  if (area.style.display === 'none') {
+    _collapseAddDeviceCred();
+    if (!area.innerHTML.trim()) _renderAddDeviceDevPanel();
+    area.style.display = 'block';
+    requestAnimationFrame(function() {
+      area.style.maxHeight = '800px';
+      area.style.opacity = '1';
+      area.style.marginTop = '12px';
+    });
+    if (chevron) chevron.style.transform = 'rotate(180deg)';
+  } else {
+    _collapseAddDeviceDev();
+  }
+}
+
+function _collapseAddDeviceDev() {
+  var area = document.getElementById('addDeviceDevArea');
+  var chevron = document.getElementById('devChevron');
+  if (!area || area.style.display === 'none') { if (chevron) chevron.style.transform = ''; _stopDevspaceAutoRefresh(); return; }
+  area.style.maxHeight = '0';
+  area.style.opacity = '0';
+  area.style.marginTop = '0';
+  if (chevron) chevron.style.transform = '';
+  _stopDevspaceAutoRefresh();
+  setTimeout(function() { if (area) area.style.display = 'none'; }, 350);
+}
+
+function _renderAddDeviceDevPanel() {
+  var area = document.getElementById('addDeviceDevArea');
+  if (!area) return;
+  area.innerHTML =
+    '<div style="border:1px solid var(--b);border-radius:12px;overflow:hidden">' +
+    '<div style="padding:14px 18px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--b);background:linear-gradient(135deg,#60a5fa,#a78bfa);position:relative;overflow:hidden">' +
+    '<div style="position:absolute;inset:0;background:radial-gradient(ellipse at top right,rgba(255,255,255,.2),transparent 60%);pointer-events:none"></div>' +
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position:relative;flex-shrink:0"><path d="M17.5 19a4.5 4.5 0 1 0-1.41-8.78 7 7 0 1 0-13.09 3.78A4.5 4.5 0 0 0 6.5 19z"/></svg>' +
+    '<span style="font-size:14px;font-weight:600;flex:1;color:#fff;position:relative">' + I18N.t('runtimes.devspace.title') + '</span>' +
+    '<span id="aiDevspaceAutoTag" style="font-size:10px;color:rgba(255,255,255,.7);position:relative;display:none"></span>' +
+    '<button style="background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.25);border-radius:6px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;position:relative" onclick="_showCreateEnvForm()">' + I18N.t('runtimes.devspace.create') + '</button>' +
+    '<button style="background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:6px;padding:5px 10px;font-size:14px;cursor:pointer;position:relative" onclick="_refreshDevspaceList()">&#8635;</button>' +
+    '</div>' +
+    '<div id="aiDevspaceBody" style="background:var(--bg)"><div style="padding:32px;text-align:center"><div style="display:inline-block;width:22px;height:22px;border:2.5px solid rgba(167,139,250,.2);border-top-color:#a78bfa;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:10px"></div><div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.devspace.loading') + '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></div></div>' +
+    '</div>';
+  _refreshDevspaceList();
+  _startDevspaceAutoRefresh();
 }
 
 function toggleRepoKey() {
   const el = document.getElementById('repoKeyRow');
   if (el) el.style.display = document.getElementById('credScope').value === 'repo' ? '' : 'none';
-}
-
-function closeGenCredential() {
-  const el = document.getElementById('genCredPanel');
-  if (el) el.remove();
-}
-
-function doCreateCredential() {
-  const name = (document.getElementById('credName') || {}).value || '';
-  if (!name) { app.showToast(I18N.t('runtimes.credential.toast_name_required')); return; }
-  const scope = document.getElementById('credScope').value;
-  const repo_key = (scope === 'repo' || scope === 'user') ? ((document.getElementById('credRepoKey') || {}).value || '').trim() : '';
-  if (scope === 'repo' && !repo_key) { app.showToast(I18N.t('runtimes.credential.toast_repo_required')); return; }
-  API.post('/settings/runtime-credentials', { name, scope, repo_key }).then(d => {
-    const token = d.token || '';
-    const runCmd = `RUNTIME_TOKEN=${token} python -m runtime.agent`;
-    const oneCmd = `curl -fsSL ${window.location.origin}/api/runtime/install | bash -s -- --token ${token} --server ${window.location.origin}`;
-    closeGenCredential();
-    const box = `<div class="cd" style="margin-top:12px;padding:16px">
-      <div style="font-size:13px;margin-bottom:8px">${I18N.t('runtimes.credential.token_warning', {name: name, scope: _scopeLabel(scope)})}</div>
-      <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px">${token}</code>
-      <div style="margin-top:10px;font-size:12px">${I18N.t('runtimes.credential.install_hint')}</div>
-      <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${oneCmd}</code>
-      <button class="bt bt-p" style="margin-top:8px" onclick="copyText('${oneCmd.replace(/'/g, "\\'")}')">${I18N.t('runtimes.action.copy_one_cmd')}</button>
-      <div style="margin-top:8px;font-size:11px;color:var(--t2)">${I18N.t('runtimes.credential.install_desc')}</div>
-      <div style="margin-top:10px;font-size:12px">${I18N.t('runtimes.credential.manual_start')}</div>
-      <code style="display:block;padding:10px;background:var(--bg);border-radius:6px;word-break:break-all;font-size:12px;margin-top:4px">${runCmd}</code>
-      <button class="bt bt-o" style="margin-top:8px" onclick="copyText('${token}')">${I18N.t('runtimes.action.copy_token')}</button>
-    </div>`;
-    const el = document.getElementById('pageContent');
-    el.insertAdjacentHTML('afterbegin', box);
-    app.showToast(I18N.t('runtimes.credential.toast_generated'));
-  }).catch(e => app.showToast(I18N.t('runtimes.credential.toast_gen_failed', {msg: e.message})));
 }
 
 function renameCredential(cid) {
@@ -257,6 +648,21 @@ function openDeviceTasks(credId) {
     el.insertAdjacentHTML('afterbegin', html);
   }).catch(e => app.showToast(I18N.t('runtimes.toast.load_tasks_failed', {msg: e.message})));
 }
+
+window._rtToggleType = function(t) {
+  _rtFilterType = (_rtFilterType === t) ? '' : t;
+  renderRuntimes(__runtimeData);
+};
+window._rtToggleScope = function(s) {
+  _rtFilterScope = (_rtFilterScope === s) ? '' : s;
+  renderRuntimes(__runtimeData);
+};
+window._rtClearFilters = function() {
+  _rtFilterType = '';
+  _rtFilterScope = '';
+  _runtimeSearch = '';
+  renderRuntimes(__runtimeData);
+};
 
 function refreshRuntimes() {
   _stopDevspaceAutoRefresh();
@@ -523,11 +929,14 @@ function _specHtml(e) {
 }
 
 function openAiDevspace() {
+  // 兼容入口：侧边栏打开时走侧边栏，否则走传统方式
+  var sidebarArea = document.getElementById('addDeviceDevArea');
+  if (sidebarArea) { toggleAddDeviceDev(); return; }
+  // 传统入口（无侧边栏时直接在页面内展开）——保留向后兼容
   var el = document.getElementById('pageContent');
   if (!el) return;
   var existing = document.getElementById('aiDevspacePanel');
   if (existing) { existing.remove(); return; }
-  // 滑入动画
   el.insertAdjacentHTML('afterbegin',
     '<div id="aiDevspacePanel" style="margin-bottom:16px;max-height:0;overflow:hidden;transition:max-height .3s ease,opacity .3s ease;opacity:0">' +
     '<div class="cd" style="padding:0;overflow:hidden">' +
@@ -540,7 +949,6 @@ function openAiDevspace() {
     '<button class="bt bt-s" style="background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.15);position:relative" onclick="_refreshDevspaceList()">&#8635;</button>' +
     '<button class="bt bt-s" style="background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.15);position:relative" onclick="_closeDevspace()">&#10005;</button></div>' +
     '<div id="aiDevspaceBody"><div class="loading">' + I18N.t('runtimes.devspace.loading') + '</div></div></div></div>');
-  // 触发动画
   setTimeout(function() {
     var p = document.getElementById('aiDevspacePanel');
     if (p) { p.style.maxHeight = '600px'; p.style.opacity = '1'; }
@@ -550,6 +958,10 @@ function openAiDevspace() {
 }
 
 function _closeDevspace() {
+  // 侧边栏模式：折叠 devspace 区域
+  var sidebarArea = document.getElementById('addDeviceDevArea');
+  if (sidebarArea) { _collapseAddDeviceDev(); return; }
+  // 传统模式
   var el = document.getElementById('aiDevspacePanel');
   if (!el) return;
   _stopDevspaceAutoRefresh();
@@ -568,20 +980,23 @@ function _startDevspaceAutoRefresh() {
   _stopDevspaceAutoRefresh();
   _devspaceAutoCountdown = _DEVSPACE_AUTO_INTERVAL;
   _devspaceAutoTimer = setInterval(function() {
-    var panel = document.getElementById('aiDevspacePanel');
+    // 侧边栏模式检查 addDeviceDevArea，传统模式检查 aiDevspacePanel
+    var panel = document.getElementById('aiDevspacePanel') || document.getElementById('addDeviceDevArea');
     if (!panel) { _stopDevspaceAutoRefresh(); return; }
+    var body = document.getElementById('aiDevspaceBody');
+    if (!body || body.style.display === 'none' || !body.offsetParent) { _stopDevspaceAutoRefresh(); return; }
     _devspaceSilentRefresh();
     _devspaceAutoCountdown = _DEVSPACE_AUTO_INTERVAL;
   }, _DEVSPACE_AUTO_INTERVAL * 1000);
   // 倒计时显示
   _devspaceCountdownTimer = setInterval(function() {
-    var panel = document.getElementById('aiDevspacePanel');
+    var panel = document.getElementById('aiDevspacePanel') || document.getElementById('addDeviceDevArea');
     if (!panel) { _stopDevspaceAutoRefresh(); return; }
     var tag = document.getElementById('aiDevspaceAutoTag');
     if (!tag) return;
     _devspaceAutoCountdown--;
     if (_devspaceAutoCountdown <= 0) _devspaceAutoCountdown = _DEVSPACE_AUTO_INTERVAL;
-    tag.textContent = _DEVSPACE_AUTO_INTERVAL + 's auto';
+    tag.textContent = '15s auto';
     tag.style.display = '';
   }, 1000);
 }
@@ -591,6 +1006,29 @@ function _stopDevspaceAutoRefresh() {
   if (_devspaceCountdownTimer) { clearInterval(_devspaceCountdownTimer); _devspaceCountdownTimer = null; }
   var tag = document.getElementById('aiDevspaceAutoTag');
   if (tag) { tag.style.display = 'none'; tag.textContent = ''; }
+}
+
+// ====== Worker 上线进度跟踪 ======
+// 后端返回 worker_online 字段表示对应 Worker 是否已真正上线（心跳<5min）。
+// 环境处于"运行中"但 worker_online=false 时显示进度条，上线后自动消失。
+// 进度条百分比基于"预计2-3分钟"做线性插值（仅用于视觉，不决定消失）。
+var _devspaceRunningSince = {};  // { envId: timestamp_ms }
+
+function _devspaceOnlineProgressHtml(envId, workerOnline, runningSinceMap) {
+  if (workerOnline) return '';  // worker 已上线，不显示进度条
+  var now = Date.now();
+  if (!runningSinceMap[envId]) {
+    runningSinceMap[envId] = now;
+  }
+  var elapsed = (now - runningSinceMap[envId]) / 1000;
+  var DURATION = 180;  // 3 minutes — 仅用于进度条宽度估算
+  var pct = Math.min(95, Math.round(elapsed / DURATION * 100));  // 封顶95%，只有真实上线才消失
+  return '<div style="margin-top:6px;display:flex;align-items:center;gap:8px">' +
+    '<div style="width:160px;height:6px;background:rgba(96,165,250,.12);border-radius:3px;overflow:hidden;flex-shrink:0">' +
+    '<div style="width:' + pct + '%;height:100%;background:linear-gradient(90deg,#60a5fa,#a78bfa);border-radius:3px;animation:devspacePulse 2s ease-in-out infinite"></div>' +
+    '</div>' +
+    '</div>' +
+    '<style>@keyframes devspacePulse{0%,100%{opacity:1}50%{opacity:.6}}</style>';
 }
 
 function _devspaceSilentRefresh() {
@@ -619,13 +1057,15 @@ function _devspaceSilentRefresh() {
       var isDeleted = st === 'cde.0009';
       var isError = ['cde.1001','cde.1002','cde.1003','cde.1004'].indexOf(st) >= 0;
       var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
+      if (!isRunning) delete _devspaceRunningSince[id];  // 非运行中时清除计时，下次开机重新开始
       html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
         '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
         '<div style="flex:1;min-width:0">' +
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">' +
         '<span style="font-size:13px;font-weight:600">' + (e.name || id) + '</span>' +
         _devStatusLabel(st) + '</div>' +
-        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div></div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div>' +
+        (isRunning ? _devspaceOnlineProgressHtml(id, e.worker_online, _devspaceRunningSince) : '') + '</div>' +
         '<div style="display:flex;gap:4px;flex-shrink:0">' +
         ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
         (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
@@ -664,13 +1104,15 @@ function _refreshDevspaceList() {
       var isDeleted = st === 'cde.0009';
       var isError = ['cde.1001','cde.1002','cde.1003','cde.1004'].indexOf(st) >= 0;
       var isBusy = ['cde.0001','cde.0003','cde.0005','cde.0006','cde.0007','cde.0008'].indexOf(st) >= 0;
+      if (!isRunning) delete _devspaceRunningSince[id];
       html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--b);transition:background .12s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
         '<div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:' + dotColor + ';box-shadow:0 0 6px ' + dotColor + '50"></div>' +
         '<div style="flex:1;min-width:0">' +
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">' +
         '<span style="font-size:13px;font-weight:600">' + (e.name || id) + '</span>' +
         _devStatusLabel(st) + '</div>' +
-        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div></div>' +
+        '<div style="font-size:11px;color:var(--t3)">' + _specHtml(e) + ' · ' + (e.type || '') + ' · ' + ((e.image || {}).os || '') + '</div>' +
+        (isRunning ? _devspaceOnlineProgressHtml(id, e.worker_online, _devspaceRunningSince) : '') + '</div>' +
         '<div style="display:flex;gap:4px;flex-shrink:0">' +
         ((isStopped || isReady) && !isBusy ? '<button class="bt bt-p bt-s" onclick="_devAction(\'start\',\'' + id + '\')">' + I18N.t('runtimes.devspace.start') + '</button>' : '') +
         (isRunning ? '<button class="bt bt-o bt-s" onclick="_devAction(\'stop\',\'' + id + '\')">' + I18N.t('runtimes.devspace.stop') + '</button>' : '') +
@@ -679,12 +1121,15 @@ function _refreshDevspaceList() {
     }
     body.innerHTML = html;
   }).catch(function(e) {
+    var msg = e.message || '';
+    var isAuthErr = msg.indexOf('Unauthorized') >= 0 || msg.indexOf('APIGW.0301') >= 0;
+    var isAgreementErr = msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0;
     body.innerHTML = '<div style="padding:32px 20px;text-align:center">' +
       '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom:10px;opacity:.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>' +
       '<div style="font-size:13px;color:var(--t2);margin-bottom:4px">' +
-      (e.message.indexOf('Unauthorized') >= 0 || e.message.indexOf('APIGW.0301') >= 0 ? I18N.t('runtimes.devspace.configure_aksk') : I18N.t('runtimes.devspace.load_failed')) + '</div>' +
+      (isAuthErr ? I18N.t('runtimes.devspace.configure_aksk') : isAgreementErr ? I18N.t('runtimes.devspace.agreement_not_signed') : I18N.t('runtimes.devspace.load_failed')) + '</div>' +
       '<div style="font-size:11px;color:var(--t3)">' +
-      (e.message.indexOf('Unauthorized') >= 0 || e.message.indexOf('APIGW.0301') >= 0 ? I18N.t('runtimes.devspace.configure_aksk_hint') : e.message) + '</div></div>';
+      (isAuthErr ? I18N.t('runtimes.devspace.configure_aksk_hint') : isAgreementErr ? '' : msg) + '</div></div>';
   });
 }
 
@@ -701,6 +1146,18 @@ function _showCreateEnvForm() {
   repoName = repoName.replace(/[^a-zA-Z0-9_]/g, '').slice(0, maxRepo);
   var envName = repoName + '_' + ts;
 
+  // 侧边栏模式：在 addDeviceDevArea 内显示创建中
+  var devArea = document.getElementById('addDeviceDevArea');
+  if (devArea) {
+    var body = devArea.querySelector('#aiDevspaceBody') || devArea;
+    body.innerHTML = '<div style="padding:32px;text-align:center;color:#a78bfa;font-size:13px">' +
+      '<div style="display:inline-block;width:20px;height:20px;border:2px solid rgba(167,139,250,.2);border-top-color:#a78bfa;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:10px"></div>' +
+      '<div>' + I18N.t('runtimes.devspace.creating') + '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></div>';
+    _doCreateEnvWithRetry(envName, 0);
+    return;
+  }
+
+  // 传统模式
   var panel = document.getElementById('aiDevspacePanel');
   if (panel) panel.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">' +
     '<h3 style="font-size:14px;flex:1;margin:0">AI Devspace</h3>' +
@@ -833,8 +1290,13 @@ function _showCreateEnvForm() {
       _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);
     }).catch(function(e) {
       var msg = e.message || '';
-      // 模板未发布（AK/SK 未加入白名单）：不创建凭据，直接提示
-      app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+      // 账号未签署服务协议——精准提示
+      if (msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0) {
+        app.showToast(I18N.t('runtimes.devspace.agreement_not_signed'), 8000);
+      } else {
+        // 模板未发布（AK/SK 未加入白名单）：不创建凭据，直接提示
+        app.showToast(I18N.t('runtimes.devspace.template_not_published'));
+      }
       _refreshDevspaceList();
     });
   }
@@ -856,8 +1318,8 @@ function _showCreateEnvForm() {
         _refreshDevspaceList();
       }).catch(function(e) {
         var msg = e.message || '';
-        // 环境名冲突：删除凭据，换名重试
-        if (attempt < 10 && (msg.indexOf('98320005') >= 0 || msg.indexOf('already been used') >= 0)) {
+        // 环境名冲突：删除凭据，换名重试（最多 _9）
+        if (attempt < 9 && (msg.indexOf('98320005') >= 0 || msg.indexOf('already been used') >= 0)) {
           API.post('/settings/runtime-credentials/' + credId + '/revoke').then(function() {
             _doCreateEnvWithRetry(baseName, attempt + 1);
           }).catch(function() {
@@ -866,6 +1328,11 @@ function _showCreateEnvForm() {
         } else if (msg.indexOf('98320022') >= 0 || msg.indexOf('count limit') >= 0) {
           API.post('/settings/runtime-credentials/' + credId + '/revoke');
           app.showToast(I18N.t('runtimes.devspace.count_limit'));
+          _refreshDevspaceList();
+        } else if (msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0) {
+          // 账号未签署 CodeArts 开发环境服务协议
+          API.post('/settings/runtime-credentials/' + credId + '/revoke');
+          app.showToast(I18N.t('runtimes.devspace.agreement_not_signed'), 8000);
           _refreshDevspaceList();
         } else if (msg.indexOf('98320049') >= 0 || msg.indexOf('Template not published') >= 0) {
           // 模板未发布（预检与实际创建之间的竞态）：删除凭据，显示精准提示
@@ -881,7 +1348,8 @@ function _showCreateEnvForm() {
       });
     }).catch(function(e) {
       var msg = e.message || '';
-      if (attempt < 10 && (msg.indexOf('exist') >= 0 || msg.indexOf('exist') >= 0)) {
+      // 凭据名冲突（后端返回中文"凭据名称已存在"）：换名重试（最多 _9）
+      if (attempt < 9 && (msg.indexOf('已存在') >= 0 || msg.indexOf('exist') >= 0)) {
         _doCreateEnvWithRetry(baseName, attempt + 1);
       } else {
         app.showToast(I18N.t('runtimes.devspace.cred_gen_failed_msg', {msg: msg}));
