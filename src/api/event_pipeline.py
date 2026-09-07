@@ -416,17 +416,33 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
     return ""
 
 
+# L2 阶段分派映射表（Issue #49 §5.3）：stage × 事件类型 → Agent
+# - 对应列 stage 命中 → 目标 Agent；"—" 表示该阶段下该事件不分发（返回空）
+# - 特例：PR updated + stage=coding + QA 有历史 → qa（复审）
+_STAGE_EVENT_AGENT_MAP = {
+    "issue_opened":        {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    "issue_comment":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    # close 已由 L1 副作用短路，此处安全兜底：close 一律不分发（issue_updated 其余 action 归 issue）
+    "issue_updated":       {"vod": "issue", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    "issue_labeled":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    "pull_request_opened": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
+    "pull_request_updated": {"vod": "issue", "issue": "issue", "coding": "qa", "qa": "qa", "sre": "sre", "done": ""},
+    "pull_request_merged": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
+    "note_hook_pr":        {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
+}
+
+
 def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
                                default_agent: str) -> str:
-    """阶段矩阵路由（D9，见 vod-skill-upgrade-plan.md §3.0.3）。
+    """阶段矩阵路由（D9，见 vod-skill-upgrade-plan.md §3.0.3）——表驱动（Issue #49 §5.3）。
 
-    关联 issue_id 的事件按 issue_state 阶段判定归属：
     - issue_opened 恒给 vod（D8）
-    - Issue 类事件（issue_updated/comment/...）：vod→VOD；issue 及之后→Issue Agent
-    - PR 类事件：vod/issue→Issue Agent 审视；coding→Coding；qa→QA；sre→SRE；done→不分发
-    无 issue_state 记录 / 非关联事件 → 返回 default_agent（现状 get_domain_agent 结果）。
+    - 其余按 issue_state.stage × event_type 查 `_STAGE_EVENT_AGENT_MAP`
+    - 特例：pull_request_updated + stage=coding + QA 有历史 → qa 复审
+    - 无 issue_state / 非关联事件 → default_agent（现状 get_domain_agent 结果）
+    - stage=done → 一律不分发
     """
-    from src.api.session_store import get_issue_stage, get_issue_stage_name
+    from src.api.session_store import get_issue_stage
 
     if event_type == "issue_opened":
         return "vod"
@@ -448,33 +464,25 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
         return "vod" if event_type in ISSUE_EVENT_TYPES else default_agent
     stage = st["stage"]
 
-    if event_type in ISSUE_EVENT_TYPES:
-        # Issue 类事件：vod→VOD；issue 及之后→Issue Agent（coding/qa/sre 不直接处理）
-        if stage == "vod":
-            return "vod"
-        if stage == "done":
-            return ""  # 已结束不再分发
-        return "issue"
-    else:  # PR 类事件
-        if stage == "vod" or stage == "issue":
-            return "issue"  # Issue Agent 审视
-        if stage == "done":
-            return ""
-        # PR updated 事件 + stage=coding：检查是否有 QA 历史记录
-        # 如果 QA 曾经审查过（说明 coding 是被 QA 回流后的修复），PR updated 应路由到 QA 复审
-        if event_type == "pull_request_updated" and stage == "coding":
-            try:
-                from src.session_manager import db, db_lock
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? AND agent_type='qa' LIMIT 1",
-                        (repo_key, issue_id))
-                    if c.fetchone():
-                        return "qa"  # QA 有历史 → 路由到 QA 复审
-            except Exception:
-                pass
-        return stage  # coding/qa/sre → 对应执行 Agent
+    # 表驱动查找；显式列缺失视为不分发
+    _row = _STAGE_EVENT_AGENT_MAP.get(event_type)
+    _agent = (_row or {}).get(stage, "") if _row else ""
+
+    # 特例：PR updated + stage=coding + QA 有历史 → qa 复审（coding 修复后重新审查）
+    if event_type == "pull_request_updated" and stage == "coding" and not _agent:
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? AND agent_type='qa' LIMIT 1",
+                    (repo_key, issue_id))
+                if c.fetchone():
+                    _agent = "qa"
+        except Exception:
+            pass
+
+    return _agent
 
 
 def resolve_actor(payload: dict, evt: dict) -> str:
@@ -741,6 +749,35 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 return result
         except Exception as e:
             log.warning(f"Pipeline: issue_updated label-only check failed: {e}")
+
+    # 2.2 L1 事件准入过滤（Issue #49，可配置规则 event_action_filter）
+    # 按 action + 操作者 + changes 判定：过滤无意义动作、edit 需 description 变更、PR update 按操作者、
+    # close 副作用-only（执行关闭后短路不进入 agent）。
+    try:
+        from src.api.event_rule import evaluate_event_action
+        _d = evaluate_event_action(event_type, evt.get("payload", {}) or {})
+        if _d["decision"] == "skip":
+            log.info(f"Pipeline skip: {_d['reason']} (event_action_filter, actor={_d['actor_type']})")
+            from src.api.event_store import append_skipped_event
+            append_skipped_event(repo_key, event_type, _d["reason"])
+            return result
+        if _d["decision"] == "side_effect":
+            # 执行副作用后短路：close → close_issue_tasks
+            if _d.get("side_effect") == "close_issue_tasks":
+                try:
+                    from src.api.routes.tasks import close_issue_tasks
+                    _ce_id = (evt.get("payload", {}) or {}).get("object_attributes", {}) or {}
+                    _ce_num = str(_ce_id.get("iid") or _ce_id.get("number") or "").lstrip("#")
+                    if _ce_num.isdigit() and int(_ce_num) > 0:
+                        _ce_n = close_issue_tasks(repo_key, int(_ce_num))
+                        log.info(f"Pipeline (L1 side_effect): closed tasks for issue #{_ce_num} ({_ce_n} rows)")
+                except Exception as _ce:
+                    log.warning(f"Pipeline L1 side_effect close_issue_tasks failed: {_ce}")
+            else:
+                log.info(f"Pipeline side_effect: {_d['side_effect'] or 'n/a'} (event_action_filter)")
+            return result
+    except Exception as e:
+        log.warning(f"Pipeline: event_action_filter check failed: {e}")
 
     # 3. 路由判定（D9 阶段矩阵 + 非 Issue 静态映射，替代 agent_type.subscribe_events，见 vod-skill-upgrade-plan §3.0.4）
     if event_type == "issue_opened":
