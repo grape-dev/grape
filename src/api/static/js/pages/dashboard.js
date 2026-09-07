@@ -10,6 +10,8 @@ function renderDashboard(data) {
   const currentScene = (data.dev_scene && scenes.find(s => s.id === data.dev_scene)) 
     ? data.dev_scene 
     : (scenes.length ? scenes[0].id : '');
+  window._currentSceneId = currentScene;
+  window._dashboardData = data;
   let owner = '', name = '';
   try {
     const cr = app.currentRepo();
@@ -228,6 +230,7 @@ function renderDashboard(data) {
         </div>
       </div>
       ${isCustomScene ? '<button class="ap-btn ap-btn-o" onclick="toggleEditMode()">编辑场景</button>' : '<button class="ap-btn ap-btn-o" onclick="toggleEngineMode()">配置引擎</button>'}
+      <button class="ap-btn ap-btn-o" onclick="openAdvancedOptions()">高级选项</button>
       ${isCustomScene ? '<button class="ap-btn ap-btn-o" style="color:#ff3b30;border-color:#ff3b30" onclick="deleteCustomScene()">删除</button>' : ''}
       </div>
       </div>
@@ -872,5 +875,198 @@ window._repairHost = function () {
     })
     .catch(function (e) {
       app.showToast && app.showToast('修复请求失败：' + (e && (e.detail && e.detail.message || e.message) || '未知错误'));
+    });
+};
+
+// ===== 场景高级选项 modal =====
+window.openAdvancedOptions = function () {
+  var sceneId = '';
+  var owner = '', name = '';
+  try {
+    var cr = app.currentRepo();
+    if (cr) { owner = cr.owner; name = cr.name; }
+  } catch (e) {}
+  if (!owner || !name) {
+    var repo = (window._dashboardData && _dashboardData.repo) || '';
+    var parts = repo.replace(/^gitcode:/, '').split('/');
+    owner = parts[0] || '';
+    name = parts[1] || '';
+  }
+  // 从 DOM 读当前选中场景
+  var trigger = document.getElementById('sceneTrigger');
+  if (trigger) {
+    var nameEl = trigger.querySelector('.ap-scene-name');
+    if (nameEl) {
+      // 遍历 scenes 匹配 name → id（从最近渲染数据取）
+      sceneId = window._currentSceneId || '';
+    }
+  }
+  if (!sceneId) {
+    app.showToast && app.showToast('请先选择场景');
+    return;
+  }
+
+  var repoParam = owner + '/' + name;
+
+  // 构建 modal 骨架
+  var modal = document.createElement('div');
+  modal.id = 'advOptionsModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = '' +
+    '<div style="background:#fff;border-radius:18px;width:480px;max-height:85vh;overflow-y:auto;box-shadow:0 12px 48px rgba(0,0,0,.2);font-family:-apple-system,BlinkMacSystemFont,sans-serif">' +
+      '<div style="padding:20px 24px;border-bottom:1px solid #e8e8ed">' +
+        '<h3 style="font-size:17px;font-weight:600;color:#1d1d1f;margin:0">高级选项</h3>' +
+        '<p style="font-size:12px;color:#86868b;margin:4px 0 0">配置场景的工作分支和自定义参数，注入到 Coding/QA/SRE Agent</p>' +
+      '</div>' +
+      '<div style="padding:20px 24px">' +
+        '<div style="margin-bottom:20px">' +
+          '<label style="font-size:13px;font-weight:600;color:#1d1d1f;display:block;margin-bottom:8px">工作分支 <span style="color:#ff3b30">*</span></label>' +
+          '<div style="display:flex;gap:8px">' +
+            '<select id="advWorkBranch" style="flex:1;min-width:0;max-width:300px;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"><option value="">加载中...</option></select>' +
+            '<button class="ap-btn ap-btn-o" onclick="window._toggleNewBranchInput()">新建分支</button>' +
+          '</div>' +
+          '<div id="newBranchInput" style="display:none;margin-top:8px">' +
+            '<div style="display:flex;gap:8px">' +
+              '<input id="newBranchName" placeholder="分支名" style="flex:1;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:13px;outline:none">' +
+              '<select id="newBranchRef" style="width:120px;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:13px;background:#f5f5f7;outline:none"></select>' +
+              '<button class="ap-btn ap-btn-p" onclick="window._createNewBranch(\'' + owner + '\',\'' + name + '\')">创建</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div>' +
+          '<label style="font-size:13px;font-weight:600;color:#1d1d1f;display:block;margin-bottom:8px">自定义配置</label>' +
+          '<div id="advCustomFields" style="display:flex;flex-direction:column;gap:8px;max-height:168px;overflow-y:auto"></div>' +
+          '<button class="ap-btn ap-btn-o" style="margin-top:8px" onclick="window._addCustomField()">+ 添加配置项</button>' +
+        '</div>' +
+      '</div>' +
+      '<div style="padding:16px 24px;border-top:1px solid #e8e8ed;display:flex;justify-content:flex-end;gap:8px">' +
+        '<button class="ap-btn ap-btn-o" onclick="window._closeAdvModal()">取消</button>' +
+        '<button class="ap-btn ap-btn-p" onclick="window._saveAdvancedOptions(\'' + sceneId + '\',\'' + repoParam + '\')">保存</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(modal);
+  modal.addEventListener('click', function (e) { if (e.target === modal) window._closeAdvModal(); });
+
+  // 加载已存配置
+  API.get('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(repoParam))
+    .then(function (d) {
+      // 填充工作分支
+      var sel = document.getElementById('advWorkBranch');
+      sel.innerHTML = '<option value="' + (d.work_branch || 'main') + '">' + (d.work_branch || 'main') + '</option>';
+      // 加载分支列表（失败不阻塞 modal，仅在下拉显示提示）
+      API.get('/scenes/branches/' + owner + '/' + name).then(function (b) {
+        var branches = (b && b.branches) || [];
+        if (branches.length) {
+          sel.innerHTML = branches.map(function (br) {
+            var s = br.name === (d.work_branch || 'main') ? ' selected' : '';
+            return '<option value="' + br.name + '"' + s + '>' + br.name + (br.protected ? ' 🔒' : '') + '</option>';
+          }).join('');
+        }
+        // 同步新建分支的 ref 下拉
+        var refSel = document.getElementById('newBranchRef');
+        refSel.innerHTML = branches.map(function (br) {
+          return '<option value="' + br.name + '">' + br.name + '</option>';
+        }).join('');
+        if (d.work_branch) refSel.value = d.work_branch;
+      }).catch(function () {
+        sel.innerHTML = '<option value="' + (d.work_branch || 'main') + '">' + (d.work_branch || 'main') + '</option>';
+      });
+
+      // 填充自定义字段
+      var fields = d.custom_fields || [];
+      var container = document.getElementById('advCustomFields');
+      container.innerHTML = '';
+      fields.forEach(function (f) { window._addCustomField(f.key, f.value); });
+    })
+    .catch(function (e) {
+      app.showToast && app.showToast('加载高级选项失败');
+    });
+};
+
+window._closeAdvModal = function () {
+  var m = document.getElementById('advOptionsModal');
+  if (m) m.remove();
+};
+
+window._toggleNewBranchInput = function () {
+  var el = document.getElementById('newBranchInput');
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+};
+
+window._addCustomField = function (key, value) {
+  var container = document.getElementById('advCustomFields');
+  if (!container) return;
+  var row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px';
+  row.innerHTML =
+    '<input class="adv-fld-key" placeholder="key" style="flex:1;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:12px;outline:none" value="' + (key || '') + '">' +
+    '<input class="adv-fld-val" placeholder="value" style="flex:2;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:12px;outline:none" value="' + (value || '') + '">' +
+    '<button class="ap-btn ap-btn-o" style="color:#ff3b30;border-color:#ff3b30;padding:6px 10px" onclick="this.parentElement.remove()">×</button>';
+  container.appendChild(row);
+};
+
+window._createNewBranch = function (owner, name) {
+  var branchName = (document.getElementById('newBranchName') || {}).value || '';
+  var refs = (document.getElementById('newBranchRef') || {}).value || 'main';
+  if (!branchName.trim()) { app.showToast && app.showToast('分支名不能为空'); return; }
+  API.post('/scenes/branches/' + owner + '/' + name, { branch_name: branchName.trim(), refs: refs })
+    .then(function (d) {
+      app.showToast && app.showToast('分支 ' + branchName + ' 已创建');
+      // 刷新分支列表
+      return API.get('/scenes/branches/' + owner + '/' + name);
+    })
+    .then(function (b) {
+      var branches = (b && b.branches) || [];
+      var sel = document.getElementById('advWorkBranch');
+      sel.innerHTML = branches.map(function (br) {
+        var s = br.name === branchName.trim() ? ' selected' : '';
+        return '<option value="' + br.name + '"' + s + '>' + br.name + (br.protected ? ' 🔒' : '') + '</option>';
+      }).join('');
+      var refSel = document.getElementById('newBranchRef');
+      refSel.innerHTML = branches.map(function (br) {
+        return '<option value="' + br.name + '">' + br.name + '</option>';
+      }).join('');
+      refSel.value = branchName.trim();
+      document.getElementById('newBranchName').value = '';
+      window._toggleNewBranchInput();
+    })
+    .catch(function (e) {
+      var msg = (e && e.detail && e.detail.message) || (e && e.message) || '创建失败';
+      app.showToast && app.showToast(msg);
+    });
+};
+
+window._saveAdvancedOptions = function (sceneId, repoParam) {
+  var workBranch = (document.getElementById('advWorkBranch') || {}).value || '';
+  if (!workBranch) { app.showToast && app.showToast('工作分支不能为空'); return; }
+
+  var fields = [];
+  var rows = document.querySelectorAll('#advCustomFields > div');
+  rows.forEach(function (row) {
+    var k = (row.querySelector('.adv-fld-key') || {}).value || '';
+    var v = (row.querySelector('.adv-fld-val') || {}).value || '';
+    if (k.trim()) fields.push({ key: k.trim(), value: v.trim() });
+  });
+
+  // 检查 key 重复
+  var seen = {};
+  for (var i = 0; i < fields.length; i++) {
+    if (seen[fields[i].key]) { app.showToast && app.showToast('配置项 key "' + fields[i].key + '" 重复'); return; }
+    seen[fields[i].key] = true;
+  }
+
+  API.put('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(repoParam), {
+    work_branch: workBranch,
+    custom_fields: fields
+  })
+    .then(function (d) {
+      app.showToast && app.showToast('高级选项已保存');
+      window._closeAdvModal();
+      // 刷新 dashboard
+      API.get('/dashboard/' + repoParam.split('/')[0] + '/' + repoParam.split('/')[1]).then(renderDashboard).catch(function () {});
+    })
+    .catch(function (e) {
+      var msg = (e && e.detail && e.detail.message) || (e && e.message) || '保存失败';
+      app.showToast && app.showToast(msg);
     });
 };

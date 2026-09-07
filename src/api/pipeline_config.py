@@ -277,17 +277,16 @@ def create_custom_scene(scene_id: str, name: str, description: str,
     now = datetime.now(timezone.utc).isoformat()
     with lock:
         c = db.cursor()
-        # Check if a soft-deleted record exists (is_active=0) — reactivate it
+        # Check if record exists (硬删除后不会有 is_active=0 残留)
         c.execute(
             "SELECT id FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=? LIMIT 1",
             (scene_id, repo_key))
         existing = c.fetchone()
         if existing:
-            # Reactivate soft-deleted record
+            # 已存在 → 更新
             c.execute(
                 "UPDATE devops_pipeline_scene SET name=?, description=?, nodes_json=?, onboarding=?, is_active=1, updated_at=? WHERE id=?",
                 (name, description, nodes_json, onboarding, now, existing[0]))
-            # 更新 display_name（列存在时）
             _try_set_display_name(c, existing[0], display_name or name)
             db.commit()
             return existing[0]
@@ -334,12 +333,12 @@ def update_custom_scene(scene_id: str, repo_key: str,
 
 
 def delete_custom_scene(scene_id: str, repo_key: str):
-    """Soft-delete a repo-scoped custom scene (is_active=0)."""
+    """Hard-delete a repo-scoped custom scene. 精确匹配 scene_id + repo_key，不影响其他仓库。"""
     db, lock = _db()
     with lock:
         c = db.cursor()
         c.execute(
-            "UPDATE devops_pipeline_scene SET is_active=0 WHERE scene_id=? AND repo_key=?",
+            "DELETE FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=?",
             (scene_id, repo_key))
         db.commit()
 

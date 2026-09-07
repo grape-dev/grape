@@ -1119,10 +1119,27 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
     # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
     host_status = _check_host_status(owner, repo, repo_key)
 
+    # 读取当前场景的高级选项（工作分支 + 自定义 key:value）
+    advanced_options = {}
+    try:
+        if dev_scene:
+            with db_lock:
+                c.execute(
+                    "SELECT advanced_options FROM devops_pipeline_scene "
+                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                    (dev_scene, repo_key))
+                _adv_row = c.fetchone()
+            if _adv_row and _adv_row[0]:
+                import json as _json
+                advanced_options = _json.loads(_adv_row[0])
+    except Exception:
+        pass
+
     return {
         "repo": repo_key,
         "role": role,
         "dev_scene": dev_scene,
+        "advanced_options": advanced_options,
         "_scenes": scenes,
         "metrics": metrics,
         "agents": agent_sessions,

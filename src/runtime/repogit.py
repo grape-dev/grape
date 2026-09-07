@@ -103,8 +103,52 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
             return None
 
 
-def _default_base_branch(base: str, token: str = "") -> str:
-    """从 refs/remotes/origin/* 推断默认分支（main → master 兜底）。"""
+def _read_scene_work_branch(repo_key: str) -> str:
+    """读场景高级选项的 work_branch（managed_repos.dev_scene → devops_pipeline_scene.advanced_options）。"""
+    try:
+        from src.session_manager import db, db_lock
+        import json as _json
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return ""
+        scene_id = row[0]
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return ""
+        opts = _json.loads(row[0]) if row[0] else {}
+        return opts.get("work_branch", "") or ""
+    except Exception:
+        return ""
+
+
+def _default_base_branch(base: str, token: str = "", repo_key: str = "", env_work_branch: str = "") -> str:
+    """推断默认分支：优先 env work_branch → 场景 DB work_branch → main/master 兜底。
+
+    env_work_branch 由 API 服务器从 MySQL 读取后通过 env_extra 注入（worker 端无 MySQL，
+    本地 sqlite 的 managed_repos 为空表，_read_scene_work_branch 读不到）。
+    """
+    # 1. 优先读环境变量注入的 work_branch（API 服务器从 MySQL 读取后注入）
+    _wb = env_work_branch
+    # 2. 环境变量没有 → 读本地 DB（API 服务器直连 MySQL 时有效）
+    if not _wb and repo_key:
+        _wb = _read_scene_work_branch(repo_key)
+    if _wb:
+        # 校验该分支在远程存在（避免配置错误导致 worktree 失败）
+        r = _run_git(["-C", base, "show-ref", "--verify", "--quiet",
+                      f"refs/remotes/origin/{_wb}"], token=token)
+        if r is not None and r.returncode == 0:
+            return _wb
+        log.warning(f"repogit: scene work_branch '{_wb}' not found in remote, fallback to default")
+    # 3. 兜底
     for cand in ("main", "master"):
         r = _run_git(["-C", base, "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{cand}"], token=token)
         if r is not None and r.returncode == 0:
@@ -150,8 +194,11 @@ def askpass_path(issue_dir: str) -> str:
     return os.path.join(issue_dir, ".git-askpass.sh")
 
 
-def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "") -> str | None:
-    """确保共享基线 + Issue 级 worktree（任务 cwd）。已存在则直接复用。"""
+def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "", work_branch: str = "") -> str | None:
+    """确保共享基线 + Issue 级 worktree（任务 cwd）。已存在则直接复用。
+
+    work_branch 由调用方从 env_extra["GRAPE_WORK_BRANCH"] 传入（API 服务器从 MySQL 读取后注入）。
+    """
     if not is_git_agent(agent_type):
         return None
     base = ensure_repo_base(repo_key, token)
@@ -166,7 +213,7 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
     branch = f"feat/issue-{issue_num}"
     with _lock_for(repo_key):
         try:
-            base_branch = _default_base_branch(base, token)
+            base_branch = _default_base_branch(base, token, repo_key, env_work_branch=work_branch)
             br = _run_git(["-C", base, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], token=token)
             if br is not None and br.returncode == 0:
                 r = _run_git(["-C", base, "worktree", "add", "--force", issue_dir, branch], token=token)

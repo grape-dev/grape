@@ -978,8 +978,10 @@ async def _execute_task(client, task, engine_name: str = ""):
         from src.runtime import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
+            _wb = env.get("GRAPE_WORK_BRANCH", "")
             _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                                _num, token=task.get("repo_gitcode_token") or "")
+                                                _num, token=task.get("repo_gitcode_token") or "",
+                                                work_branch=_wb)
             if _wt:
                 env["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
