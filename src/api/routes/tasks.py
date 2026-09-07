@@ -957,6 +957,7 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
         # 区分场景来源：issue_state.scene_id（VOD 识别）vs 仓库默认场景
         _st = get_issue_stage(_rk, _issue_id)
         _issue_scene_id = (_st.get("scene_id") or "") if _st else ""
+        _stage = (_st.get("stage") or "") if _st else ""
         if _issue_scene_id:
             _scene_id = _issue_scene_id
             _scene_source = "vod"  # VOD 识别
@@ -981,5 +982,6 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
             "scene_id": _scene_id,
             "scene_name": _scene_name,
             "scene_source": _scene_source,
+            "stage": _stage,
         })
     return {"tasks": tasks_out, "sort_order": sort_order, "mode": mode}
