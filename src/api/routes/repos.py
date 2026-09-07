@@ -299,15 +299,25 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)
         webhook_url = get_webhook_url()
         if not webhook_url:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "webhook_url 未配置，无法托管"})
+        # 读取全局 bot token（托管时存入 managed_repos.bot_gitcode_token）
+        _create_global_bot_token = ""
+        try:
+            import json as _json, os as _os2
+            _gbt_path2 = _os2.path.join(_os2.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+            if _os2.path.exists(_gbt_path2):
+                with open(_gbt_path2, "r", encoding="utf-8") as _f2:
+                    _create_global_bot_token = _json.load(_f2).get("gitcode_api_token", "") or ""
+        except Exception:
+            pass
         try:
             existing_id = find_existing_webhook(api_token, owner, repo_name, webhook_url)
             repo_key = to_repo_key(full_name)
             if existing_id:
-                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=api_token)
+                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=api_token, bot_gitcode_token=_create_global_bot_token)
                 user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             else:
                 hook_id = setup_webhook(api_token, owner, repo_name, webhook_url, webhook_password=api_token)
-                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=api_token)
+                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=api_token, bot_gitcode_token=_create_global_bot_token)
                 user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
@@ -428,7 +438,7 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         # 4) webhook：统一用 bot token 查/建（方案 C）
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
-            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
+            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=webhook_token, bot_gitcode_token=global_bot_token, bot_username=global_bot_username)
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
@@ -444,7 +454,7 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         # 清理同名旧仓库残留的 DB 数据（同上）
         from src.api.onboarding import cleanup_stale_repo_data
         cleanup_stale_repo_data(repo_key)
-        user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=webhook_token, bot_username=global_bot_username)
+        user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=webhook_token, bot_gitcode_token=global_bot_token, bot_username=global_bot_username)
         user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
         from src.api.session_store import ensure_default_agent_sessions
         ensure_default_agent_sessions(repo_key)
@@ -524,7 +534,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
     try:
         from src.user.db import add_managed_repo
         add_managed_repo(repo_key, owner, repo, webhook_id=hid,
-                         gitcode_webhook_token=bot_token, bot_username=bot_username)
+                         gitcode_webhook_token=bot_token, bot_gitcode_token=bot_token, bot_username=bot_username)
     except Exception as _e:
         log.warning(f"repair_host: write back webhook_id failed: {_e}")
     set_host_status(repo_key, "")

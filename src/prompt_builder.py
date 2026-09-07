@@ -164,6 +164,55 @@ def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
         _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")
 
 
+def _build_scene_advanced_options(repo_key: str) -> str:
+    """注入场景高级选项：工作分支 + 自定义配置（仅执行类 agent coding/qa/sre）。
+
+    读取 managed_repos.dev_scene → devops_pipeline_scene.advanced_options JSON，
+    拼装为 prompt 段落。无配置时返回空串。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        # 1. 读 managed_repos.dev_scene 拿当前场景 scene_id
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return ""
+        scene_id = row[0]
+        # 2. 读 devops_pipeline_scene.advanced_options
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return ""
+        import json as _json
+        opts = _json.loads(row[0]) if row[0] else {}
+        if not opts:
+            return ""
+        lines = ["\n## 场景高级选项"]
+        wb = opts.get("work_branch", "")
+        if wb:
+            lines.append(f"- 工作基线分支：{wb}（Issue 分支从该分支切出，PR/MR 目标分支必须为 {wb}）")
+        fields = opts.get("custom_fields", [])
+        if fields:
+            lines.append("- 项目自定义配置：")
+            for f in fields:
+                _k = f.get("key", "")
+                _v = f.get("value", "")
+                if _k:
+                    lines.append(f"  - {_k}: {_v}")
+        return "\n".join(lines) if len(lines) > 1 else ""
+    except Exception as _e:
+        from src.config import log as _log
+        _log.warning(f"prompt_builder: inject advanced options failed: {_e}")
+        return ""
+
+
 def build_role_definition(skills=None, agent_type="") -> str:
     rules = [
         "You are a DevOps operations assistant. Your domain:",
@@ -424,10 +473,17 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     except Exception:
         pass
 
-    repo_key = f"{evt['source']}:{evt['repository']}"
+    # 优先用 evt 里已有的 repo_key（A2A 事件 source='a2a' 会导致拼接错误）
+    repo_key = evt.get("repo_key") or f"{evt['source']}:{evt['repository']}"
     account = evt.get("account") or evt.get("repository", "")
     parts.append(_build_history_file_guide(repo_key, account, runtime_id))
     parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else "")))
+
+    # 场景高级选项注入（仅执行类 agent：coding/qa/sre）
+    if agent_type in ("coding", "qa", "sre"):
+        _adv = _build_scene_advanced_options(repo_key)
+        if _adv:
+            parts.append(_adv)
 
     # 子任务/多任务模式上下文注入
     _issue_id = evt.get("issue_id", "")

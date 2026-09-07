@@ -617,6 +617,101 @@ def toggle_scene_like(market_id: int, user: dict = Depends(get_current_user)):
     return {"liked": liked, "like_count": like_count}
 
 
+# ===== 分支管理（必须在 /{scene_id} 之前声明，避免路由被 scene_id 吞掉）=====
+
+class CreateBranchRequest(BaseModel):
+    branch_name: str
+    refs: str = "main"
+
+
+@router.get("/branches/{owner}/{repo}")
+def list_repo_branches(owner: str, repo: str, user: dict = Depends(get_current_user)):
+    """列出仓库所有分支（供高级选项工作分支选择）"""
+    from src.user.db import get_bot_token_by_repo
+    from src.user.repo_manager import _req
+
+    # 仓库 bot token → 全局 bot token
+    token = get_bot_token_by_repo(owner, repo)
+    if not token:
+        try:
+            import os as _os, json as _json
+            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+            if _os.path.exists(_gbt_path):
+                with open(_gbt_path, "r", encoding="utf-8") as _f:
+                    _gbt = _json.load(_f)
+                token = _gbt.get("gitcode_api_token", "") or ""
+        except Exception:
+            pass
+    if not token:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法查询分支"})
+
+    branches = []
+    try:
+        page = 1
+        while page <= 5:
+            url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/branches?per_page=100&page={page}"
+            data = _req("GET", url, token)
+            if not isinstance(data, list) or not data:
+                break
+            for b in data:
+                branches.append({
+                    "name": b.get("name", ""),
+                    "protected": bool(b.get("protected", False)),
+                })
+            if len(data) < 100:
+                break
+            page += 1
+    except Exception as e:
+        log.warning(f"List branches failed for {owner}/{repo}: {e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
+
+    return {"branches": branches}
+
+
+@router.post("/branches/{owner}/{repo}")
+def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
+                        user: dict = Depends(get_current_user)):
+    """在仓库中创建新分支"""
+    from src.user.db import get_bot_token_by_repo
+    from src.user.repo_manager import _req
+
+    # 仓库 bot token → 全局 bot token
+    token = get_bot_token_by_repo(owner, repo)
+    if not token:
+        try:
+            import os as _os, json as _json
+            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+            if _os.path.exists(_gbt_path):
+                with open(_gbt_path, "r", encoding="utf-8") as _f:
+                    _gbt = _json.load(_f)
+                token = _gbt.get("gitcode_api_token", "") or ""
+        except Exception:
+            pass
+    if not token:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法创建分支"})
+
+    if not body.branch_name or not body.branch_name.strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "分支名不能为空"})
+
+    try:
+        url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/branches"
+        result = _req("POST", url, token, {
+            "branch_name": body.branch_name.strip(),
+            "refs": body.refs or "main",
+        })
+        log.info(f"Branch created: {body.branch_name} in {owner}/{repo}")
+        return {"name": body.branch_name.strip(), "message": "分支已创建"}
+    except RuntimeError as e:
+        err_msg = str(e)
+        if "409" in err_msg:
+            raise HTTPException(status_code=409, detail={"code": 409, "message": "分支已存在"})
+        if "403" in err_msg:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "需要维护者权限才能创建分支"})
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {err_msg}"})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
+
+
 @router.get("/{scene_id}")
 def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)):
     """返回场景详情（nodes + engine 信息）"""
@@ -864,3 +959,110 @@ def app_current_repo():
     # FastAPI 无 session 级仓库选择；前端通过 query param 或 header 传
     # 这里返回 None，调用方会用 user 信息或其他方式获取 repo
     return None
+
+
+# ===== 场景高级选项：工作分支 + 自定义 key:value =====
+
+class AdvancedOptionsRequest(BaseModel):
+    work_branch: str = "main"
+    custom_fields: list = []   # [{key: str, value: str}]
+
+
+@router.get("/{scene_id}/advanced-options")
+def get_advanced_options(scene_id: str, user: dict = Depends(get_current_user), repo: str = ""):
+    """读取场景高级选项（工作分支 + 自定义 key:value）"""
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+    import json as _json
+
+    repo_key = ""
+    if repo:
+        repo_key = to_repo_key(repo)
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
+
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+    except Exception:
+        row = None
+
+    if row and row[0]:
+        try:
+            opts = _json.loads(row[0])
+        except Exception:
+            opts = {}
+        return {
+            "work_branch": opts.get("work_branch", "main") or "main",
+            "custom_fields": opts.get("custom_fields", []) or [],
+        }
+    return {"work_branch": "main", "custom_fields": []}
+
+
+@router.put("/{scene_id}/advanced-options")
+def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
+                          user: dict = Depends(get_current_user), repo: str = ""):
+    """保存场景高级选项（工作分支 + 自定义 key:value）"""
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+    from src.api.pipeline_config import _query_scene_by_id
+    import json as _json
+    from datetime import datetime, timezone
+
+    repo_key = ""
+    if repo:
+        repo_key = to_repo_key(repo)
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
+
+    # 校验 work_branch 非空（强制字段）
+    if not body.work_branch or not body.work_branch.strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "工作分支不能为空"})
+
+    # 校验场景存在
+    existing = _query_scene_by_id(scene_id, repo_key=repo_key)
+    if not existing:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
+
+    # 校验 custom_fields key 非空且不重复
+    seen_keys = set()
+    for f in (body.custom_fields or []):
+        _k = (f.get("key") or "").strip() if isinstance(f, dict) else ""
+        if not _k:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "配置项 key 不能为空"})
+        if _k in seen_keys:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"配置项 key '{_k}' 重复"})
+        seen_keys.add(_k)
+
+    opts = {
+        "work_branch": body.work_branch.strip(),
+        "custom_fields": [
+            {"key": (f.get("key") or "").strip(), "value": (f.get("value") or "").strip()}
+            for f in (body.custom_fields or []) if isinstance(f, dict)
+        ],
+    }
+    opts_json = _json.dumps(opts, ensure_ascii=False)
+    now = datetime.now(timezone.utc).isoformat()
+
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE devops_pipeline_scene SET advanced_options=?, updated_at=? "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1",
+                (opts_json, now, scene_id, repo_key))
+            if c.rowcount == 0:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在或未激活"})
+            db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+
+    log.info(f"Advanced options saved: scene={scene_id} repo={repo_key} work_branch={body.work_branch}")
+    return {"message": "高级选项已保存"}

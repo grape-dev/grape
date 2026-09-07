@@ -185,6 +185,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     prompt = ""
     try:
         from src.prompt_builder import build_prompt
+        evt["repo_key"] = repo_key
         evt["_skill_path"] = skill_path
         evt["_skill_id"] = skill_id
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
@@ -1359,6 +1360,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 4) 构建 prompt（含技能占位符化，见 skill-delivery-remote.md）
     try:
         from src.prompt_builder import build_prompt
+        evt["repo_key"] = repo_key
         evt["_skill_path"] = skill_path
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
@@ -1374,6 +1376,14 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     _inject_cloud_credentials(env_extra, repo_key)
+    # 注入场景 work_branch（worker 端 repogit 优先读环境变量，不依赖本地 DB）
+    try:
+        from src.runtime.repogit import _read_scene_work_branch
+        _wb = _read_scene_work_branch(repo_key)
+        if _wb:
+            env_extra["GRAPE_WORK_BRANCH"] = _wb
+    except Exception:
+        pass
     # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
@@ -1760,6 +1770,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     agent_name = get_agent_display_name(agent_type)
 
     try:
+        evt["repo_key"] = repo_key
         prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
         # 直接模式（direct）：组件4 统一物化 project-info / skill / knowledge 到 ws 内
@@ -1805,6 +1816,14 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         "ACCOUNT": exec_account,
     }
     _inject_cloud_credentials(env_extra, repo_key)
+    # 注入场景 work_branch（direct 模式同样注入，保持与 worker 模式一致）
+    try:
+        from src.runtime.repogit import _read_scene_work_branch
+        _wb = _read_scene_work_branch(repo_key)
+        if _wb:
+            env_extra["GRAPE_WORK_BRANCH"] = _wb
+    except Exception:
+        pass
     # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
     # （direct 模式同样需要——A2A 交办 sre 走本路径，见 _enqueue_pipeline_task 同款逻辑）
     if agent_type == "sre":
@@ -1844,7 +1863,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         from src.runtime import repogit
         _gnum = repogit.issue_num_from(issue_id)
         if repogit.is_git_agent(agent_type) and _gnum and issue_session_id:
-            _wt = repogit.ensure_issue_worktree(repo_key, agent_type, _gnum, token=repo_gitcode_token)
+            _wb = env_extra.get("GRAPE_WORK_BRANCH", "")
+            _wt = repogit.ensure_issue_worktree(repo_key, agent_type, _gnum,
+                                                token=repo_gitcode_token, work_branch=_wb)
             if _wt:
                 env_extra["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
