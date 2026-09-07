@@ -691,6 +691,50 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         chat_id = parsed["chat_id"]
         msg_id = parsed["message_id"]
         image_key = parsed.get("image_key", "")
+        file_key = parsed.get("file_key", "")
+
+        # 视频/文件消息：下载并理解
+        media_description = ""
+        if file_key:
+            msg_type = parsed.get("message_type", "")
+            is_video = msg_type == "media"
+            if is_video and msg_id and msg_id.startswith("om_"):
+                asyncio.create_task(
+                    api.reply_text(ctx, msg_id, "⏳ 正在分析视频，可能需要 30-60 秒...\n支持 MP4/MOV/WebM 等常见格式，文件不超过 50MB；视频时长超过 2 分钟时，将截取前 2 分钟的关键帧进行分析"),
+                    name=f"video-ack-{ctx.name}",
+                )
+            try:
+                # 飞书消息资源 API 的 type 参数只支持 image 和 file，
+                # 视频消息的 file_key 用 type=file 下载（飞书不支持 type=video）
+                file_bytes = await api.download_file(ctx, file_key, message_id=msg_id, file_type="file")
+                if file_bytes:
+                    if is_video:
+                        # 视频理解：ffmpeg 抽帧 + VLM 多帧分析
+                        import importlib.util as _ilu
+                        _spec = _ilu.spec_from_file_location("image_understanding",
+                            os.path.join(os.path.dirname(__file__), "..", "agent", "image_understanding.py"))
+                        _mod = _ilu.module_from_spec(_spec)
+                        _spec.loader.exec_module(_mod)
+                        media_description = _mod.understand_video_from_bytes(file_bytes)
+                        log.info(f"[Chat:{ctx.name}] video understood: {len(media_description)} chars desc")
+                    else:
+                        media_description = f"用户发送了文件（file_key={file_key}），暂不支持文件内容理解。"
+                    if not media_description:
+                        media_description = "用户发送了一个视频/文件，但未能提取有效信息。"
+                    # 缓存描述，后续追问在 TTL 窗口内自动注入
+                    _set_pending_image(chat_id, media_description)
+                    if not text or text in ("[视频]", "[文件]"):
+                        text = "请帮我分析这个视频" if is_video else "请帮我处理这个文件"
+                else:
+                    log.warning(f"[Chat:{ctx.name}] file download failed: {file_key}")
+                    media_description = f"用户发送了一个{'视频' if is_video else '文件'}，但下载失败。"
+                    if not text or text in ("[视频]", "[文件]"):
+                        text = f"请帮我分析这个{'视频' if is_video else '文件'}"
+            except Exception as e:
+                log.warning(f"[Chat:{ctx.name}] video/file understanding failed: {e}")
+                media_description = f"用户发送了一个{'视频' if is_video else '文件'}，但分析出错: {e}"
+                if not text or text in ("[视频]", "[文件]"):
+                    text = f"请帮我分析这个{'视频' if is_video else '文件'}"
 
         # 图片消息：下载图片并理解
         image_description = ""
@@ -723,12 +767,16 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 if not text or text == "[图片]":
                     text = "请帮我分析这张图片"
         else:
-            # 非图片消息：检查是否有近期图片上下文，自动注入供追问使用
-            # （修复：用户发图片后追问图片相关问题，图片描述丢失导致 opencode 拒答）
-            cached = _get_pending_image(chat_id)
-            if cached:
-                image_description = cached
-                log.info(f"[Chat:{ctx.name}] reused cached image desc ({len(image_description)} chars) for follow-up")
+            # 非图片/视频消息：检查是否有近期媒体上下文，自动注入供追问使用
+            # （图片/视频描述都缓存在 _pending_image_desc 中，追问时自动注入）
+            if not media_description:
+                cached = _get_pending_image(chat_id)
+                if cached:
+                    image_description = cached
+                    log.info(f"[Chat:{ctx.name}] reused cached media desc ({len(image_description)} chars) for follow-up")
+        # 合并视频/文件描述到 image_description（统一后续 prompt 注入链路）
+        if media_description and not image_description:
+            image_description = media_description
         # 快捷菜单/card action 没有真实 message_id，优先用 _reply_id（卡片 open_message_id）
         if not msg_id or not msg_id.startswith("om_"):
             _reply_id = parsed.get("_reply_id", "")

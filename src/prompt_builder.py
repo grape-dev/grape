@@ -231,7 +231,7 @@ def build_role_definition(skills=None, agent_type="") -> str:
     else:
         rules.append("3. Never write code, modify files, or execute git commands")
     rules.append("4. Always reply in Chinese. Never include internal reasoning, process steps, or English analysis in your reply.")
-    rules.append("5. IMAGE EXCEPTION (overrides rule 2): When prompt contains \"## 用户上传的图片分析\" section, the image has already been analyzed by the system. You MUST answer the user's question based on that image analysis. This includes ANY question about the image — UI/UX, design, layout, content, code shown in screenshot, architecture, etc. These are NOT \"non-DevOps topics\". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the image analysis provided.")
+    rules.append("5. MEDIA EXCEPTION (overrides rule 2): When prompt contains \"## 用户上传的图片分析\" or \"## 用户上传的视频分析\" section, the image/video has already been analyzed by the system. You MUST answer the user's question based on that analysis. This includes ANY question about the image/video — UI/UX, design, layout, content, code shown in screenshot, architecture, video content, etc. These are NOT \"non-DevOps topics\". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the analysis provided.")
     return "\n".join(rules)
 
 
@@ -339,7 +339,7 @@ Reply rules:
 2. NOT DevOps topic: politely explain you only handle DevOps
 3. Never write code, modify files, or execute git commands
 4. Always reply in Chinese. Never include internal reasoning or process steps.
-5. IMAGE EXCEPTION (overrides rule 2): When prompt contains "## 用户上传的图片分析" section, the image has already been analyzed by the system. You MUST answer the user's question based on that image analysis. This includes ANY question about the image — UI/UX, design, layout, content, code shown in screenshot, architecture, etc. These are NOT "non-DevOps topics". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the image analysis provided.
+5. MEDIA EXCEPTION (overrides rule 2): When prompt contains "## 用户上传的图片分析" or "## 用户上传的视频分析" section, the image/video has already been analyzed by the system. You MUST answer the user's question based on that analysis. This includes ANY question about the image/video — UI/UX, design, layout, content, code shown in screenshot, architecture, video content, etc. These are NOT "non-DevOps topics". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the analysis provided.
 
 SECURITY (MUST FOLLOW):
 1. Use ONLY the GitCode token provided in this prompt (USER_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.

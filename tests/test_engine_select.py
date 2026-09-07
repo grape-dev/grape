@@ -23,7 +23,7 @@ def _clean_tables(monkeypatch):
         c.execute("DELETE FROM devops_agent_session")
         c.execute("DELETE FROM agent_runtimes")
         c.execute("DELETE FROM runtime_credentials")
-        c.execute("DELETE FROM devops_pipeline_scene WHERE scope IN ('user','repo')")
+        c.execute("DELETE FROM devops_pipeline_scene")
         db.commit()
     yield
     with db_lock:
@@ -33,7 +33,7 @@ def _clean_tables(monkeypatch):
         c.execute("DELETE FROM devops_agent_session")
         c.execute("DELETE FROM agent_runtimes")
         c.execute("DELETE FROM runtime_credentials")
-        c.execute("DELETE FROM devops_pipeline_scene WHERE scope IN ('user','repo')")
+        c.execute("DELETE FROM devops_pipeline_scene")
         db.commit()
 
 
@@ -63,12 +63,20 @@ def _mk_engine(name, *, credential_id, status="online", healthy=1, installed=1,
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (name, name, credential_id, status, healthy, installed, ls, scope, owner_id))
         rid = c.lastrowid
+        # engine_capabilities tag="all" — _filter_by_tags 需要至少一条匹配记录否则引擎被过滤掉
+        c.execute(
+            "INSERT OR IGNORE INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)",
+            (rid,))
         db.commit()
         return rid
 
 
 def _mk_scene(scene_id, agent_type, engine_ids, scope="user", user_id=1, repo_key=""):
-    """Create a scene with a single node containing engine_runtime_ids."""
+    """Create a scene with a single node containing engine_runtime_ids.
+
+    Issue #39 方案 B 后 devops_pipeline_scene 表移除了 scope/user_id 列，
+    场景仅按 repo_key 关联。测试中用 repo_key="owner/repo" 匹配 pick_engine 的查询。
+    """
     # 确保 user_repos 有记录，让 _repo_user_id 能查到
     with db_lock:
         c = db.cursor()
@@ -81,9 +89,13 @@ def _mk_scene(scene_id, agent_type, engine_ids, scope="user", user_id=1, repo_ke
               "mode": "emit", "next": "done", "handoff": "complete",
               "engine_runtime_ids": engine_ids}]
     from src.api.pipeline_config import create_custom_scene
+    # weekly-02: create_custom_scene 签名移除 scope/user_id，场景按 repo_key 关联
+    # 测试统一用 "owner/repo" 作为 repo_key，与 pick_engine("owner/repo", ...) 对齐
+    _rk = repo_key or "owner/repo"
+    _rk = _rk.split(":")[-1] if ":" in _rk else _rk  # 归一化去掉 gitcode: 前缀
     create_custom_scene(
         scene_id=scene_id, name=scene_id, description="",
-        scope=scope, repo_key=repo_key, user_id=user_id,
+        repo_key=_rk,
         nodes=nodes)
 
 
@@ -179,12 +191,12 @@ class TestScenePoolEngineIds:
     def test_non_empty_ids(self):
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
         _mk_scene("test-pe", "vod", [glob_eng])
-        result = es.get_scene_pool_engine_ids("test-pe", "vod", user_id=1)
+        result = es.get_scene_pool_engine_ids("test-pe", "vod", repo_key="owner/repo", user_id=1)
         assert json.loads(result) == [glob_eng]
 
     def test_empty_ids_returns_empty(self):
         _mk_scene("test-pe2", "vod", [])
-        assert es.get_scene_pool_engine_ids("test-pe2", "vod", user_id=1) == ""
+        assert es.get_scene_pool_engine_ids("test-pe2", "vod", repo_key="owner/repo", user_id=1) == ""
 
     def test_no_scene_returns_empty(self):
-        assert es.get_scene_pool_engine_ids("nonexistent", "vod", user_id=1) == ""
+        assert es.get_scene_pool_engine_ids("nonexistent", "vod", repo_key="owner/repo", user_id=1) == ""
