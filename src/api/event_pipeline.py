@@ -2105,6 +2105,14 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
     """
     if not repository or not issue_number or not bot_token:
         return
+    # 过滤：优先提取结构化 conclusion，避免思考过程/JSON 块泄漏到 Issue 评论
+    try:
+        from src.api.event_store import parse_agent_output_json
+        _parsed = parse_agent_output_json(result_text)
+        if _parsed and _parsed.get("conclusion"):
+            result_text = _parsed["conclusion"]
+    except Exception:
+        pass
     try:
         import urllib.request, json as _json
         _comment = f"[{agent_type.upper()} Agent] {result_text[:3000]}"
