@@ -1,9 +1,10 @@
-"""Image understanding module: OCR + visual feature analysis → LLM interpretation.
+"""Image and video understanding module: OCR + visual feature analysis → LLM interpretation.
 
-Used by both Web Chat and Feishu Chat to inject image context into LLM prompts.
-Pipeline: RapidOCR (PP-OCRv4) for text + PIL for visual features → opengw LLM for natural language description.
+Used by both Web Chat and Feishu Chat to inject image/video context into LLM prompts.
+Image pipeline: RapidOCR (PP-OCRv4) for text + PIL for visual features → VLM (qwen2.5-vl-72b) for natural language description.
+Video pipeline: ffmpeg keyframe extraction → per-frame VLM analysis → LLM synthesis of video summary.
 """
-import os, tempfile, base64, io, time, json, urllib.request, urllib.error
+import os, tempfile, base64, io, time, json, subprocess, urllib.request, urllib.error
 from src.config import log
 
 # Lazy-loaded OCR engine
@@ -438,4 +439,228 @@ def understand_image_from_base64(b64_data: str) -> str:
         return understand_image_from_bytes(image_bytes)
     except Exception as e:
         log.warning(f"ImageUnderstanding: base64 analysis failed: {e}")
+        return ""
+
+
+# ── Video understanding ──────────────────────────────────────────────
+
+_VIDEO_MAX_FRAMES = 6
+_VIDEO_MAX_DURATION = 120  # seconds — videos longer than this are truncated
+_VIDEO_MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+
+def _get_video_duration(video_path: str) -> float:
+    """Get video duration in seconds using ffprobe."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_format", video_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            info = json.loads(result.stdout)
+            return float(info.get("format", {}).get("duration", 0))
+    except Exception as e:
+        log.warning(f"VideoUnderstanding: ffprobe failed: {e}")
+    return 0.0
+
+
+def _extract_keyframes(video_path: str, max_frames: int = _VIDEO_MAX_FRAMES) -> list[str]:
+    """Extract keyframes from video using ffmpeg.
+
+    Uniformly samples frames across the video duration.
+    Returns list of temporary JPEG file paths.
+    """
+    duration = _get_video_duration(video_path)
+    if duration <= 0:
+        # Fallback: let ffmpeg figure it out with fps-based extraction
+        duration = _VIDEO_MAX_DURATION
+
+    # Limit duration
+    duration = min(duration, _VIDEO_MAX_DURATION)
+
+    # Calculate frame interval: evenly distributed, skip first/last 5%
+    # e.g. 6 frames over 60s → interval=10s, timestamps at 3s,13s,23s,33s,43s,53s
+    if max_frames <= 1:
+        timestamps = [duration * 0.5]
+    else:
+        margin = duration * 0.05
+        usable = duration - 2 * margin
+        step = usable / max_frames
+        timestamps = [margin + step * (i + 0.5) for i in range(max_frames)]
+
+    tmp_dir = tempfile.mkdtemp(prefix="video_frames_")
+    frame_paths = []
+
+    for i, ts in enumerate(timestamps):
+        out_path = os.path.join(tmp_dir, f"frame_{i:02d}.jpg")
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-ss", f"{ts:.2f}", "-i", video_path,
+                 "-frames:v", "1", "-vf", "scale=720:-1",
+                 "-q:v", "2", "-y", out_path],
+                capture_output=True, text=True, timeout=20,
+            )
+            if result.returncode == 0 and os.path.isfile(out_path):
+                frame_paths.append(out_path)
+                log.info(f"VideoUnderstanding: extracted frame {i} at {ts:.1f}s ({os.path.getsize(out_path)} bytes)")
+            else:
+                log.warning(f"VideoUnderstanding: ffmpeg frame {i} failed: {result.stderr[:200]}")
+        except Exception as e:
+            log.warning(f"VideoUnderstanding: frame {i} extraction error: {e}")
+
+    log.info(f"VideoUnderstanding: extracted {len(frame_paths)}/{max_frames} frames from {duration:.1f}s video")
+    return frame_paths
+
+
+def _describe_frames_with_vlm(frame_paths: list[str]) -> list[str]:
+    """Send each frame to VLM and get per-frame descriptions.
+
+    Uses the existing _call_vlm_with_image() which handles base64 encoding and VLM API.
+    """
+    descriptions = []
+    for i, fp in enumerate(frame_paths):
+        # Run OCR on each frame too (helps with UI screenshots, slides with text)
+        ocr_text = _run_ocr(fp)
+        desc = _call_vlm_with_image(fp, ocr_text)
+        if not desc:
+            # Fallback to OCR+features for this frame
+            features = _analyze_image_features(fp)
+            if ocr_text or features:
+                desc = _call_vlm(ocr_text, features)
+            if not desc:
+                parts = []
+                if ocr_text:
+                    parts.append(ocr_text)
+                if features:
+                    parts.append(features)
+                desc = "；".join(parts) if parts else ""
+        if desc:
+            ts_label = f"第{i+1}帧"
+            descriptions.append(f"{ts_label}: {desc}")
+    return descriptions
+
+
+def _synthesize_video_summary(frame_descriptions: list[str]) -> str:
+    """Use VLM/LLM to synthesize frame descriptions into a coherent video summary."""
+    if not frame_descriptions:
+        return ""
+
+    if len(frame_descriptions) == 1:
+        return frame_descriptions[0]
+
+    cfg = _load_vlm_config()
+    if not cfg:
+        # No VLM available — just concatenate frame descriptions
+        return "\n".join(frame_descriptions)
+
+    # Build synthesis prompt
+    frames_text = "\n".join(frame_descriptions)
+    prompt = (
+        f"以下是对一个视频中 {len(frame_descriptions)} 个关键帧的分别描述：\n\n"
+        f"{frames_text}\n\n"
+        f"请综合以上信息，输出对这个视频内容的整体描述（不超过200字），"
+        f"包括视频的主要场景、关键内容、动态变化等。直接输出描述，不要输出思考过程。"
+    )
+
+    body = json.dumps({
+        "model": cfg["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": cfg["max_tokens"],
+        "temperature": 0.3,
+    }, ensure_ascii=False).encode("utf-8")
+
+    url = f"{cfg['base_url']}/chat/completions"
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {cfg['api_key']}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        msg = result.get("choices", [{}])[0].get("message", {})
+        content = msg.get("content", "") or msg.get("reasoning_content", "")
+        if content:
+            log.info(f"VideoUnderstanding: synthesis generated {len(content)} chars")
+            return content.strip()
+    except Exception as e:
+        log.warning(f"VideoUnderstanding: synthesis failed: {e}")
+
+    # Fallback: concatenate
+    return "\n".join(frame_descriptions)
+
+
+def understand_video(video_path: str) -> str:
+    """Analyze video and return a text description for LLM prompt injection.
+
+    Pipeline:
+    1. Validate video file and size
+    2. Extract keyframes using ffmpeg (uniform sampling, max 6 frames)
+    3. Per-frame VLM analysis (qwen2.5-vl-72b) + OCR fallback
+    4. LLM synthesis of multi-frame descriptions into video summary
+
+    Returns description string with "## 用户上传的视频分析" header, or empty string on failure.
+    """
+    if not os.path.isfile(video_path):
+        log.warning(f"VideoUnderstanding: file not found: {video_path}")
+        return ""
+
+    # Check file size
+    fsize = os.path.getsize(video_path)
+    if fsize > _VIDEO_MAX_SIZE:
+        log.warning(f"VideoUnderstanding: file too large ({fsize // 1024 // 1024}MB > {_VIDEO_MAX_SIZE // 1024 // 1024}MB)")
+        return "视频文件过大（超过50MB），无法分析。"
+
+    log.info(f"VideoUnderstanding: analyzing {video_path} ({fsize // 1024}KB)")
+
+    # Step 1: Extract keyframes
+    frame_paths = _extract_keyframes(video_path)
+    if not frame_paths:
+        log.warning("VideoUnderstanding: no frames extracted")
+        return "无法从视频中提取帧，可能视频格式不支持或已损坏。"
+
+    try:
+        # Step 2: Per-frame VLM analysis
+        frame_descs = _describe_frames_with_vlm(frame_paths)
+        if not frame_descs:
+            log.warning("VideoUnderstanding: all frame analyses failed")
+            return "视频已接收，但无法提取有效帧信息（VLM分析全部失败）。"
+
+        # Step 3: Synthesize
+        summary = _synthesize_video_summary(frame_descs)
+        if not summary:
+            summary = "\n".join(frame_descs)
+
+        result = f"## 用户上传的视频分析\n{summary}\n\n## 请基于以上视频信息回答用户问题"
+        log.info(f"VideoUnderstanding: final description {len(result)} chars")
+        return result
+    finally:
+        # Cleanup temp frames
+        for fp in frame_paths:
+            try:
+                os.unlink(fp)
+            except OSError:
+                pass
+        tmp_dir = os.path.dirname(frame_paths[0]) if frame_paths else ""
+        if tmp_dir and tmp_dir.startswith(tempfile.gettempdir()):
+            try:
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+
+
+def understand_video_from_bytes(video_bytes: bytes, ext: str = ".mp4") -> str:
+    """Analyze video from raw bytes (e.g., downloaded from Feishu)."""
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="video_")
+        try:
+            os.write(fd, video_bytes)
+            os.close(fd)
+            return understand_video(tmp_path)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    except Exception as e:
+        log.warning(f"VideoUnderstanding: bytes analysis failed: {e}")
         return ""
