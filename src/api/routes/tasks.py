@@ -577,6 +577,44 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
 
+def _is_gitcode_401(err: Exception) -> bool:
+    """判断异常是否为 GitCode API 401 Bad credentials（Issue #52）。"""
+    msg = str(err)
+    return "401" in msg or "Bad credentials" in msg
+
+
+def _gitcode_api_with_refresh(user: dict, api_call_fn, *args, **kwargs):
+    """包装 GitCode API 调用——401 时自动刷新 OAuth token 并重试一次（Issue #52）。
+
+    user: 当前登录用户 dict（含 id, username）
+    api_call_fn: 实际调 GitCode API 的函数，第一个位置参数是 token
+    *args, **kwargs: 传给 api_call_fn 的其余参数（owner, repo, title 等）
+
+    返回 api_call_fn 的结果，或抛 HTTPException（刷新失败时）。
+    """
+    from src.api.deps import get_user_token, try_refresh_gitcode_token
+
+    username = user["username"]
+    user_id = user["id"]
+    token = get_user_token(username)
+
+    try:
+        return api_call_fn(token, *args, **kwargs)
+    except RuntimeError as e:
+        if not _is_gitcode_401(e):
+            raise  # 非 401 错误不处理
+        # 401 → 尝试刷新 token
+        new_token = try_refresh_gitcode_token(user_id)
+        if not new_token:
+            raise HTTPException(status_code=401, detail={
+                "code": 401,
+                "message": "GitCode 授权已过期，请重新登录授权",
+                "action": "reauth_required"
+            })
+        # 刷新成功 → 重试一次
+        return api_call_fn(new_token, *args, **kwargs)
+
+
 def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（追加多任务模式标记）。"""
     import urllib.request as _ur, urllib.error as _uerr, json as _json
@@ -649,7 +687,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         raise HTTPException(status_code=400, detail={"code": 400, "message": "任务描述必填"})
     repo_key = to_repo_key(body.repo_key)
     owner, rname = split_owner_repo(repo_key)
-    api_token = get_user_token(user["username"])
+    # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
+    from src.api.deps import get_user_token_with_refresh
+    api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
     assignee = (body.assignee or "").strip() or user["username"]  # General Settings Account：登录用户 gitcode 账号
@@ -661,8 +701,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                                      "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
                                                      "issue_number": issue_num})
     if issue_num is None:
-        resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
-                                   (body.description or "").strip(), assignee=assignee)
+        # Issue #52: 401 时自动刷新 OAuth token 并重试
+        resp = _gitcode_api_with_refresh(
+            user, _post_gitcode_issue, owner, rname, body.title.strip(),
+            (body.description or "").strip(), assignee=assignee
+        )
         n = None
         if isinstance(resp, dict):
             n = resp.get("number") or resp.get("iid") or resp.get("id")
@@ -722,7 +765,10 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.warning(f"create_task: set_subtask_mode failed: {_e}")
         try:
             _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 自动判断是否拆分为子任务执行。"
-            _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
+            # Issue #52: 401 时自动刷新 token 重试
+            _gitcode_api_with_refresh(user, _patch_issue_body, owner, rname, issue_num, (body.description or "") + _marker)
+        except HTTPException:
+            raise  # reauth_required 需要传递给前端
         except Exception as _e:
             from src.config import log
             log.warning(f"create_task: patch issue body for multi-task-mode failed: {_e}")
@@ -848,30 +894,46 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
     if not info:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
     repo_key, issue_number, conv_id = info
-    api_token = get_user_token(user["username"])
+    # Issue #52: 用带预刷新的 token 获取
+    from src.api.deps import get_user_token_with_refresh
+    api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
 
     # 1) 发 GitCode Issue 评论（form + access_token，同 _post_gitcode_issue 的实测结论）
     from src.repo_key import split_owner_repo
-    import urllib.parse as _up
-    import urllib.request as _ur
-    import urllib.error as _uerr
     owner, rname = split_owner_repo(repo_key)
     comment_body = f"💬 **开发者澄清**\n\n{msg}"
-    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/issues/{issue_number}/comments?access_token={api_token}"
-    req = _ur.Request(url, data=_up.urlencode({"body": comment_body}).encode(),
-                      headers={"Content-Type": "application/x-www-form-urlencoded",
-                               "Accept": "application/json"}, method="POST")
+
+    def _post_comment(token: str, _owner=owner, _rname=rname, _issue_num=issue_number, _body=comment_body):
+        import urllib.parse as _up
+        import urllib.request as _ur
+        import urllib.error as _uerr
+        url = f"https://api.gitcode.com/api/v5/repos/{_owner}/{_rname}/issues/{_issue_num}/comments?access_token={token}"
+        req = _ur.Request(url, data=_up.urlencode({"body": _body}).encode(),
+                          headers={"Content-Type": "application/x-www-form-urlencoded",
+                                   "Accept": "application/json"}, method="POST")
+        try:
+            with _ur.urlopen(req, timeout=30) as resp:
+                resp.read()
+        except _uerr.HTTPError as e:
+            raise RuntimeError(f"GitCode comment failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
+        except _uerr.URLError as e:
+            raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+
     try:
-        with _ur.urlopen(req, timeout=30) as resp:
-            resp.read()
+        _gitcode_api_with_refresh(user, _post_comment)
         log.info(f"Task clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
-    except _uerr.HTTPError as e:
+    except HTTPException:
+        raise
+    except Exception as e:
+        if _is_gitcode_401(e):
+            raise HTTPException(status_code=401, detail={
+                "code": 401, "message": "GitCode 授权已过期，请重新登录授权",
+                "action": "reauth_required"
+            })
         raise HTTPException(status_code=502, detail={"code": 502,
-                                                     "message": f"GitCode 评论失败({e.code}): {e.read().decode(errors='replace')[:200]}"})
-    except _uerr.URLError as e:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"无法连接 GitCode: {e.reason}"})
+                                                     "message": f"GitCode 评论失败: {str(e)[:200]}"})
 
     # 2) 写入任务会话（如有 conv_id）
     if conv_id:

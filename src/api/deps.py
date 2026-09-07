@@ -1,4 +1,5 @@
 """共享依赖：Token 验证、Token 三层体系、用户信息获取"""
+import threading
 from fastapi import Header, HTTPException, Depends
 from src.user import db as user_db
 
@@ -8,6 +9,10 @@ TOKEN_TYPE_WEBHOOK = "webhook"
 
 # 用户活跃状态追踪——内存缓冲，定时批量 flush
 _pending_active: set = set()
+
+# 用户级 GitCode OAuth 刷新锁——同一用户并发 401 时只刷新一次（Issue #52）
+_gitcode_refresh_locks: dict[int, threading.Lock] = {}
+_gitcode_refresh_locks_guard = threading.Lock()
 
 def mark_user_active(uid: int):
     """将用户 id 加入待更新集合——O(1)，不阻塞 API"""
@@ -53,6 +58,53 @@ def get_user_token(username: str) -> str:
     """获取用户的个人 GitCode API Token（Chat Agent 使用）"""
     acc = user_db.get_user_account(username) or {}
     return acc.get("gitcode_api_token", "")
+
+
+def _get_user_refresh_lock(user_id: int) -> threading.Lock:
+    """获取用户级别的 GitCode OAuth 刷新锁（懒创建，Issue #52）。"""
+    with _gitcode_refresh_locks_guard:
+        if user_id not in _gitcode_refresh_locks:
+            _gitcode_refresh_locks[user_id] = threading.Lock()
+        return _gitcode_refresh_locks[user_id]
+
+
+def try_refresh_gitcode_token(user_id: int) -> str | None:
+    """尝试刷新 GitCode OAuth token（加锁，防并发重复刷新，Issue #52）。
+
+    返回新 token 或 None（刷新失败 / 无 refresh_token）。
+    """
+    lock = _get_user_refresh_lock(user_id)
+    with lock:
+        return user_db.refresh_gitcode_oauth_token(user_id)
+
+
+def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
+    """获取用户 GitCode token，过期时主动预刷新（Issue #52）。
+
+    与 get_user_token 的区别：当 user_id > 0 时，检查 token 年龄，
+    超过 100 分钟（GitCode token 默认 2 小时，留 20 分钟余量）则预刷新。
+    401 时的被动刷新由 _gitcode_api_with_refresh 包装器兜底。
+    """
+    import time as _time
+    acc = user_db.get_user_account(username) or {}
+    token = acc.get("gitcode_api_token", "")
+
+    if token and user_id > 0:
+        # 检查 token 年龄——临近过期则预刷新
+        cred = user_db.get_credential(user_id, "gitcode_oauth")
+        if cred:
+            fetched_at = cred.get("fetched_at", 0)
+            age = int(_time.time()) - fetched_at if fetched_at else 0
+            # 超过 100 分钟（6000 秒）预刷新
+            if age > 6000:
+                new_token = try_refresh_gitcode_token(user_id)
+                return new_token or token
+        return token
+
+    if user_id > 0 and not token:
+        return try_refresh_gitcode_token(user_id) or ""
+
+    return token
 
 
 def get_bot_token(repo_owner: str = "", repo_name: str = "") -> str:

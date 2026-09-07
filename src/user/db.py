@@ -264,7 +264,8 @@ def link_gitcode_user(user_id: int, gitcode_id: str, access_token: str, refresh_
                       (user_id, "gitcode_oauth", json.dumps({
                           "gitcode_id": gitcode_id,
                           "access_token": access_token,
-                          "refresh_token": refresh_token
+                          "refresh_token": refresh_token,
+                          "fetched_at": int(time.time())
                       })))
             db.commit()
             return True
@@ -1294,6 +1295,86 @@ def get_user_gitcode_token(user_id: int) -> str:
     except Exception as e:
         log.warning(f"get_user_gitcode_token failed for user={user_id}: {e}")
     return ""
+
+
+def _get_username_by_id(user_id: int) -> str:
+    """根据 user_id 查 username。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT username FROM user_accounts WHERE id=?", (user_id,))
+        row = c.fetchone()
+    return row[0] if row else ""
+
+
+def refresh_gitcode_oauth_token(user_id: int) -> str | None:
+    """用 refresh_token 刷新 GitCode OAuth access_token（Issue #52）。
+
+    读取 user_credentials (provider=gitcode_oauth) 中存储的 refresh_token，
+    调用 GitCode OAuth token endpoint 刷新 access_token。
+
+    成功时更新两处存储：
+    - user_credentials.config_json.access_token（OAuth 凭据原始存储）
+    - user_accounts.gitcode_api_token（API 调用实际读取的字段）
+
+    返回新的 access_token，失败返回 None。
+    """
+    import urllib.request, urllib.parse, json as _json
+
+    # 1. 读取存储的 refresh_token
+    cred = get_credential(user_id, "gitcode_oauth")
+    if not cred or not cred.get("refresh_token"):
+        log.warning(f"refresh_gitcode_oauth: no refresh_token for user={user_id}")
+        return None
+
+    rt = cred["refresh_token"]
+    client_id = get_meta_value("oauth_gitcode_client_id")
+    client_secret = get_meta_value("oauth_gitcode_client_secret")
+    if not client_id or not client_secret:
+        log.warning("refresh_gitcode_oauth: OAuth client_id/secret not configured")
+        return None
+
+    # 2. 调 GitCode OAuth refresh endpoint
+    try:
+        req = urllib.request.Request(
+            "https://gitcode.com/oauth/token",
+            data=urllib.parse.urlencode({
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            }).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST"
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        token_data = _json.loads(resp.read())
+    except Exception as e:
+        log.warning(f"refresh_gitcode_oauth: refresh failed for user={user_id}: {e}")
+        return None
+
+    new_access = token_data.get("access_token", "")
+    new_refresh = token_data.get("refresh_token", "")
+    if not new_access:
+        log.warning(f"refresh_gitcode_oauth: no access_token in response for user={user_id}")
+        return None
+
+    # 3. 更新存储（access_token + refresh_token 如果返回了新的）
+    new_cred = dict(cred)
+    new_cred["access_token"] = new_access
+    if new_refresh:
+        new_cred["refresh_token"] = new_refresh
+    new_cred["fetched_at"] = int(time.time())
+    set_credential(user_id, "gitcode_oauth", new_cred)
+
+    # 同步更新 user_accounts.gitcode_api_token（API 调用实际读取的字段）
+    username = _get_username_by_id(user_id)
+    if username:
+        acc = get_user_account(username) or {}
+        acc["gitcode_api_token"] = new_access
+        save_user_account(username, acc)
+
+    log.info(f"refresh_gitcode_oauth: success for user={user_id}")
+    return new_access
 
 
 def get_webhook_token_by_repo(full_name: str) -> str:

@@ -122,13 +122,29 @@ const API = (() => {
     if (!r.ok) {
       if (r.status === 401 && retryFn) {
         // 尝试 refresh（refresh_token 在 HttpOnly cookie 里自动带）
-        return handle401(retryFn);
+        // 但先检查是否是 GitCode OAuth 过期（不需要 JWT refresh，需要重新授权）
+        return r.json().then(err => {
+          if (err?.detail?.action === 'reauth_required') {
+            // GitCode OAuth token 过期且 refresh_token 也失效——跳授权页
+            _redirectToGitcodeAuth();
+            throw new Error(err.detail.message);
+          }
+          // 普通 JWT 过期——走 JWT refresh 流程
+          return handle401(retryFn);
+        });
       }
       if (r.status === 401) {
-        // 没有 retryFn——直接跳登录
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+        // 没有 retryFn——检查是否 GitCode reauth，否则直接跳登录
+        return r.json().then(err => {
+          if (err?.detail?.action === 'reauth_required') {
+            _redirectToGitcodeAuth();
+            throw new Error(err.detail.message);
+          }
+          localStorage.removeItem('token');
+          localStorage.removeItem('user');
+          if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+          throw new Error(err?.detail?.message || I18N.t('common.session_expired'));
+        });
       }
       return r.json().then(err => {
         const e = new Error(err?.detail?.message || I18N.t('common.request_failed', {status: r.status}));
@@ -138,6 +154,20 @@ const API = (() => {
       });
     }
     return r.json();
+  }
+
+  // Issue #52: GitCode OAuth token 过期且无法刷新时跳转授权页
+  function _redirectToGitcodeAuth() {
+    if (location.pathname.includes('/login')) return;  // 已在登录页不重复跳
+    API.get('/auth/login/gitcode').then(d => {
+      if (d.redirect_url) {
+        location.href = d.redirect_url;
+      } else {
+        location.href = '/login';
+      }
+    }).catch(() => {
+      location.href = '/login';
+    });
   }
 
   // fetch 超时封装：30s 后 abort，防止后端 hang 导致前端永久 loading
