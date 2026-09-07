@@ -420,11 +420,11 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
 # - 对应列 stage 命中 → 目标 Agent；"—" 表示该阶段下该事件不分发（返回空）
 # - 特例：PR updated + stage=coding + QA 有历史 → qa（复审）
 _STAGE_EVENT_AGENT_MAP = {
-    "issue_opened":        {"vod": "vod", "issue": "", "coding": "", "qa": "", "sre": "", "done": ""},
-    "issue_comment":       {"vod": "vod", "issue": "issue", "coding": "", "qa": "", "sre": "", "done": ""},
-    # close 已由 L1 副作用短路，此处安全兜底：一律不分发
-    "issue_updated":       {"vod": "", "issue": "", "coding": "", "qa": "", "sre": "", "done": ""},
-    "issue_labeled":       {"vod": "vod", "issue": "issue", "coding": "", "qa": "", "sre": "", "done": ""},
+    "issue_opened":        {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    "issue_comment":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    # close 已由 L1 副作用短路，此处安全兜底：close 一律不分发（issue_updated 其余 action 归 issue）
+    "issue_updated":       {"vod": "issue", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    "issue_labeled":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
     "pull_request_opened": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
     "pull_request_updated": {"vod": "issue", "issue": "issue", "coding": "qa", "qa": "qa", "sre": "sre", "done": ""},
     "pull_request_merged": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},

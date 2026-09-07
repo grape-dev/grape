@@ -210,16 +210,17 @@ Webhook 到达
 | 事件类型 | stage=vod | stage=issue | stage=coding | stage=qa | stage=sre | stage=done |
 |----------|-----------|-------------|--------------|----------|-----------|------------|
 | `issue_opened` | **vod**（审视/建阶段） | —（新建→vod） | — | — | — | 不分发 |
-| `issue_updated`(open) | vod | issue | — | — | — | 不分发 |
+| `issue_updated`(open/edit·已过L1) | vod | issue | issue | issue | issue | 不分发 |
 | `issue_updated`(close) | ⚡副作用-only² | ⚡副作用-only² | ⚡副作用-only² | ⚡副作用-only² | ⚡副作用-only² | 不分发 |
-| `issue_comment` | vod（澄清对话） | issue | — | — | — | 不分发 |
+| `issue_comment` | vod（澄清对话） | issue | issue³ | issue³ | issue³ | 不分发 |
 | `pull_request_opened` | issue | issue | coding | qa | sre | 不分发 |
-| `pull_request_updated` | issue | issue | coding/qa³ | qa | sre | 不分发 |
+| `pull_request_updated` | issue | issue | coding/qa⁴ | qa | sre | 不分发 |
 | `pull_request_merged` | issue | issue | coding | qa | sre | 不分发 |
 | `note_hook_pr` | issue | issue | coding | qa | sre | 不分发 |
 
 > ² **close = 副作用-only，不进入任何 Agent 执行**：仅处理任务关闭（`close_issue_tasks`），管道直接短路，不触发流水线。各阶段均不分派。
-> ³ PR updated + stage=coding + QA 有历史 → qa 复审；否则 coding。
+> ³ **Issue 类事件（comment/labeled；updated 的 open/edit 动作）在非 done 阶段均归 `issue`**——coding/qa/sre 阶段仍可能产生需求补充/变更的评论/编辑，需 Issue Agent 审视，不可丢弃（Q1 意图，回归修复 2026-09-07）。
+> ⁴ PR updated + stage=coding + QA 有历史 → qa 复审；否则 coding。
 
 ### 5.4 落地方式（与 §四 结合）
 

@@ -134,11 +134,11 @@ class TestResolveIssueStageAgent:
                 db.commit()
 
     def test_issue_comment_route(self):
-        # issue 类事件：vod→vod，issue→issue，coding/qa/sre→不分发
+        # issue 类事件：vod→vod，issue 及之后（coding/qa/sre）→issue，done→不分发
         assert self._resolve("issue_comment", "vod") == "vod"
         assert self._resolve("issue_comment", "issue") == "issue"
-        assert self._resolve("issue_comment", "coding") == ""
-        assert self._resolve("issue_comment", "sre") == ""
+        assert self._resolve("issue_comment", "coding") == "issue"
+        assert self._resolve("issue_comment", "sre") == "issue"
         assert self._resolve("issue_comment", "done") == ""
 
     def test_pr_opened_route(self):
@@ -157,7 +157,9 @@ class TestResolveIssueStageAgent:
     def test_issue_opened_always_vod(self):
         assert self._resolve("issue_opened", "coding") == "vod"
 
-    def test_issue_updated_close_not_routed(self):
-        # close 已由 L1 副作用短路；路由层安全兜底不分发
-        assert self._resolve("issue_updated", "vod") == ""
-        assert self._resolve("issue_updated", "issue") == ""
+    def test_issue_updated_route(self):
+        # issue_updated 非 close 动作（认识 open/edit 已由 L1 放行的部分）在非 done 阶段归 issue
+        assert self._resolve("issue_updated", "vod") == "issue"
+        assert self._resolve("issue_updated", "issue") == "issue"
+        assert self._resolve("issue_updated", "sre") == "issue"
+        assert self._resolve("issue_updated", "done") == ""
