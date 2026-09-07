@@ -476,7 +476,9 @@ def _understand_video(video_data: str) -> str:
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
-    user_token = acc.get("gitcode_api_token", "")
+    # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)
@@ -604,7 +606,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 async def send_message_stream(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
-    user_token = acc.get("gitcode_api_token", "")
+    # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)
@@ -1299,7 +1303,9 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
 
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
-    user_token = acc.get("gitcode_api_token", "")
+    # Issue #52: 用带预刷新的 token 获取
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)
@@ -1660,7 +1666,9 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     import time as _t, uuid as _uuid
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
-    user_token = acc.get("gitcode_api_token", "")
+    # Issue #52: 用带预刷新的 token 获取
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)

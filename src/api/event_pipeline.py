@@ -469,19 +469,9 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
     _row = _STAGE_EVENT_AGENT_MAP.get(event_type)
     _agent = (_row or {}).get(stage, "") if _row else ""
 
-    # 特例：PR updated + stage=coding + QA 有历史 → qa 复审（coding 修复后重新审查）
-    if event_type == "pull_request_updated" and stage == "coding" and not _agent:
-        try:
-            from src.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? AND agent_type='qa' LIMIT 1",
-                    (repo_key, issue_id))
-                if c.fetchone():
-                    _agent = "qa"
-        except Exception:
-            pass
+    # 特例已由 _STAGE_EVENT_AGENT_MAP 表驱动处理：
+    # pull_request_updated + coding → qa（weekly-02 修复 Issue #46：QA↔coding 回流闭环）
+    # 无需额外 QA 历史记录检查
 
     return _agent
 

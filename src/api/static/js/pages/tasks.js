@@ -5,6 +5,7 @@ let _tasksAll = [];           // 全部任务缓存
 let _taskSel = null;          // 选中的任务
 let _taskQuery = '';          // 搜索关键字
 let _taskPage = 1;            // 当前页码
+let _taskView = 'list';       // 'list' | 'board'
 const _TASKS_PER_PAGE = 15;   // 每页任务数
 let _taskPollTimer = null;    // 场景识别轮询定时器
 let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
@@ -164,6 +165,91 @@ function _filteredTasks() {
   return list;
 }
 
+window._openBoardDetail = function(taskId) {
+  const t = window._tasksById[taskId];
+  if (!t) return;
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+  el.innerHTML = `
+  <div style="padding:0">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--b)">
+      <button class="tsk-btn tsk-btn-ghost" onclick="loadTasks()" style="padding:6px 14px">← ${I18N.t('tasks.back_to_board')||'返回看板'}</button>
+      <h1 style="margin:0;font-size:16px;font-weight:600">${t.title || ''}</h1>
+    </div>
+    ${_detailHtml(t)}
+  </div>`;
+};
+
+function _renderBoard(filtered) {
+  const stages = ['vod', 'issue', 'coding', 'qa', 'sre'];
+  const stageLabels = {
+    vod: I18N.t('tasks.stage_vod')||'VOD',
+    issue: I18N.t('tasks.stage_issue')||'ISSUE',
+    coding: I18N.t('tasks.stage_coding')||'Coding',
+    qa: I18N.t('tasks.stage_qa')||'QA',
+    sre: I18N.t('tasks.stage_sre')||'SRE'
+  };
+  const stageColors = {
+    vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6',
+    qa: '#a855f7', sre: '#f59e0b'
+  };
+  const grouped = {};
+  stages.forEach(s => grouped[s] = []);
+  filtered.forEach(t => {
+    let stage = t.stage || 'vod';
+    if (stage === 'done') return;
+    if (!grouped[stage]) stage = 'vod';
+    grouped[stage].push(t);
+  });
+
+  // 苹果风格看板：固定列宽 280px，水平滚动，列独立垂直滚动
+  let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px">';
+  stages.forEach(s => {
+    const list = grouped[s];
+    const col = stageColors[s];
+    html += `<div style="width:280px;flex-shrink:0;display:flex;flex-direction:column;background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed)">`;
+    // 列头：颜色圆点 + 名称 + 计数（苹果风格 SF Pro 字体栈）
+    html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
+      <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
+      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${stageLabels[s]}</span>
+      <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${list.length}</span>
+    </div>`;
+    // 卡片容器：独立垂直滚动
+    html += `<div style="flex:1;overflow-y:auto;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
+    if (list.length === 0) {
+      html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">无任务</div>`;
+    } else {
+      list.forEach(t => {
+        const isDone = t.status === 'completed';
+        const isProc = t.status === 'processing';
+        const statusDot = isDone ? '#34c759' : isProc ? '#3b82f6' : '#86868b';
+        const statusText = isDone ? (I18N.t('tasks.status.tag_completed')||'完成') : isProc ? (I18N.t('tasks.status.tag_processing')||'进行中') : (I18N.t('tasks.status.tag_pending')||'待处理');
+        const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
+        // 卡片：苹果风格 rounded-lg + 0.5px border + 微弱阴影
+        html += `<div onclick="_openBoardDetail(${t.id})" style="background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+          <!-- Row 1: Issue# + 状态指示器 -->
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
+            <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#'+t.issue_number : ''}</span>
+            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${statusDot};font-weight:500">
+              <span style="width:6px;height:6px;border-radius:50%;background:${statusDot}"></span>${statusText}
+            </span>
+          </div>
+          <!-- Row 2: 标题（2行截断） -->
+          <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
+          <!-- Row 3: 元信息 -->
+          <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.repo_key || ''}</span>
+            <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
+          </div>
+        </div>`;
+      });
+    }
+    html += `</div></div>`;
+  });
+  html += '</div>';
+  return html;
+}
+
 function _render() {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -183,12 +269,34 @@ function _render() {
     return `<button class="tsk-tab${act}" onclick="_tasksTab='${key}';_taskPage=1;_render()">${label} <span class="tsk-tab-cnt">${cnt}</span></button>`;
   };
 
-  // 排序切换 UI（Issue #42）：方向（升/降）+ 模式（状态优先/纯时间序）
+  // 筛选下拉：状态 + 排序归到一个 popover（参考 multica issues-header）
   const _sortIcon = _tasksSortOrder === 'desc' ? '↓' : '↑';
-  const _sortPanel = `
-    <div style="display:inline-flex;align-items:center;gap:6px;margin-left:10px;flex-shrink:0">
-      <button class="tsk-tab" onclick="toggleTasksMode()" style="border:1px solid var(--b,var(--tg,#d0d7de));border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;background:${_tasksMode==='time' ? 'var(--bg, #fff)' : 'transparent'}" title="${I18N.t('tasks.sort.mode')}">${_tasksMode==='time' ? I18N.t('tasks.sort.time') : I18N.t('tasks.sort.priority')}</button>
-      <button class="tsk-tab" onclick="toggleTasksSort()" style="border:1px solid var(--b,var(--tg,#d0d7de));border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer" title="${I18N.t('tasks.sort.direction')}">${I18N.t('tasks.sort.order')} ${_sortIcon}</button>
+  const _filterPanel = `
+    <div style="position:relative;display:inline-flex;align-items:center;flex-shrink:0">
+      <button class="tsk-tab" onclick="document.getElementById('taskFilterPopover').style.display=document.getElementById('taskFilterPopover').style.display==='block'?'none':'block'" style="border:1px solid var(--b);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;background:var(--bg);display:inline-flex;align-items:center;gap:4px">
+        <span style="font-size:12px">⌥</span> ${I18N.t('tasks.filter')||'筛选'}
+        ${_tasksTab!=='all'||_tasksMode!=='default' ? '<span style="width:6px;height:6px;border-radius:50%;background:#3b82f6"></span>' : ''}
+      </button>
+      <div id="taskFilterPopover" style="display:none;position:absolute;top:calc(100% + 4px);left:0;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.1);padding:12px;min-width:200px;z-index:50;font-family:-apple-system,BlinkMacSystemFont,sans-serif">
+        <div style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">${I18N.t('tasks.filter_status')||'状态'}</div>
+        <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:12px">
+          ${['all','active','completed'].map(k => {
+            const lbl = k==='all'?I18N.t('tasks.tab.all'):k==='active'?I18N.t('tasks.tab.active'):I18N.t('tasks.tab.completed');
+            const cnt = k==='all'?cntAll:k==='active'?cntActive:cntDone;
+            const act = _tasksTab===k;
+            return `<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;${act?'background:rgba(59,130,246,.06)':''}" onclick="_tasksTab='${k}';_taskPage=1;document.getElementById('taskFilterPopover').style.display='none';_render()">
+              <span style="width:14px;height:14px;border-radius:50%;border:1.5px solid ${act?'#3b82f6':'var(--b,#d0d7de)'};${act?'background:#3b82f6;box-shadow:inset 0 0 0 2px #fff':''}"></span>
+              ${lbl} <span style="color:var(--t3,#86868b);font-size:11px">${cnt}</span>
+            </label>`;
+          }).join('')}
+        </div>
+        <div style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">${I18N.t('tasks.sort.mode')||'排序'}</div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <button onclick="if(_tasksMode!=='default'){_tasksMode='default';toggleTasksMode();document.getElementById('taskFilterPopover').style.display='none'}" style="flex:1;padding:5px 8px;border:0.5px solid var(--b,#e5e5ea);border-radius:8px;font-size:11px;cursor:pointer;background:${_tasksMode==='default'?'#3b82f6':'var(--bg)'};color:${_tasksMode==='default'?'#fff':'var(--t1)'}">${I18N.t('tasks.sort.priority')||'状态优先'}</button>
+          <button onclick="if(_tasksMode!=='time'){_tasksMode='time';toggleTasksMode();document.getElementById('taskFilterPopover').style.display='none'}" style="flex:1;padding:5px 8px;border:0.5px solid var(--b,#e5e5ea);border-radius:8px;font-size:11px;cursor:pointer;background:${_tasksMode==='time'?'#3b82f6':'var(--bg)'};color:${_tasksMode==='time'?'#fff':'var(--t1)'}">${I18N.t('tasks.sort.time')||'时间序'}</button>
+        </div>
+        <button onclick="toggleTasksSort();document.getElementById('taskFilterPopover').style.display='none'" style="width:100%;padding:5px 8px;border:0.5px solid var(--b,#e5e5ea);border-radius:8px;font-size:11px;cursor:pointer;background:var(--bg);color:var(--t1)">${I18N.t('tasks.sort.order')||'排序'} ${_sortIcon}</button>
+      </div>
     </div>`;
 
   // 分页：后端已按 sort_order/mode 排序返回；mode=time 时纯时间序，default 时后端已状态优先
@@ -271,20 +379,53 @@ function _render() {
   const detailHtml = _taskSel ? _detailHtml(_taskSel) : `<div class="tsk-empty" style="border:none"><div>🗒</div><h3>${I18N.t('tasks.empty.select_task_title')}</h3><p>${I18N.t('tasks.empty.select_task_desc')}</p></div>`;
 
   el.innerHTML = `
-  <div class="tsk-page">
+  <div class="tsk-page" style="max-width:none;height:calc(100vh - 60px);display:flex;flex-direction:column">
     <div class="tsk-top">
       <h1>${I18N.t('tasks.page_title')}</h1>
       <div id="deployLinkBar" style="margin-top:4px"></div>
       <div class="tsk-controls">
-        <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:10px">${I18N.t('tasks.create.btn_new')}</button>
-        ${tab('all', I18N.t('tasks.tab.all'), cntAll)}${tab('active', I18N.t('tasks.tab.active'), cntActive)}${tab('completed', I18N.t('tasks.tab.completed'), cntDone)}${_sortPanel}
-        <div class="tsk-search"><span>🔍</span><input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_taskPage=1;_render()}" onchange="_taskQuery=this.value;_taskPage=1;_render()"></div>
+        <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:8px">${I18N.t('tasks.create.btn_new')}</button>
+        ${_filterPanel}
+        <div style="flex:1"></div>
+        <div style="position:relative;display:inline-flex;align-items:center;flex-shrink:0">
+          <button class="tsk-tab" onclick="document.getElementById('taskViewPopover').style.display=document.getElementById('taskViewPopover').style.display==='block'?'none':'block'" style="border:1px solid var(--b);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;background:var(--bg);display:inline-flex;align-items:center;gap:4px">
+            <span style="font-size:12px">${_taskView==='board'?'▦':'☰'}</span> ${_taskView==='board'?(I18N.t('tasks.view_board')||'看板'):(I18N.t('tasks.view_list')||'列表')}
+            <span style="font-size:9px;color:var(--t3,#86868b)">▾</span>
+          </button>
+          <div id="taskViewPopover" style="display:none;position:absolute;top:calc(100% + 4px);right:0;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.1);padding:8px;min-width:140px;z-index:50;font-family:-apple-system,BlinkMacSystemFont,sans-serif">
+            ${['list','board'].map(k => {
+              const lbl = k==='list'?(I18N.t('tasks.view_list')||'列表'):(I18N.t('tasks.view_board')||'看板');
+              const ic = k==='list'?'☰':'▦';
+              const act = _taskView===k;
+              return `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--t1,#1d1d1f);${act?'background:rgba(59,130,246,.06)':''}" onclick="_taskView='${k}';document.getElementById('taskViewPopover').style.display='none';_render()">
+                <span style="font-size:13px">${ic}</span> ${lbl}
+                ${act?'<span style="margin-left:auto;color:#3b82f6;font-size:12px">✓</span>':''}
+              </label>`;
+            }).join('')}
+          </div>
+        </div>
       </div>
     </div>
-    <div class="tsk-layout" style="height:calc(100vh - 200px)">
+    ${_taskView === 'board' ? `
+    <div style="display:flex;justify-content:center;margin:8px 0 4px;flex-shrink:0">
+      <div style="position:relative;width:100%;max-width:400px">
+        <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--t3,#86868b);pointer-events:none">🔍</span>
+        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_taskPage=1;_render()}" onchange="_taskQuery=this.value;_taskPage=1;_render()" style="width:100%;padding:9px 14px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+      </div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+      <div style="flex:1;overflow:auto;min-height:0">${_renderBoard(filtered)}</div>
+    </div>` : `
+    <div style="display:flex;justify-content:center;margin:8px 0 4px;flex-shrink:0">
+      <div style="position:relative;width:100%;max-width:400px">
+        <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--t3,#86868b);pointer-events:none">🔍</span>
+        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_taskPage=1;_render()}" onchange="_taskQuery=this.value;_taskPage=1;_render()" style="width:100%;padding:9px 14px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+      </div>
+    </div>
+    <div class="tsk-layout" style="flex:1;min-height:0">
       <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
       <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}</div>
-    </div>
+    </div>`}
   </div>`;
 
   // 加载部署 URL 到任务中心顶部
