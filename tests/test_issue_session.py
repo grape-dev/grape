@@ -79,3 +79,66 @@ class TestIssueSession:
         removed = session_store.remove_issue_sessions("gitcode:org/test")
         assert removed == 2
         assert session_store.list_issue_sessions("gitcode:org/test") == []
+
+
+class TestRepoLevelSessionPointerDeprecated:
+    """看护（issue-session-writeback-races-design.md §七 方案 A）：
+
+    repo 级 devops_agent_session.runtime_session_id 已废弃——执行收尾只写回 Issue 级
+    (issue_agent_session)，不得再写 repo 级指针（push 忽略、无 Issue 不执行，无消费方）。
+    若这些 UPDATE 回归，说明方案 A 被破坏，测试告警。
+    """
+
+    def _trim_docstring(self, src: str) -> str:
+        # 剥掉 docstring：两处三引号之间的部分剔除后取函数体
+        if '"""' in src:
+            return '"""'.join(src.split('"""')[2:])
+        return src
+
+    def test_exec_last_no_repo_level_write(self):
+        """_execute_agent_inner 收尾不得写 devops_agent_session.runtime_session_id。"""
+        import inspect
+        from src.api import event_pipeline
+        src = self._trim_docstring(inspect.getsource(event_pipeline._execute_agent_inner))
+        # 允许 update_issue_session（Issue 级），禁止 UPDATE devops_agent_session SET runtime_session_id
+        forbidden = "UPDATE devops_agent_session SET runtime_session_id"
+        critical_forbidden = [ln for ln in src.splitlines() if forbidden in ln]
+        assert not critical_forbidden, (
+            "_execute_agent_inner must NOT write repo-level runtime_session_id (方案A), found:\n"
+            + "\n".join(critical_forbidden))
+
+    def test_complete_task_no_repo_level_write(self):
+        """complete_task 收尾不得写 devops_agent_session.runtime_session_id。"""
+        import inspect
+        from src.runtime import service
+        src = self._trim_docstring(inspect.getsource(service.complete_task))
+        forbidden = "UPDATE devops_agent_session SET runtime_session_id"
+        critical_forbidden = [ln for ln in src.splitlines() if forbidden in ln]
+        assert not critical_forbidden, (
+            "complete_task must NOT write repo-level runtime_session_id (方案A), found:\n"
+            + "\n".join(critical_forbidden))
+
+    def test_issue_session_update_isolated_from_repo(self):
+        """functional：update_issue_session 只改 issue_agent_session，repo 级指针保持原样。"""
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key='gitcode:org/test'")
+            c.execute("INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_session_id, status, last_active_at) "
+                      "VALUES ('repo-keeper', 'gitcode:org/test', 'issue', 'original_repo_ses', 'idle', datetime('now'))")
+            db.commit()
+        try:
+            s = session_store.get_or_create_issue_session("gitcode:org/test", "issue", "#9")
+            session_store.update_issue_session(s["id"], runtime_session_id="new_issue_ses")
+            # repo 级指针必须保持原样，不得被 Issue 续接写污染
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT runtime_session_id FROM devops_agent_session WHERE repo_key='gitcode:org/test' AND agent_type='issue'"
+                ).fetchone()
+            assert row and row[0] == "original_repo_ses", "repo 级指针必须保持原样，不得被 Issue 续接写污染"
+            # Issue 级已被正确写入
+            got = session_store.get_issue_session("gitcode:org/test", "issue", "#9")
+            assert got["runtime_session_id"] == "new_issue_ses"
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM devops_agent_session WHERE repo_key='gitcode:org/test'")
+                db.commit()

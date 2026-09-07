@@ -75,7 +75,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
         if agent_type:
             lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
             lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
-        _inject_vod_scenes(lines, agent_type)
+        _inject_vod_scenes(lines, agent_type, repo_key)
         return "\n".join(lines)
     _meta = meta or {}
     if _meta.get("degraded"):
@@ -100,22 +100,32 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
 
 
 def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
-    """VOD 专属：注入可用开发场景列表（内置场景 + 成员上传的自定义场景）。"""
+    """VOD 专属：注入该仓库可用开发场景列表（issue-39 方案 B：场景只与仓库关联）。
+
+    - 场景候选 = get_scenes(repo_key)（scope 仅仓库级）
+    - 无「default」场景；仓库无任何场景时 VOD 需输出「未配置场景」终止信号。
+    """
     if agent_type != "vod":
         return
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
-        scenes = get_scenes()
+        scenes = get_scenes(repo_key=repo_key)
         if not scenes:
+            # 方案 B：仓库无任何配置场景 → VOD 直接终止
+            lines.append("")
+            lines.append("> ⚠️ 该仓库**未配置任何开发场景**：请立即终止处理。")
+            lines.append("> 在最终 JSON 产出块中输出：`{\"terminate\": true, \"reason\": \"未配置场景\"}`。")
+            lines.append("> 不要继续分析需求、不要给出 recommended_scene（没有 default 场景）。")
             return
-        lines.append("\n## 可用开发场景（请根据需求特征选择最匹配的场景）")
+        lines.append("\n## 可用开发场景（该仓库已配置，请根据需求特征从中选择）")
         lines.append("| scene_id | 名称 | 技能链 | 来源 |")
         lines.append("|----------|------|--------|------|")
         for s in scenes:
-            cfg = get_pipeline_config(s["id"])
+            cfg = get_pipeline_config(s["id"], repo_key=repo_key)
             if cfg:
                 chain = " → ".join(n.get("skill", "") for n in cfg.get("nodes", []))
-                lines.append(f"| {s['id']} | {s['name']} | {chain} | 内置 |")
+                _disp = s.get("display_name") or s.get("name") or s["id"]
+                lines.append(f"| {s['id']} | {_disp} | {chain} | 内置 |")
 
         # 加载成员上传的自定义场景（project-info/member/ 下的 pipelines-user.json）
         if repo_key:
@@ -144,10 +154,11 @@ def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
         lines.append("> 成员上传文档（project-info/member/）可能包含自定义场景定义（pipelines-user.json），")
         lines.append("> 如有自定义场景且与需求匹配，优先推荐自定义场景。")
         lines.append("⚠️ **必须**在最终 JSON 产出块中额外包含 `recommended_scene` 和 `scene_reason` 两个字段。")
-        lines.append("- `recommended_scene`：填写上表中最匹配的 scene_id（如 \"blog-publish\"、\"iac\"、\"default\"）。")
+        lines.append("- `recommended_scene`：**只能填写上表中该仓库的场景 scene_id**，不允许使用其它值。")
         lines.append("- `scene_reason`：一句话说明选择理由。")
-        lines.append("- 无法确定时 `recommended_scene` 填 `\"default\"`，不得省略。")
-        lines.append("- 缺少这两个字段的输出将被系统视为无效并重试。")
+        lines.append("- **没有 `default` 场景**：禁止输出 `\"default\"`。")
+        lines.append("- 无法确定时 `recommended_scene` 填该仓库当前默认场景，不得省略。")
+        lines.append("- 注意：系统会根据用户设置决定是否采纳你的推荐，未采纳时保持仓库默认场景不变。")
     except Exception as _e:
         from src.config import log as _log
         _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")
@@ -557,6 +568,7 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
 注意：
 - 只输出一个 JSON 块，放在答复末尾。
+- JSON 块必须保持纯 JSON 结构，不得与叙述混排，且只能是最终答复末尾唯一的追加内容。
 - 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造。
 - `issue_summary` 应反映截至当前链尾的最新状态，供下游 Agent 快速浏览。
 
@@ -570,11 +582,25 @@ context 是传给下一个 Agent 的接力说明，应包含：
 你必须在单个对话轮次内完成全部操作：读取文件 → 分析 → 执行动作
 （发评论/加标签/A2A 交办等）→ 输出处理记录 JSON → 结束。
 
-⚠️ 禁止"分析完就结束"：如果你在回复中说"Let me..."或"现在我将..."
-但实际没有调用工具执行该操作，任务将被判定为未完成并重新执行。
-
 ⚠️ 必须调用工具执行实际动作：发评论用 execute_code 调 GitCode API，
 不要只输出评论内容就 end_turn。
+
+⚠️ 思考过程禁止出现在对外输出：任何思考过程叙述（如"让我…""现在我…""Let me…""Now I…"）
+只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 GitCode 评论 body 中。
+最终答复只输出：动作结果结论 + 处理记录 JSON 块。
+
+## 内部思考 vs 对外结论（必须分清）
+
+内部思考（只存在于思考/工具调用过程，绝不进最终答复与评论）：
+  ❌ "让我分析一下这个问题……"   ❌ "现在我理解了代码库……"
+  ❌ "我需要先获取环境变量……"   ❌ "Let me analyze the Issue……"
+  ❌ "Now I have a thorough understanding……"
+
+对外结论（最终答复与评论唯一允许的正文）：
+  ✅ "已定位 #38 泄漏根因：result_text 一鱼两吃导致 JSON 块入评。"
+  ✅ "完成：分类=bug，标签=bug/P1，已 A2A 交办 coding。"
+
+规则：最终答复/评论中的每个句子，都必须能在"给用户看的提交记录"里站得住——只陈述完成的事与结果。
 
 ⚠️ 评论内容边界（必须遵守）：发评论时，body 只保留 [角色名 Agent] 前缀 +
 对外结论（做了什么 / 结果 / 下一步 / 必要的原文引用）。
@@ -582,6 +608,9 @@ context 是传给下一个 Agent 的接力说明，应包含：
 处理记录 JSON 块（actions/conclusion/...）以及任何 HTML 注释标记
 （如 <!-- xxx -->）写进评论正文。处理记录 JSON 只放在最终答复末尾供系统
 存档，绝不通过评论 API 发送。
+
+⚠️ 发布前自检：把评论 body 当作**对外发布文案**朗读一遍，
+出现任何"我"的思考叙述即为不合格，改写后再发布。
 """)
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
@@ -603,7 +632,7 @@ def _append_chat_history(parts: list, history: list = None, has_valid_session: b
     """注入对话历史（chat-prompt-history-injection-design.md §3）。
 
     - 无有效 session → 注入完整「对话历史」（最近 10 条，每条截 500 字符）；
-    - 有 session → 普通对话历史由 opencode session 承载，**不再重复注入**；
+    - 有 session → 最近 3 条对话历史作为兜底上下文（防止远端 worker session 丢失）；
     - 无论 session，**含 [XXX Agent] 的 Issue 进展始终注入**为「Issue Agent 进展」段。
     """
     history = history or []
@@ -614,11 +643,14 @@ def _append_chat_history(parts: list, history: list = None, has_valid_session: b
         parts.append("\n## Issue Agent 进展")
         for m in agent_items[-10:]:
             parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
-    if not has_valid_session:
-        norm = [m for m in history if m.get("role") in ("user", "agent")]
-        if norm:
+    # 始终注入最近对话历史：has_valid_session 时只注入最近 3 条兜底，
+    # 无 session 时注入最近 10 条（与原逻辑一致）。
+    norm = [m for m in history if m.get("role") in ("user", "agent")]
+    if norm:
+        recent = norm[-3:] if has_valid_session else norm[-10:]
+        if recent:
             parts.append("\n## 对话历史")
-            for m in norm[-10:]:
+            for m in recent:
                 parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
 
 

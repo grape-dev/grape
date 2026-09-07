@@ -3,9 +3,17 @@ let _pipeActiveIdx = 0;
 let _pipePage = 1;
 const _PIPE_PER_PAGE = 10;
 const agentColors = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
-const agentLabels = [I18N.t('pipeline.agent_vod'),I18N.t('pipeline.agent_issue'),I18N.t('pipeline.agent_coding'),I18N.t('pipeline.agent_qa'),I18N.t('pipeline.agent_sre')];
 const agentIds = ['vod','issue','coding','qa','sre'];
-const stageLabels = {vod:I18N.t('pipeline.agent_vod'),issue:I18N.t('pipeline.agent_issue'),coding:I18N.t('pipeline.agent_coding'),qa:I18N.t('pipeline.agent_qa'),sre:I18N.t('pipeline.agent_sre'),done:I18N.t('pipeline.stage_done')};
+// agentLabels / stageLabels 不在模块顶层缓存 I18N.t()（语言切换后会失效），
+// 改为函数实时取值
+function _agentLabel(idx) {
+  var keys = ['pipeline.agent_vod','pipeline.agent_issue','pipeline.agent_coding','pipeline.agent_qa','pipeline.agent_sre'];
+  return I18N.t(keys[idx]) || agentIds[idx];
+}
+function _stageLabel(stage) {
+  var map = {vod:'pipeline.agent_vod',issue:'pipeline.agent_issue',coding:'pipeline.agent_coding',qa:'pipeline.agent_qa',sre:'pipeline.agent_sre',done:'pipeline.stage_done'};
+  return map[stage] ? (I18N.t(map[stage]) || stage) : stage;
+}
 const _TAG_COLORS = {vod:'var(--pk)',issue:'var(--r)',coding:'var(--a)',qa:'var(--pu)',sre:'var(--or)',chat:'var(--sk)'};
 const _MODE_ICONS = {emit:'\u2192',waterfall:'\u25c7',serial:'\u21bb',parallel:'\u21c4'};
 
@@ -214,9 +222,9 @@ function renderPipeline(data) {
     const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
       const hasAgent = p.statuses && p.statuses[j] > 0;
       const cls = ['tg-v','tg-i','tg-c','tg-q','tg-s'][j];
-      return `<span class="tg ${cls}" style="${hasAgent ? '' : 'opacity:0.4'}">${agentLabels[j].substring(0,1)}</span>`;
+      return `<span class="tg ${cls}" style="${hasAgent ? '' : 'opacity:0.4'}">${_agentLabel(j).substring(0,1)}</span>`;
     }).join('');
-    const stageName = p.stage ? (stageLabels[p.stage] || p.stage) : '—';
+    const stageName = p.stage ? (_stageLabel(p.stage) || p.stage) : '—';
     const stageClass = p.stage === 'done' ? 'tgx' : ['vod','issue','coding','qa','sre'].includes(p.stage) ? 'ty' : 't3';
     const _dur = p.duration;
     const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';

@@ -39,7 +39,8 @@ def is_plugin_mode() -> bool:
 def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "", user_id: int = 0) -> str:
     """Look up skill name from DB (plugin mode).
 
-    scene_id 非空时优先使用（Issue 级场景），否则回退到仓库默认场景。
+    scene_id 非空时优先使用（Issue 级场景），否则回退到仓库默认场景（managed_repos.dev_scene）。
+    issue-39 方案 B：无「default」场景——仓库无场景时 scene_id 为空，返回空技能。
     user_id > 0 时可查用户级场景。
     Returns skill name or empty string.
     """
@@ -48,9 +49,11 @@ def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = 
         if not scene_id:
             try:
                 from src.user.db import get_repo_scene
-                scene_id = get_repo_scene(repo_key) or "default"
+                scene_id = get_repo_scene(repo_key) or ""
             except Exception:
-                scene_id = "default"
+                scene_id = ""
+        if not scene_id:
+            return ""
         node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
         if node:
             return node.get("skill", "")
@@ -413,17 +416,33 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
     return ""
 
 
+# L2 阶段分派映射表（Issue #49 §5.3）：stage × 事件类型 → Agent
+# - 对应列 stage 命中 → 目标 Agent；"—" 表示该阶段下该事件不分发（返回空）
+# - 特例：PR updated + stage=coding + QA 有历史 → qa（复审）
+_STAGE_EVENT_AGENT_MAP = {
+    "issue_opened":        {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    "issue_comment":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    # close 已由 L1 副作用短路，此处安全兜底：close 一律不分发（issue_updated 其余 action 归 issue）
+    "issue_updated":       {"vod": "issue", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    "issue_labeled":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    "pull_request_opened": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
+    "pull_request_updated": {"vod": "issue", "issue": "issue", "coding": "qa", "qa": "qa", "sre": "sre", "done": ""},
+    "pull_request_merged": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
+    "note_hook_pr":        {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
+}
+
+
 def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
                                default_agent: str) -> str:
-    """阶段矩阵路由（D9，见 vod-skill-upgrade-plan.md §3.0.3）。
+    """阶段矩阵路由（D9，见 vod-skill-upgrade-plan.md §3.0.3）——表驱动（Issue #49 §5.3）。
 
-    关联 issue_id 的事件按 issue_state 阶段判定归属：
     - issue_opened 恒给 vod（D8）
-    - Issue 类事件（issue_updated/comment/...）：vod→VOD；issue 及之后→Issue Agent
-    - PR 类事件：vod/issue→Issue Agent 审视；coding→Coding；qa→QA；sre→SRE；done→不分发
-    无 issue_state 记录 / 非关联事件 → 返回 default_agent（现状 get_domain_agent 结果）。
+    - 其余按 issue_state.stage × event_type 查 `_STAGE_EVENT_AGENT_MAP`
+    - 特例：pull_request_updated + stage=coding + QA 有历史 → qa 复审
+    - 无 issue_state / 非关联事件 → default_agent（现状 get_domain_agent 结果）
+    - stage=done → 一律不分发
     """
-    from src.api.session_store import get_issue_stage, get_issue_stage_name
+    from src.api.session_store import get_issue_stage
 
     if event_type == "issue_opened":
         return "vod"
@@ -445,33 +464,25 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
         return "vod" if event_type in ISSUE_EVENT_TYPES else default_agent
     stage = st["stage"]
 
-    if event_type in ISSUE_EVENT_TYPES:
-        # Issue 类事件：vod→VOD；issue 及之后→Issue Agent（coding/qa/sre 不直接处理）
-        if stage == "vod":
-            return "vod"
-        if stage == "done":
-            return ""  # 已结束不再分发
-        return "issue"
-    else:  # PR 类事件
-        if stage == "vod" or stage == "issue":
-            return "issue"  # Issue Agent 审视
-        if stage == "done":
-            return ""
-        # PR updated 事件 + stage=coding：检查是否有 QA 历史记录
-        # 如果 QA 曾经审查过（说明 coding 是被 QA 回流后的修复），PR updated 应路由到 QA 复审
-        if event_type == "pull_request_updated" and stage == "coding":
-            try:
-                from src.session_manager import db, db_lock
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? AND agent_type='qa' LIMIT 1",
-                        (repo_key, issue_id))
-                    if c.fetchone():
-                        return "qa"  # QA 有历史 → 路由到 QA 复审
-            except Exception:
-                pass
-        return stage  # coding/qa/sre → 对应执行 Agent
+    # 表驱动查找；显式列缺失视为不分发
+    _row = _STAGE_EVENT_AGENT_MAP.get(event_type)
+    _agent = (_row or {}).get(stage, "") if _row else ""
+
+    # 特例：PR updated + stage=coding + QA 有历史 → qa 复审（coding 修复后重新审查）
+    if event_type == "pull_request_updated" and stage == "coding" and not _agent:
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? AND agent_type='qa' LIMIT 1",
+                    (repo_key, issue_id))
+                if c.fetchone():
+                    _agent = "qa"
+        except Exception:
+            pass
+
+    return _agent
 
 
 def resolve_actor(payload: dict, evt: dict) -> str:
@@ -697,10 +708,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _body = _oa.get("description", "") or ""
                     if "## 父任务" in _body:
                         _allow_through = True
+                    # Issue #46：Onboarding 由 bot token 创建引导 Issue（description 以「首次托管引导」开头）
+                    # → issue_opened 放行，避免 bot 建引导 Issue 后流水线永不触发（见 issue-46 方案 §4.6）
+                    elif _body.startswith("首次托管引导"):
+                        _allow_through = True
                 except Exception:
                     pass
             if _allow_through:
-                log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
+                log.info(f"Pipeline: bot={actor} created onboarding/subtask issue, allow through")
             else:
                 log.info(f"Pipeline skip: self-comment from bot={actor}")
                 return result
@@ -734,6 +749,35 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 return result
         except Exception as e:
             log.warning(f"Pipeline: issue_updated label-only check failed: {e}")
+
+    # 2.2 L1 事件准入过滤（Issue #49，可配置规则 event_action_filter）
+    # 按 action + 操作者 + changes 判定：过滤无意义动作、edit 需 description 变更、PR update 按操作者、
+    # close 副作用-only（执行关闭后短路不进入 agent）。
+    try:
+        from src.api.event_rule import evaluate_event_action
+        _d = evaluate_event_action(event_type, evt.get("payload", {}) or {})
+        if _d["decision"] == "skip":
+            log.info(f"Pipeline skip: {_d['reason']} (event_action_filter, actor={_d['actor_type']})")
+            from src.api.event_store import append_skipped_event
+            append_skipped_event(repo_key, event_type, _d["reason"])
+            return result
+        if _d["decision"] == "side_effect":
+            # 执行副作用后短路：close → close_issue_tasks
+            if _d.get("side_effect") == "close_issue_tasks":
+                try:
+                    from src.api.routes.tasks import close_issue_tasks
+                    _ce_id = (evt.get("payload", {}) or {}).get("object_attributes", {}) or {}
+                    _ce_num = str(_ce_id.get("iid") or _ce_id.get("number") or "").lstrip("#")
+                    if _ce_num.isdigit() and int(_ce_num) > 0:
+                        _ce_n = close_issue_tasks(repo_key, int(_ce_num))
+                        log.info(f"Pipeline (L1 side_effect): closed tasks for issue #{_ce_num} ({_ce_n} rows)")
+                except Exception as _ce:
+                    log.warning(f"Pipeline L1 side_effect close_issue_tasks failed: {_ce}")
+            else:
+                log.info(f"Pipeline side_effect: {_d['side_effect'] or 'n/a'} (event_action_filter)")
+            return result
+    except Exception as e:
+        log.warning(f"Pipeline: event_action_filter check failed: {e}")
 
     # 3. 路由判定（D9 阶段矩阵 + 非 Issue 静态映射，替代 agent_type.subscribe_events，见 vod-skill-upgrade-plan §3.0.4）
     if event_type == "issue_opened":
@@ -889,7 +933,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         try:
             from src.api.session_store import get_issue_scene
             _issue_scene, _issue_scene_uid = get_issue_scene(repo_key, _early_issue_id)
-            _issue_scene = _issue_scene or "default"
+            _issue_scene = _issue_scene or ""   # 方案 B：无「default」场景，空=无场景
         except Exception:
             pass
     # scene_user_id=0 时兜底反查（旧数据 is_join=0 导致 scene_user_id 未写入）
@@ -948,45 +992,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.warning(f"Pipeline: failed to load default skill config: {e}")
                 return result
 
-    # 4.5 onboarding 引导上下文（§11 v1.5）：模板一键创建模拟 issue_opened webhook 提交 run_pipeline，
-    #     完全走普通链路（广播模式靠 pool_tag 认领，不依赖仓库 runtime_id 绑定）。
-    #     事件体 payload 携带 _onboarding={"target","skill","scene","result_path"} → 覆盖技能 + 注入 ONBOARDING_* 环境变量。
-    try:
-        _onb = (evt.get("payload") or {}).get("_onboarding")
-    except Exception:
-        _onb = None
-    if isinstance(_onb, dict) and (_onb.get("target") or _onb.get("skill")):
-        _ob_skill = str(_onb.get("skill", "") or "").strip() or skill_name
-        log.info(f"Pipeline onboarding ctx: skill={_ob_skill} target={_onb.get('target')} scene={_onb.get('scene')}")
-        if _ob_skill:
-            try:
-                from src.user.db import resolve_skill_id, get_skill_by_id
-                _ob_sid = resolve_skill_id(_ob_skill)
-                if _ob_sid:
-                    skill_id = _ob_sid
-                    _ob_sk = get_skill_by_id(_ob_sid)
-                    skill_name = (_ob_sk.get("skill_name") or _ob_skill) if _ob_sk else _ob_skill
-                    skill_path = (_ob_sk.get("skill_path") or skill_name) if _ob_sk else skill_name
-                else:
-                    skill_name = _ob_skill
-                    skill_path = _ob_skill
-            except Exception as e:
-                log.warning(f"Pipeline onboarding skill resolve failed: {e}")
-                skill_name = _ob_skill
-                skill_path = _ob_skill
-        # 环境变量注入（repo-onboarding skill 读取 ONBOARDING_RESULT/TARGET）
-        _ob_ext = dict(evt.get("_env_extra") or {})
-        if _onb.get("target"):
-            _ob_ext["ONBOARDING_TARGET"] = str(_onb["target"])
-        if _onb.get("result_path"):
-            _ob_ext["ONBOARDING_RESULT"] = str(_onb["result_path"])
-        if _onb.get("scene"):
-            _ob_ext["ONBOARDING_SCENE"] = str(_onb["scene"])
-        evt["_env_extra"] = _ob_ext
-        backend = backend or ""
-        log.info(f"Pipeline: onboarding ctx applied, skill={skill_name} env={list(_ob_ext.keys())}")
-
-    # 5. 提取 Issue ID
+    # 4. 查找 Agent 配置（backend + skill），找不到则不处理
     payload = evt.get("payload", {})
     if event_type in ("note_hook_pr", "pull_request_opened", "pull_request_updated", "pull_request_merged"):
         # PR 类事件：仅用 resolve_pr_issue_id（title/分支/issues 列表/PR 详情 API）。
@@ -1335,12 +1341,13 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                 db.commit()
         except Exception:
             pass
-    oc_session_id = session.get("runtime_session_id") or ""
+    oc_session_id = ""
     issue_session_id = ""
     if _issue_num_from(issue_id):
         _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
         issue_session_id = _isess.get("id") or ""
         oc_session_id = _isess.get("runtime_session_id") or ""
+    # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回退读取。
 
     repo_gitcode_token = ""
     try:
@@ -1367,7 +1374,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     _inject_cloud_credentials(env_extra, repo_key)
-    # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT/TARGET，§11 v1.5）
+    # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
         env_extra.update(_evt_ext)
@@ -1695,7 +1702,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
                          task_id: str = ""):
     """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
-    from src.runtime.executor import stream_agent
+    from src.runtime.executor import stream_devops_agent
     from src.prompt_builder import build_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
@@ -1734,13 +1741,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
             issue_session_id = _isess.get("id") or ""
             oc_session_id = _isess.get("runtime_session_id") or ""
-        if not _has_issue and not oc_session_id:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_name, agent_type))
-                row = c.fetchone()
-                if row and row[0]:
-                    oc_session_id = row[0]
+        # 无关联 Issue 任务不执行（push 忽略），不再回退读 repo 级 runtime_session_id。
     except Exception:
         pass
 
@@ -1850,7 +1851,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
 
     try:
-        for evt_type, data in stream_agent(
+        for evt_type, data in stream_devops_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
             backend_name=backend, account=exec_account, bot_token=repo_gitcode_token,
             agent_name=agent_name,
@@ -1876,18 +1877,50 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 final_text = d.get("text", "")
                 new_oc_session_id = d.get("oc_session_id", "")
                 log.info(f"Agent done: [Agent:{agent_type}|repo:{repo_name}] exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
-                # VOD 场景推荐兜底：解析 JSON 中的 recommended_scene 并持久化
+                # VOD 场景推荐：解析 JSON 中的 recommended_scene / terminate（受 allow_scene_override 开关控制）
                 if agent_type == "vod" and final_text and issue_id:
                     try:
-                        from src.api.event_store import parse_agent_output_json
-                        _scene_out = parse_agent_output_json(final_text)
-                        if _scene_out and _scene_out.get("recommended_scene"):
-                            _rec_scene = _scene_out["recommended_scene"]
-                            from src.api.session_store import set_issue_scene
-                            from src.runtime.engine_select import _repo_user_id
-                            _vod_uid = _repo_user_id(repo_key)
-                            set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
-                            log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id}")
+                        from src.api.session_store import get_scene_override_flag
+                        _allow_override = get_scene_override_flag(repo_key, issue_id)
+                        if not _allow_override:
+                            log.info(f"VOD done: scene override disabled for {issue_id}, skip recommended_scene")
+                        else:
+                            from src.api.event_store import parse_agent_output_json
+                            _scene_out = parse_agent_output_json(final_text) or {}
+                            # 宽松兜底：VOD 输出可能仅含 recommended_scene / terminate（不含 actions 等字段，
+                            # parse_agent_output_json 的 _is_valid_output 会过滤掉），用正则直接提取
+                            if "recommended_scene" not in _scene_out and _scene_out.get("terminate") is None:
+                                import re as _re
+                                _m_term = _re.search(r'"terminate"\s*:\s*true', final_text)
+                                _m_rec = _re.search(r'"recommended_scene"\s*:\s*"([^"]+)"', final_text)
+                                if _m_term:
+                                    _scene_out["terminate"] = True
+                                if _m_rec:
+                                    _scene_out["recommended_scene"] = _m_rec.group(1)
+                                _m_reason = _re.search(r'"reason"\s*:\s*"([^"]+)"', final_text)
+                                if _m_reason:
+                                    _scene_out["reason"] = _m_reason.group(1)
+                            # 方案 B：无场景终止信号——仓库未配置场景，VOD 不推荐场景（scene 清空，不触发场景流水线）
+                            if _scene_out.get("terminate") or _scene_out.get("reason") == "未配置场景":
+                                from src.api.session_store import set_issue_scene
+                                from src.runtime.engine_select import _repo_user_id
+                                _vod_uid = _repo_user_id(repo_key)
+                                set_issue_scene(repo_key, issue_id, "", scene_user_id=_vod_uid)
+                                log.info(f"VOD done: terminate (未配置场景) for {issue_id}, scene cleared (no pipeline)")
+                                _rec_scene = None   # 不进入正常场景覆写
+                            else:
+                                _rec_scene = _scene_out.get("recommended_scene", "") or ""
+                            if _rec_scene and _rec_scene == "default":
+                                # 方案 B：没有「default」场景，default 永不写入 issue_state.scene_id
+                                log.info(f"VOD done: rec='default' invalid (无 default 场景), skip override for {issue_id}")
+                            elif _rec_scene:
+                                from src.api.session_store import set_issue_scene
+                                from src.runtime.engine_select import _repo_user_id
+                                _vod_uid = _repo_user_id(repo_key)
+                                set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
+                                log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id} (override enabled)")
+                            else:
+                                log.info(f"VOD done: no recommended_scene for {issue_id}, keep issue scene")
                     except Exception as _se:
                         log.warning(f"VOD done: scene parse failed: {_se}")
             elif evt_type == "error":
@@ -1906,20 +1939,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent failed: [Agent:{agent_type}|repo:{repo_name}] {e}")
 
-    # 更新 oc_session_id（持久化对话上下文）——Issue 级执行会话优先，回退 repo 级
+    # 更新 oc_session_id（持久化对话上下文）——仅写回 Issue 级执行会话
+    # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
     if new_oc_session_id and new_oc_session_id != oc_session_id:
         try:
             if issue_session_id:
                 from src.api.session_store import update_issue_session
                 update_issue_session(issue_session_id, runtime_session_id=new_oc_session_id)
-            # 本函数内其他分支有局部 import db_lock（1157 行）→ 会遮蔽模块级名；
-            # 此处必须局部重新绑定，否则 NameError（2026-08-20 修复 e7a93a5b 副作用）
-            from src.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("UPDATE devops_agent_session SET runtime_session_id=?, last_active_at=datetime('now') WHERE repo_key=? AND agent_type=?",
-                          (new_oc_session_id, repo_name, agent_type))
-                db.commit()
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
@@ -2050,7 +2076,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
 
 
 def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str):
-    """Agent 执行完成后，将结果作为评论发回 GitCode Issue，并同步写入任务会话（去对话可见）。"""
+    """Agent 执行完成后，将结果作为评论发回 GitCode Issue。
+
+    Issue #46 重构：不再在此同步任务会话（原 add_message 与 _execute_agent 收尾的
+    result_text 同步重复写入，造成冗余通知）；task conversation 的 result_text 同步
+    统一由 _execute_agent 收尾（event_pipeline.py:2020 附近）作为唯一写入路径。
+    """
     if not repository or not issue_number or not bot_token:
         return
     try:
@@ -2071,21 +2102,6 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
         log.info(f"Exec agent: posted result comment to {repository}/issues/{issue_number}")
     except Exception as e:
         log.warning(f"Exec agent: failed to post result comment: {e}")
-    # 同步写入任务会话：用户「去对话」时可见 agent 澄清/报告
-    try:
-        from src.repo_key import to_repo_key
-        from src.session_manager import db, db_lock, add_message
-        rk = to_repo_key(repository)
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
-                      (rk, issue_number))
-            row = c.fetchone()
-        if row and row[0]:
-            add_message(row[0], "agent", f"[{agent_type.upper()} Agent] {result_text[:3000]}")
-            log.info(f"Exec agent: synced result to task conversation {row[0]}")
-    except Exception as e:
-        log.warning(f"Exec agent: sync to task conversation failed: {e}")
 
 
 

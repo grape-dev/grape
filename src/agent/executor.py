@@ -149,17 +149,17 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
     """
     from src.agent.hermes_acp import HermesACPBackend
 
+    label = f"{agent_label} " if agent_label else ""
+
     acp = HermesACPBackend()
     env = acp.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
 
-    # GitCode token 注入（与 stream_agent 一致）
-    if bot_token:
-        env["BOT_GITCODE_TOKEN"] = bot_token
-    if user_token:
-        env["USER_GITCODE_TOKEN"] = user_token
-    elif bot_token:
-        env["USER_GITCODE_TOKEN"] = bot_token
+    # GitCode token 互斥注入（与 stream_agent 一致，收口到 _assemble_env）：
+    #   chat → 只 USER_GITCODE_TOKEN；事件任务 → 只 BOT_GITCODE_TOKEN（不同时注入）
+    _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
+                  label=label, bot_token=bot_token, user_token=user_token,
+                  user_id=user_id)
     if agent_name:
         env["AGENT_NAME"] = agent_name
     if env_extra:
@@ -172,25 +172,6 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
     except Exception:
         pass
 
-    # 注入用户凭据
-    if user_id > 0:
-        try:
-            from src.user.db import get_credentials
-            for c in get_credentials(user_id):
-                provider = c.get("provider", "")
-                cfg = c.get("config", {})
-                if provider == "huawei_cloud":
-                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
-                elif provider == "codearts":
-                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
-                else:
-                    for k, v in cfg.items():
-                        env[k.upper()] = str(v)
-        except Exception as e:
-            log.warning(f"Failed to inject user credentials: {e}")
-
     # 脱敏 token 列表
     _tokens = [t for t in (bot_token, user_token) if t]
 
@@ -202,8 +183,6 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
             if t:
                 s = s.replace(t, "[REDACTED]")
         return s
-
-    label = f"{agent_label} " if agent_label else ""
 
     # 会话失效重试（与 stream_agent 一致）
     for evt_type, data in acp.stream_execute(
@@ -227,8 +206,101 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
             yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
 
 
+def _assemble_env(env: dict, *, kind: str, label: str = "",
+                  bot_token: str = "", user_token: str = "", user_id: int = 0) -> None:
+    """按执行类型组装 GitCode token 与用户云凭据（互斥注入，§十 写操作隔离）。
+
+    - kind="chat"：只注入 USER_GITCODE_TOKEN（DB 兜底；无则 log.error，不以 bot token 冒充用户身份）
+    - kind="devops"：只注入 BOT_GITCODE_TOKEN（事件任务 prompt 只认它），不注入 USER_GITCODE_TOKEN
+    - 用户云凭据（华为云/codearts/自定义）：chat 与 devops(仓库归属用户) 都按 user_id 注入；
+      与 GITCODE token 无关，二者互不影响。
+    """
+    if kind == "chat":
+        if not user_token and user_id > 0:
+            try:
+                from src.user.db import get_user_gitcode_token
+                user_token = get_user_gitcode_token(user_id) or ""
+            except Exception as e:
+                log.warning(f"Fallback resolve user gitcode token failed: {e}")
+                user_token = ""
+        if user_token:
+            env["USER_GITCODE_TOKEN"] = user_token
+        else:
+            if bot_token:
+                log.error(f"{label}chat task lacks user token but bot_token provided: "
+                          f"will NOT impersonate user with bot token; GitCode API 401 for user write ops")
+            else:
+                log.warning(f"{label}NO token available for chat agent, GitCode API will 401")
+    elif bot_token:
+        env["BOT_GITCODE_TOKEN"] = bot_token
+        log.info(f"{label}devops event task: user token not applicable, using bot token (len={len(bot_token)})")
+    # 用户云凭据注入（devops 的 user_id=仓库归属用户，见 event_pipeline _issue_scene_uid）
+    if user_id > 0:
+        try:
+            from src.user.db import get_credentials
+            for c in get_credentials(user_id):
+                provider = c.get("provider", "")
+                cfg = c.get("config", {})
+                if provider == "huawei_cloud":
+                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
+                elif provider == "codearts":
+                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
+                else:
+                    for k, v in cfg.items():
+                        env[k.upper()] = str(v)
+        except Exception as e:
+            log.warning(f"Failed to inject user credentials: {e}")
+
+
+def stream_chat_agent(prompt: str, cwd: str, session_id: str = "",
+                      account: str = "", user_id: int = 0,
+                      user_token: str = "",
+                      env_extra: dict | None = None,
+                      agent_name: str = "",
+                      agent_label: str = "",
+                      backend_name: str = "",
+                      max_exec_seconds: int = 600) -> Generator:
+    """chat 语义专用执行器：以用户身份运行（只注入 USER_GITCODE_TOKEN + 用户云凭据）。
+
+    与 stream_devops_agent 隔离：本函数签名不含 bot_token，从调用方层面杜绝
+    「以仓库 bot token 冒充用户身份」可能（§十 写操作隔离）。
+    """
+    yield from stream_agent(
+        prompt, cwd, session_id=session_id, event_type="chat",
+        backend_name=backend_name, account=account, user_id=user_id,
+        env_extra=env_extra, bot_token="", user_token=user_token,
+        agent_name=agent_name, agent_label=agent_label,
+        max_exec_seconds=max_exec_seconds,
+    )
+
+
+def stream_devops_agent(prompt: str, cwd: str, session_id: str = "",
+                        event_type: str = "",
+                        account: str = "", repo_user_id: int = 0,
+                        bot_token: str = "",
+                        env_extra: dict | None = None,
+                        agent_name: str = "",
+                        agent_label: str = "",
+                        backend_name: str = "",
+                        max_exec_seconds: int = 600) -> Generator:
+    """devops 事件语义专用执行器：以仓库身份运行（只注入 BOT_GITCODE_TOKEN）。
+
+    repo_user_id 为仓库归属用户（仅用于注入云凭据），与 chat 用户 token 严格分离——
+    事件任务无法以用户身份写 GitCode（§十 写操作隔离）。签名不含 user_token。
+    """
+    yield from stream_agent(
+        prompt, cwd, session_id=session_id, event_type=event_type or "issue_opened",
+        backend_name=backend_name, account=account, user_id=repo_user_id,
+        env_extra=env_extra, bot_token=bot_token, user_token="",
+        agent_name=agent_name, agent_label=agent_label,
+        max_exec_seconds=max_exec_seconds,
+    )
+
+
 def stream_agent(prompt: str, cwd: str, session_id: str = "",
-                 event_type: str = "", backend_name: str = "opencode",
+                 event_type: str = "", backend_name: str = "",
                  account: str = "", user_id: int = 0,
                  env_extra: dict | None = None,
                  bot_token: str = "", user_token: str = "",
@@ -260,27 +332,13 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
     env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
-    # GitCode token 通过子进程环境变量注入（不写入 prompt，避免 token 进会话历史/日志）
-    if bot_token:
-        env["BOT_GITCODE_TOKEN"] = bot_token
-    if user_token:
-        env["USER_GITCODE_TOKEN"] = user_token
-    else:
-        # 用户 token 为空 → 兜底链路：
-        # 1) 用户登录 grape 时绑定的 GitCode token（user_accounts.gitcode_api_token）
-        # 2) 仓库 api token（bot_token 参数：worker 侧 repo_gitcode_token / 事件流水线仓库 bot token），
-        #    保证 chat agent 创建/查询 Issue 时 USER_GITCODE_TOKEN 非空，避免 401。
-        if user_id > 0:
-            try:
-                from src.user.db import get_user_gitcode_token
-                user_token = get_user_gitcode_token(user_id) or ""
-            except Exception as e:
-                log.warning(f"Fallback resolve user gitcode token failed: {e}")
-        if user_token:
-            env["USER_GITCODE_TOKEN"] = user_token
-        elif bot_token:
-            env["USER_GITCODE_TOKEN"] = bot_token
-            log.warning(f"{label}USER_GITCODE_TOKEN empty, fallback to repo bot token (len={len(bot_token)})")
+    # GitCode token 互斥注入（§十 写操作隔离）：
+    #   chat（用户身份）→ 只注入 USER_GITCODE_TOKEN；事件任务（仓库身份）→ 只注入 BOT_GITCODE_TOKEN。
+    #   BOT_GITCODE_TOKEN 与 USER_GITCODE_TOKEN 不同时注入，避免用户对话上下文暴露仓库 bot token。
+    #   判定严格以 event_type 为准（不依赖 user_token 兜底判断，防调用方误传导致误判 chat）。
+    _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
+                  label=label, bot_token=bot_token, user_token=user_token,
+                  user_id=user_id)
     # Agent 显示名（skill 中 [$AGENT_NAME] 使用，如 "Issue Agent" / "QA Agent"）
     if agent_name:
         env["AGENT_NAME"] = agent_name
@@ -295,26 +353,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     except Exception:
         pass
 
-    # 注入用户凭据
-    if user_id > 0:
-        try:
-            from src.user.db import get_credentials
-            for c in get_credentials(user_id):
-                provider = c.get("provider", "")
-                cfg = c.get("config", {})
-                if provider == "huawei_cloud":
-                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
-                elif provider == "codearts":
-                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
-                else:
-                    for k, v in cfg.items():
-                        env[k.upper()] = str(v)
-        except Exception as e:
-            log.warning(f"Failed to inject user credentials: {e}")
-
-    # 需要脱敏的 token 列表（用于日志/事件输出）
+    # 需要脱敏的 token 列表（用于日志/事件输出；_assemble_env 已把 token/凭据注入 env）
     _tokens = [t for t in (bot_token, user_token) if t]
 
     # codearts 方案E2: serve 启动移到 _run_once 内部（每次执行启动自己的 serve，避免单例并发串号）

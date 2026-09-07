@@ -274,19 +274,19 @@ def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
 
     evt = _load_event(seq)
 
-    # 1.5）onboarding 主事件重派 → target 级自愈（§5.2/§5.3/§11）：
-    #     引导事件无普通 task 快照、payload 无 repository（source='template'），走 re-run_pipeline 会被
-    #     `repository='' not recognized` 静默跳过——改为按 target 重新触发引导，恢复正常分派回归。
+    # 1.5）onboarding 主事件重派 → 任务级自愈（Issue #46 重构后兼容）：
+    #     历史 onboarding_exp/onboarding_explore 事件仍可能被 redispatch；onboarding 后端已改为「按模板创建标准任务」，
+    #     旧事件映射到新任务 type（onboarding_exp→experience，onboarding_explore→dev）后走 retry_onboarding_task 补建。
     _onb_target = (
         "experience" if evt.get("event_type") == "onboarding_exp"
-        else "explore" if evt.get("event_type") == "onboarding_explore" else ""
+        else "dev" if evt.get("event_type") == "onboarding_explore" else ""
     )
     if _onb_target:
         from src.repo_key import split_owner_repo
-        from src.api.onboarding import retry_onboarding_target
+        from src.api.onboarding import retry_onboarding_task
         _owner, _repo = split_owner_repo(evt.get("repo_key", "") or "")
-        log.info(f"[redispatch] seq={seq} onboarding {_onb_target}: target-level retry, repo={evt.get('repo_key')}")
-        _res = retry_onboarding_target(evt.get("repo_key", "") or "", _owner, _onb_target)
+        log.info(f"[redispatch] seq={seq} onboarding {_onb_target}: task-level retry, repo={evt.get('repo_key')}")
+        _res = retry_onboarding_task(evt.get("repo_key", "") or "", _owner, _onb_target)
         # 原 seq 标记 failed（保持历史记录），新 seq 接管
         try:
             update_event_status(seq, "failed")
@@ -1081,8 +1081,8 @@ def _execute_conv_task(task_id: str, loop):
 
     try:
         evt = _load_event(seq)
-        # 直接用同步 stream_agent（在线程中运行，不阻塞主 loop）
-        from src.runtime.executor import stream_agent
+        # 直接用同步 stream_devops_agent（在线程中运行，不阻塞主 loop）
+        from src.runtime.executor import stream_devops_agent
         _worker_final_text = ""
         repo_key = evt["repo_key"]
         agent_type = evt["agent_type"]
@@ -1117,8 +1117,8 @@ def _execute_conv_task(task_id: str, loop):
         bot_token = get_gitcode_token(repo_key=repo_key) or ""
         repository = from_repo_key(repo_key)
         # 用 hermes 引擎（对齐 Chat Agent）
-        for evt_type, data in stream_agent(
-            prompt, cwd=ws, session_id=oc_session_id,
+        for evt_type, data in stream_devops_agent(
+            prompt, cwd=ws, session_id=oc_session_id, event_type="event_dialogue",
             backend_name="hermes", account=repository, bot_token=bot_token,
             agent_name="Event Dialogue Agent",
             agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",

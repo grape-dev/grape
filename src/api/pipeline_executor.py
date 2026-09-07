@@ -38,7 +38,7 @@ async def dispatch_node(
 
     Returns {"status": "dispatched"|"blocked"|"failed", "node": node_id, "mode": mode}
     """
-    cfg = get_pipeline_config(scene_id, repo_key=repo_key, user_id=user_id)
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         return {"status": "failed", "node": node_id, "mode": "none", "error": "no pipeline config"}
 

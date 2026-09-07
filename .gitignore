@@ -86,7 +86,11 @@ scripts/sync_*.py
 scripts/trigger_*.py
 scripts/upgrade_*.py
 scripts/verify_*.py
+scripts/check-*-*.py
+scripts/verify-*-*.py
 scripts/install-worker.sh.bak.*
+start-cluster.sh
+configs/admin.env
 admin/
 logs/
 examples/
@@ -94,3 +98,5 @@ skills/
 !.opencode/
 !.opencode/skills/
 trace_*.py
+configs/scene-sync.json
+.coverage

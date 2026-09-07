@@ -659,3 +659,56 @@ table([I18N.t('observability.col_issue_seq'), I18N.t('observability.col_agent'),
 ### 15.8 后端测试无回归
 
 `pytest tests/test_api_routes.py`：76 passed / 7 failed。7 个 failed 已用 `git stash` 验证为预先存在（与本次改动无关，均为 chat config / skills 操作相关测试）。本次改动 0 新增 failed。
+
+## 十六、模块顶层缓存 I18N.t() 陷阱（2026-09-04 修复）
+
+### 16.1 问题描述
+
+i18n 语言包是**异步加载**的（`loadPacks()` 返回 Promise），但部分 JS 文件在**模块加载时（同步阶段）**就用 `const` 缓存了 `I18N.t()` 的返回值。这导致切换语言后这些缓存值不会更新，页面上的标签仍显示旧语言。
+
+**时序分析：**
+
+```
+1. 浏览器加载 xxx.js → 执行 const FOO = I18N.t('module.key') || '中文兜底'
+2. 此时语言包还没加载完 → I18N.t() 找不到 key → 返回 key 本身 'module.key'
+3. 如果有 || '中文兜底' → 兜底中文生效 → FOO 被永久冻结成中文
+4. 用户切换语言 → setLang() 重新加载语言包 + 调 _rerenderCurrentPage() → app.nav() 重渲染
+5. 渲染代码使用 FOO → 但这个 const 从步骤1就固化了，永远不会重新求值
+```
+
+**根因：** `setLang()` 能让 `I18N.t()` 在后续调用时返回正确翻译，但无法让已经求值过的 `const` 重新计算。
+
+### 16.2 规则
+
+**禁止在模块顶层用 `const`/`let`/`var` 缓存 `I18N.t()` 的返回值。** 必须在函数内部调用 `I18N.t()`，确保每次渲染时实时取值。
+
+正确写法：
+```javascript
+// 方式1：函数封装，每次调用实时取值
+function _scopeName(scope) {
+  return { official: I18N.t('skills.scope_official'),
+           repo: I18N.t('skills.scope_repo'),
+           user: I18N.t('skills.scope_user') }[scope];
+}
+
+// 方式2：直接内联在渲染函数中
+const html = `<a>${I18N.t('skills.scope_official')}</a>`;
+```
+
+错误写法：
+```javascript
+// ❌ 模块顶层缓存 — 脚本加载时求值一次后固化
+const _SCOPE_NAMES = {
+  official: I18N.t('skills.scope_official'),
+  repo: I18N.t('skills.scope_repo'),
+};
+```
+
+### 16.3 受影响文件及修复
+
+| # | 文件:行 | 变量 | 影响 | 修复方式 |
+|---|---------|------|------|----------|
+| 1 | `skills.js:24-28` | `_SCOPE_NAMES` | 技能市场三个 tab 标签不跟随语言切换 | 改为函数 `_scopeName(scope)` |
+| 2 | `chat.js:24` | `_NO_REPLY` | 聊天页"暂无回复"占位文案不切换 | 改为内联 `I18N.t('chat.no_reply')` |
+| 3 | `pipeline.js:6` | `agentLabels` | 流水线表格 Agent 列首字母不切换 | 改为函数 `_agentLabel(idx)` |
+| 4 | `pipeline.js:8` | `stageLabels` | 流水线表格阶段名不切换 | 改为函数 `_stageLabel(stage)` |

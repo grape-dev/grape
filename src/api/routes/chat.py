@@ -509,7 +509,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
         return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data)
 
-    from src.runtime.executor import stream_agent
+    from src.runtime.executor import stream_chat_agent
     loop = asyncio.get_event_loop()
     collected = []
     new_runtime_session_id = ""
@@ -517,7 +517,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     def run_agent():
         nonlocal new_runtime_session_id
         with _CHAT_AGENT_SEMAPHORE:
-            for evt_type, data in stream_agent(
+            for evt_type, data in stream_chat_agent(
                 prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
@@ -736,7 +736,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
-    from src.runtime.executor import stream_agent
+    from src.runtime.executor import stream_chat_agent
 
     async def event_stream():
         q = asyncio.Queue()
@@ -753,8 +753,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
             collected = []
             worker_error = ""
             try:
-                for evt_type, data in stream_agent(
-prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
+                for evt_type, data in stream_chat_agent(
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
@@ -1031,13 +1031,13 @@ def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
                 backends.append({"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）", "scope": "local", "owner": "", "runtime_id": _rid})
         except Exception:
             pass
-        # 个人引擎（scope=user）
+        # 个人引擎（scope=user，仅当前用户 + active）
         try:
             c.execute("""
                 SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id
                 FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-                WHERE rc.scope = 'user'
-            """)
+                WHERE rc.scope = 'user' AND rc.status='active' AND rc.owner_name = ?
+            """, (user["username"],))
             for r in c.fetchall():
                 _rid, ename, ver, dev, owner, cid = r
                 ins = instance_name(ename, dev or "", cid or 0)
@@ -1353,12 +1353,12 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
         # 本机直连：ChatTaskManager 启动 agent_fn
         def agent_fn():
             """agent generator — yield 事件 + finally 写 DB"""
-            from src.runtime.executor import stream_agent
+            from src.runtime.executor import stream_chat_agent
             _final_text = ""
             _new_sid = ""
             _last_error = ""
             try:
-                for evt_type, data in stream_agent(
+                for evt_type, data in stream_chat_agent(
                     prompt=prompt, cwd=cwd, session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token,

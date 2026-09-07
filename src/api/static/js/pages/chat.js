@@ -21,7 +21,7 @@ function _getTask(convId) { return _chatTasks[convId] || null; }
 function _setTask(convId, task) { _chatTasks[convId] = task; if (convId) _setStoredTask(convId, task); }
 function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStoredTask(convId); }
 
-const _NO_REPLY = I18N.t('chat.no_reply');
+// _NO_REPLY: 内联 I18N.t('chat.no_reply')，不缓存（模块顶层缓存会在语言切换后失效）
 
 /**
  * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
@@ -189,7 +189,10 @@ function loadSideConfig() {
 }
 
 function loadConversations(autoSelect) {
-  // 去对话指定会话时，不过滤 repo，确保任务会话可被定位
+  // Issue #47：首渲染即按目标仓库过滤，避免"先全局后过滤"导致串库闪烁。
+  //  - 任务中心跳转(issue:N:repoKey)：用任务自带仓库过滤（该仓库即目标，正确露出）
+  //  - 直连 conv_id：不过滤（定位既有会话）
+  //  - 普通进入：按当前仓库过滤
   const repo = app.currentRepo();
   // 解析 issue:N:repoKey 格式的 _openConvId（Task Center 跳转，会话可能已删除需重建）
   let _issueParam = null;
@@ -198,7 +201,9 @@ function loadConversations(autoSelect) {
     if (parts.length >= 3) _issueParam = {num: parts[1], repo: parts.slice(2).join(':')};
     _openConvId = null;
   }
-  const repoKey = (_openConvId || _issueParam ? '' : (repo ? repo.fullName : ''));
+  const repoKey = _issueParam && _issueParam.repo
+    ? _issueParam.repo
+    : (_openConvId ? '' : (repo ? repo.fullName : ''));
   API.get('/chat/conversations' + (repoKey ? '?repo_key=' + encodeURIComponent(repoKey) : '')).then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
@@ -512,7 +517,7 @@ function doSend(input, body) {
     const convId = r.conversation_id || _currentConvId;
     if (r.status === 'error') {
       const el = document.getElementById(tid);
-      if (el) el.innerHTML = renderMarkdown(r.error || _NO_REPLY);
+      if (el) el.innerHTML = renderMarkdown(r.error || I18N.t('chat.no_reply'));
       _clearTask(convId);
       loadConversations();
       return;
@@ -567,9 +572,9 @@ async function streamTask(taskId, elId, convId) {
             if (d.type === 'done') {
               // 完成 — 只显示最终结果
               finalText = d.text || finalText;
-              if (el) el.innerHTML = renderMarkdown(finalText) || _NO_REPLY;
+              if (el) el.innerHTML = renderMarkdown(finalText) || I18N.t('chat.no_reply');
             } else if (d.type === 'error') {
-              if (el) el.innerHTML = renderMarkdown(d.text || '') || _NO_REPLY;
+              if (el) el.innerHTML = renderMarkdown(d.text || '') || I18N.t('chat.no_reply');
             } else if (d.type === '思考中') {
               // 思考阶段 — 保持三点动画占位
               if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';

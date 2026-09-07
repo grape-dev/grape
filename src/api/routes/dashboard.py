@@ -13,13 +13,13 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/ops/overview")
-def get_ops_overview(repo: str = ""):
+def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
 
     参考 multica BusinessSampler（metrics/business_sampler.go）的实时采样设计，
     但通过 Dashboard API 暴露给前端看板，无需 Prometheus 基础设施。
 
-    无认证：运维只读数据，不涉及敏感信息（与 /health/realtime 同级）。
+    需登录：user scope worker 按当前用户过滤（与 Agent 运行时页面可见性一致）。
     数据全部来自 agent_tasks / agent_runtimes 表的实时 SQL 查询。
     repo 参数：仓库名（requiredsa/hello-flask），过滤仅该仓库的任务。
     """
@@ -218,24 +218,26 @@ def get_ops_overview(repo: str = ""):
                 pass
 
         # 查 worker（凭据），排除已注销（revoked）
-        # 显示所有 scope 的 worker（global+user+repo），repo scope 在仓库看板额外过滤
+        # worker 可见性：global 全部可见 + user scope 只看自己的 + repo scope 看仓库的
+        _uname = user.get("username") or ""
         try:
             if repo:
-                # 仓库级看板：显示 global + user + 该 repo 的 worker
+                # 仓库级看板：global + 自己的 user + 该 repo 的 worker
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND (scope IN ('global','user') OR repo_key=? OR repo_key=?) ORDER BY id",
-                    (repo_key, repo),
+                    "AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key=? OR repo_key=?) ORDER BY id",
+                    (_uname, repo_key, repo),
                 )
             else:
-                # 全局看板：显示 global + user scope 的 worker
+                # 全局看板：global + 自己的 user scope worker
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND scope IN ('global','user') ORDER BY id"
+                    "AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
+                    (_uname,),
                 )
             for w in c.fetchall():
                 wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w
@@ -860,6 +862,37 @@ async def get_a2a_health():
     return result
 
 
+def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
+    """方案 X（F-2 落地）：纯本地判定托管状态，零 GitCode API 调用。
+
+    - webhook 检测：读本地 managed_repos.webhook_id，>0 即视为存在（不远程比对 URL，杜绝 URL 漂移误报）。
+    - bot 检测：读本地已落库的 host_status；仅当原值为 bot_missing/partial 且 bot 实际应存在时
+      维持原值（不额外远程查权限，避免限流）。
+    - 不调用任何远程 API，避免 429；真实"webhook 被手动删除"的漏报由 repair-host 手动确认兜底。
+    """
+    from src.config import log as _log
+    try:
+        from src.user.db import get_host_status, set_host_status, _get_managed_webhook_id
+        webhook_id = _get_managed_webhook_id(repo_key)
+        cur = get_host_status(repo_key)
+        if not webhook_id:
+            # webhook 从未建立 → webhook_missing
+            if cur != "webhook_missing":
+                set_host_status(repo_key, "webhook_missing")
+            return "webhook_missing"
+        # webhook 存在：
+        if cur in ("bot_missing", "partial"):
+            # bot 缺失/部分是托管时落库的明确标记，保留（不远程复查）
+            return cur
+        # 正常（含曾误标 webhook_missing → 现在 webhook_id>0 存在 → 清掉误报）
+        if cur != "":
+            set_host_status(repo_key, "")
+        return ""
+    except Exception as e:
+        _log.warning(f"Dashboard: host status check failed: {e}")
+        return ""
+
+
 @router.get("/{owner}/{repo}")
 def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
@@ -962,8 +995,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         if s in event_counts:
             event_counts[s] += 1
 
-    # 获取当前场景和场景列表（从 DB 读取）
-    dev_scene = "default"
+    # 获取当前场景和场景列表（从 DB 读取，方案 B：无 default 场景）
+    dev_scene = ""
     try:
         with db_lock:
             c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
@@ -977,13 +1010,13 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
     scene_nodes = []
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
-        scenes = get_scenes(repo_key=repo_key, user_id=user.get("id", 0))
+        scenes = get_scenes(repo_key=repo_key)
         # dev_scene 必须在可见场景列表中才加载，否则自动选中第一个场景
         scene_ids = {s["id"] for s in scenes}
         if scenes:
             if not dev_scene or dev_scene not in scene_ids:
                 dev_scene = scenes[0]["id"]
-            cfg = get_pipeline_config(dev_scene, repo_key=repo_key, user_id=user.get("id", 0))
+            cfg = get_pipeline_config(dev_scene, repo_key=repo_key)
             if cfg:
                 scene_nodes = cfg.get("nodes", [])
         else:
@@ -1083,6 +1116,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
 
     metrics["active_agents"] = sum(1 for a in agent_sessions if a["status"] == "running")
 
+    # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
+    host_status = _check_host_status(owner, repo, repo_key)
+
     return {
         "repo": repo_key,
         "role": role,
@@ -1092,4 +1128,5 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         "agents": agent_sessions,
         "agent_engines": agent_engines,
         "scene_nodes": scene_nodes,
+        "host_status": host_status,
     }

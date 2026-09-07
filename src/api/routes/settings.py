@@ -783,3 +783,142 @@ def delete_engine_tag(rid: int, tag: str, user: dict = Depends(get_current_user)
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     log.info(f"Engine tag deleted: runtime={rid} tag={tag}")
     return {"message": f"标签 {tag} 已删除"}
+
+
+# ===== Issue #49：Webhook 事件 action 过滤规则（event_action_filter 管理）=====
+
+class EventActionFilterBody(BaseModel):
+    event_type: str
+    action: str
+    allow: int = 0              # 0=过滤 1=放行 2=副作用-only
+    actor: str = "any"          # user / bot / any
+    require_changes: str = ""   # JSON 数组字符串，如 '["description"]'
+    block_changes: str = ""     # JSON 数组字符串，命中即过滤，如 '["assignees","labels"]'
+    handle_side_effect: str = ""
+    priority: int = 0
+    enabled: int = 1
+
+
+class EventActionFilterUpdateBody(BaseModel):
+    allow: int | None = None
+    actor: str | None = None
+    require_changes: str | None = None
+    block_changes: str | None = None
+    handle_side_effect: str | None = None
+    priority: int | None = None
+    enabled: int | None = None
+
+
+@router.get("/event-action-filters")
+def list_event_action_filters(user: dict = Depends(get_current_user)):
+    """查看全部事件 action 过滤规则（可配置热生效）。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            # 兼容旧表（无 block_changes）
+            cols = [r[1] for r in c.execute("PRAGMA table_info(event_action_filter)").fetchall()]
+            if "block_changes" in cols:
+                c.execute("SELECT id, event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, "
+                          "priority, enabled FROM event_action_filter ORDER BY event_type, action")
+            else:
+                c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
+                          "priority, enabled FROM event_action_filter ORDER BY event_type, action")
+            rows = c.fetchall()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    return {"rules": [
+        {"id": r[0], "event_type": r[1], "action": r[2], "allow": r[3], "actor": r[4] or "any",
+         "require_changes": r[5] or "", "block_changes": r[6] or "", "handle_side_effect": r[7] or "",
+         "priority": r[8], "enabled": r[9]}
+        for r in rows
+    ]}
+
+
+@router.post("/event-action-filters")
+def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(get_current_user)):
+    """新增事件 action 过滤规则（幂等：同 event_type×action 已存在则跳过）。"""
+    from src.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT 1 FROM event_action_filter WHERE event_type=? AND action=?", (body.event_type, body.action))
+            if c.fetchone():
+                raise HTTPException(status_code=409, detail={"code": 409, "message": "该事件/动作规则已存在"})
+            c.execute(
+                "INSERT INTO event_action_filter (event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (body.event_type, body.action, body.allow, body.actor, body.require_changes,
+                 body.block_changes, body.handle_side_effect, body.priority, body.enabled, now, now))
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    return {"message": "规则已添加", "event_type": body.event_type, "action": body.action}
+
+
+@router.put("/event-action-filters/{rule_id}")
+def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
+                             user: dict = Depends(get_current_user)):
+    """修改事件 action 过滤规则（改 allow/actor/changes/副作用/优先级/启用，热生效 ≤30s）。"""
+    from src.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    sets, params = [], []
+    for field in ("allow", "actor", "require_changes", "block_changes", "handle_side_effect", "priority", "enabled"):
+        val = getattr(body, field)
+        if val is not None:
+            sets.append(f"{field}=?")
+            params.append(val)
+    if not sets:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "无可更新字段"})
+    sets.append("updated_at=?")
+    params.append(now)
+    params.append(rule_id)
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(f"UPDATE event_action_filter SET {', '.join(sets)} WHERE id=?", params)
+            if c.rowcount == 0:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    # 失效缓存，让新规则立即生效
+    try:
+        from src.api import event_rule
+        event_rule.load_event_action_rule(force=True)
+    except Exception:
+        pass
+    return {"message": "规则已更新"}
+
+
+@router.delete("/event-action-filters/{rule_id}")
+def delete_event_action_rule(rule_id: int, user: dict = Depends(get_current_user)):
+    """删除事件 action 过滤规则（删除后无规则=放行）。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("DELETE FROM event_action_filter WHERE id=?", (rule_id,))
+            if c.rowcount == 0:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+            db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    try:
+        from src.api import event_rule
+        event_rule.load_event_action_rule(force=True)
+    except Exception:
+        pass
+    return {"message": "规则已删除"}

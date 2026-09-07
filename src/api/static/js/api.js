@@ -141,12 +141,19 @@ const API = (() => {
   }
 
   // fetch 超时封装：30s 后 abort，防止后端 hang 导致前端永久 loading
+  // 网络错误自动重试：fetch 报 TypeError（TCP 连接过期/网络抖动）时延迟 500ms 重试一次
   const _DEFAULT_TIMEOUT = 30000;
-  function _fetchWithTimeout(url, opts, timeout) {
+  function _fetchWithTimeout(url, opts, timeout, _retried) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout || _DEFAULT_TIMEOUT);
     opts = Object.assign({}, opts, { signal: controller.signal });
-    return fetch(url, opts).finally(() => clearTimeout(timer));
+    return fetch(url, opts).finally(() => clearTimeout(timer)).catch(e => {
+      // 网络层错误（TypeError: Failed to fetch）——首次重试一次，避免 TCP 连接过期偶发失败
+      if (!_retried && e instanceof TypeError) {
+        return new Promise(r => setTimeout(r, 500)).then(() => _fetchWithTimeout(url, opts, timeout, true));
+      }
+      throw e;
+    });
   }
 
   function _get(path, timeout) {

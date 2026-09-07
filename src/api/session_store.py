@@ -114,21 +114,21 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
 
 
 def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
-    """读取 Issue 级开发场景。空则回退到仓库默认场景。
+    """读取 Issue 级开发场景。空则回退到仓库默认场景（managed_repos.dev_scene）。
 
+    方案 B：无「default」场景，仓库无场景时返回 ("", 0)。
     返回 (scene_id, scene_user_id)：
     - issue_state.scene_id 非空 → 用该值 + scene_user_id
-    - 否则回退 managed_repos.dev_scene（scene_user_id=0，但 _query_scene_by_id
-      会自动用 _repo_user_id 匹配 user 级场景）
+    - 否则回退 managed_repos.dev_scene（scene_user_id=0）
     """
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
     try:
         from src.user.db import get_repo_scene
-        return get_repo_scene(repo_key) or "default", 0
+        return get_repo_scene(repo_key) or "", 0
     except Exception:
-        return "default", 0
+        return "", 0
 
 
 def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int = 0):
@@ -149,6 +149,38 @@ def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: 
         db.commit()
     from src.config import log
     log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
+
+
+def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
+    """设置 Issue 是否允许 VOD 覆盖场景（allow_scene_override），幂等 upsert。"""
+    val = 1 if allowed else 0
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        row = c.fetchone()
+        if row:
+            c.execute("UPDATE issue_state SET allow_scene_override=? WHERE id=?", (val, row[0]))
+        else:
+            c.execute(
+                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, allow_scene_override, updated_at) "
+                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
+                (repo_key, issue_id, val))
+        db.commit()
+    log.info(f"SceneOverride: repo={repo_key} issue={issue_id} allowed={val}")
+
+
+def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
+    """读取 Issue 是否允许 VOD 覆盖场景。默认 False。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?",
+                (repo_key, issue_id))
+            row = c.fetchone()
+            return bool(row[0]) if row and row[0] else False
+    except Exception:
+        return False
 
 
 def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):

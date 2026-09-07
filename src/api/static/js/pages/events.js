@@ -76,7 +76,7 @@ function renderEventDetail(data) {
   const _infoSummary = `${data.status === 'completed' ? '✅' : data.status === 'failed' ? '❌' : '⏳'} ${data.duration ? data.duration + 's' : '—'}`;
 
   const html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← ${agentName}</button>
-  <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;height:calc(100vh - 160px);overflow:hidden">
+  <div id="evDetailGrid" style="display:grid;grid-template-columns:1fr;gap:14px;height:calc(100vh - 160px);overflow:hidden">
     <!-- 左栏大框：导航 + 可折叠区块 + 处理记录+答复结论 -->
     <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">
       <!-- 顶部导航栏 -->
@@ -139,8 +139,8 @@ function renderEventDetail(data) {
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
-    <!-- 右栏：对话面板 -->
-    <div id="convPanel" class="cd" style="padding:14px;display:flex;flex-direction:column;gap:8px;height:100%;overflow:hidden">
+    <!-- 右栏：对话面板（有对话/门禁开放才显示，见 loadConversation 条件渲染 Issue #35） -->
+    <div id="convPanel" class="cd" style="padding:14px;display:none;flex-direction:column;gap:8px;height:100%;overflow:hidden">
       <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">${I18N.t('events.section_conversation', {name: agentName})} <button onclick="toggleConvFullscreen()" title="${I18N.t('events.fullscreen_title')}" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">${I18N.t('events.fullscreen_btn')}</button></h3>
       <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
       <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
@@ -248,6 +248,17 @@ function loadConversation() {
   if (!_convSeq) return;
   API.get('/events/' + _convSeq + '/thread').then(d => {
     const gate = d.gate || {};
+    const hasMsgs = Array.isArray(d.messages) && d.messages.length > 0;
+    const panelEl = document.getElementById('convPanel');
+    const gridEl = document.getElementById('evDetailGrid');
+    // Issue #35 条件渲染：有对话记录 或 门禁开放（对话可发起）才显示右栏；
+    // 纯流水线事件（99%）无对话 → 隐藏右栏，左栏 1fr 满宽查阅 Agent 处理记录。
+    if (gridEl) {
+      gridEl.style.gridTemplateColumns = (hasMsgs || gate.open) ? '1fr 300px' : '1fr';
+    }
+    if (panelEl) {
+      panelEl.style.display = (hasMsgs || gate.open) ? 'flex' : 'none';
+    }
     const gateEl = document.getElementById('convGate');
     if (gateEl) gateEl.innerHTML = gate.open
       ? `<span class="tgx">${I18N.t('events.gate_open')}</span>`
@@ -259,7 +270,7 @@ function loadConversation() {
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
     const inputRow = document.getElementById('convInputRow');
-    if (inputRow) inputRow.style.display = gate.open ? 'flex' : 'none';
+    if (inputRow) inputRow.style.display = (gate.open && panelEl) ? 'flex' : 'none';
     // 左栏：对话产出（知识沉淀 + 流程操作 + 结论）
     renderOutcome(d.knowledge || {}, d.messages || []);
   }).catch(e => {
