@@ -188,52 +188,44 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
         nodes = []
     with db_lock:
         c = db.cursor()
-        skill_names = [n.get("skill", "") for n in nodes if n.get("skill")]
-        skill_ids = [n.get("skill_id", 0) for n in nodes if n.get("skill_id")]
-        if skill_names:
-            # 优先用 skill_id 批量查 skill 表
-            skill_by_id = {}
-            if skill_ids:
-                id_placeholders = ",".join("?" * len(skill_ids))
-                c.execute(
-                    f"SELECT id, skill_name, display_name, agent_type, description, scope FROM skill "
-                    f"WHERE id IN ({id_placeholders}) AND is_active=1",
-                    skill_ids,
-                )
-                for row in c.fetchall():
-                    skill_by_id[row[0]] = row
+        # 从 scene_skill_ref 表查 skill_id（同步时已写入），不依赖 nodes_json 的 skill_id
+        c.execute(
+            "SELECT skill_name, skill_id FROM scene_skill_ref WHERE scene_id=?",
+            (scene["id"],),
+        )
+        ref_map = {}
+        for r in c.fetchall():
+            ref_map[r[0]] = r[1]
 
-            # 对 skill_id=0 或未命中的，用 skill_name 批量查 skill 表
-            missing_names = [n.get("skill", "") for n in nodes if n.get("skill") and (not n.get("skill_id") or n.get("skill_id") not in skill_by_id)]
-            skill_by_name = {}
-            if missing_names:
-                name_placeholders = ",".join("?" * len(missing_names))
-                c.execute(
-                    f"SELECT id, skill_name, display_name, agent_type, description, scope FROM skill "
-                    f"WHERE skill_name IN ({name_placeholders}) AND is_active=1 "
-                    f"ORDER BY CASE scope WHEN 'official' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END",
-                    missing_names,
-                )
-                for row in c.fetchall():
-                    skill_by_name[row[1]] = row
+        # 用 ref_map 的 skill_id 批量查 skill 表
+        ref_skill_ids = [sid for sid in ref_map.values() if sid]
+        skill_by_id = {}
+        if ref_skill_ids:
+            id_placeholders = ",".join("?" * len(ref_skill_ids))
+            c.execute(
+                f"SELECT id, skill_name, display_name, agent_type, description, scope FROM skill "
+                f"WHERE id IN ({id_placeholders}) AND is_active=1",
+                ref_skill_ids,
+            )
+            for row in c.fetchall():
+                skill_by_id[row[0]] = row
 
-            # 组装结果
-            for node in nodes:
-                skill_name = node.get("skill", "")
-                if not skill_name:
-                    continue
-                skill_id = node.get("skill_id", 0)
-                row = skill_by_id.get(skill_id) if skill_id else None
-                if not row:
-                    row = skill_by_name.get(skill_name)
-                skills_detail.append({
-                    "skill_id": (row[0] if row else skill_id),
-                    "name": skill_name,
-                    "display_name": (row[2] if row and row[2] else skill_name),
-                    "agent_type": (row[3] if row else "") or node.get("tag", ""),
-                    "role_desc": (row[4] if row else "") or "",
-                    "scope": (row[5] if row else "official") or "official",
-                })
+        # 组装结果（基于 scene_skill_ref 的 skill_id 精确查询）
+        for node in nodes:
+            skill_name = node.get("skill", "")
+            if not skill_name:
+                continue
+            skill_id = ref_map.get(skill_name, 0)
+            row = skill_by_id.get(skill_id) if skill_id else None
+            skills_detail.append({
+                "skill_id": (row[0] if row else skill_id),
+                "name": skill_name,
+                "display_name": (row[2] if row and row[2] else skill_name),
+                "agent_type": (row[3] if row else "") or node.get("tag", ""),
+                "role_desc": (row[4] if row else "") or "",
+                "scope": (row[5] if row else "official") or "official",
+                "skill_deleted": not bool(row),
+            })
 
     # 查 recommended_template 对应的模板信息
     template_info = None
@@ -347,6 +339,25 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
         nodes = json.loads(nodes_json) if nodes_json else []
     except Exception:
         nodes = []
+
+    # 检查场景引用的 skill 是否都存在（基于 scene_skill_ref 的 skill_id 查 skill 表）
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT skill_name, skill_id FROM scene_skill_ref WHERE scene_id=?", (market_id,))
+        ref_rows = c.fetchall()
+        if ref_rows:
+            ref_map = {r[0]: r[1] for r in ref_rows}
+            ref_skill_ids = [sid for sid in ref_map.values() if sid]
+            if ref_skill_ids:
+                placeholders = ",".join("?" * len(ref_skill_ids))
+                c.execute(f"SELECT id FROM skill WHERE id IN ({placeholders}) AND is_active=1", ref_skill_ids)
+                existing_ids = set(r[0] for r in c.fetchall())
+            else:
+                existing_ids = set()
+            missing = [name for name, sid in ref_map.items() if sid not in existing_ids]
+            if missing:
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"场景引用了已删除的技能: {', '.join(sorted(missing))}，无法应用"})
 
     # 幂等：先查 devops_pipeline_scene WHERE market_scene_id=? AND repo_key=?
     existing_scene_id = ""
@@ -865,6 +876,14 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(get
                 log.warning(f"create_market_scene: update icon failed: {e}")
 
     log.info(f"Market scene created: id={market_id} name={body.name} scope={body.scope} repo={repo_key} by user={user.get('id')}")
+
+    # 重建 scene_skill_ref（仓库场景也需要）
+    try:
+        from src.storage.scene_sync import _rebuild_scene_skill_ref
+        _rebuild_scene_skill_ref(market_id, body.nodes, body.name)
+    except Exception as e:
+        log.warning(f"create_market_scene: rebuild scene_skill_ref failed: {e}")
+
     return {"id": market_id, "message": "场景创建成功"}
 
 
@@ -931,6 +950,14 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     )
     if not success:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在或无更新"})
+
+    # 重建 scene_skill_ref
+    try:
+        from src.storage.scene_sync import _rebuild_scene_skill_ref
+        _rebuild_scene_skill_ref(market_id, body.nodes, body.name or scene.get("name", ""))
+    except Exception as e:
+        log.warning(f"update_market_scene: rebuild scene_skill_ref failed: {e}")
+
     log.info(f"Market scene updated: id={market_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}
 

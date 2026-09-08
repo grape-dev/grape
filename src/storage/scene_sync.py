@@ -236,7 +236,7 @@ async def _download_repo_zip(client: httpx.AsyncClient, token: str) -> str:
 
 
 def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
-    """重建 scene_skill_ref：DELETE + INSERT，用 is_active=1 + scope='official' 查 skill_id。"""
+    """重建 scene_skill_ref：DELETE + INSERT，用 is_active=1 查 skill_id（优先 official，其次 repo）。"""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -244,14 +244,21 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
         for n in nodes:
             skill_name = n.get("skill", "")
             if skill_name:
+                # 优先查 official，其次 repo（仓库场景可能引用 repo scope 技能）
                 c.execute(
                     "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='official' LIMIT 1",
                     (skill_name,),
                 )
                 sk_row = c.fetchone()
+                if not sk_row:
+                    c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='repo' LIMIT 1",
+                        (skill_name,),
+                    )
+                    sk_row = c.fetchone()
                 skill_id = sk_row[0] if sk_row else 0
                 if skill_id == 0:
-                    logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active official skills, skill_id=0")
+                    logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, skill_id=0")
                 c.execute(
                     "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
                     (market_id, skill_id, skill_name),

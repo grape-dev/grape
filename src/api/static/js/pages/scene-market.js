@@ -863,17 +863,19 @@ function _renderSceneDetailPage(s) {
       const skLabel = meta.label || sk.tag || '';
       const skName = sk.display_name || sk.name || sk.skill || '';
       const roleDesc = sk.role_desc || '';
-      html += `<div class="det-card">
-        <div class="det-card-top" style="background:${bgColor}"></div>
+      const skDeleted = sk.skill_deleted;
+      html += `<div class="det-card"${skDeleted ? ' style="border-color:var(--r);opacity:.7"' : ''}>
+        <div class="det-card-top" style="background:${skDeleted ? 'var(--r)' : bgColor}"></div>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="width:22px;height:22px;border-radius:6px;background:${bgColor}22;color:${bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
+          <span style="width:22px;height:22px;border-radius:6px;background:${skDeleted ? 'var(--r)22' : bgColor+'22'};color:${skDeleted ? 'var(--r)' : bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
           <span style="font-size:14px;font-weight:600;color:#1d1d1f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${skIcon} ${skLabel}</span>
+          ${skDeleted ? '<span style="font-size:9px;color:var(--r);font-weight:600;flex-shrink:0">⚠ 已删除</span>' : ''}
         </div>
         ${roleDesc ? `<div class="det-card-desc" title="${roleDesc.replace(/"/g, '&quot;')}">${roleDesc}</div>` : '<div class="det-card-desc"></div>'}
         <div class="det-card-sep"></div>
         <div class="det-card-box">
           <div class="det-card-label">${I18N.t('dashboard.label_skill')||'技能'}</div>
-          <span class="det-card-val" style="color:#0071e3;cursor:pointer" onclick="app.nav('skill','${sk.skill_id||''}')">${skName}</span>
+          ${skDeleted ? `<span class="det-card-val" style="color:var(--r)">${skName}</span>` : `<span class="det-card-val" style="color:#0071e3;cursor:pointer" onclick="app.nav('skill','${sk.skill_id||''}')">${skName}</span>`}
         </div>
         <div class="det-card-eng">
           <div class="det-card-label">${I18N.t('dashboard.label_engine')||'引擎'}</div>
@@ -908,13 +910,14 @@ function _renderSceneDetailPage(s) {
       const skLabel = meta.label || sk.tag || '';
       const skName = sk.display_name || sk.name || sk.skill || '';
       const roleDesc = sk.role_desc || '';
-      html += `<div class="det-suite-card" onclick="app.nav('skill','${sk.skill_id||''}')">
-        <div class="det-suite-num" style="background:${bgColor}">${i+1}</div>
+      const skDeleted = sk.skill_deleted;
+      html += `<div class="det-suite-card"${skDeleted ? ' style="border-color:var(--r);opacity:.7"' : ''}${skDeleted ? '' : ` onclick="app.nav('skill','${sk.skill_id||''}')"`}>
+        <div class="det-suite-num" style="background:${skDeleted ? 'var(--r)' : bgColor}">${i+1}</div>
         <div class="det-suite-body">
-          <div class="det-suite-name">${skIcon} ${skName}</div>
+          <div class="det-suite-name">${skIcon} ${skName}${skDeleted ? ' <span style="font-size:9px;color:var(--r);font-weight:600">⚠ 已删除</span>' : ''}</div>
           <div class="det-suite-role" title="${(roleDesc || skLabel).replace(/"/g, '&quot;')}">${roleDesc || skLabel}</div>
         </div>
-        <span class="det-suite-badge" style="background:${bgColor}14;color:${bgColor}">${skLabel}</span>
+        <span class="det-suite-badge" style="background:${skDeleted ? 'var(--r)14' : bgColor+'14'};color:${skDeleted ? 'var(--r)' : bgColor}">${skLabel}</span>
       </div>`;
     });
     html += `</div></div>`;
