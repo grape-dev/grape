@@ -1,6 +1,6 @@
 """Scenes 路由：场景列表获取、CRUD、应用"""
-import json, os
-from fastapi import APIRouter, HTTPException, Depends
+import json, os, re
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
 from src.api.deps import get_current_user
 from src.config import log
@@ -21,7 +21,7 @@ def _load_scenes() -> dict:
 
 @router.get("")
 def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
-    """返回所有可用场景列表（repo + user，不含 official）"""
+    """返回所有可用场景列表（repo，不含 official）"""
     from src.api.pipeline_config import get_scenes
     from src.repo_key import to_repo_key
     repo_key = ""
@@ -67,8 +67,9 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
 def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> str:
     """解析场景图标为可访问的 URL 或 emoji。
     obs_icon_key 非空 → OBS 模式，动态生成签名 URL。
-    icon 非空 → 本地路径（/static/ 开头）。
-    都为空 → 查 scene_category 表拿分类 emoji 图标兜底。
+    icon 非空且是本地路径（/static/ 开头）→ 本地路径。
+    icon 非空且是 emoji → 直接返回。
+    都为空或 OBS 失败 → 查 scene_category 表拿分类 emoji 图标兜底。
     """
     if obs_icon_key:
         try:
@@ -78,6 +79,10 @@ def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> 
                 return storage.temporary_url(obs_icon_key)
         except Exception:
             pass
+        # OBS 失败时不走 icon 字段（可能是过期签名 URL），直接 emoji 兜底
+        from src.user.db import get_scene_category
+        cat = get_scene_category(category_id)
+        return cat.get('icon', '⚙') if cat else '⚙'
     if icon:
         return icon
     from src.user.db import get_scene_category
@@ -104,17 +109,34 @@ def list_scene_categories(user: dict = Depends(get_current_user)):
 @router.get("/market")
 def list_scenes_market(user: dict = Depends(get_current_user),
                        q: str = "", category_id: int = 0, sort: str = "latest",
+                       scope: str = "", repo: str = "",
                        featured_only: int = 0, limit: int = 0,
                        page: int = 1, page_size: int = 20):
-    """场景市场列表：支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页。
+    """场景市场列表：支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页 + scope 过滤。
     limit>0 时不分页（精选场景用），否则按 page/page_size 分页。
+    scope: official / repo，空=全部。
+    repo: scope=repo 时按 repo_key 过滤（owner/repo 格式）。
     """
     from src.user.db import (list_scene_market, batch_scene_liked,
                              batch_scene_repo_count)
+    from src.repo_key import to_repo_key
+
+    repo_key = ""
+    if repo:
+        repo_key = to_repo_key(repo)
+    elif scope in ("repo",):
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
 
     scenes, total = list_scene_market(q=q, category_id=category_id, sort=sort,
                                featured_only=featured_only, limit=limit,
-                               page=page, page_size=page_size)
+                               page=page, page_size=page_size,
+                               scope=scope, repo_key=repo_key,
+                               user_id=user.get("id", 0))
     if not scenes:
         return {"scenes": [], "total": total, "page": page, "page_size": page_size}
 
@@ -140,6 +162,7 @@ def list_scenes_market(user: dict = Depends(get_current_user),
             "skills": _parse_scene_skills(s["nodes_json"]),
             "recommended_template": s["recommended_template"],
             "repo_count": repo_count_map.get(s["id"], 0),
+            "scope": s.get("scope", "official"),
         })
     return {"scenes": result, "total": total, "page": page, "page_size": page_size}
 
@@ -164,37 +187,29 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
     with db_lock:
         c = db.cursor()
         skill_names = [n.get("skill", "") for n in nodes if n.get("skill")]
+        skill_ids = [n.get("skill_id", 0) for n in nodes if n.get("skill_id")]
         if skill_names:
-            # 批量查 scene_skill_ref（1 次查询）
-            ref_placeholders = ",".join("?" * len(skill_names))
-            c.execute(
-                f"SELECT skill_name, skill_id FROM scene_skill_ref "
-                f"WHERE scene_id=? AND skill_name IN ({ref_placeholders})",
-                [scene["id"]] + skill_names,
-            )
-            ref_map = {r[0]: r[1] for r in c.fetchall()}
-
-            # 收集有效 skill_id，批量查 skill 表（1 次查询）
-            skill_ids = [sid for sid in ref_map.values() if sid]
+            # 优先用 skill_id 批量查 skill 表
             skill_by_id = {}
             if skill_ids:
                 id_placeholders = ",".join("?" * len(skill_ids))
                 c.execute(
-                    f"SELECT id, skill_name, display_name, agent_type, description FROM skill "
+                    f"SELECT id, skill_name, display_name, agent_type, description, scope FROM skill "
                     f"WHERE id IN ({id_placeholders}) AND is_active=1",
                     skill_ids,
                 )
                 for row in c.fetchall():
                     skill_by_id[row[0]] = row
 
-            # 对 skill_id=0 或未命中的，用 skill_name 批量查（1 次查询）
-            missing_names = [sn for sn, sid in ref_map.items() if not sid or sid not in skill_by_id]
+            # 对 skill_id=0 或未命中的，用 skill_name 批量查 skill 表
+            missing_names = [n.get("skill", "") for n in nodes if n.get("skill") and (not n.get("skill_id") or n.get("skill_id") not in skill_by_id)]
             skill_by_name = {}
             if missing_names:
                 name_placeholders = ",".join("?" * len(missing_names))
                 c.execute(
-                    f"SELECT id, skill_name, display_name, agent_type, description FROM skill "
-                    f"WHERE skill_name IN ({name_placeholders}) AND is_active=1",
+                    f"SELECT id, skill_name, display_name, agent_type, description, scope FROM skill "
+                    f"WHERE skill_name IN ({name_placeholders}) AND is_active=1 "
+                    f"ORDER BY CASE scope WHEN 'official' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END",
                     missing_names,
                 )
                 for row in c.fetchall():
@@ -205,7 +220,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
                 skill_name = node.get("skill", "")
                 if not skill_name:
                     continue
-                skill_id = ref_map.get(skill_name, 0)
+                skill_id = node.get("skill_id", 0)
                 row = skill_by_id.get(skill_id) if skill_id else None
                 if not row:
                     row = skill_by_name.get(skill_name)
@@ -215,6 +230,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
                     "display_name": (row[2] if row and row[2] else skill_name),
                     "agent_type": (row[3] if row else "") or node.get("tag", ""),
                     "role_desc": (row[4] if row else "") or "",
+                    "scope": (row[5] if row else "official") or "official",
                 })
 
     # 查 recommended_template 对应的模板信息
@@ -269,6 +285,8 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
         "template": template_info,
         "repos": repos,
         "recommended_template": scene["recommended_template"],
+        "scope": scene.get("scope", "official"),
+        "nodes_raw": nodes,
     }
 
 
@@ -330,16 +348,38 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
 
     # 幂等：先查 devops_pipeline_scene WHERE market_scene_id=? AND repo_key=?
     existing_scene_id = ""
+    existing_row_id = 0
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT scene_id FROM devops_pipeline_scene "
+            "SELECT scene_id, id FROM devops_pipeline_scene "
             "WHERE market_scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
             (market_id, repo_key),
         )
         row = c.fetchone()
         if row:
             existing_scene_id = row[0]
+            existing_row_id = row[1]
+
+    # display_name 查重：仓库内不能有同名场景（排除自己）
+    display_name = scene["display_name"] or scene["name"]
+    with db_lock:
+        c = db.cursor()
+        if existing_row_id:
+            c.execute(
+                "SELECT name FROM devops_pipeline_scene "
+                "WHERE name=? AND repo_key=? AND is_active=1 AND id!=? LIMIT 1",
+                (display_name, repo_key, existing_row_id),
+            )
+        else:
+            c.execute(
+                "SELECT name FROM devops_pipeline_scene "
+                "WHERE name=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (display_name, repo_key),
+            )
+        conflict = c.fetchone()
+    if conflict:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": f"仓库中已存在名为'{display_name}'的场景，请先修改已有场景名称后再应用"})
 
     if existing_scene_id:
         # 已存在 → 更新
@@ -349,9 +389,9 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
         )
         scene_id = existing_scene_id
     else:
-        # 不存在 → 新建（scope='repo'，scene_id 用 custom-uuid 或市场 name）
-        scene_id = scene["name"] or f"custom-{uuid.uuid4().hex[:8]}"
-        scene_id = create_custom_scene(
+        # 不存在 → 新建（scope='repo'，scene_id 用 UUID）
+        scene_id = str(uuid.uuid4())
+        new_id = create_custom_scene(
             scene_id=scene_id, name=scene["display_name"] or scene_id,
             description=scene["description"] or "",
             repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding")
@@ -359,13 +399,16 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("UPDATE devops_pipeline_scene SET market_scene_id=? WHERE id=?", (market_id, scene_id))
+                c.execute("UPDATE devops_pipeline_scene SET market_scene_id=? WHERE id=?", (market_id, new_id))
                 db.commit()
+                log.info(f"apply_market_scene: UPDATE market_scene_id={market_id} WHERE id={new_id}, rowcount={c.rowcount}")
             # 取回 scene_id 字符串
             with db_lock:
                 c = db.cursor()
-                _r = c.execute("SELECT scene_id FROM devops_pipeline_scene WHERE id=?", (scene_id,)).fetchone()
-                scene_id = _r[0] if _r else scene_id
+                _r = c.execute("SELECT scene_id FROM devops_pipeline_scene WHERE id=?", (new_id,)).fetchone()
+                if _r:
+                    scene_id = _r[0]
+                    log.info(f"apply_market_scene: fetched scene_id={scene_id} from id={new_id}")
         except Exception as _e:
             log.warning(f"apply_market_scene: link market_scene_id failed: {_e}")
 
@@ -520,7 +563,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
         already_exists = True
         try:
             from src.api.routes.repos import RepoAction, host_repo
-            await host_repo(RepoAction(full_name=full_name), user)
+            host_repo(RepoAction(full_name=full_name), user)
         except Exception as e:
             log.warning(f"experience_market_scene: host_repo failed (non-fatal): {e}")
     else:
@@ -539,7 +582,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
                 log.warning(f"experience_market_scene: template push failed, trying host only: {detail}")
                 try:
                     from src.api.routes.repos import RepoAction, host_repo
-                    await host_repo(RepoAction(full_name=full_name), user)
+                    host_repo(RepoAction(full_name=full_name), user)
                 except Exception as he:
                     log.warning(f"experience_market_scene: host_repo failed (non-fatal): {he}")
             else:
@@ -548,14 +591,19 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
     # 创建/复用仓库级 devops_pipeline_scene（只与仓库关联，方案 B）
     # 幂等：同一仓库同一市场场景不重复创建（按 market_scene_id + repo_key 查重）
     experience_repo_key = to_repo_key(full_name) if full_name else ""
+    existing_scene_id = ""
+    existing_row_id = 0
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT scene_id FROM devops_pipeline_scene "
+            "SELECT scene_id, id FROM devops_pipeline_scene "
             "WHERE market_scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
             (market_id, experience_repo_key),
         )
         existing = c.fetchone()
+        if existing:
+            existing_scene_id = existing[0]
+            existing_row_id = existing[1]
 
     try:
         nodes = json.loads(scene["nodes_json"]) if scene["nodes_json"] else []
@@ -563,9 +611,29 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
         nodes = []
     nodes_json_str = json.dumps(nodes, ensure_ascii=False)
 
-    if existing:
+    # display_name 查重：仓库内不能有同名场景（排除自己）
+    display_name = scene["display_name"] or scene["name"]
+    with db_lock:
+        c = db.cursor()
+        if existing_row_id:
+            c.execute(
+                "SELECT name FROM devops_pipeline_scene "
+                "WHERE name=? AND repo_key=? AND is_active=1 AND id!=? LIMIT 1",
+                (display_name, experience_repo_key, existing_row_id),
+            )
+        else:
+            c.execute(
+                "SELECT name FROM devops_pipeline_scene "
+                "WHERE name=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (display_name, experience_repo_key),
+            )
+        conflict = c.fetchone()
+    if conflict:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": f"仓库中已存在名为'{display_name}'的场景，请先修改已有场景名称后再应用", "full_name": full_name})
+
+    if existing_scene_id:
         # 已有 repo 场景 → 更新
-        scene_id = existing[0]
+        scene_id = existing_scene_id
         from src.api.pipeline_config import update_custom_scene
         update_custom_scene(
             scene_id=scene_id, repo_key=experience_repo_key, nodes=nodes,
@@ -573,7 +641,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
         )
     else:
         # 不存在 → 新建
-        scene_id = f"custom-{uuid.uuid4().hex[:8]}"
+        scene_id = str(uuid.uuid4())
         with db_lock:
             c = db.cursor()
             from datetime import datetime, timezone
@@ -710,6 +778,339 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {err_msg}"})
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
+# ===== Scene Market CRUD（用户自定义场景，Issue-54）=====
+
+class CreateMarketSceneRequest(BaseModel):
+    name: str
+    display_name: str = ""
+    description: str = ""
+    scope: str = "repo"  # repo
+    nodes: list = []
+    icon: str = ""
+    obs_icon_key: str = ""
+    file_id: int = 0  # uploaded_files 表 id（图标临时文件）
+    category_id: int = 1
+    recommended_template: str = ""
+
+
+@router.post("/market")
+def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(get_current_user),
+                        repo: str = ""):
+    """创建用户自定义场景（写入 scene_market 表）。
+
+    scope=repo: 仓库场景（仓库所有用户可见）
+    """
+    import uuid as _uuid
+    from src.user.db import (create_scene_market, commit_uploaded_file,
+                             delete_uploaded_file, get_uploaded_file)
+    from src.repo_key import to_repo_key
+    from src.storage import get_storage
+
+    if body.scope not in ("repo",):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 repo"})
+
+    # 获取 repo_key
+    repo_key = ""
+    if repo:
+        repo_key = to_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "请先选择仓库"})
+
+    # 校验 name 是否重复
+    from src.user.db import check_scene_name_exists
+    if len(body.name) > 40:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "场景标识不能超过40个字符"})
+    if len(body.display_name) > 40:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "场景名称不能超过40个字符"})
+    if check_scene_name_exists(name=body.name, scope=body.scope, repo_key=repo_key):
+        raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 '{body.name}' 已存在"})
+
+    nodes_json = json.dumps(body.nodes, ensure_ascii=False)
+
+    try:
+        market_id = create_scene_market(
+            name=body.name, display_name=body.display_name, description=body.description,
+            scope=body.scope, repo_key=repo_key, source_user_id=user.get("id", 0),
+            nodes_json=nodes_json, icon=body.icon, obs_icon_key=body.obs_icon_key,
+            category_id=body.category_id, recommended_template=body.recommended_template,
+            created_by=user.get("username", ""),
+        )
+    except Exception as e:
+        err_upper = str(e).upper()
+        if "UNIQUE" in err_upper or "DUPLICATE" in err_upper:
+            raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 '{body.name}' 已存在"})
+        raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+
+    # 图标文件落定：临时 key → 正式 key
+    if body.file_id:
+        final_icon, final_obs_key = _finalize_scene_icon(body.file_id, market_id, body.obs_icon_key, user)
+        # 更新 scene_market 的 icon 为正式路径
+        if final_icon:
+            from src.session_manager import db, db_lock
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("UPDATE scene_market SET icon=?, obs_icon_key=? WHERE id=?", (final_icon, final_obs_key, market_id))
+                    db.commit()
+            except Exception as e:
+                log.warning(f"create_market_scene: update icon failed: {e}")
+
+    log.info(f"Market scene created: id={market_id} name={body.name} scope={body.scope} repo={repo_key} by user={user.get('id')}")
+    return {"id": market_id, "message": "场景创建成功"}
+
+
+class UpdateMarketSceneRequest(BaseModel):
+    name: str = ""
+    display_name: str = ""
+    description: str = ""
+    nodes: list = []
+    icon: str = ""
+    obs_icon_key: str = ""
+    file_id: int = 0  # 新上传的图标临时文件 id（0=未更换图标）
+    category_id: int = 0
+    recommended_template: str = ""
+
+
+@router.put("/market/{market_id}")
+def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
+                        user: dict = Depends(get_current_user)):
+    """更新用户自定义场景（scope != 'official'）。"""
+    from src.user.db import (update_scene_market, get_scene_market_by_id,
+                             delete_uploaded_file, get_uploaded_files_by_ref)
+
+    scene = get_scene_market_by_id(market_id)
+    if not scene:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+    if scene.get("scope") == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可编辑"})
+
+    nodes_json = json.dumps(body.nodes, ensure_ascii=False) if body.nodes else ""
+
+    # 图标文件落定
+    if body.file_id:
+        # 删除旧图标文件
+        old_files = get_uploaded_files_by_ref("scene_market", market_id)
+        for old_f in old_files:
+            if old_f.get("file_type") == "scene_icon":
+                _delete_scene_icon_file(delete_uploaded_file(old_f["id"]))
+        # _finalize_scene_icon 只做文件操作，返回正式路径
+        final_icon, final_obs_key = _finalize_scene_icon(body.file_id, market_id, body.obs_icon_key, user)
+        body.icon = final_icon
+        body.obs_icon_key = final_obs_key
+
+    # name 变更时校验重复
+    if body.display_name and len(body.display_name) > 40:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "场景名称不能超过40个字符"})
+    if body.name and len(body.name) > 40:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "场景标识不能超过40个字符"})
+    if body.name and body.name != scene.get("name"):
+        from src.user.db import check_scene_name_exists
+        if check_scene_name_exists(
+            name=body.name, scope=scene.get("scope", "repo"),
+            repo_key=scene.get("repo_key", ""),
+            source_user_id=scene.get("source_user_id", 0),
+            exclude_id=market_id,
+        ):
+            raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 '{body.name}' 已存在"})
+
+    success = update_scene_market(
+        market_id=market_id, name=body.name, display_name=body.display_name,
+        description=body.description, nodes_json=nodes_json,
+        icon=body.icon, obs_icon_key=body.obs_icon_key,
+        category_id=body.category_id, recommended_template=body.recommended_template,
+        updated_by=user.get("username", ""),
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在或无更新"})
+    log.info(f"Market scene updated: id={market_id} by user={user.get('id')}")
+    return {"message": "场景更新成功"}
+
+
+@router.delete("/market/{market_id}")
+def delete_market_scene(market_id: int, user: dict = Depends(get_current_user)):
+    """硬删除用户自定义场景（scope != 'official'）。"""
+    from src.user.db import (delete_scene_market, get_scene_market_by_id,
+                             delete_uploaded_file, get_uploaded_files_by_ref)
+
+    scene = get_scene_market_by_id(market_id)
+    if not scene:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+    if scene.get("scope") == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可删除"})
+
+    # 删除关联的图标文件
+    old_files = get_uploaded_files_by_ref("scene_market", market_id)
+    for old_f in old_files:
+        if old_f.get("file_type") == "scene_icon":
+            _delete_scene_icon_file(delete_uploaded_file(old_f["id"]))
+
+    success = delete_scene_market(market_id)
+    if not success:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在或不可删除"})
+    log.info(f"Market scene deleted: id={market_id} by user={user.get('id')}")
+    return {"message": "场景已删除"}
+
+@router.get("/check-name")
+def check_scene_name(name: str, scope: str, user: dict = Depends(get_current_user),
+                     repo: str = "", exclude_id: int = 0):
+    """检查场景名称是否重复（同 scope 同用户同仓库下名称唯一）。"""
+    from src.user.db import check_scene_name_exists
+    from src.repo_key import to_repo_key
+
+    repo_key = ""
+    if repo:
+        repo_key = to_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
+
+    exists = check_scene_name_exists(
+        name=name, scope=scope, repo_key=repo_key,
+        source_user_id=user.get("id", 0), exclude_id=exclude_id,
+    )
+    return {"exists": exists}
+
+
+@router.post("/market/icon-upload")
+async def upload_scene_icon(file: UploadFile = File(...),
+                            user: dict = Depends(get_current_user)):
+    """上传场景图标（临时文件，保存时落定）。
+
+    限制：格式 jpg/png/webp/gif/svg，大小 ≤ 2MB。
+    返回 {file_id, icon, obs_icon_key}。
+    """
+    import uuid as _uuid
+    from src.user.db import insert_uploaded_file
+    from src.storage import get_storage
+
+    # 校验格式
+    allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/svg+xml"}
+    allowed_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}
+    content_type = file.content_type or ""
+    filename = file.filename or ""
+    ext = os.path.splitext(filename)[1].lower()
+
+    if content_type not in allowed_types and ext not in allowed_exts:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持 jpg/png/webp/gif/svg 格式"})
+
+    # 读取并校验大小
+    content = await file.read()
+    if len(content) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "图标文件不能超过 2MB"})
+
+    if not ext:
+        ext = ".png"  # 兜底
+
+    # 生成临时 key
+    tmp_uuid = _uuid.uuid4().hex[:12]
+    file_key = f"scene-icons/tmp-{tmp_uuid}{ext}"
+
+    storage = get_storage()
+    if storage:
+        # OBS 模式
+        storage.save_bytes(file_key, content)
+        icon_url = storage.temporary_url(file_key)
+        obs_icon_key = file_key
+    else:
+        # 非 OBS 模式：写本地
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "static", "uploads", "scene-icons")
+        os.makedirs(static_dir, exist_ok=True)
+        local_path = os.path.join(static_dir, f"tmp-{tmp_uuid}{ext}")
+        with open(local_path, "wb") as f:
+            f.write(content)
+        icon_url = f"/static/uploads/scene-icons/tmp-{tmp_uuid}{ext}"
+        obs_icon_key = ""
+
+    # 插入 uploaded_files 记录
+    file_id = insert_uploaded_file(
+        file_key=file_key, original_name=filename,
+        file_size=len(content), mime_type=content_type,
+        file_type="scene_icon", created_by=user.get("username", ""),
+    )
+
+    return {"file_id": file_id, "icon": icon_url, "obs_icon_key": obs_icon_key}
+
+
+def _finalize_scene_icon(file_id: int, market_id: int, obs_icon_key: str, user: dict) -> tuple:
+    """将临时图标文件落定为正式文件（重命名 key + 更新 uploaded_files + 更新 scene_market icon 字段）。"""
+    from src.user.db import (get_uploaded_file, commit_uploaded_file,
+                             delete_uploaded_file)
+    from src.storage import get_storage
+    from src.session_manager import db, db_lock
+
+    file_rec = get_uploaded_file(file_id)
+    if not file_rec:
+        return "", ""
+
+    old_key = file_rec["file_key"]
+    ext = os.path.splitext(old_key)[1] or ".png"
+    new_key = f"scene-icons/{market_id}{ext}"
+
+    storage = get_storage()
+    if storage:
+        # OBS 模式：copy 到正式 key + 删临时 key
+        try:
+            content = storage.read_bytes(old_key)
+            if content:
+                storage.save_bytes(new_key, content)
+                storage.delete_object(old_key)
+        except Exception as e:
+            log.warning(f"Scene icon finalize (OBS): {e}")
+        # 更新 scene_market 的 icon 和 obs_icon_key
+        final_icon = storage.temporary_url(new_key) if hasattr(storage, 'temporary_url') else ""
+        final_obs_key = new_key
+    else:
+        # 非 OBS 模式：重命名本地文件
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "static", "uploads", "scene-icons")
+        old_path = os.path.join(static_dir, os.path.basename(old_key))
+        new_path = os.path.join(static_dir, f"{market_id}{ext}")
+        try:
+            if os.path.exists(old_path):
+                os.rename(old_path, new_path)
+        except Exception as e:
+            log.warning(f"Scene icon finalize (local): {e}")
+        # 更新 scene_market 的 icon 为正式本地路径
+        final_icon = f"/static/uploads/scene-icons/{market_id}{ext}"
+        final_obs_key = ""
+
+    commit_uploaded_file(file_id, "scene_market", market_id)
+
+    # 返回正式路径，由调用方设置到 body 让 update_scene_market 统一更新
+    return final_icon, final_obs_key
+
+
+def _delete_scene_icon_file(file_key: str):
+    """删除图标物理文件（OBS 或本地）。"""
+    if not file_key:
+        return
+    from src.storage import get_storage
+
+    storage = get_storage()
+    if storage:
+        try:
+            storage.delete_object(file_key)
+        except Exception as e:
+            log.warning(f"Scene icon delete (OBS): {e}")
+    else:
+        # 非 OBS 模式
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "static", "uploads", "scene-icons")
+        local_path = os.path.join(static_dir, os.path.basename(file_key))
+        try:
+            if os.path.exists(local_path):
+                os.remove(local_path)
+        except Exception as e:
+            log.warning(f"Scene icon delete (local): {e}")
 
 
 @router.get("/{scene_id}")
@@ -731,28 +1132,53 @@ def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.get("/skills/{agent_type}")
-def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user), repo: str = ""):
-    """返回该 agent_type 可选的 skill 列表。
-    repo 参数：当前仓库 fullName，用于匹配 scope='repo' 的技能（owner_id 存的是 repo_key）。
-    """
+def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user),
+                          q: str = "", scope: str = "", repo: str = "",
+                          page: int = 1, page_size: int = 20):
+    """返回该 agent_type 可选的 skill 列表（支持搜索 + scope 过滤 + 分页）。"""
     from src.session_manager import db, db_lock
-    from src.repo_key import to_repo_key
     skills = []
-    repo_key = to_repo_key(repo) if repo else ""
+    where = ["agent_type=?", "is_active=1"]
+    params: list = [agent_type]
+
+    # skill 可见范围：official + 当前仓库的 repo skill
+    repo_key = ""
+    if repo:
+        from src.repo_key import to_repo_key
+        repo_key = to_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                from src.repo_key import to_repo_key
+                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
+    where.append("(scope='official' OR (scope='repo' AND owner_id=?))")
+    params.append(repo_key)
+
+    if q:
+        where.append("(skill_name LIKE ? OR display_name LIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%"])
+    if scope:
+        where.append("scope=?")
+        params.append(scope)
+
+    where_sql = " AND ".join(where)
+
     with db_lock:
         c = db.cursor()
-        try:
-            c.execute(
-                "SELECT skill_name, display_name, scope, owner_id FROM skill "
-                "WHERE agent_type=? AND is_active=1 "
-                "AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) "
-                "ORDER BY scope, skill_name",
-                (agent_type, str(user.get("id", 0)), repo_key))
-            for r in c.fetchall():
-                skills.append({"skill_name": r[0], "display_name": r[1] or r[0], "scope": r[2], "owner_id": r[3] or ""})
-        except Exception as e:
-            log.warning(f"list_skills_for_agent failed: {e}")
-    return {"skills": skills}
+        c.execute(f"SELECT COUNT(*) FROM skill WHERE {where_sql}", params)
+        total = c.fetchone()[0]
+        offset = (page - 1) * page_size
+        c.execute(
+            f"SELECT id, skill_name, display_name, scope, owner_id, description, agent_type FROM skill "
+            f"WHERE {where_sql} ORDER BY scope, skill_name LIMIT ? OFFSET ?",
+            params + [page_size, offset],
+        )
+        for r in c.fetchall():
+            skills.append({"skill_id": r[0], "skill_name": r[1], "display_name": r[2] or r[1], "scope": r[3], "owner_id": r[4] or "", "description": r[5] or "", "agent_type": r[6] or ""})
+    return {"skills": skills, "total": total}
 
 
 # ===== Scene CRUD =====
@@ -772,7 +1198,7 @@ class CreateSceneRequest(BaseModel):
     scene_id: str = ""
     name: str
     description: str = ""
-    scope: str = "repo"  # user / repo（user 已废弃，强制 repo）
+    scope: str = "repo"  # repo
     nodes: list[SceneNodeInput] = []
 
 class UpdateSceneRequest(BaseModel):
@@ -809,7 +1235,7 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
     if not repo_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库级场景需要先选择仓库"})
 
-    scene_id = body.scene_id or f"custom-{uuid.uuid4().hex[:8]}"
+    scene_id = body.scene_id or str(uuid.uuid4())
     nodes_json = [n.model_dump() for n in body.nodes]
 
     try:
@@ -817,7 +1243,8 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
             scene_id=scene_id, name=body.name, description=body.description,
             repo_key=repo_key, nodes=nodes_json)
     except Exception as e:
-        if "UNIQUE" in str(e).upper():
+        err_upper = str(e).upper()
+        if "UNIQUE" in err_upper or "DUPLICATE" in err_upper:
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 ID '{scene_id}' 已存在"})
         raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
 

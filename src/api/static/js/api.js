@@ -147,9 +147,11 @@ const API = (() => {
         });
       }
       return r.json().then(err => {
-        const e = new Error(err?.detail?.message || I18N.t('common.request_failed', {status: r.status}));
+        const detail = err?.detail || {};
+        const e = new Error(detail.message || I18N.t('common.request_failed', {status: r.status}));
         e.status = r.status;
-        e.errors = err?.detail?.errors || null;
+        e.errors = detail.errors || null;
+        e.detail = detail;
         throw e;
       });
     }
