@@ -34,6 +34,21 @@ def _iter_deps(dependant):
         yield from _iter_deps(dep)
 
 
+def _iter_routes(route):
+    """递归产出 APIRoute（兼容 fastapi>=0.140 的惰性 `_IncludedRouter` 包装：
+
+    新版 fastapi `include_router` 以 `original_router.routes` 惰性挂载，
+    `app.routes` 里是 `_IncludedRouter` 而非 APIRoute，需展开后做对外判定。
+    """
+    if isinstance(route, APIRoute):
+        yield route
+        return
+    orig = getattr(route, "original_router", None)
+    if orig is not None:
+        for r in getattr(orig, "routes", []) or []:
+            yield from _iter_routes(r)
+
+
 def route_is_public(route) -> bool:
     """路由是否对外：依赖链中含 `get_current_user_or_api_key` 即是对外安全路由。"""
     if not isinstance(route, APIRoute):
@@ -51,7 +66,8 @@ def custom_openapi(app):
 
     public_ops = {
         (_openapi_path(r.path), m.lower())
-        for r in app.routes if route_is_public(r)
+        for route in app.routes for r in _iter_routes(route)
+        if route_is_public(r)
         for m in (getattr(r, "methods", None) or set())
         if m.lower() in _METHODS
     }
