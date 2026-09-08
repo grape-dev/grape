@@ -2089,23 +2089,42 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
 def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str):
     """Agent 执行完成后，将结果作为评论发回 GitCode Issue。
 
-    Issue #46 重构：不再在此同步任务会话（原 add_message 与 _execute_agent 收尾的
-    result_text 同步重复写入，造成冗余通知）；task conversation 的 result_text 同步
-    统一由 _execute_agent 收尾（event_pipeline.py:2020 附近）作为唯一写入路径。
+    方案 B：先 GET Issue 评论列表，若已有 agent 发的评论则跳过系统回帖，
+    避免与 agent 自己发的评论重复（"一鱼两吃"问题）。
+    agent 忘了发评论时系统补发，保证 Issue 不会静悄悄。
     """
     if not repository or not issue_number or not bot_token:
         return
     # 过滤：优先提取结构化 conclusion，避免思考过程/JSON 块泄漏到 Issue 评论
+    _conclusion = ""
     try:
         from src.api.event_store import parse_agent_output_json
         _parsed = parse_agent_output_json(result_text)
         if _parsed and _parsed.get("conclusion"):
-            result_text = _parsed["conclusion"]
+            _conclusion = _parsed["conclusion"]
     except Exception:
         pass
+    # conclusion 提取失败时用简洁默认消息，不发原始 result_text（含思考过程/JSON）
+    if not _conclusion:
+        _conclusion = f"任务已完成（{agent_type} agent）。"
     try:
         import urllib.request, json as _json
-        _comment = f"[{agent_type.upper()} Agent] {result_text[:3000]}"
+        # 先查 Issue 已有评论，若已有 agent 评论则跳过（方案 B）
+        _list_url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments?per_page=100"
+        _list_req = urllib.request.Request(_list_url, headers={
+            "Authorization": f"Bearer {bot_token}",
+        })
+        _resp = urllib.request.urlopen(_list_req, timeout=15)
+        _existing = _json.loads(_resp.read())
+        _agent_tag_lower = agent_type.lower()
+        for _c in _existing:
+            _body = (_c.get("body") or "").lower()
+            # 匹配评论前缀中包含 agent_type 的（如 [blog-vod Agent] 匹配 vod）
+            if _agent_tag_lower in _body and "agent]" in _body:
+                log.info(f"Exec agent: skip system comment, agent already posted to {repository}/issues/{issue_number}")
+                return
+        # agent 没发评论，系统补发（只发 conclusion，不发原始 result_text）
+        _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
         _comment += "\n<!-- grape-auto-comment -->"
         _data = _json.dumps({"body": _comment}).encode("utf-8")
         _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
@@ -2118,7 +2137,7 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
             method="POST",
         )
         urllib.request.urlopen(_req, timeout=15)
-        log.info(f"Exec agent: posted result comment to {repository}/issues/{issue_number}")
+        log.info(f"Exec agent: posted system comment (agent did not post) to {repository}/issues/{issue_number}")
     except Exception as e:
         log.warning(f"Exec agent: failed to post result comment: {e}")
 
