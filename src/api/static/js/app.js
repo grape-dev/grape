@@ -289,6 +289,12 @@ function loadAgentTypes() {
     window._navSignal = window._navAbortController.signal;
     window._tabSignal = null;  // 重置 tab signal
     window._currentView = view;
+    // 离开 repos 全屏页时恢复 sidebar/tb/mainView 默认布局
+    if (view !== 'repos') {
+      var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
+      var tb = $('tb'); if (tb) tb.style.display = 'flex';
+      var mv = $('mainView'); if (mv) { mv.style.position = ''; mv.style.inset = ''; mv.style.zIndex = ''; }
+    }
     // 离开任务中心时停止场景识别轮询
     if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
     // 离开 observability 时停止定时轮询
