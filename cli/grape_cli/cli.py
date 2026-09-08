@@ -4,6 +4,7 @@ import sys
 import click
 
 from grape_cli import __version__, config
+from grape_cli.client import CliError
 from grape_cli.commands.api import api_command
 from grape_cli.commands.git import git_command
 from grape_cli.contracts import load_contract
@@ -111,7 +112,12 @@ def main(*args, **kw):
             _s.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    cli(*args, **kw)
+    try:
+        cli(*args, **kw)
+    except CliError as e:
+        # 用户可操作错误（缺 token / token 无效 / 网络不可达等）→ 干净一行，不堆裸 Traceback
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(e.code or 1)
 
 
 if __name__ == "__main__":
