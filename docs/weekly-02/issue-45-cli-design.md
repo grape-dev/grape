@@ -153,22 +153,22 @@ grape --base-url https://grape.example.com --grape_api_token grape_xxx git-repo 
 | `2` | 用法错误（click `UsageError`） | 未知选项、缺参数、参数类型错、「No such command」（含契约加载失败导致组不存在） |
 | `=HTTP ≥400` | 服务端错误码透传 | 403 / 404 / 409 / 500 / 502…（`client.py` 以 `CliError(code=status)` 抛出） |
 | git 子进程码 | git 退出码原样透传 | `grape git …`（0/1/2/128…） |
-| `130` | 用户中断（Ctrl+C） | **待落地**：当前未捕获 `KeyboardInterrupt`，会裸 Traceback |
+| `130` | 用户中断（Ctrl+C） | **已实现**：click Abort 由 `main()` 捕获 → `Error: 已中断` + 退出 130 |
 
 **注意**：
 - **POSIX 截断**：`sys.exit(502)` 在 Linux 上只保留低 8 位 → 退出码变 `246`；Windows 保留 32 位（=502）。跨平台脚本判断时需知悉。
-- **401 特判**：当前 `client.py` 把 401 转成固定 `code=1`，与「HTTP 透传」策略不一致；**规范待统一为透传 401**。
-- stderr 文案与退出码配合定位：超时/401/缺 token 同码，靠 `Error: …` 文案区分。
+- **401 透传（已实现）**：`client.py` 将 401 以 `CliError(code=401)` 抛出，退出码=401，与「HTTP 透传」策略一致。
+- 超时/401/缺 token 文案在 stderr 区分：超时提示「可用 --timeout 加大」，401 提示「token 无效」，缺 token 提示「请设置 …」。
 
 ### 3.7 长等待与超时处理
 
-| 场景 | 当前行为 | 规范（待落地） |
-|------|----------|----------------|
-| 普通请求 | `httpx` 固定 `timeout=30`，超时误报「base_url 不可达」 | 新增 `--timeout <秒>` 一次性参数（默认 30）；报错细分：ReadTimeout →「请求超时，可用 --timeout 加大」，ConnectError →「检查 base_url」 |
-| 任务型长操作 | 服务端**异步**：`create` 立即返回 task_id，长耗时在服务端后台；CLI 需自行轮询 `tasks/status`、`events/detail` | 提供 `grape tasks wait --task_id x`（复用服务端 `wait_task_terminal`）或 `--wait` 轮询封装 |
-| `grape git` | `subprocess.run` 无超时（git clone/push 慢是正常，不硬切） | 保持无超时；Ctrl+C 需终止子进程（POSIX 信号 / Windows `taskkill /t`） |
-| SSE 流式 | 不支持（契约命令一次性拉全量会阻塞至超时） | `--stream` 模式（httpx stream + SSE 逐行渲染） |
-| 超时边界 | nginx `proxy_read_timeout=300s` > CLI 30s → 先撞 CLI 超时 | `--timeout` 上限建议 ≤300（与 nginx 对齐） |
+| 场景 | 当前行为 | 规范 |
+|------|----------|------|
+| 普通请求 | `httpx` 超时 = `--timeout`（默认 30）；报错细分：ReadTimeout →「请求超时，可用 --timeout 加大」，ConnectError →「base_url 不可达」 | **已实现** |
+| 任务型长操作 | 服务端**异步**：`create` 立即返回 task_id；CLI 已提供 `grape tasks wait --task-id x [--timeout s] [--interval s]`（轮询公开端点 `GET /api/tasks/{id}/status` 至终态） | **已实现** |
+| `grape git` | `subprocess.run` 无超时（git clone/push 慢是正常，不硬切）；Ctrl+C 由主入口 `main()` 统一 130 收口 | 已实现（git 子进程与 CLI 同控制组收到中断） |
+| SSE 流式 | 不支持（契约命令一次性拉全量会阻塞至超时） | `--stream` 模式（httpx stream + SSE 逐行渲染）——**未实现** |
+| 超时边界 | nginx `proxy_read_timeout=300s`；CLI `--timeout` 由用户自定（建议 ≤300） | 已实现 |
 
 ## 四、与 worker agent 集成
 

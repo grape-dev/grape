@@ -38,6 +38,9 @@ def git_command() -> click.Command:
         cmd = ["git"] + list(ctx.args)
         try:
             r = subprocess.run(cmd, env=env, cwd=cwd)
+        except KeyboardInterrupt:
+            # Ctrl+C 时 git 与 CLI 同控制组已收到中断；拉起主入口统一 130 收口
+            raise
         except OSError as e:
             raise click.ClickException(f"git 执行失败: {e}")
         sys.exit(r.returncode)

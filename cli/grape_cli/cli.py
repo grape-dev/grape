@@ -1,14 +1,42 @@
-"""grape CLI 入口：契约驱动命令 + 内置（git/api/refresh/commands/list）。"""
+"""grape CLI 入口：契约驱动命令 + 内置（git/api/refresh/commands/wait）。"""
+import json
 import sys
+import time
 
 import click
 
 from grape_cli import __version__, config
-from grape_cli.client import CliError
+from grape_cli.client import ApiClient, CliError
 from grape_cli.commands.api import api_command
 from grape_cli.commands.git import git_command
 from grape_cli.contracts import load_contract
 from grape_cli.registry import build_groups, command_tree
+
+
+def wait_command() -> click.Command:
+    """grape tasks wait：轮询任务状态直至终态（复用 GET /api/tasks/{id}/status，契约驱动）。"""
+    @click.command(name="wait", help="等待任务终态（轮询 status，直至 completed/failed/cancelled）")
+    @click.option("--task-id", required=True, help="任务 id")
+    @click.option("--timeout", default=120, help="最大等待秒（默认 120）")
+    @click.option("--interval", default=3, help="轮询间隔秒（默认 3）")
+    @click.option("--json-out", is_flag=True, help="机器可读 JSON 输出")
+    def _wait(task_id: str, timeout: int, interval: int, json_out: bool):
+        api = ApiClient()
+        _terminal = {"completed", "failed", "cancelled"}
+        deadline = time.time() + max(0, timeout)
+        data = {}
+        while True:
+            _s, data = api.request("GET", f"/api/tasks/{task_id}/status")
+            st = data.get("status", "")
+            if st in _terminal or time.time() >= deadline:
+                break
+            time.sleep(max(0, interval))
+        out = json.dumps(data, ensure_ascii=False, indent=None if json_out else 2)
+        click.echo(out)
+        if data.get("status") not in _terminal:
+            raise CliError(f"等待超时（>{timeout}s），当前状态 {st or '未知'}")
+
+    return _wait
 
 
 class ContractGroup(click.Group):
@@ -28,6 +56,13 @@ class ContractGroup(click.Group):
             schema = load_contract(refresh=refresh)
             self.contract_version = str(schema.get("info", {}).get("version", ""))
             self._groups = build_groups(schema)
+            # 注入静态 wait 子命令（非契约）：grape tasks wait --task-id x
+            _tasks = self._groups.get("tasks")
+            if _tasks is not None:
+                try:
+                    _tasks.add_command(wait_command(), name="wait")
+                except Exception:
+                    pass
             self._loaded = True
         except Exception as e:
             self._load_error = str(e)
@@ -58,17 +93,19 @@ class ContractGroup(click.Group):
 @click.option("--base-url", default=None, help="服务端地址（一次性，优先级最高）")
 @click.option("--token", "--grape-api-token", "--grape_api_token", default=None,
               help="token（一次性，优先级最高；tk_ 会话 / grape_ 用户 Key）")
+@click.option("--timeout", default=None, type=int, help="请求超时秒（默认 30；git 不受影响）")
 @click.pass_context
-def cli(ctx, base_url: str | None, token: str | None):
+def cli(ctx, base_url: str | None, token: str | None, timeout: int | None):
     """Agentic DevOps CLI：契约驱动命令（新增接口零 CLI 改动）+ git 本地传输。
 
     \b
     一次性参数示例：
       grape --token tk_xxx tasks mine --status active
       grape --base-url https://grape.example.com --grape-api-token grape_xxx skills list --json-out
+      grape --timeout 120 tasks wait --task-id 56
     """
     from grape_cli.config import set_cli_params
-    set_cli_params(base_url=base_url or "", token=token or "")
+    set_cli_params(base_url=base_url or "", token=token or "", timeout=timeout or 0)
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -116,20 +153,39 @@ git_cmd = git_command()
 cli.add_command(git_cmd)
 
 
-def main(*args, **kw):
+def main(argv=None, *args, **kw):
+    """入口：返回退出码（console script 中 sys.exit(main()) 消费）。
+
+    - 0                      成功
+    - 1                      通用/配置错误（缺 token、网络、超时等）
+    - 2                      click 用法错误
+    - =HTTP(≥400)            CliError 透传（401 等）
+    - 130                    Ctrl+C 用户中断
+    """
     # Windows GBK 控制台兜底：统一 UTF-8 输出，非 ASCII（如 ✅）逐字降级而非抛异常
     try:
         for _s in (sys.stdout, sys.stderr):
             _s.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+    _argv = list(sys.argv[1:]) if argv is None else list(argv)
     try:
-        cli(*args, **kw)
+        rv = cli(_argv, standalone_mode=False, *args, **kw)
+        return 0 if rv is None else int(rv)
+    except click.exceptions.Abort:
+        # Ctrl+C（click 把 KeyboardInterrupt 转 Abort）→ 规范化 130
+        click.echo("Error: 已中断", err=True)
+        return 130
+    except KeyboardInterrupt:
+        click.echo("Error: 已中断", err=True)
+        return 130
     except CliError as e:
-        # 用户可操作错误（缺 token / token 无效 / 网络不可达等）→ 干净一行，不堆裸 Traceback
         click.echo(f"Error: {e}", err=True)
-        sys.exit(e.code or 1)
+        return e.code or 1
+    except click.exceptions.ClickException as e:
+        e.show()
+        return int(getattr(e, "exit_code", 1)) or 1
 
 
 if __name__ == "__main__":
-    main(prog_name="grape")
+    sys.exit(main(prog_name="grape"))

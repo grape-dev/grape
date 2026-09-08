@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(ROOT, "cli"))
 from grape_cli import config as cli_config
 from grape_cli import contracts as cli_contracts
 from grape_cli import registry as cli_registry
-from grape_cli.cli import cli
+from grape_cli.cli import cli, main
 
 SAMPLE_SCHEMA = {
     "info": {"title": "Agentic DevOps API", "version": "9.9.9"},
@@ -79,7 +79,8 @@ def fake_requests(monkeypatch):
     from grape_cli.client import ApiClient
 
     def _fake_request(self, method, path, **kw):
-        REQUESTS.append({"method": method, "path": path, "token": self.token, **kw})
+        REQUESTS.append({"method": method, "path": path, "token": self.token,
+                         "timeout": self.timeout, **kw})
         return 200, {"ok": True, "path": path, "method": method}
 
     monkeypatch.setattr(ApiClient, "request", _fake_request)
@@ -231,6 +232,73 @@ def test_oneshot_params_not_leak_to_next(fake_fetch, fake_requests):
     assert runner.invoke(cli, ["--token", "tk_one", "tasks", "mine"]).exit_code == 0
     assert runner.invoke(cli, ["tasks", "mine"]).exit_code == 0
     assert REQUESTS[-1]["token"] == "tk_mocktask"
+
+
+# ===================== 超时 / 报错细分 / 401 / 中断 / wait =====================
+
+def test_timeout_flag_applied(fake_fetch, fake_requests):
+    runner = CliRunner()
+    assert runner.invoke(cli, ["--timeout", "120", "tasks", "mine"]).exit_code == 0
+    assert REQUESTS[-1]["timeout"] == 120
+
+
+def test_read_timeout_message(monkeypatch):
+    import httpx
+    from grape_cli.client import ApiClient, CliError
+    monkeypatch.setattr("grape_cli.client.httpx.request",
+                        lambda *a, **k: (_ for _ in ()).throw(httpx.ReadTimeout("slow")))
+    api = ApiClient()
+    with pytest.raises(CliError) as ei:
+        api.request("GET", "/x")
+    assert "请求超时" in str(ei.value) and "--timeout" in str(ei.value)
+    assert ei.value.code == 1
+
+
+def test_connect_error_message(monkeypatch):
+    import httpx
+    from grape_cli.client import ApiClient, CliError
+    monkeypatch.setattr("grape_cli.client.httpx.request",
+                        lambda *a, **k: (_ for _ in ()).throw(httpx.ConnectError("refused")))
+    api = ApiClient()
+    with pytest.raises(CliError) as ei:
+        api.request("GET", "/x")
+    assert "base_url 不可达" in str(ei.value)
+
+
+def test_401_passthrough(monkeypatch):
+    import httpx
+    from grape_cli.client import ApiClient, CliError
+    monkeypatch.setattr("grape_cli.client.httpx.request",
+                        lambda *a, **k: httpx.Response(401, json={"message": "unauth"}))
+    api = ApiClient()
+    with pytest.raises(CliError) as ei:
+        api.request("GET", "/x")
+    assert ei.value.code == 401
+    assert "token 无效" in str(ei.value)
+
+
+def test_ctrl_c_returns_130(fake_fetch, monkeypatch):
+    from grape_cli.client import ApiClient
+    monkeypatch.setattr(ApiClient, "request",
+                        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    rc = main(["tasks", "mine"])
+    assert rc == 130
+
+
+def test_tasks_wait_polls_until_terminal(fake_fetch, monkeypatch, capsys):
+    from grape_cli.client import ApiClient
+    calls = []
+
+    def _fake_req(self, method, path, **kw):
+        calls.append(path)
+        st = "active" if len(calls) < 3 else "completed"
+        return 200, {"status": st, "id": 56}
+
+    monkeypatch.setattr(ApiClient, "request", _fake_req)
+    rc = main(["tasks", "wait", "--task-id", "56", "--interval", "0"])
+    assert rc == 0
+    assert len(calls) == 3
+    assert "completed" in capsys.readouterr().out
 
 
 # ===================== 帮助系统（H） =====================

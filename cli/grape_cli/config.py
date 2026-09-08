@@ -9,14 +9,25 @@ from pathlib import Path
 CONFIG_DIR = Path.home() / ".grape"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
-# 本次进程的 CLI 一次性参数（--base-url / --token），优先级最高，不落盘
-_CLI_PARAMS = {"base_url": "", "token": ""}
+DEFAULT_TIMEOUT = 30  # 秒
+
+# 本次进程的 CLI 一次性参数（--base-url / --token / --timeout），优先级最高，不落盘
+_CLI_PARAMS = {"base_url": "", "token": "", "timeout": 0}
 
 
-def set_cli_params(base_url: str = "", token: str = ""):
-    """记录本次调用 `grape --base-url/--token ...` 的一次性参数（进程内，随命令结束即失）。"""
+def set_cli_params(base_url: str = "", token: str = "", timeout: int = 0):
+    """记录本次调用 `grape --base-url/--token/--timeout ...` 的一次性参数（进程内，随命令结束即失）。"""
     _CLI_PARAMS["base_url"] = (base_url or "").strip()
     _CLI_PARAMS["token"] = (token or "").strip()
+    try:
+        _CLI_PARAMS["timeout"] = max(0, int(timeout or 0))
+    except (TypeError, ValueError):
+        _CLI_PARAMS["timeout"] = 0
+
+
+def cli_timeout() -> int:
+    """本次调用请求超时（秒）；未指定用默认 30。"""
+    return _CLI_PARAMS["timeout"] or DEFAULT_TIMEOUT
 
 
 def load_file_config() -> dict:

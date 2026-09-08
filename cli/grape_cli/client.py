@@ -13,9 +13,11 @@ class CliError(Exception):
 
 
 class ApiClient:
-    def __init__(self, base_url: str = "", token: str = "", channel: str = "bearer"):
+    def __init__(self, base_url: str = "", token: str = "", channel: str = "bearer",
+                 timeout: int = 0):
         self.base_url, self.token = config.resolve(base_url, token)
         self.channel = channel  # bearer / PRIVATE-TOKEN / access_token
+        self.timeout = int(timeout or 0) or config.cli_timeout()
         if not self.token:
             raise CliError("缺少 token：请设置 GRAPE_SESSION_TOKEN（任务级）/ GRAPE_API_TOKEN（用户级），或 ~/.grape/config.json 的 token")
 
@@ -38,11 +40,16 @@ class ApiClient:
             query["access_token"] = self.token
         try:
             r = httpx.request(method.upper(), url, params=query or None,
-                              headers=self._headers(), json=json_body or None, timeout=30)
-        except httpx.HTTPError as e:
+                              headers=self._headers(), json=json_body or None,
+                              timeout=self.timeout)
+        except httpx.ConnectError as e:
             raise CliError(f"base_url 不可达：{self.base_url}（{e}）")
+        except httpx.TimeoutException as e:
+            raise CliError(f"请求超时（>{self.timeout}s，可用 --timeout 加大）：{self.base_url}{path}")
+        except httpx.HTTPError as e:
+            raise CliError(f"HTTP 错误：{self.base_url}{path}（{e}）")
         if r.status_code == 401:
-            raise CliError("认证失败：token 无效或已过期")
+            raise CliError("认证失败：token 无效或已过期", code=401)
         try:
             data = r.json()
         except Exception:

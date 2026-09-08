@@ -28,6 +28,7 @@ EXPECTED_PUBLIC = {
     "tasks_create": ("post", "/api/tasks/create"),
     "tasks_start": ("post", "/api/tasks/{task_id}/start"),
     "tasks_status": ("put", "/api/tasks/{task_id}/status"),
+    "tasks_status_get": ("get", "/api/tasks/{task_id}/status"),
     "repos_member": ("get", "/api/repos/member"),
     "repos_managed": ("get", "/api/repos/managed"),
     "repos_deploy_url": ("get", "/api/repos/deploy-url/{owner}/{repo_name}"),

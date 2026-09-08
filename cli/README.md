@@ -39,7 +39,7 @@ CLI 一次性参数（--token / --base-url）> 环境变量 GRAPE_SESSION_TOKEN 
 
 | 方式 | 示例 | 说明 |
 |------|------|------|
-| 一次性参数（**推荐单次调用**） | `grape --token tk_xxx tasks mine`<br>`grape --base-url https://grape.example.com --grape-api-token grape_xxx skills list --json-out` | 仅本次进程生效，不落盘、不污染环境；`--token` / `--grape-api-token` / `--grape_api_token` 同义 |
+| 一次性参数（**推荐单次调用**） | `grape --token tk_xxx tasks mine`<br>`grape --base-url https://grape.example.com --grape-api-token grape_xxx skills list --json-out`<br>`grape --timeout 120 tasks wait --task-id 56` | 仅本次进程生效，不落盘；`--token` / `--grape-api-token` / `--grape_api_token` 同义；`--timeout` 设请求超时（默认 30s） |
 | 环境变量 | `export GRAPE_SESSION_TOKEN=tk_xxx` | 任务级优先 |
 | 配置文件 | `~/.grape/config.json` 的 `base_url`/`token` | 持久默认值 |
 
@@ -72,6 +72,10 @@ grape --help                  # 顶层帮助：命令组 + 内置（git/api/refr
 grape commands [pattern]      # 列出全部契约命令，可管道过滤：grape commands | grep issue
 grape refresh                 # 强制拉取最新 OpenAPI 契约并缓存
 grape --version               # CLI 版本
+
+# 长等待
+grape tasks wait --task-id 56 --timeout 120 --interval 3   # 轮询任务至终态（completed/failed/cancelled）
+grape --timeout 300 tasks mine                             # 普通请求超时上限（默认 30s；git 不受影响）
 ```
 
 ### 契约生成命令（自动）

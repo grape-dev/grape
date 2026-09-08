@@ -808,6 +808,25 @@ async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = De
     return {"ok": True, "task_id": task_id, "status": ns}
 
 
+@router.get("/{task_id}/status", operation_id="tasks_status_get", summary="查询任务状态（轮询 wait 用）")
+def get_task_status(task_id: int, user: dict = Depends(get_current_user_or_api_key)):
+    """返回任务当前状态（含 repo/issue 上下文），供 CLI `grape tasks wait` 轮询至终态。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at "
+            "FROM tasks WHERE id=?",
+            (task_id,),
+        )
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    return {
+        "id": row[0], "status": row[1], "repo_key": row[2], "issue_number": row[3],
+        "title": row[4], "completed_reason": row[5] or "", "completed_at": row[6],
+    }
+
+
 class TaskClarifyBody(BaseModel):
     message: str = ""
 
