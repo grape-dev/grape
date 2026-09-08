@@ -99,15 +99,13 @@ function loadAgentTypes() {
     }).catch(e => {
       if (cachedRepos) return; // 有缓存时静默，避免覆盖已渲染内容
       if (e.name === 'AbortError') return; // Issue #63: abort 时不隐藏侧边栏
-      console.error("[loadRepos] FAILED");
-      $('sidebar').style.display = 'none';
-      $('tb').style.display = 'none';
-      $('mainView').style.display = 'flex';
-      $('mainView').style.position = 'fixed';
-      $('mainView').style.inset = '0';
-      $('mainView').style.zIndex = '100';
+      // Issue #63: 浏览器刷新时 abort 会表现为 TypeError，不清缓存不隐藏侧边栏
+      // 真实网络错误时也不隐藏侧边栏——显示重试按钮比隐藏菜单更友好
+      console.error('[loadRepos] FAILED:', e.name, e.message);
       const el = $('pageContent');
-      if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + I18N.t('app.repo.load_failed') + '</div></div>';
+      if (el) {
+        el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + (I18N.t('app.repo.load_failed')||'仓库列表加载失败') + '</div><button class="bt bt-p" style="margin-top:12px" onclick="loadRepos(true)">' + (I18N.t('common.retry')||'重试') + '</button></div>';
+      }
     });
   }
 
