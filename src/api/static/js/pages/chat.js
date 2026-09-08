@@ -316,7 +316,8 @@ function _doDeleteConv(convId) {
   API.del('/chat/conversations/' + convId).then(() => {
     if (_currentConvId === convId) {
       _currentConvId = null;
-      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
+      var _cb = document.getElementById('chatBody');
+      if (_cb) _cb.innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
     loadConversations();
     app.showToast(I18N.t('chat.conversation.deleted'));

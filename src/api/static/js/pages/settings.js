@@ -160,7 +160,8 @@ function renderSettings(tab) {
           <p style="font-size:11px;color:var(--t3);margin-top:12px">${I18N.t('settings.pipeline.warning')}</p>
         </div>`;
     }).catch(e => {
-      document.getElementById('sAdvanced').innerHTML = I18N.t('settings.common.load_failed', {msg: e.message});
+      var _sa = document.getElementById('sAdvanced');
+      if (_sa) _sa.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message});
     });
   } else if (current === 'gitcode') {
     // GitCode Repo 页面 — 需要已有仓库
