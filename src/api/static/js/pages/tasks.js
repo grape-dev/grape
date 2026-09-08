@@ -5,7 +5,7 @@ let _tasksAll = [];           // 全部任务缓存
 let _taskSel = null;          // 选中的任务
 let _taskQuery = '';          // 搜索关键字
 let _taskPage = 1;            // 当前页码
-let _taskView = 'list';       // 'list' | 'board'
+let _taskView = 'board';       // 'list' | 'board'
 const _TASKS_PER_PAGE = 15;   // 每页任务数
 let _taskPollTimer = null;    // 场景识别轮询定时器
 let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
@@ -145,7 +145,8 @@ function loadTasks() {
 function _filteredTasks() {
   let list = _tasksAll;
   if (_tasksTab === 'active') list = list.filter(t => t.status === 'active' || t.status === 'processing');
-  else if (_tasksTab === 'completed') list = list.filter(t => t.status === 'completed');
+  else if (_tasksTab === 'completed') list = list.filter(t => t.status === 'completed' || t.stage === 'done');
+  else if (_tasksTab === 'cancelled') list = list.filter(t => t.status === 'cancelled');
   if (_taskQuery) {
     const q = _taskQuery.toLowerCase().trim();
     if (q) {
@@ -171,77 +172,203 @@ function _filteredTasks() {
 window._openBoardDetail = function(taskId) {
   const t = window._tasksById[taskId];
   if (!t) return;
+  window._currentDetailTask = t;
   const el = document.getElementById('pageContent');
   if (!el) return;
+  // 暂停轮询——防止详情页被 loadTasks() 覆盖
+  if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
+  // 先渲染基本详情，然后异步加载流水线
   el.innerHTML = `
-  <div style="padding:0">
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--b)">
+  <div style="padding:0;max-width:720px;margin:0 auto">
+    <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
       <button class="tsk-btn tsk-btn-ghost" onclick="loadTasks()" style="padding:6px 14px">← ${I18N.t('tasks.back_to_board')||'返回看板'}</button>
-      <h1 style="margin:0;font-size:16px;font-weight:600">${t.title || ''}</h1>
+      <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
-    ${_detailHtml(t)}
+    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('https://gitcode.com/${t.repo_key}/issues/${t.issue_number}','_blank')">${I18N.t('tasks.detail.view_issue')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('tasks.detail.go_conversation')}</button>
+      ${_renderTaskActionsInline(t)}
+    </div>
+    <div id="_boardDetailContent">${_detailHtml(t)}</div>
+    <div id="_boardPipelineSection" style="margin-top:12px">
+      <div style="text-align:center;padding:20px;color:var(--t3,#86868b);font-size:13px">${I18N.t('tasks.loading')||'加载中...'}...</div>
+    </div>
   </div>`;
+  // 异步加载流水线信息
+  API.get('/tasks/' + taskId + '/pipeline').then(function(data) {
+    _renderPipelineSection(data);
+  }).catch(function() {
+    document.getElementById('_boardPipelineSection').innerHTML = '';
+  });
 };
 
+window._jumpToPipeline = function(nodeId) {
+  const t = window._currentDetailTask;
+  if (!t || !t.repo_key) { console.warn('jumpToPipeline: no current detail task'); return; }
+  const repoKey = t.repo_key.replace('gitcode:', '');
+  const parts = repoKey.split('/');
+  if (parts.length < 2) { console.warn('jumpToPipeline: bad repo_key', t.repo_key); return; }
+  // 设置当前 repo 到 localStorage（app.currentRepo 从这里读）
+  const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
+  localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+  // 导航到流水线页面
+  if (typeof app !== 'undefined' && app.nav) {
+    app.nav('pipe');
+  } else {
+    console.warn('jumpToPipeline: app.nav not available');
+  }
+};
+
+function _renderPipelineSection(data) {
+  const el = document.getElementById('_boardPipelineSection');
+  if (!el) return;
+  // 注入脉冲动画 CSS（仅一次）
+  if (!document.getElementById('_grapePulseCSS')) {
+    const style = document.createElement('style');
+    style.id = '_grapePulseCSS';
+    style.textContent = `
+      @keyframes grapePulse{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(59,130,246,.3)}50%{transform:scale(1.1);box-shadow:0 0 0 6px rgba(59,130,246,0)}}
+      @keyframes grapeRing{0%{transform:scale(1);opacity:.6}100%{transform:scale(2.2);opacity:0}}
+    `;
+    document.head.appendChild(style);
+  }
+  const nodes = data.nodes || [];
+  const events = data.events || [];
+  if (nodes.length === 0 && events.length === 0) {
+    el.innerHTML = '';
+    return;
+  }
+  const _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px';
+  const _cardTitle = 'font-size:12px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-family:-apple-system,BlinkMacSystemFont,sans-serif';
+  let html = `<div style="${_cardStyle}">`;
+  // 卡片标题：流水线 + 场景名
+  html += `<div style="${_cardTitle}">${I18N.t('tasks.pipeline_scene')||'流水线'} · ${data.scene_name || ''}</div>`;
+  // 流水线节点进度条
+  if (nodes.length > 0) {
+    html += '<div style="display:flex;align-items:center;gap:0;margin-bottom:16px;padding:10px;background:rgba(0,0,0,.02);border-radius:10px">';
+    nodes.forEach(function(n, i) {
+      var ns = n.node_status || 'pending';
+      var col = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : '#86868b';
+      var bg = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : 'rgba(0,0,0,.06)';
+      var isCurrent = ns === 'current';
+      var pulseStyle = isCurrent ? ';animation:grapePulse 1.2s ease-in-out infinite;cursor:pointer' : '';
+      var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #3b82f6;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
+      var innerStyle = isCurrent ? ';position:relative' : '';
+      var clickHandler = isCurrent ? ` onclick="_jumpToPipeline('${(n.id||'')}')"` : '';
+      html += `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0"${clickHandler}>`;
+      html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${ns==='completed'?'✓':i+1}</div>`;
+      html += `<span style="font-size:9px;color:${col};font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${n.name||n.id||''}</span>`;
+      html += `</div>`;
+      if (i < nodes.length - 1) {
+        var lineCol = (nodes[i+1].node_status === 'completed' || ns === 'completed') ? '#34c759' : 'rgba(0,0,0,.1)';
+        html += `<div style="height:2px;flex:0 0 14px;background:${lineCol};border-radius:1px;margin-top:-12px"></div>`;
+      }
+    });
+    html += '</div>';
+  }
+  // 事件历史（同一卡片内）
+  if (events.length > 0) {
+    html += `<div style="${_cardTitle};margin-top:4px">${I18N.t('tasks.event_history')||'事件历史'}</div>`;
+    html += '<div style="display:flex;flex-direction:column;gap:0">';
+    events.forEach(function(e, i) {
+      var isLast = i === events.length - 1;
+      var statusCol = e.status === 'completed' ? '#34c759' : e.status === 'failed' ? '#ef4444' : e.status === 'cancelled' ? '#86868b' : '#3b82f6';
+      var statusIcon = e.status === 'completed' ? '✓' : e.status === 'failed' ? '✕' : e.status === 'cancelled' ? '○' : '●';
+      html += `<div style="display:flex;gap:10px;padding-bottom:${isLast?'0':'10px'}">`;
+      html += `<div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">`;
+      html += `<div style="width:18px;height:18px;border-radius:50%;background:${statusCol}15;display:flex;align-items:center;justify-content:center;font-size:9px;color:${statusCol};font-weight:600">${statusIcon}</div>`;
+      if (!isLast) html += `<div style="width:2px;flex:1;background:rgba(0,0,0,.08);margin-top:2px;min-height:16px"></div>`;
+      html += `</div>`;
+      html += `<div style="flex:1;min-width:0;padding-top:1px">`;
+      html += `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">`;
+      html += `<span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f);font-family:-apple-system,BlinkMacSystemFont,sans-serif">${e.agent_type || e.event_type || ''}</span>`;
+      html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${(e.created_at||'').substring(5,16)}</span>`;
+      html += `</div>`;
+      if (e.title) html += `<div style="font-size:10px;color:var(--t2,#3a3a3c);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.title}</div>`;
+      if (e.summary) html += `<div style="font-size:9px;color:var(--t3,#86868b);margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${e.summary}</div>`;
+      html += `</div></div>`;
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+  el.innerHTML = html;
+}
+
 function _renderBoard(filtered) {
-  const stages = ['vod', 'issue', 'coding', 'qa', 'sre'];
+  // 看板列按 task.status 严格分组
+  const statusCols = ['pending', 'in_progress', 'awaiting_input', 'pending_review', 'done', 'cancelled'];
+  const statusLabels = {
+    pending: I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g,'') : '待处理',
+    in_progress: I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g,'') : '进行中',
+    awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
+    pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
+    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
+    cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消'
+  };
+  const statusColors = {
+    pending: '#86868b', in_progress: '#3b82f6', awaiting_input: '#f59e0b',
+    pending_review: '#10b981', done: '#34c759', cancelled: '#86868b'
+  };
+  // stage 标签和颜色（卡片内展示）
   const stageLabels = {
-    vod: I18N.t('tasks.stage_vod')||'VOD',
-    issue: I18N.t('tasks.stage_issue')||'ISSUE',
-    coding: I18N.t('tasks.stage_coding')||'Coding',
-    qa: I18N.t('tasks.stage_qa')||'QA',
-    sre: I18N.t('tasks.stage_sre')||'SRE'
+    vod: 'VOD', issue: 'ISSUE', coding: 'Coding', qa: 'QA',
+    sre: 'SRE', pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
+    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
+    '': '—'
   };
   const stageColors = {
-    vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6',
-    qa: '#a855f7', sre: '#f59e0b'
+    vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7',
+    sre: '#f59e0b', pending_review: '#10b981', done: '#34c759', '': '#86868b'
   };
+  // task.status → 看板列映射
+  function _mapStatus(t) {
+    if (t.status === 'cancelled') return 'cancelled';
+    if (t.status === 'completed' || t.stage === 'done') return 'done';
+    if (t.stage === 'pending_review') return 'pending_review';
+    if (t.status === 'awaiting_input') return 'awaiting_input';
+    // 有 stage（vod/issue/coding/qa/sre）→ Agent 正在执行 → in_progress
+    const _activeStages = ['vod','issue','coding','qa','sre'];
+    if (_activeStages.includes(t.stage)) return 'in_progress';
+    if (t.status === 'processing') return 'in_progress';
+    return 'pending';
+  }
   const grouped = {};
-  stages.forEach(s => grouped[s] = []);
-  filtered.forEach(t => {
-    let stage = t.stage || 'vod';
-    if (stage === 'done') return;
-    if (!grouped[stage]) stage = 'vod';
-    grouped[stage].push(t);
-  });
+  statusCols.forEach(s => grouped[s] = []);
+  filtered.forEach(t => { grouped[_mapStatus(t)].push(t); });
 
-  // 苹果风格看板：固定列宽 280px，水平滚动，列独立垂直滚动
+  // 苹果风格看板：响应式列宽，水平滚动，列独立垂直滚动
   let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px">';
-  stages.forEach(s => {
+  statusCols.forEach(s => {
     const list = grouped[s];
-    const col = stageColors[s];
-    html += `<div style="width:280px;flex-shrink:0;display:flex;flex-direction:column;background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed)">`;
-    // 列头：颜色圆点 + 名称 + 计数（苹果风格 SF Pro 字体栈）
+    const col = statusColors[s];
+    const dim = (s === 'cancelled') ? ';opacity:.65' : '';
+    html += `<div style="min-width:240px;max-width:300px;flex:1 1 240px;display:flex;flex-direction:column;background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed)${dim}">`;
+    // 列头：颜色圆点 + 名称 + 计数
     html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
       <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
-      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${stageLabels[s]}</span>
+      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${statusLabels[s]}</span>
       <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${list.length}</span>
     </div>`;
     // 卡片容器：独立垂直滚动
     html += `<div style="flex:1;overflow-y:auto;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
     if (list.length === 0) {
-      html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">无任务</div>`;
+      html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无任务'}</div>`;
     } else {
       list.forEach(t => {
-        const isDone = t.status === 'completed';
-        const isProc = t.status === 'processing';
-        const statusDot = isDone ? '#34c759' : isProc ? '#3b82f6' : '#86868b';
-        const statusText = isDone ? (I18N.t('tasks.status.tag_completed')||'完成') : isProc ? (I18N.t('tasks.status.tag_processing')||'进行中') : (I18N.t('tasks.status.tag_pending')||'待处理');
+        const _stage = t.stage || '';
+        const _stageLabel = stageLabels[_stage] || _stage || '—';
+        const _stageColor = stageColors[_stage] || '#86868b';
         const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
-        // 卡片：苹果风格 rounded-lg + 0.5px border + 微弱阴影
         html += `<div onclick="_openBoardDetail(${t.id})" style="background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
-          <!-- Row 1: Issue# + 状态指示器 -->
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
             <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#'+t.issue_number : ''}</span>
-            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${statusDot};font-weight:500">
-              <span style="width:6px;height:6px;border-radius:50%;background:${statusDot}"></span>${statusText}
+            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px">
+              ${_stageLabel}
             </span>
           </div>
-          <!-- Row 2: 标题（2行截断） -->
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
-          <!-- Row 3: 元信息 -->
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.repo_key || ''}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee || t.repo_key || ''}</span>
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
           </div>
         </div>`;
@@ -265,7 +392,8 @@ function _render() {
   }
   const cntAll = _tasksAll.length;
   const cntActive = _tasksAll.filter(t => t.status === 'active' || t.status === 'processing').length;
-  const cntDone = _tasksAll.filter(t => t.status === 'completed').length;
+  const cntDone = _tasksAll.filter(t => t.status === 'completed' || t.stage === 'done').length;
+  const cntCancelled = _tasksAll.filter(t => t.status === 'cancelled').length;
 
   const tab = (key, label, cnt) => {
     const act = _tasksTab === key ? ' tsk-tab-act' : '';
@@ -283,9 +411,9 @@ function _render() {
       <div id="taskFilterPopover" style="display:none;position:absolute;top:calc(100% + 4px);left:0;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.1);padding:12px;min-width:200px;z-index:50;font-family:-apple-system,BlinkMacSystemFont,sans-serif">
         <div style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">${I18N.t('tasks.filter_status')||'状态'}</div>
         <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:12px">
-          ${['all','active','completed'].map(k => {
-            const lbl = k==='all'?I18N.t('tasks.tab.all'):k==='active'?I18N.t('tasks.tab.active'):I18N.t('tasks.tab.completed');
-            const cnt = k==='all'?cntAll:k==='active'?cntActive:cntDone;
+          ${['all','active','completed','cancelled'].map(k => {
+            const lbl = k==='all'?I18N.t('tasks.tab.all'):k==='active'?I18N.t('tasks.tab.active'):k==='completed'?I18N.t('tasks.tab.completed'):(I18N.t('tasks.status.tag_cancelled')||'已取消');
+            const cnt = k==='all'?cntAll:k==='active'?cntActive:k==='completed'?cntDone:cntCancelled;
             const act = _tasksTab===k;
             return `<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;${act?'background:rgba(59,130,246,.06)':''}" onclick="_tasksTab='${k}';_taskPage=1;document.getElementById('taskFilterPopover').style.display='none';_render()">
               <span style="width:14px;height:14px;border-radius:50%;border:1.5px solid ${act?'#3b82f6':'var(--b,#d0d7de)'};${act?'background:#3b82f6;box-shadow:inset 0 0 0 2px #fff':''}"></span>
@@ -311,47 +439,60 @@ function _render() {
   const pageStart = (_taskPage - 1) * _TASKS_PER_PAGE;
   const pageRows = allRows.slice(pageStart, pageStart + _TASKS_PER_PAGE);
 
-  // 当前页分组（用于页面内分区展示，不再拼接到全量顺序中）
-  const pageActive = pageRows.filter(t => t.status === 'active');
-  const pageProc = pageRows.filter(t => t.status === 'processing');
-  const pageDone = pageRows.filter(t => t.status === 'completed');
+  // 列表模式状态映射（与看板一致）
+  function _mapStatusL(t) {
+    if (t.status === 'cancelled') return 'cancelled';
+    if (t.status === 'completed' || t.stage === 'done') return 'done';
+    if (t.stage === 'pending_review') return 'pending_review';
+    if (t.status === 'awaiting_input') return 'awaiting_input';
+    if (['vod','issue','coding','qa','sre'].includes(t.stage)) return 'in_progress';
+    if (t.status === 'processing') return 'in_progress';
+    return 'pending';
+  }
+  const _lStatusInfo = {
+    pending: {ic:'#', cls:'tsk-tag-p', rIc:'tsk-ic-p', text:I18N.t('tasks.status.tag_pending')||'<b></b>待处理'},
+    in_progress: {ic:'⏳', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_processing')||'<b></b>处理中'},
+    awaiting_input: {ic:'?', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_awaiting_input')||'待澄清'},
+    pending_review: {ic:'◉', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_pending_review')||'待审核'},
+    done: {ic:'✓', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_completed')||'<b></b>已完成'},
+    cancelled: {ic:'✕', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_cancelled')||'已取消'},
+  };
 
   const rowHtml = (t) => {
-    const isDone = t.status === 'completed';
-    const isProc = t.status === 'processing';
+    const ms = _mapStatusL(t);
+    const si = _lStatusInfo[ms] || _lStatusInfo.pending;
     const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
-    const rIc = isDone ? 'tsk-ic-d' : isProc ? 'tsk-ic-pr' : 'tsk-ic-p';
-    const icon = isDone ? '✓' : isProc ? '⏳' : '#';
-    const tagCls = isDone ? 'tsk-tag-d' : isProc ? 'tsk-tag-pr' : 'tsk-tag-p';
-    const tagText = isDone ? I18N.t('tasks.status.tag_completed') : isProc ? I18N.t('tasks.status.tag_processing') : I18N.t('tasks.status.tag_pending');
     return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
-      <div class="tsk-r-ic ${rIc}">${icon}</div>
+      <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">
         <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
         <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key}</div>
       </div>
-      <span class="tsk-tag ${tagCls}">${tagText}</span>
+      <span class="tsk-tag ${si.cls}">${si.text}</span>
     </div>`;
   };
 
   let listHtml = '';
   if (_tasksMode === 'time') {
-    // 纯时间序：不按状态分区，直接按后端顺序平铺（Issue #42）
     listHtml = pageRows.map(rowHtml).join('');
   } else {
-    // default：状态优先（后端已按 active→processing→completed 排序），页内分区展示
-    if (pageActive.length > 0) {
-      listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.pending')} <span class="tsk-sec-n">${pageActive.length}</span></div>` +
-        pageActive.map(rowHtml).join('');
-    }
-    if (pageProc.length > 0) {
-      listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.processing')} <span class="tsk-sec-n">${pageProc.length}</span></div>` +
-        pageProc.map(rowHtml).join('');
-    }
-    if (pageDone.length > 0) {
-      listHtml += `<div class="tsk-list-sec">${I18N.t('tasks.section.completed')} <span class="tsk-sec-n">${pageDone.length}</span></div>` +
-        pageDone.map(rowHtml).join('');
-    }
+    // 按新状态分区
+    const pageByStatus = {};
+    pageRows.forEach(t => { const ms = _mapStatusL(t); (pageByStatus[ms] = pageByStatus[ms] || []).push(t); });
+    const _secLabels = {
+      pending: I18N.t('tasks.section.pending')||'待处理',
+      in_progress: I18N.t('tasks.section.processing')||'进行中',
+      awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
+      pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
+      done: I18N.t('tasks.section.completed')||'已完成',
+      cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消',
+    };
+    ['pending','in_progress','awaiting_input','pending_review','done','cancelled'].forEach(ms => {
+      if (pageByStatus[ms] && pageByStatus[ms].length > 0) {
+        listHtml += `<div class="tsk-list-sec">${_secLabels[ms]} <span class="tsk-sec-n">${pageByStatus[ms].length}</span></div>` +
+          pageByStatus[ms].map(rowHtml).join('');
+      }
+    });
   }
   if (!listHtml) {
     listHtml = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
@@ -427,7 +568,7 @@ function _render() {
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
       <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
-      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}</div>
+      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('https://gitcode.com/${_taskSel.repo_key}/issues/${_taskSel.issue_number}','_blank')">${I18N.t('tasks.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('tasks.detail.go_conversation')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
 
@@ -442,38 +583,85 @@ function _render() {
 function _detailHtml(t) {
   const isDone = t.status === 'completed';
   const isProc = t.status === 'processing';
-  const tagCls = isDone ? 'tsk-tag-d' : isProc ? 'tsk-tag-pr' : 'tsk-tag-p';
-  const reasonText = t.completed_reason === 'issue_closed' ? I18N.t('tasks.status.reason_issue_closed') : t.completed_reason === 'reassigned' ? I18N.t('tasks.status.reason_reassigned') : t.completed_reason === 'bot_takeover' ? I18N.t('tasks.status.reason_bot_takeover') : (t.completed_reason || '');
-  const tagText = isDone
-    ? I18N.t('tasks.status.detail_completed') + reasonText
-    : isProc ? I18N.t('tasks.status.detail_processing') : I18N.t('tasks.status.detail_pending');
-  const detIc = isDone ? 'tsk-det-ic-d' : isProc ? 'tsk-det-ic-pr' : 'tsk-det-ic-p';
-  const icon = isDone ? '✓' : isProc ? '⏳' : '#';
-  // 场景名称
+  const isCancelled = t.status === 'cancelled';
+  const reasonText = t.completed_reason === 'issue_closed' ? I18N.t('tasks.status.reason_issue_closed') : t.completed_reason === 'reassigned' ? I18N.t('tasks.status.reason_reassigned') : t.completed_reason === 'bot_takeover' ? I18N.t('tasks.status.reason_bot_takeover') : t.completed_reason === 'user_cancelled' ? (I18N.t('tasks.cancel_task')||'已取消') : (t.completed_reason || '');
+  const tagText = isCancelled ? (I18N.t('tasks.status.tag_cancelled')||'已取消') : isDone ? (I18N.t('tasks.status.detail_completed') + reasonText) : isProc ? I18N.t('tasks.status.detail_processing') : I18N.t('tasks.status.detail_pending');
   var sceneName = t.scene_id ? (t.scene_name || t.scene_id) : '—';
   var sceneBadge = t.scene_source === 'vod' ? '' : (t.scene_id && t.scene_source === 'repo_default' ? ` <span style="font-size:10px;color:var(--t3)">${I18N.t('tasks.scene_default_badge')}</span>` : '');
-  // 多任务模式
   var subtaskBadge = t.is_subtask_mode ? `<span class="tg tg-q" style="font-size:10px">${I18N.t('tasks.multi_task_badge')}</span>` : `<span class="ts t3" style="font-size:10px">${I18N.t('tasks.single_task_badge')}</span>`;
   var parentIssue = t.parent_issue_number ? ' · ' + I18N.t('tasks.parent_task') + ' #' + t.parent_issue_number : '';
+  const _stage = t.stage || '';
+  const _stageLabel = {vod:'VOD',issue:'ISSUE',coding:'Coding',qa:'QA',sre:'SRE',pending_review:I18N.t('tasks.status.tag_pending_review')||'待审核',done:I18N.t('tasks.status.tag_completed')||'已完成','':'—'}[_stage] || _stage || '—';
+
+  // 苹果风格卡片容器
+  const _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px;margin-bottom:12px';
+  const _cardTitle = 'font-size:12px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-family:-apple-system,BlinkMacSystemFont,sans-serif';
+  const _rowStyle = 'display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:0.5px solid rgba(0,0,0,.04)';
+  const _labelStyle = 'font-size:12px;color:var(--t3,#86868b);font-weight:400';
+  const _valueStyle = 'font-size:13px;color:var(--t1,#1d1d1f);font-weight:500;text-align:right;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+
   return `
-    <div class="tsk-det-ic ${detIc}">${icon}</div>
-    <div class="tsk-det-label">Issue #${t.issue_number}</div>
-    <div class="tsk-det-title">${t.title || ''}</div>
-    <div class="tsk-det-meta">
-      <div class="tsk-m"><span>${I18N.t('tasks.detail.status')}</span><b class="${tagCls}">${tagText}</b></div>
-      <div class="tsk-m"><span>${I18N.t('tasks.detail.task_id')}</span><b>#${t.id}</b></div>
-      <div class="tsk-m"><span>${I18N.t('tasks.detail.repo')}</span><b>${t.repo_key}</b></div>
-      <div class="tsk-m"><span>${I18N.t('tasks.pipeline_scene')}</span><b>${sceneName}${sceneBadge}</b></div>
-      <div class="tsk-m"><span>${I18N.t('tasks.task_mode')}</span><b>${subtaskBadge}${parentIssue}</b></div>
-      <div class="tsk-m"><span>${I18N.t('tasks.detail.created_at')}</span><b>${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
-      ${t.completed_at ? `<div class="tsk-m"><span>${I18N.t('tasks.detail.completed_at')}</span><b>${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
-    </div>
-    <div class="tsk-det-desc">${t.task_description || I18N.t('tasks.detail.no_description')}</div>
-    <div class="tsk-det-actions">
-      <button class="tsk-btn tsk-btn-ghost" onclick="window.open('https://gitcode.com/${t.repo_key}/issues/${t.issue_number}','_blank')">${I18N.t('tasks.detail.view_issue')}</button>
-      <button class="tsk-btn tsk-btn-ghost" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('tasks.detail.go_conversation')}</button>
+    <!-- 任务详情卡片（统一） -->
+    <div style="${_cardStyle}position:relative">
+      <div style="${_cardTitle}">${I18N.t('tasks.detail_title')||'任务详情'}</div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.status')}</span><b style="${_valueStyle};color:${isDone?'#34c759':isCancelled?'#86868b':isProc?'#3b82f6':'#86868b'}">${tagText}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.task_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">Issue</span><b style="${_valueStyle}"><a href="https://gitcode.com/${t.repo_key}/issues/${t.issue_number}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">Stage</span><b style="${_valueStyle}">${_stageLabel}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.pipeline_scene')||'流水线场景'}</span><b style="${_valueStyle}">${sceneName}${sceneBadge}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.task_mode')}</span><b style="${_valueStyle}">${subtaskBadge}${parentIssue}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.created_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
+      ${t.completed_at ? `<div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.completed_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
+      ${t.task_description ? `<div style="${_rowStyle};border-bottom:none;flex-direction:column;align-items:flex-start"><span style="${_labelStyle};margin-bottom:4px">${I18N.t('tasks.detail.no_description')}</span><div style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.5;white-space:pre-wrap;width:100%">${t.task_description}</div></div>` : ''}
     </div>`;
 }
+
+function _renderTaskActionsInline(t) {
+  const _stage = t.stage || '';
+  const _status = t.status || '';
+  let html = '';
+  // Issue #51: 确认完成
+  if (_stage === 'pending_review' || _stage === 'sre' || _stage === 'sre_completed') {
+    if (_status !== 'completed' && _status !== 'cancelled') {
+      html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id})" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')||'确认完成'}</button>`;
+    }
+  }
+  // 取消任务
+  if (_status !== 'completed' && _status !== 'cancelled') {
+    html += `<button class="tsk-btn tsk-btn-ghost" onclick="cancelTask(${t.id})" style="padding:8px 14px;border-radius:10px;font-size:12px;color:#d32f2f">✕ ${I18N.t('tasks.cancel_task')||'取消'}</button>`;
+  }
+  // 恢复任务
+  if (_status === 'cancelled') {
+    html += `<button class="tsk-btn tsk-btn-primary" onclick="resumeTask(${t.id})" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">↻ ${I18N.t('tasks.resume_task')||'恢复'}</button>`;
+  }
+  return html;
+}
+
+function _renderTaskActionsBar(t) {
+  // 已废弃——按钮合并到 _detailHtml 底部行
+  return '';
+}
+
+window.confirmTaskDone = function(taskId) {
+  if (!confirm('确认此任务已完成？')) return;
+  API.post('/tasks/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}).then(() => {
+    app.showToast(I18N.t('tasks.confirm_done')||'任务已完成');
+  }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+};
+
+window.cancelTask = function(taskId) {
+  if (!confirm('确认取消此任务？取消后可恢复。')) return;
+  API.post('/tasks/' + taskId + '/cancel').then(() => {
+    app.showToast(I18N.t('tasks.cancel_task')||'任务已取消');
+  }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+};
+
+window.resumeTask = function(taskId) {
+  API.post('/tasks/' + taskId + '/resume').then(() => {
+    app.showToast(I18N.t('tasks.resume_task')||'任务已恢复');
+  }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+};
 
 function openTaskConversation(t) {
   // 跳转 chat agent：始终用 issue:N:repoKey 格式，由 chat.js 调 ensure-issue

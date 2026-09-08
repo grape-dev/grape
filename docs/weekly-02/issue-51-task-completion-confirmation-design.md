@@ -613,3 +613,62 @@ issue_state.stage = done
 - 已有 active/processing 状态的 task 可选迁移到 in_progress（或保持兼容映射）
 - `_TASK_STATUS_FLOWS` 更新为新状态迁移规则
 - skill 的 `need_input` 机制是增量——不影响不声明 need_input 的 skill
+
+## 11. 验证用例
+
+### 11.1 API 端点验证
+
+| 用例 | API | 预期 | 验证方法 |
+|------|-----|------|----------|
+| TC-01 confirm-done 端点存在 | POST /api/tasks/99999/confirm-done | 404 (task not found) | 端点注册成功 |
+| TC-02 cancel 端点存在 | POST /api/tasks/99999/cancel | 404 (task not found) | 端点注册成功 |
+| TC-03 resume 端点存在 | POST /api/tasks/99999/resume | 404 (task not found) | 端点注册成功 |
+| TC-04 confirm-done 幂等 | POST /api/tasks/{已completed的id}/confirm-done | 200 {already_done: true} | 不重复操作 |
+| TC-05 cancel 幂等 | POST /api/tasks/{已cancelled的id}/cancel | 200 {already_cancelled: true} | 不重复操作 |
+| TC-06 cancel 已完成任务 | POST /api/tasks/{已completed的id}/cancel | 400 (已完成不可取消) | 边界保护 |
+| TC-07 resume 非取消任务 | POST /api/tasks/{active的id}/resume | 400 (仅已取消可恢复) | 边界保护 |
+
+### 11.2 状态流转验证
+
+| 用例 | 初始状态 | 操作 | 预期结果 |
+|------|----------|------|----------|
+| TC-08 最后节点完成→pending_review | stage=sre | A2A done 信号 | stage=pending_review |
+| TC-09 pending_review 事件不分发 | stage=pending_review | issue_comment webhook | 不创建新 Agent 任务 |
+| TC-10 确认完成→done | stage=pending_review | POST confirm-done | stage=done, status=completed |
+| TC-11 取消任务→cancelled | status=active | POST cancel | status=cancelled, reason=user_cancelled |
+| TC-12 恢复任务→active | status=cancelled | POST resume | status=active, reason=NULL |
+| TC-13 取消终止 Agent | status=processing, Agent running | POST cancel | cancel_task() 调用, Agent 终止 |
+| TC-14 恢复后 stage 保留 | stage=coding, 取消后恢复 | POST resume | stage 仍为 coding |
+
+### 11.3 指令识别验证
+
+| 用例 | 输入 | 触发位置 | 预期 |
+|------|------|----------|------|
+| TC-15 Issue 评论 "/done" | Issue comment "/done" | webhook → event_pipeline | confirm_issue_done() 调用 |
+| TC-16 Issue 评论 "完成任务" | Issue comment "完成任务" | webhook → event_pipeline | confirm_issue_done() 调用 |
+| TC-17 Issue 评论 "/cancel" | Issue comment "/cancel" | webhook → event_pipeline | cancel_issue_task() 调用 |
+| TC-18 Issue 评论 "/resume" | Issue comment "/resume" | webhook → event_pipeline | resume_issue_task() 调用 |
+| TC-19 Chat "任务完成" | Chat message "任务完成" | chat.py send_message | confirm_issue_done() + 回复 |
+| TC-20 Chat "取消任务" | Chat message "取消任务" | chat.py send_message | cancel_issue_task() + 回复 |
+| TC-21 Chat "恢复任务" | Chat message "恢复任务" | chat.py send_message | resume_issue_task() + 回复 |
+| TC-22 Chat 普通消息不触发 | Chat message "你好" | chat.py send_message | 正常流程，不触发指令 |
+| TC-23 系统回帖不触发 | <!-- grape-auto-comment --> | event_pipeline | 跳过（原有逻辑） |
+
+### 11.4 前端验证
+
+| 用例 | 条件 | 预期 UI |
+|------|------|---------|
+| TC-24 确认完成按钮 | stage=pending_review, status≠completed | 显示"确认任务完成"按钮 |
+| TC-25 取消按钮 | status≠completed且≠cancelled | 显示"取消任务"按钮 |
+| TC-26 恢复按钮 | status=cancelled | 显示"恢复任务"按钮 |
+| TC-27 无按钮 | status=completed | 不显示任何操作按钮 |
+| TC-28 确认成功 toast | 点击确认完成 | showToast + loadTasks 刷新 |
+
+### 11.5 pytest 单元测试
+
+| 用例 | 测试文件 | 测试函数 | 验证点 |
+|------|----------|----------|--------|
+| TC-29 | test_issue_lifecycle_routing.py | test_pending_review_no_dispatch | pending_review 阶段事件不分发 |
+| TC-30 | test_issue_lifecycle_routing.py | test_last_node_to_pending_review | 最后节点完成→pending_review |
+| TC-31 | test_issue_lifecycle_routing.py | test_pr_stage_pending_review_empty | PR updated + pending_review → 空 |
+

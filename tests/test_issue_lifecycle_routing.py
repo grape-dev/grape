@@ -78,6 +78,21 @@ class TestStageRoutingHelper:
         assert _resolve_issue_stage_agent(RK, "issue_comment", ISSUE_PAYLOAD, "issue") == ""
         assert _resolve_issue_stage_agent(RK, "pull_request_updated", PR_PAYLOAD, "qa") == ""
 
+    # Issue #51: pending_review 阶段测试
+    def test_pending_review_no_dispatch(self):
+        # TC-29: pending_review 阶段所有事件不分发
+        ss.set_issue_stage(RK, "#5", "pending_review", "sre")
+        assert _resolve_issue_stage_agent(RK, "issue_comment", ISSUE_PAYLOAD, "issue") == ""
+        assert _resolve_issue_stage_agent(RK, "pull_request_updated", PR_PAYLOAD, "qa") == ""
+        assert _resolve_issue_stage_agent(RK, "issue_updated", ISSUE_PAYLOAD, "issue") == ""
+
+    def test_pr_stage_pending_review_empty(self):
+        # TC-31: PR updated + pending_review → 空
+        ss.set_issue_stage(RK, "#5", "pending_review", "sre")
+        assert _resolve_issue_stage_agent(RK, "pull_request_updated", PR_PAYLOAD, "issue") == ""
+        assert _resolve_issue_stage_agent(RK, "pull_request_opened", PR_PAYLOAD, "issue") == ""
+        assert _resolve_issue_stage_agent(RK, "pull_request_merged", PR_PAYLOAD, "issue") == ""
+
 
 class TestRunPipelineStage:
     def test_issue_opened_creates_state_and_routes_vod(self):

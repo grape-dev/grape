@@ -492,6 +492,39 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         conv = get_conversation(conv_id)
 
     add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)))
+
+    # Issue #51: Chat Agent 指令检测（任务完成/取消任务/恢复任务）
+    _msg_stripped = body.message.strip()
+    if conv_id and conv and conv.get("conv_type") == "task" and conv.get("issue_number"):
+        _task_issue_num = conv["issue_number"]
+        _task_repo_key = conv.get("repo_key", "")
+        import logging as _log_mod
+        _chat_log = _log_mod.getLogger("devops-bot")
+        if _msg_stripped in ["任务完成", "完成任务", "/done", "确认完成"]:
+            try:
+                from src.api.routes.tasks import confirm_issue_done
+                confirm_issue_done(_task_repo_key, _task_issue_num, confirmed_by="chat_agent")
+                add_message(conv_id, "assistant", "✅ 任务已确认完成")
+                return {"conversation_id": conv_id, "reply": "✅ 任务已确认完成", "task_command": "done"}
+            except Exception as _e:
+                _chat_log.warning(f"Chat command confirm_done failed: {_e}")
+        elif _msg_stripped in ["取消任务", "/cancel"]:
+            try:
+                from src.api.routes.tasks import cancel_issue_task
+                cancel_issue_task(_task_repo_key, _task_issue_num)
+                add_message(conv_id, "assistant", "任务已取消")
+                return {"conversation_id": conv_id, "reply": "任务已取消", "task_command": "cancel"}
+            except Exception as _e:
+                _chat_log.warning(f"Chat command cancel failed: {_e}")
+        elif _msg_stripped in ["恢复任务", "/resume"]:
+            try:
+                from src.api.routes.tasks import resume_issue_task
+                resume_issue_task(_task_repo_key, _task_issue_num)
+                add_message(conv_id, "assistant", "任务已恢复")
+                return {"conversation_id": conv_id, "reply": "任务已恢复", "task_command": "resume"}
+            except Exception as _e:
+                _chat_log.warning(f"Chat command resume failed: {_e}")
+
     # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
     mark_task_processing_by_conversation(conv_id)
 

@@ -421,15 +421,15 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
 # - 对应列 stage 命中 → 目标 Agent；"—" 表示该阶段下该事件不分发（返回空）
 # - 特例：PR updated + stage=coding + QA 有历史 → qa（复审）
 _STAGE_EVENT_AGENT_MAP = {
-    "issue_opened":        {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
-    "issue_comment":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
+    "issue_opened":        {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "pending_review": "", "done": ""},
+    "issue_comment":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "pending_review": "", "done": ""},
     # close 已由 L1 副作用短路，此处安全兜底：close 一律不分发（issue_updated 其余 action 归 issue）
-    "issue_updated":       {"vod": "issue", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
-    "issue_labeled":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "done": ""},
-    "pull_request_opened": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
-    "pull_request_updated": {"vod": "issue", "issue": "issue", "coding": "qa", "qa": "qa", "sre": "sre", "done": ""},
-    "pull_request_merged": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
-    "note_hook_pr":        {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "done": ""},
+    "issue_updated":       {"vod": "issue", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "pending_review": "", "done": ""},
+    "issue_labeled":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "pending_review": "", "done": ""},
+    "pull_request_opened": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
+    "pull_request_updated": {"vod": "issue", "issue": "issue", "coding": "qa", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
+    "pull_request_merged": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
+    "note_hook_pr":        {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
 }
 
 
@@ -464,6 +464,18 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
         # 无记录：issue_opened 已由上面处理；其余关联事件默认 vod（新 Issue 先审视）
         return "vod" if event_type in ISSUE_EVENT_TYPES else default_agent
     stage = st["stage"]
+
+    # Issue #51: cancelled 任务不再分发（防止取消后 A2A 继续流转）
+    from src.session_manager import db as _ck_db, db_lock as _ck_lock
+    try:
+        with _ck_lock:
+            _ck_c = _ck_db.cursor()
+            _ck_c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_id=? AND status='cancelled' LIMIT 1",
+                          (repo_key, issue_id))
+            if _ck_c.fetchone():
+                return ""
+    except Exception:
+        pass
 
     # 表驱动查找；显式列缺失视为不分发
     _row = _STAGE_EVENT_AGENT_MAP.get(event_type)
@@ -723,8 +735,39 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 from src.api.event_store import append_skipped_event
                 append_skipped_event(repo_key, event_type, "system_auto_comment")
                 return result
+
+            # Issue #51: 开发者指令检测（/done /cancel /resume）
+            _note_lower = _note.lower().strip()
+            _issue_num = ""
+            try:
+                _issue_num = str(_oa.get("iid") or _oa.get("number") or (_payload.get("issue", {}) or {}).get("number") or "").lstrip("#")
+            except Exception:
+                pass
+            if _issue_num and _issue_num.isdigit():
+                _issue_num_int = int(_issue_num)
+                if any(kw in _note_lower for kw in ["/done", "完成任务", "任务完成", "确认完成"]):
+                    from src.api.routes.tasks import confirm_issue_done
+                    confirm_issue_done(repo_key, _issue_num_int, confirmed_by="issue_comment")
+                    log.info(f"Issue #{_issue_num} confirmed done via issue comment")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, "user_confirm_done")
+                    return result
+                elif any(kw in _note_lower for kw in ["/cancel", "取消任务"]):
+                    from src.api.routes.tasks import cancel_issue_task
+                    cancel_issue_task(repo_key, _issue_num_int)
+                    log.info(f"Issue #{_issue_num} cancelled via issue comment")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, "user_cancel")
+                    return result
+                elif any(kw in _note_lower for kw in ["/resume", "恢复任务"]):
+                    from src.api.routes.tasks import resume_issue_task
+                    resume_issue_task(repo_key, _issue_num_int)
+                    log.info(f"Issue #{_issue_num} resumed via issue comment")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, "user_resume")
+                    return result
         except Exception as e:
-            log.warning(f"Pipeline: auto-comment marker check failed: {e}")
+            log.warning(f"Pipeline: auto-comment marker / command check failed: {e}")
 
     # 2.1 issue_updated 纯标签变更（changes.labels 有变化、其余内容未动）→ bot 打标签回声，跳过
     if event_type == "issue_updated":
@@ -2054,6 +2097,18 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                         log.info(f"SRE deploy_url auto-registered: {_urls[0]} for {repo_key}")
         except Exception as _e:
             log.warning(f"SRE deploy_url extraction failed: {_e}")
+
+    # Issue #51: SRE（最后节点）完成后 → 设 stage=pending_review 等待开发者审核
+    if new_status == "completed" and agent_type == "sre" and issue_id:
+        try:
+            from src.api.session_store import get_issue_stage, set_issue_stage
+            _st = get_issue_stage(repo_key, issue_id)
+            _cur_stage = (_st or {}).get("stage", "") if _st else ""
+            if _cur_stage == "sre":
+                set_issue_stage(repo_key, issue_id, "pending_review", "sre")
+                log.info(f"SRE completed → pending_review (awaiting user review) issue={issue_id}")
+        except Exception as _e:
+            log.warning(f"SRE → pending_review failed: {_e}")
 
     # 子任务 SRE 完成后 → 登记完成情况到父 Issue
     if new_status == "completed" and agent_type == "sre" and issue_id:
