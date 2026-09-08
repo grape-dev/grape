@@ -55,9 +55,20 @@ class ContractGroup(click.Group):
 @click.group(cls=ContractGroup, invoke_without_command=True)
 @click.version_option(__version__, "--version", prog_name="grape",
                       message="%(prog)s %(version)s")
+@click.option("--base-url", default=None, help="服务端地址（一次性，优先级最高）")
+@click.option("--token", "--grape-api-token", "--grape_api_token", default=None,
+              help="token（一次性，优先级最高；tk_ 会话 / grape_ 用户 Key）")
 @click.pass_context
-def cli(ctx):
-    """Agentic DevOps CLI：契约驱动命令（新增接口零 CLI 改动）+ git 本地传输。"""
+def cli(ctx, base_url: str | None, token: str | None):
+    """Agentic DevOps CLI：契约驱动命令（新增接口零 CLI 改动）+ git 本地传输。
+
+    \b
+    一次性参数示例：
+      grape --token tk_xxx tasks mine --status active
+      grape --base-url https://grape.example.com --grape-api-token grape_xxx skills list --json-out
+    """
+    from grape_cli.config import set_cli_params
+    set_cli_params(base_url=base_url or "", token=token or "")
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 

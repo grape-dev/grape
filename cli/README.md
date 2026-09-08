@@ -34,8 +34,14 @@ ln -sf /opt/grape-cli/bin/grape /usr/local/bin/grape
 配置优先级（较高的优先）：
 
 ```
-CLI 参数 > 环境变量 GRAPE_SESSION_TOKEN > GRAPE_API_TOKEN / GRAPE_BASE_URL > ~/.grape/config.json
+CLI 一次性参数（--token / --base-url）> 环境变量 GRAPE_SESSION_TOKEN > GRAPE_API_TOKEN / GRAPE_BASE_URL > ~/.grape/config.json
 ```
+
+| 方式 | 示例 | 说明 |
+|------|------|------|
+| 一次性参数（**推荐单次调用**） | `grape --token tk_xxx tasks mine`<br>`grape --base-url https://grape.example.com --grape-api-token grape_xxx skills list --json-out` | 仅本次进程生效，不落盘、不污染环境；`--token` / `--grape-api-token` / `--grape_api_token` 同义 |
+| 环境变量 | `export GRAPE_SESSION_TOKEN=tk_xxx` | 任务级优先 |
+| 配置文件 | `~/.grape/config.json` 的 `base_url`/`token` | 持久默认值 |
 
 | 环境变量 | 含义 | 何时用 |
 |----------|------|--------|
@@ -118,15 +124,19 @@ grape api POST /api/tasks/create -d '{"repo_key":"o/r","title":"x"}'
 ## 快速上手指引
 
 ```bash
-# 1) 指向生产 + 给一个可用 token
+# 1) 一次性调用（不设任何环境变量也行）
+grape --base-url https://grape.example.com --token tk_xxx skills list --json-out
+grape --base-url https://grape.example.com --grape-api-token grape_xxx tasks mine --status active
+
+# 2) 常用（一次设置，多次使用）：指向生产 + 给一个可用 token
 export GRAPE_BASE_URL=https://grape.example.com
 export GRAPE_SESSION_TOKEN=tk_xxx    # 或 export GRAPE_API_TOKEN=grape_xxx
 
-# 2) 看有哪些命令
+# 3) 看有哪些命令
 grape commands | head -40
 grape git-repo issues list --help
 
-# 3) 跑一个只读命令
+# 4) 跑一个只读命令
 grape skills list --json-out
 grape tasks mine --status active
 ```

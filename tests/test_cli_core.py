@@ -59,10 +59,12 @@ def _env(tmp_path, monkeypatch):
     cli_config.CONFIG_FILE = cli_config.CONFIG_DIR / "config.json"
     monkeypatch.setenv("GRAPE_BASE_URL", "http://mock")
     monkeypatch.setenv("GRAPE_SESSION_TOKEN", "tk_mocktask")
+    cli_config.set_cli_params("", "")  # 清空一次性参数
     REQUESTS.clear()
     cli._loaded = False
     cli._groups = {}
     yield
+    cli_config.set_cli_params("", "")
     cli._loaded = False
     cli._groups = {}
 
@@ -77,7 +79,7 @@ def fake_requests(monkeypatch):
     from grape_cli.client import ApiClient
 
     def _fake_request(self, method, path, **kw):
-        REQUESTS.append({"method": method, "path": path, **kw})
+        REQUESTS.append({"method": method, "path": path, "token": self.token, **kw})
         return 200, {"ok": True, "path": path, "method": method}
 
     monkeypatch.setattr(ApiClient, "request", _fake_request)
@@ -197,6 +199,38 @@ def test_r9_operation_id_split(fake_fetch):
     assert "tasks" in tree and "mine" in tree["tasks"]
     assert "git-repo" in tree
     assert "issues" in tree["git-repo"] or any(v.startswith("issues") for v in tree["git-repo"])
+
+
+# ===================== 一次性参数（--token / --base-url） =====================
+
+def test_oneshot_token_flag_beats_env(fake_fetch, fake_requests):
+    """grape --token tk_oneshot <cmd>：CLI 一次性 token 优先于环境变量。"""
+    runner = CliRunner()
+    r = runner.invoke(cli, ["--token", "tk_oneshot", "tasks", "mine", "--status", "active"])
+    assert r.exit_code == 0, r.output
+    assert REQUESTS[-1]["token"] == "tk_oneshot"      # 参数 > env(tk_mocktask)
+
+
+def test_oneshot_grape_api_token_alias(fake_fetch, fake_requests):
+    runner = CliRunner()
+    r = runner.invoke(cli, ["--grape_api_token=grape_oneshot", "tasks", "mine"])
+    assert r.exit_code == 0, r.output
+    assert REQUESTS[-1]["token"] == "grape_oneshot"
+
+
+def test_oneshot_base_url_flag(fake_fetch, fake_requests):
+    runner = CliRunner()
+    r = runner.invoke(cli, ["--base-url", "http://flag-host", "tasks", "mine"])
+    assert r.exit_code == 0, r.output
+    assert cli_config.resolve()[0] == "http://flag-host"
+
+
+def test_oneshot_params_not_leak_to_next(fake_fetch, fake_requests):
+    """一次性参数进程内不残留：下一次无参命令回落到环境变量。"""
+    runner = CliRunner()
+    assert runner.invoke(cli, ["--token", "tk_one", "tasks", "mine"]).exit_code == 0
+    assert runner.invoke(cli, ["tasks", "mine"]).exit_code == 0
+    assert REQUESTS[-1]["token"] == "tk_mocktask"
 
 
 # ===================== 帮助系统（H） =====================

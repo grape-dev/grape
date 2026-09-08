@@ -9,6 +9,15 @@ from pathlib import Path
 CONFIG_DIR = Path.home() / ".grape"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
+# 本次进程的 CLI 一次性参数（--base-url / --token），优先级最高，不落盘
+_CLI_PARAMS = {"base_url": "", "token": ""}
+
+
+def set_cli_params(base_url: str = "", token: str = ""):
+    """记录本次调用 `grape --base-url/--token ...` 的一次性参数（进程内，随命令结束即失）。"""
+    _CLI_PARAMS["base_url"] = (base_url or "").strip()
+    _CLI_PARAMS["token"] = (token or "").strip()
+
 
 def load_file_config() -> dict:
     try:
@@ -20,15 +29,20 @@ def load_file_config() -> dict:
 
 
 def resolve(base_url: str = "", token: str = "", refresh: bool = False) -> tuple[str, str]:
-    """返回 (base_url, token)。缺任一 → 抛 if config incomplete."""
+    """返回 (base_url, token)。缺任一 → 抛 if config incomplete.
+
+    优先级：函数参数 == CLI 一次性参数（--base-url/--token）> 环境变量 > config.json。
+    """
     cfg = load_file_config() if not refresh else {}
     env = os.environ
 
-    _base = (base_url or "").strip() or (env.get("GRAPE_BASE_URL") or "").strip() or str(cfg.get("base_url") or "").strip()
+    _base = (base_url or "").strip() or _CLI_PARAMS["base_url"] or \
+            (env.get("GRAPE_BASE_URL") or "").strip() or str(cfg.get("base_url") or "").strip()
     if not _base:
         _base = "http://localhost:8000"
 
-    _token = (token or "").strip() or (env.get("GRAPE_SESSION_TOKEN") or "").strip() or \
+    _token = (token or "").strip() or _CLI_PARAMS["token"] or \
+             (env.get("GRAPE_SESSION_TOKEN") or "").strip() or \
              (env.get("GRAPE_API_TOKEN") or "").strip() or str(cfg.get("token") or "").strip()
     return _base.rstrip("/"), _token
 
