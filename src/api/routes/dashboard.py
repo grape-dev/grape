@@ -1083,6 +1083,11 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
                "auto_resolution": 0.0, "events_week": 0, "avg_response": 0}
     try:
         with db_lock:
+            # total_issues: 统计不同 issue_id 的数量（去重）
+            c.execute(
+                "SELECT COUNT(DISTINCT issue_id) FROM events WHERE repo_key=? AND issue_id!='' AND issue_id IS NOT NULL",
+                (repo_key,))
+            metrics["total_issues"] = c.fetchone()[0] or 0
             # Auto-Resolution: completed / (completed + failed)
             c.execute(
                 "SELECT COUNT(*) FROM events WHERE repo_key=? AND status='completed'",

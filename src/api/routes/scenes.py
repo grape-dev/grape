@@ -40,7 +40,7 @@ def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
 
 @router.get("/with-pipeline")
 def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str = ""):
-    """返回场景列表 + 各场景流水线配置"""
+    """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）"""
     from src.api.pipeline_config import get_scenes, get_pipeline_config
     from src.repo_key import to_repo_key
     repo_key = ""
@@ -58,7 +58,11 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
     for s in scene_list:
         cfg = get_pipeline_config(s["id"], repo_key=repo_key)
         result.append({"id": s["id"], "name": s["name"],
-                       "display_name": s.get("display_name") or s["name"], "pipeline": cfg})
+                       "display_name": s.get("display_name") or s["name"],
+                       "description": s.get("description") or "",
+                       "work_branch": s.get("work_branch") or "main",
+                       "created_by": s.get("created_by") or "",
+                       "pipeline": cfg})
     return {"scenes": result}
 
 
@@ -815,7 +819,7 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
     try:
         db_id = create_custom_scene(
             scene_id=scene_id, name=body.name, description=body.description,
-            repo_key=repo_key, nodes=nodes_json)
+            repo_key=repo_key, nodes=nodes_json, created_by=user.get("username") or "")
     except Exception as e:
         if "UNIQUE" in str(e).upper():
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 ID '{scene_id}' 已存在"})

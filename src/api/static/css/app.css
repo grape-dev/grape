@@ -529,6 +529,10 @@
 .bg-blog{background:linear-gradient(135deg,#ff2d92,#ff9f0a)}
 .bg-harmony{background:linear-gradient(135deg,#5ac8fa,#34c759)}
 .scn-ic{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.scn-ic-lg{width:48px;height:48px;border-radius:12px;font-size:24px}
+.scn-create-card{flex-shrink:0;width:300px;min-height:200px;border:2px dashed #d2d2d7;background:transparent;border-radius:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;color:#86868b;font-size:13px;gap:8px}
+.scn-create-card:hover{border-color:#0071e3;color:#0071e3;background:rgba(0,113,227,.02)}
+.scn-create-icon{font-size:28px}
 .sub-tabs{display:flex;gap:0;border-bottom:2px solid var(--b);margin-bottom:16px}
 .sub-tab{padding:9px 16px;font-size:12px;font-weight:500;color:var(--t2);cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
 .sub-tab.act{color:var(--a);border-bottom-color:var(--a)}
