@@ -160,6 +160,14 @@ const API = (() => {
         throw e;
       });
     }
+    // Issue #63: 响应不是 JSON（如 nginx 返回 HTML 登录页）时按 401 处理，不报 "Unexpected token"
+    var ct = r.headers.get('content-type') || '';
+    if (ct.indexOf('application/json') === -1) {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+      throw new Error(I18N.t('common.session_expired') || '登录已过期，请重新登录');
+    }
     return r.json();
   }
 
