@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Grape — Multi-Agent DevOps</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=47">
-<link rel="stylesheet" href="/static/css/apple-theme.css?v=11">
+<link rel="stylesheet" href="/static/css/app.css?v=48">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=13">
 <link rel="stylesheet" href="/static/css/vendor/select2.min.css?v=1">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
@@ -49,12 +49,14 @@
 <a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span><span data-i18n="app.nav.scene_center">项目场景</span></a>
 <a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span><span data-i18n="app.nav.pipeline">流水线</span></a>
 
-<div class="grp" data-i18n="app.sidebar.devops_agents">DevOps Agents</div>
+<div class="grp-tog collapsed" id="grp-devops" data-key="sidebar.devops_agents_collapsed" onclick="app.toggleGroup(this)"><span data-i18n="app.sidebar.devops_agents">DevOps Agents</span><i class="grp-arrow">▸</i></div>
+<div class="grp-items" id="grp-devops-items">
 <a id="nav-vod" onclick="app.nav('vod')"><span class="ic" style="color:var(--pk)">●</span><span data-i18n="app.nav.vod">VOD Agent</span></a>
 <a id="nav-issue" onclick="app.nav('issue')"><span class="ic" style="color:var(--r)">●</span><span data-i18n="app.nav.issue">Issue Agent</span></a>
 <a id="nav-coding" onclick="app.nav('coding')"><span class="ic" style="color:var(--a)">●</span><span data-i18n="app.nav.coding">Coding Agent</span></a>
 <a id="nav-qa" onclick="app.nav('qa')"><span class="ic" style="color:var(--pu)">●</span><span data-i18n="app.nav.qa">QA Agent</span></a>
 <a id="nav-sre" onclick="app.nav('sre')"><span class="ic" style="color:var(--or)">●</span><span data-i18n="app.nav.sre">SRE Agent</span></a>
+</div>
 
 <div class="grp" data-i18n="app.sidebar.devops_market">场景中心</div>
 <a id="nav-scene-market" class="act" onclick="app.nav('scene-market')"><span class="ic">◈</span><span data-i18n="app.nav.scene_skill_market">场景·技能</span></a>
@@ -115,7 +117,7 @@
 <script src="/static/js/pages/knowledge.js?v=10"></script>
 <script src="/static/js/pages/runtimes.js?v=30"></script>
 <script src="/static/js/pages/observability.js?v=61"></script>
-<script src="/static/js/app.js?v=61"></script>
+<script src="/static/js/app.js?v=62"></script>
 
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>

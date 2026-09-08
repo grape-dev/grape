@@ -246,6 +246,39 @@ function loadAgentTypes() {
       _hiddenSince = 0;
     }
   });
+  // ── Sidebar 分组折叠（Issue #66）──
+  // 可折叠分组标题带 class="grp-tog" + data-key（localStorage 键）。
+  // 默认收起（HTML 中预置 collapsed）；initGroupCollapse() 读取 localStorage
+  // 同步真实状态；toggleGroup() 点击切换并写回。收起时 .grp-items 子项隐藏。
+  function _readCollapsed(key) {
+    // 默认 true（收起）；localStorage 存 '0'/'1'
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? true : v === '1';
+    } catch (e) { return true; }
+  }
+  function initGroupCollapse() {
+    document.querySelectorAll('.grp-tog[data-key]').forEach(tog => {
+      const key = tog.getAttribute('data-key');
+      const collapsed = _readCollapsed(key);
+      tog.classList.toggle('collapsed', collapsed);
+      const items = tog.nextElementSibling;
+      if (items && items.classList.contains('grp-items')) {
+        items.classList.toggle('hid', collapsed);
+      }
+    });
+  }
+  function toggleGroup(tog) {
+    const key = tog.getAttribute('data-key');
+    const collapsed = !tog.classList.contains('collapsed');
+    tog.classList.toggle('collapsed', collapsed);
+    const items = tog.nextElementSibling;
+    if (items && items.classList.contains('grp-items')) {
+      items.classList.toggle('hid', collapsed);
+    }
+    try { localStorage.setItem(key, collapsed ? '1' : '0'); } catch (e) {}
+  }
+
   function nav(view, param) {
     const repo = currentRepo();
     if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local') { loadRepos(); return; }
@@ -283,6 +316,17 @@ function loadAgentTypes() {
       if (param && o.includes("'" + param + "'")) a.classList.add('act');
       else if (!param && o === "nav('" + view + "')") a.classList.add('act');
     });
+    // 导航到折叠分组内的项时自动展开该分组（Issue #66）
+    const _actNav = document.querySelector('.sb-nav a.act');
+    if (_actNav) {
+      const _items = _actNav.closest('.grp-items');
+      if (_items && _items.classList.contains('hid')) {
+        const _tog = _items.previousElementSibling;
+        if (_tog && _tog.classList.contains('grp-tog') && _tog.classList.contains('collapsed')) {
+          toggleGroup(_tog);
+        }
+      }
+    }
 
     const title = $('pageTitle');
     const repoTitle = $('repoTitle');
@@ -517,6 +561,8 @@ function loadAgentTypes() {
       currentRepo: localStorage.getItem('currentRepo'),
       url: window.location.href
     }));
+    // 同步可折叠分组的持久化状态（Issue #66）
+    initGroupCollapse();
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
     const urlToken = p.get('token');
@@ -609,7 +655,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });
