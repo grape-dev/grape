@@ -767,6 +767,7 @@ function loadSubSkillDetail(pkgId, subName) {
   if (!el) return;
   el.innerHTML = '<div class="loading">'+(I18N.t('skills.loading')||'加载中...')+'</div>';
   API.get('/skills/package-sub/'+pkgId+'/'+subName).then(function(data) {
+    if (window._currentView !== 'skills') return;  // stale guard
     var safeContent = (data.content||'').replace(/`/g,'\\`').replace(/\${/g,'\\${');
     el.innerHTML = `
       <button class="bt bt-o bt-s" onclick="_backFromSubSkill(${pkgId})" style="margin-bottom:12px">← ${I18N.t('skills.huawei.back')||'返回'}</button>
@@ -784,6 +785,8 @@ function loadSubSkillDetail(pkgId, subName) {
         </div>
       </div>`;
   }).catch(function(e) {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'skills') return;  // stale guard
     el.innerHTML = '<div class="error">'+(I18N.t('common.load_failed')||'加载失败')+': '+(e.message||'')+'</div>';
   });
 }

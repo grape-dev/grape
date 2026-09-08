@@ -24,8 +24,11 @@ function renderKnowledge() {
     return;
   }
   API.get('/knowledge' + _repoQS()).then(d => {
+    if (window._currentView !== 'knowledge') return;  // stale guard
     _renderKnowledgeBoard(el, d);
   }).catch(e => {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'knowledge') return;  // stale guard
     el.innerHTML = '<div class="error">' + I18N.t('knowledge.load_project_failed', {msg: e.message}) + '</div>';
   });
 }
@@ -199,8 +202,11 @@ function loadKnowledgeContent(key) {
   // 但 obs_key 格式为 project-info/gitcode:xxx/file.md 时也能当 file 用（_read_file 会查 DB）
   // 所以直接传 obs_key 参数即可——后端 obs_key 为空时会回退 file 参数
   API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&obs_key=' + encodeURIComponent(key)).then(d => {
+    if (window._currentView !== 'knowledge') return;  // stale guard
     renderKnowledgeDetail(d);
   }).catch(e => {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'knowledge') return;  // stale guard
     el.innerHTML = '<div class="error">' + I18N.t('knowledge.load_detail_failed', {msg: e.message}) + '</div>';
   });
 }
