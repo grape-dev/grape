@@ -592,8 +592,6 @@ async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = De
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
-        repo_key, issue_number, status = row[0], row[2], row[1] if len(row) > 2 else None
-        # 兼容字段顺序
         _repo_key, _issue_num, _status = row[0], row[1], row[2]
         if _status == 'completed' or _status == 'done':
             return {"ok": True, "already_done": True}
@@ -724,6 +722,8 @@ async def resume_task_api(task_id: int, user: dict = Depends(get_current_user)):
             # 通过 A2A 重新派发
             try:
                 import urllib.request, json as _json
+                from src.prompt_builder import _resolve_server_url
+                _a2a_url = _resolve_server_url() + "/api/a2a"
                 _a2a_payload = _json.dumps({
                     "agent": _resume_stage,
                     "payload": {
@@ -733,7 +733,7 @@ async def resume_task_api(task_id: int, user: dict = Depends(get_current_user)):
                     }
                 }).encode()
                 _req = urllib.request.Request(
-                    "http://127.0.0.1:38080/api/a2a",
+                    _a2a_url,
                     data=_a2a_payload,
                     headers={"Content-Type": "application/json"},
                     method="POST")

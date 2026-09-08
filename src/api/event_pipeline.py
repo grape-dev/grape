@@ -468,14 +468,17 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
     # Issue #51: cancelled 任务不再分发（防止取消后 A2A 继续流转）
     from src.session_manager import db as _ck_db, db_lock as _ck_lock
     try:
-        with _ck_lock:
-            _ck_c = _ck_db.cursor()
-            _ck_c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_id=? AND status='cancelled' LIMIT 1",
-                          (repo_key, issue_id))
-            if _ck_c.fetchone():
-                return ""
-    except Exception:
-        pass
+        _ck_issue_num = str(issue_id).lstrip("#")
+        if _ck_issue_num.isdigit():
+            with _ck_lock:
+                _ck_c = _ck_db.cursor()
+                _ck_c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
+                              (repo_key, int(_ck_issue_num)))
+                if _ck_c.fetchone():
+                    return ""
+    except Exception as _ck_err:
+        log.warning(f"Pipeline: cancelled-task check failed for {repo_key}/{issue_id}: {_ck_err} — defaulting to no-dispatch (safe fail)")
+        return ""
 
     # 表驱动查找；显式列缺失视为不分发
     _row = _STAGE_EVENT_AGENT_MAP.get(event_type)

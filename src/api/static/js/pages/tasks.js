@@ -295,58 +295,49 @@ function _renderPipelineSection(data) {
 }
 
 function _renderBoard(filtered) {
-  // 看板列按 task.status 严格分组
-  const statusCols = ['pending', 'in_progress', 'awaiting_input', 'pending_review', 'done', 'cancelled'];
-  const statusLabels = {
-    pending: I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g,'') : '待处理',
-    in_progress: I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g,'') : '进行中',
-    awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
-    pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
-    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
-    cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消'
-  };
-  const statusColors = {
-    pending: '#86868b', in_progress: '#3b82f6', awaiting_input: '#f59e0b',
-    pending_review: '#10b981', done: '#34c759', cancelled: '#86868b'
-  };
-  // stage 标签和颜色（卡片内展示）
+  // Issue #43: 看板列按 task.stage 阶段分组（VOD / ISSUE / Coding / QA / SRE）
+  const stageCols = ['vod', 'issue', 'coding', 'qa', 'sre', 'done', 'cancelled'];
   const stageLabels = {
-    vod: 'VOD', issue: 'ISSUE', coding: 'Coding', qa: 'QA',
-    sre: 'SRE', pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
+    vod: I18N.t('tasks.stage_vod'),
+    issue: I18N.t('tasks.stage_issue'),
+    coding: I18N.t('tasks.stage_coding'),
+    qa: I18N.t('tasks.stage_qa'),
+    sre: I18N.t('tasks.stage_sre'),
     done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
-    '': '—'
+    cancelled: I18N.t('tasks.status.tag_cancelled') || '已取消'
   };
   const stageColors = {
     vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7',
-    sre: '#f59e0b', pending_review: '#10b981', done: '#34c759', '': '#86868b'
+    sre: '#f59e0b', done: '#34c759', cancelled: '#86868b'
   };
-  // task.status → 看板列映射
-  function _mapStatus(t) {
+  // task → 看板列映射（按阶段分列）
+  function _mapStage(t) {
     if (t.status === 'cancelled') return 'cancelled';
     if (t.status === 'completed' || t.stage === 'done') return 'done';
-    if (t.stage === 'pending_review') return 'pending_review';
-    if (t.status === 'awaiting_input') return 'awaiting_input';
-    // 有 stage（vod/issue/coding/qa/sre）→ Agent 正在执行 → in_progress
-    const _activeStages = ['vod','issue','coding','qa','sre'];
-    if (_activeStages.includes(t.stage)) return 'in_progress';
-    if (t.status === 'processing') return 'in_progress';
-    return 'pending';
+    if (t.stage === 'pending_review') return 'done';
+    const _s = t.stage || '';
+    if (['vod', 'issue', 'coding', 'qa', 'sre', 'sre_completed'].includes(_s)) {
+      return _s === 'sre_completed' ? 'sre' : _s;
+    }
+    // 无 stage 的活跃任务 → VOD（等待 VOD 识别）
+    if (t.status === 'active' || t.status === 'processing') return 'vod';
+    return 'vod';
   }
   const grouped = {};
-  statusCols.forEach(s => grouped[s] = []);
-  filtered.forEach(t => { grouped[_mapStatus(t)].push(t); });
+  stageCols.forEach(s => grouped[s] = []);
+  filtered.forEach(t => { grouped[_mapStage(t)].push(t); });
 
   // 苹果风格看板：响应式列宽，水平滚动，列独立垂直滚动
   let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px">';
-  statusCols.forEach(s => {
+  stageCols.forEach(s => {
     const list = grouped[s];
-    const col = statusColors[s];
+    const col = stageColors[s];
     const dim = (s === 'cancelled') ? ';opacity:.65' : '';
     html += `<div style="min-width:240px;max-width:300px;flex:1 1 240px;display:flex;flex-direction:column;background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed)${dim}">`;
     // 列头：颜色圆点 + 名称 + 计数
     html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
       <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
-      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${statusLabels[s]}</span>
+      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${stageLabels[s]}</span>
       <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${list.length}</span>
     </div>`;
     // 卡片容器：独立垂直滚动
@@ -355,15 +346,24 @@ function _renderBoard(filtered) {
       html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无任务'}</div>`;
     } else {
       list.forEach(t => {
+        const _status = t.status || '';
         const _stage = t.stage || '';
-        const _stageLabel = stageLabels[_stage] || _stage || '—';
-        const _stageColor = stageColors[_stage] || '#86868b';
+        // 卡片内展示状态标签
+        const _statusLabel = _status === 'cancelled' ? (I18N.t('tasks.status.tag_cancelled')||'已取消') :
+          _status === 'completed' ? (I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成') :
+          _status === 'processing' ? (I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g,'') : '进行中') :
+          _stage === 'pending_review' ? (I18N.t('tasks.status.tag_pending_review')||'待审核') :
+          (I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g,'') : '待处理');
+        const _statusColor = _status === 'cancelled' ? '#86868b' :
+          _status === 'completed' ? '#34c759' :
+          _status === 'processing' ? '#3b82f6' :
+          _stage === 'pending_review' ? '#10b981' : '#86868b';
         const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
         html += `<div onclick="_openBoardDetail(${t.id})" style="background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
             <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#'+t.issue_number : ''}</span>
-            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px">
-              ${_stageLabel}
+            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_statusColor};font-weight:600;background:${_statusColor}15;border-radius:4px;padding:2px 6px">
+              ${_statusLabel}
             </span>
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
@@ -624,16 +624,16 @@ function _renderTaskActionsInline(t) {
   // Issue #51: 确认完成
   if (_stage === 'pending_review' || _stage === 'sre' || _stage === 'sre_completed') {
     if (_status !== 'completed' && _status !== 'cancelled') {
-      html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')||'确认完成'}</button>`;
+      html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')}</button>`;
     }
   }
   // 取消任务
   if (_status !== 'completed' && _status !== 'cancelled') {
-    html += `<button class="tsk-btn tsk-btn-ghost" onclick="cancelTask(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;color:#d32f2f">✕ ${I18N.t('tasks.cancel_task')||'取消'}</button>`;
+    html += `<button class="tsk-btn tsk-btn-ghost" onclick="cancelTask(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;color:#d32f2f">✕ ${I18N.t('tasks.cancel_task')}</button>`;
   }
   // 恢复任务
   if (_status === 'cancelled') {
-    html += `<button class="tsk-btn tsk-btn-primary" onclick="resumeTask(${t.id})" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">↻ ${I18N.t('tasks.resume_task')||'恢复'}</button>`;
+    html += `<button class="tsk-btn tsk-btn-primary" onclick="resumeTask(${t.id})" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">↻ ${I18N.t('tasks.resume_task')}</button>`;
   }
   return html;
 }
@@ -659,11 +659,11 @@ window._grapeConfirm = function(opts, event) {
   if (dlgY > window.innerHeight - 160) dlgY = window.innerHeight - 160;
   dlg.style.cssText = `position:fixed;left:${dlgX}px;top:${dlgY}px;background:var(--c,#fff);border-radius:12px;padding:14px 18px;max-width:${dlgW}px;width:90%;box-shadow:0 6px 30px rgba(0,0,0,.12);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;transform:scale(1.05);transition:transform .2s cubic-bezier(.4,0,.2,1)`;
   dlg.innerHTML = `
-    <div style="font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);margin-bottom:4px;text-align:center">${title||'确认'}</div>
+    <div style="font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);margin-bottom:4px;text-align:center">${title||(I18N.t('tasks.confirm')||'确认')}</div>
     <div style="font-size:11px;color:var(--t2,#3a3a3c);line-height:1.35;text-align:center;margin-bottom:12px;white-space:pre-line">${message||''}</div>
     <div style="display:flex;gap:6px">
-      <button id="_grapeCancel" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:rgba(0,0,0,.06);font-size:11px;font-weight:500;color:var(--t1,#1d1d1f);cursor:pointer;font-family:inherit">${cancelText||'取消'}</button>
-      <button id="_grapeOK" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:${danger?'#ff3b30':'#0071e3'};font-size:11px;font-weight:600;color:#fff;cursor:pointer;font-family:inherit">${confirmText||'确认'}</button>
+      <button id="_grapeCancel" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:rgba(0,0,0,.06);font-size:11px;font-weight:500;color:var(--t1,#1d1d1f);cursor:pointer;font-family:inherit">${cancelText||(I18N.t('tasks.cancel')||'取消')}</button>
+      <button id="_grapeOK" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:${danger?'#ff3b30':'#0071e3'};font-size:11px;font-weight:600;color:#fff;cursor:pointer;font-family:inherit">${confirmText||(I18N.t('tasks.confirm')||'确认')}</button>
     </div>`;
   overlay.appendChild(dlg);
   document.body.appendChild(overlay);
@@ -676,35 +676,35 @@ window._grapeConfirm = function(opts, event) {
 
 window.confirmTaskDone = function(taskId, event) {
   _grapeConfirm({
-    title: I18N.t('tasks.confirm_done')||'确认任务完成',
-    message: 'SRE 已完成部署，确认此任务已完成？',
-    confirmText: I18N.t('tasks.confirm_done')||'确认完成',
+    title: I18N.t('tasks.confirm_done'),
+    message: I18N.t('tasks.confirm_done_message'),
+    confirmText: I18N.t('tasks.confirm_done'),
     onConfirm: function() {
       API.post('/tasks/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}).then(() => {
-        app.showToast(I18N.t('tasks.confirm_done')||'任务已完成');
-      }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+        app.showToast(I18N.t('tasks.task_done_toast'));
+      }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
     }
   }, event);
 };
 
 window.cancelTask = function(taskId, event) {
   _grapeConfirm({
-    title: I18N.t('tasks.cancel_task')||'取消任务',
-    message: '确认取消此任务？取消后可恢复。',
-    confirmText: I18N.t('tasks.cancel_task')||'取消任务',
+    title: I18N.t('tasks.cancel_task'),
+    message: I18N.t('tasks.cancel_task_message'),
+    confirmText: I18N.t('tasks.cancel_task'),
     danger: true,
     onConfirm: function() {
       API.post('/tasks/' + taskId + '/cancel').then(() => {
-        app.showToast(I18N.t('tasks.cancel_task')||'任务已取消');
-      }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+        app.showToast(I18N.t('tasks.task_cancelled_toast'));
+      }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
     }
   }, event);
 };
 
 window.resumeTask = function(taskId) {
   API.post('/tasks/' + taskId + '/resume').then(() => {
-    app.showToast(I18N.t('tasks.resume_task')||'任务已恢复');
-  }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+    app.showToast(I18N.t('tasks.task_resumed_toast'));
+  }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
 };
 
 function openTaskConversation(t) {
