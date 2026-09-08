@@ -40,7 +40,7 @@ def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
 
 @router.get("/with-pipeline")
 def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str = ""):
-    """返回场景列表 + 各场景流水线配置"""
+    """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）"""
     from src.api.pipeline_config import get_scenes, get_pipeline_config
     from src.repo_key import to_repo_key
     repo_key = ""
@@ -58,7 +58,11 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
     for s in scene_list:
         cfg = get_pipeline_config(s["id"], repo_key=repo_key)
         result.append({"id": s["id"], "name": s["name"],
-                       "display_name": s.get("display_name") or s["name"], "pipeline": cfg})
+                       "display_name": s.get("display_name") or s["name"],
+                       "description": s.get("description") or "",
+                       "work_branch": s.get("work_branch") or "main",
+                       "created_by": s.get("created_by") or "",
+                       "pipeline": cfg})
     return {"scenes": result}
 
 
@@ -402,26 +406,20 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
         )
         scene_id = existing_scene_id
     else:
-        # 不存在 → 新建（scope='repo'，scene_id 用 UUID）
-        scene_id = str(uuid.uuid4())
-        new_id = create_custom_scene(
-            scene_id=scene_id, name=scene["display_name"] or scene_id,
+        # 不存在 → 新建（scope='repo'，scene_id 用 custom-uuid 或市场 name）
+        new_scene_id = scene["name"] or f"custom-{uuid.uuid4().hex[:8]}"
+        db_id = create_custom_scene(
+            scene_id=new_scene_id, name=scene["display_name"] or new_scene_id,
             description=scene["description"] or "",
             repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding")
+        scene_id = new_scene_id
         # 回写 market_scene_id 关联
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("UPDATE devops_pipeline_scene SET market_scene_id=? WHERE id=?", (market_id, new_id))
+                c.execute("UPDATE devops_pipeline_scene SET market_scene_id=? WHERE id=?", (market_id, db_id))
                 db.commit()
-                log.info(f"apply_market_scene: UPDATE market_scene_id={market_id} WHERE id={new_id}, rowcount={c.rowcount}")
-            # 取回 scene_id 字符串
-            with db_lock:
-                c = db.cursor()
-                _r = c.execute("SELECT scene_id FROM devops_pipeline_scene WHERE id=?", (new_id,)).fetchone()
-                if _r:
-                    scene_id = _r[0]
-                    log.info(f"apply_market_scene: fetched scene_id={scene_id} from id={new_id}")
+                log.info(f"apply_market_scene: UPDATE market_scene_id={market_id} WHERE id={db_id}, rowcount={c.rowcount}")
         except Exception as _e:
             log.warning(f"apply_market_scene: link market_scene_id failed: {_e}")
 
@@ -1231,8 +1229,8 @@ class CreateSceneRequest(BaseModel):
     nodes: list[SceneNodeInput] = []
 
 class UpdateSceneRequest(BaseModel):
-    name: str = ""
-    description: str = ""
+    name: str | None = None
+    description: str | None = None
     nodes: list[SceneNodeInput] = []
 
 class ApplySceneRequest(BaseModel):
@@ -1270,7 +1268,7 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
     try:
         db_id = create_custom_scene(
             scene_id=scene_id, name=body.name, description=body.description,
-            repo_key=repo_key, nodes=nodes_json)
+            repo_key=repo_key, nodes=nodes_json, created_by=user.get("username") or "")
     except Exception as e:
         err_upper = str(e).upper()
         if "UNIQUE" in err_upper or "DUPLICATE" in err_upper:

@@ -598,6 +598,7 @@ function _showApplyConfirm(sceneId, owner, repoName, sceneName) {
 function _doApplyScene(sceneId, owner, repoName) {
   API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName).then(r => {
     if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.apply_success')||'场景已应用');
+    app.nav('dash');
   }).catch(e => {
     if (e.status === 409) {
       _showSceneNameConflict(e.message);

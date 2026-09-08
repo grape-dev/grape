@@ -2237,10 +2237,11 @@ def _migrate_tables():
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "devops_pipeline_scene", "advanced_options", "TEXT DEFAULT '{}'")
+            _ensure_column(c, "devops_pipeline_scene", "created_by", "TEXT DEFAULT ''")
             db.commit()
-            log.info("Added devops_pipeline_scene.advanced_options column")
+            log.info("Added devops_pipeline_scene.advanced_options + created_by columns")
     except Exception as e:
-        log.warning(f"Add devops_pipeline_scene.advanced_options column failed: {e}")
+        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:
