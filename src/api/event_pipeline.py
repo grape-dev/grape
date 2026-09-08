@@ -1688,6 +1688,12 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         # 清理 Future 记录
         with _DIRECT_FUTURES_LOCK:
             _DIRECT_FUTURES.pop(seq, None)
+        # Issue-45 M2：direct 会话结束 → 会话级临时 token 即时失效
+        try:
+            from src.api.auth_token import revoke_session_token
+            revoke_session_token(task_id or f"d_{seq}")
+        except Exception as e:
+            log.warning(f"Exec agent: revoke session token failed: {e}")
         # 任务级工位清理（direct 端）：轻文件 + 确认已 push 的 worktree
         try:
             _cleanup_direct_workdir(
@@ -1860,6 +1866,16 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 env_extra["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
+
+    # Issue-45 M2：direct 会话签发会话级临时 token（session_key=task_id 或 d_{seq}）
+    try:
+        from src.api.auth_token import issue_session_token
+        if repo_key and agent_type:
+            env_extra["GRAPE_API_TOKEN"] = issue_session_token(
+                session_key=task_id or f"d_{seq}",
+                repo_key=repo_key, agent_type=agent_type, user_id=0)
+    except Exception as e:
+        log.warning(f"Exec agent: issue session token failed: {e}")
 
     try:
         for evt_type, data in stream_devops_agent(

@@ -183,6 +183,7 @@ async def lifespan(app: FastAPI):
         async def _active_user_tracker():
             from src.api.deps import get_pending_active
             from src.user import db as user_db
+            _purge_i = 0
             while True:
                 await asyncio.sleep(30)
                 try:
@@ -191,6 +192,15 @@ async def lifespan(app: FastAPI):
                         await asyncio.to_thread(user_db.batch_update_last_active, list(uids))
                 except Exception as e:
                     log.warning(f"Active user tracker flush failed: {e}")
+                # Issue-45 M2：会话级临时 token TTL 兜底清理（每 5 分钟）
+                try:
+                    _purge_i += 1
+                    if _purge_i >= 10:
+                        _purge_i = 0
+                        from src.api.auth_token import purge_expired_session_tokens
+                        await asyncio.to_thread(purge_expired_session_tokens)
+                except Exception as e:
+                    log.warning(f"Session token purge failed: {e}")
 
         _active_tracker_task = asyncio.create_task(_active_user_tracker())
         log.info("Active user tracker started (30s flush)")

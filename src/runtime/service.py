@@ -408,6 +408,21 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
+    # Issue-45 M2：签发会话级临时 token 注入 GRAPE_API_TOKEN（存在即有效，删除即失效）。
+    # session_key=task_id（精确失效、不误伤并发同类会话）；chat 任务绑定 USER_ID 用户身份，
+    # devops 事件任务无用户概念（user_id=0，仓库身份）。
+    if repo_key and agent_type:
+        try:
+            from src.api.auth_token import issue_session_token
+            _tk_uid = user_id or 0
+            _usr = env.get("USER_ID") or ""
+            if str(_usr).isdigit():
+                _tk_uid = int(str(_usr))
+            env["GRAPE_API_TOKEN"] = issue_session_token(
+                session_key=task_id, repo_key=repo_key,
+                agent_type=agent_type, user_id=_tk_uid)
+        except Exception as e:
+            log.warning(f"enqueue: session token issue failed for {task_id}: {e}")
     _server_url = server_url or ""
     if not _server_url:
         try:
@@ -1065,6 +1080,13 @@ def update_task_status(task_id, status, **kw):
                 "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
                 (row[1],))
         db.commit()
+    # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
+    if status in ("completed", "failed", "cancelled"):
+        try:
+            from src.api.auth_token import revoke_session_token
+            revoke_session_token(task_id)
+        except Exception as e:
+            log.warning(f"update_task_status: revoke session token failed for {task_id}: {e}")
 
 
 def cancel_task(task_id):
