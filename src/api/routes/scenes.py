@@ -79,7 +79,9 @@ def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> 
                 return storage.temporary_url(obs_icon_key)
         except Exception:
             pass
-        # OBS 失败时不走 icon 字段（可能是过期签名 URL），直接 emoji 兜底
+        # OBS 失败时先尝试 icon 字段（可能是有效的本地路径/emoji），再 emoji 兜底
+        if icon:
+            return icon
         from src.user.db import get_scene_category
         cat = get_scene_category(category_id)
         return cat.get('icon', '⚙') if cat else '⚙'

@@ -557,8 +557,6 @@
 .det-suite-badge{font-size:10px;font-weight:600;padding:3px 10px;border-radius:999px;flex-shrink:0}
 
 /* ===== Select2 苹果风格覆盖 ===== */
-
-/* ===== Select2 苹果风格覆盖 ===== */
 .select2-container--default .select2-selection--single{background:var(--c);border:1px solid var(--b);border-radius:8px;height:28px;outline:none;transition:border-color .15s}
 .select2-container--default .select2-selection--single:focus{border-color:var(--a)}
 .select2-container--default .select2-selection--single .select2-selection__rendered{color:var(--t);line-height:26px;font-size:11px;padding-left:8px;padding-right:20px}

@@ -2231,9 +2231,12 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
 def delete_scene_market(market_id: int) -> bool:
     """硬删除用户自定义场景（scope != 'official'）。
     场景市场无回收站需求，删除即销毁，name 立即释放。
+    级联清理 scene_skill_ref 和 scene_likes 关联记录。
     """
     with db_lock:
         c = db.cursor()
+        c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
+        c.execute("DELETE FROM scene_likes WHERE scene_id=?", (market_id,))
         c.execute(
             "DELETE FROM scene_market WHERE id=? AND scope!='official'",
             (market_id,),
