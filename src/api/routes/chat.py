@@ -743,7 +743,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     runtime_session_id=runtime_session_id,
                     event_type="chat",
                     account=user.get("username") or "", user_id=user["id"],
-                    repo_gitcode_token=gitcode_token,
+                    user_gitcode_token=gitcode_token,
                     env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
                 )
                 log.info(f"Chat stream enqueued: task={tid} user={user['id']} conv={conv_id}")

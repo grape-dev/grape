@@ -128,6 +128,7 @@ _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
     "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
+    "user_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
     "status, exit_code, result_text, errors, stderr, "
@@ -310,7 +311,7 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
 
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
-                 repo_gitcode_token="", env_extra=None,
+                 repo_gitcode_token="", user_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
                  skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
@@ -424,6 +425,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
              agent_type or "", skill or "", skill_id or 0,
              prompt, cwd or "", runtime_session_id or "",
              event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
+             user_gitcode_token or "",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
              json.dumps(knowledge_files),
