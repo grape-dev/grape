@@ -96,8 +96,9 @@ function loadAgentTypes() {
       } else {
         renderReposFromData(repos);
       }
-    }).catch(() => {
+    }).catch(e => {
       if (cachedRepos) return; // 有缓存时静默，避免覆盖已渲染内容
+      if (e.name === 'AbortError') return; // Issue #63: abort 时不隐藏侧边栏
       console.error("[loadRepos] FAILED");
       $('sidebar').style.display = 'none';
       $('tb').style.display = 'none';
@@ -229,16 +230,15 @@ function loadAgentTypes() {
   }
 
   let _refreshTimer = null;
-  let _currentView = '';
   let _currentParam = null;
   let _hiddenSince = 0;
   // 页面从后台回到前台时，若隐藏超过 30 秒才刷新（避免短时间切换标签页频繁刷新）
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'hidden') {
       _hiddenSince = Date.now();
-    } else if (document.visibilityState === 'visible' && _currentView && _hiddenSince) {
+    } else if (document.visibilityState === 'visible' && window._currentView && _hiddenSince) {
       if (Date.now() - _hiddenSince > 60000) {
-        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(_currentView, _currentParam); }, 300);
+        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(window._currentView, window._currentParam); }, 300);
       }
       _hiddenSince = 0;
     }
@@ -264,8 +264,7 @@ function loadAgentTypes() {
       window._skillDetailFrom = (_prev && _prev.view) ? {view: _prev.view, param: _prev.param || null} : null;
     }
 
-    _currentView = view;
-    _currentParam = param;
+    window._currentParam = param;
     _pushHistory(view, param);
 
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
@@ -288,8 +287,18 @@ function loadAgentTypes() {
     pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    // Issue #63: 切 tab 时主动取消旧请求 + 设全局 signal + 停定时轮询
+    if (window._navAbortController) window._navAbortController.abort();
+    window._navAbortController = new AbortController();
+    window._navSignal = window._navAbortController.signal;
+    window._tabSignal = null;  // 重置 tab signal
+    window._currentView = view;
     // 离开任务中心时停止场景识别轮询
     if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
+    // 离开 observability 时停止定时轮询
+    if (view !== 'observability' && typeof stopObsAuto === 'function') stopObsAuto();
+    // 离开 chat 时停止飞书接入轮询
+    if (view !== 'chat' && typeof _stopOnboardPoll === 'function') _stopOnboardPoll();
     // 离开场景中心时清除编辑标志（防止 _dashboardEditing 泄漏导致重新进入时卡在加载中）
     if (view !== 'dash') window._dashboardEditing = false;
 
@@ -307,6 +316,7 @@ function loadAgentTypes() {
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
       ]).then(([dashData, scenesData]) => {
+        if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;
         dashData._scenes = scenesData.scenes || [];
@@ -314,6 +324,8 @@ function loadAgentTypes() {
         dashData._name = repo.name;
         renderDashboard(dashData);
       }).catch(e => {
+        if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+        if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中出错只 toast 不覆盖 UI；非编辑中清 loading 显示错误
         if (window._dashboardEditing) { app.showToast && app.showToast('刷新失败: ' + e.message); return; }
         pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';

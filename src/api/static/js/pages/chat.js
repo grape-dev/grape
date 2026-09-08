@@ -70,6 +70,8 @@ function renderChat(openConvId) {
   loadConversations(true);  // auto-select first
   loadSideConfig();
   setupChatStream();
+  // Issue #63: 切回来时如果有进行中的接入任务，恢复轮询
+  if (typeof _onboardTaskId !== 'undefined' && _onboardTaskId) pollOnboardStatus();
 }
 
 let _chatSkillScope = 'official';
@@ -833,6 +835,11 @@ function pollOnboardStatus() {
       _onboardTimer = null;
     }
   }, 2000);
+}
+
+// Issue #63: 导出停轮询函数供 app.nav 调用
+function _stopOnboardPoll() {
+  if (_onboardTimer) { clearInterval(_onboardTimer); _onboardTimer = null; }
 }
 
 function renderOnboardStatus(d) {

@@ -138,6 +138,7 @@ function _reloadSkills(searchInit) {
   var existingGrid = document.getElementById('all-skills');
   if (existingGrid) existingGrid.innerHTML = '<div class="scn-loading"><span class="scn-spinner"></span></div>';
   API.get('/skills' + qs).then(d => {
+    if (window._currentView !== 'skills' && window._currentView !== 'skills:' + _skillTab) return;  // stale guard
     _allSkills = d.skills || [];
     _skillTotal = d.total || _allSkills.length;
     if (existingGrid) {
@@ -152,6 +153,8 @@ function _reloadSkills(searchInit) {
       }, 100);
     }
   }).catch(e => {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'skills' && window._currentView !== 'skills:' + _skillTab) return;  // stale guard
     el.innerHTML = '<div class="error">' + (I18N.t('common.load_failed')||'加载失败') + ': ' + (e.message||'') + '</div>';
   });
 }
@@ -325,6 +328,11 @@ function _buildAgentGroups(scoped) {
 function _switchSkillTab(tab) {
   _skillTab = tab;
   _skillPage = 1;
+  // Issue #63: 页面内 tab 切换——取消旧 tab 请求 + 更新标识
+  if (window._tabAbortController) window._tabAbortController.abort();
+  window._tabAbortController = new AbortController();
+  window._tabSignal = window._tabAbortController.signal;
+  window._currentView = 'skills:' + tab;
   // 局部刷新：只重建列表区域（_renderSkillPage），不重建顶部 Tab 栏（renderSkills）
   _renderSkillPage();
   _reloadSkills();
