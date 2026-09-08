@@ -239,11 +239,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Agentic DevOps API",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
 app.add_middleware(
@@ -420,6 +420,10 @@ app.include_router(task_logs.router)
 app.include_router(knowledge.router)
 app.include_router(health.router)
 app.include_router(devstage.router)
+
+# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
+from src.api.openapi import custom_openapi
+app.openapi = lambda: custom_openapi(app)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

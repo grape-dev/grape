@@ -9,7 +9,7 @@
 """
 import os, re
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
 
@@ -343,8 +343,8 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
     return groups
 
 
-@router.get("")
-def list_knowledge(user: dict = Depends(get_current_user),
+@router.get("", operation_id="knowledge_list", summary="知识清单（项目级 + Agent 维度）")
+def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          repo: str = Query("", description="repo_key，如 gitcode:org/test 或 org/test")):
     """聚合返回项目级 + Agent 维度知识清单。"""
     if not repo:
@@ -403,11 +403,11 @@ def list_knowledge(user: dict = Depends(get_current_user),
     }
 
 
-@router.get("/content")
+@router.get("/content", operation_id="knowledge_content", summary="读取单个知识全文")
 def read_knowledge_content(repo: str = Query(""),
                                  file: str = Query(""),
                                  obs_key: str = Query(""),
-                                 user: dict = Depends(get_current_user)):
+                                 user: dict = Depends(get_current_user_or_api_key)):
     """读取单个知识全文（相对工作区仓库目录）或通过 obs_key 直接读 OBS。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
@@ -439,11 +439,11 @@ def read_knowledge_content(repo: str = Query(""),
     return {"repo_key": repo_key, "file": _file, "content": _read_file(repo_key, _file)}
 
 
-@router.get("/context")
+@router.get("/context", operation_id="knowledge_context", summary="合并注入上下文文本")
 def knowledge_context(repo: str = Query(""),
                             agent_type: str = "",
                             issue_num: int = 0,
-                            user: dict = Depends(get_current_user)):
+                            user: dict = Depends(get_current_user_or_api_key)):
     """返回合并注入上下文文本（project-info 摘要 + 共享知识三级 + 成员文档）。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
