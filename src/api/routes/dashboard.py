@@ -1072,7 +1072,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
                                      "status": derive_runtime_health(e["status"], e.get("last_seen_at"), _now),
                                      "tags": e.get("tags", []),
                                      "scope": e.get("scope", "global"),
-                                     "scope_label": _scope_labels.get(e.get("scope", "global"), "")}
+                                     "scope_label": _scope_labels.get(e.get("scope", "global"), ""),
+                                     "alias": e.get("alias", "")}
                                     for e in engines]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")

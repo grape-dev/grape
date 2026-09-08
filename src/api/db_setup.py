@@ -1637,6 +1637,10 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN probe_latency INT DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_last VARCHAR(64) DEFAULT ''",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_error TEXT DEFAULT ''",
+        # ===== 场景标签：引擎绑定的场景列表，约束可选角色标签 =====
+        "ALTER TABLE agent_runtimes ADD COLUMN scene_tags TEXT DEFAULT '[\"default\"]'",
+        # ===== 引擎别名：用户自定义别名，不受心跳覆盖 =====
+        "ALTER TABLE agent_runtimes ADD COLUMN alias TEXT DEFAULT ''",
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
@@ -2243,7 +2247,7 @@ def _migrate_tables():
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "agent_runtimes", "busy_slots", "INTEGER NOT NULL DEFAULT 0")
-            _ensure_column(c, "agent_runtimes", "max_concurrent", "INTEGER NOT NULL DEFAULT 4")
+            _ensure_column(c, "agent_runtimes", "max_concurrent", "INTEGER NOT NULL DEFAULT 20")
             _ensure_column(c, "agent_tasks", "attempts", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(c, "agent_tasks", "pool_agent_type", "TEXT DEFAULT ''")
             _ensure_column(c, "agent_tasks", "affinity_runtime_id", "INTEGER DEFAULT 0")

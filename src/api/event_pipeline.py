@@ -184,11 +184,11 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     # 构建 prompt（重派复用）
     prompt = ""
     try:
-        from src.prompt_builder import build_prompt
+        from src.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
         evt["_skill_path"] = skill_path
         evt["_skill_id"] = skill_id
-        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+        prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
     except Exception as e:
         log.warning(f"create_failed_task: prompt build failed: {e}")
@@ -1349,10 +1349,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
 
     # 4) 构建 prompt（含技能占位符化，见 skill-delivery-remote.md）
     try:
-        from src.prompt_builder import build_prompt
+        from src.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
         evt["_skill_path"] = skill_path
-        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+        prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
@@ -1703,7 +1703,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          task_id: str = ""):
     """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
     from src.runtime.executor import stream_devops_agent
-    from src.prompt_builder import build_prompt
+    from src.prompt_builder import build_devops_agent_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
         append_skipped_event,
@@ -1760,8 +1760,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     agent_name = get_agent_display_name(agent_type)
 
     try:
+        from src.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
-        prompt = build_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+        prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
         # 直接模式（direct）：组件4 统一物化 project-info / skill / knowledge 到 ws 内
         # （替代旧的「占位符替换为服务端绝对路径：仓库级 project-info 原件 / 全局 SKILLS_DIR」），
