@@ -1,4 +1,6 @@
 """grape CLI 入口：契约驱动命令 + 内置（git/api/refresh/commands/list）。"""
+import sys
+
 import click
 
 from grape_cli import __version__, config
@@ -103,6 +105,12 @@ cli.add_command(git_cmd)
 
 
 def main(*args, **kw):
+    # Windows GBK 控制台兜底：统一 UTF-8 输出，非 ASCII（如 ✅）逐字降级而非抛异常
+    try:
+        for _s in (sys.stdout, sys.stderr):
+            _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     cli(*args, **kw)
 
 
