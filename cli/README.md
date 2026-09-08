@@ -12,11 +12,12 @@ Agentic DevOps 命令行工具：**契约驱动命令生成** + `git` 本地传�
 ## 安装
 
 ```bash
-# 方式 A：从源码（仓库内 cli/）
-cd cli && pip install -e .
+# 方式 A：从源码（仓库内 cli/）——未发布前的标准安装
+cd cli && pip install -e .          # editable：改代码即生效（服务器建议此方式）
 
-# 方式 B：发布后
-pip install grape
+# 方式 B：发布到包索引后
+pip install grape                   # 需先 publish 到 PyPI/内部镜像；请求从索引下载，非仓库源码
+# ⚠️ 公有 PyPI 上已有同名第三方包，发布请用内部索引或专用命名，勿误装公有包
 
 # 方式 C：生产服务器独立 venv（与系统环境隔离）
 python3 -m venv /opt/grape-cli
