@@ -178,6 +178,9 @@ function loadAgentTypes() {
     }
     const parts = val.split('/');
     localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1]}));
+    // 同步侧边栏下拉选中项
+    const sel = $('repoSelect');
+    if (sel) sel.value = val;
     nav('dash');
   }
 
@@ -242,7 +245,7 @@ function loadAgentTypes() {
   });
   function nav(view, param) {
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -374,6 +377,9 @@ function loadAgentTypes() {
     } else if (view === 'scene-detail') {
       title.textContent = I18N.t('app.current_project');
       renderSceneDetail(param);
+    } else if (view === 'scene-detail-local') {
+      title.textContent = I18N.t('app.current_project');
+      renderSceneDetailLocal(param);
     }
   }
 
@@ -390,7 +396,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail'];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local'];
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {

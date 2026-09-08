@@ -288,6 +288,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     account           TEXT DEFAULT '',
     user_id           INTEGER DEFAULT 0,
     repo_gitcode_token TEXT DEFAULT '',
+    user_gitcode_token TEXT DEFAULT '',           -- chat 专用：用户级 GitCode token（互斥注入，不放 repo_gitcode_token）
     env_extra         MEDIUMTEXT DEFAULT '{}',    -- JSON(含服务端已注入的账号/用户凭据,见 skill-delivery-remote.md)
     skill_files       MEDIUMTEXT,    -- JSON: {skill_name: {rel_path: content}},远端交付技能包(MySQL 不允许 MEDIUMTEXT 默认值--无默认)
     server_url        TEXT DEFAULT '',      -- A2A 外呼地址,worker 替换 {{SERVER_URL}}
@@ -567,11 +568,13 @@ CREATE TABLE IF NOT EXISTS scene_market (
     content_hash VARCHAR(64) DEFAULT '',  -- 内容 hash（定时同步增量检测用）
     obs_icon_key VARCHAR(256) DEFAULT '',  -- OBS 桶 icon 对象 key（查询时动态生成签名 URL）
     is_active   INTEGER DEFAULT 1,
+    scope       VARCHAR(32) DEFAULT 'official',  -- 可见范围：official/repo
+    repo_key    VARCHAR(191) DEFAULT '',  -- 仓库标识（official 为空，repo 为当前仓库）
     created_by  VARCHAR(64) DEFAULT '',
     updated_by  VARCHAR(64) DEFAULT '',
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (name, source, source_user_id)
+    UNIQUE (name, scope, source_user_id, repo_key)
 )
 """
 
@@ -606,34 +609,33 @@ CREATE TABLE IF NOT EXISTS skill_likes (
 )
 """
 
-# ===== Issue-45: API Token 认证 =====
-# 会话级临时 token（方式 A）：存在即有效，删除即失效（无 revoked 标记位）。
-# session_key（task_id / conv_id）仅作失效定位的管理键，不是授权身份（token 设计 §2.3）。
-_SESSION_API_TOKENS_DDL = """
-CREATE TABLE IF NOT EXISTS session_api_tokens (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_key  TEXT NOT NULL,             -- 会话唯一键（task_id / conv_id），失效时精确定位
-    repo_key     TEXT NOT NULL,             -- 仓库（主作用域）
-    agent_type   TEXT NOT NULL,             -- vod/issue/coding/qa/sre/chat
-    user_id      INTEGER DEFAULT 0,         -- 仅 chat agent（用户身份）绑定；devops 事件 agent 无此概念，0=仓库身份
-    token_sha256 TEXT UNIQUE NOT NULL,      -- SHA-256
-    expires_at   TEXT NOT NULL,             -- 签发时刻 + TTL（校验超时用）
-    created_at   TEXT DEFAULT (datetime('now'))
+_UPLOADED_FILES_DDL = """
+CREATE TABLE IF NOT EXISTS uploaded_files (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_key        VARCHAR(1024) NOT NULL,      -- OBS 对象 key / 本地文件路径
+    original_name   VARCHAR(512) DEFAULT '',     -- 用户上传时的原始文件名
+    file_size       BIGINT DEFAULT 0,            -- 文件大小（字节）
+    mime_type       VARCHAR(128) DEFAULT '',     -- MIME 类型（如 image/png）
+    file_type       VARCHAR(32) DEFAULT '',      -- 文件用途类型（如 'scene_icon'，预留扩展）
+    scope           VARCHAR(16) DEFAULT 'temp',  -- 文件状态：temp（临时）/ committed（已提交）
+    ref_table       VARCHAR(64) DEFAULT '',      -- 关联业务表名（committed 时填，如 'scene_market'）
+    ref_id          INTEGER DEFAULT 0,           -- 关联业务记录 ID（committed 时填）
+    is_active       INTEGER DEFAULT 1,           -- 软删除标记（0=已删除）
+    created_by      VARCHAR(64) DEFAULT '',      -- 上传用户
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
 )
 """
 
-# 用户级长期 API Key（方式 B）：sha256 落库（不存明文），支持吊销。
-_API_TOKENS_DDL = """
-CREATE TABLE IF NOT EXISTS api_tokens (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL,                  -- 绑定单用户
-    token_sha256 TEXT UNIQUE NOT NULL,             -- SHA-256（不存明文）
-    name        TEXT DEFAULT '',                   -- token 名称（如 "ci-token-01"）
-    scopes      TEXT DEFAULT '["public"]',         -- 预留：未来 RBAC 扩展
-    created_at  TEXT DEFAULT (datetime('now')),
-    last_used_at TEXT DEFAULT NULL,
-    revoked     INTEGER DEFAULT 0,
-    UNIQUE (user_id, name)
+_DISTRIBUTED_LOCKS_DDL = """
+CREATE TABLE IF NOT EXISTS distributed_locks (
+    lock_key    VARCHAR(128) NOT NULL,          -- 锁唯一 key（如 'upload_cleanup'）
+    holder      VARCHAR(128) NOT NULL,          -- 锁持有者标识（hostname-随机hex）
+    locked_at   BIGINT       NOT NULL DEFAULT 0, -- 获取锁时间戳（秒）
+    expires_at  BIGINT       NOT NULL DEFAULT 0, -- 锁过期时间戳（秒），过期可被抢占
+    update_at   BIGINT       NOT NULL DEFAULT 0, -- 最后更新时间戳（排查用）
+    created_at  BIGINT       NOT NULL DEFAULT 0, -- 锁记录首次创建时间（排查用）
+    PRIMARY KEY (lock_key)
 )
 """
 
@@ -678,9 +680,8 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("scene_likes", _SCENE_LIKES_DDL),
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
-    # ===== Issue-45: API Token 认证 =====
-    ("session_api_tokens", _SESSION_API_TOKENS_DDL),
-    ("api_tokens", _API_TOKENS_DDL),
+    ("uploaded_files", _UPLOADED_FILES_DDL),
+    ("distributed_locks", _DISTRIBUTED_LOCKS_DDL),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -786,6 +787,10 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_scene_market_category_id ON scene_market(category_id)",
         "CREATE INDEX IF NOT EXISTS idx_scene_market_is_featured ON scene_market(is_featured)",
         "CREATE INDEX IF NOT EXISTS idx_scene_market_source ON scene_market(source)",
+        "CREATE INDEX IF NOT EXISTS idx_scene_market_scope ON scene_market(scope)",
+        "CREATE INDEX IF NOT EXISTS idx_scene_market_repo_key ON scene_market(repo_key)",
+        "CREATE INDEX IF NOT EXISTS idx_uploaded_files_scope ON uploaded_files(scope, is_active, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_uploaded_files_ref ON uploaded_files(ref_table, ref_id, is_active)",
         "CREATE INDEX IF NOT EXISTS idx_scene_skill_ref_skill_name ON scene_skill_ref(skill_name)",
         "CREATE INDEX IF NOT EXISTS idx_skill_is_featured ON skill(is_featured)",
         "CREATE INDEX IF NOT EXISTS idx_market_scene_id ON devops_pipeline_scene(market_scene_id)",
@@ -1178,6 +1183,64 @@ def _init_skill_featured():
         log.warning(f"Init skill featured failed: {e}")
 
 
+def _seed_featured_templates_from_json():
+    """从 configs/project-templates.json 种入 featured_templates 表（幂等自愈）。
+
+    Issue #56：优选项目 Tab 列表为空。根因：DB featured_templates 表为空（同步脚本
+    依赖外部 GitCode/GitHub API + 有效 token，环境里常未跑通），而 /top1000 API 直查
+    空表返回空列表 → 前端 Tab 无卡片。本函数用已随仓库发布的 JSON 兜底：仅当表为空时
+    把 gitcode-featured/github-featured 两个分类反向映射为 DB 行写入，使 API 即时返回
+    非空数据。同步脚本后续仍可 INSERT OR REPLACE 覆盖为最新真实数据。
+    """
+    try:
+        config_path = os.path.join(_CONFIG_DIR, "project-templates.json")
+        if not os.path.exists(config_path):
+            log.info("project-templates.json not found, skip featured_templates seed")
+            return
+        with db_lock:
+            c = db.cursor()
+            # 仅表为空时种入——不挡同步脚本后续 INSERT OR REPLACE，DB 被清空后下次启动自愈
+            cnt = c.execute("SELECT COUNT(*) FROM featured_templates").fetchone()[0]
+            if cnt > 0:
+                return
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        featured_cats = [cat for cat in (data.get("categories") or [])
+                         if cat.get("id") in ("gitcode-featured", "github-featured")]
+        if not featured_cats:
+            log.info("No featured categories in project-templates.json, skip seed")
+            return
+        import datetime as _dt
+        now = _dt.datetime.now().isoformat()
+        inserted = 0
+        with db_lock:
+            c = db.cursor()
+            for cat in featured_cats:
+                platform = cat.get("platform") or ("gitcode" if "gitcode" in cat.get("id", "") else "github")
+                for t in (cat.get("templates") or []):
+                    stats = t.get("stats") or {}
+                    repo_full_name = t.get("source_repo") or ""
+                    if not repo_full_name:
+                        continue
+                    c.execute(
+                        "INSERT OR REPLACE INTO featured_templates "
+                        "(platform, repo_full_name, repo_name, description, language, "
+                        "stars, forks, topics, html_url, clone_url, category, recommend_reason, fetched_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (platform, repo_full_name, t.get("name") or t.get("display_name") or "",
+                         (t.get("description") or "")[:200], stats.get("language") or "",
+                         stats.get("stars") or 0, 0,
+                         json.dumps(t.get("tags") or [], ensure_ascii=False),
+                         t.get("html_url") or "", t.get("clone_url") or "",
+                         "cloud-native", t.get("recommend_reason") or "", now)
+                    )
+                    inserted += 1
+            db.commit()
+        log.info(f"Seeded featured_templates with {inserted} items from project-templates.json")
+    except Exception as e:
+        log.warning(f"Seed featured_templates from json failed: {e}")
+
+
 def init_database():
     """初始化所有新表(幂等),启动时调用"""
     # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
@@ -1194,6 +1257,7 @@ def init_database():
                 # 迁移逻辑在同一个 with db_lock 块内——同一个连接
                 # db_lock 是 RLock（可重入）——_create_tables() 等内部 with db_lock 不会死锁
                 _create_tables()
+                _seed_featured_templates_from_json()
                 _migrate_tables()
                 _create_indexes()
                 _seed_from_json()
@@ -1218,6 +1282,7 @@ def init_database():
     else:
         # SQLite——单实例不需要锁
         _create_tables()
+        _seed_featured_templates_from_json()
         _migrate_tables()
         _create_indexes()
         _seed_from_json()
@@ -1242,7 +1307,7 @@ def init_database():
 def _sync_official_skills():
     """启动时从 configs/skill-description.json 同步官方技能到 skill 表(幂等).
 
-    与 /api/skills/sync-official 逻辑一致:新增 INSERT + 已有 UPDATE 元信息
+    与 skill_sync.sync_official_skills_to_obs 逻辑一致:新增 INSERT + 已有 UPDATE 元信息
    (display_name/description/agent_type)._seed_from_json 只补种缺失技能,
     不更新已有技能的元信息--配置文件中改名/改描述后需要此步骤同步.
     """
@@ -1573,6 +1638,10 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN probe_latency INT DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_last VARCHAR(64) DEFAULT ''",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_error TEXT DEFAULT ''",
+        # ===== 场景标签：引擎绑定的场景列表，约束可选角色标签 =====
+        "ALTER TABLE agent_runtimes ADD COLUMN scene_tags TEXT DEFAULT '[\"default\"]'",
+        # ===== 引擎别名：用户自定义别名，不受心跳覆盖 =====
+        "ALTER TABLE agent_runtimes ADD COLUMN alias TEXT DEFAULT ''",
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
@@ -1587,6 +1656,9 @@ def _migrate_tables():
         "ALTER TABLE scene_market ADD COLUMN obs_icon_key VARCHAR(256) DEFAULT ''",
         # ===== Issue-11: scene_category 加 slug（场景包 category 用 slug 引用） =====
         "ALTER TABLE scene_category ADD COLUMN slug VARCHAR(64) DEFAULT ''",
+        # ===== Issue-54: scene_market 加 scope + repo_key 列 =====
+        "ALTER TABLE scene_market ADD COLUMN scope VARCHAR(32) DEFAULT 'official'",
+        "ALTER TABLE scene_market ADD COLUMN repo_key VARCHAR(191) DEFAULT ''",
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
@@ -1607,6 +1679,13 @@ def _migrate_tables():
                 db.commit()
         except Exception:
             pass  # column already exists
+    # ===== Issue-54: scene_market UNIQUE 约束重建（方案 A）=====
+    # 旧约束 UNIQUE(name, source, source_user_id) → 新约束 UNIQUE(name, scope, source_user_id, repo_key)
+    # SQLite：表重建；MySQL：DROP INDEX + ADD UNIQUE INDEX
+    try:
+        _rebuild_scene_market_unique()
+    except Exception as e:
+        log.warning(f"Scene market unique rebuild failed: {e}")
     # 迁移 im 凭证到 im_bot_config 统一表
     try:
         with db_lock:
@@ -2159,17 +2238,18 @@ def _migrate_tables():
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "devops_pipeline_scene", "advanced_options", "TEXT DEFAULT '{}'")
+            _ensure_column(c, "devops_pipeline_scene", "created_by", "TEXT DEFAULT ''")
             db.commit()
-            log.info("Added devops_pipeline_scene.advanced_options column")
+            log.info("Added devops_pipeline_scene.advanced_options + created_by columns")
     except Exception as e:
-        log.warning(f"Add devops_pipeline_scene.advanced_options column failed: {e}")
+        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "agent_runtimes", "busy_slots", "INTEGER NOT NULL DEFAULT 0")
-            _ensure_column(c, "agent_runtimes", "max_concurrent", "INTEGER NOT NULL DEFAULT 4")
+            _ensure_column(c, "agent_runtimes", "max_concurrent", "INTEGER NOT NULL DEFAULT 20")
             _ensure_column(c, "agent_tasks", "attempts", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(c, "agent_tasks", "pool_agent_type", "TEXT DEFAULT ''")
             _ensure_column(c, "agent_tasks", "affinity_runtime_id", "INTEGER DEFAULT 0")
@@ -2310,6 +2390,7 @@ def _migrate_tables():
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "agent_tasks", "pool_engine_ids", "TEXT DEFAULT ''")
+            _ensure_column(c, "agent_tasks", "user_gitcode_token", "TEXT DEFAULT ''")
             db.commit()
         log.info("Added pool_engine_ids column to agent_tasks")
     except Exception as e:
@@ -2328,6 +2409,199 @@ def _migrate_tables():
         log.info("Added content_hash column to skill")
     except Exception as e:
         log.warning(f"Add skill.content_hash column failed: {e}")
+    # ===== Scene scope downgrade 已在 _migrate_scene_table_to_repo_model 中处理（Issue-39 方案 B）=====
+
+
+def _rebuild_scene_market_unique():
+    """Issue-54: scene_market UNIQUE 约束重建（方案 A，幂等）。
+
+    旧约束 UNIQUE(name, source, source_user_id) → 新约束 UNIQUE(name, scope, source_user_id, repo_key)
+
+    SQLite：表重建（CREATE 新表 → 复制数据 → DROP 旧表 → RENAME）
+    MySQL：DROP INDEX + ADD UNIQUE INDEX（在线 DDL）
+    """
+    from src.mysql_compat import get_db_backend
+    is_mysql = get_db_backend() == "mysql"
+
+    with db_lock:
+        c = db.cursor()
+
+        if is_mysql:
+            # MySQL：检查旧索引是否存在，存在则 DROP + ADD
+            # MySQL 的 UNIQUE 约束体现为索引，索引名取决于建表时的约束名
+            # SQLite 的 UNIQUE(name, source, source_user_id) 在 MySQL 翻译后索引名为 sqlite_autoindex_scene_market_N
+            # 需要查 information_schema 找到包含 (name, source, source_user_id) 的唯一索引
+            try:
+                c.execute(
+                    "SELECT INDEX_NAME FROM information_schema.statistics "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='scene_market' "
+                    "AND NON_UNIQUE=0 GROUP BY INDEX_NAME "
+                    "HAVING GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) = 'name,source,source_user_id'"
+                )
+                row = c.fetchone()
+                if row:
+                    old_idx = row[0]
+                    c.execute(f"ALTER TABLE scene_market DROP INDEX `{old_idx}`")
+                    db.commit()
+                    log.info(f"Scene market: dropped old unique index '{old_idx}'")
+            except Exception as e:
+                log.warning(f"Scene market: drop old unique index failed (may not exist): {e}")
+
+            # 检查新索引是否已存在
+            try:
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='scene_market' "
+                    "AND INDEX_NAME='uk_name_scope_user_repo' AND NON_UNIQUE=0"
+                )
+                if c.fetchone()[0] == 0:
+                    c.execute(
+                        "ALTER TABLE scene_market ADD UNIQUE INDEX uk_name_scope_user_repo "
+                        "(name, scope, source_user_id, repo_key)"
+                    )
+                    db.commit()
+                    log.info("Scene market: added new unique index uk_name_scope_user_repo (MySQL)")
+            except Exception as e:
+                log.warning(f"Scene market: add new unique index failed (may already exist): {e}")
+        else:
+            # SQLite：检查是否需要重建（新约束已存在则跳过）
+            # 通过检查表是否有 scope 列 + 旧唯一约束是否还在
+            cols = [r[1] for r in c.execute("PRAGMA table_info(scene_market)").fetchall()]
+            if "scope" not in cols:
+                # scope 列还没加（migrations 还没跑完），跳过
+                return
+
+            # 检查现有唯一索引：如果已有 (name, scope, source_user_id, repo_key) 就跳过
+            indices = c.execute("PRAGMA index_list(scene_market)").fetchall()
+            need_rebuild = True
+            for idx_row in indices:
+                idx_name = idx_row[1]
+                is_unique = idx_row[2]
+                if is_unique:
+                    idx_cols = [r[2] for r in c.execute(f"PRAGMA index_info({idx_name})").fetchall()]
+                    if set(idx_cols) == {"name", "scope", "source_user_id", "repo_key"}:
+                        need_rebuild = False
+                        break
+            if not need_rebuild:
+                return
+
+            # 表重建：创建临时新表 → 复制数据 → 删旧表 → 重命名
+            log.info("Scene market: rebuilding table for new UNIQUE constraint (SQLite)")
+            c.execute("ALTER TABLE scene_market RENAME TO scene_market_old")
+            c.execute(_SCENE_MARKET_DDL)
+            # 复制数据（official 场景补 scope='official', repo_key=***）
+            c.execute(
+                "INSERT INTO scene_market SELECT "
+                "id, name, display_name, version, description, market_description, "
+                "icon, category_id, is_featured, like_count, source, source_user_id, "
+                "recommended_template, nodes_json, onboarding, tags, author, "
+                "content_hash, obs_icon_key, is_active, "
+                "COALESCE(scope, 'official'), COALESCE(repo_key, ''), "
+                "created_by, updated_by, created_at, updated_at "
+                "FROM scene_market_old"
+            )
+            c.execute("DROP TABLE scene_market_old")
+            db.commit()
+            log.info("Scene market: table rebuilt with new UNIQUE constraint (SQLite)")
+
+
+def _scene_table_columns(c) -> set[str]:
+    try:
+        return {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
+    except Exception:
+        return set()
+
+
+def _cols_old_scene() -> bool:
+    """是否仍是旧结构（含 scope / user_id 列）→ 需要重建为 repo 模型。"""
+    with db_lock:
+        c = db.cursor()
+        _cols = _scene_table_columns(c)
+    return _cols and ("scope" in _cols or "user_id" in _cols)
+
+
+def _strip_repo_prefix(scene_id: str) -> str:
+    """去掉 scene_id 的 'repo:' 前缀。"""
+    return scene_id[len("repo:"):] if scene_id.startswith("repo:") else scene_id
+
+
+def _insert_repo_scene(c, scene_id: str, name: str, description: str, repo_key: str,
+                       nodes_json: str, onboarding: str = "repo-onboarding"):
+    try:
+        c.execute(
+            "INSERT OR IGNORE INTO devops_pipeline_scene_new (scene_id, name, description, repo_key, nodes_json, onboarding, is_active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,1, datetime('now'), datetime('now'))",
+            (scene_id, name, description, repo_key, nodes_json, onboarding))
+    except Exception as _e:
+        log.warning(f"Scene migrate: insert repo scene {scene_id}@{repo_key} failed: {_e}")
+
+
+def _migrate_scene_table_to_repo_model():
+    """Issue-39 方案 B：devops_pipeline_scene 重建为「场景只与仓库关联」模型（幂等）。
+
+    - 旧表含 scope/user_id 列 → 重建为新表（无 scope/user_id，UNIQUE(scene_id, repo_key)）
+    - 存量数据搬移：
+      * scope='repo'：保留，scene_id 去 'repo:' 前缀，repo_key 保留
+      * scope='user'：经 user_repos 反查所属仓库（repo_key）并入；孤儿（查不到仓库）丢弃
+      * scope='official'：官方模板不保留在场景表（官方场景走 scene_market），跳过
+    - 幂等：新表已重建（无 scope 列）则跳过
+    """
+    if not _cols_old_scene():
+        return
+    with db_lock:
+        c = db.cursor()
+        old_rows = c.execute(
+            "SELECT scene_id, name, description, scope, repo_key, user_id, nodes_json, onboarding, is_active "
+            "FROM devops_pipeline_scene").fetchall()
+        # user scope → repo_key 反查（user_repos）
+        repo_of_user = {}
+        try:
+            for ur in c.execute("SELECT user_id, repo_key FROM user_repos").fetchall():
+                repo_of_user.setdefault(ur[0], set()).add(ur[1])
+        except Exception:
+            pass
+        # 建新表（临时名 → 数据搬移 → 替换）
+        c.execute("DROP TABLE IF EXISTS devops_pipeline_scene_new")
+        c.execute("""
+CREATE TABLE devops_pipeline_scene_new (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_id    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    display_name TEXT DEFAULT '',
+    repo_key    TEXT NOT NULL DEFAULT '',
+    nodes_json  TEXT DEFAULT '[]',
+    onboarding  TEXT DEFAULT 'repo-onboarding',
+    is_active   INTEGER DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (scene_id, repo_key)
+)""")
+        _moved_repo = 0
+        _moved_user = 0
+        _dropped = 0
+        for sid, name, desc, scope, rk, uid, nodes, onboarding, active in old_rows:
+            nodes = nodes or "[]"
+            onboarding = onboarding or "repo-onboarding"
+            if scope == "repo":
+                _insert_repo_scene(c, _strip_repo_prefix(sid), name, desc, rk or "", nodes, onboarding)
+                _moved_repo += 1
+            elif scope == "user":
+                _rk_set = repo_of_user.get(uid) or set()
+                if _rk_set:
+                    for _rk in _rk_set:
+                        _insert_repo_scene(c, _strip_repo_prefix(sid), name, desc, _rk, nodes, onboarding)
+                    _moved_user += 1
+                else:
+                    _dropped += 1  # 孤儿 user 场景（无归属仓库），丢弃
+            else:  # official：官方模板不保留
+                _dropped += 1
+        # 替换旧表
+        c.execute("DROP TABLE devops_pipeline_scene")
+        c.execute("ALTER TABLE devops_pipeline_scene_new RENAME TO devops_pipeline_scene")
+        db.commit()
+        log.info(
+            f"Scene table migrated to repo model: repo_in={_moved_repo} user_in={_moved_user} dropped={_dropped}")
 
 
 def _seed_official_scene_market_from_pipelines():

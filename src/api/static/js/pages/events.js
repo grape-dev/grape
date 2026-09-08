@@ -75,7 +75,8 @@ function renderEventDetail(data) {
   const _ctxSummary = `${data.event_type || '—'} · ${data.actor || '—'}`;
   const _infoSummary = `${data.status === 'completed' ? '✅' : data.status === 'failed' ? '❌' : '⏳'} ${data.duration ? data.duration + 's' : '—'}`;
 
-  const html = `<button class="bt bt-o bt-s" onclick="app.nav('${agent}')" style="margin-bottom:12px">← ${agentName}</button>
+  // 返回按钮：用 history.back() 返回上一个页面
+  const html = `<button class="bt bt-o bt-s" onclick="window.history.back()" style="margin-bottom:12px">← ${I18N.t('common.back')||'返回'}</button>
   <div id="evDetailGrid" style="display:grid;grid-template-columns:1fr;gap:14px;height:calc(100vh - 160px);overflow:hidden">
     <!-- 左栏大框：导航 + 可折叠区块 + 处理记录+答复结论 -->
     <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">

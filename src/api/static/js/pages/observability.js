@@ -84,7 +84,10 @@ function refreshObs(isAutoRefresh) {
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
   const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
   Promise.all([
-    API.get('/dashboard/ops/overview' + repoParam).catch(() => null),
+    API.get('/dashboard/ops/overview' + repoParam).catch(e => {
+      console.warn('ops/overview failed:', e);
+      return null;
+    }),
     fetch('/health/realtime', {signal: AbortSignal.timeout(10000)}).then(r => r.json()).catch(() => null),
     // fetch('/metrics').then(r => r.text()).catch(() => null),  // metrics 数据当前未使用，注释掉避免无用请求
   ]).then(([ops, realtime]) => {

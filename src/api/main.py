@@ -118,6 +118,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Scene sync scheduler start failed: {e}")
 
+    # 临时上传文件定时清理：每小时清理超过 24 小时的孤儿文件（Issue-54）
+    try:
+        from src.storage.upload_cleanup import start_upload_cleanup_scheduler
+        start_upload_cleanup_scheduler()
+    except Exception as e:
+        log.warning(f"Upload cleanup scheduler start failed: {e}")
+
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
     _probe_task = None

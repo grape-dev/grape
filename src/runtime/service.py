@@ -128,6 +128,7 @@ _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
     "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
+    "user_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
     "status, exit_code, result_text, errors, stderr, "
@@ -310,7 +311,7 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
 
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
-                 repo_gitcode_token="", env_extra=None,
+                 repo_gitcode_token="", user_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
                  skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
@@ -439,6 +440,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
              agent_type or "", skill or "", skill_id or 0,
              prompt, cwd or "", runtime_session_id or "",
              event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
+             user_gitcode_token or "",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
              json.dumps(knowledge_files),
@@ -876,16 +878,15 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             owner_id = row[2] or ""
             owner_name = row[3] or ""
 
-            # 2. 并发槽检查
+            # 2. 引擎级并发槽检查（方案一：标签只做路由，并发纯引擎级）
+            # 废弃 engine_capabilities.max_concurrent，统一走 agent_runtimes.max_concurrent
             c.execute(
-                "SELECT ec.max_concurrent, "
-                "(SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')) "
-                "FROM engine_capabilities ec WHERE ec.runtime_id=? AND ec.enabled=1 AND (ec.tag=? OR ec.tag='all')",
-                (runtime_id, runtime_id, tag)
+                "SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?",
+                (runtime_id,)
             )
-            cap_row = c.fetchone()
-            if cap_row and cap_row[1] >= cap_row[0]:
-                return None  # 已满载
+            rt_row = c.fetchone()
+            if rt_row and rt_row[0] >= rt_row[1]:
+                return None  # 引擎已满载
 
             # 3. 构建任务查询（加 scope 过滤）
             # tag="all" → 匹配任意 pool_tag（广播）；其他 tag → 精确匹配 pool_tag
@@ -1321,40 +1322,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                 log.info(f"Task {task_id}: business failure detected "
                          f"(agent={task.get('agent_type')}), overriding exit_code to 1")
 
-            # 完成度校验：exit_code=0 但无结构化产出 → LLM 提前 end_turn
-            # coding/qa/sre/issue agent 正常完成应有 actions/conclusion/issue_summary JSON 块
-            # 没有则说明 LLM 提前 end_turn，未执行完任务
-            _agent_type = task.get("agent_type") or ""
-            if exit_code == 0 and not output and _agent_type in ("coding", "qa", "sre", "issue"):
-                _attempts = (task.get("attempts") or 0)
-                if _attempts < 49:
-                    log.warning(
-                        f"Task {task_id}: premature end_turn (no structured output, "
-                        f"agent={_agent_type}, attempt={_attempts+1}/50), requeueing")
-                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 结束但无结构化产出，疑似 LLM 提前 end_turn，自动重试"
-                    update_task_status(task_id, "queued", started_at=None,
-                                       result_text=result_text,
-                                       usage_json=json.dumps(usage or {}))
-                    # 释放槽位 + attempts+1
-                    with db_lock:
-                        c2 = db.cursor()
-                        c2.execute("UPDATE agent_tasks SET attempts=attempts+1, "
-                                   "runtime_id=0, started_at=NULL, status='queued' "
-                                   "WHERE id=?", (task_id,))
-                        if task.get("runtime_id"):
-                            c2.execute(
-                                "UPDATE agent_runtimes SET busy_slots = CASE "
-                                "WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END "
-                                "WHERE id=?", (task.get("runtime_id"),))
-                        db.commit()
-                    log.info(f"Task {task_id}: requeued for retry (attempt={_attempts+1})")
-                    return
-                else:
-                    log.warning(
-                        f"Task {task_id}: premature end_turn, max retries exceeded "
-                        f"(attempt={_attempts}/50), marking failed")
-                    exit_code = 1
-                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 多次结束但无结构化产出，已达最大重试次数(50)"
+            # exit_code=0 但无结构化产出 → 接受 hermes 的 end_turn 结果，直接 completed
+            # （旧逻辑会 requeue 最多49次，导致重复评论污染；现改为不重试）
 
             status = "completed" if exit_code == 0 else "failed"
             duration = None

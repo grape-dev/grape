@@ -47,14 +47,9 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     return "http://localhost:8080"
 
 
-def _build_history_file_guide(repo_key: str = "", account: str = "", runtime_id: int = 0) -> str:
-    """已废弃：Chat Agent 历史上下文由引擎 --continue 会话机制承载，
-    DevOps Agent 上下文由事件 payload + A2A context 承载，不再通过文件列表引导 Agent 读取历史。
-    """
-    return ""
-
-
 _PROJECT_INFO_MAX_CHARS = 2500
+
+_CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
 
 
 def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
@@ -75,7 +70,6 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
         if agent_type:
             lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
             lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
-        _inject_vod_scenes(lines, agent_type, repo_key)
         return "\n".join(lines)
     _meta = meta or {}
     if _meta.get("degraded"):
@@ -95,28 +89,29 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
     if agent_type:
         lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
         lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
-    _inject_vod_scenes(lines, agent_type, repo_key)
     return "\n".join(lines)
 
 
-def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
+def _build_vod_scenes_section(agent_type: str, repo_key: str = "") -> str:
     """VOD 专属：注入该仓库可用开发场景列表（issue-39 方案 B：场景只与仓库关联）。
+
+    独立于项目知识基线——即使项目知识加载异常，VOD 场景列表也不受影响。
 
     - 场景候选 = get_scenes(repo_key)（scope 仅仓库级）
     - 无「default」场景；仓库无任何场景时 VOD 需输出「未配置场景」终止信号。
     """
     if agent_type != "vod":
-        return
+        return ""
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
         scenes = get_scenes(repo_key=repo_key)
+        lines = []
         if not scenes:
-            # 方案 B：仓库无任何配置场景 → VOD 直接终止
             lines.append("")
             lines.append("> ⚠️ 该仓库**未配置任何开发场景**：请立即终止处理。")
-            lines.append("> 在最终 JSON 产出块中输出：`{\"terminate\": true, \"reason\": \"未配置场景\"}`。")
+            lines.append('> 在最终 JSON 产出块中输出：`{"terminate": true, "reason": "未配置场景"}`。')
             lines.append("> 不要继续分析需求、不要给出 recommended_scene（没有 default 场景）。")
-            return
+            return "\n".join(lines)
         lines.append("\n## 可用开发场景（该仓库已配置，请根据需求特征从中选择）")
         lines.append("| scene_id | 名称 | 技能链 | 来源 |")
         lines.append("|----------|------|--------|------|")
@@ -159,17 +154,27 @@ def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
         lines.append("- **没有 `default` 场景**：禁止输出 `\"default\"`。")
         lines.append("- 无法确定时 `recommended_scene` 填该仓库当前默认场景，不得省略。")
         lines.append("- 注意：系统会根据用户设置决定是否采纳你的推荐，未采纳时保持仓库默认场景不变。")
+        return "\n".join(lines)
     except Exception as _e:
         from src.config import log as _log
         _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")
+        return ""
+
+
+_advanced_options_cache: dict = {}  # repo_key -> (options_str, timestamp)
 
 
 def _build_scene_advanced_options(repo_key: str) -> str:
     """注入场景高级选项：工作分支 + 自定义配置（仅执行类 agent coding/qa/sre）。
 
     读取 managed_repos.dev_scene → devops_pipeline_scene.advanced_options JSON，
-    拼装为 prompt 段落。无配置时返回空串。
+    拼装为 prompt 段落。无配置时返回空串。60s TTL 内存缓存减少 DB 查询。
     """
+    import time as _time
+    now = _time.time()
+    cached = _advanced_options_cache.get(repo_key)
+    if cached and now - cached[1] < 60:
+        return cached[0]
     try:
         from src.session_manager import db, db_lock
         # 1. 读 managed_repos.dev_scene 拿当前场景 scene_id
@@ -206,7 +211,9 @@ def _build_scene_advanced_options(repo_key: str) -> str:
                 _v = f.get("value", "")
                 if _k:
                     lines.append(f"  - {_k}: {_v}")
-        return "\n".join(lines) if len(lines) > 1 else ""
+        result = "\n".join(lines) if len(lines) > 1 else ""
+        _advanced_options_cache[repo_key] = (result, now)
+        return result
     except Exception as _e:
         from src.config import log as _log
         _log.warning(f"prompt_builder: inject advanced options failed: {_e}")
@@ -399,6 +406,86 @@ def extract_event_number(payload):
     return None
 
 
+_agent_registry_cache: dict = {}
+_agent_registry_mtime: float = 0.0
+
+
+def _load_agent_registry() -> dict:
+    """加载 A2A 协议配置（mtime 缓存，文件未变时不重复读盘）。"""
+    global _agent_registry_cache, _agent_registry_mtime
+    agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
+    if not os.path.isfile(agents_file):
+        return {}
+    try:
+        mtime = os.path.getmtime(agents_file)
+        if _agent_registry_cache and mtime == _agent_registry_mtime:
+            return _agent_registry_cache
+        with open(agents_file, encoding="utf-8") as f:
+            _agent_registry_cache = json.load(f)
+            _agent_registry_mtime = mtime
+            return _agent_registry_cache
+    except Exception:
+        return _agent_registry_cache or {}
+
+
+def _build_output_contract() -> str:
+    """处理记录输出要求 + 行为约束（所有 DevOps agent 共用，见 agent-runtime-event-full-design.md §8）。
+
+    包含：JSON 契约、任务结束规则、内部思考 vs 对外结论分离、评论内容边界、发布前自检。
+    """
+    return """
+## 处理记录输出要求
+
+完成当前任务后，在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
+
+{
+  "actions": ["做了什么，如 labeled:bug / assigned:@bob / 提交了PR / 发布了审查评论"],
+  "conclusion": "处理结论/分析结果（简要）",
+  "artifacts": ["产生的产物：PR#N / 评论 / 标签 / 部署 / Issue"],
+  "next_step": "下一步建议；如需交办其他 Agent 则说明调用 A2A 的目标",
+  "issue_summary": "Issue 最新聚合结论（覆盖档案 summary；紧凑文本，用 | 分隔）"
+}
+
+注意：
+- 只输出一个 JSON 块，放在答复末尾。
+- JSON 块必须保持纯 JSON 结构，不得与叙述混排，且只能是最终答复末尾唯一的追加内容。
+- 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造。
+- `issue_summary` 应反映截至当前链尾的最新状态，供下游 Agent 快速浏览。
+
+## 任务结束
+
+完成所有业务动作（发评论 / 打标签 / 交办 A2A / 提交 PR 等）后，输出上述最终 JSON 块并**结束任务**。
+不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
+
+⚠️ 思考过程禁止出现在对外输出：任何思考过程叙述（如"让我…""现在我…""Let me…""Now I…"）
+只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 GitCode 评论 body 中。
+最终答复只输出：动作结果结论 + 处理记录 JSON 块。
+
+## 内部思考 vs 对外结论（必须分清）
+
+内部思考（只存在于思考/工具调用过程，绝不进最终答复与评论）：
+  ❌ "让我分析一下这个问题……"   ❌ "现在我理解了代码库……"
+  ❌ "我需要先获取环境变量……"   ❌ "Let me analyze the Issue……"
+  ❌ "Now I have a thorough understanding……"
+
+对外结论（最终答复与评论唯一允许的正文）：
+  ✅ "已定位 #38 泄漏根因：result_text 一鱼两吃导致 JSON 块入评。"
+  ✅ "完成：分类=bug，标签=bug/P1，已 A2A 交办 coding。"
+
+规则：最终答复/评论中的每个句子，都必须能在"给用户看的提交记录"里站得住——只陈述完成的事与结果。
+
+⚠️ 评论内容边界（必须遵守）：发评论时，body 只保留 [角色名 Agent] 前缀 +
+对外结论（做了什么 / 结果 / 下一步 / 必要的原文引用）。
+禁止把思考过程（"让我…""现在…""我需要先…"这类叙述）、
+处理记录 JSON 块（actions/conclusion/...）以及任何 HTML 注释标记
+（如 <!-- xxx -->）写进评论正文。处理记录 JSON 只放在最终答复末尾供系统
+存档，绝不通过评论 API 发送。
+
+⚠️ 发布前自检：把评论 body 当作**对外发布文案**朗读一遍，
+出现任何"我"的思考叙述即为不合格，改写后再发布。
+"""
+
+
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
                  agent_type=""):
     number = extract_event_number(evt['payload'])
@@ -476,8 +563,12 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     # 优先用 evt 里已有的 repo_key（A2A 事件 source='a2a' 会导致拼接错误）
     repo_key = evt.get("repo_key") or f"{evt['source']}:{evt['repository']}"
     account = evt.get("account") or evt.get("repository", "")
-    parts.append(_build_history_file_guide(repo_key, account, runtime_id))
     parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else "")))
+
+    # VOD 场景列表（独立于项目知识基线，避免项目知识异常时场景列表消失）
+    _vod_scenes = _build_vod_scenes_section(agent_type, repo_key)
+    if _vod_scenes:
+        parts.append(_vod_scenes)
 
     # 场景高级选项注入（仅执行类 agent：coding/qa/sre）
     if agent_type in ("coding", "qa", "sre"):
@@ -526,14 +617,8 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
 
     parts.append(build_role_definition(skills, agent_type=agent_type))
 
-    # A2A protocol instructions + available agents
-    try:
-        agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
-        if os.path.isfile(agents_file):
-            with open(agents_file, encoding="utf-8") as f:
-                agent_registry = json.load(f)
-    except Exception:
-        agent_registry = {}
+    # A2A protocol instructions + available agents（mtime 缓存，避免每次构建 prompt 读文件）
+    agent_registry = _load_agent_registry()
     if agent_registry:
         parts.append("\n## Agent-to-Agent 协议\n")
         parts.append("当你需要调用其他 Agent 时，从下表中选择最合适的：\n")
@@ -608,66 +693,7 @@ context 是传给下一个 Agent 的接力说明，应包含：
     if _role_rule:
         parts.append(_role_rule)
 
-    # M1 结构化产出契约（所有 skill 生效，一处维护，见 agent-runtime-event-full-design.md §8）
-    parts.append("""
-## 处理记录输出要求
-
-完成当前任务后，在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
-
-{
-  "actions": ["做了什么，如 labeled:bug / assigned:@bob / 提交了PR / 发布了审查评论"],
-  "conclusion": "处理结论/分析结果（简要）",
-  "artifacts": ["产生的产物：PR#N / 评论 / 标签 / 部署 / Issue"],
-  "next_step": "下一步建议；如需交办其他 Agent 则说明调用 A2A 的目标",
-  "issue_summary": "Issue 最新聚合结论（覆盖档案 summary；紧凑文本，用 | 分隔）"
-}
-
-注意：
-- 只输出一个 JSON 块，放在答复末尾。
-- JSON 块必须保持纯 JSON 结构，不得与叙述混排，且只能是最终答复末尾唯一的追加内容。
-- 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造。
-- `issue_summary` 应反映截至当前链尾的最新状态，供下游 Agent 快速浏览。
-
-## 任务结束
-
-完成所有业务动作（发评论 / 打标签 / 交办 A2A / 提交 PR 等）后，输出上述最终 JSON 块并**结束任务**。
-不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
-
-## 执行纪律
-
-你必须在单个对话轮次内完成全部操作：读取文件 → 分析 → 执行动作
-（发评论/加标签/A2A 交办等）→ 输出处理记录 JSON → 结束。
-
-⚠️ 必须调用工具执行实际动作：发评论用 execute_code 调 GitCode API，
-不要只输出评论内容就 end_turn。
-
-⚠️ 思考过程禁止出现在对外输出：任何思考过程叙述（如"让我…""现在我…""Let me…""Now I…"）
-只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 GitCode 评论 body 中。
-最终答复只输出：动作结果结论 + 处理记录 JSON 块。
-
-## 内部思考 vs 对外结论（必须分清）
-
-内部思考（只存在于思考/工具调用过程，绝不进最终答复与评论）：
-  ❌ "让我分析一下这个问题……"   ❌ "现在我理解了代码库……"
-  ❌ "我需要先获取环境变量……"   ❌ "Let me analyze the Issue……"
-  ❌ "Now I have a thorough understanding……"
-
-对外结论（最终答复与评论唯一允许的正文）：
-  ✅ "已定位 #38 泄漏根因：result_text 一鱼两吃导致 JSON 块入评。"
-  ✅ "完成：分类=bug，标签=bug/P1，已 A2A 交办 coding。"
-
-规则：最终答复/评论中的每个句子，都必须能在"给用户看的提交记录"里站得住——只陈述完成的事与结果。
-
-⚠️ 评论内容边界（必须遵守）：发评论时，body 只保留 [角色名 Agent] 前缀 +
-对外结论（做了什么 / 结果 / 下一步 / 必要的原文引用）。
-禁止把思考过程（"让我…""现在…""我需要先…"这类叙述）、
-处理记录 JSON 块（actions/conclusion/...）以及任何 HTML 注释标记
-（如 <!-- xxx -->）写进评论正文。处理记录 JSON 只放在最终答复末尾供系统
-存档，绝不通过评论 API 发送。
-
-⚠️ 发布前自检：把评论 body 当作**对外发布文案**朗读一遍，
-出现任何"我"的思考叙述即为不合格，改写后再发布。
-""")
+    parts.append(_build_output_contract())
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
 
@@ -779,7 +805,7 @@ Your token is available as the USER_GITCODE_TOKEN environment variable.
 Never print or reveal the token value.
 """)
     repo_note = f" (in {repo_key})" if repo_key else ""
-    parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
+    parts.append(f"\nUser{repo_note}: {message}{_CHAT_PROMPT_SUFFIX}")
     return "\n".join(parts)
 
 
@@ -951,5 +977,4 @@ def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
 
 # Backward-compat aliases (see docs/new-version2/chat-prompt-overview.md for new names)
 build_chat_prompt = build_general_chat_prompt  # deprecated: use build_general_chat_prompt
-build_prompt = build_devops_agent_prompt        # deprecated: use build_devops_agent_prompt
 build_conversation_prompt = build_event_chat_prompt  # deprecated: use build_event_chat_prompt

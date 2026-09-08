@@ -391,35 +391,40 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                     " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                    " COALESCE(r.alias,'')"
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
                 # 本机引擎（credential_id=0）对所有人可见
                 c.execute(
                     "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1),"
+                    " COALESCE(alias,'')"
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             elif scope == "user":
                 if username:
                     c.execute(
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                        " COALESCE(r.alias,'')"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' AND rc.owner_name=? ORDER BY r.id", (username,))
                 else:
                     c.execute(
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                        " COALESCE(r.alias,'')"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
             else:
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                     " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                    " COALESCE(r.alias,'')"
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='global' AND rc.status='active' ORDER BY r.id")
             rows = c.fetchall()
@@ -447,5 +452,6 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
             "owner_id": r[9] or "",
             "scope": scope,
             "tags": [t.strip() for t in (r[10] or "").split(",") if t.strip()],
+            "alias": r[11] or "",
         })
     return out

@@ -1,14 +1,14 @@
 """官方技能 OBS 自动同步模块（official-skill-obs-sync-design.md）。
 
 职责：
-1. 扫描本地 skills/<agent_type>/<skill>/ 目录，计算 content_hash
-2. hash 变了 → 打包 zip → 上传 OBS → 更新 DB file_path + content_hash
+1. 从 skill-description.json 同步技能元信息到 DB（INSERT/UPDATE）
+2. 扫描本地 skills/<agent_type>/<skill>/ 目录，计算 content_hash
+3. hash 变了 → 打包 zip → 上传 OBS → 更新 DB file_path + content_hash
 
 触发方式：
-- asyncio 定时任务（OBS 模式，每 30 分钟）
-- 手动触发（admin 页面"同步官方技能"按钮 → sync_official_skills API）
+- asyncio 定时任务（OBS 模式，每 30 分钟，启动即执行）
 
-非 OBS 模式（storage=None）：定时调度不启动，手动触发时只更新 DB content_hash。
+非 OBS 模式（storage=None）：定时调度不启动。
 
 不处理删除——保持和原有 DB 同步逻辑一致（只加不删，以 skill-description.json 为权威）。
 """
@@ -80,6 +80,38 @@ async def sync_official_skills_to_obs() -> dict:
 
     storage = get_storage()
     result = {"added": 0, "updated": 0, "skipped": 0}
+
+    # 1. DB 同步：从 skill-description.json INSERT/UPDATE 元信息（与 db_setup._sync_official_skills 逻辑一致）
+    from src.session_manager import db as _db, db_lock as _db_lock
+    with _db_lock:
+        c = _db.cursor()
+        for skill_name, info in data.items():
+            display_name = info.get("name", skill_name)
+            description = info.get("description", "")
+            agent_type = info.get("agent_type", "")
+            skill_path_val = info.get("path", skill_name)
+            existed = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'", (skill_name,)).fetchone()[0]
+            if existed:
+                _fp = c.execute(
+                    "SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''",
+                    (skill_name,)
+                ).fetchone()
+                if _fp:
+                    c.execute(
+                        "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, skill_name)
+                    )
+                else:
+                    c.execute(
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, skill_path_val, skill_name)
+                    )
+            else:
+                c.execute(
+                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash) VALUES (?,?,?,?,?,'official','',?)",
+                    (skill_name, display_name, description, agent_type, skill_path_val, "")
+                )
+        _db.commit()
 
     for skill_name, info in data.items():
         skill_path = info.get("path", skill_name)

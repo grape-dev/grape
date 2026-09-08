@@ -198,32 +198,19 @@ class HermesACPBackend:
                 _text_buf.append(content)
                 if "\n" in content or sum(len(s) for s in _text_buf) >= _BUF_MAX:
                     _flush_text()
-                    # 内容兜底：检测处理记录 JSON 块（grape agent 任务完成标志）
-                    # hermes ACP 有时不发 turn_end/response，但输出里含 JSON 记录
-                    # JSON 可能被拆成多条 chunk，检查 collected_text 尾部全部内容
-                    # ⚠️ 必须确认 JSON 已输出完整（含闭合 }）才触发 prompt_done，
-                    # 否则会截断 JSON 输出导致 parse_agent_output_json 解析失败
-                    if not prompt_done.is_set():
-                        _recent = "".join(collected_text[-20:])
-                        if _detect_structured_output(_recent) and "}" in _recent:
-                            log.info(f"{label}hermes ACP detected complete JSON record in text output, assuming prompt done")
+                    # chat 任务不输出 JSON 记录块，用 text 输出稳定检测：
+                    # 记录首次有 text 的时间，连续 _CHAT_IDLE_SECONDS 无新 text → 认为已完成
+                    if _is_chat_task and collected_text and not prompt_done.is_set():
+                        nonlocal _chat_first_text_time, _chat_last_text_time
+                        if _chat_first_text_time == 0:
+                            _chat_first_text_time = time.time()
+                        _chat_last_text_time = time.time()
+                        _chat_stable = (time.time() - _chat_first_text_time) >= _CHAT_STABLE_SECONDS
+                        _chat_idle = (time.time() - _chat_last_text_time) >= _CHAT_IDLE_SECONDS
+                        if _chat_stable and _chat_idle:
+                            log.info(f"{label}hermes ACP chat task text stable for {_CHAT_IDLE_SECONDS}s, assuming done")
                             prompt_result["stopReason"] = "end_turn"
                             prompt_done.set()
-                            # 多步模式：不 close stdin，让外层循环判断是否续步
-                        elif _is_chat_task and collected_text:
-                            # chat 任务不输出 JSON 记录块（actions/conclusion/issue_summary），
-                            # 用 text 输出稳定检测：记录首次有 text 的时间，
-                            # 连续 _CHAT_STABLE_SECONDS 无新 text 输出 → 认为已完成
-                            nonlocal _chat_first_text_time, _chat_last_text_time
-                            if _chat_first_text_time == 0:
-                                _chat_first_text_time = time.time()
-                            _chat_last_text_time = time.time()
-                            _chat_stable = (time.time() - _chat_first_text_time) >= _CHAT_STABLE_SECONDS
-                            _chat_idle = (time.time() - _chat_last_text_time) >= _CHAT_IDLE_SECONDS
-                            if _chat_stable and _chat_idle:
-                                log.info(f"{label}hermes ACP chat task text stable for {_CHAT_IDLE_SECONDS}s, assuming done")
-                                prompt_result["stopReason"] = "end_turn"
-                                prompt_done.set()
             elif msg_type == "thinking":
                 _think_buf.append(content)
                 if "\n" in content or sum(len(s) for s in _think_buf) >= _BUF_MAX:
@@ -312,325 +299,141 @@ class HermesACPBackend:
 
             log.info(f"{label}hermes ACP initialized")
 
-            # ── 2. 新进程重试循环：检查任务是否真做完，没做完开新进程重试 ──
-            # 与 opencode 的进程内循环不同，hermes ACP 收到 end_turn 就结束。
-            # 同 session 内发第二个 prompt 会被 Hermes 当作"纠正消息"（agent 回
-            # "Redirected the active turn" 然后不干活）。所以检查到没做完时，
-            # 关掉旧进程，开新进程新 session，把"你上次说了要做什么但没做"作为
-            # 新 prompt 发过去，agent 会当作新任务指令执行。
-            MAX_ATTEMPTS = 50
-            _global_start = time.time()
-            _global_timeout = max_exec_seconds * 2
-            _final_stop_reason = ""
-            _final_exit_code = 0
-            attempt = 0
-            _prev_text_summary = ""  # 上一步 text 输出摘要（用于构建 continuation prompt）
-            _consecutive_no_tool = 0  # 连续无 tool_use 的步数（空步检测）
-
-            for attempt in range(1, MAX_ATTEMPTS + 1):
-                # 全局超时检查
-                if time.time() - _global_start > _global_timeout:
-                    log.warning(f"{label}hermes ACP global timeout ({_global_timeout}s) exceeded at attempt {attempt}")
-                    _final_stop_reason = "timeout"
-                    break
-
-                # attempt > 1：关闭旧进程，启动新进程
-                if attempt > 1:
-                    # 关闭旧进程
-                    try:
-                        proc.stdin.close()
-                    except Exception:
-                        pass
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        _terminate_proc(proc, f"{label}hermes ACP")
-                    reader_thread.join(timeout=3)
-
-                    # 启动新进程（复用 iso_home overlay；_acp_cmd 含 bwrap 包装，见首次启动）
-                    proc = subprocess.Popen(
-                        _acp_cmd,
-                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        cwd=cwd, env=proc_env, bufsize=0, **_popen_kwargs
-                    )
-                    _res.track_proc(proc)
-                    reader_done.clear()
-                    event_queue.clear()
-                    assert proc.stdout is not None and proc.stdin is not None
-
-                    # 重建 reader 线程
-                    _fd = proc.stdout.fileno()
-                    _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
-                    _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | os.O_NONBLOCK)
-                    _read_buf = b""
-
-                    def _reader():
-                        nonlocal _read_buf
-                        try:
-                            while True:
-                                readable, _, _ = _select.select([_fd], [], [], 0.5)
-                                if not readable:
-                                    if proc.poll() is not None:
-                                        break
-                                    continue
-                                try:
-                                    chunk = proc.stdout.read(4096)
-                                except (BlockingIOError, OSError):
-                                    continue
-                                if not chunk:
-                                    break
-                                _read_buf += chunk
-                                while b"\n" in _read_buf:
-                                    line, _read_buf = _read_buf.split(b"\n", 1)
-                                    line_str = line.decode("utf-8", errors="replace").strip()
-                                    if not line_str:
-                                        continue
-                                    try:
-                                        client.handle_line(line_str)
-                                    except Exception as e:
-                                        log.warning(f"{label}hermes ACP handle_line error: {e}")
-                        except Exception as e:
-                            log.warning(f"{label}hermes ACP reader exception: {e}")
-                        finally:
-                            reader_done.set()
-                            log.info(f"{label}hermes ACP reader EOF")
-
-                    reader_thread = threading.Thread(target=_reader, daemon=True)
-                    reader_thread.start()
-
-                    # 重新 initialize + session/resume（恢复上下文）
-                    init_result, init_err = client.request("initialize", {
-                        "protocolVersion": 1,
-                        "clientInfo": {"name": "grape-agent", "version": "0.1.0"},
-                        "clientCapabilities": {},
+            # ── 2. session/new 或 session/resume ──
+            yield ("step_start", "Step 1 started (session: ACP)")
+            cwd_arg = cwd if cwd else "."
+            if session_id:
+                from src.runtime.context_compaction import check_state_db_size
+                _skip_resume = check_state_db_size(iso_home, threshold_mb=50.0)
+                if _skip_resume:
+                    log.warning(f"{label}hermes ACP state.db too large, skipping resume to avoid context overflow")
+                    session_id = ""
+                    result, err = client.request("session/new", {
+                        "cwd": cwd_arg, "mcpServers": [],
                     }, timeout=100)
-                    if init_err:
-                        error_events.append(f"re-init failed: {init_err}")
-                        break
-
-                    # 优先 session/resume 恢复上一步的对话上下文
-                    # （读过的 SKILL.md、查过的 Issue 详情、分析结果都在 state.db 中）
-                    # resume 失败时回退 session/new
-                    _resume_sid = new_session_id  # attempt 1 返回的 session_id
+                else:
                     result, err = client.request("session/resume", {
-                        "cwd": cwd if cwd else ".",
-                        "sessionId": _resume_sid,
-                        "mcpServers": [],
+                        "cwd": cwd_arg, "sessionId": session_id, "mcpServers": [],
+                    }, timeout=100)
+                if err:
+                    log.warning(f"{label}hermes ACP resume {session_id[:12]}... failed: {err}, creating new")
+                    result, err = client.request("session/new", {
+                        "cwd": cwd_arg, "mcpServers": [],
                     }, timeout=100)
                     if err:
-                        log.warning(f"{label}hermes ACP retry attempt {attempt}: resume {_resume_sid[:12]}... failed: {err}, creating new")
-                        result, err = client.request("session/new", {
-                            "cwd": cwd if cwd else ".",
-                            "mcpServers": [],
-                        }, timeout=100)
-                        if err:
-                            error_events.append(f"re-session/new failed: {err}")
-                            break
-                    _resumed_sid = _extract_session_id(result) or ""
-                    # resume 可能返回新 session_id（fork），也可能保持原 ID
-                    if _resumed_sid and _resumed_sid != _resume_sid:
-                        log.info(f"{label}hermes ACP retry attempt {attempt}: session forked {_resume_sid[:12]}... → {_resumed_sid[:12]}...")
-                        new_session_id = _resumed_sid
-                    log.info(f"{label}hermes ACP retry attempt {attempt}: resumed session {new_session_id[:12]}...")
-
-                elif attempt == 1:
-                    # attempt 1：session/new 或 session/resume
-                    cwd_arg = cwd if cwd else "."
-                    if session_id:
-                        from src.runtime.context_compaction import check_state_db_size
-                        _skip_resume = check_state_db_size(iso_home, threshold_mb=50.0)
-                        if _skip_resume:
-                            log.warning(f"{label}hermes ACP state.db too large, skipping resume to avoid context overflow")
-                            session_id = ""
-                            result, err = client.request("session/new", {
-                                "cwd": cwd_arg, "mcpServers": [],
-                            }, timeout=100)
-                        else:
-                            result, err = client.request("session/resume", {
-                                "cwd": cwd_arg, "sessionId": session_id, "mcpServers": [],
-                            }, timeout=100)
-                        if err:
-                            log.warning(f"{label}hermes ACP resume {session_id[:12]}... failed: {err}, creating new")
-                            result, err = client.request("session/new", {
-                                "cwd": cwd_arg, "mcpServers": [],
-                            }, timeout=100)
-                            if err:
-                                error_events.append(f"session/new failed: {err}")
-                                yield ("done", _done_result(-1, "", session_id, error_events, ""))
-                                return
-                            new_session_id = _extract_session_id(result) or ""
-                        else:
-                            new_session_id = _extract_session_id(result) or session_id
-                    else:
-                        result, err = client.request("session/new", {
-                            "cwd": cwd_arg, "mcpServers": [],
-                        }, timeout=100)
-                        if err:
-                            error_events.append(f"session/new failed: {err}")
-                            yield ("done", _done_result(-1, "", session_id, error_events, ""))
-                            return
-                        new_session_id = _extract_session_id(result) or ""
-                    log.info(f"{label}hermes ACP session: {new_session_id[:12]}...")
-
-                # 每步重置状态
-                prompt_done.clear()
-                prompt_result.clear()
-                _chat_first_text_time = 0.0
-                _chat_last_text_time = 0.0
-                _last_activity = time.time()
-                _step_had_tool_use = False
-
-                # attempt > 1 时清空上一步的残留数据（collected_text / text_buf / thinking_buf）
-                # 否则内循环的 reader_done + collected_text 检查会误触发，
-                # 导致 attempt 2 没发 prompt 就直接 break
-                if attempt > 1:
-                    collected_text.clear()
-                    _text_buf.clear()
-                    _think_buf.clear()
-
-                # 清理残留的 _pending entry
-                with client._lock:
-                    for _pid in list(client._pending.keys()):
-                        client._pending.pop(_pid, None)
-
-                log.info(f"{label}hermes ACP attempt {attempt}: session={new_session_id[:12]}..., reader_done={reader_done.is_set()}, prompt_done={prompt_done.is_set()}")
-
-                # 确定本步 prompt 文本
-                if attempt == 1:
-                    _step_prompt = prompt
+                        error_events.append(f"session/new failed: {err}")
+                        yield ("done", _done_result(-1, "", session_id, error_events, ""))
+                        return
+                    new_session_id = _extract_session_id(result) or ""
                 else:
-                    # 构建 continuation prompt：带上一步 text 输出摘要
-                    _step_prompt = (
-                        f"你在上一轮回复的末尾说了：\n\"{_prev_text_summary}\"\n\n"
-                        f"但你没有实际执行这些操作（未检测到结构化处理记录）。\n"
-                        f"请立即调用工具执行上述操作，不要重新分析，不要再说\"Let me...\"。\n"
-                        f"如果你需要读取 SKILL.md 或项目知识，请先读取再执行。\n"
-                        f"完成后在回复末尾输出处理记录 JSON 块。"
-                    )
-                    log.info(f"{label}hermes ACP attempt {attempt}: sending continuation prompt with prev text summary")
+                    new_session_id = _extract_session_id(result) or session_id
+            else:
+                result, err = client.request("session/new", {
+                    "cwd": cwd_arg, "mcpServers": [],
+                }, timeout=100)
+                if err:
+                    error_events.append(f"session/new failed: {err}")
+                    yield ("done", _done_result(-1, "", session_id, error_events, ""))
+                    return
+                new_session_id = _extract_session_id(result) or ""
+            log.info(f"{label}hermes ACP session: {new_session_id[:12]}...")
 
-                yield ("step_start", f"Step {attempt} started (session: ACP)")
+            # 清理残留的 _pending entry
+            with client._lock:
+                for _pid in list(client._pending.keys()):
+                    client._pending.pop(_pid, None)
 
-                # ── session/prompt（fire-and-forget）──
-                with client._lock:
-                    _prompt_id = client._next_id
-                    client._next_id += 1
-                _prompt_evt = threading.Event()
-                with client._lock:
-                    client._pending[_prompt_id] = _prompt_evt
+            # ── 3. session/prompt（fire-and-forget）──
+            with client._lock:
+                _prompt_id = client._next_id
+                client._next_id += 1
+            _prompt_evt = threading.Event()
+            with client._lock:
+                client._pending[_prompt_id] = _prompt_evt
 
-                def _send_prompt(_pid=_prompt_id, _sp=_step_prompt):
-                    msg = {"jsonrpc": "2.0", "id": _pid, "method": "session/prompt",
-                           "params": {"sessionId": new_session_id,
-                                      "prompt": [{"type": "text", "text": _sp}]}}
-                    client._prompt_req_id = _pid
-                    try:
-                        client.write_line((json.dumps(msg) + "\n").encode("utf-8"))
-                    except Exception as e:
-                        error_events.append(f"send prompt: {e}")
-                        prompt_done.set()
+            def _send_prompt(_pid=_prompt_id, _sp=prompt):
+                msg = {"jsonrpc": "2.0", "id": _pid, "method": "session/prompt",
+                       "params": {"sessionId": new_session_id,
+                                  "prompt": [{"type": "text", "text": _sp}]}}
+                client._prompt_req_id = _pid
+                try:
+                    client.write_line((json.dumps(msg) + "\n").encode("utf-8"))
+                except Exception as e:
+                    error_events.append(f"send prompt: {e}")
+                    prompt_done.set()
 
-                prompt_thread = threading.Thread(target=_send_prompt, daemon=True)
-                prompt_thread.start()
+            prompt_thread = threading.Thread(target=_send_prompt, daemon=True)
+            prompt_thread.start()
 
-                # ── 内循环：从队列消费事件 + 等 prompt 完成 ──
-                while True:
-                    with queue_lock:
-                        if event_queue:
-                            events = event_queue[:]
-                            event_queue.clear()
-                        else:
-                            events = []
+            # ── 4. 内循环：从队列消费事件 + 等 prompt 完成 ──
+            _last_activity = time.time()
+            _global_start = time.time()
+            _SILENT_TIMEOUT = 300   # 工具调用后 5分钟无事件 → 超时终止
+            _TEXT_SILENT_TIMEOUT = 60  # text 输出后 60s 无后续 → 超时终止
+            _GLOBAL_TIMEOUT = max_exec_seconds * 2
+            _last_event_type = ""   # 记录最后一次事件类型
 
-                    if events:
-                        _last_activity = time.time()
-                        for et, data in events:
-                            if et == "tool_use":
-                                _step_had_tool_use = True
-                            yield (et, data)
-
-                    if prompt_done.is_set():
-                        break
-
-                    if reader_done.is_set() and not prompt_done.is_set():
-                        if collected_text:
-                            log.info(f"{label}hermes ACP reader EOF with {len(collected_text)} text chunks, assuming done")
-                            prompt_result["stopReason"] = "end_turn"
-                            break
-                        error_events.append("hermes process exited before prompt completed")
-                        break
-
-                    elapsed_silent = time.time() - _last_activity
-                    if collected_text and elapsed_silent > 120:
-                        log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s with {len(collected_text)} text chunks, assuming done")
-                        prompt_result["stopReason"] = "end_turn"
-                        break
-
-                    if elapsed_silent > max_exec_seconds:
-                        if proc.poll() is None and elapsed_silent < max_exec_seconds * 2:
-                            _last_activity = time.time()
-                            time.sleep(0.1)
-                            continue
-                        if collected_text:
-                            log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s with {len(collected_text)} text chunks, assuming done")
-                            prompt_result["stopReason"] = "end_turn"
-                            break
-                        log.warning(f"{label}hermes ACP no activity for {max_exec_seconds}s, terminating")
-                        break
-
-                    if elapsed_silent > 600 and collected_text:
-                        log.info(f"{label}hermes ACP idle 600s with {len(collected_text)} text chunks, assuming prompt done (response may be lost)")
-                        prompt_result["stopReason"] = "end_turn"
-                        break
-
-                    time.sleep(0.05)
-
-                # ── 步结束：flush + 记录 stopReason ──
-                _flush_text()
-                _flush_thinking()
-
-                _step_stop_reason = prompt_result.get("stopReason", "")
-                _final_stop_reason = _step_stop_reason
-                log.info(f"{label}hermes ACP attempt {attempt} done: stopReason={_step_stop_reason}, tool_use={_step_had_tool_use}")
-
-                yield ("step_finish", f"Step {attempt} done (stopReason={_step_stop_reason})")
-
-                # 消费残留事件
+            while True:
                 with queue_lock:
                     if event_queue:
-                        for et, data in event_queue[:]:
-                            yield (et, data)
+                        events = event_queue[:]
                         event_queue.clear()
+                    else:
+                        events = []
 
-                # chat 任务不续步
-                if _is_chat_task:
+                if events:
+                    _last_activity = time.time()
+                    for et, data in events:
+                        _last_event_type = et
+                        yield (et, data)
+
+                if prompt_done.is_set():
                     break
 
-                # 检测结构化产出 → 任务完成
-                _full_text_so_far = "\n".join(collected_text)
-                if _detect_structured_output(_full_text_so_far):
-                    log.info(f"{label}hermes ACP structured output detected after attempt {attempt}, task complete")
-                    _final_exit_code = 0
-                    break
-
-                # 空步检测：本步无 tool_use
-                if not _step_had_tool_use:
-                    _consecutive_no_tool += 1
-                    if _consecutive_no_tool >= 2:
-                        log.warning(f"{label}hermes ACP { _consecutive_no_tool} consecutive attempts without tool_use, giving up")
+                # hermes 进程退出但没发 PromptResponse → 兼容性兜底
+                if reader_done.is_set() and not prompt_done.is_set():
+                    if collected_text:
+                        log.info(f"{label}hermes ACP reader EOF with {len(collected_text)} text chunks, assuming done")
+                        prompt_result["stopReason"] = "end_turn"
                         break
-                else:
-                    _consecutive_no_tool = 0
-                if attempt >= MAX_ATTEMPTS:
-                    log.warning(f"{label}hermes ACP max attempts ({MAX_ATTEMPTS}) reached without structured output")
+                    error_events.append("hermes process exited before prompt completed")
                     break
 
-                # 记录本步 text 输出摘要（用于下一步 continuation prompt）
-                _prev_text_summary = "\n".join(collected_text[-10:])[-800:]
-                log.info(f"{label}hermes ACP attempt {attempt} ended without structured output, will retry with new process")
-            # ── 3. 收尾 ──
-            stop_reason = _final_stop_reason
-            log.info(f"{label}hermes ACP final: stopReason={stop_reason}, attempts={attempt if attempt else 0}")
+                # 分级超时：text 后 60s → 视为完成（PromptResponse 丢失）；
+                #   tool 后 300s → 超时终止
+                elapsed_silent = time.time() - _last_activity
+                if _last_event_type == "text" and elapsed_silent > _TEXT_SILENT_TIMEOUT:
+                    log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s after text, assuming done (response lost)")
+                    prompt_result["stopReason"] = "end_turn"
+                    break
+                if elapsed_silent > _SILENT_TIMEOUT:
+                    log.warning(f"{label}hermes ACP silent {elapsed_silent:.0f}s, timeout")
+                    prompt_result["stopReason"] = "timeout"
+                    break
+
+                # 全局超时
+                if time.time() - _global_start > _GLOBAL_TIMEOUT:
+                    log.warning(f"{label}hermes ACP global timeout ({_GLOBAL_TIMEOUT}s) exceeded")
+                    prompt_result["stopReason"] = "timeout"
+                    break
+
+                time.sleep(0.05)
+
+            # ── 5. 收尾 ──
+            _flush_text()
+            _flush_thinking()
+
+            stop_reason = prompt_result.get("stopReason", "")
+            log.info(f"{label}hermes ACP done: stopReason={stop_reason}")
+
+            yield ("step_finish", f"Step 1 done (stopReason={stop_reason})")
+
+            # 消费残留事件
+            with queue_lock:
+                if event_queue:
+                    for et, data in event_queue[:]:
+                        yield (et, data)
+                    event_queue.clear()
 
             # 关闭 stdin 让 hermes 退出
             try:
@@ -659,12 +462,18 @@ class HermesACPBackend:
             except Exception:
                 pass
 
-            # 任务已完成（检测到结构化输出 或 stopReason=end_turn 无错误）时，
-            # 进程被 SIGTERM 清理不影响 exit_code
-            if _final_exit_code == 0 or (stop_reason == "end_turn" and not error_events):
+            # exit_code 判定
+            if stop_reason == "end_turn" and not error_events:
                 exit_code = 0
-            else:
+            elif stop_reason == "timeout":
+                exit_code = -1
+            elif stop_reason == "error":
+                exit_code = -1
+            elif error_events:
                 exit_code = proc.returncode if proc.returncode is not None else -1
+            else:
+                exit_code = 0
+
             full_text = "\n".join(collected_text)
             # JSON 鲁棒拼接：修复 flush 边界 \n 导致的字段名断裂、缺闭合 } 等
             if _detect_structured_output(full_text):
