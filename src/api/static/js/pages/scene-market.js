@@ -1041,7 +1041,7 @@ function _enterSceneEditor(mode, scope, sceneId) {
 
   // 初始化 5 个 agent 节点：vod/issue 默认启用，coding/qa/sre 默认禁用（需手动启用）
   _sceneEditorNodes = _AGENT_ORDER.map(at => ({
-    id: at, tag: at, skill: '', skill_id: 0, skill_display: '', skill_desc: '', skill_scope: 'official',
+    id: at, tag: at, skill: '', skill_id: 0, skill_display: '', skill_desc: '', skill_scope: 'official', skill_deleted: false,
     mode: 'emit', next: 'done', handoff: 'a2a',
     enabled: (at === 'vod' || at === 'issue')
   }));
@@ -1066,13 +1066,14 @@ function _enterSceneEditor(mode, scope, sceneId) {
               skill_display: (skDetail && skDetail.display_name) || node.skill || '',
               skill_desc: (skDetail && skDetail.role_desc) || '',
               skill_scope: (skDetail && skDetail.scope) || 'official',
+              skill_deleted: (skDetail && skDetail.skill_deleted) || false,
               mode: node.mode || 'emit',
               next: node.next || 'done',
               handoff: node.handoff || 'a2a',
               enabled: node.enabled === true
             };
           }
-          return { id: at, tag: at, skill: '', skill_id: 0, skill_display: '', skill_desc: '', mode: 'emit', next: 'done', handoff: 'a2a', enabled: false };
+          return { id: at, tag: at, skill: '', skill_id: 0, skill_display: '', skill_desc: '', skill_deleted: false, mode: 'emit', next: 'done', handoff: 'a2a', enabled: false };
         });
       }
       _sceneEditorIconUrl = d.icon || '';
@@ -1182,11 +1183,12 @@ function _renderSceneEditor(prefillSceneName, prefillName, prefillDesc, prefillC
     const bgColor = meta.color || '#0071e3';
     const canDisable = true;
     const showToggle = canDisable && !((node.id === 'vod' || node.id === 'issue') && node.enabled);
-    html += `<div class="det-card${node.enabled?'':' disabled'}" data-idx="${i}">
-      <div class="det-card-top" style="background:${bgColor}"></div>
+    html += `<div class="det-card${node.enabled?'':' disabled'}" data-idx="${i}"${node.skill_deleted ? ' style="border-color:var(--r)"' : ''}>
+      <div class="det-card-top" style="background:${node.skill_deleted ? 'var(--r)' : bgColor}"></div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="width:22px;height:22px;border-radius:6px;background:${bgColor}22;color:${bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
+        <span style="width:22px;height:22px;border-radius:6px;background:${node.skill_deleted ? 'var(--r)22' : bgColor+'22'};color:${node.skill_deleted ? 'var(--r)' : bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
         <span style="font-size:14px;font-weight:600;color:#1d1d1f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${meta.icon||''} ${meta.label||node.id}</span>
+        ${node.skill_deleted ? '<span style="font-size:9px;color:var(--r);font-weight:600;flex-shrink:0">⚠ 技能已删除</span>' : ''}
         ${showToggle ? `<button class="bt bt-o bt-s" style="font-size:9px;padding:2px 8px" onclick="_toggleAgentEnabled(${i})">${node.enabled ? '✕' : '✓'}</button>` : ''}
       </div>
       <div class="det-card-desc" title="${(node.skill_desc||'').replace(/"/g, '&quot;')}">${node.skill_desc || ''}</div>
@@ -1383,6 +1385,7 @@ function _loadAgentSkillOptions(idx) {
     node.skill_id = d.skill_id || 0;
     node.skill_desc = d.description || '';
     node.skill_scope = d.scope || _skillSelectScope[idx] || 'official';
+    node.skill_deleted = false;
     _renderEditorSkillSuite();
   });
 
@@ -1603,12 +1606,17 @@ function _saveScene() {
     return;
   }
 
-  // 校验：启用的 agent 必须配置了 skill
+  // 校验：启用的 agent 必须配置了 skill，且 skill 未被删除
   for (var i = 0; i < _sceneEditorNodes.length; i++) {
     var n = _sceneEditorNodes[i];
     if (n.enabled && !n.skill) {
       var meta = _AGENT_META[n.id] || {};
       if (app && app.showToast) app.showToast((meta.label || n.id) + ' Agent 已启用但未配置技能，请选择技能');
+      return;
+    }
+    if (n.enabled && n.skill_deleted) {
+      var meta2 = _AGENT_META[n.id] || {};
+      if (app && app.showToast) app.showToast((meta2.label || n.id) + ' Agent 引用的技能已删除，请重新选择技能');
       return;
     }
   }
