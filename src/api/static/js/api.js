@@ -160,13 +160,16 @@ const API = (() => {
         throw e;
       });
     }
-    // Issue #63: 响应不是 JSON（如 nginx 返回 HTML 登录页）时按 401 处理，不报 "Unexpected token"
+    // Issue #63: 响应是 HTML（如 nginx 502 页面或登录页重定向）时，不报 "Unexpected token"
     var ct = r.headers.get('content-type') || '';
-    if (ct.indexOf('application/json') === -1) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
-      throw new Error(I18N.t('common.session_expired') || '登录已过期，请重新登录');
+    if (ct.indexOf('text/html') !== -1) {
+      // 200 + HTML = nginx/proxy 返回了页面而非 API JSON，说明服务异常或 session 失效
+      if (r.status === 200) {
+        // 可能是 token 过期后反代返回登录页 HTML
+        throw new Error(I18N.t('common.session_expired') || '登录已过期，请重新登录');
+      }
+      // 502/503 等 = 服务器错误，不跳登录
+      throw new Error(I18N.t('common.server_error') || '服务器异常，请稍后重试');
     }
     return r.json();
   }
