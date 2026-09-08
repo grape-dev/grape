@@ -20,11 +20,13 @@ function renderSettings(tab) {
     const curRepo = app.currentRepo();
     const repoQ = curRepo && curRepo.fullName ? '?repo_key=gitcode:' + encodeURIComponent(curRepo.fullName) : '';
     API.get('/settings/credentials' + repoQ).then(d => {
+      var _sc = document.getElementById('sCredentials');
+      if (!_sc) return;
       // AK/SK 回显真实值需 HTML 转义（防引号破坏属性）
       const _esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
       const _akVal = d.huawei_cloud && d.huawei_cloud.ak_exists ? '********' : '';
       const _skVal = d.huawei_cloud && d.huawei_cloud.sk_exists ? '********' : '';
-      document.getElementById('sCredentials').innerHTML = `
+      _sc.innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.gitcode_api_title')}</h3>
           <div class="srow"><label>${I18N.t('settings.credentials.api_token')}</label><input type="password" value="${d.gitcode && d.gitcode.api_token_exists ? '********' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? '' : `placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"`} style="${d.gitcode && d.gitcode.api_token_exists ? 'background:#f1f5f9' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? 'disabled' : ''}></div>
           <div class="srow"><label>${I18N.t('settings.credentials.account')}</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + I18N.t('settings.credentials.gitcode_account_suffix') : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
@@ -36,7 +38,7 @@ function renderSettings(tab) {
           <button class="bt bt-p mt8" onclick="saveCredentials()">${I18N.t('settings.common.save')}</button>
         </div>
 `;
-    }).catch(e => document.getElementById('sCredentials').innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}));
+    }).catch(e => { var _sc = document.getElementById('sCredentials'); if (_sc) _sc.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}); });
   } else if (current === 'notifications') {
     html += `<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.notifications.title')}</h3>
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> ${I18N.t('settings.notifications.issue_events')}</label>
@@ -137,9 +139,11 @@ function renderSettings(tab) {
     html += `<div id="sAdvanced"><div class="loading">${I18N.t('settings.common.loading')}</div></div></div>`;
     el.innerHTML = html;
     API.get('/settings/pipeline-mode').then(d => {
+      var _sa = document.getElementById('sAdvanced');
+      if (!_sa) return;
       const mode = d.mode || 'legacy';
       const isPlugin = mode === 'plugin';
-      document.getElementById('sAdvanced').innerHTML = `
+      _sa.innerHTML = `
         <div class="cd">
           <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.pipeline.title')}</h3>
           <p class="tx t2" style="margin-bottom:16px;font-size:12px;line-height:1.6">
@@ -170,7 +174,9 @@ function renderSettings(tab) {
     el.innerHTML = html;
 
     API.get('/settings/gitcode-repo/' + repo.owner + '/' + repo.name).then(d => {
-        document.getElementById('sGitcode').innerHTML = `
+        var _sg = document.getElementById('sGitcode');
+        if (!_sg) return;
+        _sg.innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.devops_bot_title')}</h3>
           <div class="srow"><label>${I18N.t('settings.credentials.bot_token')}</label><input type="password" id="gitcodeBotToken" value="" placeholder="${d.devops_bot_token_exists ? I18N.t('settings.credentials.bot_token_placeholder_configured') : I18N.t('settings.credentials.bot_token_placeholder_empty')}">${d.devops_bot_token_exists ? '<span class="ts" style="color:var(--g);font-size:10px">'+I18N.t('settings.credentials.bot_configured')+'</span>' : ''}</div>
           <div class="srow"><label>${I18N.t('settings.credentials.scope')}</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
@@ -181,7 +187,7 @@ function renderSettings(tab) {
           <p class="tx t2" style="margin-bottom:8px;color:var(--r)">${I18N.t('settings.host.unhost_warning')}</p>
           <button class="bt" style="background:var(--r);color:#fff;border:none;padding:8px 16px" onclick="unhostFromSettings('${repo.fullName}')">${I18N.t('settings.host.unhost_title')}</button>
         </div>`;
-    }).catch(e => document.getElementById('sGitcode').innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}));
+    }).catch(e => { var _sg = document.getElementById('sGitcode'); if (_sg) _sg.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}); });
   } else {
     html += `<div class="ts t2">${current}</div></div>`;
     el.innerHTML = html;
