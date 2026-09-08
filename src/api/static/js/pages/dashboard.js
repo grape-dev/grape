@@ -686,7 +686,7 @@ function renderDashboard(data) {
       };
     });
 
-    const isEditingExisting = !_isCreateMode && currentScene && currentScene !== 'default' && currentScene !== '__tmp__' && isCustomScene;
+    const isEditingExisting = !_isCreateMode && currentScene && currentScene !== '__tmp__' && isCustomScene;
 
     // 编辑已有自定义场景：PUT 保存 nodes + 待提交的名称/描述
     if (isEditingExisting) {
@@ -797,7 +797,9 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
         <option value="">${I18N.t('dashboard.select_skill')}</option>
       </select>`;
       setTimeout(() => {
-        API.get('/scenes/skills/' + at).then(r => {
+        const cr = app.currentRepo();
+        const repoParam = cr && cr.fullName ? '?repo=' + encodeURIComponent(cr.fullName) : '';
+        API.get('/scenes/skills/' + at + repoParam).then(r => {
           const sel = document.querySelector(`select[onchange*="${at}"]`);
           if (sel && r.skills) {
             const current = editNodes.find(n => n.id === at)?.skill || '';
