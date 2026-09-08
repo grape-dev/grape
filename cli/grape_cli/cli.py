@@ -15,11 +15,12 @@ from grape_cli.registry import build_groups, command_tree
 
 def wait_command() -> click.Command:
     """grape tasks wait：轮询任务状态直至终态（复用 GET /api/tasks/{id}/status，契约驱动）。"""
-    @click.command(name="wait", help="等待任务终态（轮询 status，直至 completed/failed/cancelled）")
-    @click.option("--task-id", required=True, help="任务 id")
-    @click.option("--timeout", default=120, help="最大等待秒（默认 120）")
-    @click.option("--interval", default=3, help="轮询间隔秒（默认 3）")
-    @click.option("--json-out", is_flag=True, help="机器可读 JSON 输出")
+    @click.command(name="wait",
+                   help="Wait until a task reaches a terminal state (completed / failed / cancelled)")
+    @click.option("--task-id", required=True, help="task id")
+    @click.option("--timeout", default=120, help="max wait seconds (default 120)")
+    @click.option("--interval", default=3, help="poll interval seconds (default 3)")
+    @click.option("--json-out", is_flag=True, help="machine-readable JSON output")
     def _wait(task_id: str, timeout: int, interval: int, json_out: bool):
         api = ApiClient()
         _terminal = {"completed", "failed", "cancelled"}
@@ -90,16 +91,18 @@ class ContractGroup(click.Group):
 @click.group(cls=ContractGroup, invoke_without_command=True)
 @click.version_option(__version__, "--version", prog_name="grape",
                       message="%(prog)s %(version)s")
-@click.option("--base-url", default=None, help="服务端地址（一次性，优先级最高）")
+@click.option("--base-url", default=None, help="server base URL (one-shot, highest priority)")
 @click.option("--token", "--grape-api-token", "--grape_api_token", default=None,
-              help="token（一次性，优先级最高；tk_ 会话 / grape_ 用户 Key）")
-@click.option("--timeout", default=None, type=int, help="请求超时秒（默认 30；git 不受影响）")
+              help="token (one-shot, highest priority; tk_ session / grape_ user key)")
+@click.option("--timeout", default=None, type=int,
+              help="request timeout seconds (default 30; not applied to git)")
 @click.pass_context
 def cli(ctx, base_url: str | None, token: str | None, timeout: int | None):
-    """Agentic DevOps CLI：契约驱动命令（新增接口零 CLI 改动）+ git 本地传输。
+    """Grape CLI: contract-driven commands (new API endpoint -> new command automatically)
+    plus local git passthrough (platform token stays in-process).
 
     \b
-    一次性参数示例：
+    One-shot usage:
       grape --token tk_xxx tasks mine --status active
       grape --base-url https://grape.example.com --grape-api-token grape_xxx skills list --json-out
       grape --timeout 120 tasks wait --task-id 56
@@ -127,7 +130,7 @@ def _tree_lines(pattern: str = "") -> list[str]:
 
 @cli.command("refresh")
 def refresh_cmd():
-    """强制拉取最新 OpenAPI 契约并缓存。"""
+    """Force re-fetch the latest OpenAPI contract and cache it."""
     schema = load_contract(refresh=True)
     cli._groups = build_groups(schema)
     cli._loaded = True
@@ -138,7 +141,7 @@ def refresh_cmd():
 @cli.command(name="commands")
 @click.argument("pattern", default="")
 def commands_cmd(pattern: str):
-    """列出全部契约命令（可管道过滤）。"""
+    """List all contract commands (pipeable filter)."""
     lines = _tree_lines(pattern)
     for line in lines:
         click.echo(line)
@@ -174,10 +177,10 @@ def main(argv=None, *args, **kw):
         return 0 if rv is None else int(rv)
     except click.exceptions.Abort:
         # Ctrl+C（click 把 KeyboardInterrupt 转 Abort）→ 规范化 130
-        click.echo("Error: 已中断", err=True)
+        click.echo("Error: interrupted", err=True)
         return 130
     except KeyboardInterrupt:
-        click.echo("Error: 已中断", err=True)
+        click.echo("Error: interrupted", err=True)
         return 130
     except CliError as e:
         click.echo(f"Error: {e}", err=True)

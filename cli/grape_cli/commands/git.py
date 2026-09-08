@@ -15,10 +15,10 @@ from grape_cli.client import ApiClient, basic_auth
 
 
 def git_command() -> click.Command:
-    @click.command(name="git", help="本地执行 git：透传任意 git 原生命令（token 进程内注入）",
+    @click.command(name="git", help="Run git locally: passthrough any native git command (credentials injected in-process)",
                    context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
-    @click.option("--repo", default="", help="owner/repo（解析工作区与凭据）")
-    @click.option("--issue", default=None, type=int, help="Issue 号")
+    @click.option("--repo", default="", help="owner/repo (resolve workspace & credentials)")
+    @click.option("--issue", default=None, type=int, help="Issue number")
     @click.pass_context
     def git_cmd(ctx, repo: str, issue: int):
         if not shutil.which("git"):

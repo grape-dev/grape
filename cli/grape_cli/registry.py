@@ -75,8 +75,14 @@ def build_command(meta: dict) -> click.Command:
         click.echo(json.dumps(data, ensure_ascii=False,
                               indent=None if kw.get("json_out") else 2))
 
-    return click.Command(name="", callback=_run, params=options,
-                         help=op.get("summary") or op.get("description") or "")
+    summary = (op.get("summary") or "").strip()
+    desc = (op.get("description") or "").strip()
+    help_text = f"Invoke grape API: {method} {path}"
+    if summary:
+        help_text += f"\n\nSummary: {summary}"
+    if desc and desc != summary:
+        help_text += f"\n\n{desc}"
+    return click.Command(name="", callback=_run, params=options, help=help_text)
 
 
 def build_groups(schema: dict) -> dict[str, click.Group]:
@@ -103,7 +109,7 @@ def _is_meta(v) -> bool:
 
 
 def _materialize(subtree: dict, name: str) -> click.Group:
-    grp = click.Group(name=name)
+    grp = click.Group(name=name, help=f"Contract-driven commands under group '{name}'.")
     for key, val in sorted(subtree.items()):
         if _is_meta(val):
             cmd = build_command(val)

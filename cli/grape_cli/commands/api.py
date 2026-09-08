@@ -7,11 +7,11 @@ from grape_cli.client import ApiClient
 
 
 def api_command() -> click.Command:
-    @click.command(name="api", help="通用兜底：直连任意 API（方法/路径来自契约白名单）")
+    @click.command(name="api", help="Generic fallback: call any API (method/path from contract whitelist)")
     @click.argument("method")
     @click.argument("path")
-    @click.option("-d", "--data", default="", help="JSON 请求体")
-    @click.option("--json-out", is_flag=True, help="机器可读 JSON 输出")
+    @click.option("-d", "--data", default="", help="JSON request body")
+    @click.option("--json-out", is_flag=True, help="machine-readable JSON output")
     def api_cmd(method: str, path: str, data: str, json_out: bool):
         method = method.upper()
         if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
