@@ -411,6 +411,9 @@ async def request_id_and_log_middleware(request: Request, call_next):
 
 app.include_router(auth.router)
 app.include_router(repos.router)
+# Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；与 repos.py 无路径冲突）
+from src.api.git_repo_api import router as git_repo_router
+app.include_router(git_repo_router)
 app.include_router(dashboard.router)
 app.include_router(agents.router)
 app.include_router(events.router)

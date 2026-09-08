@@ -22,25 +22,49 @@ from src.user import db as user_db
 
 client = TestClient(app)
 
-# 预期进契约的对外端点（M1.4 显式 operation_id）
+# 预期进契约的对外端点（M1.4/M3 显式 operation_id）
 EXPECTED_PUBLIC = {
-    "/api/tasks/mine": "tasks_mine",
-    "/api/tasks/create": "tasks_create",
-    "/api/tasks/{task_id}/start": "tasks_start",
-    "/api/tasks/{task_id}/status": "tasks_status",
-    "/api/repos/member": "repos_member",
-    "/api/repos/managed": "repos_managed",
-    "/api/repos/deploy-url/{owner}/{repo_name}": "repos_deploy_url",
-    "/api/agents/{name}/{owner}/{repo}": "agents_detail",
-    "/api/chat/conversations": "chat_conversations",
-    "/api/chat/messages/{conv_id}": "chat_messages",
-    "/api/skills": "skills_list",
-    "/api/skills/by-id/{skill_id}": "skills_detail",
-    "/api/scenes": "scenes_list",
-    "/api/knowledge": "knowledge_list",
-    "/api/knowledge/content": "knowledge_content",
-    "/api/knowledge/context": "knowledge_context",
-    "/api/events/detail/{seq}": "events_detail",
+    "tasks_mine": ("get", "/api/tasks/mine"),
+    "tasks_create": ("post", "/api/tasks/create"),
+    "tasks_start": ("post", "/api/tasks/{task_id}/start"),
+    "tasks_status": ("put", "/api/tasks/{task_id}/status"),
+    "repos_member": ("get", "/api/repos/member"),
+    "repos_managed": ("get", "/api/repos/managed"),
+    "repos_deploy_url": ("get", "/api/repos/deploy-url/{owner}/{repo_name}"),
+    "agents_detail": ("get", "/api/agents/{name}/{owner}/{repo}"),
+    "chat_conversations": ("get", "/api/chat/conversations"),
+    "chat_messages": ("get", "/api/chat/messages/{conv_id}"),
+    "skills_list": ("get", "/api/skills"),
+    "skills_detail": ("get", "/api/skills/by-id/{skill_id}"),
+    "scenes_list": ("get", "/api/scenes"),
+    "knowledge_list": ("get", "/api/knowledge"),
+    "knowledge_content": ("get", "/api/knowledge/content"),
+    "knowledge_context": ("get", "/api/knowledge/context"),
+    "events_detail": ("get", "/api/events/detail/{seq}"),
+    # ===== Issue-45 M3：Git 仓库统一接口 =====
+    "gitrepo_repo": ("get", "/api/repos/{owner}/{repo}"),
+    "gitrepo_workspace": ("get", "/api/repos/{owner}/{repo}/workspace"),
+    "gitrepo_git_credential": ("get", "/api/repos/{owner}/{repo}/git-credential"),
+    "gitrepo_branches": ("get", "/api/repos/{owner}/{repo}/branches"),
+    "gitrepo_commits": ("get", "/api/repos/{owner}/{repo}/commits"),
+    "gitrepo_contents": ("get", "/api/repos/{owner}/{repo}/contents/{path}"),
+    "gitrepo_labels": ("get", "/api/repos/{owner}/{repo}/labels"),
+    "gitrepo_labels_create": ("post", "/api/repos/{owner}/{repo}/labels"),
+    "gitrepo_milestones": ("get", "/api/repos/{owner}/{repo}/milestones"),
+    "gitrepo_issues": ("get", "/api/repos/{owner}/{repo}/issues"),
+    "gitrepo_issues_create": ("post", "/api/repos/{owner}/{repo}/issues"),
+    "gitrepo_issues_get": ("get", "/api/repos/{owner}/{repo}/issues/{number}"),
+    "gitrepo_issues_update": ("patch", "/api/repos/{owner}/{repo}/issues/{number}"),
+    "gitrepo_issues_comments": ("get", "/api/repos/{owner}/{repo}/issues/{number}/comments"),
+    "gitrepo_issues_comments_create": ("post", "/api/repos/{owner}/{repo}/issues/{number}/comments"),
+    "gitrepo_pulls": ("get", "/api/repos/{owner}/{repo}/pulls"),
+    "gitrepo_pulls_create": ("post", "/api/repos/{owner}/{repo}/pulls"),
+    "gitrepo_pulls_get": ("get", "/api/repos/{owner}/{repo}/pulls/{number}"),
+    "gitrepo_pulls_update": ("patch", "/api/repos/{owner}/{repo}/pulls/{number}"),
+    "gitrepo_pulls_merge": ("put", "/api/repos/{owner}/{repo}/pulls/{number}/merge"),
+    "gitrepo_pulls_comments": ("get", "/api/repos/{owner}/{repo}/pulls/{number}/comments"),
+    "gitrepo_pulls_comments_create": ("post", "/api/repos/{owner}/{repo}/pulls/{number}/comments"),
+    "gitrepo_pulls_files": ("get", "/api/repos/{owner}/{repo}/pulls/{number}/files"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
@@ -84,22 +108,25 @@ def test_contract_version_and_security_schemes():
 def test_only_public_security_routes_in_contract():
     s = _schema()
     paths = set(s["paths"])
-    assert EXPECTED_PUBLIC.keys() <= paths
+    assert {p for _, p in EXPECTED_PUBLIC.values()} <= paths
     for p in NOT_IN_CONTRACT:
         assert p not in paths, f"内部路由不应进契约: {p}"
 
 
 def test_public_ops_have_operation_id_summary_security():
     s = _schema()
-    op_ids = []
+    op_ids = set()
+    seen = set()
     for path, ops in s["paths"].items():
         for method, op in ops.items():
             assert op.get("operationId"), f"缺 operation_id: {path} {method}"
             assert op.get("summary"), f"缺 summary: {path} {method}"
             assert op.get("security"), f"缺 security: {path} {method}"
             assert {"apiKey": []} in op["security"]
-            op_ids.append(op["operationId"])
-    assert set(op_ids) == set(EXPECTED_PUBLIC.values())
+            op_ids.add(op["operationId"])
+            seen.add((method, path))
+    assert op_ids == set(EXPECTED_PUBLIC)
+    assert seen == set(EXPECTED_PUBLIC.values())
 
 
 def _user():

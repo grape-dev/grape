@@ -7,10 +7,19 @@
 - 对外 operation 的 `operation_id` 由 routes 侧显式声明（契约友好，CLI 按 tag+动词命名）。
 - 版本号由 FastAPI `app.version` 承载（2.1.0），bump 触发 CLI 自动拉新。
 """
+import re
+
 from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 
 _METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+
+# FastAPI 路由模板 `/contents/{path:path}` → OpenAPI 路径 `/contents/{path}`
+_PATH_PARAM_CONV = re.compile(r"\{(\w+):\w+\}")
+
+
+def _openapi_path(path: str) -> str:
+    return _PATH_PARAM_CONV.sub(lambda m: "{" + m.group(1) + "}", path)
 
 _SECURITY_SCHEMES = {
     "apiKey":      {"type": "http", "scheme": "bearer"},
@@ -41,7 +50,7 @@ def custom_openapi(app):
     schema.setdefault("components", {})["securitySchemes"] = _SECURITY_SCHEMES
 
     public_ops = {
-        (r.path, m.lower())
+        (_openapi_path(r.path), m.lower())
         for r in app.routes if route_is_public(r)
         for m in (getattr(r, "methods", None) or set())
         if m.lower() in _METHODS
