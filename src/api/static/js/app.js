@@ -94,7 +94,14 @@ function loadAgentTypes() {
         // 后台刷新后若数据变化，轻量更新侧边栏
         initSidebarRepos();
       } else {
-        renderReposFromData(repos);
+        // Issue #63: 异步回调里调 renderReposFromData 会操作布局 DOM
+        // 如果 nav 已经执行了（_currentView 已设），说明用户已进入某页面，
+        // 不应覆盖——只更新缓存，不渲染
+        if (window._currentView && window._currentView !== '') {
+          initSidebarRepos();
+        } else {
+          renderReposFromData(repos);
+        }
       }
     }).catch(e => {
       if (cachedRepos) return; // 有缓存时静默，避免覆盖已渲染内容

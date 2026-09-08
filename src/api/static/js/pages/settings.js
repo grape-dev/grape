@@ -254,10 +254,11 @@ function unhostFromSettings(fullName) {
     }
     app.initSidebarRepos();
     API.get('/repos/managed').then(md => {
+      if (window._currentView !== 'settings') return;  // Issue #63: 用户已切走，丢弃回调
       const remaining = md.repos || [];
       if (wasCurrent || remaining.length === 0) {
         API.get('/repos/member').then(d => {
-          const repos = d.repos || [];
+          if (window._currentView !== 'settings') return;  // Issue #63: 用户已切走，丢弃回调
           document.getElementById('sidebar').style.display = 'none';
           document.getElementById('tb').style.display = 'none';
           const mv = document.getElementById('mainView');
