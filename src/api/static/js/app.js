@@ -369,7 +369,7 @@ function loadAgentTypes() {
       if (typeof renderObservability === 'function') renderObservability();
     } else if (view === 'repos') {
       title.textContent = I18N.t('app.current_project');
-      loadRepos();
+      goToRepos();
     } else if (view === 'skill') {
       title.textContent = I18N.t('app.current_project');
       const _cr = currentRepo();
