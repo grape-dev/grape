@@ -98,14 +98,11 @@ function loadAgentTypes() {
       }
     }).catch(e => {
       if (cachedRepos) return; // 有缓存时静默，避免覆盖已渲染内容
-      if (e.name === 'AbortError') return; // Issue #63: abort 时不隐藏侧边栏
-      // Issue #63: 浏览器刷新时 abort 会表现为 TypeError，不清缓存不隐藏侧边栏
-      // 真实网络错误时也不隐藏侧边栏——显示重试按钮比隐藏菜单更友好
-      console.error('[loadRepos] FAILED:', e.name, e.message);
-      const el = $('pageContent');
-      if (el) {
-        el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + (I18N.t('app.repo.load_failed')||'仓库列表加载失败') + '</div><button class="bt bt-p" style="margin-top:12px" onclick="loadRepos(true)">' + (I18N.t('common.retry')||'重试') + '</button></div>';
-      }
+      if (e.name === 'AbortError') return; // abort 时不处理
+      // Issue #63: 浏览器刷新时 abort 表现为 TypeError，延迟重试一次
+      // 页面刷新完成后重试会成功，不需要用户手动操作
+      console.error('[loadRepos] FAILED, retry in 1s:', e.name, e.message);
+      setTimeout(function() { if (localStorage.getItem('token')) loadRepos(true); }, 1000);
     });
   }
 
