@@ -101,7 +101,8 @@ F Settings 面板 ──> A（api_tokens 管理）
 | 4.2 | `contracts.py`：`/openapi.json` 拉取 + 缓存（`~/.grape/openapi-<version>.json`）+ 版本检测 + `refresh` | `cli/grape_cli/contracts.py` | H1-H6 用例绿 |
 | 4.3 | `registry.py`：operationId → typer 命令动态注册（tag/动词拆分、query/path/body/security 参数映射、`--json`） | `cli/grape_cli/registry.py` | R1-R9 用例绿（含 **R7 新增契约零 CLI 改动**） |
 | 4.4 | 帮助系统：`--help` / 组 help / `--list` / `commands` / `--version` | `registry.py`/`cli.py` | H7-H13 用例绿 |
-| 4.5 | `commands/gitrepo.py`：`/api/repos/*` REST 命令（`--provider`） | `cli/grape_cli/commands/gitrepo.py` | 见 R5/R3 |
+| 4.5 | `commands/gitrepo.py` 说明 | git-repo REST 命令由**契约自动生成**（`gitrepo_*` → `git-repo` 组 + 嵌套动词链），无需手写（cli 设计 §二）；仅 `git` 手写 | `cli/grape_cli/registry.py` | `grape git-repo issues list --owner o --repo r` 可用 |
+| 4.6 | `commands/git.py`：git 原生命令透传（`ignore_unknown_options`）+ `/git-credential` 进程内注入（GIT_CONFIG env，base64，不进 argv/磁盘） | `cli/grape_cli/commands/git.py` | C1-C7 用例绿（**C3/C4 token 零暴露为关键验收**） |
 | 4.6 | `commands/git.py`：git 原生命令透传 + `/git-credential` 进程内 credential helper（token 不进命令行/argv/磁盘/env） | `cli/grape_cli/commands/git.py` | C1-C7 用例绿（**C3/C4 token 零暴露为关键验收**） |
 | 4.7 | `api` 兜底命令（白名单验证方法/路径） | `cli/grape_cli/commands/api.py` | D4 白名单用例 |
 

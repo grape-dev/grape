@@ -169,7 +169,7 @@ def get_file_content(owner: str, repo: str, path: str, ref: str = Query("", desc
                     _repo_token(owner, repo, user))
 
 
-@router.get("/{owner}/{repo}/labels", operation_id="gitrepo_labels", summary="标签列表")
+@router.get("/{owner}/{repo}/labels", operation_id="gitrepo_labels_list", summary="标签列表")
 def list_labels(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                 p: str = Depends(_provider)):
     return _gitcode("GET", _gitcode_url(owner, repo, "/labels"), _repo_token(owner, repo, user))
@@ -191,7 +191,7 @@ def list_milestones(owner: str, repo: str, state: str = Query("all"),
 
 # ===================== Issues =====================
 
-@router.get("/{owner}/{repo}/issues", operation_id="gitrepo_issues", summary="Issue 列表")
+@router.get("/{owner}/{repo}/issues", operation_id="gitrepo_issues_list", summary="Issue 列表")
 def list_issues(owner: str, repo: str, state: str = Query("open"),
                 page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=100),
                 user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
@@ -226,7 +226,7 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
                     _repo_token(owner, repo, user), payload)
 
 
-@router.get("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments", summary="Issue 评论列表")
+@router.get("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_list", summary="Issue 评论列表")
 def list_issue_comments(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
                         p: str = Depends(_provider)):
     return _gitcode("GET", _gitcode_url(owner, repo, f"/issues/{number}/comments"),
@@ -242,7 +242,7 @@ def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
 
 # ===================== Pull Requests =====================
 
-@router.get("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls", summary="PR 列表")
+@router.get("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls_list", summary="PR 列表")
 def list_pulls(owner: str, repo: str, state: str = Query("open"),
                page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=100),
                user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
@@ -282,7 +282,7 @@ def merge_pull(owner: str, repo: str, number: int, user: dict = Depends(get_curr
                     _repo_token(owner, repo, user))
 
 
-@router.get("/{owner}/{repo}/pulls/{number}/comments", operation_id="gitrepo_pulls_comments", summary="PR 评论列表")
+@router.get("/{owner}/{repo}/pulls/{number}/comments", operation_id="gitrepo_pulls_comments_list", summary="PR 评论列表")
 def list_pull_comments(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
                        p: str = Depends(_provider)):
     return _gitcode("GET", _gitcode_url(owner, repo, f"/pulls/{number}/comments"),
