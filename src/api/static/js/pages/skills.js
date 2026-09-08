@@ -101,17 +101,14 @@ function renderSkills() {
     window._skillMarketSearchInit = null;
   }
 
-  // official 页签：并行加载精选技能（独立请求，最多5条）+ 全部技能
+  // official 页签：并行加载精选技能 + 全部技能
   if (_skillTab === 'official') {
-    Promise.all([
-      API.post('/skills/sync-official', {}).catch(() => ({})),
-      API.get('/skills/featured')
-    ]).then(([_, featData]) => {
+    _loadSkills(searchInit);
+    API.get('/skills/featured').then(featData => {
       _featuredSkills = featData.skills || [];
-      _loadSkills(searchInit);
+      _renderSkillPage();
     }).catch(() => {
       _featuredSkills = [];
-      _loadSkills(searchInit);
     });
   } else {
     _loadSkills(searchInit);
@@ -328,7 +325,9 @@ function _buildAgentGroups(scoped) {
 function _switchSkillTab(tab) {
   _skillTab = tab;
   _skillPage = 1;
-  renderSkills();
+  // 局部刷新：只重建列表区域（_renderSkillPage），不重建顶部 Tab 栏（renderSkills）
+  _renderSkillPage();
+  _reloadSkills();
 }
 
 function _switchAgentTab(idx) {
@@ -616,13 +615,45 @@ function doSkillUpload() {
 }
 
 function deleteSkill(skillId, scope) {
-  if (!confirm(I18N.t('skills.confirm.delete_skill',{name:''})||'确认删除？')) return;
-  API.del('/skills/by-id/' + encodeURIComponent(skillId)).then(r => {
-    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.deleted')||'已删除');
-    renderSkills();
-  }).catch(e => {
-    if (app && app.showToast) app.showToast(I18N.t('skills.toast.delete_failed',{msg:e.message})||'删除失败');
-  });
+  // 移除已有弹窗
+  var existing = document.getElementById('deleteSkillModal');
+  if (existing) { existing.remove(); return; }
+
+  var modal = document.createElement('div');
+  modal.id = 'deleteSkillModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+
+  modal.innerHTML = `
+    <div style="background:rgba(255,255,255,0.98);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.15);width:360px;max-width:90vw;overflow:hidden">
+      <div style="padding:24px 24px 20px;text-align:center">
+        <div style="width:48px;height:48px;border-radius:50%;background:rgba(255,59,48,0.1);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:22px">🗑</div>
+        <h3 style="font-size:16px;font-weight:600;color:#1d1d1f;margin-bottom:6px">${I18N.t('skills.confirm.delete_skill',{name:''})||'确认删除此技能？'}</h3>
+        <div style="font-size:12px;color:#86868b">${I18N.t('skills.delete_skill_tip')||'删除后不可恢复，技能数据将被永久移除'}</div>
+      </div>
+      <div style="padding:0 24px 20px;display:flex;gap:10px">
+        <button onclick="document.getElementById('deleteSkillModal').remove()" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">${I18N.t('skills.action.cancel')||'取消'}</button>
+        <button id="deleteSkillConfirmBtn" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#ff3b30;color:#fff;cursor:pointer">${I18N.t('skills.confirm_delete')||'确认删除'}</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+  document.getElementById('deleteSkillConfirmBtn').onclick = function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = I18N.t('skills.deleting') || '删除中...';
+    API.del('/skills/by-id/' + encodeURIComponent(skillId)).then(r => {
+      modal.remove();
+      if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.deleted')||'已删除');
+      renderSkills();
+    }).catch(e => {
+      btn.disabled = false;
+      btn.textContent = I18N.t('skills.confirm_delete')||'确认删除';
+      if (app && app.showToast) app.showToast(I18N.t('skills.toast.delete_failed',{msg:e.message})||'删除失败');
+    });
+  };
 }
 
 function convertSkill(skillName) {
@@ -631,13 +662,45 @@ function convertSkill(skillName) {
     if (app && app.showToast) app.showToast(I18N.t('skills.toast.select_repo_first')||'请先选择仓库');
     return;
   }
-  if (!confirm(I18N.t('skills.confirm.convert_skill',{name:skillName,repo:repo})||'确认转换？')) return;
-  API.post('/skills/convert', {skill_name: skillName, repo}).then(r => {
-    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.convert_success')||'转换成功');
-    renderSkills();
-  }).catch(e => {
-    if (app && app.showToast) app.showToast(I18N.t('skills.toast.convert_failed',{msg:e.message})||'转换失败');
-  });
+  // 移除已有弹窗
+  var existing = document.getElementById('convertSkillModal');
+  if (existing) { existing.remove(); return; }
+
+  var modal = document.createElement('div');
+  modal.id = 'convertSkillModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+
+  modal.innerHTML = `
+    <div style="background:rgba(255,255,255,0.98);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.15);width:360px;max-width:90vw;overflow:hidden">
+      <div style="padding:24px 24px 20px;text-align:center">
+        <div style="width:48px;height:48px;border-radius:50%;background:rgba(0,113,227,0.1);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:22px">🔄</div>
+        <h3 style="font-size:16px;font-weight:600;color:#1d1d1f;margin-bottom:6px">${I18N.t('skills.confirm.convert_skill',{name:skillName,repo:repo})||'确认转换？'}</h3>
+        <div style="font-size:12px;color:#86868b">${I18N.t('skills.convert_skill_tip')||'将个人技能转换为此仓库的仓库技能'}</div>
+      </div>
+      <div style="padding:0 24px 20px;display:flex;gap:10px">
+        <button onclick="document.getElementById('convertSkillModal').remove()" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">${I18N.t('skills.action.cancel')||'取消'}</button>
+        <button id="convertSkillConfirmBtn" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#0071e3;color:#fff;cursor:pointer">${I18N.t('skills.confirm_convert')||'确认转换'}</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+  document.getElementById('convertSkillConfirmBtn').onclick = function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = I18N.t('skills.converting') || '转换中...';
+    API.post('/skills/convert', {skill_name: skillName, repo}).then(r => {
+      modal.remove();
+      if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.convert_success')||'转换成功');
+      renderSkills();
+    }).catch(e => {
+      btn.disabled = false;
+      btn.textContent = I18N.t('skills.confirm_convert')||'确认转换';
+      if (app && app.showToast) app.showToast(I18N.t('skills.toast.convert_failed',{msg:e.message})||'转换失败');
+    });
+  };
 }
 
 function downloadSkillZip(id) {

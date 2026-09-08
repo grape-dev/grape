@@ -1306,7 +1306,7 @@ def init_database():
 def _sync_official_skills():
     """启动时从 configs/skill-description.json 同步官方技能到 skill 表(幂等).
 
-    与 /api/skills/sync-official 逻辑一致:新增 INSERT + 已有 UPDATE 元信息
+    与 skill_sync.sync_official_skills_to_obs 逻辑一致:新增 INSERT + 已有 UPDATE 元信息
    (display_name/description/agent_type)._seed_from_json 只补种缺失技能,
     不更新已有技能的元信息--配置文件中改名/改描述后需要此步骤同步.
     """

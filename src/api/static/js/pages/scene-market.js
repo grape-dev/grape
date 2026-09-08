@@ -597,7 +597,7 @@ function _showApplyConfirm(sceneId, owner, repoName, sceneName) {
 
 function _doApplyScene(sceneId, owner, repoName) {
   API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName).then(r => {
-    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.scene_applied')||'场景已应用');
+    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.apply_success')||'场景已应用');
   }).catch(e => {
     if (e.status === 409) {
       _showSceneNameConflict(e.message);
@@ -1387,6 +1387,7 @@ function _loadAgentSkillOptions(idx) {
     node.skill_scope = d.scope || _skillSelectScope[idx] || 'official';
     node.skill_deleted = false;
     _renderEditorSkillSuite();
+    _updateEditorCardStyle(idx);
   });
 
   // 清除时清空 node
@@ -1397,6 +1398,7 @@ function _loadAgentSkillOptions(idx) {
     node.skill_desc = '';
     node.skill_scope = 'official';
     _renderEditorSkillSuite();
+    _updateEditorCardStyle(idx);
   });
 
   // 绑定 tab 切换
@@ -1467,7 +1469,9 @@ function _loadAgentSkillOptions(idx) {
           node.skill_id = d2.skill_id || 0;
           node.skill_desc = d2.description || '';
           node.skill_scope = d2.scope || scope;
+          node.skill_deleted = false;
           _renderEditorSkillSuite();
+          _updateEditorCardStyle(idx);
         });
         $(sel).on('select2:clear', function() {
           node.skill = '';
@@ -1475,13 +1479,39 @@ function _loadAgentSkillOptions(idx) {
           node.skill_id = 0;
           node.skill_desc = '';
           node.skill_scope = 'official';
+          node.skill_deleted = false;
           _renderEditorSkillSuite();
+          _updateEditorCardStyle(idx);
         });
         // 打开下拉让用户看到新数据
         $(sel).select2('open');
       });
     });
   }
+}
+
+// ── 局部更新卡片样式（选中/清除技能后，不重渲染整个编排页）──
+function _updateEditorCardStyle(idx) {
+  var node = _sceneEditorNodes[idx];
+  if (!node) return;
+  var card = document.querySelector('.det-card[data-idx="' + idx + '"]');
+  if (!card) return;
+  var meta = _AGENT_META[node.id] || {};
+  var bgColor = meta.color || '#0071e3';
+  var deleted = node.skill_deleted;
+  card.style.borderColor = deleted ? 'var(--r)' : '';
+  var top = card.querySelector('.det-card-top');
+  if (top) top.style.background = deleted ? 'var(--r)' : bgColor;
+  var numSpan = card.querySelector('span[style*="border-radius:6px"]');
+  if (numSpan) {
+    numSpan.style.background = deleted ? 'var(--r)22' : bgColor + '22';
+    numSpan.style.color = deleted ? 'var(--r)' : bgColor;
+  }
+  var warn = null;
+  card.querySelectorAll('span').forEach(function(s) {
+    if (s.textContent.indexOf('已删除') >= 0) warn = s;
+  });
+  if (!deleted && warn) warn.remove();
 }
 
 // ── 重新渲染技能套件区域 ──
@@ -1502,13 +1532,15 @@ function _renderEditorSkillSuite() {
     var bgColor = meta.color || '#0071e3';
     var skName = node.skill_display || node.skill || '';
     var skRole = node.skill_desc || (meta.label || node.id);
-    html += '<div class="det-suite-card">' +
-      '<div class="det-suite-num" style="background:' + bgColor + '">' + (i+1) + '</div>' +
+    var skDeleted = node.skill_deleted;
+    var cardColor = skDeleted ? 'var(--r)' : bgColor;
+    html += '<div class="det-suite-card"' + (skDeleted ? ' style="border-color:var(--r);opacity:.7"' : '') + '>' +
+      '<div class="det-suite-num" style="background:' + cardColor + '">' + (i+1) + '</div>' +
       '<div class="det-suite-body">' +
-        '<div class="det-suite-name">' + (meta.icon||'') + ' ' + skName + '</div>' +
+        '<div class="det-suite-name">' + (meta.icon||'') + ' ' + skName + (skDeleted ? ' <span style="font-size:9px;color:var(--r);font-weight:600">⚠ 已删除</span>' : '') + '</div>' +
         '<div class="det-suite-role" title="' + skRole.replace(/"/g, '&quot;') + '">' + skRole + '</div>' +
       '</div>' +
-      '<span class="det-suite-badge" style="background:' + bgColor + '14;color:' + bgColor + '">' + (meta.label||node.id) + '</span>' +
+      '<span class="det-suite-badge" style="background:' + cardColor + '14;color:' + cardColor + '">' + (meta.label||node.id) + '</span>' +
     '</div>';
   });
   html += '</div></div>';
@@ -1528,6 +1560,7 @@ function _toggleAgentEnabled(idx) {
     node.skill_id = 0;
     node.skill_desc = '';
     node.skill_scope = 'official';
+    node.skill_deleted = false;
   }
   // 更新卡片 UI
   var card = document.querySelector('.det-card[data-idx="' + idx + '"]');

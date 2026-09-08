@@ -248,9 +248,14 @@
   "scene_delete_failed": "Delete failed",
   "confirm_delete_scene": "Delete this scene?",
   "delete_scene_tip": "This cannot be undone. Scene data will be permanently removed.",
+  "delete_skill_tip": "This cannot be undone. Skill data will be permanently removed.",
+  "convert_skill_tip": "Convert personal skill to repo skill for this repository",
   "confirm_delete": "Delete",
+  "confirm_convert": "Convert",
   "deleting": "Deleting...",
+  "converting": "Converting...",
   "scene_detail": "Details",
   "no_repo_selected": "Please select a repo first",
-  "no_scenes_custom": "No scenes yet. Create or import one."
+  "no_scenes_custom": "No scenes yet. Create or import one.",
+  "category_general": "General"
 }

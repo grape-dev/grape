@@ -248,9 +248,14 @@
   "scene_delete_failed": "删除失败",
   "confirm_delete_scene": "确认删除此场景？",
   "delete_scene_tip": "删除后不可恢复，场景数据将被永久移除",
+  "delete_skill_tip": "删除后不可恢复，技能数据将被永久移除",
+  "convert_skill_tip": "将个人技能转换为此仓库的仓库技能",
   "confirm_delete": "确认删除",
+  "confirm_convert": "确认转换",
   "deleting": "删除中...",
+  "converting": "转换中...",
   "scene_detail": "查看详情",
   "no_repo_selected": "请先选择仓库",
-  "no_scenes_custom": "暂无场景，点击创建或导入"
+  "no_scenes_custom": "暂无场景，点击创建或导入",
+  "category_general": "通用"
 }

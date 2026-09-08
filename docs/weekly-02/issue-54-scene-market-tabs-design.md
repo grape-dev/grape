@@ -1116,3 +1116,5 @@ if not os.path.isdir(scenes_dir):
 4. 下架基准回到 `db_names - synced_names`，删除 `repo_scene_names`
 5. 不改 Dockerfile，不依赖 git 命令
 
+108. ✓ 技能同步移除手动接口：删除 POST /api/skills/sync-official 路由 + 前端调用；DB 元信息同步（INSERT/UPDATE from skill-description.json）合并到定时任务 sync_official_skills_to_obs 中，保证两边逻辑一致
+
