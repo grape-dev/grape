@@ -1202,7 +1202,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         runtime_session_id=oc_sid,
                         event_type="chat",
                         account=exec_account, user_id=uid,
-                        repo_gitcode_token=user_token or "",
+                        user_gitcode_token=user_token or "",
                         env_extra={"IM_CHAT_ID": chat_id},
                         pool_agent_type="chat",
                     )
