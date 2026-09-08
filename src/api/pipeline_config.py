@@ -98,19 +98,23 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
     """
     db, lock = _db()
     rows = []
+    _has_dn = False
+    _has_ao = False
+    _has_cb = False
     with lock:
         c = db.cursor()
         try:
             if repo_key:
-                _has_dn = False
-                try:
-                    _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
-                    _has_dn = "display_name" in _cols
-                except Exception:
-                    pass
-                _dn_expr = ", display_name" if _has_dn else ""
+                _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
+                _has_dn = "display_name" in _cols
+                _has_ao = "advanced_options" in _cols
+                _has_cb = "created_by" in _cols
+                _extra = ""
+                if _has_dn: _extra += ", display_name"
+                if _has_ao: _extra += ", advanced_options"
+                if _has_cb: _extra += ", created_by"
                 c.execute(
-                    f"SELECT scene_id, name, description, nodes_json, onboarding{_dn_expr} FROM devops_pipeline_scene "
+                    f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                     "WHERE is_active=1 AND repo_key=? ORDER BY id", (repo_key,))
                 rows.extend(c.fetchall())
         except Exception as e:
@@ -126,10 +130,26 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
             nodes = json.loads(r[3] or "[]") if r[3] else []
         except Exception:
             nodes = []
+        # Parse advanced_options for work_branch
+        work_branch = "main"
+        col_offset = 5  # columns after onboarding (index 4)
+        if _has_dn and len(r) > col_offset:
+            col_offset += 1  # display_name
+        if _has_ao and len(r) > col_offset:
+            try:
+                opts = json.loads(r[col_offset] or "{}")
+                work_branch = opts.get("work_branch", "main") or "main"
+            except Exception:
+                pass
+            col_offset += 1
+        created_by = ""
+        if _has_cb and len(r) > col_offset:
+            created_by = r[col_offset] or ""
         result.append({
             "scene_id": scene_id, "name": r[1], "description": r[2],
-            "display_name": (r[5] if len(r) > 5 else "") or r[1],
+            "display_name": (r[5] if _has_dn and len(r) > 5 else "") or r[1],
             "nodes": nodes, "onboarding": r[4] or "repo-onboarding",
+            "work_branch": work_branch, "created_by": created_by,
         })
     return result
 
@@ -168,14 +188,14 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
 
 
 def get_scenes(repo_key: str = "") -> list[dict]:
-    """Return scene list [{id, name, display_name, scope}] for this repo (repo-scoped only).
-
-    scope 恒为 'repo'（方案 B：场景只与仓库关联），供前端兼容展示。
-    """
+    """Return scene list [{id, name, display_name, scope, description, work_branch, created_by}] for this repo."""
     db_scenes = _query_scenes_from_db(repo_key=repo_key)
     return [{"id": s["scene_id"], "name": s["name"],
              "display_name": s.get("display_name") or s["name"],
-             "scope": "repo"} for s in db_scenes]
+             "scope": "repo",
+             "description": s.get("description") or "",
+             "work_branch": s.get("work_branch") or "main",
+             "created_by": s.get("created_by") or ""} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
@@ -269,7 +289,7 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
 
 def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
-                        display_name: str = "") -> int:
+                        display_name: str = "", created_by: str = "") -> int:
     """Create or reactivate a repo-scoped custom scene in DB. Returns DB id."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -288,6 +308,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
                 "UPDATE devops_pipeline_scene SET name=?, description=?, nodes_json=?, onboarding=?, is_active=1, updated_at=? WHERE id=?",
                 (name, description, nodes_json, onboarding, now, existing[0]))
             _try_set_display_name(c, existing[0], display_name or name)
+            _try_set_created_by(c, existing[0], created_by)
             db.commit()
             return existing[0]
         # Insert new record
@@ -297,8 +318,19 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             (scene_id, name, description, repo_key, nodes_json, onboarding, now, now))
         new_id = c.lastrowid
         _try_set_display_name(c, new_id, display_name or name)
+        _try_set_created_by(c, new_id, created_by)
         db.commit()
         return new_id
+
+
+def _try_set_created_by(c, row_id: int, created_by: str):
+    """幂等写入 created_by（列不存在时忽略）。"""
+    if not created_by:
+        return
+    try:
+        c.execute("UPDATE devops_pipeline_scene SET created_by=? WHERE id=?", (created_by, row_id))
+    except Exception:
+        pass
 
 
 def _try_set_display_name(c, row_id: int, display_name: str):
@@ -310,7 +342,7 @@ def _try_set_display_name(c, row_id: int, display_name: str):
 
 
 def update_custom_scene(scene_id: str, repo_key: str,
-                        nodes: list, name: str = "", description: str = ""):
+                        nodes: list, name: str | None = None, description: str | None = None):
     """Update a repo-scoped custom scene."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -320,10 +352,12 @@ def update_custom_scene(scene_id: str, repo_key: str,
         c = db.cursor()
         sets = ["nodes_json=?", "updated_at=?"]
         params = [nodes_json, now]
-        if name:
+        if name:  # 空字符串不覆盖已有名称
             sets.append("name=?")
             params.append(name)
-        if description:  # 空字符串不覆盖已有描述
+            sets.append("display_name=?")
+            params.append(name)
+        if description is not None:  # None=不更新，空字符串=清空描述
             sets.append("description=?")
             params.append(description)
         params.extend([scene_id, repo_key])

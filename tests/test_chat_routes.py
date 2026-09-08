@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.session_manager import db, db_lock, get_chat_config
 from src.user import db as user_db
 
@@ -27,6 +27,7 @@ def _client():
         return {"id": UID, "username": USERNAME}
 
     app.dependency_overrides[get_current_user] = _fake_user
+    app.dependency_overrides[get_current_user_or_api_key] = _fake_user
     c = TestClient(app)
     yield c
     app.dependency_overrides.clear()

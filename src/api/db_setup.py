@@ -288,6 +288,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     account           TEXT DEFAULT '',
     user_id           INTEGER DEFAULT 0,
     repo_gitcode_token TEXT DEFAULT '',
+    user_gitcode_token TEXT DEFAULT '',           -- chat 专用：用户级 GitCode token（互斥注入，不放 repo_gitcode_token）
     env_extra         MEDIUMTEXT DEFAULT '{}',    -- JSON(含服务端已注入的账号/用户凭据,见 skill-delivery-remote.md)
     skill_files       MEDIUMTEXT,    -- JSON: {skill_name: {rel_path: content}},远端交付技能包(MySQL 不允许 MEDIUMTEXT 默认值--无默认)
     server_url        TEXT DEFAULT '',      -- A2A 外呼地址,worker 替换 {{SERVER_URL}}
@@ -2237,10 +2238,11 @@ def _migrate_tables():
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "devops_pipeline_scene", "advanced_options", "TEXT DEFAULT '{}'")
+            _ensure_column(c, "devops_pipeline_scene", "created_by", "TEXT DEFAULT ''")
             db.commit()
-            log.info("Added devops_pipeline_scene.advanced_options column")
+            log.info("Added devops_pipeline_scene.advanced_options + created_by columns")
     except Exception as e:
-        log.warning(f"Add devops_pipeline_scene.advanced_options column failed: {e}")
+        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:
@@ -2388,6 +2390,7 @@ def _migrate_tables():
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "agent_tasks", "pool_engine_ids", "TEXT DEFAULT ''")
+            _ensure_column(c, "agent_tasks", "user_gitcode_token", "TEXT DEFAULT ''")
             db.commit()
         log.info("Added pool_engine_ids column to agent_tasks")
     except Exception as e:

@@ -222,7 +222,11 @@ function renderPipeline(data) {
     const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
       const hasAgent = p.statuses && p.statuses[j] > 0;
       const cls = ['tg-v','tg-i','tg-c','tg-q','tg-s'][j];
-      return `<span class="tg ${cls}" style="${hasAgent ? '' : 'opacity:0.4'}">${_agentLabel(j).substring(0,1)}</span>`;
+      const evSeq = (p.stages && p.stages[j] && p.stages[j].latest_event && p.stages[j].latest_event.seq) || '';
+      if (hasAgent && evSeq) {
+        return `<span class="tg ${cls}" style="cursor:pointer;transition:transform .15s" onclick="event.stopPropagation();app.nav('event','${evSeq}')" onmouseover="this.style.transform='scale(1.25)'" onmouseout="this.style.transform='scale(1)'">${_agentLabel(j).substring(0,1)}</span>`;
+      }
+      return `<span class="tg ${cls}" style="opacity:0.3;cursor:default">${_agentLabel(j).substring(0,1)}</span>`;
     }).join('');
     const stageName = p.stage ? (_stageLabel(p.stage) || p.stage) : '—';
     const stageClass = p.stage === 'done' ? 'tgx' : ['vod','issue','coding','qa','sre'].includes(p.stage) ? 'ty' : 't3';

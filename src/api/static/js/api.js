@@ -96,7 +96,10 @@ const API = (() => {
       }
       throw new Error('no token in refresh response');
     }).catch(e => {
-      // 超时/abort/网络错误 → 清 token 跳登录页
+      // Issue #63: 区分错误类型——abort/网络错误不清 token，只有 refresh 真失败才跳登录
+      if (e.name === 'AbortError') throw e;  // 浏览器 abort/超时——不清 token
+      if (e instanceof TypeError) throw e;   // 网络错误——不清 token
+      // refresh 真的失败（HTTP 401/403）——清 token 跳登录
       localStorage.removeItem('token');
       if (location.pathname !== '/login') location.href = '/login';
       throw e;
@@ -109,7 +112,9 @@ const API = (() => {
 
   // 401 时尝试 refresh，成功后重发原请求
   function handle401(retryFn) {
-    return doRefresh().then(() => retryFn()).catch(() => {
+    return doRefresh().then(() => retryFn()).catch(e => {
+      // Issue #63: abort/网络错误不清 token（doRefresh 已处理），只有 refresh 真失败才跳登录
+      if (e.name === 'AbortError' || e instanceof TypeError) throw e;
       // refresh 也失败——清 token 跳登录（refresh_token cookie 由服务端清除）
       localStorage.removeItem('token');
       localStorage.removeItem('user');
@@ -155,6 +160,17 @@ const API = (() => {
         throw e;
       });
     }
+    // Issue #63: 响应是 HTML（如 nginx 502 页面或登录页重定向）时，不报 "Unexpected token"
+    var ct = r.headers.get('content-type') || '';
+    if (ct.indexOf('text/html') !== -1) {
+      // 200 + HTML = nginx/proxy 返回了页面而非 API JSON，说明服务异常或 session 失效
+      if (r.status === 200) {
+        // 可能是 token 过期后反代返回登录页 HTML
+        throw new Error(I18N.t('common.session_expired') || '登录已过期，请重新登录');
+      }
+      // 502/503 等 = 服务器错误，不跳登录
+      throw new Error(I18N.t('common.server_error') || '服务器异常，请稍后重试');
+    }
     return r.json();
   }
 
@@ -174,31 +190,49 @@ const API = (() => {
 
   // fetch 超时封装：30s 后 abort，防止后端 hang 导致前端永久 loading
   // 网络错误自动重试：fetch 报 TypeError（TCP 连接过期/网络抖动）时延迟 500ms 重试一次
+  // Issue #63: 合并全局 nav/tab signal，切 tab/页面时主动取消请求；区分超时 abort 和外部 abort
   const _DEFAULT_TIMEOUT = 30000;
-  function _fetchWithTimeout(url, opts, timeout, _retried) {
+  function _fetchWithTimeout(url, opts, timeout, _retried, _skipNavSignal) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout || _DEFAULT_TIMEOUT);
+    const timer = setTimeout(() => { controller._timedOut = true; controller.abort(); }, timeout || _DEFAULT_TIMEOUT);
+    // 合并全局 nav signal + tab signal（读操作合并，写操作跳过）
+    if (!_skipNavSignal) {
+      var navSignal = window._navSignal;
+      var tabSignal = window._tabSignal;
+      if (navSignal) {
+        if (navSignal.aborted) controller.abort();
+        else navSignal.addEventListener('abort', function() { controller.abort(); });
+      }
+      if (tabSignal) {
+        if (tabSignal.aborted) controller.abort();
+        else tabSignal.addEventListener('abort', function() { controller.abort(); });
+      }
+    }
     opts = Object.assign({}, opts, { signal: controller.signal });
     return fetch(url, opts).finally(() => clearTimeout(timer)).catch(e => {
+      if (e.name === 'AbortError') {
+        if (controller._timedOut) throw e;  // 超时 abort，正常显示错误
+        e.silent = true; throw e;            // 外部取消（nav/tab/浏览器），静默
+      }
       // 网络层错误（TypeError: Failed to fetch）——首次重试一次，避免 TCP 连接过期偶发失败
       if (!_retried && e instanceof TypeError) {
-        return new Promise(r => setTimeout(r, 500)).then(() => _fetchWithTimeout(url, opts, timeout, true));
+        return new Promise(r => setTimeout(r, 500)).then(() => _fetchWithTimeout(url, opts, timeout, true, _skipNavSignal));
       }
       throw e;
     });
   }
 
   function _get(path, timeout) {
-    return _fetchWithTimeout(BASE + path, {headers: headers()}, timeout).then(r => handleResp(r, () => _get(path, timeout)));
+    return _fetchWithTimeout(BASE + path, {headers: headers()}, timeout, false, false).then(r => handleResp(r, () => _get(path, timeout)));
   }
   function _post(path, body, timeout) {
-    return _fetchWithTimeout(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}, timeout).then(r => handleResp(r, () => _post(path, body, timeout)));
+    return _fetchWithTimeout(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _post(path, body, timeout)));
   }
   function _put(path, body, timeout) {
-    return _fetchWithTimeout(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}, timeout).then(r => handleResp(r, () => _put(path, body, timeout)));
+    return _fetchWithTimeout(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _put(path, body, timeout)));
   }
   function _del(path, timeout) {
-    return _fetchWithTimeout(BASE + path, {method: 'DELETE', headers: headers()}, timeout).then(r => handleResp(r, () => _del(path, timeout)));
+    return _fetchWithTimeout(BASE + path, {method: 'DELETE', headers: headers()}, timeout, false, true).then(r => handleResp(r, () => _del(path, timeout)));
   }
 
   return {

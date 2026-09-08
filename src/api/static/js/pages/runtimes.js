@@ -789,7 +789,7 @@ function refreshRuntimes() {
   const el = document.getElementById('pageContent');
   if (el) el.innerHTML = `<div class="loading">${I18N.t('runtimes.toast.refreshing')}</div>`;
   API.post('/settings/agent-runtimes/refresh').then(() => {
-    API.get('/settings/agent-runtimes').then(renderRuntimes).catch(() => {});
+    API.get('/settings/agent-runtimes').then(d => { if (window._currentView !== 'runtimes') return; renderRuntimes(d); }).catch(() => {});
     app.showToast(I18N.t('runtimes.toast.refresh_success'));
   }).catch(e => app.showToast(I18N.t('runtimes.toast.refresh_failed', {msg: e.message})));
 }

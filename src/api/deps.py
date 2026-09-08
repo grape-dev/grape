@@ -1,6 +1,6 @@
 """共享依赖：Token 验证、Token 三层体系、用户信息获取"""
 import threading
-from fastapi import Header, HTTPException, Depends
+from fastapi import Header, HTTPException, Request, Depends
 from src.user import db as user_db
 
 TOKEN_TYPE_DEVOPS = "devops_bot"
@@ -52,6 +52,71 @@ def get_current_user(authorization: str = Header(None)) -> dict:
     # 记录活跃状态——O(1)，不阻塞
     mark_user_active(uid)
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_USER}
+
+
+def _extract_api_token(request) -> str:
+    """三通道取值：Authorization: Bearer / PRIVATE-TOKEN header / ?access_token= query。"""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    private = request.headers.get("PRIVATE-TOKEN") or request.headers.get("private-token")
+    if private:
+        return private.strip()
+    return (request.query_params.get("access_token") or "").strip()
+
+
+def get_current_user_or_api_key(request: Request) -> dict:
+    """对外业务 API 统一认证入口：JWT 会话 / 会话级临时 token（A）/ 用户级 API Key（B）三选一。
+
+    三通道取值（Bearer / PRIVATE-TOKEN / access_token）后按 token 前缀分流：
+    - `tk_`    → 会话级临时 token（session_api_tokens 校验，返回 repo/agent 上下文）→ auth_type=session_token
+    - `grape_` → 用户级长期 API Key（api_tokens 校验，绑定单用户）→ auth_type=api_key
+    - 其他     → JWT access token（复用 get_current_user）→ auth_type=jwt
+
+    返回 dict 与 get_current_user 兼容（含 id/username/token），并附加认证类型与作用域字段，
+    供内部接口按需读取（如 repo_key/agent_type 做仓库级鉴权）。
+    """
+    from src.api.auth_token import SESSION_TOKEN_PREFIX, API_KEY_PREFIX, verify_session_token, verify_api_token
+    token = _extract_api_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "未登录"})
+
+    if token.startswith(SESSION_TOKEN_PREFIX):
+        info = verify_session_token(token)
+        if not info:
+            raise HTTPException(status_code=401, detail={"code": 401, "message": "会话 token 无效或已失效"})
+        return {
+            "id": info["user_id"],
+            "username": "",
+            "token": token,
+            "token_type": "session_token",
+            "auth_type": "session_token",
+            "session_key": info["session_key"],
+            "repo_key": info["repo_key"],
+            "agent_type": info["agent_type"],
+        }
+
+    if token.startswith(API_KEY_PREFIX):
+        info = verify_api_token(token)
+        if not info:
+            raise HTTPException(status_code=401, detail={"code": 401, "message": "API Key 无效或已吊销"})
+        uid = info["user_id"]
+        acc = user_db.get_user(uid) or {}
+        mark_user_active(uid)
+        return {
+            "id": uid,
+            "username": acc.get("username", ""),
+            "token": token,
+            "token_type": API_KEY_PREFIX,
+            "auth_type": "api_key",
+            "api_token_id": info["api_token_id"],
+            "token_name": info["name"],
+        }
+
+    # JWT 会话（仅 Bearer 通道承载）；原流程不变
+    user = get_current_user(authorization=request.headers.get("authorization"))
+    user["auth_type"] = "jwt"
+    return user
 
 
 def get_user_token(username: str) -> str:

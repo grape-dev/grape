@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user, get_bot_token
+from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 
@@ -97,8 +97,8 @@ def list_agent_types():
     } for r in rows]}
 
 
-@router.get("/{name}/{owner}/{repo}")
-def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depends(get_current_user)):
+@router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Agent 会话配置查看")
+def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key)):
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 

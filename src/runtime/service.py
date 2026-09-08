@@ -128,6 +128,7 @@ _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
     "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
+    "user_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
     "status, exit_code, result_text, errors, stderr, "
@@ -310,7 +311,7 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
 
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
-                 repo_gitcode_token="", env_extra=None,
+                 repo_gitcode_token="", user_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
                  skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
@@ -408,6 +409,21 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
+    # Issue-45 M2：签发会话级临时 token 注入 GRAPE_SESSION_TOKEN（存在即有效，删除即失效）。
+    # session_key=task_id（精确失效、不误伤并发同类会话）；chat 任务绑定 USER_ID 用户身份，
+    # devops 事件任务无用户概念（user_id=0，仓库身份）。
+    if repo_key and agent_type:
+        try:
+            from src.api.auth_token import issue_session_token
+            _tk_uid = user_id or 0
+            _usr = env.get("USER_ID") or ""
+            if str(_usr).isdigit():
+                _tk_uid = int(str(_usr))
+            env["GRAPE_SESSION_TOKEN"] = issue_session_token(
+                session_key=task_id, repo_key=repo_key,
+                agent_type=agent_type, user_id=_tk_uid)
+        except Exception as e:
+            log.warning(f"enqueue: session token issue failed for {task_id}: {e}")
     _server_url = server_url or ""
     if not _server_url:
         try:
@@ -424,6 +440,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
              agent_type or "", skill or "", skill_id or 0,
              prompt, cwd or "", runtime_session_id or "",
              event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
+             user_gitcode_token or "",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
              json.dumps(knowledge_files),
@@ -1064,6 +1081,13 @@ def update_task_status(task_id, status, **kw):
                 "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
                 (row[1],))
         db.commit()
+    # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
+    if status in ("completed", "failed", "cancelled"):
+        try:
+            from src.api.auth_token import revoke_session_token
+            revoke_session_token(task_id)
+        except Exception as e:
+            log.warning(f"update_task_status: revoke session token failed for {task_id}: {e}")
 
 
 def cancel_task(task_id):

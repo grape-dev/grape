@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.session_manager import db, db_lock
 from src.user import db as user_db
 
@@ -21,6 +21,7 @@ USERNAME = "agent_tester"
 @pytest.fixture(autouse=True)
 def _client():
     app.dependency_overrides[get_current_user] = lambda: {"id": UID, "username": USERNAME}
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": UID, "username": USERNAME}
     c = TestClient(app)
     yield c
     app.dependency_overrides.clear()

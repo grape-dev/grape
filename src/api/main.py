@@ -190,6 +190,7 @@ async def lifespan(app: FastAPI):
         async def _active_user_tracker():
             from src.api.deps import get_pending_active
             from src.user import db as user_db
+            _purge_i = 0
             while True:
                 await asyncio.sleep(30)
                 try:
@@ -198,6 +199,15 @@ async def lifespan(app: FastAPI):
                         await asyncio.to_thread(user_db.batch_update_last_active, list(uids))
                 except Exception as e:
                     log.warning(f"Active user tracker flush failed: {e}")
+                # Issue-45 M2：会话级临时 token TTL 兜底清理（每 5 分钟）
+                try:
+                    _purge_i += 1
+                    if _purge_i >= 10:
+                        _purge_i = 0
+                        from src.api.auth_token import purge_expired_session_tokens
+                        await asyncio.to_thread(purge_expired_session_tokens)
+                except Exception as e:
+                    log.warning(f"Session token purge failed: {e}")
 
         _active_tracker_task = asyncio.create_task(_active_user_tracker())
         log.info("Active user tracker started (30s flush)")
@@ -246,11 +256,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Agentic DevOps API",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
 app.add_middleware(
@@ -408,6 +418,9 @@ async def request_id_and_log_middleware(request: Request, call_next):
 
 app.include_router(auth.router)
 app.include_router(repos.router)
+# Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；与 repos.py 无路径冲突）
+from src.api.git_repo_api import router as git_repo_router
+app.include_router(git_repo_router)
 app.include_router(dashboard.router)
 app.include_router(agents.router)
 app.include_router(events.router)
@@ -427,6 +440,10 @@ app.include_router(task_logs.router)
 app.include_router(knowledge.router)
 app.include_router(health.router)
 app.include_router(devstage.router)
+
+# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
+from src.api.openapi import custom_openapi
+app.openapi = lambda: custom_openapi(app)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
