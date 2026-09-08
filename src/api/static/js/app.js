@@ -184,6 +184,7 @@ function loadAgentTypes() {
     _pushHistory('repos', null);
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     localStorage.setItem('sidebarTab', 'projects');
+    window._currentView = 'repos';
 
     // 叠加轻量 loading 遮罩，不改动当前 DOM 布局
     let ov = document.getElementById('gotoReposOverlay');
@@ -196,6 +197,7 @@ function loadAgentTypes() {
     }
 
     API.get('/repos/member').then(d => {
+      if (window._currentView !== 'repos') return;  // stale guard
       // 数据就绪，一次性切换 UI
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
@@ -208,6 +210,7 @@ function loadAgentTypes() {
       $('pageTitle').textContent = I18N.t('app.current_project');
       renderRepoSelection(d.repos || []);
     }).catch(e => {
+      if (window._currentView !== 'repos') return;  // stale guard
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
       $('tb').style.display = 'none';
