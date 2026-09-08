@@ -112,7 +112,9 @@ const API = (() => {
 
   // 401 时尝试 refresh，成功后重发原请求
   function handle401(retryFn) {
-    return doRefresh().then(() => retryFn()).catch(() => {
+    return doRefresh().then(() => retryFn()).catch(e => {
+      // Issue #63: abort/网络错误不清 token（doRefresh 已处理），只有 refresh 真失败才跳登录
+      if (e.name === 'AbortError' || e instanceof TypeError) throw e;
       // refresh 也失败——清 token 跳登录（refresh_token cookie 由服务端清除）
       localStorage.removeItem('token');
       localStorage.removeItem('user');
