@@ -544,7 +544,7 @@
 .det-card{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:#f5f5f7;border:1px solid #e8e8ed;border-radius:14px;padding:16px;display:flex;flex-direction:column;transition:all .2s;position:relative}
 .det-card:hover{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
 .det-card-top{width:36px;height:4px;border-radius:2px;margin-bottom:12px}
-.det-card-desc{font-size:10px;color:#86868b;line-height:1.5;margin-bottom:10px;flex:1}
+.det-card-desc{font-size:10px;color:#86868b;line-height:1.5;margin-bottom:10px;flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
 .det-card-sep{height:1px;background:#e8e8ed;margin:8px 0}
 .det-card-box{background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center}
 .det-card-label{font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px}
@@ -559,3 +559,24 @@
 .det-suite-name{font-size:14px;font-weight:600;color:#1d1d1f;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .det-suite-role{font-size:11px;color:#86868b;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .det-suite-badge{font-size:10px;font-weight:600;padding:3px 10px;border-radius:999px;flex-shrink:0}
+
+/* ===== Select2 苹果风格覆盖 ===== */
+.select2-container--default .select2-selection--single{background:var(--c);border:1px solid var(--b);border-radius:8px;height:28px;outline:none;transition:border-color .15s}
+.select2-container--default .select2-selection--single:focus{border-color:var(--a)}
+.select2-container--default .select2-selection--single .select2-selection__rendered{color:var(--t);line-height:26px;font-size:11px;padding-left:8px;padding-right:20px}
+.select2-container--default .select2-selection--single .select2-selection__placeholder{color:var(--t3)}
+.select2-container--default .select2-selection--single .select2-selection__arrow{height:26px;right:4px}
+.select2-container--default .select2-selection--single .select2-selection__arrow b{border-color:var(--t3) transparent transparent transparent}
+.select2-container--default.select2-container--open .select2-selection--single .select2-selection__arrow b{border-color:transparent transparent var(--t3) transparent}
+.select2-container--default .select2-selection__clear{color:var(--t3);font-size:14px;line-height:1}
+.select2-container--default .select2-selection--single[aria-expanded=true]{border-color:var(--a);box-shadow:0 0 0 2px rgba(0,113,227,.08)}
+.select2-dropdown{border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.1);background:var(--c);overflow:hidden}
+.select2-search{padding:6px 8px;border-bottom:1px solid var(--b)}
+.select2-search--dropdown .select2-search__field{border:1px solid var(--b);border-radius:6px;height:26px;font-size:11px;outline:none;background:var(--bg);color:var(--t);padding:0 8px}
+.select2-search--dropdown .select2-search__field:focus{border-color:var(--a);background:var(--c)}
+.select2-results{padding:0}
+.select2-results__option{padding:6px 10px;font-size:11px;color:var(--t);transition:background .1s}
+.select2-container--default .select2-results__option--highlighted[aria-selected]{background:rgba(0,113,227,.08);color:var(--a)}
+.select2-container--default .select2-results__option[aria-selected=true]{background:rgba(0,113,227,.06);color:var(--a);font-weight:500}
+.select2-results__group{padding:6px 10px;font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;background:var(--bg);border-bottom:1px solid var(--b)}
+.select2-results__message{color:var(--t3);font-size:10px;padding:8px;text-align:center}

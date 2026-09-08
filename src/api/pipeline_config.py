@@ -316,10 +316,11 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             "INSERT INTO devops_pipeline_scene (scene_id, name, description, repo_key, nodes_json, onboarding, is_active, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,1,?,?)",
             (scene_id, name, description, repo_key, nodes_json, onboarding, now, now))
-        _try_set_display_name(c, c.lastrowid, display_name or name)
-        _try_set_created_by(c, c.lastrowid, created_by)
+        new_id = c.lastrowid
+        _try_set_display_name(c, new_id, display_name or name)
+        _try_set_created_by(c, new_id, created_by)
         db.commit()
-        return c.lastrowid
+        return new_id
 
 
 def _try_set_created_by(c, row_id: int, created_by: str):

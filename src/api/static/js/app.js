@@ -178,6 +178,9 @@ function loadAgentTypes() {
     }
     const parts = val.split('/');
     localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1]}));
+    // 同步侧边栏下拉选中项
+    const sel = $('repoSelect');
+    if (sel) sel.value = val;
     nav('dash');
   }
 
