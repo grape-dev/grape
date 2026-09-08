@@ -861,16 +861,15 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             owner_id = row[2] or ""
             owner_name = row[3] or ""
 
-            # 2. 并发槽检查
+            # 2. 引擎级并发槽检查（方案一：标签只做路由，并发纯引擎级）
+            # 废弃 engine_capabilities.max_concurrent，统一走 agent_runtimes.max_concurrent
             c.execute(
-                "SELECT ec.max_concurrent, "
-                "(SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')) "
-                "FROM engine_capabilities ec WHERE ec.runtime_id=? AND ec.enabled=1 AND (ec.tag=? OR ec.tag='all')",
-                (runtime_id, runtime_id, tag)
+                "SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?",
+                (runtime_id,)
             )
-            cap_row = c.fetchone()
-            if cap_row and cap_row[1] >= cap_row[0]:
-                return None  # 已满载
+            rt_row = c.fetchone()
+            if rt_row and rt_row[0] >= rt_row[1]:
+                return None  # 引擎已满载
 
             # 3. 构建任务查询（加 scope 过滤）
             # tag="all" → 匹配任意 pool_tag（广播）；其他 tag → 精确匹配 pool_tag

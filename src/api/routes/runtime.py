@@ -1083,3 +1083,120 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_curre
         db.commit()
     log.info(f"Runtime tags set: rid={runtime_id} tags={tags} (engine_capabilities → agent_tags synced)")
     return {"tags": tags}
+
+
+class MaxConcurrentBody(BaseModel):
+    max_concurrent: int = 20
+
+
+@router.put("/runtimes/{runtime_id}/max-concurrent")
+def set_runtime_max_concurrent(runtime_id: int, body: MaxConcurrentBody,
+                                user: dict = Depends(get_current_user)):
+    """设置引擎级最大并发数（方案一：并发纯引擎级，标签只做路由）。"""
+    from src.session_manager import db, db_lock
+    if body.max_concurrent < 1 or body.max_concurrent > 100:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "max_concurrent 必须在 1-100 之间"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        c.execute("UPDATE agent_runtimes SET max_concurrent=? WHERE id=?", (body.max_concurrent, runtime_id))
+        db.commit()
+    log.info(f"Runtime max_concurrent set: rid={runtime_id} max_concurrent={body.max_concurrent}")
+    return {"max_concurrent": body.max_concurrent}
+
+
+# ===== 场景标签 =====
+
+@router.get("/scene-tags")
+def list_scene_tags(user: dict = Depends(get_current_user)):
+    """返回场景市场所有场景及其可用角色标签（供前端场景选择器使用）。
+
+    返回格式：[{name, display_name, roles: ["vod","issue","coding","qa","sre"]}, ...]
+    """
+    from src.user.db import list_scene_market
+    scenes, _ = list_scene_market(limit=0)
+    result = []
+    for s in scenes:
+        nodes = json.loads(s.get("nodes_json") or "[]") if isinstance(s.get("nodes_json"), str) else (s.get("nodes_json") or [])
+        roles = []
+        for n in nodes:
+            if isinstance(n, dict) and n.get("tag") and n["tag"] not in roles:
+                roles.append(n["tag"])
+        result.append({
+            "name": s["name"],
+            "display_name": s.get("display_name") or s["name"],
+            "roles": roles,
+        })
+    return {"scenes": result}
+
+
+@router.get("/runtimes/{runtime_id}/scene-tags")
+def get_runtime_scene_tags(runtime_id: int, user: dict = Depends(get_current_user)):
+    """返回引擎的场景标签列表。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT scene_tags FROM agent_runtimes WHERE id=?", (runtime_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+    tags = json.loads(row[0]) if row[0] else ["default"]
+    return {"scene_tags": tags}
+
+
+class SceneTagsBody(BaseModel):
+    scene_tags: list[str] = ["default"]
+
+
+@router.put("/runtimes/{runtime_id}/scene-tags")
+def set_runtime_scene_tags(runtime_id: int, body: SceneTagsBody,
+                            user: dict = Depends(get_current_user)):
+    """设置引擎的场景标签。
+
+    场景标签是元数据，约束可选角色标签范围。
+    保存时不修改角色标签——前端根据场景的可用角色自动过滤角色标签 checkbox。
+    """
+    tags = body.scene_tags or ["default"]
+    # 去重保序
+    seen = set()
+    deduped = []
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            deduped.append(t)
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        c.execute("UPDATE agent_runtimes SET scene_tags=? WHERE id=?", (json.dumps(deduped, ensure_ascii=False), runtime_id))
+        db.commit()
+    log.info(f"Runtime scene_tags set: rid={runtime_id} scene_tags={deduped}")
+    return {"scene_tags": deduped}
+
+
+# ===== 引擎别名 =====
+
+class AliasBody(BaseModel):
+    alias: str = ""
+
+
+@router.put("/runtimes/{runtime_id}/alias")
+def set_runtime_alias(runtime_id: int, body: AliasBody,
+                       user: dict = Depends(get_current_user)):
+    """设置引擎别名。空字符串表示清除别名。"""
+    alias = (body.alias or "").strip()
+    if len(alias) > 64:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "alias 最长 64 字符"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        c.execute("UPDATE agent_runtimes SET alias=? WHERE id=?", (alias, runtime_id))
+        db.commit()
+    log.info(f"Runtime alias set: rid={runtime_id} alias={alias!r}")
+    return {"alias": alias}
+
+

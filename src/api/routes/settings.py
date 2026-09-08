@@ -287,8 +287,8 @@ def get_agent_runtimes(user: dict = Depends(get_current_user)):
         try:
             with db_lock:
                 _tc = db.cursor()
-                _tc.execute("SELECT tag, max_concurrent, priority, enabled FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rt["id"],))
-                rt["tags"] = [{"tag": r[0], "max_concurrent": r[1], "priority": r[2], "enabled": bool(r[3])} for r in _tc.fetchall()]
+                _tc.execute("SELECT tag, priority, enabled FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rt["id"],))
+                rt["tags"] = [{"tag": r[0], "priority": r[1], "enabled": bool(r[2])} for r in _tc.fetchall()]
         except Exception:
             rt["tags"] = []
         visible_runtimes.append(rt)
@@ -349,7 +349,9 @@ def get_agent_runtimes(user: dict = Depends(get_current_user)):
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
-                "agent_tags": rt.get("agent_tags", [])})
+                "agent_tags": rt.get("agent_tags", []),
+                "scene_tags": rt.get("scene_tags", ["default"]),
+                "alias": rt.get("alias", "")})
         else:
             # 本机 hostname 未在 runtime_credentials 中注册 → 创建虚拟本机设备
             _local_dev_key = "__local__"
@@ -368,7 +370,9 @@ def get_agent_runtimes(user: dict = Depends(get_current_user)):
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
-                "agent_tags": rt.get("agent_tags", [])})
+                "agent_tags": rt.get("agent_tags", []),
+                "scene_tags": rt.get("scene_tags", ["default"]),
+                "alias": rt.get("alias", "")})
     # AI Devspace 创建的凭据：worker 尚未上线注册时没有 agent_runtimes 行，
     # 但用户需要在 Workers 列表看到这个待接入设备（凭据已生成，环境正在启动）。
     # 保留没有承载引擎但凭据 active 的设备，health=offline 让用户知道还没接入。
@@ -564,6 +568,39 @@ def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depe
     return {"message": f"凭据已改名为 {name}"}
 
 
+class CredScopeBody(BaseModel):
+    scope: str = "user"
+    repo_key: str = ""
+
+
+@router.put("/runtime-credentials/{cid}/scope")
+def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(get_current_user)):
+    """切换凭据 scope（仓库/个人）。仅 owner 可操作，仅 active 凭据可改。不允许设为 global。"""
+    from src.session_manager import db, db_lock
+    scope = _normalize_scope(body.scope)
+    if scope == "global":
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "不允许设为全局，仅可切换仓库/个人"})
+    repo_key = (body.repo_key or "").strip()
+    if scope == "repo" and not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 scope 需填写 repo_key"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+        _owner, _status = row[0] or "", row[1] or ""
+        if _status != "active":
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改 scope"})
+        _uname = user.get("username") or ""
+        if _owner != _uname:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅凭据 owner 可修改 scope"})
+        c.execute("UPDATE runtime_credentials SET scope=?, repo_key=? WHERE id=?", (scope, repo_key or None, cid))
+        db.commit()
+    log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key}")
+    return {"scope": scope, "repo_key": repo_key}
+
+
 @router.get("/runtime-credentials")
 def list_runtime_credentials(user: dict = Depends(get_current_user)):
     """凭据列表（不含 token_hash / 明文）"""
@@ -649,12 +686,10 @@ def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_
 
 class EngineTagBody(BaseModel):
     tag: str
-    max_concurrent: int = 1
     priority: int = 50
 
 
 class EngineTagUpdateBody(BaseModel):
-    max_concurrent: int = 1
     priority: int = 50
     enabled: int = 1
 
@@ -678,7 +713,7 @@ def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, tag, max_concurrent, priority, enabled, created_at, updated_at "
+                "SELECT id, tag, priority, enabled, created_at, updated_at "
                 "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
                 (rid,)
             )
@@ -686,8 +721,8 @@ def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"tags": [
-        {"id": r[0], "tag": r[1], "max_concurrent": r[2], "priority": r[3],
-         "enabled": bool(r[4]), "created_at": r[5], "updated_at": r[6]}
+        {"id": r[0], "tag": r[1], "priority": r[2],
+         "enabled": bool(r[3]), "created_at": r[4], "updated_at": r[5]}
         for r in rows
     ]}
 
@@ -709,9 +744,9 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_curre
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在"})
             c.execute(
                 "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                "VALUES (?,?,?,?,1,?,?) "
-                "ON DUPLICATE KEY UPDATE max_concurrent=VALUES(max_concurrent), priority=VALUES(priority), updated_at=VALUES(updated_at)",
-                (rid, tag, body.max_concurrent, body.priority, now, now)
+                "VALUES (?,?,1,?,1,?,?) "
+                "ON DUPLICATE KEY UPDATE priority=VALUES(priority), updated_at=VALUES(updated_at)",
+                (rid, tag, body.priority, now, now)
             )
             _sync_agent_tags(rid, c)
             db.commit()
@@ -723,15 +758,15 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_curre
             try:
                 c.execute(
                     "REPLACE INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                    "VALUES (?,?,?,?,1,?,?)",
-                    (rid, tag, body.max_concurrent, body.priority, now, now)
+                    "VALUES (?,?,1,?,1,?,?)",
+                    (rid, tag, body.priority, now, now)
                 )
                 _sync_agent_tags(rid, c)
                 db.commit()
             except Exception as e2:
                 db.rollback()
                 raise HTTPException(status_code=500, detail={"code": 500, "message": str(e2)})
-    log.info(f"Engine tag added: runtime={rid} tag={tag} concurrent={body.max_concurrent} priority={body.priority}")
+    log.info(f"Engine tag added: runtime={rid} tag={tag} priority={body.priority}")
     return {"message": f"标签 {tag} 已添加", "tag": tag}
 
 
@@ -747,9 +782,9 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
         c = db.cursor()
         try:
             c.execute(
-                "UPDATE engine_capabilities SET max_concurrent=?, priority=?, enabled=?, updated_at=? "
+                "UPDATE engine_capabilities SET priority=?, enabled=?, updated_at=? "
                 "WHERE runtime_id=? AND tag=?",
-                (body.max_concurrent, body.priority, body.enabled, now, rid, tag)
+                (body.priority, body.enabled, now, rid, tag)
             )
             if c.rowcount == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})

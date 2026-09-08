@@ -277,6 +277,29 @@ def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list):
         _rebuild_scene_skill_ref(row[0], nodes, scene_name)
 
 
+def _init_featured_scenes_if_empty():
+    """精选场景初始化：如果 official 场景没有任何 is_featured=1 的，设置默认精选。
+
+    独立于远端同步——即使没有 token 无法拉远端场景包，本地已有 official 场景也需要精选标记。
+    """
+    default_featured = ("default", "cloud-native", "iac")
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
+        featured_count = c.fetchone()[0]
+        if featured_count == 0:
+            placeholders = ",".join("?" * len(default_featured))
+            c.execute(
+                f"UPDATE scene_market SET is_featured=1, updated_at=datetime('now') "
+                f"WHERE name IN ({placeholders}) AND source='official' AND is_active=1",
+                default_featured,
+            )
+            db.commit()
+            log.info(f"Scene sync: initialized featured scenes: {', '.join(default_featured)}")
+        else:
+            log.info(f"Scene sync: {featured_count} featured scenes already exist, skip init")
+
+
 async def sync_official_scenes():
     """定时同步官方场景从 grape-skills 仓库到 scene_market 表。"""
     log.info(f"Scene sync started: {_REPO_URL} branch={_REPO_BRANCH} (ZIP archive)")
@@ -285,7 +308,8 @@ async def sync_official_scenes():
     try:
         bot_token = _get_sync_token()
         if not bot_token:
-            log.warning("Scene sync: no GitCode token configured (GRAPE_DEV_TOKEN env / configs/scene-sync.json), skip")
+            log.warning("Scene sync: no GitCode token configured (GRAPE_DEV_TOKEN env / configs/scene-sync.json), skip remote sync")
+            _init_featured_scenes_if_empty()
             return
 
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -482,23 +506,8 @@ async def sync_official_scenes():
             f"skipped={stats['skipped']}, failed={stats['failed']}"
         )
 
-        # 6. 初始化精选场景：如果 official 场景没有任何 is_featured=1 的，设置默认精选
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
-            featured_count = c.fetchone()[0]
-            if featured_count == 0:
-                default_featured = ("default", "cloud-native", "iac")
-                placeholders = ",".join("?" * len(default_featured))
-                c.execute(
-                    f"UPDATE scene_market SET is_featured=1, updated_at=datetime('now') "
-                    f"WHERE name IN ({placeholders}) AND source='official' AND is_active=1",
-                    default_featured,
-                )
-                db.commit()
-                log.info(f"Scene sync: initialized featured scenes: {', '.join(default_featured)}")
-            else:
-                log.info(f"Scene sync: {featured_count} featured scenes already exist, skip init")
+        # 7. 初始化精选场景（提取为独立函数，token 缺失时也能调用）
+        _init_featured_scenes_if_empty()
 
     finally:
         if tmp_dir:
