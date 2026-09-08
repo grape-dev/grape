@@ -61,6 +61,7 @@
   "refresh_failed": "刷新失败: {{msg}}",
   "please_input_scene_name": "请输入场景名称",
   "scene_saved": "场景已保存",
+  "scene_info_pending": "信息已暂存，请点击保存按钮提交",
   "scene_created": "场景创建成功",
   "select_engine": "选择引擎",
   "engines_available": "{{count}} 个可用引擎 · 不选 = 广播竞争",

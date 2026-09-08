@@ -322,6 +322,8 @@ def update_custom_scene(scene_id: str, repo_key: str,
         if name:
             sets.append("name=?")
             params.append(name)
+            sets.append("display_name=?")
+            params.append(name)
         if description:  # 空字符串不覆盖已有描述
             sets.append("description=?")
             params.append(description)

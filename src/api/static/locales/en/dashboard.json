@@ -61,6 +61,7 @@
   "refresh_failed": "Refresh failed: {{msg}}",
   "please_input_scene_name": "Please enter a scene name",
   "scene_saved": "Scene saved",
+  "scene_info_pending": "Info staged. Click Save to submit.",
   "scene_created": "Scene created successfully",
   "select_engine": "Select Engine",
   "engines_available": "{{count}} available engines · No selection = broadcast",

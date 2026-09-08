@@ -656,7 +656,7 @@ function renderDashboard(data) {
       _pendingSceneName = newName;
       _pendingSceneDesc = document.getElementById('editSceneDescInput').value.trim();
       overlay.remove();
-      app.showToast(I18N.t('dashboard.scene_saved'));
+      app.showToast(I18N.t('dashboard.scene_info_pending'));
     };
   };
 
