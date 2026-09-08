@@ -129,12 +129,15 @@ function loadTasks() {
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
   API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
           '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode).then(d => {
+    if (window._currentView !== 'tasks') return;  // stale guard
     _tasksAll = d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
     if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
     _render();
   }).catch(e => {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'tasks') return;  // stale guard
     el.innerHTML = '<div class="error">' + I18N.t('tasks.load_failed', {msg: e.message}) + '</div>';
   });
 }

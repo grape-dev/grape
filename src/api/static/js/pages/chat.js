@@ -70,6 +70,8 @@ function renderChat(openConvId) {
   loadConversations(true);  // auto-select first
   loadSideConfig();
   setupChatStream();
+  // Issue #63: 切回来时如果有进行中的接入任务，恢复轮询
+  if (typeof _onboardTaskId !== 'undefined' && _onboardTaskId) pollOnboardStatus();
 }
 
 let _chatSkillScope = 'official';
@@ -220,7 +222,8 @@ function loadConversations(autoSelect) {
     });
     if (convs.length === 0) {
       html += '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">' + I18N.t('chat.conversation.empty_hint') + '</div>';
-      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
+      var _cb = document.getElementById('chatBody');
+      if (_cb) _cb.innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
     list.innerHTML = html;
     list.querySelectorAll('.conv-item').forEach(item => {
@@ -250,9 +253,12 @@ function newConversation() {
   API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
     _currentConvId = d.conversation_id;
     loadConversations();
-    document.getElementById('chatBody').innerHTML = '';
-    document.getElementById('chatInput').disabled = false;
-    document.querySelector('.chat-in button').disabled = false;
+    var _cb = document.getElementById('chatBody');
+    if (_cb) _cb.innerHTML = '';
+    var _ci = document.getElementById('chatInput');
+    if (_ci) _ci.disabled = false;
+    var _btn = document.querySelector('.chat-in button');
+    if (_btn) _btn.disabled = false;
     const hdr = document.querySelector('.chat-hdr h2');
     if (hdr) hdr.textContent = I18N.t('chat.header.title');
   }).catch(e => app.showToast(I18N.t('chat.conversation.create_failed', {msg: e.message})));
@@ -310,7 +316,8 @@ function _doDeleteConv(convId) {
   API.del('/chat/conversations/' + convId).then(() => {
     if (_currentConvId === convId) {
       _currentConvId = null;
-      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
+      var _cb = document.getElementById('chatBody');
+      if (_cb) _cb.innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
     loadConversations();
     app.showToast(I18N.t('chat.conversation.deleted'));
@@ -833,6 +840,11 @@ function pollOnboardStatus() {
       _onboardTimer = null;
     }
   }, 2000);
+}
+
+// Issue #63: 导出停轮询函数供 app.nav 调用
+function _stopOnboardPoll() {
+  if (_onboardTimer) { clearInterval(_onboardTimer); _onboardTimer = null; }
 }
 
 function renderOnboardStatus(d) {

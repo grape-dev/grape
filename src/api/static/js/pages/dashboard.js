@@ -225,7 +225,7 @@ function renderDashboard(data) {
       if (e) e.stopPropagation();
       API.post('/scenes/apply/' + owner + '/' + name, {scene_id: sceneId}).then(r => {
         app.showToast(r.message || I18N.t('dashboard.scene_applied'));
-        API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+        API.get('/dashboard/' + owner + '/' + name).then(d => { if (window._currentView !== 'dash') return; renderDashboard(d); }).catch(() => {});
       }).catch(err => app.showToast(I18N.t('dashboard.apply_failed', {msg: (err.detail?.message || err.message)})));
     };
   }
@@ -292,7 +292,7 @@ function renderDashboard(data) {
         overlay.remove();
         app.showToast(I18N.t('dashboard.scene_deleted')||'场景已删除');
         // 重新加载
-        API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+        API.get('/dashboard/' + owner + '/' + name).then(d => { if (window._currentView !== 'dash') return; renderDashboard(d); }).catch(() => {});
       }).catch(err => { overlay.remove(); app.showToast(I18N.t('dashboard.delete_failed', {msg: (err.detail?.message || err.message)})); });
     };
   };
@@ -1689,7 +1689,7 @@ window._saveAdvancedOptions = function (sceneId, repoParam) {
       app.showToast && app.showToast('高级选项已保存');
       window._closeAdvModal();
       // 刷新 dashboard
-      API.get('/dashboard/' + repoParam.split('/')[0] + '/' + repoParam.split('/')[1]).then(renderDashboard).catch(function () {});
+      API.get('/dashboard/' + repoParam.split('/')[0] + '/' + repoParam.split('/')[1]).then(d => { if (window._currentView !== 'dash') return; renderDashboard(d); }).catch(function () {});
     })
     .catch(function (e) {
       var msg = (e && e.detail && e.detail.message) || (e && e.message) || '保存失败';
