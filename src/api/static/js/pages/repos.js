@@ -275,7 +275,7 @@ function renderRepos() {
           <span class="ts t2">${r.role}</span>
           <span class="ts t3">${r.is_hosted ? 'Webhook OK' : ''} · ★ ${r.name}</span>
           <span class="tg ${statusClass}" style="margin-left:auto">${statusText}</span>
-          <button class="bt bt-o bt-s" onclick="event.stopPropagation();unhostRepo('${r.full_name}')" style="color:var(--r);border-color:var(--r)">${I18N.t('repos.managed.unhost_btn')}</button>
+          <button class="bt bt-o bt-s" onclick="event.stopPropagation();unhostRepo('${r.full_name}',event)" style="color:var(--r);border-color:var(--r)">${I18N.t('repos.managed.unhost_btn')}</button>
         </div>`;
       });
     }
@@ -361,8 +361,22 @@ function selectRepo(fullName, owner, name) {
   app.nav('dash');
 }
 
-function unhostRepo(fullName) {
-  if (!confirm(I18N.t('repos.unhost.confirm', {name: fullName}))) return;
+function unhostRepo(fullName, event) {
+  if (window._grapeConfirm) {
+    _grapeConfirm({
+      title: I18N.t('repos.unhost.confirm_title') || '解除托管',
+      message: I18N.t('repos.unhost.confirm', {name: fullName}),
+      confirmText: I18N.t('repos.unhost.confirm_btn') || '解除托管',
+      danger: true,
+      onConfirm: function() { _doUnhost(fullName); }
+    }, event);
+  } else {
+    if (!confirm(I18N.t('repos.unhost.confirm', {name: fullName}))) return;
+    _doUnhost(fullName);
+  }
+}
+
+function _doUnhost(fullName) {
   API.post('/repos/remove', {full_name: fullName}).then(r => {
     app.showToast(I18N.t('repos.unhost.done'));
     app.loadProfile().then(() => {

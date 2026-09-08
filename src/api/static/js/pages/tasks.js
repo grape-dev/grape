@@ -624,12 +624,12 @@ function _renderTaskActionsInline(t) {
   // Issue #51: 确认完成
   if (_stage === 'pending_review' || _stage === 'sre' || _stage === 'sre_completed') {
     if (_status !== 'completed' && _status !== 'cancelled') {
-      html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id})" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')||'确认完成'}</button>`;
+      html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')||'确认完成'}</button>`;
     }
   }
   // 取消任务
   if (_status !== 'completed' && _status !== 'cancelled') {
-    html += `<button class="tsk-btn tsk-btn-ghost" onclick="cancelTask(${t.id})" style="padding:8px 14px;border-radius:10px;font-size:12px;color:#d32f2f">✕ ${I18N.t('tasks.cancel_task')||'取消'}</button>`;
+    html += `<button class="tsk-btn tsk-btn-ghost" onclick="cancelTask(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;color:#d32f2f">✕ ${I18N.t('tasks.cancel_task')||'取消'}</button>`;
   }
   // 恢复任务
   if (_status === 'cancelled') {
@@ -643,18 +643,62 @@ function _renderTaskActionsBar(t) {
   return '';
 }
 
-window.confirmTaskDone = function(taskId) {
-  if (!confirm('确认此任务已完成？')) return;
-  API.post('/tasks/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}).then(() => {
-    app.showToast(I18N.t('tasks.confirm_done')||'任务已完成');
-  }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+window._grapeConfirm = function(opts, event) {
+  const {title, message, confirmText, cancelText, onConfirm, danger} = opts;
+  let posX = window.innerWidth / 2, posY = window.innerHeight / 2;
+  if (event && event.clientX) { posX = event.clientX; posY = event.clientY; }
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.2);backdrop-filter:blur(3px);z-index:9999;opacity:0;transition:opacity .2s';
+  const dlg = document.createElement('div');
+  const dlgW = 260;
+  let dlgX = posX - dlgW / 2;
+  let dlgY = posY - 50;
+  if (dlgX < 12) dlgX = 12;
+  if (dlgX + dlgW > window.innerWidth - 12) dlgX = window.innerWidth - dlgW - 12;
+  if (dlgY < 12) dlgY = 12;
+  if (dlgY > window.innerHeight - 160) dlgY = window.innerHeight - 160;
+  dlg.style.cssText = `position:fixed;left:${dlgX}px;top:${dlgY}px;background:var(--c,#fff);border-radius:12px;padding:14px 18px;max-width:${dlgW}px;width:90%;box-shadow:0 6px 30px rgba(0,0,0,.12);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;transform:scale(1.05);transition:transform .2s cubic-bezier(.4,0,.2,1)`;
+  dlg.innerHTML = `
+    <div style="font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);margin-bottom:4px;text-align:center">${title||'确认'}</div>
+    <div style="font-size:11px;color:var(--t2,#3a3a3c);line-height:1.35;text-align:center;margin-bottom:12px;white-space:pre-line">${message||''}</div>
+    <div style="display:flex;gap:6px">
+      <button id="_grapeCancel" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:rgba(0,0,0,.06);font-size:11px;font-weight:500;color:var(--t1,#1d1d1f);cursor:pointer;font-family:inherit">${cancelText||'取消'}</button>
+      <button id="_grapeOK" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:${danger?'#ff3b30':'#0071e3'};font-size:11px;font-weight:600;color:#fff;cursor:pointer;font-family:inherit">${confirmText||'确认'}</button>
+    </div>`;
+  overlay.appendChild(dlg);
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => { overlay.style.opacity = '1'; dlg.style.transform = 'scale(1)'; });
+  function _close() { overlay.style.opacity = '0'; dlg.style.transform = 'scale(1.05)'; setTimeout(() => overlay.remove(), 200); }
+  document.getElementById('_grapeCancel').onclick = _close;
+  document.getElementById('_grapeOK').onclick = function() { _close(); if (onConfirm) setTimeout(onConfirm, 100); };
+  overlay.onclick = function(e) { if (e.target === overlay) _close(); };
 };
 
-window.cancelTask = function(taskId) {
-  if (!confirm('确认取消此任务？取消后可恢复。')) return;
-  API.post('/tasks/' + taskId + '/cancel').then(() => {
-    app.showToast(I18N.t('tasks.cancel_task')||'任务已取消');
-  }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+window.confirmTaskDone = function(taskId, event) {
+  _grapeConfirm({
+    title: I18N.t('tasks.confirm_done')||'确认任务完成',
+    message: 'SRE 已完成部署，确认此任务已完成？',
+    confirmText: I18N.t('tasks.confirm_done')||'确认完成',
+    onConfirm: function() {
+      API.post('/tasks/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}).then(() => {
+        app.showToast(I18N.t('tasks.confirm_done')||'任务已完成');
+      }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+    }
+  }, event);
+};
+
+window.cancelTask = function(taskId, event) {
+  _grapeConfirm({
+    title: I18N.t('tasks.cancel_task')||'取消任务',
+    message: '确认取消此任务？取消后可恢复。',
+    confirmText: I18N.t('tasks.cancel_task')||'取消任务',
+    danger: true,
+    onConfirm: function() {
+      API.post('/tasks/' + taskId + '/cancel').then(() => {
+        app.showToast(I18N.t('tasks.cancel_task')||'任务已取消');
+      }).catch(e => app.showToast('操作失败: ' + (e.detail?.message || e.message)));
+    }
+  }, event);
 };
 
 window.resumeTask = function(taskId) {
