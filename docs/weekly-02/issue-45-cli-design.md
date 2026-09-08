@@ -121,16 +121,17 @@ grape git status --repo owner/repo
 - agent 不确定参数 → `grape <group> <verb> --help` 查看参数；
 - 无网络/契约未拉取时 `--help` 显示已缓存契约的组名（降级提示）。
 
-- **配置优先级**：CLI 参数 > 环境变量（`GRAPE_BASE_URL`/`GRAPE_TOKEN`）> `~/.grape/config.json`。
-- **认证**：默认 `Authorization: Bearer <token>`；兼容 `PRIVATE-TOKEN`/`access_token`。
+- **配置优先级**：CLI 参数 > 环境变量（**`GRAPE_API_TOKEN`**（任务级临时 token，worker 优先）> `GRAPE_BASE_URL`/`GRAPE_TOKEN`）> `~/.grape/config.json`。
+- **认证**：默认 `Authorization: Bearer <token>`；兼容 `PRIVATE-TOKEN`/`access_token`。token 可为会话级（`tk_`）或用户级（`grape_`）。
 - **输出**：human-readable；`--json` 机器可读（worker 解析）。
 - **错误处理**：401 → 提示 token 无效；契约拉取失败 → 提示 base_url 或 refresh。
 
 ## 四、与 worker agent 集成
 
-- worker 侧 agent（`src/agent/opencode.py` 等）`pip install grape`，用 `GRAPE_BASE_URL` + `GRAPE_TOKEN` 调用 task/repo/agent/git 操作。
+- worker 侧 agent（`src/agent/opencode.py` 等）`pip install grape`，用 `GRAPE_BASE_URL` + **`GRAPE_API_TOKEN`（任务级临时 token，随任务自动注入，零配置）** 调用 task/repo/agent/git 操作。
+- CLI 在 agent 内运行时优先读 `GRAPE_API_TOKEN`；独立/三方场景用用户级 `GRAPE_TOKEN`（方式 B，Web UI 生成）。
 - 替代当前部分直接 curl 的依赖，统一走 CLI/API。
-- **CLI 不提供 create/revoke token 子命令**（避免自举越权）；API Key 由 Web UI 生成。
+- **CLI 不提供 create/revoke token 子命令**（避免自举越权）；用户级 API Key（方式 B）由 Web UI 生成。
 
 ## 五、改动清单（CLI 部分）
 
@@ -151,6 +152,7 @@ grape git status --repo owner/repo
 |---|------|------|------|
 | A1 | 参数 > 环境变量 > 配置文件优先级 | 三处都给 `--base-url`/`--token` | 取参数值 |
 | A2 | 仅环境变量 | `GRAPE_BASE_URL`+`GRAPE_TOKEN` | 正确加载 |
+| A2b | 任务级 token 优先 | `GRAPE_API_TOKEN` 与 `GRAPE_TOKEN` 同环境 | 取 `GRAPE_API_TOKEN`（任务级优先） |
 | A3 | 仅配置文件 | `~/.grape/config.json` | 正确加载 |
 | A4 | 三者皆无 | — | 报错并给出 "需 --base-url/--token" 提示（exit≠0） |
 | A5 | 认证头 | 给定 token | 请求头为 `Authorization: Bearer <token>`；兼容 PRIVATE-TOKEN / access_token |
