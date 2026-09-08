@@ -641,7 +641,13 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
             API.put('/scenes/' + encodeURIComponent(scene.id) + '?repo=' + encodeURIComponent(owner + '/' + name), payload).then(() => {
               app.showToast(I18N.t('dashboard.scene_saved')||'场景已保存');
               if (field === 'sceneName') sceneName = trimmed; else sceneDesc = trimmed;
-            }).catch(err => { app.showToast(I18N.t('dashboard.save_failed')||'保存失败' + ': ' + (err.detail?.message || err.message)); });
+            }).catch(err => {
+              // 回滚 UI 到旧值
+              if (newDisplay) {
+                newDisplay.innerHTML = currentVal || (field === 'sceneDesc' ? '<span style="color:#c7c7cc;font-style:italic">' + (I18N.t('dashboard.desc_optional')||'描述（可选）') + '</span>' : '&nbsp;');
+              }
+              app.showToast(I18N.t('dashboard.save_failed', {msg: (err.detail?.message || err.message)}));
+            });
           }).catch(err => { app.showToast('加载场景数据失败: ' + (err.message||'')); });
         }
       }
@@ -925,7 +931,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
           cardsContainer.innerHTML = _renderFlowCards(newNodes, agents, agentEngines, _agentOrder, _agentLabels, _colors, _descs, false, []);
         }
       }).catch(() => {});
-    }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed')||'保存失败' + ': ' + (e.detail?.message || e.message)); });
+    }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
   };
 
   // 取消编辑 — 只恢复执行流程区域
@@ -1325,22 +1331,35 @@ window.enterCreateMode = function() {
     });
     API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload }).then(r => {
       window._dashboardEditing = false;
-      app.showToast(I18N.t('dashboard.scene_created')||'场景创建成功');
-      // 先刷新 dashboard 数据，再跳转到新场景详情页
-      if (r.scene_id) {
+      // 收集高级选项
+      var workBranch = (document.getElementById('advWorkBranchInline') || {}).value || 'main';
+      var fields = [];
+      document.querySelectorAll('#advCustomFieldsInline .adv-kv').forEach(function(row) {
+        var k = (row.querySelector('.adv-kv-key') || {}).value || '';
+        var v = (row.querySelector('.adv-kv-val') || {}).value || '';
+        if (k.trim()) fields.push({ key: k.trim(), value: v.trim() });
+      });
+      // 有高级选项就一并保存，然后刷新 dashboard 跳项目场景
+      var advPromise = (workBranch || fields.length) ?
+        API.put('/scenes/' + encodeURIComponent(r.scene_id) + '/advanced-options?repo=' + encodeURIComponent(owner + '/' + name), { work_branch: workBranch, custom_fields: fields }) :
+        Promise.resolve();
+      advPromise.then(function() {
+        app.showToast(I18N.t('dashboard.scene_created')||'场景创建成功');
+        // 刷新 dashboard 数据后跳项目场景
         API.get('/dashboard/' + owner + '/' + name).then(dashData => {
           return API.get('/scenes?repo=' + encodeURIComponent(owner + '/' + name)).then(scenesData => {
             dashData._scenes = scenesData.scenes || [];
             dashData._owner = owner;
             dashData._name = name;
             window._dashboardData = dashData;
-            app.nav('scene-detail-local', r.scene_id);
+            app.nav('dash');
           });
         }).catch(() => { app.nav('dash'); });
-      } else {
+      }).catch(function(e) {
+        app.showToast(I18N.t('dashboard.scene_created')||'场景创建成功');
         app.nav('dash');
-      }
-    }).catch(e => { app.showToast(I18N.t('dashboard.save_failed')||'保存失败' + ': ' + (e.detail?.message || e.message)); });
+      });
+    }).catch(e => { app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
   };
 };
 

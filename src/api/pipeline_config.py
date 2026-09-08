@@ -341,7 +341,7 @@ def _try_set_display_name(c, row_id: int, display_name: str):
 
 
 def update_custom_scene(scene_id: str, repo_key: str,
-                        nodes: list, name: str = "", description: str = ""):
+                        nodes: list, name: str | None = None, description: str | None = None):
     """Update a repo-scoped custom scene."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -351,12 +351,12 @@ def update_custom_scene(scene_id: str, repo_key: str,
         c = db.cursor()
         sets = ["nodes_json=?", "updated_at=?"]
         params = [nodes_json, now]
-        if name:
+        if name:  # 空字符串不覆盖已有名称
             sets.append("name=?")
             params.append(name)
             sets.append("display_name=?")
             params.append(name)
-        if description:  # 空字符串不覆盖已有描述
+        if description is not None:  # None=不更新，空字符串=清空描述
             sets.append("description=?")
             params.append(description)
         params.extend([scene_id, repo_key])

@@ -354,22 +354,18 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
         scene_id = existing_scene_id
     else:
         # 不存在 → 新建（scope='repo'，scene_id 用 custom-uuid 或市场 name）
-        scene_id = scene["name"] or f"custom-{uuid.uuid4().hex[:8]}"
-        scene_id = create_custom_scene(
-            scene_id=scene_id, name=scene["display_name"] or scene_id,
+        new_scene_id = scene["name"] or f"custom-{uuid.uuid4().hex[:8]}"
+        db_id = create_custom_scene(
+            scene_id=new_scene_id, name=scene["display_name"] or new_scene_id,
             description=scene["description"] or "",
             repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding")
+        scene_id = new_scene_id
         # 回写 market_scene_id 关联
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("UPDATE devops_pipeline_scene SET market_scene_id=? WHERE id=?", (market_id, scene_id))
+                c.execute("UPDATE devops_pipeline_scene SET market_scene_id=? WHERE id=?", (market_id, db_id))
                 db.commit()
-            # 取回 scene_id 字符串
-            with db_lock:
-                c = db.cursor()
-                _r = c.execute("SELECT scene_id FROM devops_pipeline_scene WHERE id=?", (scene_id,)).fetchone()
-                scene_id = _r[0] if _r else scene_id
         except Exception as _e:
             log.warning(f"apply_market_scene: link market_scene_id failed: {_e}")
 
@@ -780,8 +776,8 @@ class CreateSceneRequest(BaseModel):
     nodes: list[SceneNodeInput] = []
 
 class UpdateSceneRequest(BaseModel):
-    name: str = ""
-    description: str = ""
+    name: str | None = None
+    description: str | None = None
     nodes: list[SceneNodeInput] = []
 
 class ApplySceneRequest(BaseModel):
