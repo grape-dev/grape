@@ -731,10 +731,14 @@ def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.get("/skills/{agent_type}")
-def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user)):
-    """返回该 agent_type 可选的 skill 列表"""
+def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user), repo: str = ""):
+    """返回该 agent_type 可选的 skill 列表。
+    repo 参数：当前仓库 fullName，用于匹配 scope='repo' 的技能（owner_id 存的是 repo_key）。
+    """
     from src.session_manager import db, db_lock
+    from src.repo_key import to_repo_key
     skills = []
+    repo_key = to_repo_key(repo) if repo else ""
     with db_lock:
         c = db.cursor()
         try:
@@ -743,7 +747,7 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user
                 "WHERE agent_type=? AND is_active=1 "
                 "AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) "
                 "ORDER BY scope, skill_name",
-                (agent_type, user.get("id", 0), user.get("id", 0)))
+                (agent_type, str(user.get("id", 0)), repo_key))
             for r in c.fetchall():
                 skills.append({"skill_name": r[0], "display_name": r[1] or r[0], "scope": r[2], "owner_id": r[3] or ""})
         except Exception as e:
