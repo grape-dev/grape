@@ -19,8 +19,8 @@ def _load_scenes() -> dict:
     return data.get("scenes", {})
 
 
-@router.get("")
-def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
+@router.get("", operation_id="scenes_list", summary="场景列表")
+def list_scenes(user: dict = Depends(get_current_user_or_api_key), repo: str = ""):
     """返回所有可用场景列表（repo，不含 official）"""
     from src.api.pipeline_config import get_scenes
     from src.repo_key import to_repo_key
