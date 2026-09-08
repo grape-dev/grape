@@ -6,12 +6,14 @@ from .base import AgentBackend
 from .opencode import OpencodeBackend
 from .codearts import CodeArtsBackend
 from .hermes import HermesBackend
+from .codex import CodexBackend
 
 
 _BACKENDS = {
     "opencode": OpencodeBackend(),
     "codearts": CodeArtsBackend(),
     "hermes": HermesBackend(),
+    "codex": CodexBackend(),
 }
 
 # 运行中的 agent 子进程注册表：供服务停机时统一终止，避免 uvicorn 优雅停机
@@ -66,6 +68,7 @@ def discover_backends() -> list[dict]:
         "opencode": {"cli": "opencode", "pip": "opencode"},
         "codearts": {"cli": "codearts", "pip": "codearts-cli"},
         "hermes": {"cli": "hermes", "pip": "hermes"},
+        "codex": {"cli": "codex", "pip": "@openai/codex"},
         "cursor": {"cli": "cursor", "pip": "cursor"},
     }
     results = []

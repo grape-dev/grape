@@ -6,6 +6,7 @@
 from .base import AgentRuntime
 from .opencode import OpencodeRuntime
 from .codearts import CodeArtsRuntime
+from .codex import CodexRuntime
 from .registry import _RUNTIMES, register_runtime, get_runtime, discover_runtimes
 from .executor import stream_runtime, stream_agent, stream_opencode, consume_stream_async
 from .service import (

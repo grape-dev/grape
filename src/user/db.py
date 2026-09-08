@@ -1821,7 +1821,7 @@ def is_known_engine_name(name: str) -> bool:
     if not name:
         return False
     # 静态白名单（避免 lazy import 循环引用导致 always False）
-    _KNOWN = {"opencode", "codearts", "hermes", "cursor"}
+    _KNOWN = {"opencode", "codearts", "hermes", "codex", "cursor"}
     if name in _KNOWN:
         return True
     try:
