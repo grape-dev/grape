@@ -1369,7 +1369,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 注入场景 work_branch（worker 端 repogit 优先读环境变量，不依赖本地 DB）
     try:
         from src.runtime.repogit import _read_scene_work_branch
-        _wb = _read_scene_work_branch(repo_key)
+        _wb = _read_scene_work_branch(repo_key, issue_id)
         if _wb:
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
@@ -1810,7 +1810,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # 注入场景 work_branch（direct 模式同样注入，保持与 worker 模式一致）
     try:
         from src.runtime.repogit import _read_scene_work_branch
-        _wb = _read_scene_work_branch(repo_key)
+        _wb = _read_scene_work_branch(repo_key, issue_id)
         if _wb:
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
