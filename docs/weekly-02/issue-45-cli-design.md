@@ -1,9 +1,9 @@
 ﻿# Issue #45 设计文档：grape CLI 独立包
 
 > Issue：https://gitcode.com/grape-dev/grape/issues/45
-> 类型：Feature | P1 | 状态：spec-ready
+> 类型：Feature | P1 | 状态：in-progress（M0–M4 已实现并部署生产；§3.6/§3.7 标「待落地」项未实现）
 > 分支：`weekly-02`
-> 日期：2026-09-07
+> 日期：2026-09-07（2026-09-08 刷新：一次性参数/错误码规范/超时与长等待规范）
 > 范围：`grape` 独立发布包的形态、子命令、与 git/worker 集成。
 
 ## 关联文档
@@ -121,10 +121,54 @@ grape git status --repo owner/repo
 - agent 不确定参数 → `grape <group> <verb> --help` 查看参数；
 - 无网络/契约未拉取时 `--help` 显示已缓存契约的组名（降级提示）。
 
-- **配置优先级**：CLI 参数 > 环境变量（**`GRAPE_SESSION_TOKEN`**（任务级临时 token，worker 优先）> `GRAPE_BASE_URL`/`GRAPE_API_TOKEN`）> `~/.grape/config.json`。
+- **配置优先级**：CLI 一次性参数 > 环境变量（**`GRAPE_SESSION_TOKEN`**（任务级临时 token，worker 优先）> `GRAPE_BASE_URL`/`GRAPE_API_TOKEN`）> `~/.grape/config.json`。
 - **认证**：默认 `Authorization: Bearer <token>`；兼容 `PRIVATE-TOKEN`/`access_token`。token 可为会话级（`tk_`）或用户级（`grape_`）。
 - **输出**：human-readable；`--json` 机器可读（worker 解析）。
-- **错误处理**：401 → 提示 token 无效；契约拉取失败 → 提示 base_url 或 refresh。
+
+### 3.5 一次性参数（--token / --base-url）
+
+单次调用不依赖环境变量/配置文件，**优先级最高、进程内不落盘**，命令结束即失：
+
+```
+grape --token tk_xxx tasks mine --status active
+grape --base-url https://grape.example.com --token tk_xxx skills list --json-out
+grape --base-url https://grape.example.com --grape_api_token grape_xxx git-repo issues list --owner o --repo r
+```
+
+| 参数 | 别名 | 说明 |
+|------|------|------|
+| `--token` | `--grape-api-token` / `--grape_api_token` | 一次性 token（`tk_` 会话 / `grape_` 用户 Key），按前缀自动分流 |
+| `--base-url` | — | 一次性服务端地址 |
+
+> 实现：`config.set_cli_params()` 记录本次调用参数，`config.resolve()` 按「flag > 环境变量 > config.json」解析，契约加载与所有请求自动生效。
+
+### 3.6 错误码与退出码规范
+
+统一由 `main()` 捕获 `CliError` 收口（`sys.exit(e.code or 1)`）：
+
+| 退出码 | 含义 | 触发 |
+|--------|------|------|
+| `0` | 成功 | 命令完成、`--help`、`--version`、`commands`、`refresh` |
+| `1` | 通用/配置错误 | 缺 token、网络不可达/超时、**401（当前特判）**、缺必填参数、`--json` 非法、git 未安装、`api` 非法 method |
+| `2` | 用法错误（click `UsageError`） | 未知选项、缺参数、参数类型错、「No such command」（含契约加载失败导致组不存在） |
+| `=HTTP ≥400` | 服务端错误码透传 | 403 / 404 / 409 / 500 / 502…（`client.py` 以 `CliError(code=status)` 抛出） |
+| git 子进程码 | git 退出码原样透传 | `grape git …`（0/1/2/128…） |
+| `130` | 用户中断（Ctrl+C） | **待落地**：当前未捕获 `KeyboardInterrupt`，会裸 Traceback |
+
+**注意**：
+- **POSIX 截断**：`sys.exit(502)` 在 Linux 上只保留低 8 位 → 退出码变 `246`；Windows 保留 32 位（=502）。跨平台脚本判断时需知悉。
+- **401 特判**：当前 `client.py` 把 401 转成固定 `code=1`，与「HTTP 透传」策略不一致；**规范待统一为透传 401**。
+- stderr 文案与退出码配合定位：超时/401/缺 token 同码，靠 `Error: …` 文案区分。
+
+### 3.7 长等待与超时处理
+
+| 场景 | 当前行为 | 规范（待落地） |
+|------|----------|----------------|
+| 普通请求 | `httpx` 固定 `timeout=30`，超时误报「base_url 不可达」 | 新增 `--timeout <秒>` 一次性参数（默认 30）；报错细分：ReadTimeout →「请求超时，可用 --timeout 加大」，ConnectError →「检查 base_url」 |
+| 任务型长操作 | 服务端**异步**：`create` 立即返回 task_id，长耗时在服务端后台；CLI 需自行轮询 `tasks/status`、`events/detail` | 提供 `grape tasks wait --task_id x`（复用服务端 `wait_task_terminal`）或 `--wait` 轮询封装 |
+| `grape git` | `subprocess.run` 无超时（git clone/push 慢是正常，不硬切） | 保持无超时；Ctrl+C 需终止子进程（POSIX 信号 / Windows `taskkill /t`） |
+| SSE 流式 | 不支持（契约命令一次性拉全量会阻塞至超时） | `--stream` 模式（httpx stream + SSE 逐行渲染） |
+| 超时边界 | nginx `proxy_read_timeout=300s` > CLI 30s → 先撞 CLI 超时 | `--timeout` 上限建议 ≤300（与 nginx 对齐） |
 
 ## 四、与 worker agent 集成
 
