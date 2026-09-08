@@ -1,25 +1,25 @@
 """官方场景定时同步模块（issue-11-scene-skill-market-tech-design.md §8.6）。
 
 职责：
-1. 每 30 分钟从 grape-skills 仓库通过 GitCode API v5 逐文件下载 scenes/ 目录
+1. 每 30 分钟从 grape-skills 仓库下载 ZIP 归档包并解压 scenes/ 目录
 2. 遍历每个场景目录，读 scene.json + README.md
 3. 校验 nodes 合法性 + 预检 skill 引用
 4. content_hash 增量比对：hash 不变跳过，变了按 version 比对更新
-5. 仓库中不存在的 official 场景 → is_active 置 0（下架）
+5. 下架通过管理员手动操作（不再自动下架）
 
 触发方式：
 - asyncio 定时任务（启动即执行，之后每 30 分钟）
 - 失败不阻塞服务，打 WARNING 日志
 """
 import asyncio
-import base64
 import hashlib
+import io
 import json
 import logging
 import os
 import shutil
 import tempfile
-from datetime import datetime, timezone
+import zipfile
 
 import httpx
 from src.config import log
@@ -199,61 +199,44 @@ def _get_sync_token() -> str:
     return ""
 
 
-async def _api_list_dir(client: httpx.AsyncClient, path: str, token: str) -> list:
-    """GitCode API v5 列目录，返回 [{type, name, path}, ...]。"""
-    url = f"https://api.gitcode.com/api/v5/repos/{_OWNER_REPO}/contents/{path}"
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    resp = await client.get(url, params={"ref": _REPO_BRANCH}, headers=headers, timeout=15.0)
-    resp.raise_for_status()
-    return resp.json()
+async def _download_repo_zip(client: httpx.AsyncClient, token: str) -> str:
+    """下载仓库 ZIP 归档并解压到临时目录，返回解压后的本地根路径。
 
-
-async def _api_get_file(client: httpx.AsyncClient, path: str, token: str) -> bytes:
-    """GitCode API v5 下载文件内容（base64 解码后返回 bytes）。"""
-    url = f"https://api.gitcode.com/api/v5/repos/{_OWNER_REPO}/contents/{path}"
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    resp = await client.get(url, params={"ref": _REPO_BRANCH}, headers=headers, timeout=15.0)
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("encoding") == "base64":
-        return base64.b64decode(data["content"])
-    return data.get("content", "").encode("utf-8")
-
-
-async def _download_dir_recursive(client: httpx.AsyncClient, api_path: str, local_path: str, token: str, is_references: bool = False, depth: int = 0):
-    """递归下载目录：遍历 API 列出的文件/子目录，文件直接下载，子目录递归。
-
-    - 根目录（is_references=False）：只下载 scene.json / README.md / icon.*
-    - references 子目录（is_references=True）：下载全部文件，递归所有子目录
+    URL: https://raw.gitcode.com/{owner}/{repo}/archive/refs/heads/{branch}.zip
+    认证: Authorization: Bearer {token}
+    ZIP 内顶层目录名: {repo}-{branch}
     """
-    if depth > 5:
-        logger.warning(f"Scene sync: recursive depth limit exceeded at {api_path}, skip")
-        return
-    entries = await _api_list_dir(client, api_path, token)
-    for entry in entries:
-        etype = entry.get("type", "")
-        ename = entry.get("name", "")
-        epath = entry.get("path", "")
-        if etype == "file":
-            # 根目录只下载需要的文件；references 子目录下载全部
-            if is_references or ename in ("scene.json", "README.md") or ename.startswith("icon."):
-                content = await _api_get_file(client, epath, token)
-                with open(os.path.join(local_path, ename), "wb") as f:
-                    f.write(content)
-        elif etype == "dir":
-            if ename == "references" or is_references:
-                # references 目录或 references 内的子目录：递归下载全部
-                sub_local = os.path.join(local_path, ename)
-                os.makedirs(sub_local, exist_ok=True)
-                await _download_dir_recursive(client, epath, sub_local, token, is_references=True, depth=depth + 1)
+    url = f"https://raw.gitcode.com/{_OWNER_REPO}/archive/refs/heads/{_REPO_BRANCH}.zip"
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = await client.get(url, headers=headers, timeout=60.0, follow_redirects=True)
+    resp.raise_for_status()
+    data = resp.content
+    if not data or len(data) < 100:
+        raise ValueError(f"ZIP download returned empty or too small ({len(data)} bytes)")
+
+    tmp_dir = tempfile.mkdtemp(prefix="scene_sync_zip_")
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        zf.extractall(tmp_dir)
+
+    # ZIP 顶层目录名: {repo}-{branch}
+    repo_name = _OWNER_REPO.split("/")[-1]
+    top_dir = f"{repo_name}-{_REPO_BRANCH}"
+    repo_root = os.path.join(tmp_dir, top_dir)
+    if not os.path.isdir(repo_root):
+        # 兜底：找解压目录下第一个子目录
+        entries = os.listdir(tmp_dir)
+        if entries and len(entries) == 1:
+            repo_root = os.path.join(tmp_dir, entries[0])
+        else:
+            raise FileNotFoundError(f"ZIP top-level directory '{top_dir}' not found in extracted files")
+
+    return repo_root
 
 
 def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
-    """重建 scene_skill_ref：DELETE + INSERT，用 is_active=1 + scope='official' 查 skill_id。"""
+    """重建 scene_skill_ref：DELETE + INSERT，用 is_active=1 查 skill_id（优先 official，其次 repo）。"""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -261,14 +244,21 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
         for n in nodes:
             skill_name = n.get("skill", "")
             if skill_name:
+                # 优先查 official，其次 repo（仓库场景可能引用 repo scope 技能）
                 c.execute(
                     "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='official' LIMIT 1",
                     (skill_name,),
                 )
                 sk_row = c.fetchone()
+                if not sk_row:
+                    c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='repo' LIMIT 1",
+                        (skill_name,),
+                    )
+                    sk_row = c.fetchone()
                 skill_id = sk_row[0] if sk_row else 0
                 if skill_id == 0:
-                    logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active official skills, skill_id=0")
+                    logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, skill_id=0")
                 c.execute(
                     "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
                     (market_id, skill_id, skill_name),
@@ -287,62 +277,63 @@ def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list):
         _rebuild_scene_skill_ref(row[0], nodes, scene_name)
 
 
+def _init_featured_scenes_if_empty():
+    """精选场景初始化：如果 official 场景没有任何 is_featured=1 的，设置默认精选。
+
+    独立于远端同步——即使没有 token 无法拉远端场景包，本地已有 official 场景也需要精选标记。
+    """
+    default_featured = ("default", "cloud-native", "iac")
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
+        featured_count = c.fetchone()[0]
+        if featured_count == 0:
+            placeholders = ",".join("?" * len(default_featured))
+            c.execute(
+                f"UPDATE scene_market SET is_featured=1, updated_at=datetime('now') "
+                f"WHERE name IN ({placeholders}) AND source='official' AND is_active=1",
+                default_featured,
+            )
+            db.commit()
+            log.info(f"Scene sync: initialized featured scenes: {', '.join(default_featured)}")
+        else:
+            log.info(f"Scene sync: {featured_count} featured scenes already exist, skip init")
+
+
 async def sync_official_scenes():
     """定时同步官方场景从 grape-skills 仓库到 scene_market 表。"""
-    log.info(f"Scene sync started: {_REPO_URL} branch={_REPO_BRANCH} (API v5)")
+    log.info(f"Scene sync started: {_REPO_URL} branch={_REPO_BRANCH} (ZIP archive)")
 
-    tmp_dir = tempfile.mkdtemp(prefix="scene_sync_")
+    tmp_dir = None
     try:
         bot_token = _get_sync_token()
         if not bot_token:
-            log.warning("Scene sync: no GitCode token configured (GRAPE_DEV_TOKEN env / configs/scene-sync.json), skip")
+            log.warning("Scene sync: no GitCode token configured (GRAPE_DEV_TOKEN env / configs/scene-sync.json), skip remote sync")
+            _init_featured_scenes_if_empty()
             return
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # 1. 列 scenes/ 目录
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # 1. 下载 ZIP 归档并解压
             try:
-                entries = await _api_list_dir(client, "scenes", bot_token)
+                repo_root = await _download_repo_zip(client, bot_token)
             except Exception as e:
-                log.warning(f"Scene sync: list scenes/ failed: {e}")
+                log.warning(f"Scene sync: download repo zip failed: {e}")
                 return
 
-            scene_dirs = [e for e in entries if e.get("type") == "dir"
-                          and e["name"] not in ("_template", "third-party")]
-            if not scene_dirs:
-                log.warning("Scene sync: no scene directories found")
-                return
-
-            # 2. 逐场景下载
-            local_scenes_dir = os.path.join(tmp_dir, "scenes")
-            os.makedirs(local_scenes_dir, exist_ok=True)
-
-            for sdir in scene_dirs:
-                scene_name = sdir["name"]
-                scene_path = os.path.join(local_scenes_dir, scene_name)
-                os.makedirs(scene_path, exist_ok=True)
-
-                try:
-                    # 列场景目录里的文件，递归下载（含 references/ 子目录）
-                    await _download_dir_recursive(client, f"scenes/{scene_name}", scene_path, bot_token)
-                except Exception as e:
-                    logger.warning(f"Scene sync: download {scene_name} failed: {e}")
-                    continue
-
-        # 3. 定位 scenes/ 目录
-        scenes_dir = local_scenes_dir
+        # 2. 定位 scenes/ 目录
+        scenes_dir = os.path.join(repo_root, "scenes")
         if not os.path.isdir(scenes_dir):
-            log.warning("Scene sync: scenes/ directory not found")
+            log.warning("Scene sync: scenes/ directory not found in zip")
             return
 
-        # 4. 刷新 category 缓存
+        # 3. 刷新 category 缓存
         _refresh_cat_cache()
         if not _cat_cache:
             log.warning("Scene sync: scene_category slug cache is empty, category_id will be 0 (unclassified)")
 
-        stats = {"added": 0, "updated": 0, "skipped": 0, "failed": 0, "delisted": 0}
-        synced_names = set()
+        stats = {"added": 0, "updated": 0, "skipped": 0, "failed": 0}
 
-        # 5. 遍历场景目录
+        # 4. 遍历场景目录
         for entry in sorted(os.listdir(scenes_dir)):
             if entry in ("_template", "third-party", "__MACOSX", ".DS_Store", ".git"):
                 continue
@@ -388,31 +379,18 @@ async def sync_official_scenes():
                 else:
                     market_desc = scene_data.get("description", "")
 
-                # c. icon（OBS 模式上传到 OBS 桶，obs_icon_key 存对象 key；非 OBS 模式 copy 到本地静态目录，icon 存路径。无 icon 文件留空，前端用 category.icon 兜底）
-                icon_val = ""
-                obs_icon_key = ""
+                # c. icon 先读文件数据，OBS key 等 INSERT/UPDATE 后用 market_id 生成
+                icon_file_data = None
+                icon_file_ext = ""
                 for ext in (".png", ".svg", ".jpg"):
                     icon_file = os.path.join(scene_path, "icon" + ext)
                     if os.path.exists(icon_file):
                         try:
-                            from src.storage import get_storage
-                            storage = get_storage()
-                            if storage:
-                                # OBS 模式：上传到 OBS 桶，obs_icon_key 存对象 key
-                                obs_icon_key = f"grape/scenes/icons/{name}{ext}"
-                                with open(icon_file, "rb") as f:
-                                    storage.save_bytes(obs_icon_key, f.read())
-                            else:
-                                # 非 OBS 模式：copy 到本地静态目录
-                                static_dir = os.path.join(os.path.dirname(__file__), "..", "api", "static", "img", "scenes")
-                                os.makedirs(static_dir, exist_ok=True)
-                                dest = os.path.join(static_dir, name + ext)
-                                shutil.copy2(icon_file, dest)
-                                icon_val = f"/static/img/scenes/{name}{ext}"
+                            with open(icon_file, "rb") as f:
+                                icon_file_data = f.read()
+                            icon_file_ext = ext
                         except Exception as e:
-                            logger.warning(f"Scene sync: {name} icon storage failed: {e}, icon will be empty")
-                            icon_val = ""
-                            obs_icon_key = ""
+                            logger.warning(f"Scene sync: {name} icon read failed: {e}")
                         break
 
                 # d. content_hash
@@ -447,7 +425,6 @@ async def sync_official_scenes():
                         scene_id, old_version, old_hash = row
                         if old_hash == content_hash:
                             stats["skipped"] += 1
-                            synced_names.add(name)
                             continue
 
                         # hash 变了
@@ -457,39 +434,65 @@ async def sync_official_scenes():
                                 f"(old={old_version}, new={version}), updating anyway"
                             )
 
+                        # 先 UPDATE 不带 icon（icon 等 OBS 上传后单独 UPDATE）
                         c.execute(
                             "UPDATE scene_market SET "
                             "display_name=?, version=?, description=?, market_description=?, "
-                            "icon=?, obs_icon_key=?, category_id=?, recommended_template=?, nodes_json=?, "
+                            "category_id=?, recommended_template=?, nodes_json=?, "
                             "onboarding=?, tags=?, author=?, content_hash=?, "
-                            "is_active=1, updated_at=? "
+                            "is_active=1, updated_at=datetime('now') "
                             "WHERE id=?",
                             (display_name, version, description, market_desc,
-                             icon_val, obs_icon_key, category_id, recommended_template, nodes_json,
+                             category_id, recommended_template, nodes_json,
                              onboarding, tags_str, author, content_hash,
-                             datetime.now(timezone.utc).isoformat(), scene_id),
+                             scene_id),
                         )
                         db.commit()
+                        market_id = scene_id
                         stats["updated"] += 1
                         log.info(f"Scene sync: updated '{name}' v{version}")
                     else:
-                        now = datetime.now(timezone.utc).isoformat()
                         c.execute(
                             "INSERT INTO scene_market "
                             "(name, display_name, version, description, market_description, icon, obs_icon_key, "
                             "category_id, is_featured, like_count, source, source_user_id, "
                             "recommended_template, nodes_json, onboarding, tags, author, "
                             "content_hash, is_active, created_at, updated_at) "
-                            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,1,?,?)",
+                            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
                             (name, display_name, version, description, market_desc,
-                             icon_val, obs_icon_key, category_id, recommended_template, nodes_json,
-                             onboarding, tags_str, author, content_hash, now, now),
+                             "", "", category_id, recommended_template, nodes_json,
+                             onboarding, tags_str, author, content_hash),
                         )
                         db.commit()
+                        market_id = c.lastrowid
                         stats["added"] += 1
                         log.info(f"Scene sync: added '{name}' v{version}")
 
-                synced_names.add(name)
+                    # icon 上传：用 market_id 作为 OBS key（全局唯一）
+                    if icon_file_data:
+                        try:
+                            from src.storage import get_storage
+                            storage = get_storage()
+                            icon_key = f"scene-icons/{market_id}{icon_file_ext}"
+                            if storage:
+                                storage.save_bytes(icon_key, icon_file_data)
+                                icon_val = storage.temporary_url(icon_key) if hasattr(storage, 'temporary_url') else ""
+                                obs_icon_key = icon_key
+                            else:
+                                static_dir = os.path.join(os.path.dirname(__file__), "..", "api", "static", "img", "scenes")
+                                os.makedirs(static_dir, exist_ok=True)
+                                dest = os.path.join(static_dir, f"{market_id}{icon_file_ext}")
+                                with open(dest, "wb") as f:
+                                    f.write(icon_file_data)
+                                icon_val = f"/static/img/scenes/{market_id}{icon_file_ext}"
+                                obs_icon_key = ""
+                            # UPDATE icon 字段
+                            with db_lock:
+                                cur = db.cursor()
+                                cur.execute("UPDATE scene_market SET icon=?, obs_icon_key=? WHERE id=?", (icon_val, obs_icon_key, market_id))
+                                db.commit()
+                        except Exception as e:
+                            logger.warning(f"Scene sync: {name} icon storage failed: {e}")
 
                 # g. 重建 scene_skill_ref（含 skill_id）
                 _rebuild_scene_skill_ref_by_name(name, nodes)
@@ -498,46 +501,17 @@ async def sync_official_scenes():
                 logger.warning(f"Scene sync: {entry} failed: {e}", exc_info=True)
                 stats["failed"] += 1
 
-        # 6. 下架处理
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT name FROM scene_market WHERE source='official' AND is_active=1")
-            db_names = set(r[0] for r in c.fetchall())
-            for db_name in db_names - synced_names:
-                c.execute(
-                    "UPDATE scene_market SET is_active=0, updated_at=? "
-                    "WHERE name=? AND source='official'",
-                    (datetime.now(timezone.utc).isoformat(), db_name),
-                )
-                stats["delisted"] += 1
-                log.info(f"Scene sync: delisted '{db_name}' (not in repo anymore)")
-            db.commit()
-
         log.info(
             f"Scene sync done: added={stats['added']}, updated={stats['updated']}, "
-            f"skipped={stats['skipped']}, delisted={stats['delisted']}, failed={stats['failed']}"
+            f"skipped={stats['skipped']}, failed={stats['failed']}"
         )
 
-        # 7. 初始化精选场景：如果 official 场景没有任何 is_featured=1 的，设置默认精选
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
-            featured_count = c.fetchone()[0]
-            if featured_count == 0:
-                default_featured = ("default", "cloud-native", "iac")
-                placeholders = ",".join("?" * len(default_featured))
-                c.execute(
-                    f"UPDATE scene_market SET is_featured=1, updated_at=? "
-                    f"WHERE name IN ({placeholders}) AND source='official' AND is_active=1",
-                    (datetime.now(timezone.utc).isoformat(), *default_featured),
-                )
-                db.commit()
-                log.info(f"Scene sync: initialized featured scenes: {', '.join(default_featured)}")
-            else:
-                log.info(f"Scene sync: {featured_count} featured scenes already exist, skip init")
+        # 7. 初始化精选场景（提取为独立函数，token 缺失时也能调用）
+        _init_featured_scenes_if_empty()
 
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 async def _scene_sync_worker(interval: float = 1800.0):
