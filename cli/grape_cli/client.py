@@ -17,7 +17,7 @@ class ApiClient:
         self.base_url, self.token = config.resolve(base_url, token)
         self.channel = channel  # bearer / PRIVATE-TOKEN / access_token
         if not self.token:
-            raise CliError("缺少 token：请设置 GRAPE_API_TOKEN / GRAPE_TOKEN，或 ~/.grape/config.json 的 token")
+            raise CliError("缺少 token：请设置 GRAPE_SESSION_TOKEN（任务级）/ GRAPE_API_TOKEN（用户级），或 ~/.grape/config.json 的 token")
 
     def _headers(self, extra: dict | None = None) -> dict:
         h = {"Accept": "application/json"}

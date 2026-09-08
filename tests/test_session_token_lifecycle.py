@@ -1,11 +1,11 @@
 """Issue-45 M2：会话级临时 token 生命周期测试.
 
 覆盖：
-- enqueue_task 签发 GRAPE_API_TOKEN（session_key=task_id，devops 无 user_id）
+- enqueue_task 签发 GRAPE_SESSION_TOKEN（session_key=task_id，devops 无 user_id）
 - chat 任务绑定 USER_ID
 - 任务终态（complete/fail/cancel）→ token 即时失效
 - direct 模式签发 + finally 失效
-- env 中 GRAPE_API_TOKEN 不落 agent_tasks 明文之外（sha256 落库）
+- env 中 GRAPE_SESSION_TOKEN 不落 agent_tasks 明文之外（sha256 落库）
 """
 import uuid
 from unittest.mock import patch
@@ -68,7 +68,7 @@ def test_enqueue_issues_token_and_injects_env():
     _cleanup()
     tid = _new_task(repo_key="gitcode:o/r", agent_type="vod")
     env = _task_env(tid)
-    plain = env.get("GRAPE_API_TOKEN", "")
+    plain = env.get("GRAPE_SESSION_TOKEN", "")
     assert plain.startswith("tk_")
     row = _session_row(tid)
     assert row is not None and row[1] == "gitcode:o/r" and row[2] == "vod" and row[3] == 0
@@ -79,7 +79,7 @@ def test_chat_task_binds_user_id():
     _cleanup()
     tid = _new_task(repo_key="chat:123", agent_type="chat", user_id=123,
                     env_extra={"USER_ID": "123", "CONVERSATION_ID": "conv-x"})
-    plain = _task_env(tid)["GRAPE_API_TOKEN"]
+    plain = _task_env(tid)["GRAPE_SESSION_TOKEN"]
     assert plain.startswith("tk_")
     row = _session_row(tid)
     assert row[2] == "chat" and row[3] == 123
@@ -90,7 +90,7 @@ def test_chat_task_binds_user_id():
 def test_task_terminal_revokes_token():
     _cleanup()
     tid = _new_task()
-    plain = _task_env(tid)["GRAPE_API_TOKEN"]
+    plain = _task_env(tid)["GRAPE_SESSION_TOKEN"]
     assert auth_token.verify_session_token(plain) is not None
     complete_task(tid, "done", exit_code=0)
     assert auth_token.verify_session_token(plain) is None
@@ -100,7 +100,7 @@ def test_task_terminal_revokes_token():
 def test_task_fail_revokes_token():
     _cleanup()
     tid = _new_task()
-    plain = _task_env(tid)["GRAPE_API_TOKEN"]
+    plain = _task_env(tid)["GRAPE_SESSION_TOKEN"]
     update_task_status(tid, "failed", exit_code=1)
     assert auth_token.verify_session_token(plain) is None
 
@@ -108,7 +108,7 @@ def test_task_fail_revokes_token():
 def test_task_cancel_revokes_token():
     _cleanup()
     tid = _new_task()
-    plain = _task_env(tid)["GRAPE_API_TOKEN"]
+    plain = _task_env(tid)["GRAPE_SESSION_TOKEN"]
     cancel_task(tid)
     assert auth_token.verify_session_token(plain) is None
 
@@ -121,7 +121,7 @@ def test_direct_mode_issues_and_revokes():
 
     def _fake_stream(prompt, cwd, session_id="", **kw):
         env = kw.get("env_extra", {})
-        token = env.get("GRAPE_API_TOKEN", "")
+        token = env.get("GRAPE_SESSION_TOKEN", "")
         captured["token"] = token
         captured["verify"] = auth_token.verify_session_token(token) if token else None
         yield ("step_start", "s")

@@ -58,7 +58,7 @@ def _env(tmp_path, monkeypatch):
     cli_config.CONFIG_DIR = tmp_path / ".grape"
     cli_config.CONFIG_FILE = cli_config.CONFIG_DIR / "config.json"
     monkeypatch.setenv("GRAPE_BASE_URL", "http://mock")
-    monkeypatch.setenv("GRAPE_API_TOKEN", "tk_mocktask")
+    monkeypatch.setenv("GRAPE_SESSION_TOKEN", "tk_mocktask")
     REQUESTS.clear()
     cli._loaded = False
     cli._groups = {}
@@ -86,20 +86,20 @@ def fake_requests(monkeypatch):
 # ===================== A. 配置与认证 =====================
 
 def test_a1_arg_over_env_over_file(monkeypatch):
-    monkeypatch.delenv("GRAPE_API_TOKEN", raising=False)
+    monkeypatch.delenv("GRAPE_SESSION_TOKEN", raising=False)
     cli_config.save_config(base_url="http://file", token="file_tok")
     base, tok = cli_config.resolve(base_url="http://arg", token="arg_tok")
     assert base == "http://arg" and tok == "arg_tok"
 
 
 def test_a2_env_loading(monkeypatch):
-    monkeypatch.delenv("GRAPE_TOKEN", raising=False)
+    monkeypatch.delenv("GRAPE_API_TOKEN", raising=False)
     base, tok = cli_config.resolve()
-    assert base == "http://mock" and tok == "tk_mocktask"  # GRAPE_API_TOKEN 任务级优先
+    assert base == "http://mock" and tok == "tk_mocktask"  # GRAPE_SESSION_TOKEN 任务级优先
 
 
 def test_a2b_task_token_preferred(monkeypatch):
-    monkeypatch.setenv("GRAPE_TOKEN", "grape_usertok")
+    monkeypatch.setenv("GRAPE_API_TOKEN", "grape_usertok")
     _, tok = cli_config.resolve()
     assert tok == "tk_mocktask"  # 任务级 > 用户级
 
@@ -109,8 +109,8 @@ def test_a3_file_config(monkeypatch, tmp_path):
     cli_config.CONFIG_FILE = cli_config.CONFIG_DIR / "config.json"
     cli_config.save_config(base_url="http://file", token="file_tok")
     monkeypatch.delenv("GRAPE_BASE_URL", raising=False)
+    monkeypatch.delenv("GRAPE_SESSION_TOKEN", raising=False)
     monkeypatch.delenv("GRAPE_API_TOKEN", raising=False)
-    monkeypatch.delenv("GRAPE_TOKEN", raising=False)
     base, tok = cli_config.resolve()
     assert (base, tok) == ("http://file", "file_tok")
 

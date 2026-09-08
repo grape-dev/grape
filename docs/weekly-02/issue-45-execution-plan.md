@@ -66,13 +66,13 @@ F Settings 面板 ──> A（api_tokens 管理）
 
 | # | 任务 | 文件 | 验收 |
 |---|------|------|------|
-| 2.1 | 任务入队时签发：`enqueue_task` 统一签发（session_key=task_id）+ `env_extra["GRAPE_API_TOKEN"]` 注入 | `src/runtime/service.py`（L311 enqueue_task，统一覆盖 pipeline/direct/chat 各入队路径） | enqueue 后 `session_api_tokens` 有行；`GRAPE_API_TOKEN` 进任务 env |
+| 2.1 | 任务入队时签发：`enqueue_task` 统一签发（session_key=task_id）+ `env_extra["GRAPE_SESSION_TOKEN"]` 注入 | `src/runtime/service.py`（L311 enqueue_task，统一覆盖 pipeline/direct/chat 各入队路径） | enqueue 后 `session_api_tokens` 有行；`GRAPE_SESSION_TOKEN` 进任务 env |
 | 2.2 | chat 会话签发：enqueue 时按 env USER_ID 绑定 user_id（repo_key=`chat:{uid}`，agent_type=chat）；direct 模式 `_execute_agent_inner` 按 task_id 或 `d_{seq}` 签发 | `src/runtime/service.py` / `src/api/event_pipeline.py`（_execute_agent/_execute_agent_inner） | chat 会话 token 带 user_id；direct 执行结束失效 |
 | 2.3 | 会话结束失效：任务终态（complete/fail/cancel 经 `update_task_status`）按 task_id revoke；direct finally revoke | `src/runtime/service.py` update_task_status / `src/api/event_pipeline.py` | 再调用 401；并发同类会话不受影响（T3/T5/T8） |
 | 2.4 | TTL 兜底：过期行清理（签发时 `expires_at`，main 活跃追踪循环每 5 分钟 purge） | `src/api/main.py` / `auth_token.py` | 过期 token 校验 401；脏数据可收敛（T4） |
 | 2.4 | TTL 兜底：过期行清理（签发时 `expires_at`，启动/周期任务 PURGE） | `auth_token.py` | 过期 token 校验 401；脏数据可收敛（T4） |
 
-**退出标准**：会话生命周期用例（token 文档 T1-T5、T8）全绿；`test_executor_token_env.py` 回归（devops 不注入 USER_TOKEN，仅 GRAPE_API_TOKEN）。
+**退出标准**：会话生命周期用例（token 文档 T1-T5、T8）全绿；`test_executor_token_env.py` 回归（devops 不注入 USER_TOKEN，仅 GRAPE_SESSION_TOKEN）。
 
 > 注：`enqueue_task`（`src/runtime/service.py` L311）已支持 `env_extra` 透传，无需改签名，仅需在 2.1/2.2 的组装处新增字段。
 
@@ -143,8 +143,8 @@ M5 收尾（技能迁移与 3.4 协同，见 §三 M3 注）
 |------|--------|
 | 对外路由判定 | `openapi.py` 用 Depends 函数身份区分对外/内部——对外路由**禁止**再引 `get_current_user`，否则契约漏收录或误暴露 |
 | `session_key` 语义 | token 文档 §2.1：管理键 ≠ 授权身份；revoke 按 key 不按 (repo,agent) 宽删 |
-| devops 无 user：chat 有 user | `GRAPE_API_TOKEN` 注入点分别取 task_id / conv_id 作 session_key；user_id 处 0 或 chat 用户 id |
-| CLI token 优先级 | `GRAPE_API_TOKEN`（任务级）> `GRAPE_TOKEN`（用户级）——worker 内自动优先任务 token |
+| devops 无 user：chat 有 user | `GRAPE_SESSION_TOKEN` 注入点分别取 task_id / conv_id 作 session_key；user_id 处 0 或 chat 用户 id |
+| CLI token 优先级 | `GRAPE_SESSION_TOKEN`（任务级）> `GRAPE_API_TOKEN`（用户级）——worker 内自动优先任务 token |
 | git 透传 token 零暴露 | 只用进程内 credential helper / `GIT_CONFIG` env；禁 argv/落盘（C3/C4） |
 
 ## 六、风险与依赖协调

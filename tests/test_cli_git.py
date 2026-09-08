@@ -24,7 +24,7 @@ def _env(tmp_path, monkeypatch):
     cli_config.CONFIG_DIR = tmp_path / ".grape"
     cli_config.CONFIG_FILE = cli_config.CONFIG_DIR / "config.json"
     monkeypatch.setenv("GRAPE_BASE_URL", "http://mock")
-    monkeypatch.setenv("GRAPE_API_TOKEN", "grape_secret_123")
+    monkeypatch.setenv("GRAPE_SESSION_TOKEN", "grape_secret_123")
     SPAWNED.clear()
     cli._loaded = False
     cli._groups = {}

@@ -62,7 +62,7 @@
 > 完整 Token 机制（会话级临时 token + 用户级 API Key + 三通道 + deps 统一入口）已抽出为
 > **`docs/weekly-02/issue-45-api-token-design.md`**（本接口设计文档不再重复描述）。
 > 要点速览：
-> - **方式 A（P0）**：会话级临时 token（`tk_`），按 repo+agent_type 为主作用域签发（chat 另带 user_id）、注入 `GRAPE_API_TOKEN` env、会话结束即删除失效。worker/chat agent 用。
+> - **方式 A（P0）**：会话级临时 token（`tk_`），按 repo+agent_type 为主作用域签发（chat 另带 user_id）、注入 `GRAPE_SESSION_TOKEN` env、会话结束即删除失效。worker/chat agent 用。
 > - **方式 B（P1）**：用户级长期 API Key（`grape_`），三方外部集成用。
 > - 统一入口 `get_current_user_or_api_key`：JWT / session token / API Key 三选一，三通道（Bearer / PRIVATE-TOKEN / access_token）。
 
@@ -70,8 +70,8 @@
 
 对外路由（tasks/repos/agents/chat/skills/scenes/knowledge/events）的 Depends 替换为 `get_current_user_or_api_key`（三合一：JWT 会话 / 任务级临时 token（A）/ 用户级 API Key（B）任一通过）；管理类保持 `get_current_user`。
 
-- worker agent（有任务上下文）自然用任务级临时 token（A）——随任务注入的 `GRAPE_API_TOKEN`。
-- CLI 在 agent 内运行时复用 `GRAPE_API_TOKEN`；独立/三方场景用用户级 API Key（B）。
+- worker agent（有任务上下文）自然用任务级临时 token（A）——随任务注入的 `GRAPE_SESSION_TOKEN`。
+- CLI 在 agent 内运行时复用 `GRAPE_SESSION_TOKEN`；独立/三方场景用用户级 API Key（B）。
 
 ### 3.3 OpenAPI 对外暴露与版本管理
 

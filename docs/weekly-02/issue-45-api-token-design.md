@@ -46,7 +46,7 @@ worker/chat agent 及三方软件可通过 **Token** 认证访问对外业务 AP
 任务 / 对话执行（enqueue / chat agent 启动）
   │ 签发临时 token（tk_<rand>）绑定 (repo_key, agent_type[, user_id for chat])
   ▼
-注入 agent 环境变量：GRAPE_API_TOKEN=tk_xxx（复用现有 BOT_GITCODE_TOKEN 注入通道）
+注入 agent 环境变量：GRAPE_SESSION_TOKEN=tk_xxx（复用现有 BOT_GITCODE_TOKEN 注入通道）
   ▼
 agent 执行中用该 token 调 {{SERVER_URL}}/api/...（三通道携带）
   ▼
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS session_api_tokens (
 ### 2.4 签发 / 注入 / 失效
 
 - **签发**：执行会话建立时（任务入队 / chat agent 启动）生成 `tk_<rand32>`，sha256 落 `session_api_tokens`，`session_key` 记录会话（task_id / conv_id）；明文仅注入 env，不落盘。
-- **注入**：`env_extra["GRAPE_API_TOKEN"]=tk_xxx`（与 BOT_GITCODE_TOKEN 同通道）。
+- **注入**：`env_extra["GRAPE_SESSION_TOKEN"]=tk_xxx`（与 BOT_GITCODE_TOKEN 同通道）。
 - **校验**：sha256 查表 → **行存在且未过期即有效**；返回作用域（repo_key + agent_type，chat 另含 user_id）。
 - **失效 = 删除该行**：执行结束时 `DELETE FROM session_api_tokens WHERE session_key=?`（精确定位该会话，**不影响同仓库/同类型的并发会话**）；TTL 兜底清理过期行。
 
@@ -87,7 +87,7 @@ token 的**授权身份** = **repo_key + agent_type** → 天然限制为"该仓
 
 **示例（agent 内）**：
 ```bash
-curl -s -H "Authorization: Bearer $GRAPE_API_TOKEN" \
+curl -s -H "Authorization: Bearer $GRAPE_SESSION_TOKEN" \
   {{SERVER_URL}}/api/tasks/create ...
 ```
 
@@ -159,13 +159,13 @@ def get_user_or_device_by_token(request: Request) -> dict:
 |---|------|------|--------|
 | 1 | `src/api/db_setup.py` | 新增 `session_api_tokens`（会话级，方式 A）+ `api_tokens`（用户级，方式 B） | P0 |
 | 2 | 新增 `src/api/auth_token.py` | session token：issue/verify/revoke（按 `session_key` 定位；作用域=repo+agent，chat 另带 user）；api key：generate/verify/revoke/list | P0 |
-| 3 | `src/api/event_pipeline.py` / `runtime` | 会话启动时签发临时 token + 注入 `GRAPE_API_TOKEN` env；会话结束时删除 | P0 |
+| 3 | `src/api/event_pipeline.py` / `runtime` | 会话启动时签发临时 token + 注入 `GRAPE_SESSION_TOKEN` env；会话结束时删除 | P0 |
 | 4 | `src/api/deps.py` | `get_current_user_or_api_key`（JWT / session token / API Key 三选一，含三通道） | P0 |
 | 5 | `tests/` | session token 签发/失效 + API Key + JWT 三选一 | P1 |
 
 ## 六、验收标准
 
-- [ ] **会话级临时 token（A）**：会话签发 `GRAPE_API_TOKEN` → agent 调业务 API；会话结束（任务完成/失败/取消、对话关闭）后 token 失效
+- [ ] **会话级临时 token（A）**：会话签发 `GRAPE_SESSION_TOKEN` → agent 调业务 API；会话结束（任务完成/失败/取消、对话关闭）后 token 失效
 - [ ] **用户级 API Key（B）**：三通道认证可调业务 API（外部集成）
 - [ ] `tk_`（session）与 `grape_`（api key）与 JWT 三种认证并存、互不影响
 - [ ] Token 管理仅在 Web UI（会话），API Key 不能自举
@@ -176,7 +176,7 @@ def get_user_or_device_by_token(request: Request) -> dict:
 | # | 用例 | 断言 |
 |---|------|------|
 | T1 | 会话签发临时 token | 会话建立后 `session_api_tokens` 有行（session_key+repo+agent；chat 另带 user_id，devops 无），sha256 落库，明文只经 env |
-| T2 | agent 用 `GRAPE_API_TOKEN` 调业务 API | 通过，auth_type=session_token + 携带 repo/agent 上下文（chat 另含 user） |
+| T2 | agent 用 `GRAPE_SESSION_TOKEN` 调业务 API | 通过，auth_type=session_token + 携带 repo/agent 上下文（chat 另含 user） |
 | T3 | 会话结束（任务完成/对话关闭）token 失效 | 再调 → 401 |
 | T4 | 超 TTL token 失效 | 过期后 → 401 |
 | T5 | 撤销/失败结束会话 token | 同 T3 |

@@ -1,6 +1,6 @@
 """配置解析：CLI 参数 > 环境变量 > ~/.grape/config.json。
 
-token 优先级：--token 参数 > `GRAPE_API_TOKEN`（任务级临时 token，worker 优先）> `GRAPE_TOKEN`（用户级）> config.json。
+token 优先级：--token 参数 > `GRAPE_SESSION_TOKEN`（任务级临时 token，worker 优先）> `GRAPE_API_TOKEN`（用户级）> config.json。
 """
 import json
 import os
@@ -28,8 +28,8 @@ def resolve(base_url: str = "", token: str = "", refresh: bool = False) -> tuple
     if not _base:
         _base = "http://localhost:8000"
 
-    _token = (token or "").strip() or (env.get("GRAPE_API_TOKEN") or "").strip() or \
-             (env.get("GRAPE_TOKEN") or "").strip() or str(cfg.get("token") or "").strip()
+    _token = (token or "").strip() or (env.get("GRAPE_SESSION_TOKEN") or "").strip() or \
+             (env.get("GRAPE_API_TOKEN") or "").strip() or str(cfg.get("token") or "").strip()
     return _base.rstrip("/"), _token
 
 

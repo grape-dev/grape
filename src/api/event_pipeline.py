@@ -1871,7 +1871,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     try:
         from src.api.auth_token import issue_session_token
         if repo_key and agent_type:
-            env_extra["GRAPE_API_TOKEN"] = issue_session_token(
+            env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=task_id or f"d_{seq}",
                 repo_key=repo_key, agent_type=agent_type, user_id=0)
     except Exception as e:
