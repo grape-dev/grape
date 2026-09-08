@@ -333,6 +333,7 @@ function loadTop1000(catIdx) {
     search: _tmplState.search,
     sortBy: 'stars',
     totalPages: 1,
+    fallbackItems: prev.fallbackItems || [],
   };
   _tmplState.top1000Cache[cat.id] = cache;
   renderTemplateCategory();
@@ -351,11 +352,20 @@ function loadTop1000(catIdx) {
     .then(function(data) {
       var c2 = _tmplState.top1000Cache[cat.id];
       if (!c2) return;
-      c2.items = data.templates || [];
-      c2.total = data.total || 0;
+      var apiItems = data.templates || [];
+      // Issue #56：API 返回空（DB 表空且种子未生效）时回退 JSON 兜底数据，避免 Tab 空白
+      if (apiItems.length === 0 && c2.fallbackItems && c2.fallbackItems.length > 0) {
+        c2.items = c2.fallbackItems;
+        c2.total = c2.fallbackItems.length;
+        c2.totalPages = 1;
+        console.warn('[top1000] API returned empty, fallback to JSON data:', cat.id);
+      } else {
+        c2.items = apiItems;
+        c2.total = data.total || 0;
+        c2.totalPages = Math.max(1, Math.ceil(c2.total / 20));
+      }
       c2.loading = false;
       c2.loaded = true;
-      c2.totalPages = Math.max(1, Math.ceil(c2.total / 20));
       _tmplState.top1000Cache[cat.id] = c2;
       renderTemplateCategory();
     })
