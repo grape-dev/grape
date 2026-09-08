@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_user_token
+from src.api.deps import get_current_user, get_current_user_or_api_key, get_user_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (
@@ -480,8 +480,8 @@ def _resolve_user_chat_bot(bm, user_id: int):
     return None
 
 
-@router.post("/{task_id}/start")
-async def start_task(task_id: int, user: dict = Depends(get_current_user)):
+@router.post("/{task_id}/start", operation_id="tasks_start", summary="打开任务会话")
+async def start_task(task_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """打开任务会话（"去对话"）——不再翻转状态。
 
     task-status-processing-trigger-fix.md §3.3：状态变更以"任务会话收到真实用户消息"为准
@@ -670,8 +670,8 @@ def create_standard_task(repo_key: str, title: str, description: str,
             "message": "任务已创建（Issue 已同步）" if created else "任务已创建（复用已有 Issue）"}
 
 
-@router.post("/create")
-async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
+@router.post("/create", operation_id="tasks_create", summary="新建任务（同步建 GitCode Issue）")
+async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
     - issue 责任人 = 系统 General Settings 的 Account（settings.credentials.gitcode.account，
@@ -777,8 +777,8 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 
 
-@router.put("/{task_id}/status")
-async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user)):
+@router.put("/{task_id}/status", operation_id="tasks_status", summary="更新任务状态")
+async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user_or_api_key)):
     """任务状态迁移（active → processing → completed / cancelled；cancelled → active 可恢复）。
 
     终端状态 completed 不可改；同一任务只能单向流转（按 _TASK_STATUS_FLOWS 校验）。
@@ -806,6 +806,25 @@ async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = De
         )
         db.commit()
     return {"ok": True, "task_id": task_id, "status": ns}
+
+
+@router.get("/{task_id}/status", operation_id="tasks_status_get", summary="查询任务状态（轮询 wait 用）")
+def get_task_status(task_id: int, user: dict = Depends(get_current_user_or_api_key)):
+    """返回任务当前状态（含 repo/issue 上下文），供 CLI `grape tasks wait` 轮询至终态。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at "
+            "FROM tasks WHERE id=?",
+            (task_id,),
+        )
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    return {
+        "id": row[0], "status": row[1], "repo_key": row[2], "issue_number": row[3],
+        "title": row[4], "completed_reason": row[5] or "", "completed_at": row[6],
+    }
 
 
 class TaskClarifyBody(BaseModel):
@@ -966,12 +985,12 @@ async def close_tasks(body: TaskCloseBody, request: Request):
     return {"ok": True, "closed": closed}
 
 
-@router.get("/mine")
+@router.get("/mine", operation_id="tasks_mine", summary="我的任务列表")
 async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                    repo_key: str = Query("", description="按仓库过滤"),
                    sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                    mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
-                   user: dict = Depends(get_current_user)):
+                   user: dict = Depends(get_current_user_or_api_key)):
     """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤 / 按时间排序）。
 
     sort_order: desc（默认，最新在前）/ asc（最早在前）

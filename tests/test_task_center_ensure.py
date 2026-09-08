@@ -111,13 +111,14 @@ def test_my_tasks_shows_unowned_rows():
     """mine 展示 user_id=0 的任务（P2 修订：展示不隐藏）"""
     from fastapi.testclient import TestClient
     from src.api.main import app
-    from src.api.deps import get_current_user
+    from src.api.deps import get_current_user, get_current_user_or_api_key
 
     with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=None), \
          patch.object(tasks_mod, "_get_issue_title", return_value="Unowned"):
         tasks_mod.ensure_issue_task(REPO, 7, title="Unowned", assignee="ghost", event_type="issue_opened")
 
     app.dependency_overrides[get_current_user] = lambda: {"id": 999, "username": "viewer"}
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 999, "username": "viewer"}
     try:
         client = TestClient(app)
         r = client.get("/api/tasks/mine")

@@ -3,15 +3,15 @@ import asyncio
 import os
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.config import log
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
-@router.get("/detail/{seq}")
-def get_event_detail(seq: int, user: dict = Depends(get_current_user)):
+@router.get("/detail/{seq}", operation_id="events_detail", summary="事件详情（结果/日志）")
+def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
