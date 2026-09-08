@@ -672,3 +672,101 @@ issue_state.stage = done
 | TC-30 | test_issue_lifecycle_routing.py | test_last_node_to_pending_review | 最后节点完成→pending_review |
 | TC-31 | test_issue_lifecycle_routing.py | test_pr_stage_pending_review_empty | PR updated + pending_review → 空 |
 
+## 12. 实施记录（已实施，commit 4d3e96f0）
+
+### 12.1 后端实施
+
+| 步骤 | 文件 | 实际改动 |
+|------|------|----------|
+| 1. pending_review 阶段 | `event_pipeline.py` | _STAGE_EVENT_AGENT_MAP 所有事件新增 pending_review 列（值为空，不分发） |
+| 2. 最后节点→pending_review (webhook) | `webhook.py` | A2A 端点：agent_name=="done" 或 next=="done" 时设 stage=pending_review |
+| 3. 最后节点→pending_review (queue) | `service.py` | complete_task 中：agent 完成后检查 pipeline nodes，若 next=="done" 则设 pending_review |
+| 4. 最后节点→pending_review (direct) | `event_pipeline.py` | _execute_agent_inner 中：SRE 完成后若 stage==sre 则设 pending_review |
+| 5. confirm-done API | `tasks.py` | POST /{task_id}/confirm-done：检查 stage，更新 status=completed + stage=done |
+| 6. cancel API | `tasks.py` | POST /{task_id}/cancel：终止所有运行中 agent_tasks + cancel_direct_task + events 状态 cancelled |
+| 7. resume API | `tasks.py` | POST /{task_id}/resume：查最后 completed event 的 next 节点，set_issue_stage + A2A 重新派发 |
+| 8. close_issue_tasks 修订 | `tasks.py` | 不再直接 completed；检查是否有 agent running，有则不修改 stage |
+| 9. bot_takeover 修订 | `tasks.py` | 同上，有 agent running 时不修改 stage |
+| 10. Issue 评论指令 | `event_pipeline.py` | 检测 /done /cancel /resume 关键词 → 调用 confirm_issue_done/cancel_issue_task/resume_issue_task |
+| 11. Chat Agent 指令 | `chat.py` | send_message 中检测"任务完成"/"取消任务"/"恢复任务" → 调用对应函数 |
+| 12. cancelled 拦截 (event_pipeline) | `event_pipeline.py` | _resolve_issue_stage_agent 中检查 task.status=cancelled → 返回空不分发 |
+| 13. cancelled 拦截 (A2A 端点) | `webhook.py` | a2a_endpoint 中检查 task.status=cancelled → 返回 {skipped: task_cancelled} |
+| 14. pipeline API | `tasks.py` | GET /{task_id}/pipeline：返回 scene/nodes（含 node_status）/events |
+
+### 12.2 前端实施
+
+| 步骤 | 文件 | 实际改动 |
+|------|------|----------|
+| 15. 看板视图 | `tasks.js` | 按 task.status 6列分组（pending/in_progress/awaiting_input/pending_review/done/cancelled） |
+| 16. 看板默认模式 | `tasks.js` | _taskView 默认 'board' |
+| 17. 卡片 stage 标签 | `tasks.js` | 卡片右上角显示当前 stage（VOD/ISSUE/Coding/QA/SRE/待审核/已完成） |
+| 18. 卡片创建人 | `tasks.js` | 卡片底部显示 assignee（替代 repo_key） |
+| 19. 看板搜索 | `tasks.js` | 苹果风格搜索框（onkeyup Enter + onchange） |
+| 20. 筛选 popover | `tasks.js` | 状态筛选下拉（全部/待处理/已完成/已取消） |
+| 21. 视图 popover | `tasks.js` | 视图切换下拉（列表/看板） |
+| 22. 任务详情卡片 | `tasks.js` | 统一卡片：status/task_id/Issue(超链接)/repo/Stage/场景/模式/时间/描述 |
+| 23. 操作按钮 | `tasks.js` | 按钮在标题横线下方右对齐（看板模式）/详情卡片下方（列表模式） |
+| 24. 流水线+事件卡片 | `tasks.js` | 合并为一个卡片：节点进度条 + 事件时间线 |
+| 25. 脉冲动画 | `tasks.js` | 当前执行节点 grapePulse + grapeRing 动画 |
+| 26. 节点点击跳转 | `tasks.js` | 点击当前节点 → _jumpToPipeline → app.nav('pipe') |
+| 27. 列表模式状态统一 | `tasks.js` | rowHtml 使用 _mapStatusL（与看板一致）+ 6状态分区 |
+| 28. 列表 cancelled tab | `tasks.js` | 筛选新增"已取消"选项 |
+| 29. 苹果风格确认弹窗 | `tasks.js` | _grapeConfirm：当前位置弹出（260px，11px 字体，12px 圆角） |
+| 30. 解除托管弹窗 | `repos.js` | unhostRepo 使用 _grapeConfirm + 传递 event |
+| 31. 详情轮询暂停 | `tasks.js` | _openBoardDetail 中 clearInterval(_taskPollTimer) |
+| 32. 详情不自动返回 | `tasks.js` | confirmTaskDone/cancelTask/resumeTask 移除 loadTasks() 调用 |
+
+### 12.3 i18n 实施
+
+| 文件 | 新增 key |
+|------|----------|
+| zh/tasks.json | confirm_done, cancel_task, resume_task, event_history, status.tag_pending_review, status.tag_cancelled, status.tag_awaiting_input |
+| en/tasks.json | 同上英文 |
+| zh/repos.json | unhost.confirm_title, unhost.confirm_btn |
+| en/repos.json | 同上英文 |
+
+### 12.4 版本号
+
+| 文件 | 版本 |
+|------|------|
+| tasks.js | v58 |
+| repos.js | v33 |
+| index.html | 同步 |
+
+### 12.5 验证结果
+
+| 验证项 | 结果 |
+|--------|------|
+| Python 语法（5 files） | OK |
+| tasks.js 语法 | OK |
+| repos.js 语法 | OK |
+| JSON 有效性（4 files） | OK |
+| pytest | 80 passed, 0 failed, 2 deselected |
+| API 端点验证 | confirm-done/cancel/resume/pipeline 均存在（404 for non-existent task） |
+| pending_review 事件不分发 | TC-29/TC-31 PASSED |
+
+### 12.6 与原方案差异（实施后修订）
+
+| 原方案 | 实际实施 | 原因 |
+|--------|----------|------|
+| 仅 event_pipeline 中 SRE→pending_review | 新增 service.py complete_task 中统一处理 | queue 模式不走 _execute_agent_inner |
+| 仅 webhook.py A2A 拦截 cancelled | 新增 event_pipeline.py _resolve_issue_stage_agent 拦截 | 防止 Issue 评论等事件触发分发 |
+| close_issue_tasks 直接设 pending_review | 检查是否有 agent running，有则不修改 | 防止 bot_takeover 在 coding running 时错误设 pending_review |
+| resume 用 issue_state.stage | 改为查最后 completed event 的 next | issue_state.stage 可能被 A2A 改到下游 |
+| resume A2A 路径 /api/webhook/a2a | 修正为 /api/a2a | A2A 端点实际路由 |
+| 确认弹窗用 confirm() | 改为 _grapeConfirm 苹果风格弹窗 | 用户体验优化 |
+| 看板按 stage 分列(vod/issue/coding/...) | 改为按 task.status 分列(6状态) | stage 在卡片内展示，列按生命周期状态 |
+| 列表模式用旧 active/processing/completed | 统一为 6 状态映射 + 分区 | 与看板一致 |
+
+## 13. 已知问题与后续优化
+
+| 问题 | 状态 | 说明 |
+|------|------|------|
+| SRE 完成后 A2A 到 done 可能不发 | 已修复 | service.py complete_task 中统一检查最后节点 |
+| 取消后 A2A 信号仍可能到达 | 已修复 | webhook.py + event_pipeline.py 双重拦截 |
+| bot_takeover 在 agent running 时错误设 pending_review | 已修复 | 检查 agent_tasks running 状态 |
+| resume 从错误 stage 恢复 | 已修复 | 查最后 completed event 而非 issue_state.stage |
+| 详情页自动返回看板 | 已修复 | 暂停轮询 + 移除 loadTasks() |
+| awaiting_input 状态 | 未实施 | skill need_input 机制待后续实现 |
+| 多任务模式子任务 pending_review | 未实施 | 子任务独立确认逻辑待后续实现 |
+
