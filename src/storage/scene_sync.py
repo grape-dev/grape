@@ -5,7 +5,7 @@
 2. 遍历每个场景目录，读 scene.json + README.md
 3. 校验 nodes 合法性 + 预检 skill 引用
 4. content_hash 增量比对：hash 不变跳过，变了按 version 比对更新
-5. 仓库中不存在的 official 场景 → is_active 置 0（下架）
+5. 下架通过管理员手动操作（不再自动下架）
 
 触发方式：
 - asyncio 定时任务（启动即执行，之后每 30 分钟）

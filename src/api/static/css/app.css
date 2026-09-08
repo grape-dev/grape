@@ -540,7 +540,7 @@
 .det-card{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:#f5f5f7;border:1px solid #e8e8ed;border-radius:14px;padding:16px;display:flex;flex-direction:column;transition:all .2s;position:relative}
 .det-card:hover{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
 .det-card-top{width:36px;height:4px;border-radius:2px;margin-bottom:12px}
-.det-card-desc{font-size:10px;color:#86868b;line-height:1.5;margin-bottom:10px;flex:1}
+.det-card-desc{font-size:10px;color:#86868b;line-height:1.5;margin-bottom:10px;flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
 .det-card-sep{height:1px;background:#e8e8ed;margin:8px 0}
 .det-card-box{background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center}
 .det-card-label{font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px}

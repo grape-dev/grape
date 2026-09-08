@@ -1394,7 +1394,6 @@ function _loadAgentSkillOptions(idx) {
   });
 
   // 绑定 tab 切换
-  var card = document.querySelector('.det-card[data-idx="' + idx + '"]');
   if (card) {
     card.querySelectorAll('.ed-skill-tab-opt').forEach(function(tab) {
       tab.addEventListener('click', function(e) {
