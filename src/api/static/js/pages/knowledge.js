@@ -541,6 +541,14 @@ function renderKnowledge() {
               </div>
             </div>
 
+            <!-- Tab 栏 -->
+            <div class="kb-tab-bar">
+              <button class="kb-tab" :class="{ active: activeTab === 'all' }" @click="switchTab('all')">{{ t('stats_all') }}</button>
+              <button class="kb-tab" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">{{ t('stats_system') }}</button>
+              <button class="kb-tab" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">{{ t('stats_agent') }}</button>
+              <button class="kb-tab" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">{{ t('stats_user') }}</button>
+            </div>
+
             <!-- 筛选器 -->
             <div class="filter-bar">
               <select v-model="filter.refStatus" class="kb-select">
