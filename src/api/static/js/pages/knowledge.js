@@ -29,7 +29,8 @@ function renderKnowledge() {
       return {
         view: 'list',
         list: [],
-        loading: true,
+        loading: false,
+        firstLoad: true,
         filter: { refStatus: '', query: '' },
         stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
         showArchived: false,
@@ -535,8 +536,7 @@ function renderKnowledge() {
       <div class="knowledge-page">
         <!-- ===== 列表视图 ===== -->
         <template v-if="view === 'list'">
-          <div v-if="loading" class="loading">{{ t('loading') }}</div>
-          <template v-else>
+          <template v-if="!firstLoad">
             <!-- 统计卡片（纯展示，不联动） -->
             <div class="stats-bar">
               <div class="stat-card">
@@ -592,7 +592,6 @@ function renderKnowledge() {
                 </div>
                 <div class="card-actions">
                   <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
-                  <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" @click="quickEdit(k)">{{ t('edit_save') }}</button>
                   <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="quickDelete(k)">{{ t('delete') }}</button>
                   <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('archive') }}</button>
                   <button v-if="k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('unarchive') }}</button>
