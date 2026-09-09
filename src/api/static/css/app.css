@@ -502,7 +502,9 @@
 .scn-card{background:var(--c);border:1px solid var(--b);border-radius:18px;overflow:hidden;cursor:pointer;transition:all .3s cubic-bezier(.25,.1,.25,1);box-shadow:var(--sh);display:flex;flex-direction:column}
 .scn-card:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08);border-color:rgba(0,113,227,.15)}
 .scn-scroll-track .scn-card{flex-shrink:0;width:300px}
-.scn-card-bar{height:4px;width:100%}
+.scn-grid-track .scn-card{width:100%;flex-shrink:unset;position:relative}
+.scn-card-bar{height:4px;width:100%;transition:height .3s cubic-bezier(.25,.1,.25,1)}
+.scn-card:hover .scn-card-bar{height:0}
 .scn-card-body{padding:20px;display:flex;flex-direction:column;flex:1}
 .scn-card-head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
 .scn-card-title{font-size:17px;font-weight:600;letter-spacing:-.01em;color:var(--t);flex:1}

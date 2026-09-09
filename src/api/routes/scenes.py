@@ -1237,6 +1237,62 @@ class ApplySceneRequest(BaseModel):
     scene_id: str
 
 
+def _validate_scene_engine_ids(nodes: list, repo_key: str):
+    """校验场景 nodes 的 engine_runtime_ids：
+    1. 引擎 ID 必须存在
+    2. scope=repo 的引擎 owner_id 必须匹配当前仓库
+    3. 引擎必须有对应节点 tag 的能力（engine_capabilities.tag 或 'all'）
+
+    校验失败抛 HTTPException(400)。
+    """
+    from src.session_manager import db, db_lock
+    from src.repo_key import from_repo_key
+    _repo_norm = (from_repo_key(repo_key) or "").strip()
+    for node in nodes:
+        tag = node.get("tag") or node.get("id") or ""
+        eids = node.get("engine_runtime_ids") or []
+        if not eids:
+            continue
+        if not tag:
+            continue
+        for eid in eids:
+            try:
+                _eid = int(eid)
+            except (ValueError, TypeError):
+                continue
+            with db_lock:
+                c = db.cursor()
+                # 查引擎 + credential scope/owner_id
+                c.execute(
+                    "SELECT r.credential_id, rc.scope, rc.owner_id "
+                    "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                    "WHERE r.id=?", (_eid,))
+                row = c.fetchone()
+            if not row:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"节点 {tag} 的引擎 ID {_eid} 不存在"})
+            _cred_id, _scope, _owner_id = row[0] or 0, row[1] or "global", row[2] or ""
+            # scope=repo 时校验仓库归属
+            if _scope == "repo" and _cred_id > 0:
+                _owner_norm = (from_repo_key(_owner_id) or "").strip()
+                if _owner_norm and _repo_norm and _owner_norm != _repo_norm:
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400,
+                        "message": f"节点 {tag} 的引擎 {_eid} 属于仓库 {_owner_norm}，不是当前仓库 {_repo_norm}"})
+            # 校验 tag 能力
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT 1 FROM engine_capabilities "
+                    "WHERE runtime_id=? AND enabled=1 AND (tag=? OR tag='all') LIMIT 1",
+                    (_eid, tag))
+                if not c.fetchone():
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400,
+                        "message": f"节点 {tag} 的引擎 {_eid} 没有该角色能力标签（{tag}），请重新选择"})
+
+
 @router.post("")
 def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
     """创建自定义场景（方案 B：场景只与仓库关联，无 user 级）"""
@@ -1262,8 +1318,10 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
     if not repo_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库级场景需要先选择仓库"})
 
+    # 校验 engine_runtime_ids：scope=repo 的引擎必须属于当前仓库，且 tag 必须包含节点标签
+    _validate_scene_engine_ids(nodes_json := [n.model_dump() for n in body.nodes], repo_key)
+
     scene_id = body.scene_id or str(uuid.uuid4())
-    nodes_json = [n.model_dump() for n in body.nodes]
 
     try:
         db_id = create_custom_scene(
@@ -1301,6 +1359,8 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(g
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
 
     nodes_json = [n.model_dump() for n in body.nodes]
+    if repo_key:
+        _validate_scene_engine_ids(nodes_json, repo_key)
     update_custom_scene(
         scene_id=scene_id, repo_key=repo_key, nodes=nodes_json,
         name=body.name, description=body.description)

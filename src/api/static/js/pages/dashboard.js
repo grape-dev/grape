@@ -145,6 +145,13 @@ function renderDashboard(data) {
       .host-banner button{margin-left:auto;background:#ff9500;color:#fff;border:none;border-radius:8px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:600}
       .host-banner.error button{background:#ff3b30}
       .scn-applied-badge{font-size:10px;font-weight:600;padding:3px 10px;border-radius:999px;background:rgba(52,199,89,.12);color:#34c759;display:inline-flex;align-items:center;gap:3px}
+      .scn-grid-wrap{position:relative;max-height:560px;overflow-y:auto}
+      .scn-grid-track{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;padding:4px 0}
+      .scn-grid-track .scn-card{width:100%;transition:all .3s cubic-bezier(.25,.1,.25,1)}
+      .scn-grid-track .scn-card:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08);border-color:rgba(0,113,227,.15)}
+      @media(max-width:1200px){.scn-grid-track{grid-template-columns:repeat(4,1fr)}}
+      @media(max-width:900px){.scn-grid-track{grid-template-columns:repeat(3,1fr)}}
+      @media(max-width:600px){.scn-grid-track{grid-template-columns:repeat(2,1fr)}}
       .scn-create-card{flex-shrink:0;width:300px;min-height:200px;border:2px dashed #d2d2d7;background:transparent;border-radius:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;color:#86868b;font-size:13px;gap:8px}
       .scn-create-card:hover{border-color:#0071e3;color:#0071e3;background:rgba(0,113,227,.02)}
       .scn-create-icon{font-size:28px}
@@ -180,9 +187,9 @@ function renderDashboard(data) {
       </div>
     </div>`;
 
-    // 场景中心介绍框
+    // 场景中心介绍框（缩短高度）
     html += `<div class="apple-card" style="margin-bottom:16px;background:linear-gradient(135deg,#f0f4ff,#f5f5f7);border:1px solid #d2d2d7">
-      <div style="display:flex;align-items:center;gap:16px;padding:16px 20px">
+      <div style="display:flex;align-items:center;gap:12px;padding:10px 20px">
         <div style="font-size:32px;flex-shrink:0">🏪</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:14px;font-weight:600;color:#1d1d1f;margin-bottom:4px">${I18N.t('dashboard.market_intro_title')||'探索场景中心'}</div>
@@ -192,40 +199,43 @@ function renderDashboard(data) {
       </div>
     </div>`;
 
-    // 场景卡片网格（横向滚动）
+    // 场景卡片网格（网格布局，一排五个，自动换行）
     html += `<div class="apple-card">
       <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between">
         <h2>${I18N.t('dashboard.scene_center_title')} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${scenesData.length}</span></h2>
-        <button class="ap-btn ap-btn-o" id="deleteModeBtn" onclick="_toggleDeleteMode()">${I18N.t('dashboard.delete_scene')||'删除场景'}</button>
+        <button class="ap-btn ap-btn-p" onclick="enterCreateMode()">＋ ${I18N.t('dashboard.add_scene')||'添加场景'}</button>
       </div>
-      <div class="scn-scroll-wrap">
-        <div id="dash-scenes" class="scn-scroll-track">`;
+      <div class="scn-grid-wrap">
+        <div id="dash-scenes" class="scn-grid-track">`;
 
     scenesData.forEach((s, idx) => {
       html += _renderLocalSceneCard(s, s.id === currentScene, idx);
     });
 
-    // 创建新场景卡片
-    html += `<div class="scn-create-card" onclick="enterCreateMode()">
-      <span class="scn-create-icon">➕</span>
-      <span>${I18N.t('dashboard.create_custom_scene')}</span>
-    </div>`;
-
     html += `</div>
-        <button class="scn-scroll-btn scn-scroll-prev" id="dash-scenes-prev" onclick="document.getElementById('dash-scenes').scrollBy({left:-314,behavior:'smooth'})">◀</button>
-        <button class="scn-scroll-btn scn-scroll-next" id="dash-scenes-next" onclick="document.getElementById('dash-scenes').scrollBy({left:314,behavior:'smooth'})">▶</button>
       </div>
     </div>`;
 
     el.innerHTML = html;
-    setTimeout(() => _updateDashScrollBtns(), 100);
 
     // 场景应用（从卡片快捷应用）
     window._applySceneFromCard = function(sceneId, e) {
       if (e) e.stopPropagation();
       API.post('/scenes/apply/' + owner + '/' + name, {scene_id: sceneId}).then(r => {
         app.showToast(r.message || I18N.t('dashboard.scene_applied'));
-        API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+        // 局部更新详情页按钮状态（不跳回列表）
+        const btn = document.getElementById('sceneApplyBtn');
+        if (btn) {
+          const badge = document.createElement('span');
+          badge.className = 'scn-applied-badge';
+          badge.id = 'sceneApplyBadge';
+          badge.style.cssText = 'margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500';
+          badge.textContent = '✓ ' + (I18N.t('dashboard.current_default')||'当前默认');
+          btn.replaceWith(badge);
+        } else {
+          // 卡片列表里点的，刷新列表
+          API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+        }
       }).catch(err => app.showToast(I18N.t('dashboard.apply_failed', {msg: (err.detail?.message || err.message)})));
     };
   }
@@ -329,8 +339,8 @@ function _renderLocalSceneCard(s, isApplied, idx) {
       <div class="scn-chain">${chain || '<span class="ts t3">—</span>'}</div>
       <div class="scn-card-foot">
         ${isApplied
-          ? `<span class="scn-applied-badge">✓ ${I18N.t('dashboard.current_applied')||'当前应用'}</span>`
-          : `<button class="ap-btn ap-btn-p" onclick="_applySceneFromCard('${s.id}',event)">${I18N.t('dashboard.apply_scene')||'应用'}</button>`
+          ? `<span class="scn-applied-badge">✓ ${I18N.t('dashboard.current_default')||'当前默认'}</span>`
+          : `<button class="ap-btn ap-btn-p" onclick="_applySceneFromCard('${s.id}',event)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`
         }
         ${createdBy ? `<span class="ts t3" style="margin-left:auto;font-size:11px">@${createdBy}</span>` : ''}
       </div>
@@ -479,7 +489,8 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
         <div id="sceneNameDisplay" style="font-size:20px;font-weight:700;cursor:text;padding:2px 6px;margin:-2px -6px 4px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneName')">${sceneName}</div>
         <div id="sceneDescDisplay" style="font-size:13px;color:#86868b;cursor:text;padding:2px 6px;margin:-2px -6px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneDesc')">${sceneDesc || '<span style="color:#c7c7cc;font-style:italic">' + (I18N.t('dashboard.desc_optional')||'描述（可选）') + '</span>'}</div>
       </div>
-      ${isApplied ? '<span class="ap-btn ap-btn-p" style="margin-top:4px;cursor:default;opacity:.85">✓ ' + (I18N.t('dashboard.current_applied')||'当前应用') + '</span>' : `<button class="ap-btn ap-btn-p" style="margin-top:4px" onclick="_applySceneFromCard('${scene.id}',null)">${I18N.t('dashboard.apply_scene')||'应用'}</button>`}
+      ${isApplied ? '<span class="scn-applied-badge" id="sceneApplyBadge" style="margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500">✓ ' + (I18N.t('dashboard.current_default')||'当前默认') + '</span>' : `<button class="ap-btn ap-btn-p" id="sceneApplyBtn" style="margin-top:4px" onclick="_applySceneFromCard('${scene.id}',null)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`}
+      ${isCustomScene ? `<button class="ap-btn" style="margin-top:4px;background:transparent;border:1px solid #ff3b30;color:#ff3b30" onclick="_confirmDeleteScene('${scene.id}','${(scene.display_name||scene.name||'').replace(/'/g,'\\\'')}',null)">${I18N.t('common.delete')||'删除'}</button>` : ''}
     </div>
   </div>`;
 
@@ -726,26 +737,15 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     if (e) e.stopPropagation();
     API.post('/scenes/apply/' + owner + '/' + name, {scene_id: sceneId}).then(r => {
       app.showToast(r.message || I18N.t('dashboard.scene_applied'));
-      // 原地将应用按钮变为当前应用标记，不刷新整个页面
-      const applyBtn = e ? e.target : null;
-      if (applyBtn) {
+      // 原地将设为默认按钮变为当前默认标记，不刷新整个页面
+      const btn = document.getElementById('sceneApplyBtn');
+      if (btn) {
         const badge = document.createElement('span');
         badge.className = 'scn-applied-badge';
-        badge.style.marginTop = '4px';
-        badge.innerHTML = '✓ ' + (I18N.t('dashboard.current_applied')||'当前应用');
-        applyBtn.parentNode.replaceChild(badge, applyBtn);
-      } else {
-        // 没有事件对象时查找按钮
-        const btns = document.querySelectorAll('.ap-btn-p');
-        btns.forEach(b => {
-          if (b.textContent.includes(I18N.t('dashboard.apply_scene')||'应用')) {
-            const badge = document.createElement('span');
-            badge.className = 'scn-applied-badge';
-            badge.style.marginTop = '4px';
-            badge.innerHTML = '✓ ' + (I18N.t('dashboard.current_applied')||'当前应用');
-            b.parentNode.replaceChild(badge, b);
-          }
-        });
+        badge.id = 'sceneApplyBadge';
+        badge.style.cssText = 'margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500';
+        badge.textContent = '✓ ' + (I18N.t('dashboard.current_default')||'当前默认');
+        btn.replaceWith(badge);
       }
     }).catch(err => app.showToast(I18N.t('dashboard.apply_failed', {msg: (err.detail?.message || err.message)})));
   };
@@ -787,7 +787,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
     const skLabel = meta.label || tag;
     const agent = agents.find(a => a.agent_type === tag) || {};
     const skillName = agent.skill_display_name || agent.skill || node.skill || '';
-    const engineIds = agent.engine_runtime_ids || node.engine_runtime_ids || [];
+    const engineIds = node.engine_runtime_ids || agent.engine_runtime_ids || [];
     const modeIcon = {emit:'→',waterfall:'◇',serial:'↻',parallel:'⇄'}[node.mode] || '→';
     const en = editNodes.find(n => n.id === tag);
     const enabled = editMode ? (en ? en.enabled : true) : (node.enabled !== false);
@@ -849,7 +849,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
         handoff: node.handoff || 'a2a',
         skip: node.skip || [],
         enabled: node.enabled !== false,
-        engine_runtime_ids: ag.engine_runtime_ids || node.engine_runtime_ids || [],
+        engine_runtime_ids: node.engine_runtime_ids || ag.engine_runtime_ids || [],
       };
     }
     // 场景中不存在的 agent（被删除的）→ 置灰显示
@@ -1140,14 +1140,10 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   document.getElementById('confirmEngineBtn2').onclick = function() {
     node.engine_runtime_ids = window._engCurIds.slice();
     overlay.remove();
-    const cardsEl = document.getElementById('agentCards');
+    const cardsEl = document.getElementById('flowCardsContainer');
     if (cardsEl) {
-      // 重新渲染编辑卡片
-      const agentOrder = ['vod','issue','coding','qa','sre'];
-      const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
-      const colors = {vod:'#ff2d92',issue:'#ff3b30',coding:'#0071e3',qa:'#af52de',sre:'#ff9f0a'};
-      const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
-      cardsEl.innerHTML = renderAgentCards(agents, agentOrder, agentLabels, colors, descs, agentEngines, true, true, editNodes, false);
+      // 重新渲染编辑卡片（用 _renderEditFlowCards 保持与编辑模式一致的结构）
+      cardsEl.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
     }
   };
   overlay.addEventListener('click', function(ev) { if (ev.target === overlay) overlay.remove(); });
