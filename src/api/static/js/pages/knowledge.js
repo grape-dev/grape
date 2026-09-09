@@ -36,7 +36,7 @@ function renderKnowledge() {
         showArchived: false,
         activeTab: 'system',
         page: 1,
-        pageSize: 50,
+        pageSize: 20,
         total: 0,
         editModal: null,
         entryModal: null,
@@ -147,6 +147,7 @@ function renderKnowledge() {
           if (window._currentView !== 'knowledge') return;
           this.list = d.knowledge || [];
           this.total = d.total || 0;
+          this.firstLoad = false;
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
           if (window._currentView !== 'knowledge') return;
@@ -168,6 +169,13 @@ function renderKnowledge() {
       switchTab(tab) {
         this.activeTab = tab;
         this.page = 1;
+        this.loadList();
+      },
+      totalPages() {
+        return Math.max(1, Math.ceil(this.total / this.pageSize));
+      },
+      changePage(p) {
+        this.page = p;
         this.loadList();
       },
       sourceLabel(s) {
@@ -572,11 +580,17 @@ function renderKnowledge() {
               <label class="kb-checkbox-label">
                 <input type="checkbox" v-model="showArchived"> {{ t('show_archived') }}
               </label>
-              <button v-if="activeTab === 'user'" class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a);margin-left:auto" @click="openEntryModal">{{ t('entry_create') }}</button>
+              <div style="margin-left:auto;display:flex;gap:8px">
+                <button v-if="activeTab === 'user'" class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a)" @click="openEntryModal">{{ t('entry_create') }}</button>
+              </div>
             </div>
 
-            <div v-if="filteredList.length === 0" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
-            <div v-else class="kb-grid">
+            <div v-if="loading" class="kb-loading-overlay">
+              <div class="kb-spinner"></div>
+              <span style="font-size:12px;color:var(--t3);margin-top:8px">{{ t('loading') }}</span>
+            </div>
+            <div v-if="filteredList.length === 0 && !loading" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
+            <div v-show="filteredList.length > 0" class="kb-grid" :class="{ 'kb-grid-loading': loading }">
               <div v-for="k in filteredList" :key="k.id || k.file_path" class="cd skill-card" style="padding:14px" :class="{ 'archived-card': k.archived }">
                 <div class="card-header">
                   <span class="source-tag" :class="sourceClass(k.source)">{{ sourceLabel(k.source) }}</span>
@@ -597,6 +611,16 @@ function renderKnowledge() {
                   <button v-if="k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('unarchive') }}</button>
                 </div>
               </div>
+            </div>
+            <!-- 分页器 -->
+            <div class="kb-pager">
+              <button class="kb-page-btn" :disabled="page <= 1" @click="changePage(page - 1)">‹</button>
+              <span style="font-size:12px;color:var(--t2)">{{ page }} / {{ totalPages() }} ({{ total }})</span>
+              <button class="kb-page-btn" :disabled="page >= totalPages()" @click="changePage(page + 1)">›</button>
+              <select v-model="pageSize" class="kb-select" style="width:auto" @change="changePage(1)">
+                <option :value="20">20/页</option>
+                <option :value="50">50/页</option>
+              </select>
             </div>
           </template>
         </template>

@@ -659,6 +659,11 @@
 .kb-page-btn:hover:not(:disabled){background:var(--bg);border-color:var(--a);color:var(--a)}
 .kb-page-btn:disabled{opacity:.4;cursor:not-allowed}
 .source-tag{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600}
+.kb-grid-loading{opacity:.4;pointer-events:none}
+.kb-loading-overlay{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 0}
+.kb-spinner{width:28px;height:28px;border:3px solid var(--b);border-top-color:var(--a);border-radius:50%;animation:kb-spin .6s linear infinite}
+@keyframes kb-spin{to{transform:rotate(360deg)}}
+.kb-pager{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;padding:12px 0}
 .source-system{background:rgba(0,113,227,0.1);color:#0071e3}
 .source-agent{background:rgba(255,149,0,0.1);color:#ff9500}
 .source-manual{background:rgba(52,199,89,0.1);color:#34c759}
