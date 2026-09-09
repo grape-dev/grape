@@ -251,6 +251,7 @@ function renderKnowledge() {
           const d = await API.get('/knowledge/' + kid);
           if (this.detail && this.detail.id === kid) {
             this.detail = d;
+            this.$nextTick(() => this.updateSceneScrollBtns());
           }
         } catch (e) {
           // ignore
