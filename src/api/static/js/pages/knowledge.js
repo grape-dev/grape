@@ -28,6 +28,7 @@ function renderKnowledge() {
     data() {
       return {
         view: 'list',
+        editMode: false,
         list: [],
         loading: false,
         firstLoad: true,
@@ -38,7 +39,6 @@ function renderKnowledge() {
         page: 1,
         pageSize: 20,
         total: 0,
-        editModal: null,
         entryModal: null,
         detail: null,
         scenes: [],
@@ -227,6 +227,7 @@ function renderKnowledge() {
         }
       },
       backToList() {
+        this.editMode = false;
         this.view = 'list';
         this.detail = null;
         this.loadList();
@@ -446,20 +447,23 @@ function renderKnowledge() {
 
       // 编辑
       editKnowledge() {
-        this.editModal = { id: this.detail.id, content: this.detail.content || '', description: this.detail.description || '', loading: false };
+        this.editMode = true;
+      },
+      cancelEdit() {
+        this.editMode = false;
       },
       async saveEdit() {
-        if (!this.editModal) return;
-        this.editModal.loading = true;
+        if (!this.detail) return;
         try {
-          await API.put('/knowledge/' + this.editModal.id, { content: this.editModal.content, description: this.editModal.description });
+          await API.put('/knowledge/' + this.detail.id, {
+            content: this.detail.content || '',
+            description: this.detail.description || ''
+          });
           app.showToast(this.t('knowledge_updated'));
-          this.editModal = null;
+          this.editMode = false;
           await this.viewContent({ id: this.detail.id });
         } catch (e) {
           app.showToast(e.message || I18N.t('common.load_failed'));
-        } finally {
-          if (this.editModal) this.editModal.loading = false;
         }
       },
 
@@ -514,7 +518,7 @@ function renderKnowledge() {
       quickEdit(k) {
         this.viewContent(k).then(() => {
           if (this.detail && this.detail.source === 'manual') {
-            this.editModal = { id: this.detail.id, content: this.detail.content || '', loading: false };
+            this.editMode = true;
           }
         });
       },
@@ -645,7 +649,7 @@ function renderKnowledge() {
         </template>
 
         <!-- ===== 详情视图 ===== -->
-        <template v-if="view === 'detail' && detail">
+        <template v-if="view === 'detail' && detail && !editMode">
           <div style="margin-bottom:16px">
             <button class="bt bt-o bt-s" @click="backToList">← {{ t('back_to_list') }}</button>
           </div>
@@ -807,18 +811,23 @@ function renderKnowledge() {
           </div>
         </template>
 
-        <!-- 编辑 modal -->
-        <div v-if="editModal" class="modal-overlay" @click.self="editModal = null">
-          <div class="modal cd">
-            <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('edit_title') }}</h3>
-            <input v-model="editModal.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%;margin-bottom:8px">
-            <textarea v-model="editModal.content" rows="12" class="kb-textarea"></textarea>
-            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
-              <button class="bt bt-o bt-s" @click="editModal = null">{{ t('cancel') }}</button>
-              <button class="bt bt-p bt-s" :disabled="editModal.loading" @click="saveEdit">{{ t('confirm') }}</button>
+        <!-- ===== 编辑视图 ===== -->
+        <template v-if="view === 'detail' && detail && editMode">
+          <div style="margin-bottom:16px">
+            <button class="bt bt-o bt-s" @click="cancelEdit">← {{ t('back_to_list') }}</button>
+          </div>
+          <div class="cd" style="padding:28px 32px;margin-bottom:20px;border-radius:20px">
+            <div class="cd-h" style="margin-bottom:16px">
+              <h2 style="font-size:16px;font-weight:600">{{ t('edit_title') }}</h2>
+            </div>
+            <input v-model="detail.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%;margin-bottom:12px">
+            <textarea v-model="detail.content" rows="20" class="kb-textarea"></textarea>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--b)">
+              <button class="bt bt-o bt-s" @click="cancelEdit">{{ t('cancel') }}</button>
+              <button class="bt bt-p bt-s" @click="saveEdit">{{ t('confirm') }}</button>
             </div>
           </div>
-        </div>
+        </template>
 
         <!-- 新增 modal -->
         <div v-if="entryModal" class="modal-overlay" @click.self="entryModal = null">
