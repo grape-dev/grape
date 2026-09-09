@@ -525,7 +525,6 @@ function renderKnowledge() {
                 </div>
               </div>
             </div>
-            <!-- 操作按钮区 -->
             <div style="display:flex;align-items:center;gap:8px;padding-top:16px;border-top:1px solid var(--b);flex-wrap:wrap">
               <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" @click="editKnowledge">{{ t('edit_save') }}</button>
               <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="deleteKnowledge">{{ t('delete') }}</button>
@@ -534,64 +533,57 @@ function renderKnowledge() {
             </div>
           </div>
 
-          <!-- 知识内容 -->
-          <div class="cd-h" style="margin-bottom:12px"><h2 style="font-size:16px;font-weight:600">{{ t('detail_content_title') }}</h2></div>
-          <div class="cd" style="padding:24px;margin-bottom:20px;border-radius:18px">
-            <div v-html="renderMarkdown(detail.content || '')" class="kb-detail-content"></div>
+          <!-- 内容卡片（固定高度，超出滚动） -->
+          <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
+            <div class="cd-h" style="margin-bottom:12px"><h2 style="font-size:16px;font-weight:600">{{ t('detail_content_title') }}</h2></div>
+            <div class="kb-detail-scroll">
+              <div v-html="renderMarkdown(detail.content || '')" class="kb-detail-content"></div>
+            </div>
           </div>
 
-          <!-- 关联管理 -->
-          <div class="cd-h" style="margin-bottom:12px"><h2 style="font-size:16px;font-weight:600">{{ t('ref_modal_title') }}</h2></div>
-          <div class="cd" style="padding:24px;border-radius:18px">
-            <!-- 全局关联 -->
-            <div class="kb-ref-section">
-              <div class="kb-ref-section-title">{{ t('ref_scope') }}</div>
-              <div class="kb-tag-row">
-                <span v-if="isGlobalChecked()" class="kb-tag kb-tag-global">
-                  {{ t('ref_global') }}
+          <!-- Agent 关联卡片 -->
+          <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
+            <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+              <h2 style="font-size:16px;font-weight:600">{{ t('ref_agent_title') }}</h2>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span v-if="isGlobalChecked()" class="kb-tag kb-tag-global" style="font-size:10px">
+                  {{ t('ref_global_short') }}
                   <button class="kb-tag-x" @click="toggleGlobalRef">×</button>
                 </span>
-                <button v-if="!isGlobalChecked()" class="kb-tag-add" @click="toggleGlobalRef">+ {{ t('ref_add_global') }}</button>
+                <button v-if="!isGlobalChecked()" class="kb-tag-add" style="font-size:10px" @click="toggleGlobalRef">+ {{ t('ref_add_global') }}</button>
+                <button class="kb-tag-add" style="font-size:10px" @click="addAgentPopover = !addAgentPopover">+ {{ t('ref_add_agent') }}</button>
               </div>
             </div>
-
-            <!-- Agent 关联 -->
-            <div class="kb-ref-section">
-              <div class="kb-ref-section-title">
-                {{ t('ref_agent_title') }}
-                <button class="kb-tag-add" style="margin-left:8px" @click="addAgentPopover = !addAgentPopover">+ {{ t('ref_add_agent') }}</button>
-              </div>
-              <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:8px 0">{{ t('ref_no_agents_linked') }}</div>
-              <div v-else class="kb-scene-grid">
-                <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card">
-                  <button class="kb-scene-x" @click="removeAgentRef(tag)">×</button>
-                  <div class="kb-scene-name">{{ tag.label }}</div>
-                  <div class="kb-scene-id">{{ tag.agentType }}</div>
-                </div>
-              </div>
-              <div v-if="addAgentPopover" class="kb-popover cd">
-                <div v-if="availableAgentTypes.length === 0" class="ts t2" style="padding:8px">{{ t('ref_no_available') }}</div>
-                <div v-else class="kb-popover-list">
-                  <button v-for="at in availableAgentTypes" :key="at.value" class="kb-popover-item" @click="addAgentByType(at.value); addAgentPopover = false">
-                    {{ at.label }}
-                  </button>
-                </div>
+            <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_agents_linked') }}</div>
+            <div v-else class="kb-scene-grid">
+              <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card">
+                <button class="kb-scene-x" @click="removeAgentRef(tag)">×</button>
+                <div class="kb-scene-name">{{ tag.label }}</div>
+                <div class="kb-scene-id">{{ tag.agentType }}</div>
               </div>
             </div>
-
-            <!-- 场景关联 -->
-            <div class="kb-ref-section">
-              <div class="kb-ref-section-title">
-                {{ t('ref_scene_title') }}
-                <button class="kb-tag-add" style="margin-left:8px" @click="openScenePopover">+ {{ t('ref_add_scene') }}</button>
+            <div v-if="addAgentPopover" class="kb-popover cd">
+              <div v-if="availableAgentTypes.length === 0" class="ts t2" style="padding:8px">{{ t('ref_no_available') }}</div>
+              <div v-else class="kb-popover-list">
+                <button v-for="at in availableAgentTypes" :key="at.value" class="kb-popover-item" @click="addAgentByType(at.value); addAgentPopover = false">
+                  {{ at.label }}
+                </button>
               </div>
-              <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:8px 0">{{ t('ref_no_scenes_linked') }}</div>
-              <div v-else class="kb-scene-grid">
-                <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card">
-                  <button class="kb-scene-x" @click="removeSceneRef(tag)">×</button>
-                  <div class="kb-scene-name">{{ tag.label }}</div>
-                  <div class="kb-scene-id">{{ tag.sceneId.substring(0, 12) }}...</div>
-                </div>
+            </div>
+          </div>
+
+          <!-- 场景关联卡片 -->
+          <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
+            <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+              <h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2>
+              <button class="kb-tag-add" style="font-size:10px" @click="openScenePopover">+ {{ t('ref_add_scene') }}</button>
+            </div>
+            <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
+            <div v-else class="kb-scene-grid">
+              <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card">
+                <button class="kb-scene-x" @click="removeSceneRef(tag)">×</button>
+                <div class="kb-scene-name">{{ tag.label }}</div>
+                <div class="kb-scene-id">{{ tag.sceneId.substring(0, 12) }}...</div>
               </div>
             </div>
           </div>

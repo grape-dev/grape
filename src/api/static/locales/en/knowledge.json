@@ -101,5 +101,6 @@
   "ref_added_count": "Added {{count}} scenes",
   "confirm": "Confirm",
   "detail_content_title": "Content",
-  "ref_no_agents_linked": "No agents linked yet"
+  "ref_no_agents_linked": "No agents linked yet",
+  "ref_global_short": "Global"
 }

@@ -101,5 +101,6 @@
   "ref_added_count": "已添加 {{count}} 个场景",
   "confirm": "确认",
   "detail_content_title": "知识内容",
-  "ref_no_agents_linked": "暂未关联任何 Agent"
+  "ref_no_agents_linked": "暂未关联任何 Agent",
+  "ref_global_short": "全局"
 }
