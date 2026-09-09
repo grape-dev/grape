@@ -136,7 +136,7 @@ git (本地，CLI 内) -- 缺凭据 → grape credential helper → POST/GET /ap
 
 ### 技能/worker 如何使用（`grapecli git <原生 git 命令>`，不接触平台 token）
 
-worker agent 安装 `grape-cli`，用 `GRAPE_TOKEN`（grape api_key）执行任意 git 命令；CLI 本地执行、token 进程内获取：
+worker agent 安装 `grape-cli`，用 `GRAPE_API_TOKEN`（grape api_key）执行任意 git 命令；CLI 本地执行、token 进程内获取：
 
 ```bash
 # 就绪工作区（clone/复用 + 切 Issue 分支）
@@ -406,4 +406,4 @@ grapecli git diff --repo Jason7602/hello
 | 502 | 平台 token 解析失败 | `{"detail":{"code":502,"message":"Git 仓库 token 解析失败"}}` |
 | 429 | 平台限流（400/min，4000/hour） | 透传 |
 
-> 技能迁移后：`gitcode-api-reference.md` 中 `api.gitcode.com/api/v5` → `{{SERVER_URL}}/api/repos/...`；认证 `$BOT_GITCODE_TOKEN` → `$GRAPE_TOKEN`。
+> 技能迁移后：`gitcode-api-reference.md` 中 `api.gitcode.com/api/v5` → `{{SERVER_URL}}/api/repos/...`；认证 `$BOT_GITCODE_TOKEN` → `$GRAPE_API_TOKEN`。

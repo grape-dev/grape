@@ -9,6 +9,7 @@
 
 ## 关联文档
 
+- **API Token 认证机制：`docs/weekly-02/issue-45-api-token-design.md`**（会话级临时 + 用户级长期 + 三通道）
 - CLI 设计：`docs/weekly-02/issue-45-cli-design.md`（**契约驱动：新增接口自动获得 CLI 命令**）
 - Git 仓库统一接口：`docs/weekly-02/issue-45-git-repos-api-design.md`
 - 技能实际 API 使用面（参考基线）：`docs/weekly-02/issue-45-skills-api-scan.md`
@@ -56,68 +57,21 @@
 
 ## 三、API 设计
 
-### 3.1 Token 认证机制（对齐 GitCode 官方认证风格）
+### 3.1 Token 认证机制 → 见独立设计文档
 
-> **参考**：GitCode 官方 OpenAPI 文档（docs.gitcode.com/docs/apis）认证方式：
-> - `Authorization: Bearer {token}`（Header）
-> - `PRIVATE-TOKEN: {token}`（Header，GitLab 风格）
-> - `?access_token={token}`（query，Gitee 风格，GitCode 写操作用它）
-> - 认证无效 → `401 Unauthorized` + `{"message":"401 Unauthorized"}`。
->
-> **差异点**：grape token 是 **grape 自签发的用户级 API Key**（非 GitCode 个人访问令牌），但传输姿势复用 GitCode 官方三种方式。
-
-**新增表 `api_tokens`**（用户级 Token，绑定单用户）：
-
-```sql
-CREATE TABLE IF NOT EXISTS api_tokens (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL,                  -- 绑定单用户
-    token_sha256 TEXT UNIQUE NOT NULL,             -- SHA-256（不存明文）
-    name        TEXT DEFAULT '',                   -- token 名称（如 "worker-calc-01"）
-    scopes      TEXT DEFAULT '["public"]',         -- 预留：未来 RBAC 扩展
-    created_at  TEXT DEFAULT (datetime('now')),
-    last_used_at TEXT DEFAULT NULL,
-    revoked     INTEGER DEFAULT 0,
-    UNIQUE (user_id, name)
-)
-```
-
-**新增 `src/api/auth_token.py`**：
-
-```python
-def generate_api_token(user_id: int, name: str = "") -> str: ...
-def verify_api_token(token: str) -> dict | None: ...
-def revoke_api_token(user_id: int, token_id: int) -> bool: ...
-def list_api_tokens(user_id: int) -> list[dict]: ...
-```
-
-**认证流程（三通道统一入口，`src/api/deps.py` 新增）**：
-
-```python
-def get_user_by_api_token(request: Request) -> dict:
-    """Authorization: Bearer / PRIVATE-TOKEN / access_token query 三通道取值。"""
-    auth = request.headers.get("Authorization", "")
-    if auth.lower().startswith("bearer "):
-        token = auth[7:].strip()
-    elif request.headers.get("PRIVATE-TOKEN"):
-        token = request.headers.get("PRIVATE-TOKEN").strip()
-    else:
-        token = request.query_params.get("access_token", "").strip()
-    if not token:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "401 Unauthorized"})
-    info = verify_api_token(token)
-    if not info:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "401 Unauthorized"})
-    mark_user_active(info["user_id"])
-    return {"id": info["user_id"], "username": info["username"], "auth_type": "api_key"}
-```
-
-- **与现有 JWT 的关系**：三通道 API Key + 现有 `get_current_user`（JWT）并存。对外接口用 `get_current_user_or_api_key`（二选一）。
-- **安全**：明文仅生成时返回一次；落库 sha256；支持吊销；按 worker/集成方命名。
+> 完整 Token 机制（会话级临时 token + 用户级 API Key + 三通道 + deps 统一入口）已抽出为
+> **`docs/weekly-02/issue-45-api-token-design.md`**（本接口设计文档不再重复描述）。
+> 要点速览：
+> - **方式 A（P0）**：会话级临时 token（`tk_`），按 repo+agent_type 为主作用域签发（chat 另带 user_id）、注入 `GRAPE_SESSION_TOKEN` env、会话结束即删除失效。worker/chat agent 用。
+> - **方式 B（P1）**：用户级长期 API Key（`grape_`），三方外部集成用。
+> - 统一入口 `get_current_user_or_api_key`：JWT / session token / API Key 三选一，三通道（Bearer / PRIVATE-TOKEN / access_token）。
 
 ### 3.2 对外接口认证接入
 
-对外路由（tasks/repos/agents/chat/skills/scenes/knowledge/events）的 Depends 替换为 `get_current_user_or_api_key`；管理类保持 `get_current_user`。
+对外路由（tasks/repos/agents/chat/skills/scenes/knowledge/events）的 Depends 替换为 `get_current_user_or_api_key`（三合一：JWT 会话 / 任务级临时 token（A）/ 用户级 API Key（B）任一通过）；管理类保持 `get_current_user`。
+
+- worker agent（有任务上下文）自然用任务级临时 token（A）——随任务注入的 `GRAPE_SESSION_TOKEN`。
+- CLI 在 agent 内运行时复用 `GRAPE_SESSION_TOKEN`；独立/三方场景用用户级 API Key（B）。
 
 ### 3.3 OpenAPI 对外暴露与版本管理
 
@@ -202,32 +156,36 @@ app.openapi = custom_openapi
 
 ## 四、改动清单（API 部分）
 
+> Token 认证专项（`session_api_tokens` / `api_tokens` / `auth_token.py` / deps 三选一 / 签发注入失效）见
+> **`issue-45-api-token-design.md`**；下表仅列本接口文档范围内的 API 侧改动。
+
 | # | 模块 | 改动 | 优先级 |
 |---|------|------|--------|
-| 1 | `src/api/db_setup.py` | 新增 `api_tokens` 表 | P0 |
-| 2 | 新增 `src/api/auth_token.py` | generate/verify/revoke/list | P0 |
-| 3 | `src/api/deps.py` | `get_current_user_or_api_key`（二选一）+ 三通道 | P0 |
-| 4 | 对外路由（tasks/repos/agents/chat/skills/scenes/knowledge/events） | 认证依赖切换为二选一 | P1 |
-| 5 | `src/api/main.py` | 开启 docs_url/redoc_url/openapi_url | P0 |
-| 6 | 新增 `src/api/openapi.py` | custom_openapi + securitySchemes + 版本 2.1.0 + **operationId 收集 / 内部接口过滤 / 契约含 CLI 生成所需信息**（§3.5 闭环 CLI） | P0 |
-| 7 | Token 管理（内部） | Settings 页「API Tokens」面板（会话认证，不对外） | P1 |
-| 8 | `tests/` | token 认证 + 二选一 | P1 |
+| 1 | `src/api/deps.py` | 对外认证接入：接口依赖换用 `get_current_user_or_api_key`（三选一，含三通道） | P0 |
+| 2 | 对外路由（tasks/repos/agents/chat/skills/scenes/knowledge/events） | 认证依赖切换为三选一 | P1 |
+| 3 | `src/api/main.py` | 开启 docs_url/redoc_url/openapi_url | P0 |
+| 4 | 新增 `src/api/openapi.py` | custom_openapi + securitySchemes + 版本 2.1.0 + **operationId 收集 / 内部接口过滤 / 契约含 CLI 生成所需信息**（§3.5 闭环 CLI） | P0 |
+| 5 | Token 管理（内部） | Settings 页「API Tokens」面板（会话认证，不对外；仅方式 B 用户级 key，见 token 文档） | P1 |
+| 6 | `tests/` | OpenAPI 呈现 + 三选一认证接缝（token 机制用例见 token 文档） | P1 |
 
 ## 五、验收标准
 
-- [ ] 第三方可通过 Token/API Key（三通道）认证调用业务 API
+- [ ] **会话级临时 token（A）** 与 用户级 API Key（B）三通道认证调用业务 API（详见 `issue-45-api-token-design.md`）
 - [ ] 可访问 OpenAPI 文档（Swagger UI/ReDoc/JSON）并据此生成客户端 SDK
 - [ ] 对外接口有明确文档与版本管理（2.1.0 + securitySchemes）
 - [ ] Token 管理仅在 Web UI（会话），API Key 不能自举
 - [ ] 现有测试全绿 + 新增用例通过
+
+> Token 认证专项测试（T1-T9：签发/失效/作用域/脱敏）见 `issue-45-api-token-design.md` §七。
 
 ## 六、风险
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | 开启 /docs 暴露内部端点 | 中 | 管理类路由仍会话认证；openapi.py 可只呈现带 security 的路由 |
-| API Key 明文泄露 | 高 | 明文仅创建返回一次；sha256 落库；可吊销 |
-| 二选一认证误放管理接口 | 中 | 仅改对外路由依赖；评审把关 |
+| 会话级临时 token 泄露 | 低→中 | 生命周期=执行会话；TTL 兜底；会话结束即删除失效；明文不落盘（T9） |
+| 用户 API Key 明文泄露 | 高 | 明文仅创建返回一次；sha256 落库；可吊销；**仅方式 B（外部集成）用** |
+| 三选一认证误放管理接口 | 中 | 仅改对外路由依赖；评审把关 |
 
 ## 附：关键代码位置
 

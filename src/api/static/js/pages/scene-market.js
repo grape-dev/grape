@@ -93,6 +93,11 @@ function _switchSceneTab(tab) {
   _sceneMarketPage = 1;
   _sceneMarketQ = '';
   _sceneMarketActiveCat = 0;
+  // Issue #63: 页面内 tab 切换——取消旧 tab 请求 + 更新标识
+  if (window._tabAbortController) window._tabAbortController.abort();
+  window._tabAbortController = new AbortController();
+  window._tabSignal = window._tabAbortController.signal;
+  window._currentView = 'scene-market:' + tab;
   const el = document.getElementById('marketTabContent');
   if (!el) return;
 
@@ -161,6 +166,7 @@ function _loadSceneMarketList() {
   var gridEl = document.getElementById('officialSceneGrid');
   if (gridEl) gridEl.innerHTML = '<div class="scn-loading"><span class="scn-spinner"></span></div>';
   API.get('/scenes/market' + qs).then(d => {
+    if (window._currentView !== 'scene-market:official') return;  // stale guard
     _sceneMarketScenes = d.scenes || [];
     _sceneMarketTotal = d.total || 0;
     // 首次渲染完整页面，后续只刷新网格
@@ -170,6 +176,8 @@ function _loadSceneMarketList() {
       _renderSceneMarketPage();
     }
   }).catch(e => {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'scene-market:official') return;  // stale guard
     el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + (e.message||'') + '</div>';
   });
 }
@@ -249,6 +257,7 @@ function _loadCustomScenes(scope) {
   })();
 
   Promise.all([loadScenes, loadCats]).then(([d, catData]) => {
+    if (window._currentView !== 'scene-market:' + scope) return;  // stale guard
     _sceneMarketScenes = d.scenes || [];
     _sceneMarketTotal = d.total || 0;
     _sceneMarketCats = catData.categories || _sceneMarketCats;
@@ -264,6 +273,8 @@ function _loadCustomScenes(scope) {
       _renderCustomSceneGrid(scope);
     }
   }).catch(e => {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'scene-market:' + scope) return;  // stale guard
     const listEl = document.getElementById('customSceneList');
     if (listEl) {
       listEl.classList.remove('loading');

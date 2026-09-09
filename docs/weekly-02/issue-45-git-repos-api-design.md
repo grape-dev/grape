@@ -103,7 +103,7 @@ agent → grape git <任意 git 原生命令> → 本地 git（CLI 内经 /git-c
 | 2 | 新增 `/git-credential`、`/workspace` | CLI 内部取 token/工作区 | P0 |
 | 3 | `cli/grape_cli/commands/gitrepo.py` | `/api/repos/*` REST 命令（issue/pulls/comments/branches/contents/commits/labels）+ `--provider` | P1 |
 | 4 | `cli/grape_cli/commands/git.py` | git 原生命令透传 + credential helper（方案③） | P1 |
-| 5 | 技能迁移 | `gitcode-api-reference.md`：`api.gitcode.com` → `{{SERVER_URL}}/api/repos/...`；`$BOT_GITCODE_TOKEN` → `$GRAPE_TOKEN` | P1 |
+| 5 | 技能迁移 | `gitcode-api-reference.md`：`api.gitcode.com` → `{{SERVER_URL}}/api/repos/...`；`$BOT_GITCODE_TOKEN` → `$GRAPE_API_TOKEN` | P1 |
 | 6 | `tests/` | provider 分派 + 白名单 + credential + CLI gitrepo/git | P1 |
 
 ## 六、验收标准

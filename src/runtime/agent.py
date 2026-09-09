@@ -1145,15 +1145,17 @@ async def _execute_task(client, task, engine_name: str = ""):
             _esq_parts.append(f"engine:{engine_name}")
         _esq = "|".join(_esq_parts)
         # chat 任务以用户身份执行（回帖/建 issue 等 GitCode API 操作）——注入用户级 token。
-        # 直接执行路径（send/IM）均传 user_token；唯队列路径曾漏传，导致
-        # USER_GITCODE_TOKEN 为空、agent 回帖 401（2026-08-19 修复）。
+        # 优先从 task payload 的 user_gitcode_token 字段读取（主控端 enqueue 时注入，
+        # 与 repo_gitcode_token 互斥分离）；为空时回退 DB 查询（worker 本地 SQLite/MySQL）。
         user_token = ""
         if (task.get("agent_type") or "") == "chat" or (task.get("event_type") or "") == "chat":
-            try:
-                from src.user.db import get_user_gitcode_token
-                user_token = get_user_gitcode_token(task.get("user_id") or 0) or ""
-            except Exception as e:
-                log.warning(f"chat user token resolve failed: {e}")
+            user_token = task.get("user_gitcode_token") or ""
+            if not user_token:
+                try:
+                    from src.user.db import get_user_gitcode_token
+                    user_token = get_user_gitcode_token(task.get("user_id") or 0) or ""
+                except Exception as e:
+                    log.warning(f"chat user token resolve failed: {e}")
         # 方案 2：线程化迭代 stream_runtime（worker-event-loop-block-rootcause.md §8.5）——
         # 同步生成器的 readline() 阻塞移到后台线程，事件循环持续调度 claim/heartbeat，
         # 根治「长命令静默无输出」期间的事件循环停摆（替代方案 1 的 await sleep(0)）。

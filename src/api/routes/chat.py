@@ -22,7 +22,7 @@ _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.user import db as user_db
 from src.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
@@ -92,8 +92,8 @@ def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")
     _mt = "image/jpeg" if fpath.lower().endswith((".jpg", ".jpeg")) else "image/png"
     return FileResponse(fpath, media_type=_mt, headers={"Cache-Control": "public, max-age=86400"})
 
-@router.get("/conversations")
-def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user)):
+@router.get("/conversations", operation_id="chat_conversations", summary="会话列表")
+def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user_or_api_key)):
     convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
 
@@ -167,8 +167,8 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
 
 # ====== Messages ======
 
-@router.get("/messages/{conv_id}")
-def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user)):
+@router.get("/messages/{conv_id}", operation_id="chat_messages", summary="会话消息列表")
+def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user_or_api_key)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
@@ -492,6 +492,39 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         conv = get_conversation(conv_id)
 
     add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)))
+
+    # Issue #51: Chat Agent 指令检测（任务完成/取消任务/恢复任务）
+    _msg_stripped = body.message.strip()
+    if conv_id and conv and conv.get("conv_type") == "task" and conv.get("issue_number"):
+        _task_issue_num = conv["issue_number"]
+        _task_repo_key = conv.get("repo_key", "")
+        import logging as _log_mod
+        _chat_log = _log_mod.getLogger("devops-bot")
+        if _msg_stripped in ["任务完成", "完成任务", "/done", "确认完成"]:
+            try:
+                from src.api.routes.tasks import confirm_issue_done
+                confirm_issue_done(_task_repo_key, _task_issue_num, confirmed_by="chat_agent")
+                add_message(conv_id, "assistant", "✅ 任务已确认完成")
+                return {"conversation_id": conv_id, "reply": "✅ 任务已确认完成", "task_command": "done"}
+            except Exception as _e:
+                _chat_log.warning(f"Chat command confirm_done failed: {_e}")
+        elif _msg_stripped in ["取消任务", "/cancel"]:
+            try:
+                from src.api.routes.tasks import cancel_issue_task
+                cancel_issue_task(_task_repo_key, _task_issue_num)
+                add_message(conv_id, "assistant", "任务已取消")
+                return {"conversation_id": conv_id, "reply": "任务已取消", "task_command": "cancel"}
+            except Exception as _e:
+                _chat_log.warning(f"Chat command cancel failed: {_e}")
+        elif _msg_stripped in ["恢复任务", "/resume"]:
+            try:
+                from src.api.routes.tasks import resume_issue_task
+                resume_issue_task(_task_repo_key, _task_issue_num)
+                add_message(conv_id, "assistant", "任务已恢复")
+                return {"conversation_id": conv_id, "reply": "任务已恢复", "task_command": "resume"}
+            except Exception as _e:
+                _chat_log.warning(f"Chat command resume failed: {_e}")
+
     # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
     mark_task_processing_by_conversation(conv_id)
 
@@ -743,7 +776,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     runtime_session_id=runtime_session_id,
                     event_type="chat",
                     account=user.get("username") or "", user_id=user["id"],
-                    repo_gitcode_token=gitcode_token,
+                    user_gitcode_token=gitcode_token,
                     env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
                 )
                 log.info(f"Chat stream enqueued: task={tid} user={user['id']} conv={conv_id}")

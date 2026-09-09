@@ -1,9 +1,9 @@
 ﻿# Issue #45 设计文档：grape CLI 独立包
 
 > Issue：https://gitcode.com/grape-dev/grape/issues/45
-> 类型：Feature | P1 | 状态：spec-ready
+> 类型：Feature | P1 | 状态：in-progress（M0–M4 已实现并部署生产；§3.6/§3.7 标「待落地」项未实现）
 > 分支：`weekly-02`
-> 日期：2026-09-07
+> 日期：2026-09-07（2026-09-08 刷新：一次性参数/错误码规范/超时与长等待规范）
 > 范围：`grape` 独立发布包的形态、子命令、与 git/worker 集成。
 
 ## 关联文档
@@ -34,7 +34,7 @@ cli/                          # 独立发布包根（可放仓库根 cli/，单�
 │   ├── __main__.py           # python -m grape_cli
 │   ├── cli.py                # typer 入口（组命令）：注册"契约生成命令" + 手写特殊命令（git）
 │   ├── client.py             # HTTP 客户端（httpx，base_url + api_key header）
-│   ├── config.py             # 配置：--base-url / --token / env GRAPE_BASE_URL/GRAPE_TOKEN / ~/.grape/config.json
+│   ├── config.py             # 配置：--base-url / --token / env GRAPE_BASE_URL/GRAPE_API_TOKEN / ~/.grape/config.json
 │   ├── contracts.py          # ★ 契约加载：读 /openapi.json → 缓存 → 解析 operationId/参数映射（方案 B）
 │   ├── registry.py           # ★ 契约→命令注册：把 OpenAPI operation 动态变成 typer 命令
 │   └── commands/
@@ -121,16 +121,61 @@ grape git status --repo owner/repo
 - agent 不确定参数 → `grape <group> <verb> --help` 查看参数；
 - 无网络/契约未拉取时 `--help` 显示已缓存契约的组名（降级提示）。
 
-- **配置优先级**：CLI 参数 > 环境变量（`GRAPE_BASE_URL`/`GRAPE_TOKEN`）> `~/.grape/config.json`。
-- **认证**：默认 `Authorization: Bearer <token>`；兼容 `PRIVATE-TOKEN`/`access_token`。
+- **配置优先级**：CLI 一次性参数 > 环境变量（**`GRAPE_SESSION_TOKEN`**（任务级临时 token，worker 优先）> `GRAPE_BASE_URL`/`GRAPE_API_TOKEN`）> `~/.grape/config.json`。
+- **认证**：默认 `Authorization: Bearer <token>`；兼容 `PRIVATE-TOKEN`/`access_token`。token 可为会话级（`tk_`）或用户级（`grape_`）。
 - **输出**：human-readable；`--json` 机器可读（worker 解析）。
-- **错误处理**：401 → 提示 token 无效；契约拉取失败 → 提示 base_url 或 refresh。
+
+### 3.5 一次性参数（--token / --base-url）
+
+单次调用不依赖环境变量/配置文件，**优先级最高、进程内不落盘**，命令结束即失：
+
+```
+grape --token tk_xxx tasks mine --status active
+grape --base-url https://grape.example.com --token tk_xxx skills list --json-out
+grape --base-url https://grape.example.com --grape_api_token grape_xxx git-repo issues list --owner o --repo r
+```
+
+| 参数 | 别名 | 说明 |
+|------|------|------|
+| `--token` | `--grape-api-token` / `--grape_api_token` | 一次性 token（`tk_` 会话 / `grape_` 用户 Key），按前缀自动分流 |
+| `--base-url` | — | 一次性服务端地址 |
+
+> 实现：`config.set_cli_params()` 记录本次调用参数，`config.resolve()` 按「flag > 环境变量 > config.json」解析，契约加载与所有请求自动生效。
+
+### 3.6 错误码与退出码规范
+
+统一由 `main()` 捕获 `CliError` 收口（`sys.exit(e.code or 1)`）：
+
+| 退出码 | 含义 | 触发 |
+|--------|------|------|
+| `0` | 成功 | 命令完成、`--help`、`--version`、`commands`、`refresh` |
+| `1` | 通用/配置错误 | 缺 token、网络不可达/超时、**401（当前特判）**、缺必填参数、`--json` 非法、git 未安装、`api` 非法 method |
+| `2` | 用法错误（click `UsageError`） | 未知选项、缺参数、参数类型错、「No such command」（含契约加载失败导致组不存在） |
+| `=HTTP ≥400` | 服务端错误码透传 | 403 / 404 / 409 / 500 / 502…（`client.py` 以 `CliError(code=status)` 抛出） |
+| git 子进程码 | git 退出码原样透传 | `grape git …`（0/1/2/128…） |
+| `130` | 用户中断（Ctrl+C） | **已实现**：click Abort 由 `main()` 捕获 → `Error: 已中断` + 退出 130 |
+
+**注意**：
+- **POSIX 截断**：`sys.exit(502)` 在 Linux 上只保留低 8 位 → 退出码变 `246`；Windows 保留 32 位（=502）。跨平台脚本判断时需知悉。
+- **401 透传（已实现）**：`client.py` 将 401 以 `CliError(code=401)` 抛出，退出码=401，与「HTTP 透传」策略一致。
+- 超时/401/缺 token 文案在 stderr 区分：超时提示「可用 --timeout 加大」，401 提示「token 无效」，缺 token 提示「请设置 …」。
+
+### 3.7 长等待与超时处理
+
+| 场景 | 当前行为 | 规范 |
+|------|----------|------|
+| 普通请求 | `httpx` 超时 = `--timeout`（默认 30）；报错细分：ReadTimeout →「请求超时，可用 --timeout 加大」，ConnectError →「base_url 不可达」 | **已实现** |
+| 任务型长操作 | 服务端**异步**：`create` 立即返回 task_id；CLI 已提供 `grape tasks wait --task-id x [--timeout s] [--interval s]`（轮询公开端点 `GET /api/tasks/{id}/status` 至终态） | **已实现** |
+| `grape git` | `subprocess.run` 无超时（git clone/push 慢是正常，不硬切）；Ctrl+C 由主入口 `main()` 统一 130 收口 | 已实现（git 子进程与 CLI 同控制组收到中断） |
+| SSE 流式 | 不支持（契约命令一次性拉全量会阻塞至超时） | `--stream` 模式（httpx stream + SSE 逐行渲染）——**未实现** |
+| 超时边界 | nginx `proxy_read_timeout=300s`；CLI `--timeout` 由用户自定（建议 ≤300） | 已实现 |
 
 ## 四、与 worker agent 集成
 
-- worker 侧 agent（`src/agent/opencode.py` 等）`pip install grape`，用 `GRAPE_BASE_URL` + `GRAPE_TOKEN` 调用 task/repo/agent/git 操作。
+- worker 侧 agent（`src/agent/opencode.py` 等）`pip install grape`，用 `GRAPE_BASE_URL` + **`GRAPE_SESSION_TOKEN`（任务级临时 token，随任务自动注入，零配置）** 调用 task/repo/agent/git 操作。
+- CLI 在 agent 内运行时优先读 `GRAPE_SESSION_TOKEN`；独立/三方场景用用户级 `GRAPE_API_TOKEN`（方式 B，Web UI 生成）。
 - 替代当前部分直接 curl 的依赖，统一走 CLI/API。
-- **CLI 不提供 create/revoke token 子命令**（避免自举越权）；API Key 由 Web UI 生成。
+- **CLI 不提供 create/revoke token 子命令**（避免自举越权）；用户级 API Key（方式 B）由 Web UI 生成。
 
 ## 五、改动清单（CLI 部分）
 
@@ -150,7 +195,8 @@ grape git status --repo owner/repo
 | # | 用例 | 输入 | 断言 |
 |---|------|------|------|
 | A1 | 参数 > 环境变量 > 配置文件优先级 | 三处都给 `--base-url`/`--token` | 取参数值 |
-| A2 | 仅环境变量 | `GRAPE_BASE_URL`+`GRAPE_TOKEN` | 正确加载 |
+| A2 | 仅环境变量 | `GRAPE_BASE_URL`+`GRAPE_API_TOKEN` | 正确加载 |
+| A2b | 任务级 token 优先 | `GRAPE_SESSION_TOKEN` 与 `GRAPE_API_TOKEN` 同环境 | 取 `GRAPE_SESSION_TOKEN`（任务级优先） |
 | A3 | 仅配置文件 | `~/.grape/config.json` | 正确加载 |
 | A4 | 三者皆无 | — | 报错并给出 "需 --base-url/--token" 提示（exit≠0） |
 | A5 | 认证头 | 给定 token | 请求头为 `Authorization: Bearer <token>`；兼容 PRIVATE-TOKEN / access_token |
