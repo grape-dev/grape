@@ -38,6 +38,10 @@ function renderKnowledge() {
         detail: null,
         scenes: [],
         agentTypes: AGENT_TYPES,
+        addAgentPopover: false,
+        addScenePopover: false,
+        sceneSearch: '',
+        sceneSelected: [],
       };
     },
     computed: {
@@ -80,6 +84,34 @@ function renderKnowledge() {
       detailGlobalRef() {
         if (!this.detail || !this.detail.refs) return null;
         return this.detail.refs.find(r => r.scene_id === '' && r.agent_type === '');
+      },
+      selectedAgentTags() {
+        if (!this.detail || !this.detail.refs) return [];
+        return this.detail.refs
+          .filter(r => r.scene_id === '' && r.agent_type !== '' && r.enabled)
+          .map(r => ({ ref: r, agentType: r.agent_type, label: this.agentLabel(r.agent_type) }));
+      },
+      availableAgentTypes() {
+        const selected = new Set(this.selectedAgentTags.map(t => t.agentType));
+        return this.agentTypes.filter(a => a.value && !selected.has(a.value));
+      },
+      selectedSceneTags() {
+        if (!this.detail || !this.detail.refs) return [];
+        return this.detail.refs
+          .filter(r => r.scene_id !== '' && r.enabled)
+          .map(r => {
+            const scene = this.scenes.find(s => s.id === r.scene_id);
+            return { ref: r, sceneId: r.scene_id, label: scene ? scene.name : r.scene_id.substring(0, 8) };
+          });
+      },
+      availableScenes() {
+        const selected = new Set(this.selectedSceneTags.map(t => t.sceneId));
+        let available = this.scenes.filter(s => !selected.has(s.id));
+        if (this.sceneSearch) {
+          const q = this.sceneSearch.toLowerCase();
+          available = available.filter(s => (s.name || '').toLowerCase().includes(q) || (s.id || '').toLowerCase().includes(q));
+        }
+        return available;
       },
     },
     async mounted() {
@@ -182,37 +214,35 @@ function renderKnowledge() {
         }
       },
 
-      // Agent 多选关联
-      isAgentChecked(agentType) {
-        if (!this.detail || !this.detail.refs) return false;
-        return this.detail.refs.some(r => r.scene_id === '' && r.agent_type === agentType && r.enabled);
+      // Agent 标签操作
+      agentLabel(agentType) {
+        const at = AGENT_TYPES.find(a => a.value === agentType);
+        return at ? at.label : agentType;
       },
-      async toggleAgentRef(agentType) {
+      async removeAgentRef(tag) {
+        try {
+          await API.put('/knowledge/ref/' + tag.ref.id, { enabled: false });
+          tag.ref.enabled = false;
+        } catch (e) {
+          app.showToast(e.message);
+        }
+      },
+      async addAgentByType(agentType) {
         const kid = this.detail.id;
-        const existing = (this.detail.refs || []).find(r => r.scene_id === '' && r.agent_type === agentType);
-        if (existing) {
-          try {
-            await API.put('/knowledge/ref/' + existing.id, { enabled: !existing.enabled });
-            existing.enabled = !existing.enabled;
-          } catch (e) {
-            app.showToast(e.message);
-          }
-        } else {
-          try {
-            await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: agentType });
-            await this.loadRefs(kid);
-            app.showToast(this.t('ref_add'));
-          } catch (e) {
-            if (e.detail && e.detail.message && (e.detail.message.includes('已绑定') || e.detail.message.includes('Duplicate'))) {
-              app.showToast(this.t('ref_already_bound'));
-            } else {
-              app.showToast(e.message || I18N.t('common.load_failed'));
-            }
+        try {
+          await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: agentType });
+          await this.loadRefs(kid);
+          app.showToast(this.t('ref_add'));
+        } catch (e) {
+          if (e.detail && e.detail.message && (e.detail.message.includes('已绑定') || e.detail.message.includes('Duplicate'))) {
+            app.showToast(this.t('ref_already_bound'));
+          } else {
+            app.showToast(e.message || I18N.t('common.load_failed'));
           }
         }
       },
 
-      // 全局关联（所有场景 + 所有 Agent）
+      // 全局标签操作
       isGlobalChecked() {
         return this.detailGlobalRef && this.detailGlobalRef.enabled;
       },
@@ -237,34 +267,57 @@ function renderKnowledge() {
         }
       },
 
-      // 场景多选关联
-      isSceneChecked(sceneId) {
-        if (!this.detail || !this.detail.refs) return false;
-        return this.detail.refs.some(r => r.scene_id === sceneId && r.enabled);
+      // 场景标签操作
+      async removeSceneRef(tag) {
+        try {
+          await API.put('/knowledge/ref/' + tag.ref.id, { enabled: false });
+          tag.ref.enabled = false;
+        } catch (e) {
+          app.showToast(e.message);
+        }
       },
-      async toggleSceneRef(sceneId) {
+      async addSceneById(sceneId) {
         const kid = this.detail.id;
-        const existing = (this.detail.refs || []).find(r => r.scene_id === sceneId && r.agent_type === '');
-        if (existing) {
-          try {
-            await API.put('/knowledge/ref/' + existing.id, { enabled: !existing.enabled });
-            existing.enabled = !existing.enabled;
-          } catch (e) {
-            app.showToast(e.message);
-          }
-        } else {
-          try {
-            await API.post('/knowledge/' + kid + '/refs', { scene_id: sceneId, agent_type: '' });
-            await this.loadRefs(kid);
-            app.showToast(this.t('ref_add'));
-          } catch (e) {
-            if (e.detail && e.detail.message && (e.detail.message.includes('已绑定') || e.detail.message.includes('Duplicate'))) {
-              app.showToast(this.t('ref_already_bound'));
-            } else {
-              app.showToast(e.message || I18N.t('common.load_failed'));
-            }
+        try {
+          await API.post('/knowledge/' + kid + '/refs', { scene_id: sceneId, agent_type: '' });
+          await this.loadRefs(kid);
+          app.showToast(this.t('ref_add'));
+        } catch (e) {
+          if (e.detail && e.detail.message && (e.detail.message.includes('已绑定') || e.detail.message.includes('Duplicate'))) {
+            app.showToast(this.t('ref_already_bound'));
+          } else {
+            app.showToast(e.message || I18N.t('common.load_failed'));
           }
         }
+      },
+      openScenePopover() {
+        this.addScenePopover = true;
+        this.sceneSearch = '';
+        this.sceneSelected = [];
+      },
+      toggleSceneSelect(sceneId) {
+        const idx = this.sceneSelected.indexOf(sceneId);
+        if (idx >= 0) {
+          this.sceneSelected.splice(idx, 1);
+        } else {
+          this.sceneSelected.push(sceneId);
+        }
+      },
+      async confirmAddScenes() {
+        const kid = this.detail.id;
+        let ok = 0;
+        for (const sid of this.sceneSelected) {
+          try {
+            await API.post('/knowledge/' + kid + '/refs', { scene_id: sid, agent_type: '' });
+            ok++;
+          } catch (e) { /* ignore duplicates */ }
+        }
+        if (ok > 0) {
+          await this.loadRefs(kid);
+          app.showToast(this.t('ref_added_count', { count: ok }));
+        }
+        this.addScenePopover = false;
+        this.sceneSelected = [];
       },
 
       // 编辑
@@ -479,32 +532,73 @@ function renderKnowledge() {
 
             <!-- 全局关联 -->
             <div class="kb-ref-section">
-              <label class="kb-ref-item">
-                <input type="checkbox" :checked="isGlobalChecked()" @change="toggleGlobalRef">
-                <span>{{ t('ref_global') }}</span>
-              </label>
-            </div>
-
-            <!-- Agent 多选 -->
-            <div class="kb-ref-section">
-              <div class="kb-ref-section-title">{{ t('ref_agent_title') }}</div>
-              <div class="kb-ref-grid">
-                <label v-for="at in agentTypes.filter(a => a.value)" :key="at.value" class="kb-ref-item">
-                  <input type="checkbox" :checked="isAgentChecked(at.value)" @change="toggleAgentRef(at.value)">
-                  <span>{{ at.label }}</span>
-                </label>
+              <div class="kb-ref-section-title">{{ t('ref_scope') }}</div>
+              <div class="kb-tag-row">
+                <span v-if="isGlobalChecked()" class="kb-tag kb-tag-global">
+                  {{ t('ref_global') }}
+                  <button class="kb-tag-x" @click="toggleGlobalRef">×</button>
+                </span>
+                <button v-if="!isGlobalChecked()" class="kb-tag-add" @click="toggleGlobalRef">+ {{ t('ref_add_global') }}</button>
               </div>
             </div>
 
-            <!-- 场景多选 -->
+            <!-- Agent 标签 -->
             <div class="kb-ref-section">
-              <div class="kb-ref-section-title">{{ t('ref_scene_title') }}</div>
-              <div v-if="scenes.length === 0" class="ts t2" style="padding:8px">{{ t('ref_no_scenes') }}</div>
-              <div v-else class="kb-ref-grid">
-                <label v-for="s in scenes" :key="s.id" class="kb-ref-item">
-                  <input type="checkbox" :checked="isSceneChecked(s.id)" @change="toggleSceneRef(s.id)">
-                  <span>{{ s.name }}</span>
-                </label>
+              <div class="kb-ref-section-title">{{ t('ref_agent_title') }}</div>
+              <div class="kb-tag-row">
+                <span v-for="tag in selectedAgentTags" :key="tag.agentType" class="kb-tag kb-tag-agent">
+                  {{ tag.label }}
+                  <button class="kb-tag-x" @click="removeAgentRef(tag)">×</button>
+                </span>
+                <button v-if="availableAgentTypes.length > 0" class="kb-tag-add" @click="addAgentPopover = !addAgentPopover">+ {{ t('ref_add_agent') }}</button>
+              </div>
+              <div v-if="addAgentPopover" class="kb-popover cd">
+                <div v-if="availableAgentTypes.length === 0" class="ts t2" style="padding:8px">{{ t('ref_no_available') }}</div>
+                <div v-else class="kb-popover-list">
+                  <button v-for="at in availableAgentTypes" :key="at.value" class="kb-popover-item" @click="addAgentByType(at.value); addAgentPopover = false">
+                    {{ at.label }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 场景关联 -->
+            <div class="kb-ref-section">
+              <div class="kb-ref-section-title">
+                {{ t('ref_scene_title') }}
+                <button class="kb-tag-add" style="margin-left:8px" @click="openScenePopover">+ {{ t('ref_add_scene') }}</button>
+              </div>
+              <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:8px 0">{{ t('ref_no_scenes_linked') }}</div>
+              <div v-else class="kb-scene-grid">
+                <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card">
+                  <button class="kb-scene-x" @click="removeSceneRef(tag)">×</button>
+                  <div class="kb-scene-name">{{ tag.label }}</div>
+                  <div class="kb-scene-id">{{ tag.sceneId.substring(0, 12) }}...</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 场景选择弹出层 -->
+            <div v-if="addScenePopover" class="modal-overlay" @click.self="addScenePopover = false">
+              <div class="modal cd" style="width:560px">
+                <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
+                <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
+                <div v-if="availableScenes.length === 0" class="ts t2" style="padding:12px">{{ t('ref_no_available') }}</div>
+                <div v-else class="kb-scene-pick-grid" style="max-height:320px;overflow-y:auto">
+                  <div v-for="s in availableScenes" :key="s.id" class="kb-scene-pick-item"
+                       :class="{ selected: sceneSelected.includes(s.id) }"
+                       @click="toggleSceneSelect(s.id)">
+                    <div class="kb-scene-pick-name">{{ s.name }}</div>
+                    <div class="kb-scene-pick-id">{{ (s.id || '').substring(0, 12) }}</div>
+                  </div>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+                  <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
+                  <div style="display:flex;gap:8px">
+                    <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
+                    <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

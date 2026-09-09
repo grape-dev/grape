@@ -88,5 +88,16 @@
   "ref_global": "Global (all scenes + all agents)",
   "ref_agent_title": "Linked Agent Types",
   "ref_scene_title": "Linked Scenes",
-  "ref_no_scenes": "No scenes in this repo"
+  "ref_no_scenes": "No scenes in this repo",
+  "ref_scope": "Scope",
+  "ref_add_global": "Set Global",
+  "ref_add_agent": "Add Agent",
+  "ref_add_scene": "Add Scene",
+  "ref_no_available": "No options available",
+  "ref_no_scenes_linked": "No scenes linked yet",
+  "ref_select_scenes": "Select Scenes",
+  "ref_search_scenes": "Search scene name or ID...",
+  "ref_selected_count": "{{count}} selected",
+  "ref_added_count": "Added {{count}} scenes",
+  "confirm": "Confirm"
 }

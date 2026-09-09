@@ -88,5 +88,16 @@
   "ref_global": "全局生效（所有场景 + 所有 Agent）",
   "ref_agent_title": "关联 Agent 类型",
   "ref_scene_title": "关联场景",
-  "ref_no_scenes": "该仓库暂无场景"
+  "ref_no_scenes": "该仓库暂无场景",
+  "ref_scope": "生效范围",
+  "ref_add_global": "设为全局",
+  "ref_add_agent": "添加 Agent",
+  "ref_add_scene": "添加场景",
+  "ref_no_available": "没有可添加的选项",
+  "ref_no_scenes_linked": "暂未关联任何场景",
+  "ref_select_scenes": "选择场景",
+  "ref_search_scenes": "搜索场景名称或 ID...",
+  "ref_selected_count": "已选 {{count}} 个",
+  "ref_added_count": "已添加 {{count}} 个场景",
+  "confirm": "确认"
 }
