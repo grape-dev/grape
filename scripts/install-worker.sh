@@ -186,6 +186,18 @@ if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   fi
 fi
 
+# ===== 4.5 安装 grape CLI（包内 cli/grape_cli，供 agent 用 `grape` 命令）=====
+if [ -d "$INSTALL_DIR/cli/grape_cli" ]; then
+  cat > "$VENV/bin/grape" <<EOF
+#!/usr/bin/env bash
+# grape CLI 启动器（install-worker.sh 生成）：token/base_url 取自 agent env
+export PYTHONPATH="$INSTALL_DIR/cli:\${PYTHONPATH:-}"
+exec "$VENV/bin/python" -m grape_cli "\$@"
+EOF
+  chmod +x "$VENV/bin/grape"
+  log "grape CLI 已装: $VENV/bin/grape（agent 内直接使用 \`grape ...\`）"
+fi
+
 # ===== 5. 写入接入配置（凭据 + 主系统地址，权限 600）=====
 # 保留已有 HERMES_CUSTOM_* 等 API key（重装不应覆盖本地配置）：
 # ① 备份旧文件中的 HERMES_CUSTOM 行 ② cat 覆盖 RUNTIME_*  ③ 追加回 HERMES_CUSTOM 行
@@ -293,6 +305,7 @@ ExecStart=$VENV/bin/python -m src.runtime.agent
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=PATH=$INSTALL_DIR/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$ENV_FILE
 
 [Install]
@@ -346,7 +359,7 @@ if [ "\$1" != "--no-daemon" ]; then
 fi
 
 cd "$INSTALL_DIR"
-export PATH="\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
+export PATH="$INSTALL_DIR/.venv/bin:\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
 set -a; . "$ENV_FILE"; set +a
 exec "$VENV/bin/python" -m src.runtime.agent
 EOF

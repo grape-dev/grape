@@ -42,6 +42,8 @@ MANIFEST = [
     "src/api/knowledge.py",
     "src/agent/",
     "src/runtime/",
+    # grape CLI（agent 侧 `grape` 命令，vod 试点；install-worker.sh 生成 venv/bin/grape 启动器）
+    "cli/grape_cli/",
     "requirements-worker.txt",
 ]
 
