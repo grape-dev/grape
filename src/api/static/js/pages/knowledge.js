@@ -555,15 +555,19 @@ function renderKnowledge() {
               </div>
             </div>
 
-            <!-- Agent 标签 -->
+            <!-- Agent 关联 -->
             <div class="kb-ref-section">
-              <div class="kb-ref-section-title">{{ t('ref_agent_title') }}</div>
-              <div class="kb-tag-row">
-                <span v-for="tag in selectedAgentTags" :key="tag.agentType" class="kb-tag kb-tag-agent">
-                  {{ tag.label }}
-                  <button class="kb-tag-x" @click="removeAgentRef(tag)">×</button>
-                </span>
-                <button v-if="availableAgentTypes.length > 0" class="kb-tag-add" @click="addAgentPopover = !addAgentPopover">+ {{ t('ref_add_agent') }}</button>
+              <div class="kb-ref-section-title">
+                {{ t('ref_agent_title') }}
+                <button class="kb-tag-add" style="margin-left:8px" @click="addAgentPopover = !addAgentPopover">+ {{ t('ref_add_agent') }}</button>
+              </div>
+              <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:8px 0">{{ t('ref_no_agents_linked') }}</div>
+              <div v-else class="kb-scene-grid">
+                <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card">
+                  <button class="kb-scene-x" @click="removeAgentRef(tag)">×</button>
+                  <div class="kb-scene-name">{{ tag.label }}</div>
+                  <div class="kb-scene-id">{{ tag.agentType }}</div>
+                </div>
               </div>
               <div v-if="addAgentPopover" class="kb-popover cd">
                 <div v-if="availableAgentTypes.length === 0" class="ts t2" style="padding:8px">{{ t('ref_no_available') }}</div>
