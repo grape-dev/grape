@@ -69,7 +69,7 @@
   "ref_delete_confirm": "确认删除此关联？",
   "ref_already_bound": "该知识已绑定此场景/Agent 类型",
   "edit_title": "编辑知识",
-  "edit_save": "保存",
+  "edit_save": "编辑",
   "entry_title": "新增知识",
   "entry_content": "输入知识内容（支持 Markdown）",
   "entry_create": "新增知识",

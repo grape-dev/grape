@@ -769,6 +769,7 @@ class KnowledgeEntryBody(BaseModel):
 
 class KnowledgeUpdateBody(BaseModel):
     content: str = ""
+    description: str = ""
 
 class KnowledgeRefBody(BaseModel):
     scene_id: str = ""
@@ -1011,6 +1012,17 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可编辑"})
 
     _update_knowledge_content(knowledge_id, row, body.content)
+
+    # 更新描述
+    if body.description is not None:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.cursor().execute(
+                "UPDATE agent_shared_knowledge SET description=? WHERE id=?",
+                (body.description, knowledge_id)
+            )
+            db.commit()
+
     return {"ok": True, "message": "知识已更新"}
 
 

@@ -446,13 +446,13 @@ function renderKnowledge() {
 
       // 编辑
       editKnowledge() {
-        this.editModal = { id: this.detail.id, content: this.detail.content || '', loading: false };
+        this.editModal = { id: this.detail.id, content: this.detail.content || '', description: this.detail.description || '', loading: false };
       },
       async saveEdit() {
         if (!this.editModal) return;
         this.editModal.loading = true;
         try {
-          await API.put('/knowledge/' + this.editModal.id, { content: this.editModal.content });
+          await API.put('/knowledge/' + this.editModal.id, { content: this.editModal.content, description: this.editModal.description });
           app.showToast(this.t('knowledge_updated'));
           this.editModal = null;
           await this.viewContent({ id: this.detail.id });
@@ -811,10 +811,11 @@ function renderKnowledge() {
         <div v-if="editModal" class="modal-overlay" @click.self="editModal = null">
           <div class="modal cd">
             <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('edit_title') }}</h3>
+            <input v-model="editModal.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%;margin-bottom:8px">
             <textarea v-model="editModal.content" rows="12" class="kb-textarea"></textarea>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
               <button class="bt bt-o bt-s" @click="editModal = null">{{ t('cancel') }}</button>
-              <button class="bt bt-p bt-s" :disabled="editModal.loading" @click="saveEdit">{{ t('edit_save') }}</button>
+              <button class="bt bt-p bt-s" :disabled="editModal.loading" @click="saveEdit">{{ t('confirm') }}</button>
             </div>
           </div>
         </div>

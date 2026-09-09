@@ -69,7 +69,7 @@
   "ref_delete_confirm": "Delete this link?",
   "ref_already_bound": "Already linked to this scene/agent",
   "edit_title": "Edit Knowledge",
-  "edit_save": "Save",
+  "edit_save": "Edit",
   "entry_title": "New Knowledge",
   "entry_content": "Enter content (Markdown supported)",
   "entry_create": "New Knowledge",
