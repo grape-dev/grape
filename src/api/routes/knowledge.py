@@ -956,15 +956,17 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_cu
 
     from src.session_manager import db, db_lock
     with db_lock:
-        db.cursor().execute(
+        c = db.cursor()
+        c.execute(
             "INSERT INTO agent_shared_knowledge "
             "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             ("member", repo_key, body.agent_type or "", 0, rel, obs_key, content_hash, "accepted", 0, username, "manual", body.description or "")
         )
+        kid = c.lastrowid
         db.commit()
 
-    return {"ok": True, "message": "知识已创建", "file_path": rel}
+    return {"ok": True, "message": "知识已创建", "file_path": rel, "id": kid}
 
 
 # ===== {id} 路由 =====

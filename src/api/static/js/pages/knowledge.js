@@ -29,6 +29,7 @@ function renderKnowledge() {
       return {
         view: 'list',
         editMode: false,
+        createForm: null,
         list: [],
         loading: false,
         firstLoad: true,
@@ -39,7 +40,6 @@ function renderKnowledge() {
         page: 1,
         pageSize: 20,
         total: 0,
-        entryModal: null,
         detail: null,
         scenes: [],
         agentTypes: AGENT_TYPES,
@@ -521,25 +521,59 @@ function renderKnowledge() {
 
       // 新增知识
       openEntryModal() {
-        this.entryModal = { content: '', agentType: '', description: '', loading: false };
+        this.createForm = {
+          title: '',
+          description: '',
+          content: '',
+          agentSelected: [],
+          sceneSelected: []
+        };
+        this.view = 'create';
+        this.loadScenes();
       },
-      async createEntry() {
-        if (!this.entryModal.content.trim()) { app.showToast(this.t('entry_content')); return; }
-        this.entryModal.loading = true;
+      cancelCreate() {
+        this.createForm = null;
+        this.view = 'list';
+      },
+      toggleCreateAgent(agentType) {
+        const idx = this.createForm.agentSelected.indexOf(agentType);
+        if (idx >= 0) this.createForm.agentSelected.splice(idx, 1);
+        else this.createForm.agentSelected.push(agentType);
+      },
+      toggleCreateScene(sceneId) {
+        const idx = this.createForm.sceneSelected.indexOf(sceneId);
+        if (idx >= 0) this.createForm.sceneSelected.splice(idx, 1);
+        else this.createForm.sceneSelected.push(sceneId);
+      },
+      async saveCreate() {
+        if (!this.createForm.content.trim()) { app.showToast(this.t('entry_content')); return; }
         try {
-          await API.post('/knowledge/entry', {
+          const d = await API.post('/knowledge/entry', {
             repo: this.currentRepo(),
-            content: this.entryModal.content,
-            agent_type: this.entryModal.agentType || '',
-            description: this.entryModal.description || ''
+            content: this.createForm.content,
+            agent_type: '',
+            description: this.createForm.description || ''
           });
+          const kid = d.id || d.knowledge_id;
+          // 批量关联 Agent
+          if (kid && this.createForm.agentSelected.length > 0) {
+            for (const at of this.createForm.agentSelected) {
+              try { await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: at }); } catch(e) {}
+            }
+          }
+          // 批量关联场景
+          if (kid && this.createForm.sceneSelected.length > 0) {
+            for (const sid of this.createForm.sceneSelected) {
+              try { await API.post('/knowledge/' + kid + '/refs', { scene_id: sid, agent_type: '' }); } catch(e) {}
+            }
+          }
           app.showToast(this.t('knowledge_created'));
-          this.entryModal = null;
+          this.createForm = null;
+          this.view = 'list';
+          await this.loadStats();
           await this.loadList();
         } catch (e) {
           app.showToast(e.message || I18N.t('common.load_failed'));
-        } finally {
-          if (this.entryModal) this.entryModal.loading = false;
         }
       },
 
@@ -814,22 +848,51 @@ function renderKnowledge() {
           </div>
         </template>
 
-        <!-- 新增 modal -->
-        <div v-if="entryModal" class="modal-overlay" @click.self="entryModal = null">
-          <div class="modal cd">
-            <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('entry_title') }}</h3>
-            <input v-model="entryModal.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%;margin-bottom:8px">
-            <textarea v-model="entryModal.content" rows="10" :placeholder="t('entry_content')" class="kb-textarea"></textarea>
-            <select v-model="entryModal.agentType" class="kb-select" style="width:100%;margin-top:8px">
-              <option value="">{{ t('ref_agent_all') }}</option>
-              <option v-for="at in agentTypes.filter(a => a.value)" :key="at.value" :value="at.value">{{ at.label }}</option>
-            </select>
-            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
-              <button class="bt bt-o bt-s" @click="entryModal = null">{{ t('cancel') }}</button>
-              <button class="bt bt-p bt-s" :disabled="entryModal.loading" @click="createEntry">{{ t('entry_create') }}</button>
+        <!-- ===== 新增视图 ===== -->
+        <template v-if="view === 'create' && createForm">
+          <div style="margin-bottom:16px">
+            <button class="bt bt-o bt-s" @click="cancelCreate">← {{ t('back_to_list') }}</button>
+          </div>
+          <div class="cd" style="padding:28px 32px;margin-bottom:20px;border-radius:20px">
+            <div class="cd-h" style="margin-bottom:16px">
+              <h2 style="font-size:16px;font-weight:600">{{ t('entry_title') }}</h2>
+            </div>
+            <div style="margin-bottom:12px">
+              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_description') }}</label>
+              <input v-model="createForm.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%">
+            </div>
+            <div style="margin-bottom:12px">
+              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_content') }}</label>
+              <textarea v-model="createForm.content" rows="20" class="kb-textarea"></textarea>
+            </div>
+            <!-- Agent 关联 -->
+            <div style="margin-bottom:16px">
+              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:6px">{{ t('ref_agent_title') }}</label>
+              <div style="display:flex;flex-wrap:wrap;gap:6px">
+                <span v-for="at in agentTypes.filter(a => a.value)" :key="at.value"
+                  class="kb-tag" :class="{ 'kb-tag-selected': createForm.agentSelected.includes(at.value) }"
+                  style="cursor:pointer;font-size:11px" @click="toggleCreateAgent(at.value)">
+                  {{ at.label }}
+                </span>
+              </div>
+            </div>
+            <!-- 场景关联 -->
+            <div style="margin-bottom:16px">
+              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:6px">{{ t('ref_scene_title') }}</label>
+              <div style="display:flex;flex-wrap:wrap;gap:6px">
+                <span v-for="s in scenes" :key="s.id"
+                  class="kb-tag" :class="{ 'kb-tag-selected': createForm.sceneSelected.includes(s.id) }"
+                  style="cursor:pointer;font-size:11px" @click="toggleCreateScene(s.id)">
+                  {{ s.name }}
+                </span>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:16px;border-top:1px solid var(--b)">
+              <button class="bt bt-o bt-s" @click="cancelCreate">{{ t('cancel') }}</button>
+              <button class="bt bt-p bt-s" @click="saveCreate">{{ t('confirm') }}</button>
             </div>
           </div>
-        </div>
+        </template>
       </div>
     `,
   });
