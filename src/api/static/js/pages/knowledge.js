@@ -21,6 +21,9 @@ function renderKnowledge() {
     _knowledgeVueApp = null;
   }
 
+  // 清空容器，确保 Vue mount 时没有残留 DOM
+  el.innerHTML = '';
+
   _knowledgeVueApp = Vue.createApp({
     data() {
       return {
@@ -628,116 +631,151 @@ function renderKnowledge() {
             </div>
           </div>
 
-          <!-- Agent 关联卡片 -->
-          <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
-            <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-              <h2 style="font-size:16px;font-weight:600">{{ t('ref_agent_title') }}</h2>
-              <div style="display:flex;align-items:center;gap:8px">
-                <span v-if="isGlobalChecked()" class="kb-tag kb-tag-global" style="font-size:10px">
-                  {{ t('ref_global_short') }}
-                  <button class="kb-tag-x" @click="toggleGlobalRef">×</button>
-                </span>
-                <button v-if="!isGlobalChecked()" class="kb-tag-add" style="font-size:10px" @click="toggleGlobalRef">+ {{ t('ref_add_global') }}</button>
-                <button class="kb-tag-add" style="font-size:10px" @click="openAgentPopover">+ {{ t('ref_add_agent') }}</button>
-              </div>
-            </div>
-            <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_agents_linked') }}</div>
-            <div v-else class="kb-scene-grid">
-              <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card">
-                <button class="kb-scene-x" @click="removeAgentRef(tag)">×</button>
-                <div class="kb-scene-name">{{ tag.label }}</div>
-                <div class="kb-scene-id">{{ tag.agentType }}</div>
-              </div>
-            </div>
+          <!-- 系统知识：自动加载，不显示关联管理 -->
+          <div v-if="detail.source === 'system'" class="cd kb-detail-card" style="padding:20px;margin-bottom:20px;border-radius:18px">
+            <div class="ts t2" style="text-align:center">{{ t('ref_system_auto') }}</div>
           </div>
 
-          <!-- Agent 选择弹出层（多选） -->
-          <div v-if="addAgentPopover" class="modal-overlay" @click.self="addAgentPopover = false">
-            <div class="modal cd" style="width:480px">
-              <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_agents') }}</h3>
-              <div v-if="availableAgentTypes.length === 0" class="ts t2" style="padding:12px">{{ t('ref_no_available') }}</div>
-              <div v-else class="kb-scene-pick-grid">
-                <div v-for="at in availableAgentTypes" :key="at.value" class="kb-scene-pick-item"
-                     :class="{ selected: agentSelected.includes(at.value) }"
-                     @click="toggleAgentSelect(at.value)">
-                  <div class="kb-scene-pick-name">{{ at.label }}</div>
-                  <div class="kb-scene-pick-id">{{ at.value }}</div>
-                </div>
-              </div>
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
-                <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: agentSelected.length }) }}</span>
-                <div style="display:flex;gap:8px">
-                  <button class="bt bt-o bt-s" @click="addAgentPopover = false">{{ t('cancel') }}</button>
-                  <button class="bt bt-p bt-s" :disabled="agentSelected.length === 0" @click="confirmAddAgents">{{ t('confirm') }}</button>
+          <!-- Agent 知识：只读查看关联 -->
+          <template v-if="detail.source === 'agent'">
+            <!-- Agent 关联（只读） -->
+            <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
+              <div class="cd-h" style="margin-bottom:14px"><h2 style="font-size:16px;font-weight:600">{{ t('ref_agent_title') }}</h2></div>
+              <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_agents_linked') }}</div>
+              <div v-else class="kb-scene-grid">
+                <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card">
+                  <div class="kb-scene-name">{{ tag.label }}</div>
+                  <div class="kb-scene-id">{{ tag.agentType }}</div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <!-- 场景关联卡片 -->
-          <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
-            <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-              <h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2>
-              <button class="kb-tag-add" style="font-size:10px" @click="openScenePopover">+ {{ t('ref_add_scene') }}</button>
-            </div>
-            <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
-            <div v-else class="kb-scene-grid">
-              <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card">
-                <button class="kb-scene-x" @click="removeSceneRef(tag)">×</button>
-                <div class="kb-scene-name">{{ tag.label }}</div>
-                <div class="kb-scene-id">{{ String(tag.sceneId || '').substring(0, 12) }}...</div>
+            <!-- 场景关联（只读） -->
+            <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
+              <div class="cd-h" style="margin-bottom:14px"><h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2></div>
+              <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
+              <div v-else class="kb-scene-grid">
+                <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card">
+                  <div class="kb-scene-name">{{ tag.label }}</div>
+                  <div class="kb-scene-id">{{ String(tag.sceneId || '').substring(0, 12) }}...</div>
+                </div>
               </div>
             </div>
-          </div>
+          </template>
 
-          <!-- 场景选择弹出层（tab + 卡片 + 搜索 + 分页） -->
-          <div v-if="addScenePopover" class="modal-overlay" @click.self="addScenePopover = false">
-            <div class="modal cd" style="width:680px;max-width:92vw">
-              <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
-
-              <!-- Tab 切换 -->
-              <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:1px solid var(--b)">
-                <button class="kb-tab" :class="{ active: sceneTab === 'market' }" @click="switchSceneTab('market')">{{ t('ref_tab_market') }}</button>
-                <button class="kb-tab" :class="{ active: sceneTab === 'repo' }" @click="switchSceneTab('repo')">{{ t('ref_tab_repo') }}</button>
+          <!-- 用户知识：可配置 Agent/场景 -->
+          <template v-if="detail.source === 'manual'">
+            <!-- Agent 关联卡片 -->
+            <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
+              <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+                <h2 style="font-size:16px;font-weight:600">{{ t('ref_agent_title') }}</h2>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span v-if="isGlobalChecked()" class="kb-tag kb-tag-global" style="font-size:10px">
+                    {{ t('ref_global_short') }}
+                    <button class="kb-tag-x" @click="toggleGlobalRef">×</button>
+                  </span>
+                  <button v-if="!isGlobalChecked()" class="kb-tag-add" style="font-size:10px" @click="toggleGlobalRef">+ {{ t('ref_add_global') }}</button>
+                  <button class="kb-tag-add" style="font-size:10px" @click="openAgentPopover">+ {{ t('ref_add_agent') }}</button>
+                </div>
               </div>
+              <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_agents_linked') }}</div>
+              <div v-else class="kb-scene-grid">
+                <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card">
+                  <button class="kb-scene-x" @click="removeAgentRef(tag)">×</button>
+                  <div class="kb-scene-name">{{ tag.label }}</div>
+                  <div class="kb-scene-id">{{ tag.agentType }}</div>
+                </div>
+              </div>
+            </div>
 
-              <!-- 搜索 -->
-              <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
-
-              <!-- 场景列表（固定高度滚动） -->
-              <div class="kb-scene-pick-scroll">
-                <div v-if="availableScenes.length === 0" class="ts t2" style="padding:24px;text-align:center">{{ t('ref_no_available') }}</div>
+            <!-- Agent 选择弹出层（多选） -->
+            <div v-if="addAgentPopover" class="modal-overlay" @click.self="addAgentPopover = false">
+              <div class="modal cd" style="width:480px">
+                <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_agents') }}</h3>
+                <div v-if="availableAgentTypes.length === 0" class="ts t2" style="padding:12px">{{ t('ref_no_available') }}</div>
                 <div v-else class="kb-scene-pick-grid">
-                  <div v-for="s in availableScenes" :key="s.id" class="kb-scene-pick-card"
-                       :class="{ selected: sceneSelected.includes(s.id) }"
-                       @click="toggleSceneSelect(s.id)">
-                    <div class="kb-scene-pick-bar"></div>
-                    <div class="kb-scene-pick-card-body">
-                      <div class="kb-scene-pick-name">{{ s.name }}</div>
-                      <div v-if="s.desc" class="kb-scene-pick-desc">{{ s.desc }}</div>
-                      <div class="kb-scene-pick-id">{{ String(s.id || '').substring(0, 16) }}</div>
-                    </div>
+                  <div v-for="at in availableAgentTypes" :key="at.value" class="kb-scene-pick-item"
+                       :class="{ selected: agentSelected.includes(at.value) }"
+                       @click="toggleAgentSelect(at.value)">
+                    <div class="kb-scene-pick-name">{{ at.label }}</div>
+                    <div class="kb-scene-pick-id">{{ at.value }}</div>
+                  </div>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+                  <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: agentSelected.length }) }}</span>
+                  <div style="display:flex;gap:8px">
+                    <button class="bt bt-o bt-s" @click="addAgentPopover = false">{{ t('cancel') }}</button>
+                    <button class="bt bt-p bt-s" :disabled="agentSelected.length === 0" @click="confirmAddAgents">{{ t('confirm') }}</button>
                   </div>
                 </div>
               </div>
+            </div>
 
-              <!-- 底部：分页 + 操作 -->
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
-                <div style="display:flex;align-items:center;gap:8px">
-                  <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
-                  <template v-if="sceneTab === 'market' && marketTotal > marketPageSize">
-                    <button class="kb-page-btn" :disabled="marketPage <= 1" @click="marketPrevPage">‹</button>
-                    <span style="font-size:11px;color:var(--t3)">{{ marketPage }}/{{ marketTotalPages() }}</span>
-                    <button class="kb-page-btn" :disabled="marketPage >= marketTotalPages()" @click="marketNextPage">›</button>
-                  </template>
-                </div>
-                <div style="display:flex;gap:8px">
-                  <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
-                  <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
+            <!-- 场景关联卡片 -->
+            <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
+              <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+                <h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2>
+                <button class="kb-tag-add" style="font-size:10px" @click="openScenePopover">+ {{ t('ref_add_scene') }}</button>
+              </div>
+              <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
+              <div v-else class="kb-scene-grid">
+                <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card">
+                  <button class="kb-scene-x" @click="removeSceneRef(tag)">×</button>
+                  <div class="kb-scene-name">{{ tag.label }}</div>
+                  <div class="kb-scene-id">{{ String(tag.sceneId || '').substring(0, 12) }}...</div>
                 </div>
               </div>
             </div>
-          </div>
+
+            <!-- 场景选择弹出层（tab + 卡片 + 搜索 + 分页） -->
+            <div v-if="addScenePopover" class="modal-overlay" @click.self="addScenePopover = false">
+              <div class="modal cd" style="width:680px;max-width:92vw">
+                <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
+
+                <!-- Tab 切换 -->
+                <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:1px solid var(--b)">
+                  <button class="kb-tab" :class="{ active: sceneTab === 'market' }" @click="switchSceneTab('market')">{{ t('ref_tab_market') }}</button>
+                  <button class="kb-tab" :class="{ active: sceneTab === 'repo' }" @click="switchSceneTab('repo')">{{ t('ref_tab_repo') }}</button>
+                </div>
+
+                <!-- 搜索 -->
+                <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
+
+                <!-- 场景列表（固定高度滚动） -->
+                <div class="kb-scene-pick-scroll">
+                  <div v-if="availableScenes.length === 0" class="ts t2" style="padding:24px;text-align:center">{{ t('ref_no_available') }}</div>
+                  <div v-else class="kb-scene-pick-grid">
+                    <div v-for="s in availableScenes" :key="s.id" class="kb-scene-pick-card"
+                         :class="{ selected: sceneSelected.includes(s.id) }"
+                         @click="toggleSceneSelect(s.id)">
+                      <div class="kb-scene-pick-bar"></div>
+                      <div class="kb-scene-pick-card-body">
+                        <div class="kb-scene-pick-name">{{ s.name }}</div>
+                        <div v-if="s.desc" class="kb-scene-pick-desc">{{ s.desc }}</div>
+                        <div class="kb-scene-pick-id">{{ String(s.id || '').substring(0, 16) }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 底部：分页 + 操作 -->
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
+                    <template v-if="sceneTab === 'market' && marketTotal > marketPageSize">
+                      <button class="kb-page-btn" :disabled="marketPage <= 1" @click="marketPrevPage">‹</button>
+                      <span style="font-size:11px;color:var(--t3)">{{ marketPage }}/{{ marketTotalPages() }}</span>
+                      <button class="kb-page-btn" :disabled="marketPage >= marketTotalPages()" @click="marketNextPage">›</button>
+                    </template>
+                  </div>
+                  <div style="display:flex;gap:8px">
+                    <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
+                    <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
           </div>
         </template>
 

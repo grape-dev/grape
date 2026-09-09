@@ -106,5 +106,6 @@
   "ref_global_short": "Global",
   "ref_select_agents": "Select Agents",
   "ref_tab_market": "Scene Market",
-  "ref_tab_repo": "Repo Scenes"
+  "ref_tab_repo": "Repo Scenes",
+  "ref_system_auto": "System knowledge loads automatically, no configuration needed"
 }

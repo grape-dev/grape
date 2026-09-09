@@ -106,5 +106,6 @@
   "ref_global_short": "全局",
   "ref_select_agents": "选择 Agent",
   "ref_tab_market": "场景市场",
-  "ref_tab_repo": "仓库场景"
+  "ref_tab_repo": "仓库场景",
+  "ref_system_auto": "系统知识自动加载，无需配置关联"
 }
