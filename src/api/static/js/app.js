@@ -291,7 +291,7 @@ function loadAgentTypes() {
     // 离开任务中心时停止场景识别轮询
     if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
     // 离开场景中心时清除编辑标志（防止 _dashboardEditing 泄漏导致重新进入时卡在加载中）
-    if (view !== 'dash') window._dashboardEditing = false;
+    window._dashboardEditing = false;
 
     if (repo) {
       repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.fullName || (repo.owner + '/' + repo.name)}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;

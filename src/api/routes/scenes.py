@@ -1227,11 +1227,13 @@ class CreateSceneRequest(BaseModel):
     description: str = ""
     scope: str = "repo"  # repo
     nodes: list[SceneNodeInput] = []
+    icon: str = ""
 
 class UpdateSceneRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     nodes: list[SceneNodeInput] = []
+    icon: str | None = None
 
 class ApplySceneRequest(BaseModel):
     scene_id: str
@@ -1326,7 +1328,8 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
     try:
         db_id = create_custom_scene(
             scene_id=scene_id, name=body.name, description=body.description,
-            repo_key=repo_key, nodes=nodes_json, created_by=user.get("username") or "")
+            repo_key=repo_key, nodes=nodes_json, created_by=user.get("username") or "",
+            icon=body.icon or "")
     except Exception as e:
         err_upper = str(e).upper()
         if "UNIQUE" in err_upper or "DUPLICATE" in err_upper:
@@ -1363,7 +1366,7 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(g
         _validate_scene_engine_ids(nodes_json, repo_key)
     update_custom_scene(
         scene_id=scene_id, repo_key=repo_key, nodes=nodes_json,
-        name=body.name, description=body.description)
+        name=body.name, description=body.description, icon=body.icon)
 
     log.info(f"Scene updated: id={scene_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}

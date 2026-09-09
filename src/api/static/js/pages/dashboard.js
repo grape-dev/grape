@@ -18,6 +18,21 @@ const _DASH_SCENE_BG = [
   'bg-default', 'bg-harmony', 'bg-iac', 'bg-skill', 'bg-agent', 'bg-blog',
 ];
 
+// 自定义场景可选图标池
+const _CUSTOM_SCENE_ICONS = ['📦','🚀','🎨','🔬','🏗️','🛠️','📊','🎮','🌐','💡','🔧','⚡','🎯','🌱','🔥','⭐'];
+
+// 场景图标映射（按 scene_id / name 匹配分类图标）
+const _SCENE_ICONS = {
+  'default':        '⚙',
+  'harmony':        '🍃',
+  'iac':            '☁',
+  'cloud-native':   '☁',
+  'skill-dev':      '🔧',
+  'api-skill-dev':  '🔧',
+  'agent-dev':      '🤖',
+  'blog-publish':   '📝',
+};
+
 // 全局状态
 let _dashScenePipelines = {};  // scene_id → pipeline_config（技能链用）
 let _dashDetailSceneId = '';   // 当前查看详情的场景 ID
@@ -82,8 +97,6 @@ function renderDashboard(data) {
       .ap-empty-title{font-size:15px;font-weight:600;color:#1d1d1f;margin-bottom:6px}
       .ap-empty-desc{font-size:12px;color:#86868b;margin-bottom:20px}
       .ap-btn{padding:8px 20px;border-radius:10px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:all .15s}
-      .ap-btn-p{background:#0071e3;color:#fff}
-      .ap-btn-p:hover{background:#0077ed}
     </style>
     <div class="ap-hero">
       <div class="ap-hero-row">
@@ -103,7 +116,7 @@ function renderDashboard(data) {
       <div class="ap-empty-icon">📋</div>
       <div class="ap-empty-title">${I18N.t('dashboard.no_scene_title')}</div>
       <div class="ap-empty-desc">${I18N.t('dashboard.no_scene_desc')}</div>
-      <button class="ap-btn ap-btn-p" onclick="_enterCreateFromEmpty()">➕ ${I18N.t('dashboard.no_scene_create')}</button>
+      <button class="ap-btn" onclick="_enterCreateFromEmpty()">➕ ${I18N.t('dashboard.no_scene_create')}</button>
     </div>`;
     return;
   }
@@ -126,35 +139,38 @@ function renderDashboard(data) {
   function _renderSceneCards() {
     const scenesData = scenes;
     let html = `<style>
-      .ap-hero{background:#fff;border:1px solid #d2d2d7;border-radius:18px;padding:28px 32px;margin-bottom:16px;box-shadow:0 2px 12px rgba(0,0,0,.06)}
+      .ap-hero{background:rgba(255,255,255,.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:none;border-radius:18px;padding:24px 32px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
       .ap-hero-row{display:flex;align-items:center;gap:16px}
-      .ap-hero-icon{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#0071e3,#5ac8fa);display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;flex-shrink:0}
+      .ap-hero-icon{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#5ac8fa,#0071e3);display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;flex-shrink:0}
       .ap-hero-title{font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px}
       .ap-hero-sub{font-size:12px;color:#86868b;margin-top:3px}
       .ap-stats{display:flex;gap:8px;margin-left:auto}
       .ap-stat{text-align:center;padding:8px 18px;background:#f5f5f7;border-radius:12px;min-width:64px}
       .ap-stat .v{font-size:20px;font-weight:700;line-height:1.1}
       .ap-stat .l{font-size:10px;color:#86868b;margin-top:2px;letter-spacing:.3px}
-      .ap-btn{padding:6px 14px;border-radius:10px;font-size:12px;font-weight:500;cursor:pointer;border:none;transition:all .15s}
-      .ap-btn-p{background:#0071e3;color:#fff}
-      .ap-btn-p:hover{background:#0077ed}
-      .ap-btn-o{background:transparent;border:1px solid #d2d2d7;color:#6e6e73}
-      .ap-btn-o:hover{border-color:#0071e3;color:#0071e3}
-      .host-banner{display:flex;align-items:center;gap:10px;background:#fff3cd;border:1px solid #ffc107;border-radius:12px;padding:10px 14px;margin-bottom:12px;font-size:13px;color:#7a5b00}
-      .host-banner.error{background:#fdecea;border-color:#ff3b30;color:#c31f1e}
-      .host-banner button{margin-left:auto;background:#ff9500;color:#fff;border:none;border-radius:8px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:600}
-      .host-banner.error button{background:#ff3b30}
-      .scn-applied-badge{font-size:10px;font-weight:600;padding:3px 10px;border-radius:999px;background:rgba(52,199,89,.12);color:#34c759;display:inline-flex;align-items:center;gap:3px}
-      .scn-grid-wrap{position:relative;max-height:560px;overflow-y:auto}
-      .scn-grid-track{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;padding:4px 0}
-      .scn-grid-track .scn-card{width:100%;transition:all .3s cubic-bezier(.25,.1,.25,1)}
-      .scn-grid-track .scn-card:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08);border-color:rgba(0,113,227,.15)}
-      @media(max-width:1200px){.scn-grid-track{grid-template-columns:repeat(4,1fr)}}
-      @media(max-width:900px){.scn-grid-track{grid-template-columns:repeat(3,1fr)}}
-      @media(max-width:600px){.scn-grid-track{grid-template-columns:repeat(2,1fr)}}
-      .scn-create-card{flex-shrink:0;width:300px;min-height:200px;border:2px dashed #d2d2d7;background:transparent;border-radius:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;color:#86868b;font-size:13px;gap:8px}
-      .scn-create-card:hover{border-color:#0071e3;color:#0071e3;background:rgba(0,113,227,.02)}
-      .scn-create-icon{font-size:28px}
+      .ap-btn{padding:7px 18px;border-radius:999px;font-size:12px;font-weight:500;cursor:pointer;transition:all .2s ease;background:transparent;border:1px solid rgba(0,113,227,.3);color:#0071e3}
+      .ap-btn:hover{background:#0071e3;border-color:#0071e3;color:#fff}
+      .ap-btn-d{border:1px solid rgba(255,59,48,.3);color:#ff3b30}
+      .ap-btn-d:hover{background:#ff3b30;border-color:#ff3b30;color:#fff}
+      .host-banner{display:flex;align-items:center;gap:10px;background:rgba(255,243,205,.8);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:none;border-radius:14px;padding:10px 14px;margin-bottom:12px;font-size:13px;color:#7a5b00;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+      .host-banner.error{background:rgba(253,236,234,.8);color:#c31f1e}
+      .host-banner button{margin-left:auto;background:rgba(255,149,0,.15);color:#ff9500;border:1px solid rgba(255,149,0,.3);border-radius:999px;padding:6px 16px;cursor:pointer;font-size:12px;font-weight:500;transition:all .2s}
+      .host-banner button:hover{background:#ff9500;color:#fff;border-color:#ff9500}
+      .host-banner.error button{color:#ff3b30;border-color:rgba(255,59,48,.3);background:rgba(255,59,48,.1)}
+      .host-banner.error button:hover{background:#ff3b30;color:#fff;border-color:#ff3b30}
+      .scn-applied-badge{font-size:11px;font-weight:500;padding:5px 14px;border-radius:999px;background:rgba(52,199,89,.1);color:#34c759;display:inline-flex;align-items:center;gap:3px;border:1px solid rgba(52,199,89,.2)}
+      .scn-list{display:flex;flex-direction:column;gap:12px}
+      .scn-row{display:flex;align-items:center;gap:16px;padding:16px 20px;background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;cursor:pointer;transition:all .25s ease;position:relative;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+      .scn-row:hover{background:rgba(255,255,255,.8);box-shadow:0 3px 16px rgba(0,0,0,.08)}
+      .scn-row-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;color:#fff;font-weight:600}
+      .scn-row-name{font-size:15px;font-weight:600;color:#1d1d1f;white-space:nowrap;letter-spacing:-.2px}
+      .scn-row-mid{flex:0 1 30%;min-width:0;display:flex;flex-direction:column;gap:3px}
+      .scn-row-desc{font-size:12px;color:#86868b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400}
+      .scn-row-chain{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1 1 auto;min-width:0;padding:0 16px}
+      .scn-row-chain .scn-tag{font-size:12px;font-weight:500;padding:4px 14px;border-radius:999px;letter-spacing:.1px}
+      .scn-row-chain .scn-arr{font-size:12px;color:#d2d2d7;font-weight:400;margin:0 1px}
+      .scn-branch-tag{font-size:11px;font-weight:500;padding:3px 12px;border-radius:999px;background:rgba(142,142,147,.1);color:#8e8e93;letter-spacing:.1px;flex-shrink:0}
+      .scn-row-right{display:flex;align-items:center;gap:10px;flex-shrink:0}
       .scn-card-desc{font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:14px;min-height:38px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
       .scn-card-foot{display:flex;align-items:center;gap:8px;padding-top:14px;border-top:1px solid var(--b);margin-top:auto}
     </style>`;
@@ -188,32 +204,30 @@ function renderDashboard(data) {
     </div>`;
 
     // 场景中心介绍框（缩短高度）
-    html += `<div class="apple-card" style="margin-bottom:16px;background:linear-gradient(135deg,#f0f4ff,#f5f5f7);border:1px solid #d2d2d7">
+    html += `<div class="apple-card" style="margin-bottom:16px;background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;box-shadow:0 1px 4px rgba(0,0,0,.05)">
       <div style="display:flex;align-items:center;gap:12px;padding:10px 20px">
         <div style="font-size:32px;flex-shrink:0">🏪</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:14px;font-weight:600;color:#1d1d1f;margin-bottom:4px">${I18N.t('dashboard.market_intro_title')||'探索场景中心'}</div>
           <div style="font-size:12px;color:#86868b;line-height:1.5">${I18N.t('dashboard.market_intro_desc')||'场景中心提供官方场景模板，涵盖云原生、IaC、Agent 开发等多种场景，一键应用到你的项目'}</div>
         </div>
-        <button class="ap-btn ap-btn-p" onclick="app.nav('scene-market')">${I18N.t('dashboard.goto_market')||'前往场景中心'} →</button>
+        <button class="ap-btn" onclick="app.nav('scene-market')">${I18N.t('dashboard.goto_market')||'前往场景中心'} →</button>
       </div>
     </div>`;
 
-    // 场景卡片网格（网格布局，一排五个，自动换行）
-    html += `<div class="apple-card">
-      <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between">
+    // 场景列表（列表式，每行一个场景）
+    html += `<div class="apple-card" style="background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;box-shadow:0 1px 4px rgba(0,0,0,.05)">
+      <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
         <h2>${I18N.t('dashboard.scene_center_title')} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${scenesData.length}</span></h2>
-        <button class="ap-btn ap-btn-p" onclick="enterCreateMode()">＋ ${I18N.t('dashboard.add_scene')||'添加场景'}</button>
+        <button class="ap-btn" onclick="enterCreateMode()">＋ ${I18N.t('dashboard.add_scene')||'添加场景'}</button>
       </div>
-      <div class="scn-grid-wrap">
-        <div id="dash-scenes" class="scn-grid-track">`;
+      <div id="dash-scenes" class="scn-list">`;
 
     scenesData.forEach((s, idx) => {
       html += _renderLocalSceneCard(s, s.id === currentScene, idx);
     });
 
     html += `</div>
-      </div>
     </div>`;
 
     el.innerHTML = html;
@@ -248,7 +262,7 @@ function renderDashboard(data) {
     const btn = document.getElementById('deleteModeBtn');
     if (_deleteModeActive) {
       // 进入删除模式：卡片上加叉号
-      document.querySelectorAll('.scn-card').forEach(card => {
+      document.querySelectorAll('.scn-row').forEach(card => {
         if (card.querySelector('.scn-del-x')) return;
         const x = document.createElement('div');
         x.className = 'scn-del-x';
@@ -274,7 +288,7 @@ function renderDashboard(data) {
     } else {
       // 退出删除模式：移除叉号 + 恢复卡片样式
       document.querySelectorAll('.scn-del-x').forEach(x => x.remove());
-      document.querySelectorAll('.scn-card').forEach(card => {
+      document.querySelectorAll('.scn-row').forEach(card => {
       });
       if (btn) {
         btn.textContent = I18N.t('dashboard.delete_scene')||'删除场景';
@@ -293,8 +307,8 @@ function renderDashboard(data) {
       '<h3 style="margin:0 0 12px;font-size:17px;font-weight:600;color:#1d1d1f">' + (I18N.t('dashboard.confirm_delete_scene')||'确认删除场景') + '</h3>' +
       '<p style="margin:0 0 20px;font-size:13px;color:#86868b;line-height:1.5">' + sceneName + '</p>' +
       '<div style="display:flex;justify-content:flex-end;gap:8px">' +
-        '<button class="ap-btn ap-btn-o" onclick="this.closest(\'[style*=fixed]\').remove()">' + (I18N.t('common.cancel')||'取消') + '</button>' +
-        '<button class="ap-btn ap-btn-p" id="confirmDeleteCardBtn" style="background:#ff3b30">' + (I18N.t('common.delete')||'删除') + '</button>' +
+        '<button class="ap-btn" onclick="this.closest(\'[style*=fixed]\').remove()">' + (I18N.t('common.cancel')||'取消') + '</button>' +
+        '<button class="ap-btn ap-btn-d" id="confirmDeleteCardBtn">' + (I18N.t('common.delete')||'删除') + '</button>' +
       '</div></div>';
     document.body.appendChild(overlay);
     document.getElementById('confirmDeleteCardBtn').onclick = function() {
@@ -310,40 +324,45 @@ function renderDashboard(data) {
   _loadPipelines();
 }
 
-// ── 渲染单个场景卡片（本地场景，区别于市场卡片的点赞/体验）──
+// ── 渲染单个场景行（列表式，一行一个场景）──
 let _deleteMode = false;
 function _renderLocalSceneCard(s, isApplied, idx) {
   const catBg = _DASH_SCENE_BG[idx % _DASH_SCENE_BG.length];
-  const icon = s.scope === 'official' ? '⚙' : '📦';
+  const icon = _SCENE_ICONS[s.id] || _SCENE_ICONS[s.name] || s.icon || (s.scope === 'official' ? '⚙' : '📦');
   const pipeline = _dashScenePipelines[s.id] || {};
   const nodes = pipeline.nodes || [];
+  // 莫兰迪配色（低饱和度）
+  const morandiColors = ['#8B9DB0','#A8B8A0','#C4A882','#B0A0B8','#9BB0C4','#C49B9B'];
+  const tagColors = {vod:'#B07A8B',issue:'#B8857A',coding:'#7A92B0',qa:'#9A85A8',sre:'#B89B6A'};
   const chain = nodes.map((n, i) => {
     const tag = n.tag || n.id || '';
     const meta = _DASH_AGENT_META[tag] || {};
     const label = meta.label || tag;
-    return `${i>0?'<span class="scn-arr">→</span>':''}<span class="scn-tag">${label}</span>`;
+    return `${i>0?'<span class="scn-arr">→</span>':''}<span class="scn-tag" style="background:${(tagColors[tag]||'#B0B0B0')}1A;color:${tagColors[tag]||'#86868b'}">${label}</span>`;
   }).join('');
   const desc = s.description || '';
   const workBranch = s.work_branch || 'main';
   const createdBy = s.created_by || '';
+  const barColor = morandiColors[idx % morandiColors.length];
 
-  return `<div class="scn-card" data-scene-id="${s.id}" data-scene-name="${(s.display_name||s.name||'').replace(/"/g,'&quot;')}" onclick="app.nav('scene-detail-local','${s.id}')">
-    <div class="scn-card-bar ${catBg}"></div>
-    <div class="scn-card-body">
-      <div class="scn-card-head">
-        <div class="scn-ic ${catBg}">${icon}</div>
-        <div class="scn-card-title">${s.display_name || s.name}</div>
-        <span class="tg tg-d" style="font-size:9px;flex-shrink:0">🌿 ${workBranch}</span>
+  return `<div class="scn-row" data-scene-id="${s.id}" data-scene-name="${(s.display_name||s.name||'').replace(/"/g,'&quot;')}" onclick="app.nav('scene-detail-local','${s.id}')">
+    <div class="scn-row-icon" style="background:${barColor}">${icon}</div>
+    <div class="scn-row-mid">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="scn-row-name">${s.display_name || s.name}</span>
+        ${createdBy ? `<span style="font-size:10px;color:var(--t3)">@${createdBy}</span>` : ''}
       </div>
-      <div class="scn-card-desc" title="${desc.replace(/"/g, '&quot;')}">${desc || '&nbsp;'}</div>
-      <div class="scn-chain">${chain || '<span class="ts t3">—</span>'}</div>
-      <div class="scn-card-foot">
-        ${isApplied
-          ? `<span class="scn-applied-badge">✓ ${I18N.t('dashboard.current_default')||'当前默认'}</span>`
-          : `<button class="ap-btn ap-btn-p" onclick="_applySceneFromCard('${s.id}',event)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`
-        }
-        ${createdBy ? `<span class="ts t3" style="margin-left:auto;font-size:11px">@${createdBy}</span>` : ''}
+      <div style="display:flex;align-items:center;gap:8px;min-width:0">
+        <span class="scn-row-desc" title="${desc.replace(/"/g, '&quot;')}">${desc || '—'}</span>
       </div>
+    </div>
+    <div class="scn-row-chain">${chain}</div>
+    <div class="scn-row-right">
+      <span class="scn-branch-tag">🌿 ${workBranch}</span>
+      ${isApplied
+        ? `<span class="scn-applied-badge">✓ ${I18N.t('dashboard.current_default')||'当前默认'}</span>`
+        : `<button class="ap-btn" onclick="_applySceneFromCard('${s.id}',event)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`
+      }
     </div>
   </div>`;
 }
@@ -418,49 +437,52 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   const el = document.getElementById('pageContent');
   if (!el) return;
   const catBg = 'bg-default';
-  const icon = scene.scope === 'official' ? '⚙' : '📦';
+  const icon = _SCENE_ICONS[scene.id] || _SCENE_ICONS[scene.name] || (scene.scope === 'official' ? '⚙' : '📦');
   const agentOrder = ['vod','issue','coding','qa','sre'];
   const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
-  const colors = {vod:'#ff2d92',issue:'#ff3b30',coding:'#0071e3',qa:'#af52de',sre:'#ff9f0a'};
+  const colors = {vod:'#B07A8B',issue:'#B8857A',coding:'#7A92B0',qa:'#9A85A8',sre:'#B89B6A'};
+  const _detailMorandi = ['#8B9DB0','#A8B8A0','#C4A882','#B0A0B8','#9BB0C4','#C49B9B'];
+  const _detailIconColor = _detailMorandi[(scene.id || '').length % _detailMorandi.length];
   const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
   const sceneName = scene.display_name || scene.name;
   const sceneDesc = scene.description || '';
 
   let html = `<style>
-    .ap-btn{padding:6px 14px;border-radius:10px;font-size:12px;font-weight:500;cursor:pointer;border:none;transition:all .15s}
-    .ap-btn-p{background:#0071e3;color:#fff}.ap-btn-p:hover{background:#0077ed}
-    .ap-btn-o{background:transparent;border:1px solid #d2d2d7;color:#6e6e73}.ap-btn-o:hover{border-color:#0071e3;color:#0071e3}
+    .ap-btn{padding:7px 18px;border-radius:999px;font-size:12px;font-weight:500;cursor:pointer;transition:all .2s ease;background:transparent;border:1px solid rgba(0,113,227,.3);color:#0071e3}
+    .ap-btn:hover{background:#0071e3;border-color:#0071e3;color:#fff}
+    .ap-btn-d{border:1px solid rgba(255,59,48,.3);color:#ff3b30}
+    .ap-btn-d:hover{background:#ff3b30;border-color:#ff3b30;color:#fff}
     .ap-grid{display:flex;gap:12px;padding:0;overflow-x:auto;min-height:280px}
-    .ap-nd{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:#f5f5f7;border:1px solid #e8e8ed;border-radius:14px;padding:16px;display:flex;flex-direction:column;transition:all .2s;position:relative}
-    .ap-nd:hover{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
+    .ap-nd{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;padding:18px;display:flex;flex-direction:column;transition:all .25s ease;position:relative;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+    .ap-nd:hover{background:rgba(255,255,255,.8);box-shadow:0 3px 16px rgba(0,0,0,.08)}
     .ap-nd-top{width:36px;height:4px;border-radius:2px;margin-bottom:12px}
     .ap-nd-name{font-size:14px;font-weight:600;color:#1d1d1f;margin-bottom:6px;display:flex;align-items:center;gap:8px}
-    .ap-nd-desc{font-size:10px;color:#86868b;line-height:1.5;margin-bottom:10px}
-    .det-card-wrap{background:#fff;border:1px solid #e8e8ed;border-radius:18px;padding:24px;margin-bottom:16px}
-    .scn-applied-badge{font-size:10px;font-weight:600;padding:3px 10px;border-radius:999px;background:rgba(52,199,89,.12);color:#34c759;display:inline-flex;align-items:center;gap:3px}
-    .pl-stat{text-align:center;padding:8px 16px;background:#fff;border:1px solid #d2d2d7;border-radius:12px;min-width:64px}
+    .ap-nd-desc{font-size:11px;color:#86868b;line-height:1.5;margin-bottom:10px;font-weight:400}
+    .det-card-wrap{background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;padding:24px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+    .scn-applied-badge{font-size:11px;font-weight:500;padding:5px 14px;border-radius:999px;background:rgba(52,199,89,.1);color:#34c759;display:inline-flex;align-items:center;gap:3px;border:1px solid rgba(52,199,89,.2)}
+    .pl-stat{text-align:center;padding:8px 16px;background:#f5f5f7;border:none;border-radius:14px;min-width:64px}
     .pl-stat .v{font-size:18px;font-weight:700;line-height:1.1}
     .pl-stat .l{font-size:10px;color:#86868b;margin-top:2px}
-    .pl-table-card{background:#fff;border:1px solid #d2d2d7;border-radius:18px;box-shadow:0 2px 12px rgba(0,0,0,.06);overflow:hidden}
+    .pl-table-card{background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;box-shadow:0 1px 4px rgba(0,0,0,.05);overflow:hidden}
     .pl-table-wrap{overflow-y:auto;max-height:400px}
     .pl-table{width:100%;border-collapse:collapse;font-size:12px}
-    .pl-table th{text-align:left;padding:10px 14px;font-weight:500;color:#86868b;border-bottom:1px solid #e8e8ed;font-size:10px;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;background:#fff;z-index:1}
-    .pl-table td{padding:10px 14px;border-bottom:1px solid #f2f2f7}
+    .pl-table th{text-align:left;padding:10px 14px;font-weight:500;color:#86868b;border-bottom:1px solid rgba(0,0,0,.04);font-size:10px;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;background:rgba(255,255,255,.9);z-index:1}
+    .pl-table td{padding:10px 14px;border-bottom:1px solid rgba(0,0,0,.03)}
     .pl-table tr{cursor:pointer;transition:background .12s}
-    .pl-table tr:hover td{background:#f5f5f7}
-    .scene-edit-input{width:100%;padding:6px 10px;border:1px solid #0071e3;border-radius:8px;font-size:inherit;font-weight:inherit;background:#fff;color:#1d1d1f;outline:none}
-    .adv-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #f2f2f7}
+    .pl-table tr:hover td{background:rgba(0,0,0,.02)}
+    .scene-edit-input{width:100%;padding:6px 10px;border:none;border-radius:8px;font-size:inherit;font-weight:inherit;background:#f5f5f7;color:#1d1d1f;outline:none}
+    .adv-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid rgba(0,0,0,.04)}
     .adv-row:last-child{border-bottom:none}
     .adv-label{font-size:12px;font-weight:600;color:#86868b;min-width:80px;flex-shrink:0}
-    .adv-select{flex:1;max-width:280px;padding:7px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none}
-    .adv-select:focus{border-color:#0071e3;background:#fff}
+    .adv-select{flex:1;max-width:280px;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none}
+    .adv-select:focus{background:#ebebed}
     .adv-kv{display:flex;gap:8px;align-items:center}
-    .adv-kv input{padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s}
-    .adv-kv input:focus{border-color:#0071e3;background:#fff}
+    .adv-kv input{padding:8px 12px;border:none;border-radius:12px;font-size:12px;outline:none;background:#f5f5f7;transition:background .15s}
+    .adv-kv input:focus{background:#ebebed}
     .adv-kv-key{flex:0 0 120px}
     .adv-kv-val{flex:1}
-    .adv-del{width:28px;height:28px;border-radius:8px;border:1px solid #e8e8ed;background:transparent;color:#ff3b30;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-    .adv-del:hover{border-color:#ff3b30;background:rgba(255,59,48,.06)}
+    .adv-del{width:28px;height:28px;border-radius:999px;border:none;background:rgba(255,59,48,.08);color:#ff3b30;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .adv-del:hover{background:rgba(255,59,48,.15)}
     select{appearance:none;-webkit-appearance:none;-moz-appearance:none;background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2386868b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px!important;border-radius:8px;cursor:pointer}
     select option{padding:8px 12px;background:#fff;color:#1d1d1f;font-size:12px}
     select option:checked{background:#0071e3;color:#fff}
@@ -479,18 +501,18 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   </style>`;
 
   // 返回按钮
-  html += `<button class="ap-btn ap-btn-o" onclick="app.nav('dash')" style="margin-bottom:12px">← ${I18N.t('dashboard.scene_center_title')||'项目场景'}</button>`;
+  html += `<button class="ap-btn" onclick="app.nav('dash')" style="margin-bottom:12px">← ${I18N.t('dashboard.scene_center_title')||'项目场景'}</button>`;
 
   // 场景名称 + 描述（各自独立点击编辑，像文件重命名）
   html += `<div class="cd" style="padding:20px 24px;margin-bottom:16px">
     <div style="display:flex;align-items:flex-start;gap:16px">
-      <div class="scn-ic scn-ic-lg ${catBg}" style="width:48px;height:48px;border-radius:12px;font-size:24px">${icon}</div>
+      <div class="scn-row-icon" style="width:40px;height:40px;border-radius:10px;font-size:18px;background:${_detailIconColor};display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff;font-weight:600">${icon}</div>
       <div style="flex:1;min-width:0">
         <div id="sceneNameDisplay" style="font-size:20px;font-weight:700;cursor:text;padding:2px 6px;margin:-2px -6px 4px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneName')">${sceneName}</div>
         <div id="sceneDescDisplay" style="font-size:13px;color:#86868b;cursor:text;padding:2px 6px;margin:-2px -6px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneDesc')">${sceneDesc || '<span style="color:#c7c7cc;font-style:italic">' + (I18N.t('dashboard.desc_optional')||'描述（可选）') + '</span>'}</div>
       </div>
-      ${isApplied ? '<span class="scn-applied-badge" id="sceneApplyBadge" style="margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500">✓ ' + (I18N.t('dashboard.current_default')||'当前默认') + '</span>' : `<button class="ap-btn ap-btn-p" id="sceneApplyBtn" style="margin-top:4px" onclick="_applySceneFromCard('${scene.id}',null)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`}
-      ${isCustomScene ? `<button class="ap-btn" style="margin-top:4px;background:transparent;border:1px solid #ff3b30;color:#ff3b30" onclick="_confirmDeleteScene('${scene.id}','${(scene.display_name||scene.name||'').replace(/'/g,'\\\'')}',null)">${I18N.t('common.delete')||'删除'}</button>` : ''}
+      ${isApplied ? '<span class="scn-applied-badge" id="sceneApplyBadge" style="margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500">✓ ' + (I18N.t('dashboard.current_default')||'当前默认') + '</span>' : `<button class="ap-btn" id="sceneApplyBtn" style="margin-top:4px" onclick="_applySceneFromCard('${scene.id}',null)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`}
+      ${isCustomScene ? `<button class="ap-btn ap-btn-d" style="margin-top:4px" onclick="_confirmDeleteScene('${scene.id}','${(scene.display_name||scene.name||'').replace(/'/g,'\\\'')}',null)">${I18N.t('common.delete')||'删除'}</button>` : ''}
     </div>
   </div>`;
 
@@ -499,7 +521,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     <div id="flowHeader" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
       <h2 style="font-size:15px;font-weight:600">${I18N.t('skills.execution_flow')||'执行流程'}</h2>
       <div style="display:flex;gap:8px">
-        ${isCustomScene ? `<button class="ap-btn ap-btn-o" id="editFlowBtn" onclick="_toggleFlowEdit('${scene.id}','${owner}','${name}')">${I18N.t('dashboard.edit')||'编辑'}</button>` : ''}
+        ${isCustomScene ? `<button class="ap-btn" id="editFlowBtn" onclick="_toggleFlowEdit('${scene.id}','${owner}','${name}')">${I18N.t('dashboard.edit')||'编辑'}</button>` : ''}
       </div>
     </div>
     <div class="ap-grid" style="padding:0" id="flowCardsContainer">`;
@@ -515,25 +537,25 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   html += `<div class="det-card-wrap" id="advOptionsInline">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <h2 style="font-size:15px;font-weight:600">${I18N.t('dashboard.advanced_options')||'高级选项'}</h2>
-      <button class="ap-btn ap-btn-p" onclick="_saveAdvancedOptionsInline('${scene.id}','${owner}/${name}')">${I18N.t('common.save')||'保存'}</button>
+      <button class="ap-btn" onclick="_saveAdvancedOptionsInline('${scene.id}','${owner}/${name}')">${I18N.t('common.save')||'保存'}</button>
     </div>
     <div class="adv-row">
       <span class="adv-label">${I18N.t('dashboard.work_branch')||'工作分支'}</span>
       <select id="advWorkBranchInline" class="adv-select" style="padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer;transition:all .15s" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'"><option value="">${I18N.t('common.loading')||'加载中...'}</option></select>
-      <button class="ap-btn ap-btn-o" onclick="_toggleNewBranchInline()">${I18N.t('dashboard.create_branch')||'新建分支'}</button>
+      <button class="ap-btn" onclick="_toggleNewBranchInline()">${I18N.t('dashboard.create_branch')||'新建分支'}</button>
     </div>
     <div id="newBranchInputInline" style="display:none;padding:8px 0 4px 92px">
       <div style="display:flex;gap:8px">
         <input id="newBranchNameInline" placeholder="${I18N.t('dashboard.branch_name')||'分支名'}" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'">
         <select id="newBranchRefInline" style="width:120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;background:#f5f5f7;outline:none;cursor:pointer;transition:all .15s" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'"></select>
-        <button class="ap-btn ap-btn-p" onclick="_createNewBranchInline('${owner}','${name}')">${I18N.t('common.create')||'创建'}</button>
-        <button class="ap-btn ap-btn-o" onclick="_toggleNewBranchInline()">${I18N.t('common.cancel')||'取消'}</button>
+        <button class="ap-btn" onclick="_createNewBranchInline('${owner}','${name}')">${I18N.t('common.create')||'创建'}</button>
+        <button class="ap-btn" onclick="_toggleNewBranchInline()">${I18N.t('common.cancel')||'取消'}</button>
       </div>
     </div>
     <div style="padding:12px 0 4px">
       <div style="font-size:12px;font-weight:600;color:#86868b;margin-bottom:8px">${I18N.t('dashboard.custom_config')||'自定义配置'}</div>
       <div id="advCustomFieldsInline" style="display:flex;flex-direction:column;gap:8px"></div>
-      <button class="ap-btn ap-btn-o" style="margin-top:8px;font-size:11px" onclick="_addCustomFieldInline()">+ ${I18N.t('dashboard.add_config')||'添加配置项'}</button>
+      <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addCustomFieldInline()">+ ${I18N.t('dashboard.add_config')||'添加配置项'}</button>
     </div>
   </div>`;
 
@@ -758,8 +780,8 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
       <h3 style="margin:0 0 12px;font-size:17px;font-weight:600;color:#1d1d1f">${I18N.t('dashboard.confirm_delete_scene')||'确认删除场景'}</h3>
       <p style="margin:0 0 20px;font-size:13px;color:#86868b;line-height:1.5">${sn}</p>
       <div style="display:flex;justify-content:flex-end;gap:8px">
-        <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')||'取消'}</button>
-        <button class="ap-btn ap-btn-p" id="confirmDeleteSceneBtn2" style="background:#ff3b30">${I18N.t('common.delete')||'删除'}</button>
+        <button class="ap-btn" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')||'取消'}</button>
+        <button class="ap-btn ap-btn-d" id="confirmDeleteSceneBtn2">${I18N.t('common.delete')||'删除'}</button>
       </div>
     </div>`;
     document.body.appendChild(overlay);
@@ -865,8 +887,8 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   if (headerDiv) {
     headerDiv.innerHTML = `<h2 style="font-size:15px;font-weight:600">${I18N.t('skills.execution_flow')||'执行流程'}</h2>
       <div style="display:flex;gap:8px">
-        <button class="ap-btn ap-btn-p" onclick="_saveSceneEdit('${sceneId}','${owner}','${name}')">${I18N.t('common.save')||'保存'}</button>
-        <button class="ap-btn ap-btn-o" onclick="_cancelSceneEdit('${sceneId}','${owner}','${name}')">${I18N.t('common.cancel')||'取消'}</button>
+        <button class="ap-btn" onclick="_saveSceneEdit('${sceneId}','${owner}','${name}')">${I18N.t('common.save')||'保存'}</button>
+        <button class="ap-btn" onclick="_cancelSceneEdit('${sceneId}','${owner}','${name}')">${I18N.t('common.cancel')||'取消'}</button>
       </div>`;
   }
 
@@ -919,7 +941,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
         if (headerDiv) {
           headerDiv.innerHTML = `<h2 style="font-size:15px;font-weight:600">${I18N.t('skills.execution_flow')||'执行流程'}</h2>
             <div style="display:flex;gap:8px">
-              <button class="ap-btn ap-btn-o" id="editFlowBtn" onclick="_toggleFlowEdit('${sceneId}','${owner}','${name}')">${I18N.t('dashboard.edit')||'编辑'}</button>
+              <button class="ap-btn" id="editFlowBtn" onclick="_toggleFlowEdit('${sceneId}','${owner}','${name}')">${I18N.t('dashboard.edit')||'编辑'}</button>
             </div>`;
         }
         // 恢复查看模式卡片
@@ -941,7 +963,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     if (headerDiv) {
       headerDiv.innerHTML = `<h2 style="font-size:15px;font-weight:600">${I18N.t('skills.execution_flow')||'执行流程'}</h2>
         <div style="display:flex;gap:8px">
-          <button class="ap-btn ap-btn-o" id="editFlowBtn" onclick="_toggleFlowEdit('${sceneId}','${owner}','${name}')">${I18N.t('dashboard.edit')||'编辑'}</button>
+          <button class="ap-btn" id="editFlowBtn" onclick="_toggleFlowEdit('${sceneId}','${owner}','${name}')">${I18N.t('dashboard.edit')||'编辑'}</button>
         </div>`;
     }
     // 恢复查看模式卡片
@@ -957,7 +979,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
 
 // 渲染编辑模式的流程卡片（带箭头，引擎按钮在下方）
 function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes) {
-  const colors = {vod:'#ff2d92',issue:'#ff3b30',coding:'#0071e3',qa:'#af52de',sre:'#ff9f0a'};
+  const colors = {vod:'#B07A8B',issue:'#B8857A',coding:'#7A92B0',qa:'#9A85A8',sre:'#B89B6A'};
   const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
   const canToggle = (tag) => tag !== 'vod' && tag !== 'issue';
   let html = '';
@@ -1078,7 +1100,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
       html += `<div style="margin-top:12px;margin-bottom:4px;font-size:11px;font-weight:600;color:#86868b;text-transform:uppercase;letter-spacing:.5px">${_SCOPE_LABELS[s]||s} (${groups[s].length})</div>`;
       html += groups[s].map(e => {
         const checked = currentIds.includes(e.id);
-        return `<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:1px solid ${checked ? '#0071e3' : '#e8e8ed'};border-radius:12px;cursor:pointer;background:${checked ? 'rgba(0,113,227,.04)' : '#f5f5f7'};transition:all .15s">
+        return `<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:${checked ? 'rgba(0,113,227,.06)' : '#f5f5f7'};transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">
           <input type="checkbox" data-eid="${e.id}" ${checked ? 'checked' : ''} onchange="if(this.checked){window._engCurIds.push(${e.id})}else{window._engCurIds=window._engCurIds.filter(x=>x!==${e.id})}" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">
           <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">${e.alias || e.name}${e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + e.name + ')</span>' : ''}${_tagBadge(e.tags)}${_scopeBadge(e.scope)}</div><div style="font-size:10px;color:#86868b;margin-top:3px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div></div>
           <span style="font-size:11px;font-weight:500;color:${e.status === 'recently_lost' ? '#f59e0b' : '#34c759'}">${e.status === 'recently_lost' ? '失联' : I18N.t('dashboard.online')||'在线'}</span>
@@ -1116,15 +1138,15 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
 
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
-  overlay.innerHTML = `<div id="engModalBox" style="background:#fff;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 12px 48px rgba(0,0,0,.15);display:flex;flex-direction:column">
+  overlay.innerHTML = `<div id="engModalBox" style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">
     <h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${I18N.t('dashboard.select_engine')||'选择引擎'} — ${title}</h3>
     <div style="font-size:12px;color:#86868b;margin-bottom:12px">${I18N.t('dashboard.engines_available', {count: allEngines.length})||'可用引擎: '+allEngines.length}</div>
     <div id="engFilterTags" style="flex-shrink:0">${_renderFilterTags()}</div>
-    <div style="margin-bottom:12px;flex-shrink:0"><input id="engSearchInput" placeholder="搜索引擎名称/设备/标签..." style="width:100%;padding:8px 12px;border:1px solid #e8e8ed;border-radius:8px;font-size:13px;background:#f5f5f7;color:#1d1d1f"></div>
+    <div style="margin-bottom:12px;flex-shrink:0"><input id="engSearchInput" placeholder="搜索引擎名称/设备/标签..." style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>
     <div id="engListContainer" style="display:flex;flex-direction:column;gap:4px;flex:1;overflow-y:auto;min-height:0">${_renderEngineList('')}</div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;flex-shrink:0">
-      <button class="ap-btn ap-btn-o" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')||'取消'}</button>
-      <button class="ap-btn ap-btn-p" id="confirmEngineBtn2">${I18N.t('common.confirm')||'确认'}</button>
+      <button class="ap-btn" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')||'取消'}</button>
+      <button class="ap-btn" id="confirmEngineBtn2">${I18N.t('common.confirm')||'确认'}</button>
     </div>
   </div>`;
   document.body.appendChild(overlay);
@@ -1171,23 +1193,27 @@ window.enterCreateMode = function() {
   const el = document.getElementById('pageContent');
   if (!el) return;
   const catBg = 'bg-default';
-  const icon = '📦';
-  const colors = {vod:'#ff2d92',issue:'#ff3b30',coding:'#0071e3',qa:'#af52de',sre:'#ff9f0a'};
+  let _createSceneIcon = '📦';
+  const icon = _createSceneIcon;
+  const colors = {vod:'#B07A8B',issue:'#B8857A',coding:'#7A92B0',qa:'#9A85A8',sre:'#B89B6A'};
+  const _detailMorandi = ['#8B9DB0','#A8B8A0','#C4A882','#B0A0B8','#9BB0C4','#C49B9B'];
+  const _detailIconColor = _detailMorandi[0];
   const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
   const canToggle = (tag) => tag !== 'vod' && tag !== 'issue';
 
   let html = `<style>
-    .ap-btn{padding:6px 14px;border-radius:10px;font-size:12px;font-weight:500;cursor:pointer;border:none;transition:all .15s}
-    .ap-btn-p{background:#0071e3;color:#fff}.ap-btn-p:hover{background:#0077ed}
-    .ap-btn-o{background:transparent;border:1px solid #d2d2d7;color:#6e6e73}.ap-btn-o:hover{border-color:#0071e3;color:#0071e3}
+    .ap-btn{padding:7px 18px;border-radius:999px;font-size:12px;font-weight:500;cursor:pointer;transition:all .2s ease;background:transparent;border:1px solid rgba(0,113,227,.3);color:#0071e3}
+    .ap-btn:hover{background:#0071e3;border-color:#0071e3;color:#fff}
+    .ap-btn-d{border:1px solid rgba(255,59,48,.3);color:#ff3b30}
+    .ap-btn-d:hover{background:#ff3b30;border-color:#ff3b30;color:#fff}
     .ap-grid{display:flex;gap:12px;padding:0;overflow-x:auto;min-height:280px}
-    .ap-nd{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:#f5f5f7;border:1px solid #e8e8ed;border-radius:14px;padding:16px;display:flex;flex-direction:column;transition:all .2s;position:relative}
-    .ap-nd:hover{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
+    .ap-nd{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;padding:18px;display:flex;flex-direction:column;transition:all .25s ease;position:relative;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+    .ap-nd:hover{background:rgba(255,255,255,.8);box-shadow:0 3px 16px rgba(0,0,0,.08)}
     .ap-nd-top{width:36px;height:4px;border-radius:2px;margin-bottom:12px}
     .ap-nd-name{font-size:14px;font-weight:600;color:#1d1d1f;margin-bottom:6px;display:flex;align-items:center;gap:8px}
-    .ap-nd-desc{font-size:10px;color:#86868b;line-height:1.5;margin-bottom:10px}
-    .det-card-wrap{background:#fff;border:1px solid #e8e8ed;border-radius:18px;padding:24px;margin-bottom:16px}
-    .scn-applied-badge{font-size:10px;font-weight:600;padding:3px 10px;border-radius:999px;background:rgba(52,199,89,.12);color:#34c759;display:inline-flex;align-items:center;gap:3px}
+    .ap-nd-desc{font-size:11px;color:#86868b;line-height:1.5;margin-bottom:10px;font-weight:400}
+    .det-card-wrap{background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;padding:24px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+    .scn-applied-badge{font-size:11px;font-weight:500;padding:5px 14px;border-radius:999px;background:rgba(52,199,89,.1);color:#34c759;display:inline-flex;align-items:center;gap:3px;border:1px solid rgba(52,199,89,.2)}
     select{appearance:none;-webkit-appearance:none;-moz-appearance:none;background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2386868b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px!important;border-radius:8px;cursor:pointer}
     select option{padding:8px 12px;background:#fff;color:#1d1d1f;font-size:12px}
     select option:checked{background:#0071e3;color:#fff}
@@ -1197,17 +1223,21 @@ window.enterCreateMode = function() {
   </style>`;
 
   // 返回按钮
-  html += `<button class="ap-btn ap-btn-o" onclick="window._dashboardEditing=false;app.nav('dash')" style="margin-bottom:12px">← ${I18N.t('dashboard.scene_center_title')||'项目场景'}</button>`;
+  html += `<button class="ap-btn" onclick="window._dashboardEditing=false;app.nav('dash')" style="margin-bottom:12px">← ${I18N.t('dashboard.scene_center_title')||'项目场景'}</button>`;
 
-  // 场景名称 + 描述（直接 input，不需要点击切换）
+  // 场景名称 + 描述 + 图标选择（直接 input，不需要点击切换）
+  const _iconPickerHtml = _CUSTOM_SCENE_ICONS.map(ic =>
+    `<span class="icon-pick${ic === _createSceneIcon ? ' active' : ''}" onclick="_pickCreateIcon('${ic}')" style="font-size:20px;width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s;${ic === _createSceneIcon ? 'background:#0071e3;color:#fff' : 'background:#f5f5f7'}">${ic}</span>`
+  ).join('');
   html += `<div class="cd" style="padding:20px 24px;margin-bottom:16px">
     <div style="display:flex;align-items:flex-start;gap:16px">
-      <div class="scn-ic scn-ic-lg ${catBg}" style="width:48px;height:48px;border-radius:12px;font-size:24px">${icon}</div>
+      <div class="scn-row-icon" id="createSceneIconDisplay" style="width:40px;height:40px;border-radius:10px;font-size:18px;cursor:pointer;background:${_detailIconColor};display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff;font-weight:600" onclick="document.getElementById('iconPickerPanel').style.display=document.getElementById('iconPickerPanel').style.display==='none'?'flex':'none'">${icon}</div>
       <div style="flex:1;min-width:0">
         <input id="createSceneName" placeholder="${I18N.t('dashboard.scene_name_placeholder')||'请输入场景名称'}" style="width:100%;font-size:20px;font-weight:700;padding:4px 8px;border:1px solid #d2d2d7;border-radius:6px;outline:none;background:#fff;margin-bottom:6px;transition:border-color .15s" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='#d2d2d7'">
         <input id="createSceneDesc" placeholder="${I18N.t('dashboard.desc_optional')||'描述（可选）'}" style="width:100%;font-size:13px;padding:4px 8px;border:1px solid #d2d2d7;border-radius:6px;outline:none;background:#fff;color:#86868b;transition:border-color .15s" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='#d2d2d7'">
+        <div id="iconPickerPanel" style="display:none;flex-wrap:wrap;gap:6px;margin-top:8px;padding:8px;background:#f5f5f7;border-radius:10px">${_iconPickerHtml}</div>
       </div>
-      <button class="ap-btn ap-btn-p" style="margin-top:4px" onclick="_saveCreateScene('${owner}','${name}')">${I18N.t('common.save')||'保存'}</button>
+      <button class="ap-btn" style="margin-top:4px" onclick="_saveCreateScene('${owner}','${name}')">${I18N.t('common.save')||'保存'}</button>
     </div>
   </div>`;
 
@@ -1228,24 +1258,37 @@ window.enterCreateMode = function() {
     <div class="adv-row" style="display:flex;align-items:center;gap:12px;padding:10px 0">
       <span style="font-size:12px;font-weight:600;color:#86868b;min-width:80px;flex-shrink:0">${I18N.t('dashboard.work_branch')||'工作分支'}</span>
       <select id="advWorkBranchInline" style="flex:1;max-width:280px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer;transition:all .15s" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'"><option value="main">main</option></select>
-      <button class="ap-btn ap-btn-o" onclick="_toggleNewBranchInline()">${I18N.t('dashboard.create_branch')||'新建分支'}</button>
+      <button class="ap-btn" onclick="_toggleNewBranchInline()">${I18N.t('dashboard.create_branch')||'新建分支'}</button>
     </div>
     <div id="newBranchInputInline" style="display:none;padding:8px 0 4px 92px">
       <div style="display:flex;gap:8px">
         <input id="newBranchNameInline" placeholder="${I18N.t('dashboard.branch_name')||'分支名'}" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'">
         <select id="newBranchRefInline" style="width:120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;background:#f5f5f7;outline:none;cursor:pointer;transition:all .15s" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'"><option value="main">main</option></select>
-        <button class="ap-btn ap-btn-p" onclick="_createNewBranchInline('${owner}','${name}')">${I18N.t('common.create')||'创建'}</button>
-        <button class="ap-btn ap-btn-o" onclick="_toggleNewBranchInline()">${I18N.t('common.cancel')||'取消'}</button>
+        <button class="ap-btn" onclick="_createNewBranchInline('${owner}','${name}')">${I18N.t('common.create')||'创建'}</button>
+        <button class="ap-btn" onclick="_toggleNewBranchInline()">${I18N.t('common.cancel')||'取消'}</button>
       </div>
     </div>
     <div style="padding:12px 0 4px">
       <div style="font-size:12px;font-weight:600;color:#86868b;margin-bottom:8px">${I18N.t('dashboard.custom_config')||'自定义配置'}</div>
       <div id="advCustomFieldsInline" style="display:flex;flex-direction:column;gap:8px"></div>
-      <button class="ap-btn ap-btn-o" style="margin-top:8px;font-size:11px" onclick="_addCustomFieldInline()">+ ${I18N.t('dashboard.add_config')||'添加配置项'}</button>
+      <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addCustomFieldInline()">+ ${I18N.t('dashboard.add_config')||'添加配置项'}</button>
     </div>
   </div>`;
 
   el.innerHTML = html;
+
+  // 图标选择
+  window._pickCreateIcon = function(ic) {
+    _createSceneIcon = ic;
+    const display = document.getElementById('createSceneIconDisplay');
+    if (display) display.textContent = ic;
+    document.querySelectorAll('.icon-pick').forEach(el => {
+      const isActive = el.textContent === ic;
+      el.style.background = isActive ? '#0071e3' : '#f5f5f7';
+      el.style.color = isActive ? '#fff' : '';
+      el.classList.toggle('active', isActive);
+    });
+  };
 
   // 加载分支列表
   API.get('/scenes/branches/' + owner + '/' + name).then(function(b) {
@@ -1288,7 +1331,7 @@ window.enterCreateMode = function() {
     row.style.cssText = 'display:flex;gap:8px;align-items:center';
     row.innerHTML = '<input class="adv-kv-key" placeholder="key" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (key || '') + '">' +
       '<input class="adv-kv-val" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (value || '') + '">' +
-      '<button class="ap-btn ap-btn-o" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>';
+      '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>';
     container.appendChild(row);
   };
 
@@ -1325,7 +1368,7 @@ window.enterCreateMode = function() {
       const nextAgent = i < arr.length - 1 ? arr[i + 1].id : 'done';
       return { id: n.id, tag: n.tag, skill: n.skill || '', mode: 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
     });
-    API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload }).then(r => {
+    API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload, icon: _createSceneIcon }).then(r => {
       window._dashboardEditing = false;
       // 收集高级选项
       var workBranch = (document.getElementById('advWorkBranchInline') || {}).value || 'main';
@@ -1545,25 +1588,25 @@ window.openAdvancedOptions = function () {
           '<label style="font-size:13px;font-weight:600;color:#1d1d1f;display:block;margin-bottom:8px">工作分支 <span style="color:#ff3b30">*</span></label>' +
           '<div style="display:flex;gap:8px">' +
             '<select id="advWorkBranch" style="flex:1;min-width:0;max-width:300px;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"><option value="">加载中...</option></select>' +
-            '<button class="ap-btn ap-btn-o" onclick="window._toggleNewBranchInput()">新建分支</button>' +
+            '<button class="ap-btn" onclick="window._toggleNewBranchInput()">新建分支</button>' +
           '</div>' +
           '<div id="newBranchInput" style="display:none;margin-top:8px">' +
             '<div style="display:flex;gap:8px">' +
               '<input id="newBranchName" placeholder="分支名" style="flex:1;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:13px;outline:none">' +
               '<select id="newBranchRef" style="width:120px;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:13px;background:#f5f5f7;outline:none"></select>' +
-              '<button class="ap-btn ap-btn-p" onclick="window._createNewBranch(\'' + owner + '\',\'' + name + '\')">创建</button>' +
+              '<button class="ap-btn" onclick="window._createNewBranch(\'' + owner + '\',\'' + name + '\')">创建</button>' +
             '</div>' +
           '</div>' +
         '</div>' +
         '<div>' +
           '<label style="font-size:13px;font-weight:600;color:#1d1d1f;display:block;margin-bottom:8px">自定义配置</label>' +
           '<div id="advCustomFields" style="display:flex;flex-direction:column;gap:8px;max-height:168px;overflow-y:auto"></div>' +
-          '<button class="ap-btn ap-btn-o" style="margin-top:8px" onclick="window._addCustomField()">+ 添加配置项</button>' +
+          '<button class="ap-btn" style="margin-top:8px" onclick="window._addCustomField()">+ 添加配置项</button>' +
         '</div>' +
       '</div>' +
       '<div style="padding:16px 24px;border-top:1px solid #e8e8ed;display:flex;justify-content:flex-end;gap:8px">' +
-        '<button class="ap-btn ap-btn-o" onclick="window._closeAdvModal()">取消</button>' +
-        '<button class="ap-btn ap-btn-p" onclick="window._saveAdvancedOptions(\'' + sceneId + '\',\'' + repoParam + '\')">保存</button>' +
+        '<button class="ap-btn" onclick="window._closeAdvModal()">取消</button>' +
+        '<button class="ap-btn" onclick="window._saveAdvancedOptions(\'' + sceneId + '\',\'' + repoParam + '\')">保存</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(modal);
@@ -1623,7 +1666,7 @@ window._addCustomField = function (key, value) {
   row.innerHTML =
     '<input class="adv-fld-key" placeholder="key" style="flex:1;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:12px;outline:none" value="' + (key || '') + '">' +
     '<input class="adv-fld-val" placeholder="value" style="flex:2;padding:8px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:12px;outline:none" value="' + (value || '') + '">' +
-    '<button class="ap-btn ap-btn-o" style="color:#ff3b30;border-color:#ff3b30;padding:6px 10px" onclick="this.parentElement.remove()">×</button>';
+    '<button class="ap-btn" style="color:#ff3b30;border-color:#ff3b30;padding:6px 10px" onclick="this.parentElement.remove()">×</button>';
   container.appendChild(row);
 };
 

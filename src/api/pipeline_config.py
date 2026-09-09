@@ -101,6 +101,7 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
     _has_dn = False
     _has_ao = False
     _has_cb = False
+    _has_icon = False
     with lock:
         c = db.cursor()
         try:
@@ -109,10 +110,12 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
                 _has_dn = "display_name" in _cols
                 _has_ao = "advanced_options" in _cols
                 _has_cb = "created_by" in _cols
+                _has_icon = "icon" in _cols
                 _extra = ""
                 if _has_dn: _extra += ", display_name"
                 if _has_ao: _extra += ", advanced_options"
                 if _has_cb: _extra += ", created_by"
+                if _has_icon: _extra += ", icon"
                 c.execute(
                     f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                     "WHERE is_active=1 AND repo_key=? ORDER BY id", (repo_key,))
@@ -145,11 +148,16 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
         created_by = ""
         if _has_cb and len(r) > col_offset:
             created_by = r[col_offset] or ""
+            col_offset += 1
+        icon = ""
+        if _has_icon and len(r) > col_offset:
+            icon = r[col_offset] or ""
         result.append({
             "scene_id": scene_id, "name": r[1], "description": r[2],
             "display_name": (r[5] if _has_dn and len(r) > 5 else "") or r[1],
             "nodes": nodes, "onboarding": r[4] or "repo-onboarding",
             "work_branch": work_branch, "created_by": created_by,
+            "icon": icon,
         })
     return result
 
@@ -195,7 +203,8 @@ def get_scenes(repo_key: str = "") -> list[dict]:
              "scope": "repo",
              "description": s.get("description") or "",
              "work_branch": s.get("work_branch") or "main",
-             "created_by": s.get("created_by") or ""} for s in db_scenes]
+             "created_by": s.get("created_by") or "",
+             "icon": s.get("icon") or ""} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
@@ -289,7 +298,7 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
 
 def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
-                        display_name: str = "", created_by: str = "") -> int:
+                        display_name: str = "", created_by: str = "", icon: str = "") -> int:
     """Create or reactivate a repo-scoped custom scene in DB. Returns DB id."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -309,6 +318,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
                 (name, description, nodes_json, onboarding, now, existing[0]))
             _try_set_display_name(c, existing[0], display_name or name)
             _try_set_created_by(c, existing[0], created_by)
+            _try_set_icon(c, existing[0], icon)
             db.commit()
             return existing[0]
         # Insert new record
@@ -319,6 +329,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
         new_id = c.lastrowid
         _try_set_display_name(c, new_id, display_name or name)
         _try_set_created_by(c, new_id, created_by)
+        _try_set_icon(c, new_id, icon)
         db.commit()
         return new_id
 
@@ -333,6 +344,14 @@ def _try_set_created_by(c, row_id: int, created_by: str):
         pass
 
 
+def _try_set_icon(c, row_id: int, icon: str):
+    """幂等写入 icon（列不存在时忽略）。"""
+    try:
+        c.execute("UPDATE devops_pipeline_scene SET icon=? WHERE id=?", (icon, row_id))
+    except Exception:
+        pass
+
+
 def _try_set_display_name(c, row_id: int, display_name: str):
     """幂等写入 display_name（列不存在时忽略，兼容旧库）。"""
     try:
@@ -342,7 +361,8 @@ def _try_set_display_name(c, row_id: int, display_name: str):
 
 
 def update_custom_scene(scene_id: str, repo_key: str,
-                        nodes: list, name: str | None = None, description: str | None = None):
+                        nodes: list, name: str | None = None, description: str | None = None,
+                        icon: str | None = None):
     """Update a repo-scoped custom scene."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -360,6 +380,9 @@ def update_custom_scene(scene_id: str, repo_key: str,
         if description is not None:  # None=不更新，空字符串=清空描述
             sets.append("description=?")
             params.append(description)
+        if icon is not None:
+            sets.append("icon=?")
+            params.append(icon)
         params.extend([scene_id, repo_key])
         c.execute(
             f"UPDATE devops_pipeline_scene SET {','.join(sets)} WHERE scene_id=? AND repo_key=? AND is_active=1",
