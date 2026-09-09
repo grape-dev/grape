@@ -604,7 +604,7 @@ function renderKnowledge() {
             </div>
             <div v-if="filteredList.length === 0 && !loading" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
             <div v-show="filteredList.length > 0 && !loading" class="kb-grid">
-              <div v-for="k in filteredList" :key="k.id || k.file_path" class="cd skill-card" :class="{ 'archived-card': k.archived }">
+              <div v-for="k in filteredList" :key="k.id || k.file_path" class="skill-card" :class="{ 'archived-card': k.archived }">
                 <div class="scn-card-bar" :class="sourceBarClass(k.source)"></div>
                 <div class="scn-card-body">
                   <div class="scn-card-head">
