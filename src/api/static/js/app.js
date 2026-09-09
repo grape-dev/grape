@@ -247,6 +247,10 @@ function loadAgentTypes() {
     }
   });
   function nav(view, param) {
+    // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
+    if (view === 'knowledge' && window._currentView === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
+      return;
+    }
     const repo = currentRepo();
     if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local') { loadRepos(); return; }
 
@@ -294,7 +298,10 @@ function loadAgentTypes() {
       _knowledgeVueApp = null;
     }
 
-    pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
+    // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不覆盖 DOM（避免 Vue 虚拟 DOM 不一致）
+    if (!(view === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp)) {
+      pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
+    }
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     // Issue #63: 切 tab 时主动取消旧请求 + 设全局 signal + 停定时轮询
@@ -375,7 +382,9 @@ function loadAgentTypes() {
       renderSkills();
     } else if (view === 'knowledge') {
       title.textContent = I18N.t('app.current_project');
-      renderKnowledge();
+      if (typeof _knowledgeVueApp === 'undefined' || !_knowledgeVueApp) {
+        renderKnowledge();
+      }
     } else if (view === 'runtimes') {
       title.textContent = I18N.t('app.current_project');
       if (typeof renderRuntimes !== 'function') {
