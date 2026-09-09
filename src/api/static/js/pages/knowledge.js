@@ -554,7 +554,7 @@ function renderKnowledge() {
 
             <!-- 筛选器 -->
             <div class="filter-bar">
-              <select v-model="filter.refStatus" class="kb-select">
+              <select v-if="activeTab === 'user'" v-model="filter.refStatus" class="kb-select">
                 <option value="">{{ t('filter_ref_all') }}</option>
                 <option value="linked">{{ t('filter_ref_linked') }}</option>
                 <option value="unlinked">{{ t('filter_ref_unlinked') }}</option>
