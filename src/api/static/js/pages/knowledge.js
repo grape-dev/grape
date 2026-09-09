@@ -27,9 +27,10 @@ function renderKnowledge() {
         view: 'list',
         list: [],
         loading: true,
-        filter: { source: '', refStatus: '', query: '' },
+        filter: { refStatus: '', query: '' },
         stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
         showArchived: false,
+        activeTab: 'all',
         page: 1,
         pageSize: 50,
         total: 0,
@@ -56,13 +57,6 @@ function renderKnowledge() {
         let result = this.list;
         if (!this.showArchived) {
           result = result.filter(k => !k.archived);
-        }
-        if (this.filter.source === 'system') {
-          result = result.filter(k => k.source === 'system');
-        } else if (this.filter.source === 'agent') {
-          result = result.filter(k => k.source === 'agent');
-        } else if (this.filter.source === 'manual') {
-          result = result.filter(k => k.source === 'manual');
         }
         if (this.filter.refStatus === 'linked') {
           result = result.filter(k => k.refs && k.refs.length > 0);
@@ -141,7 +135,8 @@ function renderKnowledge() {
           const repo = this.currentRepo();
           if (!repo) { this.loading = false; return; }
           const params = new URLSearchParams({ repo: repo, page: this.page, page_size: this.pageSize });
-          if (this.filter.source) params.set('source', this.filter.source);
+          const tabSource = { system: 'system', agent: 'agent', user: 'manual' };
+          if (tabSource[this.activeTab]) params.set('source', tabSource[this.activeTab]);
           const d = await API.get('/knowledge?' + params.toString());
           if (window._currentView !== 'knowledge') return;
           this.list = d.knowledge || [];
@@ -154,11 +149,8 @@ function renderKnowledge() {
           if (window._currentView === 'knowledge') this.loading = false;
         }
       },
-      filterByStats(type) {
-        if (type === 'system') this.filter.source = 'system';
-        else if (type === 'agent') this.filter.source = 'agent';
-        else if (type === 'user') this.filter.source = 'manual';
-        else if (type === 'unlinked') this.filter.refStatus = 'unlinked';
+      switchTab(tab) {
+        this.activeTab = tab;
         this.page = 1;
         this.loadList();
       },
@@ -529,32 +521,25 @@ function renderKnowledge() {
         <template v-if="view === 'list'">
           <div v-if="loading" class="loading">{{ t('loading') }}</div>
           <template v-else>
-            <div class="stats-bar">
-              <div class="stat-card" @click="filterByStats('system')">
-                <span class="stat-num">{{ statSystem() }}</span>
-                <span class="stat-label">{{ t('stats_system') }}</span>
-              </div>
-              <div class="stat-card" @click="filterByStats('agent')">
-                <span class="stat-num">{{ statAgent() }}</span>
-                <span class="stat-label">{{ t('stats_agent') }}</span>
-              </div>
-              <div class="stat-card" @click="filterByStats('user')">
-                <span class="stat-num">{{ statUser() }}</span>
-                <span class="stat-label">{{ t('stats_user') }}</span>
-              </div>
-              <div class="stat-card" @click="filterByStats('unlinked')">
-                <span class="stat-num">{{ statUnlinked() }}</span>
-                <span class="stat-label">{{ t('stats_unlinked') }}</span>
-              </div>
+            <!-- Tab 栏 -->
+            <div class="kb-tab-bar">
+              <button class="kb-tab" :class="{ active: activeTab === 'all' }" @click="switchTab('all')">
+                {{ t('stats_all') }} <span class="kb-tab-count">{{ stats.system + stats.agent + stats.manual }}</span>
+              </button>
+              <button class="kb-tab" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">
+                {{ t('stats_system') }} <span class="kb-tab-count">{{ statSystem() }}</span>
+              </button>
+              <button class="kb-tab" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">
+                {{ t('stats_agent') }} <span class="kb-tab-count">{{ statAgent() }}</span>
+              </button>
+              <button class="kb-tab" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">
+                {{ t('stats_user') }} <span class="kb-tab-count">{{ statUser() }}</span>
+              </button>
+              <button class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a);margin-left:auto" @click="openEntryModal">{{ t('entry_create') }}</button>
             </div>
 
+            <!-- 筛选器 -->
             <div class="filter-bar">
-              <select v-model="filter.source" class="kb-select">
-                <option value="">{{ t('filter_source_all') }}</option>
-                <option value="system">{{ t('source_system') }}</option>
-                <option value="agent">{{ t('source_agent') }}</option>
-                <option value="manual">{{ t('source_manual') }}</option>
-              </select>
               <select v-model="filter.refStatus" class="kb-select">
                 <option value="">{{ t('filter_ref_all') }}</option>
                 <option value="linked">{{ t('filter_ref_linked') }}</option>
@@ -564,7 +549,6 @@ function renderKnowledge() {
               <label class="kb-checkbox-label">
                 <input type="checkbox" v-model="showArchived"> {{ t('show_archived') }}
               </label>
-              <button class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a);margin-left:auto" @click="openEntryModal">{{ t('entry_create') }}</button>
             </div>
 
             <div v-if="filteredList.length === 0" class="ts t2" style="padding:12px">{{ t('empty') }}</div>

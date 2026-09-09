@@ -47,6 +47,7 @@
   "view": "View",
   "delete": "Delete",
   "stats_system": "System",
+  "stats_all": "All",
   "stats_agent": "Agent",
   "stats_user": "User",
   "stats_unlinked": "Unlinked",

@@ -47,6 +47,7 @@
   "view": "查看",
   "delete": "删除",
   "stats_system": "系统知识",
+  "stats_all": "全部",
   "stats_agent": "Agent 知识",
   "stats_user": "用户知识",
   "stats_unlinked": "未关联",

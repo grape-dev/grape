@@ -639,6 +639,9 @@
 .kb-tab{padding:8px 16px;font-size:13px;font-weight:500;color:var(--t3);border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
 .kb-tab.active{color:var(--t);border-bottom-color:var(--a);font-weight:600}
 .kb-tab:hover:not(.active){color:var(--t2)}
+.kb-tab-bar{display:flex;align-items:center;gap:0;margin-bottom:16px;border-bottom:1px solid var(--b)}
+.kb-tab-count{font-size:10px;color:var(--t3);background:var(--bg);padding:1px 6px;border-radius:8px;margin-left:4px}
+.kb-tab.active .kb-tab-count{color:var(--a);background:rgba(0,113,227,0.08)}
 .kb-scene-pick-scroll{max-height:360px;overflow-y:auto;padding-right:4px}
 .kb-scene-pick-scroll::-webkit-scrollbar{width:6px}
 .kb-scene-pick-scroll::-webkit-scrollbar-thumb{background:var(--bg);border-radius:3px}
