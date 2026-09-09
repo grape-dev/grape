@@ -464,13 +464,17 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 
 ### 6.9 知识列表 API 改动
 
-`GET /api/knowledge` 返回数据以 id 为主键，所有后续操作（编辑/查询详情/删除/关联管理）都以 id 为准。
+`GET /api/knowledge` 返回数据以 id 为主键，所有后续操作都以 id 为准。
 
 **权限校验**：`_check_repo_member(user, repo_key)` —— 只有当前仓库的成员（托管者或已加入）才能查看。新增知识和上传知识同样校验。
 
 **Tab 设计**：只有 3 个 tab（系统知识/Agent 知识/用户知识），无"全部"tab。每个 tab 按 source 筛选后端查询。
 
 **性能优化**：列表不返回 content 字段，不调 `_read_entry_content` 读文件——只返回 description。
+
+**统计接口独立**：`GET /api/knowledge/stats?repo=xxx` 只返回 `{system, agent, manual, unlinked}`，不与列表接口混合。tab 切换只调列表接口（局部刷新），统计只在首次加载和增删后刷新。
+
+**分页**：`page` + `page_size`（默认 20），返回 `total`。前端始终显示分页器。
 
 ```python
 # 每条知识返回的字段（不含 content，提高性能）：
@@ -487,7 +491,7 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
     "source_seq": 0,
     "created_by": "user1",
     "created_at": "2026-09-09 10:00:00",
-    "description": "用户填写的知识描述",  # 替代 content——列表只展示描述
+    "description": "用户填写的知识描述",
     "archived": 0,
     "refs": [...],
     "ref_summary": "全局",
@@ -495,247 +499,51 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 }
 ```
 
-**所有后续接口都以 id 主键为准**：
-
-| 接口 | 方法 | URL | 说明 |
-|------|------|-----|------|
-| 查询详情 | GET | `/api/knowledge/{id}` | 按 id 查询单条知识全文 |
-| 编辑 | PUT | `/api/knowledge/{id}` | 按 id 编辑知识内容 |
-| 删除 | DEL | `/api/knowledge/{id}` | 按 id 删除知识 |
-| 查看关联 | GET | `/api/knowledge/{id}/refs` | 按 id 查询关联列表 |
-| 新增关联 | POST | `/api/knowledge/{id}/refs` | 按 id 新增关联 |
-| 修改关联 | PUT | `/api/knowledge/ref/{ref_id}` | 按 ref_id 修改关联开关 |
-| 删除关联 | DEL | `/api/knowledge/ref/{ref_id}` | 按 ref_id 删除关联 |
-| 标记归档 | PUT | `/api/knowledge/{id}/archive` | 按 id 标记/取消归档 |
-| 读取全文 | GET | `/api/knowledge/content?repo=xxx&obs_key=xxx` | 保留现有（按 obs_key 读全文） |
-
-**`ref_summary` 生成规则**：
-- 有 `scene_id='' AND agent_type=''` 的关联 → "全局"
-- 有特定 `scene_id` 的关联 → "已关联 N 个场景"
-- 有特定 `agent_type` 的关联 → "已关联 {agent_type}"
-- 无关联记录 → "未关联"
-
-**`list_knowledge` 端点改动**（`knowledge.py:346`）：
-
-返回数据改为统一列表格式——不再分 `project` / `agents` 两层，改为 `knowledge` 统一数组：
-
-```python
-return {
-    "repo_key": repo_key,
-    "knowledge": all_knowledge,  # 统一列表，每条含 id + source + refs + ref_summary
-    "stats": {                   # 新增：统计数（前端统计卡片用）
-        "system": sum(1 for k in all_knowledge if k["source"] == "system"),
-        "agent": sum(1 for k in all_knowledge if k["source"] == "agent"),
-        "manual": sum(1 for k in all_knowledge if k["source"] == "manual"),
-        "unlinked": sum(1 for k in all_knowledge if not k.get("refs")),
-    },
-}
-```
-
-前端 `_flattenList` 简化为直接用 `d.knowledge` + `d.stats`。
-
----
-
 ### 6.10 前端 knowledge.js 改动方案——Vue 3 实现
 
-**当前 knowledge.js 结构**（340 行）：纯原生 JS，项目 tab / Agent tab 两 tab 切换 + 搜索过滤 + 查看全文 + 上传文档 + 删除文档。
+**引入 Vue 3**：下载到本地 vendor（`/static/js/vendor/vue.global.prod.min.js`），不影响其他页面。
 
-**改动方案**：知识库页面改用 Vue 3 本地 vendor 方式实现，不影响其他页面。
+**页面结构**：
+- 列表视图 + 详情视图（`view: 'list' | 'detail'`）
+- 列表视图：统计卡片（纯展示不联动）→ Tab 栏（系统/Agent/用户）→ 筛选器（搜索 + 查询按钮 + 归档开关 + 新增按钮）→ 卡片网格 → 分页器
+- 详情视图：返回按钮 → 头部卡片（标签 + 描述 + 元数据 + 操作按钮）→ 内容卡片（固定高度滚动）→ 关联管理（按 source 控制权限）
 
-**引入 Vue 3**：
+**Tab 栏**：药丸式（pill）风格，3 个 tab，无"全部"。切换时只调 `loadList()` 局部刷新，不重建 Vue。
 
-下载 Vue 3.4.30 prod min JS 到 `src/api/static/js/vendor/` 目录，`index.html` 新增引入，放在其他 JS 之前：
+**局部刷新**：
+- `firstLoad` 标记：首次加载时隐藏内容显示 loading，之后 loading 时只显示 spinner overlay
+- `v-show` 代替 `v-if` 控制列表显隐（保留 DOM，不重新创建）
+- `loadList` 只更新 `this.list` 和 `this.total`，Vue 响应式更新
+- `loadStats` 独立调用 `/api/knowledge/stats`，不影响列表
+- loading 时：spinner overlay + grid opacity 0.4（不消失，不闪烁）
 
-```html
-<script src="/static/js/vendor/vue.global.prod.min.js?v=1"></script>
-```
+**卡片样式**（参考场景中心 scene-market）：
+- `border-radius:18px` + `box-shadow:var(--sh)` + hover `translateY(-4px)` + 加重阴影
+- 底部按钮区：`border-top:1px solid var(--b)` 横线隔离 + `justify-content:flex-end` 靠右
+- 卡片内容展示 description（不展示 content）
+- `min-height:320px` 防止 loading 切换时高度抖动
 
-**Vue 应用结构**（v=18，最终版）：
+**详情页面按 source 控制权限**：
+| source | Agent 关联卡片 | 场景关联卡片 | 操作 |
+|--------|---------------|-------------|------|
+| system | 不显示 | 不显示 | 显示"自动加载"提示 |
+| agent | 只读（无增删按钮） | 只读（无增删按钮） | 只查看 |
+| manual | 完整配置（+按钮 + X 删除） | 完整配置（+按钮 + 搜索多选弹出层） | 可增删 |
 
-`renderKnowledge()` 创建 Vue 应用挂载到 `pageContent`，包含两个视图：列表视图 + 详情视图。
+**关联管理交互**：
+- Agent 关联：卡片式 + "+"按钮打开多选弹出层 + 已选项带 X 删除
+- 场景关联：卡片式 + "+"按钮打开弹窗（tab 切换场景市场/仓库场景 + 搜索 + 多选 + 分页）
+- 全局关联：pill 标签 + X 删除
 
-```javascript
-function renderKnowledge() {
-  const el = document.getElementById('pageContent');
-  if (!el) return;
+**分页器**：始终显示，`page / totalPages (total)` + 20/50 每页切换。
 
-  // 卸载旧的 Vue 应用
-  if (_knowledgeVueApp) { _knowledgeVueApp.unmount(); _knowledgeVueApp = null; }
+**新增知识 modal**：描述输入框 + 内容 textarea + Agent 类型下拉。
 
-  _knowledgeVueApp = Vue.createApp({
-    data() {
-      return {
-        view: 'list',          // 'list' | 'detail'
-        list: [],              // 知识列表
-        loading: true,
-        filter: { source: '', refStatus: '', query: '' },
-        stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
-        showArchived: false,
-        page: 1, pageSize: 50, total: 0,
-        editModal: null,       // 编辑 modal
-        entryModal: null,      // 新增 modal
-        detail: null,          // 详情数据
-        scenes: [],            // 场景列表（从 /api/scenes 加载）
-        agentTypes: AGENT_TYPES,  // 固定 Agent 类型列表
-        addAgentPopover: false,
-        addScenePopover: false,
-        sceneSearch: '',       // 场景搜索关键词
-        sceneSelected: [],     // 场景多选选中列表
-      };
-    },
-    // ... computed / methods / template
-  });
-  _knowledgeVueApp.mount(el);
-}
-```
-
-**列表视图**：
-
-- 4 个统计卡片（系统 / Agent / 用户 / 未关联），点击筛选
-- 筛选器：来源下拉（system/agent/manual）+ 关联状态下拉 + 全文搜索 + 归档开关
-- 知识卡片网格：固定高度 200px，内容 -webkit-line-clamp:4 截断，底部操作按钮
-- 卡片操作：查看（进详情页）/ 编辑 / 删除 / 归档
-
-**详情视图**（点击"查看"进入，按 id 查询 `GET /api/knowledge/{id}`）：
-
-- 返回按钮回到列表
-- 知识全文展示（Markdown 渲染）
-- 编辑 / 删除 / 归档操作按钮
-- 关联管理区域（3 个部分）：
-
-1. **生效范围**：全局标签（pill），带 X 删除 / + 添加
-2. **关联 Agent 类型**：标签式（pill），已选显示为圆角标签带 X 删除，点 + 打开弹出层选择
-3. **关联场景**：卡片式，已选显示为卡片带 X 删除，点 + 打开弹出层支持搜索 + 多选
-
-**Agent 标签交互**：
-
-```
-[全局生效 ×]                    ← 全局标签（蓝色 pill）
-[VOD ×] [Coding ×] [+ 添加 Agent] ← Agent 标签（橙色 pill）+ 添加按钮
-         ↓ 点击 + 添加 Agent
-    [弹出层]
-    VOD / Coding / QA / SRE / Chat  ← 未选的 Agent 类型
-```
-
-**场景卡片交互**：
-
-```
-[+ 添加场景]
-┌─────────────┐ ┌─────────────┐
-│ ×           │ │ ×           │   ← 已选场景卡片（带 X 删除）
-│ 场景名称     │ │ 另一个场景   │
-│ 64a98e90... │ │ df38599d... │   ← 场景 ID 缩略
-└─────────────┘ └─────────────┘
-
-    ↓ 点击 + 添加场景
-┌──────────────────────────────────┐
-│ 选择场景                          │
-│ [搜索场景名称或 ID...]            │   ← 搜索框
-│ ┌──────┐ ┌──────┐ ┌──────┐      │
-│ │测试图标│ │通用开发│ │华为云  │      │   ← 可选场景卡片（多选）
-│ │94781c │ │df3859 │ │f4d4c6 │      │   ← 选中后蓝色边框
-│ └──────┘ └──────┘ └──────┘      │
-│ 已选 2 个          [取消] [确认]   │   ← 底部统计 + 操作
-└──────────────────────────────────┘
-```
-
-**关键方法**：
-
-| 方法 | 用途 |
-|------|------|
-| `viewContent(k)` | 按 id 查询 `GET /api/knowledge/{id}`，进入详情视图 |
-| `backToList()` | 返回列表视图，重新加载 |
-| `loadScenes()` | 从 `GET /api/scenes?repo=xxx` 加载场景列表 |
-| `loadRefs(kid)` | 从 `GET /api/knowledge/{id}/refs` 加载关联记录 |
-| `removeAgentRef(tag)` | `PUT /api/knowledge/ref/{id}` enabled=false |
-| `addAgentByType(type)` | `POST /api/knowledge/{id}/refs` scene_id='', agent_type=type |
-| `toggleGlobalRef()` | 全局关联的添加/移除 |
-| `removeSceneRef(tag)` | `PUT /api/knowledge/ref/{id}` enabled=false |
-| `openScenePopover()` | 打开场景选择弹出层，清空搜索和选中 |
-| `toggleSceneSelect(id)` | 多选切换 |
-| `confirmAddScenes()` | 批量 POST 添加选中的场景 |
-| `quickDelete(k)` | 列表卡片快速删除 |
-| `quickArchive(k)` | 列表卡片快速归档 |
-| `quickEdit(k)` | 列表卡片快速编辑（进详情后打开编辑 modal） |
-
-**computed**：
-
-| 属性 | 用途 |
-|------|------|
-| `filteredList` | 列表筛选（source/refStatus/query/showArchived） |
-| `selectedAgentTags` | 已选 Agent 标签列表（enabled 的） |
-| `availableAgentTypes` | 未选的 Agent 类型（排除已选） |
-| `selectedSceneTags` | 已选场景标签列表（enabled 的） |
-| `availableScenes` | 未选的场景（排除已选 + 搜索过滤） |
-
-**Vue 应用生命周期管理**：
-
-- `renderKnowledge()` 创建 Vue 应用并 mount
-- `app.nav()` 切走时调 `_knowledgeVueApp.unmount()` 清理
-- 切回来时重新调 `renderKnowledge()` 重新创建
-
-**CSS 样式**（`app.css` 追加）：
-
-```css
-/* 列表卡片 */
-.kb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
-.kb-select { padding: 7px 10px; border: 1px solid var(--b); border-radius: var(--rd); font-size: 12px; background: var(--c); }
-.kb-input { padding: 7px 14px; border: 1px solid var(--b); border-radius: var(--rd); font-size: 12px; outline: none; background: var(--c); width: 200px; }
-.kb-textarea { width: 100%; min-height: 200px; padding: 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 13px; font-family: monospace; resize: vertical; }
-.kb-detail-content { font-size: 13px; line-height: 1.6; overflow-x: auto; }
-.kb-checkbox-label { font-size: 11px; color: var(--t3); display: flex; align-items: center; gap: 4px; cursor: pointer; }
-
-/* 标签（pill） */
-.kb-tag-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.kb-tag { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 980px; font-size: 11px; font-weight: 500; line-height: 1.4; }
-.kb-tag-global { background: rgba(0,113,227,0.1); color: #0071e3; }
-.kb-tag-agent { background: rgba(255,149,0,0.1); color: #ff9500; }
-.kb-tag-x { border: none; background: none; color: inherit; font-size: 14px; cursor: pointer; padding: 0; line-height: 1; opacity: 0.6; }
-.kb-tag-x:hover { opacity: 1; }
-.kb-tag-add { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 980px; border: 1px dashed var(--b); background: none; font-size: 11px; color: var(--t3); cursor: pointer; transition: background .15s, border-color .15s; }
-.kb-tag-add:hover { background: var(--bg); border-color: var(--a); color: var(--a); }
-
-/* Agent 弹出层 */
-.kb-popover { position: absolute; margin-top: 4px; padding: 6px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.08); z-index: 100; min-width: 200px; }
-.kb-popover-list { display: flex; flex-direction: column; gap: 2px; }
-.kb-popover-item { padding: 8px 12px; border: none; background: none; text-align: left; font-size: 12px; color: var(--t); cursor: pointer; border-radius: 8px; transition: background .1s; }
-.kb-popover-item:hover { background: rgba(0,113,227,0.06); color: var(--a); }
-
-/* 场景卡片 */
-.kb-scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
-.kb-scene-card { position: relative; padding: 14px; border-radius: 12px; transition: box-shadow .2s, transform .2s; }
-.kb-scene-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.08); transform: translateY(-1px); }
-.kb-scene-x { position: absolute; top: 8px; right: 8px; border: none; background: rgba(0,0,0,0.05); color: var(--t3); font-size: 14px; cursor: pointer; width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; line-height: 1; transition: background .15s; }
-.kb-scene-x:hover { background: rgba(0,0,0,0.1); color: var(--t); }
-.kb-scene-name { font-size: 12px; font-weight: 600; color: var(--t); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 20px; }
-.kb-scene-id { font-size: 10px; color: var(--t3); font-family: monospace; }
-
-/* 场景选择弹出层 */
-.kb-scene-pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
-.kb-scene-pick-item { padding: 10px 12px; border-radius: 10px; border: 2px solid var(--b); cursor: pointer; transition: border-color .15s, background .15s; }
-.kb-scene-pick-item:hover { background: rgba(0,113,227,0.04); }
-.kb-scene-pick-item.selected { border-color: var(--a); background: rgba(0,113,227,0.08); }
-.kb-scene-pick-name { font-size: 12px; font-weight: 500; color: var(--t); margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.kb-scene-pick-id { font-size: 10px; color: var(--t3); font-family: monospace; }
-
-/* 关联管理区域 */
-.kb-ref-section { margin-bottom: 16px; }
-.kb-ref-section-title { font-size: 12px; font-weight: 600; color: var(--t2); margin-bottom: 8px; }
-
-/* Modal */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 999; }
-.modal { width: 500px; max-width: 90vw; padding: 24px; border-radius: 14px; background: var(--c); box-shadow: 0 8px 32px rgba(0,0,0,0.15); }
-```
-
-**Playwright 验证结果**：
-
-- 列表 5 张卡片 + 4 统计卡片 ✅
-- 点击查看调 `GET /api/knowledge/{id}` ✅
-- 详情页面全文展示 ✅
-- Agent 标签（pill）+ X 删除 + 弹出层选择 ✅
-- 场景卡片 + X 删除 + 弹出层搜索 + 多选 + 确认回显 ✅
-- 返回列表 ✅
-- 无 console 错误 ✅
+**Vue 生命周期管理**：
+- `nav('knowledge')` 调 `renderKnowledge()` 创建 Vue 应用
+- `nav()` 切走时先 `unmount()` 再 `innerHTML = ''`
+- 已在 knowledge 页面时 `nav('knowledge')` 直接 return（防止重复 mount）
+- `renderKnowledge()` 里 `el.innerHTML = ''` 清空容器后再 mount
 
 ### 6.11 i18n 改动
 
