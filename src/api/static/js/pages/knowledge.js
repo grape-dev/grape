@@ -329,7 +329,7 @@ function renderKnowledge() {
           <div v-if="filteredList.length === 0" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
           <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">
             <div v-for="k in filteredList" :key="k.id || k.file_path" class="cd skill-card" style="padding:14px" :class="{ 'archived-card': k.archived }">
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+              <div class="card-header" style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
                 <span class="source-tag" :class="sourceClass(k.source)">{{ sourceLabel(k.source) }}</span>
                 <span v-if="k.ref_summary && k.ref_summary !== '未关联'" class="ref-tag">{{ k.ref_summary }}</span>
                 <span v-else class="ref-tag unlinked">{{ t('ref_unlinked') }}</span>
@@ -337,9 +337,11 @@ function renderKnowledge() {
                 <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
               </div>
               <div v-if="isFileTooLarge(k)" class="size-warning">⚠ {{ t('file_too_large', { size: fileSizeKB(k) }) }}</div>
-              <div style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:6px">{{ (k.content || '').substring(0, 200) }}</div>
-              <div style="font-size:10px;color:var(--t3);margin-bottom:8px">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</div>
-              <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <div class="card-content" :title="k.content || ''" style="font-size:11px;color:var(--t2);line-height:1.4;margin-bottom:6px">{{ k.content || '' }}</div>
+              <div class="card-footer" style="font-size:10px;color:var(--t3);margin-bottom:8px">
+                <span>{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
+              </div>
+              <div class="card-actions" style="display:flex;gap:6px;flex-wrap:wrap">
                 <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
                 <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" @click="editKnowledge(k)">{{ t('edit_save') }}</button>
                 <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="deleteKnowledge(k)">{{ t('delete') }}</button>
