@@ -636,33 +636,6 @@ function renderKnowledge() {
             <div class="ts t2" style="text-align:center">{{ t('ref_system_auto') }}</div>
           </div>
 
-          <!-- Agent 知识：只读查看关联 -->
-          <template v-if="detail.source === 'agent'">
-            <!-- Agent 关联（只读） -->
-            <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
-              <div class="cd-h" style="margin-bottom:14px"><h2 style="font-size:16px;font-weight:600">{{ t('ref_agent_title') }}</h2></div>
-              <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_agents_linked') }}</div>
-              <div v-else class="kb-scene-grid">
-                <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card">
-                  <div class="kb-scene-name">{{ tag.label }}</div>
-                  <div class="kb-scene-id">{{ tag.agentType }}</div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 场景关联（只读） -->
-            <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
-              <div class="cd-h" style="margin-bottom:14px"><h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2></div>
-              <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
-              <div v-else class="kb-scene-grid">
-                <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card">
-                  <div class="kb-scene-name">{{ tag.label }}</div>
-                  <div class="kb-scene-id">{{ String(tag.sceneId || '').substring(0, 12) }}...</div>
-                </div>
-              </div>
-            </div>
-          </template>
-
           <!-- 用户知识：可配置 Agent/场景 -->
           <template v-if="detail.source === 'manual'">
             <!-- Agent 关联卡片 -->
