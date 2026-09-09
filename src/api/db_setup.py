@@ -2179,8 +2179,9 @@ def _migrate_tables():
             c = db.cursor()
             _ensure_column(c, "devops_pipeline_scene", "advanced_options", "TEXT DEFAULT '{}'")
             _ensure_column(c, "devops_pipeline_scene", "created_by", "TEXT DEFAULT ''")
+            _ensure_column(c, "devops_pipeline_scene", "icon", "TEXT DEFAULT ''")
             db.commit()
-            log.info("Added devops_pipeline_scene.advanced_options + created_by columns")
+            log.info("Added devops_pipeline_scene.advanced_options + created_by + icon columns")
     except Exception as e:
         log.warning(f"Add devops_pipeline_scene.advanced_options/created_by column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
