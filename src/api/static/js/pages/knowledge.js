@@ -105,7 +105,7 @@ function renderKnowledge() {
         return this.detail.refs
           .filter(r => r.scene_id !== '' && r.enabled)
           .map(r => {
-            return { ref: r, sceneId: r.scene_id, label: r.scene_name || String(r.scene_id || '').substring(0, 8) };
+            return { ref: r, sceneId: r.scene_id, label: r.scene_display_name || r.scene_name || String(r.scene_id || '').substring(0, 8) };
           });
       },
       availableScenes() {
@@ -218,7 +218,6 @@ function renderKnowledge() {
           this.detail = d;
           this.view = 'detail';
           await this.loadScenes();
-          await this.loadRefs(k.id);
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
           app.showToast(e.message || I18N.t('common.load_failed'));
@@ -244,10 +243,11 @@ function renderKnowledge() {
         }
       },
       async loadRefs(kid) {
+        // 刷新详情以获取完整 refs（含 scene_name/pipeline 等）
         try {
-          const d = await API.get('/knowledge/' + kid + '/refs');
+          const d = await API.get('/knowledge/' + kid);
           if (this.detail && this.detail.id === kid) {
-            this.detail.refs = d.refs || [];
+            this.detail = d;
           }
         } catch (e) {
           // ignore
@@ -742,7 +742,7 @@ function renderKnowledge() {
               <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_agents_linked') }}</div>
               <div v-else class="scn-scroll-wrap">
                 <div class="scn-scroll-track">
-                  <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card" style="flex-shrink:0;width:200px">
+                  <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="kb-scene-card" style="flex-shrink:0;width:200px">
                     <button class="kb-scene-x" @click="removeAgentRef(tag)">×</button>
                     <div class="kb-scene-name">{{ tag.label }}</div>
                     <div class="kb-scene-id">{{ tag.agentType }}</div>
@@ -783,10 +783,22 @@ function renderKnowledge() {
               <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
               <div v-else class="scn-scroll-wrap">
                 <div class="scn-scroll-track">
-                  <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card" style="flex-shrink:0;width:260px">
-                    <button class="kb-scene-x" @click="removeSceneRef(tag)">×</button>
-                    <div class="kb-scene-name">{{ tag.label }}</div>
-                    <div class="kb-scene-id">{{ String(tag.sceneId || '').substring(0, 12) }}...</div>
+                  <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="scn-card" style="flex-shrink:0;width:300px;position:relative">
+                    <button class="kb-scene-x" style="z-index:5" @click="removeSceneRef(tag)">×</button>
+                    <div class="scn-card-bar" :class="sourceBarClass(detail.source)"></div>
+                    <div class="scn-card-body">
+                      <div class="scn-card-head">
+                        <div class="scn-ic bg-default">📦</div>
+                        <div class="scn-card-title">{{ tag.ref.scene_display_name || tag.label }}</div>
+                      </div>
+                      <div v-if="tag.ref.scene_description" class="scn-card-desc">{{ tag.ref.scene_description }}</div>
+                      <div v-if="tag.ref.scene_pipeline" class="scn-chain">
+                        <template v-for="(node, i) in tag.ref.scene_pipeline.split(' → ')" :key="i">
+                          <span v-if="i > 0" class="scn-arr">→</span>
+                          <span class="scn-tag">{{ node }}</span>
+                        </template>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

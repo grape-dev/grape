@@ -625,7 +625,7 @@
 .kb-popover-item{padding:8px 12px;border:none;background:none;text-align:left;font-size:12px;color:var(--t);cursor:pointer;border-radius:8px;transition:background .1s}
 .kb-popover-item:hover{background:rgba(0,113,227,0.06);color:var(--a)}
 .kb-scene-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
-.kb-scene-card{position:relative;padding:14px;border-radius:12px;transition:box-shadow .2s,transform .2s}
+.kb-scene-card{position:relative;padding:16px;border-radius:14px;transition:box-shadow .2s,transform .2s;background:var(--c);border:1px solid var(--b)}
 .kb-scene-card:hover{box-shadow:0 2px 8px rgba(0,0,0,0.04),0 8px 24px rgba(0,0,0,0.08);transform:translateY(-1px)}
 .kb-scene-x{position:absolute;top:8px;right:8px;border:none;background:rgba(0,0,0,0.05);color:var(--t3);font-size:14px;cursor:pointer;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;line-height:1;transition:background .15s}
 .kb-scene-x:hover{background:rgba(0,0,0,0.1);color:var(--t)}
