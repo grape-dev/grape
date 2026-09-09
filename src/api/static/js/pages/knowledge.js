@@ -33,6 +33,8 @@ function renderKnowledge() {
         createForm: null,
         sceneScrollLeft: false,
         sceneScrollRight: false,
+        createScenePopover: false,
+        createSceneSearch: '',
         list: [],
         loading: false,
         firstLoad: true,
@@ -116,6 +118,15 @@ function renderKnowledge() {
         let available = (this.repoScenes || []).filter(s => !selected.has(s.id));
         if (this.sceneSearch) {
           const q = this.sceneSearch.toLowerCase();
+          available = available.filter(s => (s.name || '').toLowerCase().includes(q) || (s.id || '').toLowerCase().includes(q));
+        }
+        return available;
+      },
+      availableCreateScenes() {
+        const selected = new Set(this.createForm?.sceneSelected || []);
+        let available = (this.repoScenes || []).filter(s => !selected.has(s.id));
+        if (this.createSceneSearch) {
+          const q = this.createSceneSearch.toLowerCase();
           available = available.filter(s => (s.name || '').toLowerCase().includes(q) || (s.id || '').toLowerCase().includes(q));
         }
         return available;
@@ -546,6 +557,16 @@ function renderKnowledge() {
         };
         this.view = 'create';
         this.loadScenes();
+        this.loadRepoScenes();
+      },
+      getSceneName(sid) {
+        const s = (this.repoScenes || []).find(x => x.id === sid);
+        return s ? s.name : String(sid || '').substring(0, 12);
+      },
+      openCreateScenePopover() {
+        this.createScenePopover = true;
+        this.createSceneSearch = '';
+        this.loadRepoScenes();
       },
       cancelCreate() {
         this.createForm = null;
@@ -865,38 +886,86 @@ function renderKnowledge() {
               <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_description') }}</label>
               <input v-model="createForm.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%">
             </div>
-            <div style="margin-bottom:12px">
+            <div style="margin-bottom:16px">
               <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_content') }}</label>
               <textarea v-model="createForm.content" rows="20" class="kb-textarea"></textarea>
             </div>
-            <!-- Agent 关联 -->
-            <div style="margin-bottom:16px">
-              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:6px">{{ t('ref_agent_title') }}</label>
-              <div style="display:flex;flex-wrap:wrap;gap:6px">
-                <span v-for="at in agentTypes.filter(a => a.value)" :key="at.value"
-                  class="kb-tag" :class="{ 'kb-tag-selected': createForm.agentSelected.includes(at.value) }"
-                  style="cursor:pointer;font-size:11px" @click="toggleCreateAgent(at.value)">
-                  {{ at.label }}
-                </span>
-              </div>
+          </div>
+
+          <!-- Agent 关联卡片（标签式，同详情页面） -->
+          <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
+            <div class="cd-h" style="margin-bottom:14px">
+              <h2 style="font-size:16px;font-weight:600">{{ t('ref_agent_title') }}</h2>
             </div>
-            <!-- 场景关联 -->
-            <div style="margin-bottom:16px">
-              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:6px">{{ t('ref_scene_title') }}</label>
-              <div style="display:flex;flex-wrap:wrap;gap:6px">
-                <span v-for="s in scenes" :key="s.id"
-                  class="kb-tag" :class="{ 'kb-tag-selected': createForm.sceneSelected.includes(s.id) }"
-                  style="cursor:pointer;font-size:11px" @click="toggleCreateScene(s.id)">
-                  {{ s.name }}
-                </span>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              <div v-for="at in agentTypes.filter(a => a.value)" :key="at.value"
+                class="kb-agent-tag" :class="{ 'kb-agent-selected': createForm.agentSelected.includes(at.value) }"
+                @click="toggleCreateAgent(at.value)">
+                <div class="kb-agent-name">{{ at.label }}</div>
+                <div v-if="at.desc" class="kb-agent-desc">{{ at.desc }}</div>
               </div>
-            </div>
-            <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:16px;border-top:1px solid var(--b)">
-              <button class="bt bt-o bt-s" @click="cancelCreate">{{ t('cancel') }}</button>
-              <button class="bt bt-p bt-s" @click="saveCreate">{{ t('confirm') }}</button>
             </div>
           </div>
+
+          <!-- 场景关联卡片（scn-card + 弹出层选择，同详情页面） -->
+          <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
+            <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+              <h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2>
+              <button class="kb-tag-add" style="font-size:10px" @click="openCreateScenePopover">+ {{ t('ref_add_scene') }}</button>
+            </div>
+            <div v-if="createForm.sceneSelected.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
+            <div v-else class="scn-scroll-wrap">
+              <div class="scn-scroll-track">
+                <div v-for="sid in createForm.sceneSelected" :key="sid" class="scn-card" style="flex-shrink:0;width:300px;position:relative">
+                  <button class="kb-scene-x" style="z-index:5" @click="toggleCreateScene(sid)">×</button>
+                  <div class="scn-card-bar bg-default"></div>
+                  <div class="scn-card-body">
+                    <div class="scn-card-head">
+                      <div class="scn-ic bg-default">📦</div>
+                      <div class="scn-card-title">{{ getSceneName(sid) }}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button class="bt bt-o bt-s" @click="cancelCreate">{{ t('cancel') }}</button>
+            <button class="bt bt-p bt-s" @click="saveCreate">{{ t('confirm') }}</button>
+          </div>
         </template>
+
+        <!-- 新增页面场景选择弹出层 -->
+        <div v-if="createScenePopover" class="modal-overlay" @click.self="createScenePopover = false">
+          <div class="modal cd" style="width:720px;max-width:92vw">
+            <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
+            <input v-model="createSceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
+            <div style="max-height:400px;overflow-y:auto;padding-right:4px">
+              <div v-if="availableCreateScenes.length === 0" class="ts t2" style="padding:24px;text-align:center">{{ t('ref_no_available') }}</div>
+              <div v-else class="rgrid" style="gap:12px">
+                <div v-for="s in availableCreateScenes" :key="s.id" class="scn-card"
+                     :class="{ 'kb-pick-selected': createForm.sceneSelected.includes(s.id) }"
+                     style="cursor:pointer;position:relative"
+                     @click="toggleCreateScene(s.id)">
+                  <div v-if="createForm.sceneSelected.includes(s.id)" class="kb-pick-check">✓</div>
+                  <div class="scn-card-bar bg-default"></div>
+                  <div class="scn-card-body">
+                    <div class="scn-card-head">
+                      <div class="scn-ic bg-default">📦</div>
+                      <div class="scn-card-title">{{ s.name }}</div>
+                    </div>
+                    <div v-if="s.desc" class="scn-card-desc">{{ s.desc }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
+              <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: createForm.sceneSelected.length }) }}</span>
+              <button class="bt bt-o bt-s" @click="createScenePopover = false">{{ t('confirm') }}</button>
+            </div>
+          </div>
+        </div>
       </div>
     `,
   });
