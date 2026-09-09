@@ -295,49 +295,56 @@ function _renderPipelineSection(data) {
 }
 
 function _renderBoard(filtered) {
-  // Issue #43: 看板列按 task.stage 阶段分组（VOD / ISSUE / Coding / QA / SRE）
-  const stageCols = ['vod', 'issue', 'coding', 'qa', 'sre', 'done', 'cancelled'];
-  const stageLabels = {
-    vod: I18N.t('tasks.stage_vod'),
-    issue: I18N.t('tasks.stage_issue'),
-    coding: I18N.t('tasks.stage_coding'),
-    qa: I18N.t('tasks.stage_qa'),
-    sre: I18N.t('tasks.stage_sre'),
+  // 看板列按 task.status 严格分组
+  const statusCols = ['pending', 'in_progress', 'awaiting_input', 'pending_review', 'done', 'cancelled'];
+  const statusLabels = {
+    pending: I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g,'') : '待处理',
+    in_progress: I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g,'') : '进行中',
+    awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
+    pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
     done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
-    cancelled: I18N.t('tasks.status.tag_cancelled') || '已取消'
+    cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消'
+  };
+  const statusColors = {
+    pending: '#86868b', in_progress: '#3b82f6', awaiting_input: '#f59e0b',
+    pending_review: '#10b981', done: '#34c759', cancelled: '#86868b'
+  };
+  const stageLabels = {
+    vod: 'VOD', issue: 'ISSUE', coding: 'Coding', qa: 'QA',
+    sre: 'SRE', pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
+    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
+    '': '—'
   };
   const stageColors = {
     vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7',
-    sre: '#f59e0b', done: '#34c759', cancelled: '#86868b'
+    sre: '#f59e0b', pending_review: '#10b981', done: '#34c759', '': '#86868b'
   };
-  // task → 看板列映射（按阶段分列）
-  function _mapStage(t) {
+  // task.status → 看板列映射
+  function _mapStatus(t) {
     if (t.status === 'cancelled') return 'cancelled';
     if (t.status === 'completed' || t.stage === 'done') return 'done';
-    if (t.stage === 'pending_review') return 'done';
-    const _s = t.stage || '';
-    if (['vod', 'issue', 'coding', 'qa', 'sre', 'sre_completed'].includes(_s)) {
-      return _s === 'sre_completed' ? 'sre' : _s;
-    }
-    // 无 stage 的活跃任务 → VOD（等待 VOD 识别）
-    if (t.status === 'active' || t.status === 'processing') return 'vod';
-    return 'vod';
+    if (t.stage === 'pending_review') return 'pending_review';
+    if (t.status === 'awaiting_input') return 'awaiting_input';
+    const _activeStages = ['vod','issue','coding','qa','sre'];
+    if (_activeStages.includes(t.stage)) return 'in_progress';
+    if (t.status === 'processing') return 'in_progress';
+    return 'pending';
   }
   const grouped = {};
-  stageCols.forEach(s => grouped[s] = []);
-  filtered.forEach(t => { grouped[_mapStage(t)].push(t); });
+  statusCols.forEach(s => grouped[s] = []);
+  filtered.forEach(t => { grouped[_mapStatus(t)].push(t); });
 
   // 苹果风格看板：响应式列宽，水平滚动，列独立垂直滚动
   let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px">';
-  stageCols.forEach(s => {
+  statusCols.forEach(s => {
     const list = grouped[s];
-    const col = stageColors[s];
+    const col = statusColors[s];
     const dim = (s === 'cancelled') ? ';opacity:.65' : '';
     html += `<div style="min-width:240px;max-width:300px;flex:1 1 240px;display:flex;flex-direction:column;background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed)${dim}">`;
     // 列头：颜色圆点 + 名称 + 计数
     html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
       <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
-      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${stageLabels[s]}</span>
+      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${statusLabels[s]}</span>
       <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${list.length}</span>
     </div>`;
     // 卡片容器：独立垂直滚动
@@ -346,24 +353,15 @@ function _renderBoard(filtered) {
       html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无任务'}</div>`;
     } else {
       list.forEach(t => {
-        const _status = t.status || '';
         const _stage = t.stage || '';
-        // 卡片内展示状态标签
-        const _statusLabel = _status === 'cancelled' ? (I18N.t('tasks.status.tag_cancelled')||'已取消') :
-          _status === 'completed' ? (I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成') :
-          _status === 'processing' ? (I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g,'') : '进行中') :
-          _stage === 'pending_review' ? (I18N.t('tasks.status.tag_pending_review')||'待审核') :
-          (I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g,'') : '待处理');
-        const _statusColor = _status === 'cancelled' ? '#86868b' :
-          _status === 'completed' ? '#34c759' :
-          _status === 'processing' ? '#3b82f6' :
-          _stage === 'pending_review' ? '#10b981' : '#86868b';
+        const _stageLabel = stageLabels[_stage] || _stage || '—';
+        const _stageColor = stageColors[_stage] || '#86868b';
         const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
         html += `<div onclick="_openBoardDetail(${t.id})" style="background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
             <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#'+t.issue_number : ''}</span>
-            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_statusColor};font-weight:600;background:${_statusColor}15;border-radius:4px;padding:2px 6px">
-              ${_statusLabel}
+            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px">
+              ${_stageLabel}
             </span>
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
