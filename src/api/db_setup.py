@@ -1183,64 +1183,6 @@ def _init_skill_featured():
         log.warning(f"Init skill featured failed: {e}")
 
 
-def _seed_featured_templates_from_json():
-    """从 configs/project-templates.json 种入 featured_templates 表（幂等自愈）。
-
-    Issue #56：优选项目 Tab 列表为空。根因：DB featured_templates 表为空（同步脚本
-    依赖外部 GitCode/GitHub API + 有效 token，环境里常未跑通），而 /top1000 API 直查
-    空表返回空列表 → 前端 Tab 无卡片。本函数用已随仓库发布的 JSON 兜底：仅当表为空时
-    把 gitcode-featured/github-featured 两个分类反向映射为 DB 行写入，使 API 即时返回
-    非空数据。同步脚本后续仍可 INSERT OR REPLACE 覆盖为最新真实数据。
-    """
-    try:
-        config_path = os.path.join(_CONFIG_DIR, "project-templates.json")
-        if not os.path.exists(config_path):
-            log.info("project-templates.json not found, skip featured_templates seed")
-            return
-        with db_lock:
-            c = db.cursor()
-            # 仅表为空时种入——不挡同步脚本后续 INSERT OR REPLACE，DB 被清空后下次启动自愈
-            cnt = c.execute("SELECT COUNT(*) FROM featured_templates").fetchone()[0]
-            if cnt > 0:
-                return
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        featured_cats = [cat for cat in (data.get("categories") or [])
-                         if cat.get("id") in ("gitcode-featured", "github-featured")]
-        if not featured_cats:
-            log.info("No featured categories in project-templates.json, skip seed")
-            return
-        import datetime as _dt
-        now = _dt.datetime.now().isoformat()
-        inserted = 0
-        with db_lock:
-            c = db.cursor()
-            for cat in featured_cats:
-                platform = cat.get("platform") or ("gitcode" if "gitcode" in cat.get("id", "") else "github")
-                for t in (cat.get("templates") or []):
-                    stats = t.get("stats") or {}
-                    repo_full_name = t.get("source_repo") or ""
-                    if not repo_full_name:
-                        continue
-                    c.execute(
-                        "INSERT OR REPLACE INTO featured_templates "
-                        "(platform, repo_full_name, repo_name, description, language, "
-                        "stars, forks, topics, html_url, clone_url, category, recommend_reason, fetched_at) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (platform, repo_full_name, t.get("name") or t.get("display_name") or "",
-                         (t.get("description") or "")[:200], stats.get("language") or "",
-                         stats.get("stars") or 0, 0,
-                         json.dumps(t.get("tags") or [], ensure_ascii=False),
-                         t.get("html_url") or "", t.get("clone_url") or "",
-                         "cloud-native", t.get("recommend_reason") or "", now)
-                    )
-                    inserted += 1
-            db.commit()
-        log.info(f"Seeded featured_templates with {inserted} items from project-templates.json")
-    except Exception as e:
-        log.warning(f"Seed featured_templates from json failed: {e}")
-
-
 def init_database():
     """初始化所有新表(幂等),启动时调用"""
     # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
@@ -1257,7 +1199,6 @@ def init_database():
                 # 迁移逻辑在同一个 with db_lock 块内——同一个连接
                 # db_lock 是 RLock（可重入）——_create_tables() 等内部 with db_lock 不会死锁
                 _create_tables()
-                _seed_featured_templates_from_json()
                 _migrate_tables()
                 _create_indexes()
                 _seed_from_json()
@@ -1282,7 +1223,6 @@ def init_database():
     else:
         # SQLite——单实例不需要锁
         _create_tables()
-        _seed_featured_templates_from_json()
         _migrate_tables()
         _create_indexes()
         _seed_from_json()
