@@ -6,6 +6,7 @@ var _knowledgeVueApp = null;
 const AGENT_TYPES = [
   { value: '', label: '全部 Agent', desc: '' },
   { value: 'vod', label: 'VOD', desc: '需求分析、拆解 Issue、规划开发路径' },
+  { value: 'issue', label: 'Issue', desc: '需求拆解、任务规划、Issue 管理' },
   { value: 'coding', label: 'Coding', desc: '代码实现、修复缺陷、创建 PR' },
   { value: 'qa', label: 'QA', desc: '代码审查、测试验证、质量把关' },
   { value: 'sre', label: 'SRE', desc: '部署发布、监控告警、运维排障' },
