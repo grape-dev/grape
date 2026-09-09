@@ -79,6 +79,12 @@ function renderKnowledge() {
       t(key, params) {
         return I18N.t('knowledge.' + key, params || {});
       },
+      currentRepo() {
+        try {
+          const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+          return c ? (c.fullName || '') : '';
+        } catch { return ''; }
+      },
       async loadList() {
         this.loading = true;
         try {
