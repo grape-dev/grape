@@ -250,7 +250,7 @@ async def create_from_template(body: CreateTemplateRequest,
         if repo_created:
             cleanup_stale_repo_data(repo_key)
         set_repo_scene(repo_key, scene_id)
-        trigger_onboarding(repo_key, owner)
+        trigger_onboarding(repo_key, owner, template_id=body.template_id)
     except Exception as e:
         log.warning(f"template onboarding trigger failed: {e}")
 
