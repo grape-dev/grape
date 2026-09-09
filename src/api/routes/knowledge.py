@@ -1138,13 +1138,30 @@ def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
     username = str(user.get("username") or "")
     try:
         with db_lock:
-            db.cursor().execute(
-                "INSERT INTO scene_knowledge_ref "
-                "(knowledge_id, scene_id, agent_type, enabled, created_by) "
-                "VALUES (?, ?, ?, 1, ?)",
-                (knowledge_id, scene_id, agent_type, username)
-            )
-            db.commit()
+            c = db.cursor()
+            # 先查有没有已存在（含 enabled=0 软删除）的记录
+            existing = c.execute(
+                "SELECT id, enabled FROM scene_knowledge_ref "
+                "WHERE knowledge_id=? AND scene_id=? AND agent_type=?",
+                (knowledge_id, scene_id, agent_type)
+            ).fetchone()
+            if existing:
+                # 已存在 → UPDATE enabled=1（恢复软删除的记录）
+                if existing[1] == 0:
+                    c.execute(
+                        "UPDATE scene_knowledge_ref SET enabled=1, updated_by=? WHERE id=?",
+                        (username, existing[0])
+                    )
+                    db.commit()
+                # enabled=1 的记录直接跳过（已绑定）
+            else:
+                c.execute(
+                    "INSERT INTO scene_knowledge_ref "
+                    "(knowledge_id, scene_id, agent_type, enabled, created_by) "
+                    "VALUES (?, ?, ?, 1, ?)",
+                    (knowledge_id, scene_id, agent_type, username)
+                )
+                db.commit()
     except Exception as e:
         err_msg = str(e).upper()
         if "UNIQUE" in err_msg or "DUPLICATE" in err_msg:

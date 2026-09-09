@@ -264,7 +264,7 @@ function renderKnowledge() {
       },
       async removeAgentRef(tag) {
         try {
-          await API.put('/knowledge/ref/' + tag.ref.id, { enabled: false });
+          await API.del('/knowledge/ref/' + tag.ref.id);
           tag.ref.enabled = false;
         } catch (e) {
           app.showToast(e.message);
@@ -294,8 +294,8 @@ function renderKnowledge() {
         const existing = this.detailGlobalRef;
         if (existing) {
           try {
-            await API.put('/knowledge/ref/' + existing.id, { enabled: !existing.enabled });
-            existing.enabled = !existing.enabled;
+            await API.del('/knowledge/ref/' + existing.id);
+            existing.enabled = false;
           } catch (e) {
             app.showToast(e.message);
           }
@@ -313,7 +313,7 @@ function renderKnowledge() {
       // 场景标签操作
       async removeSceneRef(tag) {
         try {
-          await API.put('/knowledge/ref/' + tag.ref.id, { enabled: false });
+          await API.del('/knowledge/ref/' + tag.ref.id);
           tag.ref.enabled = false;
         } catch (e) {
           app.showToast(e.message);
@@ -819,36 +819,38 @@ function renderKnowledge() {
               </div>
             </div>
 
-            <!-- 场景选择弹出层（tab + 卡片 + 搜索 + 分页） -->
+            <!-- 场景选择弹出层 -->
             <div v-if="addScenePopover" class="modal-overlay" @click.self="addScenePopover = false">
-              <div class="modal cd" style="width:680px;max-width:92vw">
+              <div class="modal cd" style="width:720px;max-width:92vw">
                 <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
 
                 <!-- 搜索 -->
                 <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
 
                 <!-- 场景列表（固定高度滚动） -->
-                <div class="kb-scene-pick-scroll">
+                <div class="kb-scene-pick-scroll" style="max-height:400px;overflow-y:auto;padding-right:4px">
                   <div v-if="availableScenes.length === 0" class="ts t2" style="padding:24px;text-align:center">{{ t('ref_no_available') }}</div>
-                  <div v-else class="kb-scene-pick-grid">
-                    <div v-for="s in availableScenes" :key="s.id" class="kb-scene-pick-card"
-                         :class="{ selected: sceneSelected.includes(s.id) }"
+                  <div v-else class="rgrid" style="gap:12px">
+                    <div v-for="s in availableScenes" :key="s.id" class="scn-card"
+                         :class="{ 'kb-pick-selected': sceneSelected.includes(s.id) }"
+                         style="cursor:pointer;position:relative"
                          @click="toggleSceneSelect(s.id)">
-                      <div class="kb-scene-pick-bar"></div>
-                      <div class="kb-scene-pick-card-body">
-                        <div class="kb-scene-pick-name">{{ s.name }}</div>
-                        <div v-if="s.desc" class="kb-scene-pick-desc">{{ s.desc }}</div>
-                        <div class="kb-scene-pick-id">{{ String(s.id || '').substring(0, 16) }}</div>
+                      <div v-if="sceneSelected.includes(s.id)" class="kb-pick-check">✓</div>
+                      <div class="scn-card-bar bg-default"></div>
+                      <div class="scn-card-body">
+                        <div class="scn-card-head">
+                          <div class="scn-ic bg-default">📦</div>
+                          <div class="scn-card-title">{{ s.name }}</div>
+                        </div>
+                        <div v-if="s.desc" class="scn-card-desc">{{ s.desc }}</div>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                <!-- 底部：分页 + 操作 -->
+                <!-- 底部：已选数量 + 操作 -->
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
-                  <div style="display:flex;align-items:center;gap:8px">
-                    <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
-                  </div>
+                  <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
                   <div style="display:flex;gap:8px">
                     <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
                     <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>

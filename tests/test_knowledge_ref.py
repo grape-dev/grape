@@ -210,10 +210,11 @@ class TestKnowledgeRef:
         client.post(f"/api/knowledge/{test_knowledge['manual_id']}/refs",
                     json={"scene_id": "dup-scene", "agent_type": "qa"},
                     headers=auth_headers)
+        # 第二次 POST 同样的关联——幂等跳过，返回 200
         r = client.post(f"/api/knowledge/{test_knowledge['manual_id']}/refs",
                         json={"scene_id": "dup-scene", "agent_type": "qa"},
                         headers=auth_headers)
-        assert r.status_code == 409
+        assert r.status_code == 200
 
     def test_toggle_ref(self, auth_headers, test_knowledge):
         client.post(f"/api/knowledge/{test_knowledge['manual_id']}/refs",
