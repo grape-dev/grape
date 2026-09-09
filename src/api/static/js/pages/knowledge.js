@@ -4,12 +4,12 @@
 var _knowledgeVueApp = null;
 
 const AGENT_TYPES = [
-  { value: '', label: '全部 Agent' },
-  { value: 'vod', label: 'VOD' },
-  { value: 'coding', label: 'Coding' },
-  { value: 'qa', label: 'QA' },
-  { value: 'sre', label: 'SRE' },
-  { value: 'chat', label: 'Chat' },
+  { value: '', label: '全部 Agent', desc: '' },
+  { value: 'vod', label: 'VOD', desc: '需求分析、拆解 Issue、规划开发路径' },
+  { value: 'coding', label: 'Coding', desc: '代码实现、修复缺陷、创建 PR' },
+  { value: 'qa', label: 'QA', desc: '代码审查、测试验证、质量把关' },
+  { value: 'sre', label: 'SRE', desc: '部署发布、监控告警、运维排障' },
+  { value: 'chat', label: 'Chat', desc: '对话交互、知识沉淀、流程控制' },
 ];
 
 function renderKnowledge() {
@@ -259,9 +259,27 @@ function renderKnowledge() {
       },
 
       // Agent 标签操作
+      isAgentSelected(agentType) {
+        if (!this.detail || !this.detail.refs) return false;
+        return this.detail.refs.some(r => r.agent_type === agentType && r.scene_id === '' && r.enabled);
+      },
       agentLabel(agentType) {
         const at = AGENT_TYPES.find(a => a.value === agentType);
         return at ? at.label : agentType;
+      },
+      async toggleAgentRef(agentType) {
+        const kid = this.detail.id;
+        if (this.isAgentSelected(agentType)) {
+          // 已选 → 删除
+          const ref = this.detail.refs.find(r => r.agent_type === agentType && r.scene_id === '' && r.enabled);
+          if (ref) {
+            try { await API.del('/knowledge/ref/' + ref.id); } catch(e) { app.showToast(e.message); }
+          }
+        } else {
+          // 未选 → 添加
+          try { await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [agentType] }); } catch(e) { app.showToast(e.message); }
+        }
+        await this.loadRefs(kid);
       },
       async removeAgentRef(tag) {
         try {
@@ -721,50 +739,21 @@ function renderKnowledge() {
 
           <!-- 用户知识：可配置 Agent/场景 -->
           <template v-if="detail.source === 'manual'">
-            <!-- Agent 关联卡片 -->
+            <!-- Agent 关联卡片（标签式，点击切换） -->
             <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
               <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
                 <h2 style="font-size:16px;font-weight:600">{{ t('ref_agent_title') }}</h2>
-                <div style="display:flex;align-items:center;gap:8px">
-                  <span v-if="isGlobalChecked()" class="kb-tag kb-tag-global" style="font-size:10px">
-                    {{ t('ref_global_short') }}
-                    <button class="kb-tag-x" @click="toggleGlobalRef">×</button>
-                  </span>
-                  <button v-if="!isGlobalChecked()" class="kb-tag-add" style="font-size:10px" @click="toggleGlobalRef">+ {{ t('ref_add_global') }}</button>
-                  <button class="kb-tag-add" style="font-size:10px" @click="openAgentPopover">+ {{ t('ref_add_agent') }}</button>
-                </div>
+                <span v-if="isGlobalChecked()" class="kb-tag kb-tag-global" style="font-size:10px;cursor:pointer" @click="toggleGlobalRef">
+                  {{ t('ref_global_short') }} ×
+                </span>
+                <button v-else class="kb-tag-add" style="font-size:10px" @click="toggleGlobalRef">+ {{ t('ref_add_global') }}</button>
               </div>
-              <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_agents_linked') }}</div>
-              <div v-else class="scn-scroll-wrap">
-                <div class="scn-scroll-track">
-                  <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="kb-scene-card" style="flex-shrink:0;width:200px">
-                    <button class="kb-scene-x" @click="removeAgentRef(tag)">×</button>
-                    <div class="kb-scene-name">{{ tag.label }}</div>
-                    <div class="kb-scene-id">{{ tag.agentType }}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Agent 选择弹出层（多选） -->
-            <div v-if="addAgentPopover" class="modal-overlay" @click.self="addAgentPopover = false">
-              <div class="modal cd" style="width:480px">
-                <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_agents') }}</h3>
-                <div v-if="availableAgentTypes.length === 0" class="ts t2" style="padding:12px">{{ t('ref_no_available') }}</div>
-                <div v-else class="kb-scene-pick-grid">
-                  <div v-for="at in availableAgentTypes" :key="at.value" class="kb-scene-pick-item"
-                       :class="{ selected: agentSelected.includes(at.value) }"
-                       @click="toggleAgentSelect(at.value)">
-                    <div class="kb-scene-pick-name">{{ at.label }}</div>
-                    <div class="kb-scene-pick-id">{{ at.value }}</div>
-                  </div>
-                </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
-                  <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: agentSelected.length }) }}</span>
-                  <div style="display:flex;gap:8px">
-                    <button class="bt bt-o bt-s" @click="addAgentPopover = false">{{ t('cancel') }}</button>
-                    <button class="bt bt-p bt-s" :disabled="agentSelected.length === 0" @click="confirmAddAgents">{{ t('confirm') }}</button>
-                  </div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px">
+                <div v-for="at in agentTypes.filter(a => a.value)" :key="at.value"
+                  class="kb-agent-tag" :class="{ 'kb-agent-selected': isAgentSelected(at.value) }"
+                  @click="toggleAgentRef(at.value)">
+                  <div class="kb-agent-name">{{ at.label }}</div>
+                  <div v-if="at.desc" class="kb-agent-desc">{{ at.desc }}</div>
                 </div>
               </div>
             </div>
