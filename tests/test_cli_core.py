@@ -118,6 +118,14 @@ def test_a3_file_config(monkeypatch, tmp_path):
     assert (base, tok) == ("http://file", "file_tok")
 
 
+def test_a3b_injected_server_url_fallback(monkeypatch):
+    """GRAPE_BASE_URL 未设时，回退到服务端注入的 GRAPE_SERVER_URL（无 --base-url 也能用）。"""
+    monkeypatch.delenv("GRAPE_BASE_URL", raising=False)
+    monkeypatch.setenv("GRAPE_SERVER_URL", "http://injected:3000")
+    base, _tok = cli_config.resolve()
+    assert base == "http://injected:3000"
+
+
 # ===================== 契约加载 =====================
 
 def test_h1_first_fetch_caches(tmp_path, fake_fetch):

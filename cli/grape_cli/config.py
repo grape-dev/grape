@@ -48,7 +48,9 @@ def resolve(base_url: str = "", token: str = "", refresh: bool = False) -> tuple
     env = os.environ
 
     _base = (base_url or "").strip() or _CLI_PARAMS["base_url"] or \
-            (env.get("GRAPE_BASE_URL") or "").strip() or str(cfg.get("base_url") or "").strip()
+            (env.get("GRAPE_BASE_URL") or "").strip() or \
+            (env.get("GRAPE_SERVER_URL") or "").strip() or \
+            str(cfg.get("base_url") or "").strip()
     if not _base:
         _base = "http://localhost:8000"
 
