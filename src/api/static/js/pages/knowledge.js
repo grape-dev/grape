@@ -592,7 +592,7 @@ function renderKnowledge() {
             <div v-if="filteredList.length === 0 && !loading" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
             <div v-show="filteredList.length > 0 && !loading" class="kb-grid">
               <div v-for="k in filteredList" :key="k.id || k.file_path" class="cd skill-card" :class="{ 'archived-card': k.archived }">
-                <div style="padding:20px;display:flex;flex-direction:column;flex:1">
+                <div style="padding:16px;display:flex;flex-direction:column;flex:1">
                   <div class="card-header">
                     <span class="source-tag" :class="sourceClass(k.source)">{{ sourceLabel(k.source) }}</span>
                     <span v-if="k.ref_summary && k.ref_summary !== '未关联'" class="ref-tag">{{ k.ref_summary }}</span>
