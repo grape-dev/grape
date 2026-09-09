@@ -42,8 +42,8 @@ MANIFEST = [
     "src/api/knowledge.py",
     "src/agent/",
     "src/runtime/",
-    # grape CLI（agent 侧 `grape` 命令，vod 试点；install-worker.sh 生成 venv/bin/grape 启动器）
-    "cli/grape_cli/",
+    # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
+    # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
     "requirements-worker.txt",
 ]
 

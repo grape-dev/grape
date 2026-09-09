@@ -186,16 +186,14 @@ if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   fi
 fi
 
-# ===== 4.5 安装 grape CLI（包内 cli/grape_cli，供 agent 用 `grape` 命令）=====
-if [ -d "$INSTALL_DIR/cli/grape_cli" ]; then
-  cat > "$VENV/bin/grape" <<EOF
-#!/usr/bin/env bash
-# grape CLI 启动器（install-worker.sh 生成）：token/base_url 取自 agent env
-export PYTHONPATH="$INSTALL_DIR/cli:\${PYTHONPATH:-}"
-exec "$VENV/bin/python" -m grape_cli "\$@"
-EOF
-  chmod +x "$VENV/bin/grape"
+# ===== 4.5 安装 grape CLI（独立项目 grape-cli，2026-09-08 起不再随包内置）=====
+log "安装 grape CLI（gitcode.com/grape-dev/grape-cli）..."
+if "$VENV/bin/pip" install -q --no-cache-dir \
+    git+https://gitcode.com/grape-dev/grape-cli.git 2>/dev/null; then
+  chmod +x "$VENV/bin/grape" 2>/dev/null || true
   log "grape CLI 已装: $VENV/bin/grape（agent 内直接使用 \`grape ...\`）"
+else
+  log "警告: grape-cli 安装失败（网络/凭据），agent 内暂无 \`grape\` 命令；不影响 worker 运行"
 fi
 
 # ===== 5. 写入接入配置（凭据 + 主系统地址，权限 600）=====
