@@ -521,21 +521,24 @@ function renderKnowledge() {
         <template v-if="view === 'list'">
           <div v-if="loading" class="loading">{{ t('loading') }}</div>
           <template v-else>
-            <!-- Tab 栏 -->
-            <div class="kb-tab-bar">
-              <button class="kb-tab" :class="{ active: activeTab === 'all' }" @click="switchTab('all')">
-                {{ t('stats_all') }} <span class="kb-tab-count">{{ stats.system + stats.agent + stats.manual }}</span>
-              </button>
-              <button class="kb-tab" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">
-                {{ t('stats_system') }} <span class="kb-tab-count">{{ statSystem() }}</span>
-              </button>
-              <button class="kb-tab" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">
-                {{ t('stats_agent') }} <span class="kb-tab-count">{{ statAgent() }}</span>
-              </button>
-              <button class="kb-tab" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">
-                {{ t('stats_user') }} <span class="kb-tab-count">{{ statUser() }}</span>
-              </button>
-              <button class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a);margin-left:auto" @click="openEntryModal">{{ t('entry_create') }}</button>
+            <!-- 统计卡片 -->
+            <div class="stats-bar">
+              <div class="stat-card" :class="{ active: activeTab === 'all' }" @click="switchTab('all')">
+                <span class="stat-num">{{ stats.system + stats.agent + stats.manual }}</span>
+                <span class="stat-label">{{ t('stats_all') }}</span>
+              </div>
+              <div class="stat-card" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">
+                <span class="stat-num">{{ statSystem() }}</span>
+                <span class="stat-label">{{ t('stats_system') }}</span>
+              </div>
+              <div class="stat-card" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">
+                <span class="stat-num">{{ statAgent() }}</span>
+                <span class="stat-label">{{ t('stats_agent') }}</span>
+              </div>
+              <div class="stat-card" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">
+                <span class="stat-num">{{ statUser() }}</span>
+                <span class="stat-label">{{ t('stats_user') }}</span>
+              </div>
             </div>
 
             <!-- 筛选器 -->
@@ -549,6 +552,7 @@ function renderKnowledge() {
               <label class="kb-checkbox-label">
                 <input type="checkbox" v-model="showArchived"> {{ t('show_archived') }}
               </label>
+              <button class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a);margin-left:auto" @click="openEntryModal">{{ t('entry_create') }}</button>
             </div>
 
             <div v-if="filteredList.length === 0" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
