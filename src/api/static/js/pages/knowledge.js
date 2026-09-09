@@ -42,6 +42,13 @@ function renderKnowledge() {
         addScenePopover: false,
         sceneSearch: '',
         sceneSelected: [],
+        agentSelected: [],
+        sceneTab: 'market',
+        marketScenes: [],
+        marketPage: 1,
+        marketTotal: 0,
+        marketPageSize: 12,
+        repoScenes: [],
       };
     },
     computed: {
@@ -101,12 +108,13 @@ function renderKnowledge() {
           .filter(r => r.scene_id !== '' && r.enabled)
           .map(r => {
             const scene = this.scenes.find(s => s.id === r.scene_id);
-            return { ref: r, sceneId: r.scene_id, label: scene ? scene.name : r.scene_id.substring(0, 8) };
+            return { ref: r, sceneId: r.scene_id, label: scene ? scene.name : String(r.scene_id || '').substring(0, 8) };
           });
       },
       availableScenes() {
         const selected = new Set(this.selectedSceneTags.map(t => t.sceneId));
-        let available = this.scenes.filter(s => !selected.has(s.id));
+        let source = this.sceneTab === 'market' ? this.marketScenes : this.repoScenes;
+        let available = (source || []).filter(s => !selected.has(s.id));
         if (this.sceneSearch) {
           const q = this.sceneSearch.toLowerCase();
           available = available.filter(s => (s.name || '').toLowerCase().includes(q) || (s.id || '').toLowerCase().includes(q));
@@ -196,7 +204,7 @@ function renderKnowledge() {
           const d = await API.get('/scenes?repo=' + encodeURIComponent(repo));
           if (window._currentView !== 'knowledge') return;
           this.scenes = (d.scenes || []).map(s => ({
-            id: s.id || s.scene_id || '',
+            id: String(s.id || s.scene_id || ''),
             name: s.display_name || s.name || s.id || '',
           }));
         } catch (e) {
@@ -294,6 +302,59 @@ function renderKnowledge() {
         this.addScenePopover = true;
         this.sceneSearch = '';
         this.sceneSelected = [];
+        this.sceneTab = 'market';
+        this.marketPage = 1;
+        this.loadMarketScenes();
+        this.loadRepoScenes();
+      },
+      switchSceneTab(tab) {
+        this.sceneTab = tab;
+        this.sceneSearch = '';
+      },
+      async loadMarketScenes() {
+        try {
+          const d = await API.get('/scenes/market?scope=official&page=' + this.marketPage + '&page_size=' + this.marketPageSize);
+          if (window._currentView !== 'knowledge') return;
+          this.marketScenes = (d.scenes || []).map(s => ({
+            id: String(s.id || s.scene_id || ''),
+            name: s.display_name || s.name || '',
+            desc: s.market_description || s.description || '',
+            category: s.category_name || '',
+          }));
+          this.marketTotal = d.total || 0;
+        } catch (e) {
+          this.marketScenes = [];
+        }
+      },
+      async loadRepoScenes() {
+        try {
+          const repo = this.currentRepo();
+          const d = await API.get('/scenes?repo=' + encodeURIComponent(repo));
+          if (window._currentView !== 'knowledge') return;
+          this.repoScenes = (d.scenes || []).map(s => ({
+            id: String(s.id || s.scene_id || ''),
+            name: s.display_name || s.name || '',
+            desc: s.description || '',
+            category: '',
+          }));
+        } catch (e) {
+          this.repoScenes = [];
+        }
+      },
+      marketTotalPages() {
+        return Math.ceil(this.marketTotal / this.marketPageSize) || 1;
+      },
+      marketPrevPage() {
+        if (this.marketPage > 1) {
+          this.marketPage--;
+          this.loadMarketScenes();
+        }
+      },
+      marketNextPage() {
+        if (this.marketPage < this.marketTotalPages()) {
+          this.marketPage++;
+          this.loadMarketScenes();
+        }
       },
       toggleSceneSelect(sceneId) {
         const idx = this.sceneSelected.indexOf(sceneId);
@@ -318,6 +379,36 @@ function renderKnowledge() {
         }
         this.addScenePopover = false;
         this.sceneSelected = [];
+      },
+
+      // Agent 多选
+      openAgentPopover() {
+        this.addAgentPopover = true;
+        this.agentSelected = [];
+      },
+      toggleAgentSelect(agentType) {
+        const idx = this.agentSelected.indexOf(agentType);
+        if (idx >= 0) {
+          this.agentSelected.splice(idx, 1);
+        } else {
+          this.agentSelected.push(agentType);
+        }
+      },
+      async confirmAddAgents() {
+        const kid = this.detail.id;
+        let ok = 0;
+        for (const at of this.agentSelected) {
+          try {
+            await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: at });
+            ok++;
+          } catch (e) { /* ignore duplicates */ }
+        }
+        if (ok > 0) {
+          await this.loadRefs(kid);
+          app.showToast(this.t('ref_added_count', { count: ok }));
+        }
+        this.addAgentPopover = false;
+        this.agentSelected = [];
       },
 
       // 编辑
@@ -551,7 +642,7 @@ function renderKnowledge() {
                   <button class="kb-tag-x" @click="toggleGlobalRef">×</button>
                 </span>
                 <button v-if="!isGlobalChecked()" class="kb-tag-add" style="font-size:10px" @click="toggleGlobalRef">+ {{ t('ref_add_global') }}</button>
-                <button class="kb-tag-add" style="font-size:10px" @click="addAgentPopover = !addAgentPopover">+ {{ t('ref_add_agent') }}</button>
+                <button class="kb-tag-add" style="font-size:10px" @click="openAgentPopover">+ {{ t('ref_add_agent') }}</button>
               </div>
             </div>
             <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_agents_linked') }}</div>
@@ -562,12 +653,27 @@ function renderKnowledge() {
                 <div class="kb-scene-id">{{ tag.agentType }}</div>
               </div>
             </div>
-            <div v-if="addAgentPopover" class="kb-popover cd">
-              <div v-if="availableAgentTypes.length === 0" class="ts t2" style="padding:8px">{{ t('ref_no_available') }}</div>
-              <div v-else class="kb-popover-list">
-                <button v-for="at in availableAgentTypes" :key="at.value" class="kb-popover-item" @click="addAgentByType(at.value); addAgentPopover = false">
-                  {{ at.label }}
-                </button>
+          </div>
+
+          <!-- Agent 选择弹出层（多选） -->
+          <div v-if="addAgentPopover" class="modal-overlay" @click.self="addAgentPopover = false">
+            <div class="modal cd" style="width:480px">
+              <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_agents') }}</h3>
+              <div v-if="availableAgentTypes.length === 0" class="ts t2" style="padding:12px">{{ t('ref_no_available') }}</div>
+              <div v-else class="kb-scene-pick-grid">
+                <div v-for="at in availableAgentTypes" :key="at.value" class="kb-scene-pick-item"
+                     :class="{ selected: agentSelected.includes(at.value) }"
+                     @click="toggleAgentSelect(at.value)">
+                  <div class="kb-scene-pick-name">{{ at.label }}</div>
+                  <div class="kb-scene-pick-id">{{ at.value }}</div>
+                </div>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+                <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: agentSelected.length }) }}</span>
+                <div style="display:flex;gap:8px">
+                  <button class="bt bt-o bt-s" @click="addAgentPopover = false">{{ t('cancel') }}</button>
+                  <button class="bt bt-p bt-s" :disabled="agentSelected.length === 0" @click="confirmAddAgents">{{ t('confirm') }}</button>
+                </div>
               </div>
             </div>
           </div>
@@ -583,27 +689,52 @@ function renderKnowledge() {
               <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card">
                 <button class="kb-scene-x" @click="removeSceneRef(tag)">×</button>
                 <div class="kb-scene-name">{{ tag.label }}</div>
-                <div class="kb-scene-id">{{ tag.sceneId.substring(0, 12) }}...</div>
+                <div class="kb-scene-id">{{ String(tag.sceneId || '').substring(0, 12) }}...</div>
               </div>
             </div>
           </div>
 
-          <!-- 场景选择弹出层 -->
+          <!-- 场景选择弹出层（tab + 卡片 + 搜索 + 分页） -->
           <div v-if="addScenePopover" class="modal-overlay" @click.self="addScenePopover = false">
-            <div class="modal cd" style="width:560px">
+            <div class="modal cd" style="width:680px;max-width:92vw">
               <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
+
+              <!-- Tab 切换 -->
+              <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:1px solid var(--b)">
+                <button class="kb-tab" :class="{ active: sceneTab === 'market' }" @click="switchSceneTab('market')">{{ t('ref_tab_market') }}</button>
+                <button class="kb-tab" :class="{ active: sceneTab === 'repo' }" @click="switchSceneTab('repo')">{{ t('ref_tab_repo') }}</button>
+              </div>
+
+              <!-- 搜索 -->
               <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
-              <div v-if="availableScenes.length === 0" class="ts t2" style="padding:12px">{{ t('ref_no_available') }}</div>
-              <div v-else class="kb-scene-pick-grid" style="max-height:320px;overflow-y:auto">
-                <div v-for="s in availableScenes" :key="s.id" class="kb-scene-pick-item"
-                     :class="{ selected: sceneSelected.includes(s.id) }"
-                     @click="toggleSceneSelect(s.id)">
-                  <div class="kb-scene-pick-name">{{ s.name }}</div>
-                  <div class="kb-scene-pick-id">{{ (s.id || '').substring(0, 12) }}</div>
+
+              <!-- 场景列表（固定高度滚动） -->
+              <div class="kb-scene-pick-scroll">
+                <div v-if="availableScenes.length === 0" class="ts t2" style="padding:24px;text-align:center">{{ t('ref_no_available') }}</div>
+                <div v-else class="kb-scene-pick-grid">
+                  <div v-for="s in availableScenes" :key="s.id" class="kb-scene-pick-card"
+                       :class="{ selected: sceneSelected.includes(s.id) }"
+                       @click="toggleSceneSelect(s.id)">
+                    <div class="kb-scene-pick-bar"></div>
+                    <div class="kb-scene-pick-card-body">
+                      <div class="kb-scene-pick-name">{{ s.name }}</div>
+                      <div v-if="s.desc" class="kb-scene-pick-desc">{{ s.desc }}</div>
+                      <div class="kb-scene-pick-id">{{ String(s.id || '').substring(0, 16) }}</div>
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
-                <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
+
+              <!-- 底部：分页 + 操作 -->
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
+                  <template v-if="sceneTab === 'market' && marketTotal > marketPageSize">
+                    <button class="kb-page-btn" :disabled="marketPage <= 1" @click="marketPrevPage">‹</button>
+                    <span style="font-size:11px;color:var(--t3)">{{ marketPage }}/{{ marketTotalPages() }}</span>
+                    <button class="kb-page-btn" :disabled="marketPage >= marketTotalPages()" @click="marketNextPage">›</button>
+                  </template>
+                </div>
                 <div style="display:flex;gap:8px">
                   <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
                   <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>

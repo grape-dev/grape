@@ -102,5 +102,8 @@
   "confirm": "确认",
   "detail_content_title": "知识内容",
   "ref_no_agents_linked": "暂未关联任何 Agent",
-  "ref_global_short": "全局"
+  "ref_global_short": "全局",
+  "ref_select_agents": "选择 Agent",
+  "ref_tab_market": "场景市场",
+  "ref_tab_repo": "仓库场景"
 }

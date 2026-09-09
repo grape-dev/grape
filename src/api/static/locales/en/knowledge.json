@@ -102,5 +102,8 @@
   "confirm": "Confirm",
   "detail_content_title": "Content",
   "ref_no_agents_linked": "No agents linked yet",
-  "ref_global_short": "Global"
+  "ref_global_short": "Global",
+  "ref_select_agents": "Select Agents",
+  "ref_tab_market": "Scene Market",
+  "ref_tab_repo": "Repo Scenes"
 }
