@@ -563,7 +563,7 @@ function renderKnowledge() {
               <label class="kb-checkbox-label">
                 <input type="checkbox" v-model="showArchived"> {{ t('show_archived') }}
               </label>
-              <button class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a);margin-left:auto" @click="openEntryModal">{{ t('entry_create') }}</button>
+              <button v-if="activeTab === 'user'" class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a);margin-left:auto" @click="openEntryModal">{{ t('entry_create') }}</button>
             </div>
 
             <div v-if="filteredList.length === 0" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
