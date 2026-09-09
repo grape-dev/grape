@@ -30,6 +30,7 @@ EXPECTED_PUBLIC = {
     "tasks_status": ("put", "/api/tasks/{task_id}/status"),
     "tasks_status_get": ("get", "/api/tasks/{task_id}/status"),
     "tasks_complete": ("post", "/api/tasks/complete"),
+    "a2a_handoff": ("post", "/api/a2a"),
     "repos_member": ("get", "/api/repos/member"),
     "repos_managed": ("get", "/api/repos/managed"),
     "repos_deploy_url": ("get", "/api/repos/deploy-url/{owner}/{repo_name}"),

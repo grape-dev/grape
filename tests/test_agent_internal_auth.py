@@ -29,7 +29,14 @@ def _clean():
 
 
 def _stub(tok: str = ""):
-    return SimpleNamespace(headers={"Authorization": f"Bearer {tok}"} if tok else {})
+    class _Q:
+        def get(self, k, default=None):
+            return default
+    return SimpleNamespace(
+        headers={"authorization": f"Bearer {tok}" if tok else "",
+                 "Authorization": f"Bearer {tok}" if tok else "",
+                 "X-Bot-Token": ""},
+        query_params=_Q())
 
 
 def _seed_session(repo=REPO) -> str:
@@ -84,6 +91,16 @@ def test_a2a_reject_no_token_on_managed_repo():
 
 def test_a2a_unmanaged_defer_without_token():
     _authorize_a2a(_stub("anything"), REPO)  # 未托管仓库 → 放行交由下游
+
+
+# ===================== get_user_or_none（A2A 软认证） =====================
+
+def test_get_user_or_none_session_dict_and_garbage_none():
+    from src.api.deps import get_user_or_none
+    tok = _seed_session()
+    assert get_user_or_none(_stub(tok)) is not None
+    assert get_user_or_none(_stub("garbage")) is None
+    assert get_user_or_none(_stub("")) is None
 
 
 # ===================== _require_event_bot_token =====================

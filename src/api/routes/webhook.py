@@ -1,8 +1,9 @@
 """Webhook & A2A 端点 — 集成事件管道"""
 import json, os, time
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from src.config import log
+from src.api.deps import get_user_or_none
 from src.api.event_pipeline import run_pipeline
 
 router = APIRouter(tags=["webhook"])
@@ -146,9 +147,9 @@ def _authorize_a2a(request: Request, repo_key: str):
     raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid token"})
 
 
-@router.post("/api/a2a")
-async def a2a_endpoint(request: Request):
-    """Agent-to-Agent 协议端点：仅限内网调用"""
+@router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Agent 交办（A2A，grape a2a handoff）")
+async def a2a_endpoint(request: Request, user: dict | None = Depends(get_user_or_none)):
+    """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
     body = await request.json()
     agent_name = body.get("agent", "")
     payload = body.get("payload", {})
@@ -171,8 +172,15 @@ async def a2a_endpoint(request: Request):
     log.info(f"A2A: agent={agent_name}, repo={repository}")
     seq = 0
 
-    # 仓库级鉴权：bot token / 会话级临时 token（M2 试点）二选一
-    _authorize_a2a(request, repo_key)
+    # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
+    if user and user.get("auth_type") in ("jwt", "api_key"):
+        from src.user.db import get_managed_repos
+        managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
+        if repo_key not in managed:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
+    else:
+        # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
+        _authorize_a2a(request, repo_key)
 
     # Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
     from src.api.session_store import is_agent_enabled
