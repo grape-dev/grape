@@ -107,5 +107,8 @@
   "ref_select_agents": "Select Agents",
   "ref_tab_market": "Scene Market",
   "ref_tab_repo": "Repo Scenes",
-  "ref_system_auto": "System knowledge loads automatically, no configuration needed"
+  "ref_system_auto": "System knowledge loads automatically, no configuration needed",
+  "no_description": "No description provided",
+  "search_btn": "Search",
+  "entry_description": "Description (brief summary of this knowledge)"
 }

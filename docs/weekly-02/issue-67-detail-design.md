@@ -37,6 +37,51 @@ UPDATE agent_shared_knowledge SET source = 'manual' WHERE scope = 'member' AND (
 | `upload_knowledge()` | `src/api/routes/knowledge.py:472` | `source='manual'`（用户上传） |
 | `POST /api/knowledge/entry`（新增） | `src/api/routes/knowledge.py`（新增） | `source='manual'`（用户输入） |
 
+### 6.1.5 description 字段
+
+**DDL**（建表 + 迁移）：
+
+```sql
+-- 建表 DDL（db_setup.py）
+description TEXT DEFAULT ''  -- 知识描述：system/agent 自动生成，manual 用户填写
+
+-- 迁移（幂等 ALTER）
+ALTER TABLE agent_shared_knowledge ADD COLUMN description TEXT DEFAULT '';
+```
+
+**自动生成规则**（`write_knowledge` 里按 scope + agent_type 自动生成）：
+
+| scope | agent_type | 自动描述 |
+|-------|-----------|---------|
+| baseline | — | VOD 基线分析：项目代码结构图谱 / 项目能力清单 / 项目元数据（按文件名区分） |
+| project | vod | VOD Agent：需求分析、拆解 Issue、规划开发路径 沉淀的项目级经验 |
+| project | coding | Coding Agent：代码实现、修复缺陷、创建 PR 沉淀的项目级经验 |
+| project | qa | QA Agent：代码审查、测试验证、质量把关 沉淀的项目级经验 |
+| project | sre | SRE Agent：部署发布、监控告警、运维排障 沉淀的项目级经验 |
+| project | chat | Chat Agent：对话交互、知识沉淀、流程控制 沉淀的项目级经验 |
+| issue | — | Issue #N 对话沉淀的经验 |
+| issue_agent | vod/coding/qa/sre/chat | Issue #N {Agent职责} 沉淀的经验 |
+| member | — | 空（用户手动填写） |
+
+**baseline INSERT**（`sync_baselines_to_obs`）按文件名生成描述：
+- `project-graph.md` → "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）"
+- `project-capabilities.md` → "VOD 基线分析：项目能力清单（功能特性/支持能力）"
+- `.metadata.json` → "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）"
+
+**用户知识**（`POST /api/knowledge/entry`）：用户在新增 modal 填写描述，没填显示"当前用户没有填写描述"。
+
+**列表 API**（`list_knowledge`）：不返回 content 字段（提高性能），只返回 description。
+
+**详情 API**（`GET /api/knowledge/{id}`）：返回 description 字段，详情页面头部展示。
+
+**数据回填**（已有数据）：
+```sql
+UPDATE agent_shared_knowledge SET description='VOD 基线分析：项目能力清单' WHERE scope='baseline' AND (description IS NULL OR description='');
+UPDATE agent_shared_knowledge SET description='Agent 沉淀的项目级经验' WHERE scope='project' AND (description IS NULL OR description='');
+UPDATE agent_shared_knowledge SET description=CONCAT('Issue #', issue_num, ' 对话沉淀的经验') WHERE scope='issue' AND (description IS NULL OR description='');
+UPDATE agent_shared_knowledge SET description=CONCAT('Issue #', issue_num, ' ', agent_type, ' Agent 沉淀的经验') WHERE scope='issue_agent' AND (description IS NULL OR description='');
+```
+
 ### 6.2 prompt_builder 注入逻辑改动
 
 **当前逻辑**（`src/prompt_builder.py:907-934`）：
@@ -419,14 +464,20 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 
 ### 6.9 知识列表 API 改动
 
-`GET /api/knowledge` 返回数据以 id 为主键，所有后续操作（编辑/查询详情/删除/关联管理）都以 id 为准：
+`GET /api/knowledge` 返回数据以 id 为主键，所有后续操作（编辑/查询详情/删除/关联管理）都以 id 为准。
+
+**权限校验**：`_check_repo_member(user, repo_key)` —— 只有当前仓库的成员（托管者或已加入）才能查看。新增知识和上传知识同样校验。
+
+**Tab 设计**：只有 3 个 tab（系统知识/Agent 知识/用户知识），无"全部"tab。每个 tab 按 source 筛选后端查询。
+
+**性能优化**：列表不返回 content 字段，不调 `_read_entry_content` 读文件——只返回 description。
 
 ```python
-# 每条知识必须返回 id 主键，后续接口都以 id 操作：
+# 每条知识返回的字段（不含 content，提高性能）：
 {
-    "id": 42,                    # 知识主键（必须返回，后续 CRUD 以此为准）
-    "source": "manual",          # 新增：来源
-    "scope": "member",           # 保留：注入范围（向后兼容）
+    "id": 42,
+    "source": "manual",
+    "scope": "member",
     "repo_key": "gitcode:xxx/yyy",
     "agent_type": "coding",
     "issue_num": 0,
@@ -436,15 +487,11 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
     "source_seq": 0,
     "created_by": "user1",
     "created_at": "2026-09-09 10:00:00",
-    "updated_at": "2026-09-09 10:00:00",
-    "content": "知识正文预览...",  # 前 500 字符
-    "archived": 0,               # 新增：归档标记
-    "refs": [                    # 新增：关联列表
-        {"id": 1, "scene_id": "", "agent_type": "coding", "enabled": 1},
-        {"id": 2, "scene_id": "uuid-xxx", "agent_type": "", "enabled": 1},
-    ],
-    "ref_summary": "全局",       # 新增：关联摘要（前端展示用）
-    "issue_tag": "",             # 新增：Issue 标签（issue/issue_agent 级知识专用）
+    "description": "用户填写的知识描述",  # 替代 content——列表只展示描述
+    "archived": 0,
+    "refs": [...],
+    "ref_summary": "全局",
+    "issue_tag": "",
 }
 ```
 

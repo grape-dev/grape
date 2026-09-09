@@ -184,7 +184,7 @@ def read_knowledge(repo_key: str, agent_type: str = "", issue_num: int = 0) -> d
 def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "accepted",
                     agent_type: str = "", issue_num: int = 0,
                     source_seq: int = 0, created_by: str = "",
-                    source: str = "") -> str:
+                    source: str = "", description: str = "") -> str:
     """写入知识正文文件 + 登记索引行。返回文件绝对路径。
 
     Issue #67 改动：
@@ -257,6 +257,28 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
         content_hash = ""
 
     # 3. DB 写入——先查有无已存在记录（Issue #67：一个 scope 一条记录）
+    # 自动生成描述（如果调用方没传）
+    if not description:
+        _agent_desc = {
+            "vod": "VOD Agent：需求分析、拆解 Issue、规划开发路径",
+            "coding": "Coding Agent：代码实现、修复缺陷、创建 PR",
+            "qa": "QA Agent：代码审查、测试验证、质量把关",
+            "sre": "SRE Agent：部署发布、监控告警、运维排障",
+            "chat": "Chat Agent：对话交互、知识沉淀、流程控制",
+        }
+        if scope == "baseline":
+            description = "VOD 基线分析自动生成"
+        elif scope == "project":
+            _role = _agent_desc.get(agent_type, "Agent")
+            description = f"{_role} 沉淀的项目级经验"
+        elif scope == "issue":
+            description = f"Issue #{issue_num} 对话沉淀的经验"
+        elif scope == "issue_agent":
+            _role = _agent_desc.get(agent_type, agent_type)
+            description = f"Issue #{issue_num} {_role} 沉淀的经验"
+        elif scope == "member":
+            description = ""  # 用户手动填写
+
     knowledge_id = None
     with db_lock:
         c = db.cursor()
@@ -270,18 +292,18 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             # 有记录 → UPDATE（不插入新记录）
             c.execute(
                 "UPDATE agent_shared_knowledge "
-                "SET content_hash=?, obs_key=?, source_seq=?, updated_at=datetime('now') "
+                "SET content_hash=?, obs_key=?, source_seq=?, description=?, updated_at=datetime('now') "
                 "WHERE id=?",
-                (content_hash, obs_key, source_seq, existing[0])
+                (content_hash, obs_key, source_seq, description, existing[0])
             )
             knowledge_id = existing[0]
         else:
             # 无记录 → INSERT
             c.execute(
                 "INSERT INTO agent_shared_knowledge "
-                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (scope, repo_key, agent_type, issue_num, rel_path, obs_key, content_hash, status, source_seq, created_by, source)
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (scope, repo_key, agent_type, issue_num, rel_path, obs_key, content_hash, status, source_seq, created_by, source, description)
             )
             knowledge_id = c.lastrowid
         db.commit()
@@ -780,13 +802,18 @@ def _sync_baseline_files():
                         )
                         db.commit()
                 else:  # DB 无记录 → INSERT
+                    _baseline_desc = {
+                        "project-graph.md": "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）",
+                        "project-capabilities.md": "VOD 基线分析：项目能力清单（功能特性/支持能力）",
+                        ".metadata.json": "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）",
+                    }.get(fname, "VOD 基线分析自动生成")
                     with db_lock:
                         c = db.cursor()
                         c.execute(
                             "INSERT INTO agent_shared_knowledge "
-                            "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source) "
-                            "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync', 'system')",
-                            (repo_key, file_path, storage_key, content_hash)
+                            "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, description) "
+                            "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync', 'system', ?)",
+                            (repo_key, file_path, storage_key, content_hash, _baseline_desc)
                         )
                         db.commit()
                 log.info(f"[knowledge] sync baseline {repo_key}/{fname} → OBS")

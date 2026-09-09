@@ -107,5 +107,8 @@
   "ref_select_agents": "选择 Agent",
   "ref_tab_market": "场景市场",
   "ref_tab_repo": "仓库场景",
-  "ref_system_auto": "系统知识自动加载，无需配置关联"
+  "ref_system_auto": "系统知识自动加载，无需配置关联",
+  "no_description": "当前用户没有填写描述",
+  "search_btn": "查询",
+  "entry_description": "知识描述（简述这条知识的用途）"
 }

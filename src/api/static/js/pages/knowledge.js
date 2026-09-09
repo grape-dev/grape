@@ -33,7 +33,7 @@ function renderKnowledge() {
         filter: { refStatus: '', query: '' },
         stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
         showArchived: false,
-        activeTab: 'all',
+        activeTab: 'system',
         page: 1,
         pageSize: 50,
         total: 0,
@@ -483,7 +483,7 @@ function renderKnowledge() {
 
       // 新增知识
       openEntryModal() {
-        this.entryModal = { content: '', agentType: '', loading: false };
+        this.entryModal = { content: '', agentType: '', description: '', loading: false };
       },
       async createEntry() {
         if (!this.entryModal.content.trim()) { app.showToast(this.t('entry_content')); return; }
@@ -492,7 +492,8 @@ function renderKnowledge() {
           await API.post('/knowledge/entry', {
             repo: this.currentRepo(),
             content: this.entryModal.content,
-            agent_type: this.entryModal.agentType || ''
+            agent_type: this.entryModal.agentType || '',
+            description: this.entryModal.description || ''
           });
           app.showToast(this.t('knowledge_created'));
           this.entryModal = null;
@@ -527,10 +528,6 @@ function renderKnowledge() {
             <!-- 统计卡片（纯展示，不联动） -->
             <div class="stats-bar">
               <div class="stat-card">
-                <span class="stat-num">{{ stats.system + stats.agent + stats.manual }}</span>
-                <span class="stat-label">{{ t('stats_all') }}</span>
-              </div>
-              <div class="stat-card">
                 <span class="stat-num">{{ statSystem() }}</span>
                 <span class="stat-label">{{ t('stats_system') }}</span>
               </div>
@@ -546,7 +543,6 @@ function renderKnowledge() {
 
             <!-- Tab 栏（切换数据源） -->
             <div class="kb-tab-bar">
-              <button class="kb-tab" :class="{ active: activeTab === 'all' }" @click="switchTab('all')">{{ t('stats_all') }}</button>
               <button class="kb-tab" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">{{ t('stats_system') }}</button>
               <button class="kb-tab" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">{{ t('stats_agent') }}</button>
               <button class="kb-tab" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">{{ t('stats_user') }}</button>
@@ -559,7 +555,8 @@ function renderKnowledge() {
                 <option value="linked">{{ t('filter_ref_linked') }}</option>
                 <option value="unlinked">{{ t('filter_ref_unlinked') }}</option>
               </select>
-              <input v-model="filter.query" :placeholder="t('search_placeholder')" class="kb-input">
+              <input v-model="filter.query" :placeholder="t('search_placeholder')" class="kb-input" @keyup.enter="loadList">
+              <button class="bt bt-o bt-s" @click="loadList">{{ t('search_btn') }}</button>
               <label class="kb-checkbox-label">
                 <input type="checkbox" v-model="showArchived"> {{ t('show_archived') }}
               </label>
@@ -577,7 +574,7 @@ function renderKnowledge() {
                   <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                 </div>
                 <div v-if="isFileTooLarge(k)" class="size-warning">⚠ {{ t('file_too_large', { size: fileSizeKB(k) }) }}</div>
-                <div class="card-content">{{ k.content || '' }}</div>
+                <div class="card-content">{{ k.description || t('no_description') }}</div>
                 <div class="card-footer">
                   <span>{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
                 </div>
@@ -608,6 +605,9 @@ function renderKnowledge() {
                   <span class="tg tg-d" style="font-size:10px">{{ detail.scope }}</span>
                   <span v-if="detail.issue_tag" class="issue-tag">{{ detail.issue_tag }}</span>
                   <span v-if="detail.archived" class="archived-tag">{{ t('archived') }}</span>
+                </div>
+                <div style="font-size:13px;color:var(--t2);line-height:1.5;margin-bottom:8px;font-weight:500">
+                  {{ detail.description || t('no_description') }}
                 </div>
                 <div style="font-size:11px;color:var(--t3);line-height:1.6">
                   {{ detail.created_by || '' }} · {{ (detail.created_at || '').substring(0, 16) }}
@@ -768,6 +768,7 @@ function renderKnowledge() {
         <div v-if="entryModal" class="modal-overlay" @click.self="entryModal = null">
           <div class="modal cd">
             <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('entry_title') }}</h3>
+            <input v-model="entryModal.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%;margin-bottom:8px">
             <textarea v-model="entryModal.content" rows="10" :placeholder="t('entry_content')" class="kb-textarea"></textarea>
             <select v-model="entryModal.agentType" class="kb-select" style="width:100%;margin-top:8px">
               <option value="">{{ t('ref_agent_all') }}</option>

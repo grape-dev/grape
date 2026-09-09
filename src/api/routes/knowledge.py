@@ -348,6 +348,23 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
     return groups
 
 
+def _check_repo_member(user: dict, repo_key: str):
+    """校验用户是否是当前仓库的成员（托管者或已加入）。"""
+    from src.user.db import get_user_repos
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无法识别用户身份"})
+    try:
+        repos = get_user_repos(user_id) or []
+        is_member = any(r.get("repo_key") == repo_key for r in repos)
+        if not is_member:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问此仓库的知识库"})
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "权限校验失败"})
+
+
 @router.get("", operation_id="knowledge_list", summary="知识清单（统一列表 + 分页）")
 def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          repo: str = Query("", description="repo_key"),
@@ -359,6 +376,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo)
+    _check_repo_member(user, repo_key)
 
     from src.session_manager import db, db_lock
 
@@ -395,16 +413,15 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
         offset = (page - 1) * page_size
         rows = c.execute(
             f"SELECT id, scope, repo_key, agent_type, issue_num, file_path, status, "
-            f"source_seq, created_by, created_at, obs_key, content_hash, updated_at, source, archived "
+            f"source_seq, created_by, created_at, obs_key, content_hash, updated_at, source, archived, description "
             f"FROM agent_shared_knowledge {where} "
             f"ORDER BY id DESC LIMIT ? OFFSET ?",
             params + [page_size, offset]
         ).fetchall()
 
-    # 构建统一列表
+    # 构建统一列表（不读 content，只返回 description——提高性能）
     all_knowledge = []
     for r in rows:
-        content = _read_entry_content(repo_key, r[10] or "", r[5] or "")
         all_knowledge.append({
             "id": r[0],
             "scope": r[1],
@@ -419,7 +436,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
             "obs_key": r[10] or "",
             "source": r[13] or "",
             "archived": r[14] or 0,
-            "content": (content or "")[:500],
+            "description": r[15] or "",
             "issue_tag": f"Issue #{r[4]}" if r[4] and r[1] in ("issue", "issue_agent") else "",
         })
 
@@ -558,6 +575,7 @@ async def upload_knowledge(file: UploadFile = File(...),
 
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo)
+    _check_repo_member(user, repo_key)
     base = _repo_base(repo_key)
     # §六：Agent 维度上传落盘 project-info/agent/{agent_type}/（仅该 Agent 定向注入）；
     # 项目级维持 project-info/member/{username}/
@@ -737,6 +755,7 @@ class KnowledgeEntryBody(BaseModel):
     repo: str = ""
     content: str = ""
     agent_type: str = ""
+    description: str = ""
 
 class KnowledgeUpdateBody(BaseModel):
     content: str = ""
@@ -779,7 +798,7 @@ def _get_knowledge_by_id(knowledge_id: int):
         row = db.cursor().execute(
             "SELECT id, scope, repo_key, agent_type, issue_num, file_path, "
             "status, source_seq, created_by, created_at, obs_key, content_hash, "
-            "updated_at, source, archived "
+            "updated_at, source, archived, description "
             "FROM agent_shared_knowledge WHERE id = ?",
             (knowledge_id,)
         ).fetchone()
@@ -793,6 +812,7 @@ def _get_knowledge_by_id(knowledge_id: int):
         "created_at": row[9] or "", "obs_key": row[10] or "",
         "content_hash": row[11] or "", "updated_at": row[12] or "",
         "source": row[13] or "", "archived": row[14] or 0,
+        "description": row[15] or "",
     }
 
 
@@ -898,6 +918,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_cu
 
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(body.repo)
+    _check_repo_member(user, repo_key)
     base = _repo_base(repo_key)
     username = str(user.get("username") or user.get("id") or "user")
     filename = f"entry_{int(time.time())}_{uuid.uuid4().hex[:6]}.md"
@@ -926,9 +947,9 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_cu
     with db_lock:
         db.cursor().execute(
             "INSERT INTO agent_shared_knowledge "
-            "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            ("member", repo_key, body.agent_type or "", 0, rel, obs_key, content_hash, "accepted", 0, username, "manual")
+            "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("member", repo_key, body.agent_type or "", 0, rel, obs_key, content_hash, "accepted", 0, username, "manual", body.description or "")
         )
         db.commit()
 
