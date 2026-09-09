@@ -39,6 +39,9 @@ function renderKnowledge() {
         filter: { source: '', refStatus: '', query: '' },
         stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
         showArchived: false,
+        page: 1,
+        pageSize: 50,
+        total: 0,
         editModal: null,
         refModal: null,
         entryModal: null,
@@ -84,10 +87,15 @@ function renderKnowledge() {
       async loadList() {
         this.loading = true;
         try {
-          const d = await API.get('/knowledge' + _repoQS());
+          const repo = this.currentRepo();
+          if (!repo) { this.loading = false; return; }
+          const params = new URLSearchParams({ repo: repo, page: this.page, page_size: this.pageSize });
+          if (this.filter.source) params.set('source', this.filter.source);
+          const d = await API.get('/knowledge?' + params.toString());
           if (window._currentView !== 'knowledge') return;
           this.list = d.knowledge || [];
           this.stats = d.stats || { system: 0, agent: 0, manual: 0, unlinked: 0 };
+          this.total = d.total || 0;
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
           if (window._currentView !== 'knowledge') return;
@@ -100,6 +108,8 @@ function renderKnowledge() {
         else if (type === 'agent') this.filter.source = 'agent';
         else if (type === 'user') this.filter.source = 'manual';
         else if (type === 'unlinked') this.filter.refStatus = 'unlinked';
+        this.page = 1;
+        this.loadList();
       },
       sourceLabel(s) {
         if (s === 'system') return this.t('source_system');

@@ -348,148 +348,86 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
     return groups
 
 
-@router.get("", operation_id="knowledge_list", summary="知识清单（项目级 + Agent 维度）")
+@router.get("", operation_id="knowledge_list", summary="知识清单（统一列表 + 分页）")
 def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
-                         repo: str = Query("", description="repo_key，如 gitcode:org/test 或 org/test")):
-    """聚合返回项目级 + Agent 维度知识清单。"""
+                         repo: str = Query("", description="repo_key"),
+                         source: str = Query("", description="按来源筛选：system/agent/manual"),
+                         page: int = Query(1, description="页码，从1开始"),
+                         page_size: int = Query(50, description="每页条数，默认50")):
+    """统一知识列表——只查 DB agent_shared_knowledge 表，返回分页列表 + 统计。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo)
 
-    # 项目级：project-info files + meta
-    files = {}
-    meta = {}
-    try:
-        from src.runtime.service import load_project_info
-        files, meta = load_project_info(repo_key)
-    except Exception:
-        files, meta = {}, {}
-    # 查 DB baseline obs_key（供前端 content 端点直接用 obs_key 读 OBS）
-    baseline_obs = {}
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            rows = db.cursor().execute(
-                "SELECT file_path, obs_key FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL",
-                (repo_key,)
-            ).fetchall()
-        for fp, ok in rows:
-            fname = os.path.basename(fp)
-            if fname and ok:
-                baseline_obs[fname] = ok
-    except Exception:
-        pass
+    from src.session_manager import db, db_lock
 
-    project_files = [
-        {"name": "project-info/project-graph.md", "label": "Project Graph",
-         "updated": meta.get("last_updated", ""), "obs_key": baseline_obs.get("project-graph.md", "")}
-        for n in ("project-graph.md",) if n in files
-    ] + [
-        {"name": "project-info/project-capabilities.md", "label": "Project Capabilities",
-         "updated": meta.get("last_updated", ""), "obs_key": baseline_obs.get("project-capabilities.md", "")}
-        for n in ("project-capabilities.md",) if n in files
-    ]
-    if ".metadata.json" in files:
-        project_files.append({"name": "project-info/.metadata.json", "label": "metadata",
-                              "updated": meta.get("last_updated", ""),
-                              "obs_key": baseline_obs.get(".metadata.json", "")})
+    # 构建 WHERE 条件
+    where = "WHERE repo_key=? AND archived=0"
+    params = [repo_key]
+    if source:
+        where += " AND source=?"
+        params.append(source)
 
-    # ===== Issue #67：统一列表 + stats =====
+    # 查总数 + 统计
+    with db_lock:
+        c = db.cursor()
+        total = c.execute(f"SELECT COUNT(*) FROM agent_shared_knowledge {where}", params).fetchone()[0]
+
+        # 统计（不受 source 筛选影响——返回全部统计数）
+        stats_row = c.execute(
+            "SELECT "
+            "SUM(CASE WHEN source='system' AND archived=0 THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN source='agent' AND archived=0 THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN source='manual' AND archived=0 THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN archived=0 AND id NOT IN (SELECT DISTINCT knowledge_id FROM scene_knowledge_ref WHERE enabled=1) THEN 1 ELSE 0 END) "
+            "FROM agent_shared_knowledge WHERE repo_key=?",
+            (repo_key,)
+        ).fetchone()
+        stats = {
+            "system": stats_row[0] or 0,
+            "agent": stats_row[1] or 0,
+            "manual": stats_row[2] or 0,
+            "unlinked": stats_row[3] or 0,
+        }
+
+        # 分页查询
+        offset = (page - 1) * page_size
+        rows = c.execute(
+            f"SELECT id, scope, repo_key, agent_type, issue_num, file_path, status, "
+            f"source_seq, created_by, created_at, obs_key, content_hash, updated_at, source, archived "
+            f"FROM agent_shared_knowledge {where} "
+            f"ORDER BY id DESC LIMIT ? OFFSET ?",
+            params + [page_size, offset]
+        ).fetchall()
+
+    # 构建统一列表
     all_knowledge = []
-
-    # baseline 知识——从 DB 查 id
-    baseline_db_ids = {}
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            b_rows = db.cursor().execute(
-                "SELECT id, file_path, obs_key, archived FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='baseline'",
-                (repo_key,)
-            ).fetchall()
-        for bid, fp, ok, arch in b_rows:
-            fname = os.path.basename(fp) if fp else ""
-            baseline_db_ids[fname] = {"id": bid, "obs_key": ok or "", "archived": arch or 0}
-    except Exception:
-        pass
-
-    for f in project_files:
-        content = ""
-        try:
-            if f.get("obs_key"):
-                content = _read_entry_content(repo_key, f["obs_key"], f["name"])
-            elif f["name"] in files:
-                content = files[f["name"]]
-        except Exception:
-            pass
-        fname = os.path.basename(f["name"]) if f["name"] else ""
-        db_info = baseline_db_ids.get(fname, {})
+    for r in rows:
+        content = _read_entry_content(repo_key, r[10] or "", r[5] or "")
         all_knowledge.append({
-            "id": db_info.get("id", 0),
-            "source": "system", "scope": "baseline",
-            "repo_key": repo_key, "agent_type": "", "issue_num": 0,
-            "file_path": f["name"], "obs_key": f.get("obs_key", ""),
-            "content": (content or "")[:500], "archived": db_info.get("archived", 0),
-            "created_by": "", "created_at": f.get("updated", ""),
-            "issue_tag": "",
+            "id": r[0],
+            "scope": r[1],
+            "repo_key": r[2],
+            "agent_type": r[3] or "",
+            "issue_num": r[4] or 0,
+            "file_path": r[5] or "",
+            "status": r[6] or "accepted",
+            "source_seq": r[7] or 0,
+            "created_by": r[8] or "",
+            "created_at": normalize_event_time(r[9] or ""),
+            "obs_key": r[10] or "",
+            "source": r[13] or "",
+            "archived": r[14] or 0,
+            "content": (content or "")[:500],
+            "issue_tag": f"Issue #{r[4]}" if r[4] and r[1] in ("issue", "issue_agent") else "",
         })
 
-    # project 级知识沉淀
-    for k in _project_knowledge_entries(repo_key):
-        k["source"] = k.get("source") or "agent"
-        k["issue_tag"] = ""
-        all_knowledge.append(k)
-
-    # issue / issue_agent 级知识
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            issue_rows = db.cursor().execute(
-                "SELECT id, scope, agent_type, issue_num, file_path, obs_key, "
-                "source_seq, created_by, created_at, source, archived "
-                "FROM agent_shared_knowledge "
-                "WHERE repo_key = ? AND scope IN ('issue', 'issue_agent') AND archived = 0 "
-                "ORDER BY issue_num DESC, id DESC",
-                (repo_key,)
-            ).fetchall()
-        for r in issue_rows:
-            content = _read_entry_content(repo_key, r[5] or "", r[4] or "")
-            all_knowledge.append({
-                "id": r[0], "source": r[9] or "agent", "scope": r[1],
-                "repo_key": repo_key, "agent_type": r[2] or "",
-                "issue_num": r[3] or 0, "file_path": r[4],
-                "obs_key": r[5] or "", "content": (content or "")[:500],
-                "archived": r[10] or 0, "source_seq": r[6] or 0,
-                "created_by": r[7] or "", "created_at": normalize_event_time(r[8] or ""),
-                "issue_tag": f"Issue #{r[3]}" if r[3] else "",
-            })
-    except Exception:
-        pass
-
-    # member 文档
-    for doc in _member_docs(repo_key):
-        doc["source"] = "manual"
-        doc["scope"] = "member"
-        doc["issue_tag"] = ""
-        all_knowledge.append(doc)
-
-    # agent 级知识
-    agents_data = _agent_knowledge_entries(repo_key)
-    for at, entries in agents_data.items():
-        for e in entries:
-            e["source"] = e.get("source") or "agent"
-            e["agent_type"] = at
-            e["issue_tag"] = f"Issue #{e.get('issue_num', '')}" if e.get("issue_num") else ""
-            all_knowledge.append(e)
-
-    # 查关联记录 + ref_summary
-    try:
-        from src.session_manager import db, db_lock
-        kid_list = [k["id"] for k in all_knowledge if k.get("id")]
-        if kid_list:
-            placeholders = ",".join("?" * len(kid_list))
+    # 查关联记录
+    kid_list = [k["id"] for k in all_knowledge if k["id"]]
+    if kid_list:
+        placeholders = ",".join("?" * len(kid_list))
+        try:
             with db_lock:
                 ref_rows = db.cursor().execute(
                     f"SELECT knowledge_id, scene_id, agent_type, enabled FROM scene_knowledge_ref "
@@ -501,39 +439,25 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                 ref_map.setdefault(kid, []).append(
                     {"scene_id": sid, "agent_type": at, "enabled": en})
             for k in all_knowledge:
-                refs = ref_map.get(k.get("id", 0), [])
+                refs = ref_map.get(k["id"], [])
                 k["refs"] = refs
                 k["ref_summary"] = _build_ref_summary(refs)
-        else:
+        except Exception:
             for k in all_knowledge:
                 k["refs"] = []
                 k["ref_summary"] = "未关联"
-    except Exception:
+    else:
         for k in all_knowledge:
             k["refs"] = []
             k["ref_summary"] = "未关联"
 
-    # 统计
-    stats = {
-        "system": sum(1 for k in all_knowledge if k.get("source") == "system"),
-        "agent": sum(1 for k in all_knowledge if k.get("source") == "agent"),
-        "manual": sum(1 for k in all_knowledge if k.get("source") == "manual"),
-        "unlinked": sum(1 for k in all_knowledge if not k.get("refs")),
-    }
-
     return {
         "repo_key": repo_key,
-        # 向后兼容：保留旧格式
-        "project": {
-            "meta": meta,
-            "files": project_files,
-            "knowledge": _project_knowledge_entries(repo_key),
-            "member_docs": _member_docs(repo_key),
-        },
-        "agents": agents_data,
-        # Issue #67 新增：统一列表 + 统计
         "knowledge": all_knowledge,
         "stats": stats,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
     }
 
 

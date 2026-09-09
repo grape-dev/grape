@@ -8,7 +8,7 @@
 - prompt_builder 注入（查 scene_knowledge_ref + 返回值类型）
 - 归档 API
 """
-import os, sys, hashlib
+import os, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
@@ -18,6 +18,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from src.api.main import app  # noqa: E402
 from src.session_manager import db, db_lock  # noqa: E402
+from src.user import db as user_db  # noqa: E402
 
 # JWT access token helper
 def _jwt_access_token(user_id, username="test"):
@@ -29,37 +30,27 @@ def _jwt_access_token(user_id, username="test"):
 client = TestClient(app)
 
 TEST_REPO = "gitcode:test-org67/test-repo"
+_uid = None
 
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_test_user():
     """创建测试用户。"""
-    import sqlite3
-    with db_lock:
-        c = db.cursor()
-        # 确保有测试用户
-        try:
-            c.execute("DELETE FROM users WHERE username='test_user67'")
-        except Exception:
-            pass
-        c.execute(
-            "INSERT INTO users (username, password_hash, display_name) VALUES (?, ?, ?)",
-            ("test_user67", hashlib.sha256("test123".encode()).hexdigest(), "Test User 67")
-        )
-        db.commit()
+    global _uid
+    user_db.create_user("test_user67", "test123")
+    _uid = user_db.get_user_by_username("test_user67")
     yield
     # 清理
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id IN (SELECT id FROM agent_shared_knowledge WHERE repo_key=?)", (TEST_REPO,))
         c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key=?", (TEST_REPO,))
-        c.execute("DELETE FROM users WHERE username='test_user67'")
         db.commit()
 
 
 @pytest.fixture
 def auth_headers():
-    token = _jwt_access_token(1, "test_user67")
+    token = _jwt_access_token(_uid["id"], _uid["username"])
     return {"Authorization": f"Bearer {token}"}
 
 
