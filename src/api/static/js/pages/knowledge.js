@@ -557,7 +557,7 @@ function renderKnowledge() {
         <!-- ===== 列表视图 ===== -->
         <template v-if="view === 'list'">
           <template v-if="!firstLoad">
-            <!-- 统计卡片（点击切换 tab） -->
+            <!-- 统计卡片（点击切换 tab，在 apple-card 外面） -->
             <div class="stats-bar">
               <div class="stat-card" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">
                 <span class="stat-num">{{ statSystem() }}</span>
@@ -573,15 +573,15 @@ function renderKnowledge() {
               </div>
             </div>
 
-            <div class="apple-card" style="padding:20px">
-              <!-- Tab 栏（切换数据源） -->
+            <!-- Tab 栏（在 apple-card 外面） -->
             <div class="kb-tab-bar">
               <button class="kb-tab" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">{{ t('stats_system') }}</button>
               <button class="kb-tab" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">{{ t('stats_agent') }}</button>
               <button class="kb-tab" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">{{ t('stats_user') }}</button>
             </div>
 
-            <!-- 筛选器 -->
+            <div class="apple-card" style="padding:20px">
+              <!-- 筛选器 -->
             <div class="filter-bar">
               <select v-if="activeTab === 'user'" v-model="filter.refStatus" class="kb-select">
                 <option value="">{{ t('filter_ref_all') }}</option>
