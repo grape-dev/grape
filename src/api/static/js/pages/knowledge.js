@@ -183,6 +183,18 @@ function renderKnowledge() {
         if (s === 'agent') return this.t('source_agent');
         return this.t('source_manual');
       },
+      sourceBarClass(s) {
+        if (s === 'system') return 'bg-default';
+        if (s === 'agent') return 'bg-skill';
+        if (s === 'manual') return 'bg-agent';
+        return 'bg-default';
+      },
+      sourceIcon(s) {
+        if (s === 'system') return '⚙';
+        if (s === 'agent') return '🤖';
+        if (s === 'manual') return '✍';
+        return '📄';
+      },
       sourceClass(s) {
         return 'source-' + (s || 'agent');
       },
@@ -593,23 +605,22 @@ function renderKnowledge() {
             <div v-if="filteredList.length === 0 && !loading" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
             <div v-show="filteredList.length > 0 && !loading" class="kb-grid">
               <div v-for="k in filteredList" :key="k.id || k.file_path" class="cd skill-card" :class="{ 'archived-card': k.archived }">
-                <div style="padding:16px;display:flex;flex-direction:column;flex:1">
-                  <div class="card-header">
-                    <span class="source-tag" :class="sourceClass(k.source)">{{ sourceLabel(k.source) }}</span>
-                    <span v-if="k.ref_summary && k.ref_summary !== '未关联'" class="ref-tag">{{ k.ref_summary }}</span>
-                    <span v-else class="ref-tag unlinked">{{ t('ref_unlinked') }}</span>
-                    <span v-if="k.issue_tag" class="issue-tag">{{ k.issue_tag }}</span>
+                <div class="scn-card-bar" :class="sourceBarClass(k.source)"></div>
+                <div class="scn-card-body">
+                  <div class="scn-card-head">
+                    <div class="scn-ic" :class="sourceBarClass(k.source)">{{ sourceIcon(k.source) }}</div>
+                    <div class="scn-card-title">{{ sourceLabel(k.source) }}</div>
                     <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
-                  <div class="card-content">{{ k.description || t('no_description') }}</div>
-                  <div class="card-footer">
-                    <span>{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
-                  </div>
-                  <div class="card-actions">
-                    <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
-                    <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="quickDelete(k)">{{ t('delete') }}</button>
-                    <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('archive') }}</button>
-                    <button v-if="k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('unarchive') }}</button>
+                  <div class="scn-card-desc">{{ k.description || t('no_description') }}</div>
+                  <div class="scn-card-foot">
+                    <span class="scn-meta">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
+                    <div class="scn-card-btns">
+                      <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
+                      <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="quickDelete(k)">{{ t('delete') }}</button>
+                      <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('archive') }}</button>
+                      <button v-if="k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('unarchive') }}</button>
+                    </div>
                   </div>
                 </div>
               </div>
