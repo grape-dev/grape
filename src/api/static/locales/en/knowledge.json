@@ -81,5 +81,7 @@
   "unarchive": "Unarchive",
   "archive": "Archive",
   "file_too_large": "File is large ({{size}}KB), consider cleaning up outdated entries",
-  "error_no_id": "No valid ID for this knowledge"
+  "error_no_id": "No valid ID for this knowledge",
+  "injected_knowledge_count": "Injected {{count}} knowledge entries",
+  "view_injected_detail": "View Details"
 }

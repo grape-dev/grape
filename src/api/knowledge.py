@@ -784,8 +784,8 @@ def _sync_baseline_files():
                         c = db.cursor()
                         c.execute(
                             "INSERT INTO agent_shared_knowledge "
-                            "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by) "
-                            "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync')",
+                            "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source) "
+                            "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync', 'system')",
                             (repo_key, file_path, storage_key, content_hash)
                         )
                         db.commit()

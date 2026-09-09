@@ -287,7 +287,7 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT scope, agent_type, issue_num, file_path, status, source_seq, created_by, created_at, obs_key "
+                "SELECT id, scope, agent_type, issue_num, file_path, status, source_seq, created_by, created_at, obs_key, source, archived "
                 "FROM agent_shared_knowledge WHERE repo_key=? AND scope IN ('issue','issue_agent') "
                 "ORDER BY agent_type, id DESC LIMIT 500",
                 (repo_key,))
@@ -296,14 +296,16 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
             rows = []
     groups: dict[str, list] = {}
     for r in rows:
-        at = r[1] or ""
-        content = _read_entry_content(repo_key, r[8], r[3])
+        at = r[2] or ""
+        content = _read_entry_content(repo_key, r[9], r[4])
         groups.setdefault(at, []).append({
-            "scope": r[0], "agent_type": at, "issue_num": r[2] or 0,
-            "file_path": r[3] or "", "path": _repo_root_rel(r[3], repo_key),
-            "status": r[4] or "", "source_seq": r[5] or 0,
-            "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""),
-            "content": content, "obs_key": r[8] or "",
+            "id": r[0],
+            "scope": r[1], "agent_type": at, "issue_num": r[3] or 0,
+            "file_path": r[4] or "", "path": _repo_root_rel(r[4], repo_key),
+            "status": r[5] or "", "source_seq": r[6] or 0,
+            "created_by": r[7] or "", "created_at": normalize_event_time(r[8] or ""),
+            "content": content, "obs_key": r[9] or "",
+            "source": r[10] or "agent", "archived": r[11] or 0,
         })
     # Agent 专属成员上传文档（§六：查 DB scope='member' AND agent_type!=''）
     # agent_files() 已有 OBS 分支，直接调用——不依赖本地磁盘

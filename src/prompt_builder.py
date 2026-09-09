@@ -975,10 +975,10 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
 
 
 def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
-                               agent_type: str = "", issue_num: int = 0) -> str:
+                               agent_type: str = "", issue_num: int = 0) -> tuple:
     """Event 对话专用 prompt：对话 skill 指令 + 事件上下文 + 线程历史 + 共享知识。
 
-    对话 skill 为元技能（skills/event-dialogue/SKILL.md），约束解释/沉淀/流程控制行为。
+    返回 (prompt, injected_ids)——injected_ids 是注入的知识 ID 列表，供调用方记录到事件线程。
     """
     parts = [f"# Event 对话（与 {agent_type or 'agent'} 就事件对话）"]
 
@@ -1010,7 +1010,7 @@ def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
 
     parts.append(f"## 用户消息\n{user_message}")
     parts.append("请用中文简洁回复；如需沉淀共享知识或流程干预，调用对应端点（POST /api/events/{seq}/knowledge、/flow/reset，带 BOT_GITCODE_TOKEN）。")
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), _injected_ids
 
 
 # Backward-compat aliases (see docs/new-version2/chat-prompt-overview.md for new names)
