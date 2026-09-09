@@ -17,7 +17,7 @@ function renderKnowledge() {
   if (!el) return;
 
   if (_knowledgeVueApp) {
-    _knowledgeVueApp.unmount();
+    try { _knowledgeVueApp.unmount(); } catch(e) {}
     _knowledgeVueApp = null;
   }
 

@@ -287,6 +287,13 @@ function loadAgentTypes() {
     const title = $('pageTitle');
     const repoTitle = $('repoTitle');
     const pc = $('pageContent');
+
+    // Issue #67: 离开 knowledge 页面时先卸载 Vue 应用（必须在 innerHTML 替换之前）
+    if (view !== 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
+      try { _knowledgeVueApp.unmount(); } catch(e) {}
+      _knowledgeVueApp = null;
+    }
+
     pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
@@ -296,11 +303,6 @@ function loadAgentTypes() {
     window._navSignal = window._navAbortController.signal;
     window._tabSignal = null;  // 重置 tab signal
     window._currentView = view;
-    // Issue #67: 离开 knowledge 页面时卸载 Vue 应用
-    if (view !== 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
-      _knowledgeVueApp.unmount();
-      _knowledgeVueApp = null;
-    }
     // 离开 repos 全屏页时恢复 sidebar/tb/mainView 默认布局
     if (view !== 'repos') {
       var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
