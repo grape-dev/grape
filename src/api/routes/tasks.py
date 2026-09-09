@@ -219,16 +219,44 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
 
 
 def close_issue_tasks(repo_key: str, issue_number: int) -> int:
-    """webhook 兜底（P5）：Issue closed → 该 issue 所有 active/processing 任务完成。"""
+    """webhook 兜底（P5）：Issue closed → 该 issue 所有 active/processing 任务进入 pending_review。
+
+    Issue #51 修订：不再直接 completed，而是先设为 pending_review 等待开发者审核。
+    只有 stage 已经是 done/pending_review 时才直接关闭。
+    """
     from src.repo_key import to_repo_key
+    from src.api.session_store import get_issue_stage, set_issue_stage
     repo_key = to_repo_key(repo_key)
+    _issue_id = f"#{issue_number}"
+    _stage_info = get_issue_stage(repo_key, _issue_id)
+    _stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
+
     with db_lock:
         c = db.cursor()
+        # 检查是否有 agent 正在 running
         c.execute(
-            "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-            (repo_key, issue_number)
-        )
+            "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running') LIMIT 1",
+            (repo_key, _issue_id))
+        _has_running = c.fetchone() is not None
+
+        if _stage in ("done", "pending_review"):
+            # 已经在待审核或已完成阶段 → 直接关闭
+            c.execute(
+                "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+                (repo_key, issue_number)
+            )
+            if _stage != "done" and not _has_running:
+                set_issue_stage(repo_key, _issue_id, "done", "issue_closed")
+        elif not _has_running:
+            # 还在 pipeline 流转中且无 agent 运行 → 设为 pending_review 等待开发者确认
+            c.execute(
+                "UPDATE tasks SET status='processing', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='active'",
+                (repo_key, issue_number)
+            )
+            set_issue_stage(repo_key, _issue_id, "pending_review", "issue_closed")
+        # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         db.commit()
         return c.rowcount
 
@@ -247,17 +275,40 @@ def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee:
 
 
 def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
-    """bot 接管：将同 issue 所有 active/processing 任务置 completed（bot_takeover）。
+    """bot 接管：将同 issue active 任务置 processing（Issue #51：不再直接 completed）。
 
-    见 task-lifecycle-design.md §2.3：issue agent 将 assignee 刷为 grape_bot 表示自己接管，
-    用户任务无需再处理，全部关闭。不建 bot 任务。
+    见 task-lifecycle-design.md §2.3：issue agent 将 assignee 刷为 grape_bot 表示自己接管。
+    Issue #51 修订：不再直接关闭，改为走 pending_review 流程。
+    如果有 agent 正在 running，不修改 stage（等 agent 完成后再判定）。
     """
+    from src.api.session_store import get_issue_stage, set_issue_stage
+    _issue_id = f"#{issue_number}"
+    _stage_info = get_issue_stage(repo_key, _issue_id)
+    _stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
+
+    # 检查是否有 agent 正在 running
     with db_lock:
         c = db.cursor()
         c.execute(
-            "UPDATE tasks SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-            (repo_key, issue_number))
+            "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running') LIMIT 1",
+            (repo_key, _issue_id))
+        _has_running = c.fetchone() is not None
+
+        if _stage in ("done", "pending_review"):
+            c.execute(
+                "UPDATE tasks SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+                (repo_key, issue_number))
+            if _stage != "done" and not _has_running:
+                set_issue_stage(repo_key, _issue_id, "done", "bot_takeover")
+        elif not _has_running:
+            # 没有 agent 在运行 → 设为 pending_review
+            c.execute(
+                "UPDATE tasks SET status='processing', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='active'",
+                (repo_key, issue_number))
+            set_issue_stage(repo_key, _issue_id, "pending_review", "bot_takeover")
+        # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         db.commit()
         return c.rowcount
 
@@ -518,6 +569,224 @@ _TASK_STATUS_FLOWS = {
     "completed": (),
     "cancelled": ("active",),
 }
+
+
+# Issue #51: 任务确认完成 / 取消 / 恢复
+class TaskConfirmBody(BaseModel):
+    confirmation: str = "user_confirmed"
+
+
+@router.post("/{task_id}/confirm-done")
+async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = Depends(get_current_user)):
+    """开发者确认任务完成（Issue #51）。
+
+    将 task status → done，issue_state stage → done，
+    completed_reason → 'user_confirmed' / 'issue_comment' / 'chat_agent'。
+    仅 pending_review 阶段可确认；已 done 幂等跳过。
+    """
+    from src.api.session_store import set_issue_stage, get_issue_stage
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number, status FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+                  (task_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        _repo_key, _issue_num, _status = row[0], row[1], row[2]
+        if _status == 'completed' or _status == 'done':
+            return {"ok": True, "already_done": True}
+        # 获取 stage 判断是否可确认
+        _st = None
+        if _issue_num:
+            _st = get_issue_stage(_repo_key, f"#{_issue_num}")
+        _stage = (_st.get("stage") if _st else "") or ""
+        # 允许 pending_review 和 sre/sre_completed 阶段确认
+        if _stage not in ("pending_review", "sre_completed", "sre", "done"):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "任务尚未到待审核阶段"})
+        c.execute(
+            "UPDATE tasks SET status='completed', completed_reason=?, completed_at=datetime('now') WHERE id=?",
+            (body.confirmation, task_id))
+        if _issue_num:
+            set_issue_stage(_repo_key, f"#{_issue_num}", "done", "user")
+        db.commit()
+    log.info(f"Task #{task_id} confirmed done by {body.confirmation}")
+    return {"ok": True, "task_id": task_id, "status": "completed", "stage": "done"}
+
+
+@router.post("/{task_id}/cancel")
+async def cancel_task_api(task_id: int, user: dict = Depends(get_current_user)):
+    """开发者取消任务（Issue #51）。任何阶段可取消，取消后 Agent 终止 + 流水线停止。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status, repo_key, issue_number FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+                  (task_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        status, repo_key, issue_number = row[0], row[1], row[2]
+        if status == 'cancelled':
+            return {"ok": True, "already_cancelled": True}
+        if status == 'completed':
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "已完成任务不可取消"})
+
+        # 终止所有运行中 agent_tasks（用 repo_key + issue_number 查）
+        _issue_id = f"#{issue_number}" if issue_number else ""
+        _cancelled_agents = 0
+        if _issue_id:
+            c.execute(
+                "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+                (repo_key, _issue_id))
+            _agent_rows = c.fetchall()
+            for _at_id, _at_seq in _agent_rows:
+                try:
+                    from src.runtime.service import cancel_task as _cancel_agent
+                    _cancel_agent(_at_id)
+                except Exception:
+                    pass
+                try:
+                    if _at_seq:
+                        from src.api.event_pipeline import cancel_direct_task
+                        cancel_direct_task(_at_seq)
+                except Exception:
+                    pass
+                try:
+                    if _at_seq:
+                        from src.api.event_store import update_event_status
+                        update_event_status(_at_seq, "cancelled")
+                except Exception:
+                    pass
+                _cancelled_agents += 1
+            # 更新 agent_tasks 状态
+            c.execute(
+                "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+                (repo_key, _issue_id))
+
+        c.execute(
+            "UPDATE tasks SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
+            (task_id,))
+        db.commit()
+    log.info(f"Task #{task_id} cancelled by user (agents={_cancelled_agents})")
+    return {"ok": True, "task_id": task_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
+
+
+@router.post("/{task_id}/resume")
+async def resume_task_api(task_id: int, user: dict = Depends(get_current_user)):
+    """开发者恢复已取消的任务（Issue #51）。回到取消前 stage 继续流转。"""
+    from src.api.session_store import get_issue_stage
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status, repo_key, issue_number FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+                  (task_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        status, repo_key, issue_number = row[0], row[1], row[2]
+        if status != 'cancelled':
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仅已取消任务可恢复"})
+        c.execute(
+            "UPDATE tasks SET status='processing', completed_reason=NULL, completed_at=NULL WHERE id=?",
+            (task_id,))
+        db.commit()
+    # 恢复后重新派发到正确的 stage
+    # 不直接用 issue_state.stage（可能已被 A2A 改到下游），而是查最后一个 completed 的 event
+    _issue_id = f"#{issue_number}" if issue_number else ""
+    if _issue_id:
+        from src.api.event_store import get_events
+        _events = get_events(repo_key, issue_id=_issue_id, limit=50)
+        # 找最后一个 completed 的 agent_type
+        _last_completed_agent = ""
+        for _e in reversed(_events):
+            if _e.get("status") == "completed" and _e.get("agent_type"):
+                _last_completed_agent = _e["agent_type"]
+                break
+        # 查 pipeline 中下一个节点
+        from src.api.pipeline_config import get_pipeline_config
+        from src.api.session_store import get_issue_scene
+        _scene_id = get_issue_scene(repo_key, _issue_id) or "default"
+        _pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
+        _nodes = (_pipe_cfg or {}).get("nodes", [])
+        _resume_stage = ""
+        if _last_completed_agent:
+            # 找 last_completed 的 next
+            for _n in _nodes:
+                if _n.get("id") == _last_completed_agent:
+                    _resume_stage = _n.get("next", "")
+                    break
+        if not _resume_stage:
+            # 没有 completed event 或没有 next → 从第一个节点开始
+            _resume_stage = _nodes[0].get("id", "vod") if _nodes else "vod"
+        # 更新 issue_state.stage 到恢复点
+        if _resume_stage and _resume_stage not in ("done", ""):
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(repo_key, _issue_id, _resume_stage, "resume")
+            # 通过 A2A 重新派发
+            try:
+                import urllib.request, json as _json
+                from src.prompt_builder import _resolve_server_url
+                _a2a_url = _resolve_server_url() + "/api/a2a"
+                _a2a_payload = _json.dumps({
+                    "agent": _resume_stage,
+                    "payload": {
+                        "repository": repo_key.replace("gitcode:", ""),
+                        "issue_number": issue_number,
+                        "context": f"resume from cancelled, last_completed={_last_completed_agent}, next={_resume_stage}",
+                    }
+                }).encode()
+                _req = urllib.request.Request(
+                    _a2a_url,
+                    data=_a2a_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                urllib.request.urlopen(_req, timeout=5)
+                log.info(f"Task #{task_id} resumed → re-dispatched to stage={_resume_stage} (last_completed={_last_completed_agent})")
+            except Exception as _e:
+                log.warning(f"Task #{task_id} resume re-dispatch failed: {_e}")
+    log.info(f"Task #{task_id} resumed by user")
+    return {"ok": True, "task_id": task_id, "status": "processing"}
+
+
+def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "issue_comment"):
+    """Issue 评论确认完成 → 关闭该 issue 所有 active 任务 + stage=done"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE tasks SET status='completed', completed_reason=?, completed_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+            (confirmed_by, repo_key, issue_number))
+        affected = c.rowcount
+        db.commit()
+    from src.api.session_store import set_issue_stage
+    set_issue_stage(repo_key, f"#{issue_number}", "done", "user")
+    log.info(f"Issue #{issue_number} confirmed done by {confirmed_by} ({affected} tasks closed)")
+    return affected
+
+
+def cancel_issue_task(repo_key: str, issue_number: int):
+    """Issue 评论取消任务"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE tasks SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+            (repo_key, issue_number))
+        affected = c.rowcount
+        db.commit()
+    log.info(f"Issue #{issue_number} cancelled ({affected} tasks)")
+    return affected
+
+
+def resume_issue_task(repo_key: str, issue_number: int):
+    """Issue 评论恢复任务"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE tasks SET status='active', completed_reason=NULL, completed_at=NULL "
+            "WHERE repo_key=? AND issue_number=? AND status='cancelled'",
+            (repo_key, issue_number))
+        affected = c.rowcount
+        db.commit()
+    log.info(f"Issue #{issue_number} resumed ({affected} tasks)")
+    return affected
 
 
 def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str) -> int | None:
@@ -967,22 +1236,67 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
 
 @router.post("/close")
 async def close_tasks(body: TaskCloseBody, request: Request):
-    """issue agent 关闭 Issue 后调用：该 issue 全部 active 任务 → completed（issue_closed）"""
+    """issue agent 关闭 Issue 后调用：复用 close_issue_tasks（Issue #51：走 pending_review 流程）"""
     from src.repo_key import to_repo_key
     if not body.repo_key or not body.issue_number:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key / issue_number 必填"})
     body.repo_key = to_repo_key(body.repo_key)
     _require_bot_token(request, body.repo_key)
+    closed = close_issue_tasks(body.repo_key, body.issue_number)
+    return {"ok": True, "closed": closed}
+
+
+@router.get("/{task_id}/pipeline")
+async def get_task_pipeline(task_id: int, user: dict = Depends(get_current_user)):
+    """获取任务关联的流水线信息和事件历史（Issue #51 详情页展示）"""
+    from src.api.event_store import get_events
+    from src.api.pipeline_config import get_pipeline_config
+    from src.api.session_store import get_issue_stage, get_issue_scene
+
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-            (body.repo_key, body.issue_number)
-        )
-        db.commit()
-        closed = c.rowcount
-    return {"ok": True, "closed": closed}
+        c.execute("SELECT repo_key, issue_number FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+                  (task_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        repo_key, issue_number = row[0], row[1]
+
+    issue_id = f"#{issue_number}" if issue_number else ""
+    _scene_id = get_issue_scene(repo_key, issue_id) or "default"
+    _stage_info = get_issue_stage(repo_key, issue_id) if issue_id else None
+    _current_stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
+
+    # 流水线配置
+    pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
+    nodes = (pipe_cfg or {}).get("nodes", [])
+
+    # 标记每个节点状态
+    _stage_order = [n.get("id", "") for n in nodes]
+    _cur_idx = _stage_order.index(_current_stage) if _current_stage in _stage_order else -1
+    for i, n in enumerate(nodes):
+        nid = n.get("id", "")
+        if _current_stage == "done" or _current_stage == "pending_review":
+            n["node_status"] = "completed"
+        elif i < _cur_idx:
+            n["node_status"] = "completed"
+        elif i == _cur_idx:
+            n["node_status"] = "current"
+        else:
+            n["node_status"] = "pending"
+
+    # 事件历史
+    events = []
+    if issue_id:
+        events = get_events(repo_key, issue_id=issue_id, limit=30)
+
+    return {
+        "scene_id": _scene_id,
+        "scene_name": (pipe_cfg or {}).get("name", _scene_id),
+        "current_stage": _current_stage,
+        "nodes": nodes,
+        "events": events,
+    }
 
 
 @router.get("/mine", operation_id="tasks_mine", summary="我的任务列表")

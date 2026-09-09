@@ -1344,6 +1344,29 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                                   duration=duration,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=_conclusion or (result_text or "")[:200])
+            # Issue #51: 最后节点完成后 → 设 stage=pending_review 等待开发者审核
+            # 统一处理：检查 agent 是否是 pipeline 最后节点（非 done 的 next=done）
+            if status == "completed" and task.get("issue_id"):
+                try:
+                    _ag = task.get("agent_type") or ""
+                    _rk = task.get("repo_key") or ""
+                    _iid = task.get("issue_id") or ""
+                    if _ag and _rk and _iid:
+                        from src.api.session_store import get_issue_stage, get_issue_scene, set_issue_stage
+                        from src.api.pipeline_config import get_pipeline_config
+                        _st = get_issue_stage(_rk, _iid)
+                        _cur_stage = (_st or {}).get("stage", "") if _st else ""
+                        if _cur_stage == _ag:  # 当前 stage 就是完成的 agent → 检查是否最后节点
+                            _scene_id = get_issue_scene(_rk, _iid) or "default"
+                            _pipe_cfg = get_pipeline_config(_scene_id, repo_key=_rk)
+                            _nodes = (_pipe_cfg or {}).get("nodes", [])
+                            for _n in _nodes:
+                                if _n.get("id") == _ag and _n.get("next") == "done":
+                                    set_issue_stage(_rk, _iid, "pending_review", _ag)
+                                    log.info(f"Last node {_ag} completed → pending_review issue={_iid}")
+                                    break
+                except Exception as _e:
+                    log.warning(f"complete_task: pending_review check failed: {_e}")
         except Exception as e:
             log.warning(f"complete_task finalize failed: {e}")
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
