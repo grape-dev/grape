@@ -1,34 +1,30 @@
 // knowledge.js — 项目知识库页面（Issue #67 Vue 3 重写）
-// 统一列表 + 统计卡片 + 筛选器 + CRUD + 关联管理
+// 统一列表 + 统计卡片 + 筛选器 + 详情页面 + 关联管理
 
 var _knowledgeVueApp = null;
 
-function _currentRepo() {
-  try {
-    const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
-    return c ? (c.fullName || '') : '';
-  } catch { return ''; }
-}
+const AGENT_TYPES = [
+  { value: '', label: '全部 Agent' },
+  { value: 'vod', label: 'VOD' },
+  { value: 'coding', label: 'Coding' },
+  { value: 'qa', label: 'QA' },
+  { value: 'sre', label: 'SRE' },
+  { value: 'chat', label: 'Chat' },
+];
 
 function renderKnowledge() {
   const el = document.getElementById('pageContent');
   if (!el) return;
 
-  // 卸载旧的 Vue 应用
   if (_knowledgeVueApp) {
     _knowledgeVueApp.unmount();
     _knowledgeVueApp = null;
   }
 
-  const repo = _currentRepo();
-  if (!repo) {
-    el.innerHTML = '<div class="ts t2" style="padding:12px">' + I18N.t('knowledge.no_repo_selected') + '</div>';
-    return;
-  }
-
   _knowledgeVueApp = Vue.createApp({
     data() {
       return {
+        view: 'list',
         list: [],
         loading: true,
         filter: { source: '', refStatus: '', query: '' },
@@ -38,9 +34,10 @@ function renderKnowledge() {
         pageSize: 50,
         total: 0,
         editModal: null,
-        refModal: null,
         entryModal: null,
-        detailView: null,
+        detail: null,
+        scenes: [],
+        agentTypes: AGENT_TYPES,
       };
     },
     computed: {
@@ -70,6 +67,19 @@ function renderKnowledge() {
           );
         }
         return result;
+      },
+      detailAgentRefs() {
+        if (!this.detail || !this.detail.refs) return [];
+        const agentRefs = this.detail.refs.filter(r => r.scene_id === '' && r.agent_type !== '');
+        return agentRefs;
+      },
+      detailSceneRefs() {
+        if (!this.detail || !this.detail.refs) return [];
+        return this.detail.refs.filter(r => r.scene_id !== '');
+      },
+      detailGlobalRef() {
+        if (!this.detail || !this.detail.refs) return null;
+        return this.detail.refs.find(r => r.scene_id === '' && r.agent_type === '');
       },
     },
     async mounted() {
@@ -125,8 +135,7 @@ function renderKnowledge() {
       statUser() { return this.stats.manual; },
       statUnlinked() { return this.stats.unlinked; },
 
-      // 查看全文
-      // 查看全文——按 id 查询
+      // 详情页面
       async viewContent(k) {
         if (!k.id) {
           app.showToast(this.t('error_no_id'));
@@ -135,22 +144,132 @@ function renderKnowledge() {
         try {
           const d = await API.get('/knowledge/' + k.id);
           if (window._currentView !== 'knowledge') return;
-          this.detailView = d;
+          this.detail = d;
+          this.view = 'detail';
+          await this.loadScenes();
+          await this.loadRefs(k.id);
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
           app.showToast(e.message || I18N.t('common.load_failed'));
         }
       },
+      backToList() {
+        this.view = 'list';
+        this.detail = null;
+        this.loadList();
+      },
+      async loadScenes() {
+        try {
+          const repo = this.currentRepo();
+          const d = await API.get('/scenes?repo=' + encodeURIComponent(repo));
+          if (window._currentView !== 'knowledge') return;
+          this.scenes = (d.scenes || []).map(s => ({
+            id: s.id || s.scene_id || '',
+            name: s.display_name || s.name || s.id || '',
+          }));
+        } catch (e) {
+          this.scenes = [];
+        }
+      },
+      async loadRefs(kid) {
+        try {
+          const d = await API.get('/knowledge/' + kid + '/refs');
+          if (this.detail && this.detail.id === kid) {
+            this.detail.refs = d.refs || [];
+          }
+        } catch (e) {
+          // ignore
+        }
+      },
+
+      // Agent 多选关联
+      isAgentChecked(agentType) {
+        if (!this.detail || !this.detail.refs) return false;
+        return this.detail.refs.some(r => r.scene_id === '' && r.agent_type === agentType && r.enabled);
+      },
+      async toggleAgentRef(agentType) {
+        const kid = this.detail.id;
+        const existing = (this.detail.refs || []).find(r => r.scene_id === '' && r.agent_type === agentType);
+        if (existing) {
+          try {
+            await API.put('/knowledge/ref/' + existing.id, { enabled: !existing.enabled });
+            existing.enabled = !existing.enabled;
+          } catch (e) {
+            app.showToast(e.message);
+          }
+        } else {
+          try {
+            await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: agentType });
+            await this.loadRefs(kid);
+            app.showToast(this.t('ref_add'));
+          } catch (e) {
+            if (e.detail && e.detail.message && (e.detail.message.includes('已绑定') || e.detail.message.includes('Duplicate'))) {
+              app.showToast(this.t('ref_already_bound'));
+            } else {
+              app.showToast(e.message || I18N.t('common.load_failed'));
+            }
+          }
+        }
+      },
+
+      // 全局关联（所有场景 + 所有 Agent）
+      isGlobalChecked() {
+        return this.detailGlobalRef && this.detailGlobalRef.enabled;
+      },
+      async toggleGlobalRef() {
+        const kid = this.detail.id;
+        const existing = this.detailGlobalRef;
+        if (existing) {
+          try {
+            await API.put('/knowledge/ref/' + existing.id, { enabled: !existing.enabled });
+            existing.enabled = !existing.enabled;
+          } catch (e) {
+            app.showToast(e.message);
+          }
+        } else {
+          try {
+            await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: '' });
+            await this.loadRefs(kid);
+            app.showToast(this.t('ref_add'));
+          } catch (e) {
+            app.showToast(e.message || I18N.t('common.load_failed'));
+          }
+        }
+      },
+
+      // 场景多选关联
+      isSceneChecked(sceneId) {
+        if (!this.detail || !this.detail.refs) return false;
+        return this.detail.refs.some(r => r.scene_id === sceneId && r.enabled);
+      },
+      async toggleSceneRef(sceneId) {
+        const kid = this.detail.id;
+        const existing = (this.detail.refs || []).find(r => r.scene_id === sceneId && r.agent_type === '');
+        if (existing) {
+          try {
+            await API.put('/knowledge/ref/' + existing.id, { enabled: !existing.enabled });
+            existing.enabled = !existing.enabled;
+          } catch (e) {
+            app.showToast(e.message);
+          }
+        } else {
+          try {
+            await API.post('/knowledge/' + kid + '/refs', { scene_id: sceneId, agent_type: '' });
+            await this.loadRefs(kid);
+            app.showToast(this.t('ref_add'));
+          } catch (e) {
+            if (e.detail && e.detail.message && (e.detail.message.includes('已绑定') || e.detail.message.includes('Duplicate'))) {
+              app.showToast(this.t('ref_already_bound'));
+            } else {
+              app.showToast(e.message || I18N.t('common.load_failed'));
+            }
+          }
+        }
+      },
 
       // 编辑
-      editKnowledge(k) {
-        this.editModal = { id: k.id, content: k.content || '', loading: false };
-        // 加载全文
-        API.get('/knowledge/' + k.id).then(d => {
-          if (this.editModal && this.editModal.id === k.id) {
-            this.editModal.content = d.content || '';
-          }
-        }).catch(() => {});
+      editKnowledge() {
+        this.editModal = { id: this.detail.id, content: this.detail.content || '', loading: false };
       },
       async saveEdit() {
         if (!this.editModal) return;
@@ -159,7 +278,7 @@ function renderKnowledge() {
           await API.put('/knowledge/' + this.editModal.id, { content: this.editModal.content });
           app.showToast(this.t('knowledge_updated'));
           this.editModal = null;
-          await this.loadList();
+          await this.viewContent({ id: this.detail.id });
         } catch (e) {
           app.showToast(e.message || I18N.t('common.load_failed'));
         } finally {
@@ -168,7 +287,33 @@ function renderKnowledge() {
       },
 
       // 删除
-      async deleteKnowledge(k) {
+      deleteKnowledge() {
+        const self = this;
+        const kid = this.detail.id;
+        _showAppleConfirm(this.t('delete_confirm'), async function() {
+          try {
+            await API.del('/knowledge/' + kid);
+            app.showToast(self.t('knowledge_deleted'));
+            self.backToList();
+          } catch (e) {
+            app.showToast(e.message || I18N.t('common.load_failed'));
+          }
+        });
+      },
+
+      // 归档
+      async toggleArchive() {
+        try {
+          await API.put('/knowledge/' + this.detail.id + '/archive', { archived: !this.detail.archived });
+          app.showToast(this.detail.archived ? this.t('unarchived') : this.t('archived'));
+          this.detail.archived = !this.detail.archived;
+        } catch (e) {
+          app.showToast(e.message || I18N.t('common.load_failed'));
+        }
+      },
+
+      // 卡片上的快速操作
+      async quickDelete(k) {
         const self = this;
         _showAppleConfirm(this.t('delete_confirm'), async function() {
           try {
@@ -180,9 +325,7 @@ function renderKnowledge() {
           }
         });
       },
-
-      // 归档/取消归档
-      async toggleArchive(k) {
+      async quickArchive(k) {
         try {
           await API.put('/knowledge/' + k.id + '/archive', { archived: !k.archived });
           app.showToast(k.archived ? this.t('unarchived') : this.t('archived'));
@@ -191,57 +334,10 @@ function renderKnowledge() {
           app.showToast(e.message || I18N.t('common.load_failed'));
         }
       },
-
-      // 关联设置
-      async openRefModal(k) {
-        try {
-          const d = await API.get('/knowledge/' + k.id + '/refs');
-          this.refModal = { knowledge: k, refs: d.refs || [], newScene: '', newAgent: '' };
-        } catch (e) {
-          app.showToast(e.message);
-        }
-      },
-      async addRef() {
-        const sceneId = this.refModal.newScene || '';
-        const agentType = this.refModal.newAgent || '';
-        try {
-          await API.post('/knowledge/' + this.refModal.knowledge.id + '/refs', {
-            scene_id: sceneId, agent_type: agentType
-          });
-          const d = await API.get('/knowledge/' + this.refModal.knowledge.id + '/refs');
-          this.refModal.refs = d.refs || [];
-          this.refModal.newScene = '';
-          this.refModal.newAgent = '';
-          app.showToast(this.t('ref_add'));
-        } catch (e) {
-          if (e.detail && e.detail.message && e.detail.message.includes('已绑定')) {
-            app.showToast(this.t('ref_already_bound'));
-          } else if (e.detail && e.detail.message && e.detail.message.includes('20')) {
-            app.showToast(e.detail.message);
-          } else {
-            app.showToast(e.message || I18N.t('common.load_failed'));
-          }
-        }
-      },
-      async toggleRef(ref) {
-        try {
-          await API.put('/knowledge/ref/' + ref.id, { enabled: !ref.enabled });
-          ref.enabled = !ref.enabled;
-        } catch (e) {
-          app.showToast(e.message);
-        }
-      },
-      deleteRef(ref) {
-        const self = this;
-        const affected = this.refModal.refs.filter(r => r.enabled && r.id !== ref.id).length;
-        const msg = this.t('ref_delete_confirm') + (affected > 0 ? '（会影响 ' + affected + ' 个场景）' : '');
-        _showAppleConfirm(msg, async function() {
-          try {
-            await API.del('/knowledge/ref/' + ref.id);
-            self.refModal.refs = self.refModal.refs.filter(r => r.id !== ref.id);
-            app.showToast(self.t('ref_delete'));
-          } catch (e) {
-            app.showToast(e.message);
+      quickEdit(k) {
+        this.viewContent(k).then(() => {
+          if (this.detail && this.detail.source === 'manual') {
+            this.editModal = { id: this.detail.id, content: this.detail.content || '', loading: false };
           }
         });
       },
@@ -255,7 +351,7 @@ function renderKnowledge() {
         this.entryModal.loading = true;
         try {
           await API.post('/knowledge/entry', {
-            repo: _currentRepo(),
+            repo: this.currentRepo(),
             content: this.entryModal.content,
             agent_type: this.entryModal.agentType || ''
           });
@@ -285,78 +381,140 @@ function renderKnowledge() {
     },
     template: `
       <div class="knowledge-page">
-        <div v-if="loading" class="loading">{{ t('loading') }}</div>
-        <template v-else>
-          <div class="stats-bar">
-            <div class="stat-card" @click="filterByStats('system')">
-              <span class="stat-num">{{ statSystem() }}</span>
-              <span class="stat-label">{{ t('stats_system') }}</span>
+        <!-- ===== 列表视图 ===== -->
+        <template v-if="view === 'list'">
+          <div v-if="loading" class="loading">{{ t('loading') }}</div>
+          <template v-else>
+            <div class="stats-bar">
+              <div class="stat-card" @click="filterByStats('system')">
+                <span class="stat-num">{{ statSystem() }}</span>
+                <span class="stat-label">{{ t('stats_system') }}</span>
+              </div>
+              <div class="stat-card" @click="filterByStats('agent')">
+                <span class="stat-num">{{ statAgent() }}</span>
+                <span class="stat-label">{{ t('stats_agent') }}</span>
+              </div>
+              <div class="stat-card" @click="filterByStats('user')">
+                <span class="stat-num">{{ statUser() }}</span>
+                <span class="stat-label">{{ t('stats_user') }}</span>
+              </div>
+              <div class="stat-card" @click="filterByStats('unlinked')">
+                <span class="stat-num">{{ statUnlinked() }}</span>
+                <span class="stat-label">{{ t('stats_unlinked') }}</span>
+              </div>
             </div>
-            <div class="stat-card" @click="filterByStats('agent')">
-              <span class="stat-num">{{ statAgent() }}</span>
-              <span class="stat-label">{{ t('stats_agent') }}</span>
+
+            <div class="filter-bar">
+              <select v-model="filter.source" class="kb-select">
+                <option value="">{{ t('filter_source_all') }}</option>
+                <option value="system">{{ t('source_system') }}</option>
+                <option value="agent">{{ t('source_agent') }}</option>
+                <option value="manual">{{ t('source_manual') }}</option>
+              </select>
+              <select v-model="filter.refStatus" class="kb-select">
+                <option value="">{{ t('filter_ref_all') }}</option>
+                <option value="linked">{{ t('filter_ref_linked') }}</option>
+                <option value="unlinked">{{ t('filter_ref_unlinked') }}</option>
+              </select>
+              <input v-model="filter.query" :placeholder="t('search_placeholder')" class="kb-input">
+              <label class="kb-checkbox-label">
+                <input type="checkbox" v-model="showArchived"> {{ t('show_archived') }}
+              </label>
+              <button class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a);margin-left:auto" @click="openEntryModal">{{ t('entry_create') }}</button>
             </div>
-            <div class="stat-card" @click="filterByStats('user')">
-              <span class="stat-num">{{ statUser() }}</span>
-              <span class="stat-label">{{ t('stats_user') }}</span>
+
+            <div v-if="filteredList.length === 0" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
+            <div v-else class="kb-grid">
+              <div v-for="k in filteredList" :key="k.id || k.file_path" class="cd skill-card" style="padding:14px" :class="{ 'archived-card': k.archived }">
+                <div class="card-header">
+                  <span class="source-tag" :class="sourceClass(k.source)">{{ sourceLabel(k.source) }}</span>
+                  <span v-if="k.ref_summary && k.ref_summary !== '未关联'" class="ref-tag">{{ k.ref_summary }}</span>
+                  <span v-else class="ref-tag unlinked">{{ t('ref_unlinked') }}</span>
+                  <span v-if="k.issue_tag" class="issue-tag">{{ k.issue_tag }}</span>
+                  <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
+                </div>
+                <div v-if="isFileTooLarge(k)" class="size-warning">⚠ {{ t('file_too_large', { size: fileSizeKB(k) }) }}</div>
+                <div class="card-content">{{ k.content || '' }}</div>
+                <div class="card-footer">
+                  <span>{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
+                </div>
+                <div class="card-actions">
+                  <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
+                  <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" @click="quickEdit(k)">{{ t('edit_save') }}</button>
+                  <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="quickDelete(k)">{{ t('delete') }}</button>
+                  <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('archive') }}</button>
+                  <button v-if="k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('unarchive') }}</button>
+                </div>
+              </div>
             </div>
-            <div class="stat-card" @click="filterByStats('unlinked')">
-              <span class="stat-num">{{ statUnlinked() }}</span>
-              <span class="stat-label">{{ t('stats_unlinked') }}</span>
+          </template>
+        </template>
+
+        <!-- ===== 详情视图 ===== -->
+        <template v-if="view === 'detail' && detail">
+          <div style="margin-bottom:16px">
+            <button class="bt bt-o bt-s" @click="backToList">← {{ t('back_to_list') }}</button>
+          </div>
+
+          <div class="cd" style="padding:20px;margin-bottom:16px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+              <span class="source-tag" :class="sourceClass(detail.source)">{{ sourceLabel(detail.source) }}</span>
+              <span class="ref-tag">{{ detail.scope }}</span>
+              <span v-if="detail.issue_tag" class="issue-tag">{{ detail.issue_tag }}</span>
+              <span v-if="detail.archived" class="archived-tag">{{ t('archived') }}</span>
+              <span style="font-size:10px;color:var(--t3);margin-left:auto">{{ detail.created_by || '' }} · {{ (detail.created_at || '').substring(0, 16) }}</span>
+            </div>
+            <div v-html="renderMarkdown(detail.content || '')" class="kb-detail-content"></div>
+            <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
+              <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" @click="editKnowledge">{{ t('edit_save') }}</button>
+              <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="deleteKnowledge">{{ t('delete') }}</button>
+              <button v-if="detail.source !== 'manual' && !detail.archived" class="bt bt-o bt-s" @click="toggleArchive">{{ t('archive') }}</button>
+              <button v-if="detail.archived" class="bt bt-o bt-s" @click="toggleArchive">{{ t('unarchive') }}</button>
             </div>
           </div>
 
-          <div class="filter-bar">
-            <select v-model="filter.source" style="padding:7px 10px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;background:var(--c)">
-              <option value="">{{ t('filter_source_all') }}</option>
-              <option value="system">{{ t('source_system') }}</option>
-              <option value="agent">{{ t('source_agent') }}</option>
-              <option value="manual">{{ t('source_manual') }}</option>
-            </select>
-            <select v-model="filter.refStatus" style="padding:7px 10px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;background:var(--c)">
-              <option value="">{{ t('filter_ref_all') }}</option>
-              <option value="linked">{{ t('filter_ref_linked') }}</option>
-              <option value="unlinked">{{ t('filter_ref_unlinked') }}</option>
-            </select>
-            <input v-model="filter.query" :placeholder="t('search_placeholder')"
-              style="padding:7px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);width:200px">
-            <label style="font-size:11px;color:var(--t3);display:flex;align-items:center;gap:4px;cursor:pointer">
-              <input type="checkbox" v-model="showArchived"> {{ t('show_archived') }}
-            </label>
-            <button @click="openEntryModal" style="padding:7px 14px;border:1px solid var(--a);border-radius:var(--rd);font-size:12px;cursor:pointer;color:var(--a);margin-left:auto">{{ t('entry_create') }}</button>
-          </div>
+          <!-- 关联管理 -->
+          <div class="cd" style="padding:20px">
+            <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">{{ t('ref_modal_title') }}</h3>
 
-          <div v-if="filteredList.length === 0" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
-          <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">
-            <div v-for="k in filteredList" :key="k.id || k.file_path" class="cd skill-card" style="padding:14px" :class="{ 'archived-card': k.archived }">
-              <div class="card-header">
-                <span class="source-tag" :class="sourceClass(k.source)">{{ sourceLabel(k.source) }}</span>
-                <span v-if="k.ref_summary && k.ref_summary !== '未关联'" class="ref-tag">{{ k.ref_summary }}</span>
-                <span v-else class="ref-tag unlinked">{{ t('ref_unlinked') }}</span>
-                <span v-if="k.issue_tag" class="issue-tag">{{ k.issue_tag }}</span>
-                <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
+            <!-- 全局关联 -->
+            <div class="kb-ref-section">
+              <label class="kb-ref-item">
+                <input type="checkbox" :checked="isGlobalChecked()" @change="toggleGlobalRef">
+                <span>{{ t('ref_global') }}</span>
+              </label>
+            </div>
+
+            <!-- Agent 多选 -->
+            <div class="kb-ref-section">
+              <div class="kb-ref-section-title">{{ t('ref_agent_title') }}</div>
+              <div class="kb-ref-grid">
+                <label v-for="at in agentTypes.filter(a => a.value)" :key="at.value" class="kb-ref-item">
+                  <input type="checkbox" :checked="isAgentChecked(at.value)" @change="toggleAgentRef(at.value)">
+                  <span>{{ at.label }}</span>
+                </label>
               </div>
-              <div v-if="isFileTooLarge(k)" class="size-warning">⚠ {{ t('file_too_large', { size: fileSizeKB(k) }) }}</div>
-              <div class="card-content">{{ k.content || '' }}</div>
-              <div class="card-footer">
-                <span>{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
-              </div>
-              <div class="card-actions">
-                <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
-                <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" @click="editKnowledge(k)">{{ t('edit_save') }}</button>
-                <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="deleteKnowledge(k)">{{ t('delete') }}</button>
-                <button v-if="!k.archived" class="bt bt-o bt-s" @click="openRefModal(k)">{{ t('ref_settings') }}</button>
-                <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click="toggleArchive(k)">{{ t('archive') }}</button>
-                <button v-if="k.archived" class="bt bt-o bt-s" @click="toggleArchive(k)">{{ t('unarchive') }}</button>
+            </div>
+
+            <!-- 场景多选 -->
+            <div class="kb-ref-section">
+              <div class="kb-ref-section-title">{{ t('ref_scene_title') }}</div>
+              <div v-if="scenes.length === 0" class="ts t2" style="padding:8px">{{ t('ref_no_scenes') }}</div>
+              <div v-else class="kb-ref-grid">
+                <label v-for="s in scenes" :key="s.id" class="kb-ref-item">
+                  <input type="checkbox" :checked="isSceneChecked(s.id)" @change="toggleSceneRef(s.id)">
+                  <span>{{ s.name }}</span>
+                </label>
               </div>
             </div>
           </div>
         </template>
 
+        <!-- 编辑 modal -->
         <div v-if="editModal" class="modal-overlay" @click.self="editModal = null">
           <div class="modal cd">
             <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('edit_title') }}</h3>
-            <textarea v-model="editModal.content" rows="12" style="width:100%;min-height:200px;padding:12px;border:1px solid var(--b);border-radius:8px;font-size:13px;font-family:monospace;resize:vertical"></textarea>
+            <textarea v-model="editModal.content" rows="12" class="kb-textarea"></textarea>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
               <button class="bt bt-o bt-s" @click="editModal = null">{{ t('cancel') }}</button>
               <button class="bt bt-p bt-s" :disabled="editModal.loading" @click="saveEdit">{{ t('edit_save') }}</button>
@@ -364,63 +522,19 @@ function renderKnowledge() {
           </div>
         </div>
 
-        <div v-if="refModal" class="modal-overlay" @click.self="refModal = null">
-          <div class="modal cd" style="width:520px">
-            <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_modal_title') }}</h3>
-            <div style="display:flex;gap:8px;margin-bottom:14px">
-              <input v-model="refModal.newScene" :placeholder="t('ref_scene')" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px">
-              <select v-model="refModal.newAgent" style="padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">
-                <option value="">{{ t('ref_agent_all') }}</option>
-                <option value="vod">VOD</option>
-                <option value="coding">Coding</option>
-                <option value="qa">QA</option>
-                <option value="sre">SRE</option>
-                <option value="chat">Chat</option>
-              </select>
-              <button class="bt bt-p bt-s" @click="addRef">{{ t('ref_add') }}</button>
-            </div>
-            <div v-if="refModal.refs.length === 0" class="ts t2" style="padding:8px">{{ t('ref_unlinked') }}</div>
-            <div v-else style="max-height:300px;overflow-y:auto">
-              <div v-for="ref in refModal.refs" :key="ref.id" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--bg)">
-                <span style="font-size:12px;flex:1">{{ ref.scene_id || t('ref_scene_all') }} · {{ ref.agent_type || t('ref_agent_all') }}</span>
-                <label style="cursor:pointer">
-                  <input type="checkbox" :checked="ref.enabled" @change="toggleRef(ref)">
-                </label>
-                <button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="deleteRef(ref)">{{ t('ref_delete') }}</button>
-              </div>
-            </div>
-            <div style="display:flex;justify-content:flex-end;margin-top:12px">
-              <button class="bt bt-o bt-s" @click="refModal = null">{{ t('cancel') }}</button>
-            </div>
-          </div>
-        </div>
-
+        <!-- 新增 modal -->
         <div v-if="entryModal" class="modal-overlay" @click.self="entryModal = null">
           <div class="modal cd">
             <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('entry_title') }}</h3>
-            <textarea v-model="entryModal.content" rows="10" :placeholder="t('entry_content')" style="width:100%;min-height:180px;padding:12px;border:1px solid var(--b);border-radius:8px;font-size:13px;font-family:monospace;resize:vertical"></textarea>
-            <select v-model="entryModal.agentType" style="width:100%;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);margin-top:8px">
+            <textarea v-model="entryModal.content" rows="10" :placeholder="t('entry_content')" class="kb-textarea"></textarea>
+            <select v-model="entryModal.agentType" class="kb-select" style="width:100%;margin-top:8px">
               <option value="">{{ t('ref_agent_all') }}</option>
-              <option value="vod">VOD</option>
-              <option value="coding">Coding</option>
-              <option value="qa">QA</option>
-              <option value="sre">SRE</option>
-              <option value="chat">Chat</option>
+              <option v-for="at in agentTypes.filter(a => a.value)" :key="at.value" :value="at.value">{{ at.label }}</option>
             </select>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
               <button class="bt bt-o bt-s" @click="entryModal = null">{{ t('cancel') }}</button>
               <button class="bt bt-p bt-s" :disabled="entryModal.loading" @click="createEntry">{{ t('entry_create') }}</button>
             </div>
-          </div>
-        </div>
-
-        <div v-if="detailView" class="modal-overlay" @click.self="detailView = null">
-          <div class="modal cd" style="width:700px;max-width:90vw;max-height:80vh;overflow-y:auto">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-              <h3 style="font-size:14px;font-weight:600">{{ detailView.file || detailView.obs_key || '' }}</h3>
-              <button class="bt bt-o bt-s" @click="detailView = null">{{ t('cancel') }}</button>
-            </div>
-            <div v-html="renderMarkdown(detailView.content || '')" style="font-size:13px;line-height:1.6"></div>
           </div>
         </div>
       </div>

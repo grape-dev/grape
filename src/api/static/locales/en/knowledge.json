@@ -83,5 +83,10 @@
   "file_too_large": "File is large ({{size}}KB), consider cleaning up outdated entries",
   "error_no_id": "No valid ID for this knowledge",
   "injected_knowledge_count": "Injected {{count}} knowledge entries",
-  "view_injected_detail": "View Details"
+  "view_injected_detail": "View Details",
+  "back_to_list": "Back to List",
+  "ref_global": "Global (all scenes + all agents)",
+  "ref_agent_title": "Linked Agent Types",
+  "ref_scene_title": "Linked Scenes",
+  "ref_no_scenes": "No scenes in this repo"
 }

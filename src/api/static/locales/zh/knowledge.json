@@ -83,5 +83,10 @@
   "file_too_large": "文件较大（{{size}}KB），建议整理去除不需要的知识",
   "error_no_id": "该知识没有有效ID，无法操作",
   "injected_knowledge_count": "本次注入 {{count}} 条知识",
-  "view_injected_detail": "查看详情"
+  "view_injected_detail": "查看详情",
+  "back_to_list": "返回列表",
+  "ref_global": "全局生效（所有场景 + 所有 Agent）",
+  "ref_agent_title": "关联 Agent 类型",
+  "ref_scene_title": "关联场景",
+  "ref_no_scenes": "该仓库暂无场景"
 }
