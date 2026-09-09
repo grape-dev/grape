@@ -557,17 +557,17 @@ function renderKnowledge() {
         <!-- ===== 列表视图 ===== -->
         <template v-if="view === 'list'">
           <template v-if="!firstLoad">
-            <!-- 统计卡片（纯展示，在 apple-card 外面） -->
+            <!-- 统计卡片（点击切换 tab） -->
             <div class="stats-bar">
-              <div class="stat-card">
+              <div class="stat-card" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">
                 <span class="stat-num">{{ statSystem() }}</span>
                 <span class="stat-label">{{ t('stats_system') }}</span>
               </div>
-              <div class="stat-card">
+              <div class="stat-card" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">
                 <span class="stat-num">{{ statAgent() }}</span>
                 <span class="stat-label">{{ t('stats_agent') }}</span>
               </div>
-              <div class="stat-card">
+              <div class="stat-card" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">
                 <span class="stat-num">{{ statUser() }}</span>
                 <span class="stat-label">{{ t('stats_user') }}</span>
               </div>
@@ -604,7 +604,7 @@ function renderKnowledge() {
             </div>
             <div v-if="filteredList.length === 0 && !loading" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
             <div v-show="filteredList.length > 0 && !loading" class="kb-grid">
-              <div v-for="k in filteredList" :key="k.id || k.file_path" class="skill-card" :class="{ 'archived-card': k.archived }">
+              <div v-for="k in filteredList" :key="k.id || k.file_path" class="skill-card" :class="{ 'archived-card': k.archived }" @click="viewContent(k)">
                 <div class="scn-card-bar" :class="sourceBarClass(k.source)"></div>
                 <div class="scn-card-body">
                   <div class="scn-card-head">
@@ -616,10 +616,10 @@ function renderKnowledge() {
                   <div class="scn-card-foot">
                     <span class="scn-meta">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
                     <div class="scn-card-btns">
-                      <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
-                      <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="quickDelete(k)">{{ t('delete') }}</button>
-                      <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('archive') }}</button>
-                      <button v-if="k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('unarchive') }}</button>
+                      <button class="bt bt-o bt-s" @click.stop="viewContent(k)">{{ t('view') }}</button>
+                      <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click.stop="quickDelete(k)">{{ t('delete') }}</button>
+                      <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click.stop="quickArchive(k)">{{ t('archive') }}</button>
+                      <button v-if="k.archived" class="bt bt-o bt-s" @click.stop="quickArchive(k)">{{ t('unarchive') }}</button>
                     </div>
                   </div>
                 </div>
@@ -664,7 +664,7 @@ function renderKnowledge() {
                 </div>
               </div>
             </div>
-            <div style="display:flex;align-items:center;gap:8px;padding-top:16px;border-top:1px solid var(--b);flex-wrap:wrap">
+            <div style="display:flex;align-items:center;gap:8px;padding-top:16px;border-top:1px solid var(--b);flex-wrap:wrap;justify-content:flex-end">
               <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" @click="editKnowledge">{{ t('edit_save') }}</button>
               <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="deleteKnowledge">{{ t('delete') }}</button>
               <button v-if="detail.source !== 'manual' && !detail.archived" class="bt bt-o bt-s" @click="toggleArchive">{{ t('archive') }}</button>

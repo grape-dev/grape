@@ -992,7 +992,7 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
         "issue_num": row["issue_num"], "file_path": row["file_path"],
         "obs_key": row["obs_key"], "content": content,
         "archived": row["archived"], "created_by": row["created_by"],
-        "created_at": row["created_at"],
+        "created_at": row["created_at"], "description": row.get("description", ""),
         "refs": [{"id": r[0], "scene_id": r[1], "agent_type": r[2], "enabled": r[3],
                    "created_by": r[4], "created_at": r[5]} for r in refs],
     }
