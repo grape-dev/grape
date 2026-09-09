@@ -276,6 +276,12 @@ function renderKnowledge() {
       fileSizeKB(k) {
         return ((k.content || '').length / 1024).toFixed(1);
       },
+      renderMarkdown(content) {
+        if (typeof marked !== 'undefined' && marked.parse) {
+          return marked.parse(content);
+        }
+        return '<pre>' + (content || '').replace(/</g, '&lt;') + '</pre>';
+      },
     },
     template: `
       <div class="knowledge-page">
@@ -420,12 +426,4 @@ function renderKnowledge() {
   });
 
   _knowledgeVueApp.mount(el);
-}
-
-// renderMarkdown 供 Vue template 的 v-html 调用
-function renderMarkdown(content) {
-  if (typeof marked !== 'undefined' && marked.parse) {
-    return marked.parse(content);
-  }
-  return '<pre>' + (content || '').replace(/</g, '&lt;') + '</pre>';
 }
