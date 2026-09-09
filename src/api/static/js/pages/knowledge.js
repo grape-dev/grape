@@ -105,8 +105,7 @@ function renderKnowledge() {
         return this.detail.refs
           .filter(r => r.scene_id !== '' && r.enabled)
           .map(r => {
-            const scene = this.scenes.find(s => s.id === r.scene_id);
-            return { ref: r, sceneId: r.scene_id, label: scene ? scene.name : String(r.scene_id || '').substring(0, 8) };
+            return { ref: r, sceneId: r.scene_id, label: r.scene_name || String(r.scene_id || '').substring(0, 8) };
           });
       },
       availableScenes() {
@@ -741,11 +740,13 @@ function renderKnowledge() {
                 </div>
               </div>
               <div v-if="selectedAgentTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_agents_linked') }}</div>
-              <div v-else class="kb-scene-grid">
-                <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card">
-                  <button class="kb-scene-x" @click="removeAgentRef(tag)">×</button>
-                  <div class="kb-scene-name">{{ tag.label }}</div>
-                  <div class="kb-scene-id">{{ tag.agentType }}</div>
+              <div v-else class="scn-scroll-wrap">
+                <div class="scn-scroll-track">
+                  <div v-for="tag in selectedAgentTags" :key="tag.agentType" class="cd kb-scene-card" style="flex-shrink:0;width:200px">
+                    <button class="kb-scene-x" @click="removeAgentRef(tag)">×</button>
+                    <div class="kb-scene-name">{{ tag.label }}</div>
+                    <div class="kb-scene-id">{{ tag.agentType }}</div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -780,11 +781,13 @@ function renderKnowledge() {
                 <button class="kb-tag-add" style="font-size:10px" @click="openScenePopover">+ {{ t('ref_add_scene') }}</button>
               </div>
               <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
-              <div v-else class="kb-scene-grid">
-                <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card">
-                  <button class="kb-scene-x" @click="removeSceneRef(tag)">×</button>
-                  <div class="kb-scene-name">{{ tag.label }}</div>
-                  <div class="kb-scene-id">{{ String(tag.sceneId || '').substring(0, 12) }}...</div>
+              <div v-else class="scn-scroll-wrap">
+                <div class="scn-scroll-track">
+                  <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="cd kb-scene-card" style="flex-shrink:0;width:260px">
+                    <button class="kb-scene-x" @click="removeSceneRef(tag)">×</button>
+                    <div class="kb-scene-name">{{ tag.label }}</div>
+                    <div class="kb-scene-id">{{ String(tag.sceneId || '').substring(0, 12) }}...</div>
+                  </div>
                 </div>
               </div>
             </div>

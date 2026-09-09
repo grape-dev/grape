@@ -983,9 +983,12 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
     from src.session_manager import db, db_lock
     with db_lock:
         refs = db.cursor().execute(
-            "SELECT id, scene_id, agent_type, enabled, created_by, created_at "
-            "FROM scene_knowledge_ref WHERE knowledge_id = ? ORDER BY id",
-            (knowledge_id,)
+            "SELECT r.id, r.scene_id, r.agent_type, r.enabled, r.created_by, r.created_at, "
+            "s.name, s.description "
+            "FROM scene_knowledge_ref r "
+            "LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? "
+            "WHERE r.knowledge_id = ? ORDER BY r.id",
+            (row["repo_key"], knowledge_id)
         ).fetchall()
 
     return {
@@ -997,7 +1000,8 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
         "archived": row["archived"], "created_by": row["created_by"],
         "created_at": row["created_at"], "description": row.get("description", ""),
         "refs": [{"id": r[0], "scene_id": r[1], "agent_type": r[2], "enabled": r[3],
-                   "created_by": r[4], "created_at": r[5]} for r in refs],
+                   "created_by": r[4], "created_at": r[5],
+                   "scene_name": r[6] or "", "scene_description": r[7] or ""} for r in refs],
     }
 
 
