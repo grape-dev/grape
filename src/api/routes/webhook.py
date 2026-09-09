@@ -118,6 +118,34 @@ async def gitcode_webhook(request: Request):
     return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
 
 
+def _authorize_a2a(request: Request, repo_key: str):
+    """A2A 端点仓库级鉴权：bot token 或会话级临时 token（repo 作用域）二选一通过。
+
+    - bot token：仓库级（managed_repos / devops_agent_session），支持远端 worker；
+    - 会话 token（GRAPE_SESSION_TOKEN，M2）：校验 repo_key 匹配——该仓库执行期 agent 凭据。
+    仅当仓库已托管（有 bot token）才严格校验 bot；未托管仓库允许会话 token 或交由后续校验。
+    """
+    _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
+    if not _auth:
+        _auth = request.headers.get("X-Bot-Token", "") or ""
+    if not repo_key:
+        log.warning("A2A: missing repository, reject")
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
+    from src.user.db import get_repo_bot_token_no_global
+    from src.api.auth_token import verify_session_token_for_repo
+    _expected = get_repo_bot_token_no_global(repo_key) or ""
+    _bot_ok = bool(_expected) and _auth == _expected
+    _session_ok = bool(verify_session_token_for_repo(_auth, repo_key))
+    if _bot_ok or _session_ok:
+        log.info(f"A2A: token OK (bot={_bot_ok}, session={_session_ok}) repo={repo_key}")
+        return
+    if not _expected:
+        log.warning(f"A2A: repo not managed (no bot token) & no matching session token, defer to downstream: {repo_key}")
+        return
+    log.warning(f"A2A: unauthorized (token mismatch) for repo={repo_key}")
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid token"})
+
+
 @router.post("/api/a2a")
 async def a2a_endpoint(request: Request):
     """Agent-to-Agent 协议端点：仅限内网调用"""
@@ -132,8 +160,6 @@ async def a2a_endpoint(request: Request):
     if not payload.get("issue_number"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing issue_number in payload: 所有 A2A 事件必须关联一个 Issue"})
 
-    # 仓库级 bot token 鉴权（替代纯内网 IP 校验，支持远端 worker）
-    # Agent 调用时带 Authorization: Bearer <BOT_GITCODE_TOKEN>（或 X-Bot-Token header）
     repository = payload.get("repository", "")
     account = payload.get("account", "") or repository
     context = payload.get("context", "")
@@ -145,25 +171,8 @@ async def a2a_endpoint(request: Request):
     log.info(f"A2A: agent={agent_name}, repo={repository}")
     seq = 0
 
-    # 鉴权：Bearer token 对比该 repo 的 bot token（Agent 的 BOT_GITCODE_TOKEN）
-    # 复用仓库级 bot token 机制（对齐 webhook 鉴权思路），支持远端 worker 调用。
-    # 仅当仓库已托管（库中有 bot token）时严格校验；未托管仓库放行，交由后续 agent 配置查找处理。
-    _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
-    if not _auth:
-        _auth = request.headers.get("X-Bot-Token", "") or ""
-    if repo_key:
-        from src.user.db import get_repo_bot_token_no_global
-        _expected = get_repo_bot_token_no_global(repo_key) or ""
-        if _expected and _auth == _expected:
-            log.info(f"A2A: bot token OK, agent={agent_name}")
-        elif not _expected:
-            log.warning(f"A2A: repo not managed (no bot token), defer to downstream: {repo_key}")
-        else:
-            log.warning(f"A2A: unauthorized (token mismatch) for repo={repo_key}")
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid bot token"})
-    else:
-        log.warning(f"A2A: missing repository, reject")
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
+    # 仓库级鉴权：bot token / 会话级临时 token（M2 试点）二选一
+    _authorize_a2a(request, repo_key)
 
     # Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
     from src.api.session_store import is_agent_enabled
