@@ -590,25 +590,26 @@ function renderKnowledge() {
               <span style="font-size:12px;color:var(--t3);margin-top:8px">{{ t('loading') }}</span>
             </div>
             <div v-if="filteredList.length === 0 && !loading" class="ts t2" style="padding:12px">{{ t('empty') }}</div>
-            <div v-show="filteredList.length > 0" class="kb-grid" :class="{ 'kb-grid-loading': loading }">
-              <div v-for="k in filteredList" :key="k.id || k.file_path" class="cd skill-card" style="padding:14px" :class="{ 'archived-card': k.archived }">
-                <div class="card-header">
-                  <span class="source-tag" :class="sourceClass(k.source)">{{ sourceLabel(k.source) }}</span>
-                  <span v-if="k.ref_summary && k.ref_summary !== '未关联'" class="ref-tag">{{ k.ref_summary }}</span>
-                  <span v-else class="ref-tag unlinked">{{ t('ref_unlinked') }}</span>
-                  <span v-if="k.issue_tag" class="issue-tag">{{ k.issue_tag }}</span>
-                  <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
-                </div>
-                <div v-if="isFileTooLarge(k)" class="size-warning">⚠ {{ t('file_too_large', { size: fileSizeKB(k) }) }}</div>
-                <div class="card-content">{{ k.description || t('no_description') }}</div>
-                <div class="card-footer">
-                  <span>{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
-                </div>
-                <div class="card-actions">
-                  <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
-                  <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="quickDelete(k)">{{ t('delete') }}</button>
-                  <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('archive') }}</button>
-                  <button v-if="k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('unarchive') }}</button>
+            <div v-show="filteredList.length > 0 && !loading" class="kb-grid">
+              <div v-for="k in filteredList" :key="k.id || k.file_path" class="cd skill-card" :class="{ 'archived-card': k.archived }">
+                <div style="padding:16px 20px;display:flex;flex-direction:column;flex:1">
+                  <div class="card-header">
+                    <span class="source-tag" :class="sourceClass(k.source)">{{ sourceLabel(k.source) }}</span>
+                    <span v-if="k.ref_summary && k.ref_summary !== '未关联'" class="ref-tag">{{ k.ref_summary }}</span>
+                    <span v-else class="ref-tag unlinked">{{ t('ref_unlinked') }}</span>
+                    <span v-if="k.issue_tag" class="issue-tag">{{ k.issue_tag }}</span>
+                    <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
+                  </div>
+                  <div class="card-content">{{ k.description || t('no_description') }}</div>
+                  <div class="card-footer">
+                    <span>{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
+                  </div>
+                  <div class="card-actions">
+                    <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
+                    <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="quickDelete(k)">{{ t('delete') }}</button>
+                    <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('archive') }}</button>
+                    <button v-if="k.archived" class="bt bt-o bt-s" @click="quickArchive(k)">{{ t('unarchive') }}</button>
+                  </div>
                 </div>
               </div>
             </div>
