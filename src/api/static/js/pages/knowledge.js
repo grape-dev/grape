@@ -30,6 +30,8 @@ function renderKnowledge() {
         view: 'list',
         editMode: false,
         createForm: null,
+        sceneScrollLeft: false,
+        sceneScrollRight: false,
         list: [],
         loading: false,
         firstLoad: true,
@@ -218,6 +220,7 @@ function renderKnowledge() {
           this.detail = d;
           this.view = 'detail';
           await this.loadScenes();
+          this.$nextTick(() => this.updateSceneScrollBtns());
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
           app.showToast(e.message || I18N.t('common.load_failed'));
@@ -446,6 +449,16 @@ function renderKnowledge() {
       },
       cancelEdit() {
         this.editMode = false;
+      },
+      scrollSceneTrack(delta) {
+        const el = this.$refs.sceneTrack;
+        if (el) el.scrollBy({ left: delta, behavior: 'smooth' });
+      },
+      updateSceneScrollBtns() {
+        const el = this.$refs.sceneTrack;
+        if (!el) return;
+        this.sceneScrollLeft = el.scrollLeft > 5;
+        this.sceneScrollRight = el.scrollLeft + el.clientWidth < el.scrollWidth - 5;
       },
       async saveEdit() {
         if (!this.detail) return;
@@ -782,7 +795,8 @@ function renderKnowledge() {
               </div>
               <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
               <div v-else class="scn-scroll-wrap">
-                <div class="scn-scroll-track">
+                <button class="scn-scroll-btn scn-scroll-prev" :class="{ show: sceneScrollLeft }" @click="scrollSceneTrack(-314)">◀</button>
+                <div class="scn-scroll-track" ref="sceneTrack" @scroll="updateSceneScrollBtns">
                   <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="scn-card" style="flex-shrink:0;width:300px;position:relative">
                     <button class="kb-scene-x" style="z-index:5" @click="removeSceneRef(tag)">×</button>
                     <div class="scn-card-bar" :class="sourceBarClass(detail.source)"></div>
@@ -801,6 +815,7 @@ function renderKnowledge() {
                     </div>
                   </div>
                 </div>
+                <button class="scn-scroll-btn scn-scroll-next" :class="{ show: sceneScrollRight }" @click="scrollSceneTrack(314)">▶</button>
               </div>
             </div>
 
