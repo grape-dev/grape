@@ -69,6 +69,26 @@
     "qa": "pr",
     "sre": "blog-publish"
    }
+  },
+  "harmony": {
+   "name": "鸿蒙开发",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue-advance",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   }
+  },
+  "hello-demo": {
+   "name": "Hello Demo",
+   "mapping": {
+    "vod": "vod",
+    "issue": "issue",
+    "coding": "implementation",
+    "qa": "pr",
+    "sre": "cloud-deploy"
+   }
   }
  }
 }
