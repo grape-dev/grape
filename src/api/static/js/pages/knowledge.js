@@ -509,16 +509,24 @@ function renderKnowledge() {
             <button class="bt bt-o bt-s" @click="backToList">← {{ t('back_to_list') }}</button>
           </div>
 
-          <div class="cd" style="padding:20px;margin-bottom:16px">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-              <span class="source-tag" :class="sourceClass(detail.source)">{{ sourceLabel(detail.source) }}</span>
-              <span class="ref-tag">{{ detail.scope }}</span>
-              <span v-if="detail.issue_tag" class="issue-tag">{{ detail.issue_tag }}</span>
-              <span v-if="detail.archived" class="archived-tag">{{ t('archived') }}</span>
-              <span style="font-size:10px;color:var(--t3);margin-left:auto">{{ detail.created_by || '' }} · {{ (detail.created_at || '').substring(0, 16) }}</span>
+          <!-- 头部卡片：标签 + 元数据 + 操作按钮 -->
+          <div class="cd" style="padding:28px 32px;margin-bottom:20px;border-radius:20px">
+            <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px">
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+                  <span class="source-tag" :class="sourceClass(detail.source)" style="font-size:11px;padding:3px 12px">{{ sourceLabel(detail.source) }}</span>
+                  <span class="tg tg-d" style="font-size:10px">{{ detail.scope }}</span>
+                  <span v-if="detail.issue_tag" class="issue-tag">{{ detail.issue_tag }}</span>
+                  <span v-if="detail.archived" class="archived-tag">{{ t('archived') }}</span>
+                </div>
+                <div style="font-size:11px;color:var(--t3);line-height:1.6">
+                  {{ detail.created_by || '' }} · {{ (detail.created_at || '').substring(0, 16) }}
+                  <span v-if="detail.file_path"> · {{ detail.file_path }}</span>
+                </div>
+              </div>
             </div>
-            <div v-html="renderMarkdown(detail.content || '')" class="kb-detail-content"></div>
-            <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
+            <!-- 操作按钮区 -->
+            <div style="display:flex;align-items:center;gap:8px;padding-top:16px;border-top:1px solid var(--b);flex-wrap:wrap">
               <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" @click="editKnowledge">{{ t('edit_save') }}</button>
               <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="deleteKnowledge">{{ t('delete') }}</button>
               <button v-if="detail.source !== 'manual' && !detail.archived" class="bt bt-o bt-s" @click="toggleArchive">{{ t('archive') }}</button>
@@ -526,10 +534,15 @@ function renderKnowledge() {
             </div>
           </div>
 
-          <!-- 关联管理 -->
-          <div class="cd" style="padding:20px">
-            <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">{{ t('ref_modal_title') }}</h3>
+          <!-- 知识内容 -->
+          <div class="cd-h" style="margin-bottom:12px"><h2 style="font-size:16px;font-weight:600">{{ t('detail_content_title') }}</h2></div>
+          <div class="cd" style="padding:24px;margin-bottom:20px;border-radius:18px">
+            <div v-html="renderMarkdown(detail.content || '')" class="kb-detail-content"></div>
+          </div>
 
+          <!-- 关联管理 -->
+          <div class="cd-h" style="margin-bottom:12px"><h2 style="font-size:16px;font-weight:600">{{ t('ref_modal_title') }}</h2></div>
+          <div class="cd" style="padding:24px;border-radius:18px">
             <!-- 全局关联 -->
             <div class="kb-ref-section">
               <div class="kb-ref-section-title">{{ t('ref_scope') }}</div>
@@ -577,30 +590,31 @@ function renderKnowledge() {
                 </div>
               </div>
             </div>
+          </div>
 
-            <!-- 场景选择弹出层 -->
-            <div v-if="addScenePopover" class="modal-overlay" @click.self="addScenePopover = false">
-              <div class="modal cd" style="width:560px">
-                <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
-                <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
-                <div v-if="availableScenes.length === 0" class="ts t2" style="padding:12px">{{ t('ref_no_available') }}</div>
-                <div v-else class="kb-scene-pick-grid" style="max-height:320px;overflow-y:auto">
-                  <div v-for="s in availableScenes" :key="s.id" class="kb-scene-pick-item"
-                       :class="{ selected: sceneSelected.includes(s.id) }"
-                       @click="toggleSceneSelect(s.id)">
-                    <div class="kb-scene-pick-name">{{ s.name }}</div>
-                    <div class="kb-scene-pick-id">{{ (s.id || '').substring(0, 12) }}</div>
-                  </div>
+          <!-- 场景选择弹出层 -->
+          <div v-if="addScenePopover" class="modal-overlay" @click.self="addScenePopover = false">
+            <div class="modal cd" style="width:560px">
+              <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
+              <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
+              <div v-if="availableScenes.length === 0" class="ts t2" style="padding:12px">{{ t('ref_no_available') }}</div>
+              <div v-else class="kb-scene-pick-grid" style="max-height:320px;overflow-y:auto">
+                <div v-for="s in availableScenes" :key="s.id" class="kb-scene-pick-item"
+                     :class="{ selected: sceneSelected.includes(s.id) }"
+                     @click="toggleSceneSelect(s.id)">
+                  <div class="kb-scene-pick-name">{{ s.name }}</div>
+                  <div class="kb-scene-pick-id">{{ (s.id || '').substring(0, 12) }}</div>
                 </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
-                  <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
-                  <div style="display:flex;gap:8px">
-                    <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
-                    <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
-                  </div>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+                <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
+                <div style="display:flex;gap:8px">
+                  <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
+                  <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
                 </div>
               </div>
             </div>
+          </div>
           </div>
         </template>
 

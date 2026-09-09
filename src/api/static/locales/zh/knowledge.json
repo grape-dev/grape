@@ -99,5 +99,6 @@
   "ref_search_scenes": "搜索场景名称或 ID...",
   "ref_selected_count": "已选 {{count}} 个",
   "ref_added_count": "已添加 {{count}} 个场景",
-  "confirm": "确认"
+  "confirm": "确认",
+  "detail_content_title": "知识内容"
 }

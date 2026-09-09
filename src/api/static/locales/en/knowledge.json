@@ -99,5 +99,6 @@
   "ref_search_scenes": "Search scene name or ID...",
   "ref_selected_count": "{{count}} selected",
   "ref_added_count": "Added {{count}} scenes",
-  "confirm": "Confirm"
+  "confirm": "Confirm",
+  "detail_content_title": "Content"
 }
