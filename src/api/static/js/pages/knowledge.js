@@ -183,6 +183,11 @@ function renderKnowledge() {
         if (s === 'agent') return this.t('source_agent');
         return this.t('source_manual');
       },
+      knowledgeTitle(k) {
+        if (!k.file_path) return k.description || '';
+        const fname = k.file_path.split('/').pop().replace(/\.\w+$/, '');
+        return fname.replace(/[-_]/g, ' ');
+      },
       sourceBarClass(s) {
         if (s === 'system') return 'bg-default';
         if (s === 'agent') return 'bg-skill';
@@ -609,7 +614,7 @@ function renderKnowledge() {
                 <div class="scn-card-body">
                   <div class="scn-card-head">
                     <div class="scn-ic" :class="sourceBarClass(k.source)">{{ sourceIcon(k.source) }}</div>
-                    <div class="scn-card-title">{{ sourceLabel(k.source) }}</div>
+                    <div class="scn-card-title">{{ knowledgeTitle(k) }}</div>
                     <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
                   <div class="scn-card-desc">{{ k.description || t('no_description') }}</div>
@@ -655,6 +660,7 @@ function renderKnowledge() {
                   <span v-if="detail.issue_tag" class="issue-tag">{{ detail.issue_tag }}</span>
                   <span v-if="detail.archived" class="archived-tag">{{ t('archived') }}</span>
                 </div>
+                <h2 style="font-size:17px;font-weight:600;color:var(--t);margin-bottom:8px">{{ knowledgeTitle(detail) }}</h2>
                 <div style="font-size:13px;color:var(--t2);line-height:1.5;margin-bottom:8px;font-weight:500">
                   {{ detail.description || t('no_description') }}
                 </div>
