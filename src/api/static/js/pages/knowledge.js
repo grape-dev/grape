@@ -521,27 +521,27 @@ function renderKnowledge() {
         <template v-if="view === 'list'">
           <div v-if="loading" class="loading">{{ t('loading') }}</div>
           <template v-else>
-            <!-- 统计卡片 -->
+            <!-- 统计卡片（纯展示，不联动） -->
             <div class="stats-bar">
-              <div class="stat-card" :class="{ active: activeTab === 'all' }" @click="switchTab('all')">
+              <div class="stat-card">
                 <span class="stat-num">{{ stats.system + stats.agent + stats.manual }}</span>
                 <span class="stat-label">{{ t('stats_all') }}</span>
               </div>
-              <div class="stat-card" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">
+              <div class="stat-card">
                 <span class="stat-num">{{ statSystem() }}</span>
                 <span class="stat-label">{{ t('stats_system') }}</span>
               </div>
-              <div class="stat-card" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">
+              <div class="stat-card">
                 <span class="stat-num">{{ statAgent() }}</span>
                 <span class="stat-label">{{ t('stats_agent') }}</span>
               </div>
-              <div class="stat-card" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">
+              <div class="stat-card">
                 <span class="stat-num">{{ statUser() }}</span>
                 <span class="stat-label">{{ t('stats_user') }}</span>
               </div>
             </div>
 
-            <!-- Tab 栏 -->
+            <!-- Tab 栏（切换数据源） -->
             <div class="kb-tab-bar">
               <button class="kb-tab" :class="{ active: activeTab === 'all' }" @click="switchTab('all')">{{ t('stats_all') }}</button>
               <button class="kb-tab" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">{{ t('stats_system') }}</button>
