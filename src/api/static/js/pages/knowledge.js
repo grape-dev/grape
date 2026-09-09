@@ -111,8 +111,7 @@ function renderKnowledge() {
       },
       availableScenes() {
         const selected = new Set(this.selectedSceneTags.map(t => t.sceneId));
-        let source = this.sceneTab === 'market' ? this.marketScenes : this.repoScenes;
-        let available = (source || []).filter(s => !selected.has(s.id));
+        let available = (this.repoScenes || []).filter(s => !selected.has(s.id));
         if (this.sceneSearch) {
           const q = this.sceneSearch.toLowerCase();
           available = available.filter(s => (s.name || '').toLowerCase().includes(q) || (s.id || '').toLowerCase().includes(q));
@@ -336,9 +335,6 @@ function renderKnowledge() {
         this.addScenePopover = true;
         this.sceneSearch = '';
         this.sceneSelected = [];
-        this.sceneTab = 'market';
-        this.marketPage = 1;
-        this.loadMarketScenes();
         this.loadRepoScenes();
       },
       switchSceneTab(tab) {
@@ -764,12 +760,6 @@ function renderKnowledge() {
               <div class="modal cd" style="width:680px;max-width:92vw">
                 <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
 
-                <!-- Tab 切换 -->
-                <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:1px solid var(--b)">
-                  <button class="kb-tab" :class="{ active: sceneTab === 'market' }" @click="switchSceneTab('market')">{{ t('ref_tab_market') }}</button>
-                  <button class="kb-tab" :class="{ active: sceneTab === 'repo' }" @click="switchSceneTab('repo')">{{ t('ref_tab_repo') }}</button>
-                </div>
-
                 <!-- 搜索 -->
                 <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
 
@@ -794,11 +784,6 @@ function renderKnowledge() {
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
                   <div style="display:flex;align-items:center;gap:8px">
                     <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
-                    <template v-if="sceneTab === 'market' && marketTotal > marketPageSize">
-                      <button class="kb-page-btn" :disabled="marketPage <= 1" @click="marketPrevPage">‹</button>
-                      <span style="font-size:11px;color:var(--t3)">{{ marketPage }}/{{ marketTotalPages() }}</span>
-                      <button class="kb-page-btn" :disabled="marketPage >= marketTotalPages()" @click="marketNextPage">›</button>
-                    </template>
                   </div>
                   <div style="display:flex;gap:8px">
                     <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
