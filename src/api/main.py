@@ -125,6 +125,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Upload cleanup scheduler start failed: {e}")
 
+    # Issue #67: 归档知识定时清理——每天清理超过 90 天的归档知识
+    try:
+        from src.api.knowledge import cleanup_archived_knowledge
+        import threading, time as _t
+
+        def _knowledge_cleanup_loop():
+            while True:
+                _t.sleep(86400)  # 24 小时
+                try:
+                    cleanup_archived_knowledge()
+                except Exception as _e:
+                    log.warning(f"Knowledge cleanup failed: {_e}")
+
+        _t2 = threading.Thread(target=_knowledge_cleanup_loop, daemon=True)
+        _t2.start()
+        log.info("Knowledge cleanup scheduler started (daily)")
+    except Exception as e:
+        log.warning(f"Knowledge cleanup scheduler start failed: {e}")
+
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
     _probe_task = None

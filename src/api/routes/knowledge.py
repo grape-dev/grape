@@ -7,8 +7,9 @@
 - POST /api/knowledge         成员手动上传知识文档（md/txt/json，鉴权当前用户）
 - DEL  /api/knowledge         删除成员上传的知识
 """
-import os, re
+import os, re, time, uuid, hashlib
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query
+from pydantic import BaseModel
 from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
@@ -391,15 +392,126 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                               "updated": meta.get("last_updated", ""),
                               "obs_key": baseline_obs.get(".metadata.json", "")})
 
+    # ===== Issue #67：统一列表 + stats =====
+    all_knowledge = []
+
+    # baseline 知识
+    for f in project_files:
+        content = ""
+        try:
+            if f.get("obs_key"):
+                content = _read_entry_content(repo_key, f["obs_key"], f["name"])
+            elif f["name"] in files:
+                content = files[f["name"]]
+        except Exception:
+            pass
+        all_knowledge.append({
+            "id": 0, "source": "system", "scope": "baseline",
+            "repo_key": repo_key, "agent_type": "", "issue_num": 0,
+            "file_path": f["name"], "obs_key": f.get("obs_key", ""),
+            "content": (content or "")[:500], "archived": 0,
+            "created_by": "", "created_at": f.get("updated", ""),
+            "issue_tag": "",
+        })
+
+    # project 级知识沉淀
+    for k in _project_knowledge_entries(repo_key):
+        k["source"] = k.get("source") or "agent"
+        k["issue_tag"] = ""
+        all_knowledge.append(k)
+
+    # issue / issue_agent 级知识
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            issue_rows = db.cursor().execute(
+                "SELECT id, scope, agent_type, issue_num, file_path, obs_key, "
+                "source_seq, created_by, created_at, source, archived "
+                "FROM agent_shared_knowledge "
+                "WHERE repo_key = ? AND scope IN ('issue', 'issue_agent') AND archived = 0 "
+                "ORDER BY issue_num DESC, id DESC",
+                (repo_key,)
+            ).fetchall()
+        for r in issue_rows:
+            content = _read_entry_content(repo_key, r[5] or "", r[4] or "")
+            all_knowledge.append({
+                "id": r[0], "source": r[9] or "agent", "scope": r[1],
+                "repo_key": repo_key, "agent_type": r[2] or "",
+                "issue_num": r[3] or 0, "file_path": r[4],
+                "obs_key": r[5] or "", "content": (content or "")[:500],
+                "archived": r[10] or 0, "source_seq": r[6] or 0,
+                "created_by": r[7] or "", "created_at": normalize_event_time(r[8] or ""),
+                "issue_tag": f"Issue #{r[3]}" if r[3] else "",
+            })
+    except Exception:
+        pass
+
+    # member 文档
+    for doc in _member_docs(repo_key):
+        doc["source"] = "manual"
+        doc["scope"] = "member"
+        doc["issue_tag"] = ""
+        all_knowledge.append(doc)
+
+    # agent 级知识
+    agents_data = _agent_knowledge_entries(repo_key)
+    for at, entries in agents_data.items():
+        for e in entries:
+            e["source"] = e.get("source") or "agent"
+            e["agent_type"] = at
+            e["issue_tag"] = f"Issue #{e.get('issue_num', '')}" if e.get("issue_num") else ""
+            all_knowledge.append(e)
+
+    # 查关联记录 + ref_summary
+    try:
+        from src.session_manager import db, db_lock
+        kid_list = [k["id"] for k in all_knowledge if k.get("id")]
+        if kid_list:
+            placeholders = ",".join("?" * len(kid_list))
+            with db_lock:
+                ref_rows = db.cursor().execute(
+                    f"SELECT knowledge_id, scene_id, agent_type, enabled FROM scene_knowledge_ref "
+                    f"WHERE knowledge_id IN ({placeholders})",
+                    kid_list
+                ).fetchall()
+            ref_map = {}
+            for kid, sid, at, en in ref_rows:
+                ref_map.setdefault(kid, []).append(
+                    {"scene_id": sid, "agent_type": at, "enabled": en})
+            for k in all_knowledge:
+                refs = ref_map.get(k.get("id", 0), [])
+                k["refs"] = refs
+                k["ref_summary"] = _build_ref_summary(refs)
+        else:
+            for k in all_knowledge:
+                k["refs"] = []
+                k["ref_summary"] = "未关联"
+    except Exception:
+        for k in all_knowledge:
+            k["refs"] = []
+            k["ref_summary"] = "未关联"
+
+    # 统计
+    stats = {
+        "system": sum(1 for k in all_knowledge if k.get("source") == "system"),
+        "agent": sum(1 for k in all_knowledge if k.get("source") == "agent"),
+        "manual": sum(1 for k in all_knowledge if k.get("source") == "manual"),
+        "unlinked": sum(1 for k in all_knowledge if not k.get("refs")),
+    }
+
     return {
         "repo_key": repo_key,
+        # 向后兼容：保留旧格式
         "project": {
             "meta": meta,
             "files": project_files,
             "knowledge": _project_knowledge_entries(repo_key),
             "member_docs": _member_docs(repo_key),
         },
-        "agents": _agent_knowledge_entries(repo_key),
+        "agents": agents_data,
+        # Issue #67 新增：统一列表 + 统计
+        "knowledge": all_knowledge,
+        "stats": stats,
     }
 
 
@@ -443,8 +555,9 @@ def read_knowledge_content(repo: str = Query(""),
 def knowledge_context(repo: str = Query(""),
                             agent_type: str = "",
                             issue_num: int = 0,
+                            scene_id: str = Query(""),
                             user: dict = Depends(get_current_user_or_api_key)):
-    """返回合并注入上下文文本（project-info 摘要 + 共享知识三级 + 成员文档）。"""
+    """返回合并注入上下文文本（project-info 摘要 + 共享知识 + 成员文档）。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
     from src.repo_key import to_repo_key
@@ -456,7 +569,7 @@ def knowledge_context(repo: str = Query(""),
         pi = _build_project_info_section(repo_key)
         if pi:
             lines.append(pi)
-        k = _build_knowledge_section(repo_key, agent_type=agent_type, issue_num=issue_num)
+        k, _ = _build_knowledge_section(repo_key, agent_type=agent_type, issue_num=issue_num, scene_id=scene_id)
         if k:
             lines.append(k)
     except Exception:
@@ -582,10 +695,10 @@ async def upload_knowledge(file: UploadFile = File(...),
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 ("member", repo_key, agent_type, 0, rel, obs_key, content_hash, "accepted", 0,
-                 str(user.get("username") or user.get("id") or "")))
+                 str(user.get("username") or user.get("id") or ""), "manual"))
             db.commit()
     except Exception as e:
         log.warning(f"knowledge member index failed {repo_key}: {e}")
@@ -670,3 +783,369 @@ def delete_knowledge(repo: str = Query(""),
     except Exception:
         pass
     return {"message": f"已删除 {os.path.basename(rel)}"}
+
+
+# ===== Issue #67：知识 CRUD + 关联管理 + 归档 API =====
+
+class KnowledgeEntryBody(BaseModel):
+    repo: str = ""
+    content: str = ""
+    agent_type: str = ""
+
+class KnowledgeUpdateBody(BaseModel):
+    content: str = ""
+
+class KnowledgeRefBody(BaseModel):
+    scene_id: str = ""
+    agent_type: str = ""
+
+class KnowledgeRefUpdateBody(BaseModel):
+    enabled: bool = True
+
+class ArchiveBody(BaseModel):
+    archived: bool = True
+
+
+def _build_ref_summary(refs: list) -> str:
+    """根据关联记录生成摘要文本。"""
+    if not refs:
+        return "未关联"
+    enabled_refs = [r for r in refs if r.get("enabled")]
+    if not enabled_refs:
+        return "未关联"
+    has_global = any(r.get("scene_id") == "" and r.get("agent_type") == "" for r in enabled_refs)
+    if has_global:
+        return "全局"
+    scene_count = sum(1 for r in enabled_refs if r.get("scene_id"))
+    agent_types = [r.get("agent_type") for r in enabled_refs if r.get("agent_type")]
+    parts = []
+    if scene_count:
+        parts.append(f"已关联 {scene_count} 个场景")
+    if agent_types:
+        parts.append(f"已关联 {', '.join(set(agent_types))}")
+    return " · ".join(parts) if parts else "已关联"
+
+
+def _get_knowledge_by_id(knowledge_id: int):
+    """按 id 查询单条知识记录。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT id, scope, repo_key, agent_type, issue_num, file_path, "
+            "status, source_seq, created_by, created_at, obs_key, content_hash, "
+            "updated_at, source, archived "
+            "FROM agent_shared_knowledge WHERE id = ?",
+            (knowledge_id,)
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0], "scope": row[1], "repo_key": row[2],
+        "agent_type": row[3] or "", "issue_num": row[4] or 0,
+        "file_path": row[5], "status": row[6] or "accepted",
+        "source_seq": row[7] or 0, "created_by": row[8] or "",
+        "created_at": row[9] or "", "obs_key": row[10] or "",
+        "content_hash": row[11] or "", "updated_at": row[12] or "",
+        "source": row[13] or "", "archived": row[14] or 0,
+    }
+
+
+def _check_ref_permission(knowledge_id: int, user: dict):
+    """校验用户是否有权限管理该知识的关联。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+    if row["source"] == "manual":
+        if row["created_by"] != user.get("username"):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可管理关联"})
+    else:
+        # system/agent 知识——仓库托管者可管理
+        # TODO: is_repo_admin 检查（当前先放行，后续补全）
+        pass
+    return row
+
+
+def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
+    """更新知识内容：写文件 + OBS + DB content_hash + updated_at。"""
+    repo_key = row["repo_key"]
+    file_path = row["file_path"]
+    base = _repo_base(repo_key)
+    full = os.path.normpath(os.path.join(base, file_path))
+    if full != base and not full.startswith(base + os.sep):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    obs_key = row.get("obs_key", "")
+    content_hash = ""
+    try:
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None and obs_key:
+            with open(full, "rb") as f:
+                file_bytes = f.read()
+            storage.save_bytes(obs_key, file_bytes)
+            content_hash = hashlib.sha256(file_bytes).hexdigest()
+    except Exception as e:
+        log.warning(f"[knowledge] OBS update failed for {obs_key}: {e}")
+
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE agent_shared_knowledge "
+            "SET content_hash = ?, updated_at = datetime('now') WHERE id = ?",
+            (content_hash, knowledge_id)
+        )
+        db.commit()
+
+
+def _delete_knowledge_full(knowledge_id: int, row: dict):
+    """删除知识：OBS 对象 + 本地文件 + DB 记录 + 关联记录。"""
+    from src.session_manager import db, db_lock
+
+    obs_key = row.get("obs_key", "")
+    if obs_key:
+        try:
+            from src.storage import get_storage
+            storage = get_storage()
+            if storage is not None:
+                storage.delete_object(obs_key)
+        except Exception as e:
+            log.warning(f"[knowledge] OBS delete failed for {obs_key}: {e}")
+
+    file_path = row.get("file_path", "")
+    if file_path:
+        base = _repo_base(row["repo_key"])
+        full = os.path.normpath(os.path.join(base, file_path))
+        if os.path.isfile(full):
+            try:
+                os.remove(full)
+            except Exception:
+                pass
+
+    with db_lock:
+        db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id = ?", (knowledge_id,))
+        db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE id = ?", (knowledge_id,))
+        db.commit()
+
+
+# ===== CRUD API（固定路径在 {id} 之前） =====
+
+@router.post("/entry")
+def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_current_user)):
+    """用户直接输入文本创建知识条目（source=manual）。"""
+    if not (body.content or "").strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
+    if not body.repo:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
+
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(body.repo)
+    base = _repo_base(repo_key)
+    username = str(user.get("username") or user.get("id") or "user")
+    filename = f"entry_{int(time.time())}_{uuid.uuid4().hex[:6]}.md"
+    member_dir = os.path.join(base, "project-info", "member", username)
+    os.makedirs(member_dir, exist_ok=True)
+    file_path = os.path.join(member_dir, filename)
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(body.content.strip())
+
+    rel = os.path.relpath(file_path, WORKSPACE_DIR)
+    content_hash = hashlib.sha256(body.content.encode("utf-8")).hexdigest()
+
+    obs_key = ""
+    try:
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None:
+            owner, rname = _owner_repo(repo_key)
+            obs_key = f"knowledge/{owner}/{rname}/member/{username}/{filename}"
+            with open(file_path, "rb") as f:
+                storage.save_bytes(obs_key, f.read())
+    except Exception as e:
+        log.warning(f"[knowledge] entry OBS save failed: {e}")
+
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.cursor().execute(
+            "INSERT INTO agent_shared_knowledge "
+            "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("member", repo_key, body.agent_type or "", 0, rel, obs_key, content_hash, "accepted", 0, username, "manual")
+        )
+        db.commit()
+
+    return {"ok": True, "message": "知识已创建", "file_path": rel}
+
+
+# ===== {id} 路由 =====
+
+@router.get("/{knowledge_id}")
+def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_user_or_api_key)):
+    """按 id 查询单条知识全文。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+
+    content = _read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""))
+
+    from src.session_manager import db, db_lock
+    with db_lock:
+        refs = db.cursor().execute(
+            "SELECT id, scene_id, agent_type, enabled, created_by, created_at "
+            "FROM scene_knowledge_ref WHERE knowledge_id = ? ORDER BY id",
+            (knowledge_id,)
+        ).fetchall()
+
+    return {
+        "id": knowledge_id,
+        "source": row["source"], "scope": row["scope"],
+        "repo_key": row["repo_key"], "agent_type": row["agent_type"],
+        "issue_num": row["issue_num"], "file_path": row["file_path"],
+        "obs_key": row["obs_key"], "content": content,
+        "archived": row["archived"], "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "refs": [{"id": r[0], "scene_id": r[1], "agent_type": r[2], "enabled": r[3],
+                   "created_by": r[4], "created_at": r[5]} for r in refs],
+    }
+
+
+@router.put("/{knowledge_id}")
+def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
+                     user: dict = Depends(get_current_user)):
+    """编辑知识内容，仅 source=manual 可编辑。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+    if row["source"] != "manual":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "系统生成的知识不可编辑"})
+    if row["created_by"] != user.get("username"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可编辑"})
+
+    _update_knowledge_content(knowledge_id, row, body.content)
+    return {"ok": True, "message": "知识已更新"}
+
+
+@router.delete("/{knowledge_id}")
+def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(get_current_user)):
+    """删除 source=manual 的知识条目。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+    if row["source"] != "manual":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "系统生成的知识不可删除"})
+    if row["created_by"] != user.get("username"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可删除"})
+
+    _delete_knowledge_full(knowledge_id, row)
+    return {"ok": True, "message": "知识已删除"}
+
+
+@router.put("/{knowledge_id}/archive")
+def archive_knowledge(knowledge_id: int, body: ArchiveBody,
+                      user: dict = Depends(get_current_user)):
+    """标记/取消归档。body.archived=true 标记归档，false 取消归档。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+
+    # 权限：manual 仅创建者，system/agent 仓库托管者（当前先放行）
+    if row["source"] == "manual" and row["created_by"] != user.get("username"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可操作"})
+
+    archived = 1 if body.archived else 0
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE agent_shared_knowledge SET archived=? WHERE id=?",
+            (archived, knowledge_id)
+        )
+        c.execute(
+            "UPDATE scene_knowledge_ref SET enabled=?, updated_by=? WHERE knowledge_id=?",
+            (0 if archived else 1, str(user.get("username") or ""), knowledge_id)
+        )
+        db.commit()
+    return {"ok": True, "archived": archived}
+
+
+# ===== 关联管理 API =====
+
+@router.get("/{knowledge_id}/refs")
+def get_knowledge_refs(knowledge_id: int, user: dict = Depends(get_current_user)):
+    """获取知识的所有关联关系。"""
+    _check_ref_permission(knowledge_id, user)
+    from src.session_manager import db, db_lock
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT id, scene_id, agent_type, enabled, created_by, created_at, updated_at, updated_by "
+            "FROM scene_knowledge_ref WHERE knowledge_id = ? ORDER BY id",
+            (knowledge_id,)
+        ).fetchall()
+    return {"refs": [{"id": r[0], "scene_id": r[1], "agent_type": r[2], "enabled": r[3],
+                        "created_by": r[4], "created_at": r[5], "updated_at": r[6], "updated_by": r[7]}
+                       for r in rows]}
+
+
+@router.post("/{knowledge_id}/refs")
+def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
+                      user: dict = Depends(get_current_user)):
+    """为知识新增场景/Agent 关联。"""
+    _check_ref_permission(knowledge_id, user)
+
+    # 校验关联数量——同一 scene_id + agent_type 最多 20 条
+    from src.session_manager import db, db_lock
+    scene_id = body.scene_id or ""
+    agent_type = body.agent_type or ""
+    with db_lock:
+        count = db.cursor().execute(
+            "SELECT COUNT(*) FROM scene_knowledge_ref "
+            "WHERE knowledge_id=? AND scene_id=? AND agent_type=? AND enabled=1",
+            (knowledge_id, scene_id, agent_type)
+        ).fetchone()[0]
+    if count >= 20:
+        raise HTTPException(status_code=400,
+            detail={"code": 400, "message": "每个场景每个 Agent 节点最多关联 20 条知识"})
+
+    username = str(user.get("username") or "")
+    try:
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO scene_knowledge_ref "
+                "(knowledge_id, scene_id, agent_type, enabled, created_by) "
+                "VALUES (?, ?, ?, 1, ?)",
+                (knowledge_id, scene_id, agent_type, username)
+            )
+            db.commit()
+    except Exception as e:
+        if "UNIQUE" in str(e).upper():
+            raise HTTPException(status_code=409,
+                detail={"code": 409, "message": "该知识已绑定此场景/Agent 类型"})
+        raise
+    return {"ok": True}
+
+
+@router.put("/ref/{ref_id}")
+def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
+                         user: dict = Depends(get_current_user)):
+    """修改关联的 enabled 开关。"""
+    from src.session_manager import db, db_lock
+    username = str(user.get("username") or "")
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE scene_knowledge_ref SET enabled = ?, updated_by = ? WHERE id = ?",
+            (1 if body.enabled else 0, username, ref_id)
+        )
+        db.commit()
+    return {"ok": True}
+
+
+@router.delete("/ref/{ref_id}")
+def delete_knowledge_ref(ref_id: int, user: dict = Depends(get_current_user)):
+    """删除知识的某条关联。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE id = ?", (ref_id,))
+        db.commit()
+    return {"ok": True}

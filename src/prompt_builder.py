@@ -904,21 +904,58 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
 
 # ====== Event 对话（event-conversation-design.md）======
 
-def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0) -> str:
-    """共享知识段落：project + issue + issue_agent 三级 accepted 知识 + 成员上传文档合并注入。"""
-    lines = ["### 用户反馈沉淀的共享知识（仅 accepted）"]
+def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0,
+                             scene_id: str = "") -> tuple:
+    """共享知识段落：查 scene_knowledge_ref 表注入关联知识 + 基线文件。
+
+    Issue #67 改动：
+    - 新增 scene_id 参数
+    - 注入逻辑改为查 scene_knowledge_ref 表（DISTINCT knowledge_id 去重）
+    - 向后兼容：表不存在或无关联记录时回退到 scope 三级注入
+    - 返回 (知识段落文本, 注入的知识 ID 列表)
+    """
+    lines = ["### 用户反馈沉淀的共享知识（仅 enabled）"]
     found = False
+    injected_ids = []
+
+    # 1. 查 scene_knowledge_ref 表注入关联知识
     try:
-        from src.api.knowledge import read_knowledge
-        k = read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num)
+        from src.session_manager import db, db_lock
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT DISTINCT k.id, k.scope, k.source, k.obs_key, k.file_path "
+                "FROM scene_knowledge_ref r "
+                "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+                "WHERE r.enabled = 1 "
+                "AND (r.scene_id = ? OR r.scene_id = '') "
+                "AND (r.agent_type = ? OR r.agent_type = '') "
+                "AND k.repo_key = ? "
+                "AND k.status = 'accepted' "
+                "AND k.archived = 0",
+                (scene_id, agent_type, repo_key)
+            ).fetchall()
+
+        from src.api.routes.knowledge import _read_entry_content
+        for kid, scope, source, obs_key, file_path in rows:
+            content = _read_entry_content(repo_key, obs_key or "", file_path or "")
+            if content:
+                found = True
+                injected_ids.append(kid)
+                lines.append(f"[{source} 级] {content[:500]}")
     except Exception:
-        k = {}
-    for scope in ("project", "issue", "issue_agent"):
-        content = k.get(scope)
-        if content:
-            found = True
-            lines.append(f"[{scope} 级] {content}")
-    # 成员上传文档摘要（knowledge-board-design.md §2.5：并入对话类 Agent 上下文）
+        # 向后兼容：scene_knowledge_ref 表不存在时回退到 scope 三级注入
+        try:
+            from src.api.knowledge import read_knowledge
+            k = read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num)
+            for scope in ("project", "issue", "issue_agent"):
+                content = k.get(scope)
+                if content:
+                    found = True
+                    lines.append(f"[{scope} 级] {content}")
+        except Exception:
+            pass
+
+    # 2. 成员上传文档摘要（保持现有逻辑）
     try:
         from src.api.knowledge import member_files
         mf = member_files(repo_key)
@@ -930,10 +967,11 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
                 lines.append(f"- {rel.split('/')[-1]}: {body[:200]}{'…' if len(body) > 200 else ''}")
     except Exception:
         pass
+
     if not found:
-        return ""
+        return "", []
     lines.append("后续任务应遵循以上知识，除非用户当前明确推翻。")
-    return "\n".join(lines)
+    return "\n".join(lines), injected_ids
 
 
 def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
@@ -966,7 +1004,7 @@ def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
         hist = "\n".join(f"[{m.get('role')}] {m.get('content', '')}" for m in thread[-20:])
         parts.append(f"## 对话历史\n{hist}")
 
-    knowledge = _build_knowledge_section(evt.get("repo_key", ""), agent_type=agent_type, issue_num=issue_num)
+    knowledge, _injected_ids = _build_knowledge_section(evt.get("repo_key", ""), agent_type=agent_type, issue_num=issue_num)
     if knowledge:
         parts.append(f"## 共享知识\n{knowledge}")
 

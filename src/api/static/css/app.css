@@ -580,3 +580,23 @@
 .select2-container--default .select2-results__option[aria-selected=true]{background:rgba(0,113,227,.06);color:var(--a);font-weight:500}
 .select2-results__group{padding:6px 10px;font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;background:var(--bg);border-bottom:1px solid var(--b)}
 .select2-results__message{color:var(--t3);font-size:10px;padding:8px;text-align:center}
+
+/* ===== Issue #67: 知识库页面 Vue 组件样式 ===== */
+.knowledge-page .stats-bar{display:flex;gap:12px;margin-bottom:16px}
+.knowledge-page .stat-card{flex:1;padding:16px;border-radius:12px;background:var(--c);cursor:pointer;transition:transform .2s;display:flex;flex-direction:column;align-items:center;border:1px solid var(--b)}
+.knowledge-page .stat-card:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,0.08)}
+.knowledge-page .stat-num{font-size:24px;font-weight:700;color:var(--t)}
+.knowledge-page .stat-label{font-size:11px;color:var(--t3);margin-top:4px}
+.knowledge-page .filter-bar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.source-tag{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600}
+.source-system{background:rgba(0,113,227,0.1);color:#0071e3}
+.source-agent{background:rgba(255,149,0,0.1);color:#ff9500}
+.source-manual{background:rgba(52,199,89,0.1);color:#34c759}
+.ref-tag{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(0,113,227,0.08);color:var(--t2)}
+.ref-tag.unlinked{background:rgba(142,142,147,0.1);color:var(--t3)}
+.issue-tag{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(88,86,214,0.1);color:#5856d6}
+.archived-tag{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(142,142,147,0.15);color:var(--t3)}
+.size-warning{font-size:10px;color:var(--or);padding:4px 0}
+.archived-card{opacity:0.6}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:999}
+.modal{width:500px;max-width:90vw;padding:24px;border-radius:14px;background:var(--c);box-shadow:0 8px 32px rgba(0,0,0,0.15)}

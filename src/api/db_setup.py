@@ -419,7 +419,7 @@ CREATE TABLE IF NOT EXISTS event_thread (
 _AGENT_SHARED_KNOWLEDGE_DDL = """
 CREATE TABLE IF NOT EXISTS agent_shared_knowledge (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    scope       TEXT NOT NULL,              -- project / issue / issue_agent
+    scope       TEXT NOT NULL,              -- baseline / project / issue / issue_agent / member
     repo_key    TEXT NOT NULL,
     agent_type  TEXT DEFAULT '',            -- scope=issue_agent 时必填
     issue_num   INTEGER DEFAULT 0,          -- scope=issue / issue_agent 时必填
@@ -430,8 +430,47 @@ CREATE TABLE IF NOT EXISTS agent_shared_knowledge (
     created_at  TEXT DEFAULT (datetime('now')),
     obs_key      VARCHAR(512) DEFAULT '',    -- OBS 对象键（正文已搬入对象存储，见 knowledge-obs-design）
     content_hash VARCHAR(64) DEFAULT '',     -- 正文内容哈希（变更检测/增量同步）
-    updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP  -- 最近内容更新时间（OBS 同步审计）
+    updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,  -- 最近内容更新时间（OBS 同步审计）
+    source       TEXT NOT NULL DEFAULT '',   -- 知识来源：system / agent / manual
+    archived     INTEGER NOT NULL DEFAULT 0  -- 0正常 1归档（归档后不注入）
 )
+"""
+
+# ===== scene_knowledge_ref：知识-场景-Agent 绑定关系表（Issue #67） =====
+_SCENE_KNOWLEDGE_REF_DDL = """
+CREATE TABLE IF NOT EXISTS scene_knowledge_ref (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    knowledge_id  INTEGER NOT NULL,                        -- agent_shared_knowledge.id
+    scene_id      TEXT NOT NULL DEFAULT '',                 -- 场景UUID，空字符串=全部场景，禁止NULL
+    agent_type    TEXT NOT NULL DEFAULT '',                 -- Agent类型，空字符串=全部Agent，禁止NULL
+    enabled       INTEGER NOT NULL DEFAULT 1,               -- 1启用 0禁用
+    created_by    TEXT NOT NULL DEFAULT '',                 -- 创建人
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),  -- 创建时间
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),  -- 更新时间
+    updated_by    TEXT NOT NULL DEFAULT '',                 -- 最后修改人
+    UNIQUE (knowledge_id, scene_id, agent_type)
+)
+"""
+
+# MySQL 原生 DDL（不走翻译层，生产环境用）
+_SCENE_KNOWLEDGE_REF_MYSQL_DDL = """
+CREATE TABLE IF NOT EXISTS scene_knowledge_ref (
+    id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    knowledge_id  BIGINT UNSIGNED NOT NULL COMMENT 'agent_shared_knowledge主键',
+    scene_id      VARCHAR(64) NOT NULL DEFAULT '' COMMENT '场景UUID，空字符串代表全部场景，禁止NULL',
+    agent_type    VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'Agent类型，空字符串代表全部Agent，禁止NULL',
+    enabled       TINYINT NOT NULL DEFAULT 1 COMMENT '1启用 0禁用',
+    created_by    VARCHAR(64) NOT NULL DEFAULT '' COMMENT '创建人',
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间，自动刷新',
+    updated_by    VARCHAR(64) NOT NULL DEFAULT '' COMMENT '最后修改人',
+    UNIQUE KEY uk_knowledge_scene_agent (knowledge_id, scene_id, agent_type),
+    KEY idx_query (enabled, scene_id, agent_type),
+    CONSTRAINT fk_scene_knowledge_ref_knowledge_id
+        FOREIGN KEY (knowledge_id) REFERENCES agent_shared_knowledge(id)
+        ON DELETE CASCADE
+        ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库-场景-Agent绑定关系'
 """
 
 # ===== engine tagging (event-dispatch-redesign-v2.md 2.2) =====
@@ -664,6 +703,7 @@ _NEW_TABLES = [
     ("tasks", _TASKS_DDL),
     ("event_thread", _EVENT_THREAD_DDL),
     ("agent_shared_knowledge", _AGENT_SHARED_KNOWLEDGE_DDL),
+    ("scene_knowledge_ref", _SCENE_KNOWLEDGE_REF_DDL),
     ("bot_seen_messages", """
 CREATE TABLE IF NOT EXISTS bot_seen_messages (
     app_id TEXT NOT NULL,
@@ -1277,6 +1317,11 @@ def init_database():
                     _backfill_scene_display_names()
                 except Exception as _e:
                     log.warning(f"Scene display_name backfill failed: {_e}")
+                # ===== Issue #67: 知识库优化迁移 =====
+                try:
+                    _migrate_knowledge_issue67()
+                except Exception as _e:
+                    log.warning(f"Issue #67 knowledge migration failed: {_e}")
             finally:
                 c.execute("SELECT RELEASE_LOCK('grape_migrate')")
     else:
@@ -1302,7 +1347,115 @@ def init_database():
             _backfill_scene_display_names()
         except Exception as _e:
             log.warning(f"Scene display_name backfill failed: {_e}")
+        # ===== Issue #67: 知识库优化迁移 =====
+        try:
+            _migrate_knowledge_issue67()
+        except Exception as _e:
+            log.warning(f"Issue #67 knowledge migration failed: {_e}")
     # MySQL with session_manager
+
+def _migrate_knowledge_issue67():
+    """Issue #67 知识库优化迁移：source 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。"""
+    from src.mysql_compat import get_db_backend
+    _is_mysql = get_db_backend() == "mysql"
+
+    with db_lock:
+        c = db.cursor()
+
+        # 1. source 字段回填（幂等——只更新 source 为空的记录）
+        c.execute(
+            "UPDATE agent_shared_knowledge SET source = 'system' "
+            "WHERE scope = 'baseline' AND (source IS NULL OR source = '')")
+        c.execute(
+            "UPDATE agent_shared_knowledge SET source = 'agent' "
+            "WHERE scope IN ('project', 'issue', 'issue_agent') AND (source IS NULL OR source = '')")
+        c.execute(
+            "UPDATE agent_shared_knowledge SET source = 'manual' "
+            "WHERE scope = 'member' AND (source IS NULL OR source = '')")
+
+        # 2. 重复记录去重——每个 scope + repo_key + agent_type + issue_num 只保留最新一条
+        if _is_mysql:
+            # MySQL 不允许子查询引用要删除的表，用临时表
+            c.execute(
+                "CREATE TEMPORARY TABLE IF NOT EXISTS _keep_ids AS "
+                "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+                "GROUP BY repo_key, scope, agent_type, issue_num")
+            c.execute(
+                "DELETE FROM agent_shared_knowledge "
+                "WHERE id NOT IN (SELECT keep_id FROM _keep_ids)")
+            c.execute("DROP TEMPORARY TABLE IF EXISTS _keep_ids")
+        else:
+            # SQLite 支持子查询引用要删除的表
+            c.execute(
+                "DELETE FROM agent_shared_knowledge "
+                "WHERE id NOT IN ("
+                "  SELECT MAX(id) FROM agent_shared_knowledge "
+                "  GROUP BY repo_key, scope, agent_type, issue_num)")
+
+        # 3. scene_knowledge_ref 数据迁移——为现有知识生成关联记录
+        # baseline → 全局关联
+        c.execute(
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
+            "SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge "
+            "WHERE scope = 'baseline' AND source = 'system'")
+        # project → 全局关联
+        c.execute(
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
+            "SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge "
+            "WHERE scope = 'project' AND source = 'agent'")
+        # issue → 全局关联
+        c.execute(
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
+            "SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge "
+            "WHERE scope = 'issue' AND source = 'agent'")
+        # issue_agent → 指定 Agent 关联
+        c.execute(
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
+            "SELECT id, '', agent_type, 1, 'system' FROM agent_shared_knowledge "
+            "WHERE scope = 'issue_agent' AND source = 'agent' AND agent_type != ''")
+        # member（agent_type 非空）→ 指定 Agent 关联
+        c.execute(
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
+            "SELECT id, '', agent_type, 1, 'system' FROM agent_shared_knowledge "
+            "WHERE scope = 'member' AND source = 'manual' AND agent_type != ''")
+        # member（agent_type 空）→ 全局关联
+        c.execute(
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
+            "SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge "
+            "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
+
+        db.commit()
+
+    # 4. MySQL 原生 DDL——scene_knowledge_ref 表用原生 MySQL DDL 重建（如果翻译层产出不够严谨）
+    if _is_mysql:
+        try:
+            from src.mysql_compat import mysql_config
+            import pymysql
+            cfg = mysql_config()
+            conn = pymysql.connect(
+                host=cfg.get("host", ""), port=cfg.get("port", 3306),
+                user=cfg.get("user", ""), password=cfg.get("password", ""),
+                database=cfg.get("database", ""), charset="utf8mb4", autocommit=True)
+            try:
+                with conn.cursor() as cur:
+                    # 检查表是否有 updated_by 列（翻译层产出的可能没有）
+                    cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'scene_knowledge_ref' "
+                        "AND COLUMN_NAME = 'updated_by'", (cfg.get("database", ""),))
+                    has_updated_by = cur.fetchone()[0]
+                    if not has_updated_by:
+                        # 翻译层产出不完整——用原生 DDL 重建
+                        cur.execute("DROP TABLE IF EXISTS scene_knowledge_ref")
+                        cur.execute(_SCENE_KNOWLEDGE_REF_MYSQL_DDL)
+                        log.info("[Issue #67] scene_knowledge_ref recreated with native MySQL DDL")
+            finally:
+                conn.close()
+        except Exception as e:
+            log.warning(f"[Issue #67] MySQL native DDL failed: {e}")
+
+    log.info("[Issue #67] knowledge migration done")
+
 
 def _sync_official_skills():
     """启动时从 configs/skill-description.json 同步官方技能到 skill 表(幂等).
@@ -1626,6 +1779,9 @@ def _migrate_tables():
         "ALTER TABLE agent_shared_knowledge ADD COLUMN obs_key VARCHAR(512) DEFAULT ''",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        # ===== Issue #67：知识来源 + 归档标记 =====
+        "ALTER TABLE agent_shared_knowledge ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE agent_shared_knowledge ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
         # ===== knowledge-obs-design：agent_tasks 知识/project-info OBS 临时 URL =====
         "ALTER TABLE agent_tasks ADD COLUMN project_info_file_urls TEXT DEFAULT ''",
         "ALTER TABLE agent_tasks ADD COLUMN knowledge_file_urls TEXT DEFAULT ''",

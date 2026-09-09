@@ -296,6 +296,11 @@ function loadAgentTypes() {
     window._navSignal = window._navAbortController.signal;
     window._tabSignal = null;  // 重置 tab signal
     window._currentView = view;
+    // Issue #67: 离开 knowledge 页面时卸载 Vue 应用
+    if (view !== 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
+      _knowledgeVueApp.unmount();
+      _knowledgeVueApp = null;
+    }
     // 离开 repos 全屏页时恢复 sidebar/tb/mainView 默认布局
     if (view !== 'repos') {
       var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
@@ -613,3 +618,20 @@ function loadAgentTypes() {
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });
+
+// Issue #67: 全局苹果风格确认 modal（knowledge.js / skills.js 共用）
+function _showAppleConfirm(message, onConfirm, onCancel) {
+  var modal = document.createElement('div');
+  modal.id = 'appleConfirmModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = '<div class="cd" style="width:360px;padding:24px;border-radius:14px;text-align:center">' +
+    '<p style="font-size:14px;color:var(--t);margin-bottom:20px;line-height:1.5">' + message + '</p>' +
+    '<div style="display:flex;gap:10px">' +
+    '<button id="appleConfirmCancel" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">' + (I18N.t('common.cancel') || '取消') + '</button>' +
+    '<button id="appleConfirmOk" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#ff3b30;color:#fff;cursor:pointer">' + (I18N.t('common.confirm') || '确认') + '</button>' +
+    '</div></div>';
+  document.body.appendChild(modal);
+  modal.onclick = function(e) { if (e.target === modal) { modal.remove(); if (onCancel) onCancel(); } };
+  document.getElementById('appleConfirmOk').onclick = function() { modal.remove(); if (onConfirm) onConfirm(); };
+  document.getElementById('appleConfirmCancel').onclick = function() { modal.remove(); if (onCancel) onCancel(); };
+}

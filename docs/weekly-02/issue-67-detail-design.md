@@ -1,0 +1,1929 @@
+# Issue #67：项目知识库优化 — 详细设计
+
+## 六、技术实现方案
+
+### 6.1 source 字段 DDL
+
+**SQLite**（通过 `_ensure_column` 幂等添加）：
+
+```sql
+ALTER TABLE agent_shared_knowledge ADD COLUMN source TEXT NOT NULL DEFAULT '';
+```
+
+**MySQL**（原生 DDL）：
+
+```sql
+ALTER TABLE agent_shared_knowledge
+  ADD COLUMN source VARCHAR(32) NOT NULL DEFAULT '' COMMENT '知识来源：system/agent/manual';
+```
+
+**数据回填**（SQLite + MySQL 通用）：
+
+```sql
+-- baseline → system
+UPDATE agent_shared_knowledge SET source = 'system' WHERE scope = 'baseline' AND (source IS NULL OR source = '');
+-- project/issue/issue_agent → agent
+UPDATE agent_shared_knowledge SET source = 'agent' WHERE scope IN ('project', 'issue', 'issue_agent') AND (source IS NULL OR source = '');
+-- member → manual
+UPDATE agent_shared_knowledge SET source = 'manual' WHERE scope = 'member' AND (source IS NULL OR source = '');
+```
+
+**写入时设置 source**：
+
+| 函数 | 文件位置 | 设置值 |
+|------|---------|--------|
+| `write_knowledge()` | `src/api/knowledge.py:184` | `source='agent'`（Agent 沉淀） |
+| `build_project_info()` | `src/project_info/builder.py:244` | `source='system'`（VOD 基线，写 DB 时设） |
+| `upload_knowledge()` | `src/api/routes/knowledge.py:472` | `source='manual'`（用户上传） |
+| `POST /api/knowledge/entry`（新增） | `src/api/routes/knowledge.py`（新增） | `source='manual'`（用户输入） |
+
+### 6.2 prompt_builder 注入逻辑改动
+
+**当前逻辑**（`src/prompt_builder.py:907-934`）：
+
+`_build_knowledge_section()` 按 scope 三级注入：
+1. `read_knowledge(repo_key, agent_type, issue_num)` 返回 `{scope: content}`
+2. 遍历 `("project", "issue", "issue_agent")` 注入
+3. 追加成员文档摘要
+
+**改动后逻辑**：
+
+```python
+def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> str:
+    """共享知识段落：查 scene_knowledge_ref 表注入关联知识 + 基线文件。
+
+    向后兼容：无 scene_knowledge_ref 表或无关联记录时，回退到 scope 三级注入。
+    """
+    lines = ["### 用户反馈沉淀的共享知识（仅 enabled）"]
+    found = False
+
+    # 1. 基线知识始终注入（project-graph.md / project-capabilities.md 摘要）
+    try:
+        from src.runtime.service import load_project_info
+        files, meta = load_project_info(repo_key)
+        if files:
+            found = True
+            lines.append("[baseline 级] 项目基线文件：")
+            for fname in ("project-graph.md", "project-capabilities.md"):
+                if fname in files:
+                    body = files[fname].strip()
+                    lines.append(f"- {fname}: {body[:200]}{'…' if len(body) > 200 else ''}")
+    except Exception:
+        pass
+
+    # 2. 查 scene_knowledge_ref 表注入关联知识
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT DISTINCT k.id, k.content, k.scope, k.source, k.obs_key, k.file_path "
+                "FROM scene_knowledge_ref r "
+                "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+                "WHERE r.enabled = 1 "
+                "AND (r.scene_id = ? OR r.scene_id = '') "
+                "AND (r.agent_type = ? OR r.agent_type = '') "
+                "AND k.repo_key = ? "
+                "AND k.status = 'accepted'",
+                (scene_id, agent_type, repo_key)
+            ).fetchall()
+
+        for kid, content, scope, source, obs_key, file_path in rows:
+            # obs_key 非空 → 从 OBS 读取（已缓存）；否则用 content
+            text = content or ""
+            if not text and obs_key:
+                text = _read_obs_content(obs_key)
+            if not text and file_path:
+                text = _read_local_file(repo_key, file_path)
+            if text:
+                found = True
+                lines.append(f"[{source} 级] {text[:500]}")
+    except Exception:
+        # 向后兼容：scene_knowledge_ref 表不存在时回退到 scope 三级注入
+        try:
+            from src.api.knowledge import read_knowledge
+            k = read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num)
+            for scope in ("project", "issue", "issue_agent"):
+                content = k.get(scope)
+                if content:
+                    found = True
+                    lines.append(f"[{scope} 级] {content}")
+        except Exception:
+            pass
+
+    # 3. 成员文档摘要（保持现有逻辑）
+    try:
+        from src.api.knowledge import member_files
+        mf = member_files(repo_key)
+        if mf:
+            found = True
+            lines.append("[member 级] 项目成员上传文档：")
+            for rel in sorted(mf):
+                body = mf[rel].strip()
+                lines.append(f"- {rel.split('/')[-1]}: {body[:200]}{'…' if len(body) > 200 else ''}")
+    except Exception:
+        pass
+
+    if not found:
+        return ""
+    return "\n".join(lines)
+```
+
+**改动点**：
+- 新增 `scene_id` 参数——调用方传入当前执行的场景 ID
+- 注入逻辑改为查 `scene_knowledge_ref` 表（`DISTINCT knowledge_id` 去重）
+- 向后兼容：表不存在或无关联记录时回退到 `read_knowledge` scope 三级注入
+- 基线知识单独注入（不走关联表——基线始终全局注入）
+- 成员文档保持现有 `member_files()` 逻辑
+
+**调用方改动**：
+
+| 调用方 | 文件位置 | 改动 |
+|--------|---------|------|
+| `build_event_chat_prompt()` | `prompt_builder.py:939` | 传入 `scene_id`（从事件上下文取） |
+| `build_general_chat_prompt()` | `prompt_builder.py` | 传入 `scene_id`（从会话上下文取） |
+| `GET /api/knowledge/context` | `knowledge.py:442` | 传入 `scene_id`（query param 新增） |
+
+### 6.3 GET /api/knowledge/context 端点改动
+
+新增 `scene_id` query 参数：
+
+```python
+@router.get("/context", operation_id="knowledge_context")
+def knowledge_context(repo: str = Query(""),
+                      agent_type: str = "",
+                      issue_num: int = 0,
+                      scene_id: str = Query(""),  # 新增
+                      user: dict = Depends(get_current_user_or_api_key)):
+    ...
+    knowledge = _build_knowledge_section(repo_key, agent_type=agent_type,
+                                         issue_num=issue_num, scene_id=scene_id)
+    ...
+```
+
+远端 worker 调用时传入 `scene_id`，后端查关联表注入。
+
+### 6.4 write_knowledge() 改动
+
+写入知识后自动生成 `scene_knowledge_ref` 关联记录：
+
+```python
+def write_knowledge(*, repo_key, scope, content, status="accepted",
+                    agent_type="", issue_num=0, source_seq=0, created_by=""):
+    # ... 现有写入逻辑不变 ...
+
+    # 新增：写入后自动生成关联记录
+    if status == "accepted":
+        _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num)
+
+    return file_path
+
+
+def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
+    """系统写入知识时按 scope 规则自动生成关联记录。"""
+    from src.session_manager import db, db_lock
+    ref_map = {
+        "baseline":     {"scene_id": "", "agent_type": ""},           # 全局
+        "project":      {"scene_id": "", "agent_type": ""},           # 全局
+        "issue":        {"scene_id": "", "agent_type": ""},           # 全局（issue_num 控制同 Issue 生效）
+        "issue_agent":  {"scene_id": "", "agent_type": agent_type},   # 指定 Agent
+        "member":       {"scene_id": "", "agent_type": agent_type},   # 用户上传时指定的 Agent
+    }
+    ref = ref_map.get(scope)
+    if not ref:
+        return
+    try:
+        with db_lock:
+            db.cursor().execute(
+                "INSERT OR IGNORE INTO scene_knowledge_ref "
+                "(knowledge_id, scene_id, agent_type, enabled, created_by) "
+                "VALUES (?, ?, ?, 1, ?)",
+                (knowledge_id, ref["scene_id"], ref["agent_type"], "system")
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"[knowledge] auto generate ref failed: {e}")
+```
+
+**注意**：`INSERT OR IGNORE`（SQLite）/ `INSERT IGNORE`（MySQL）避免唯一约束冲突——如果用户已手动创建了相同关联，不覆盖。
+
+### 6.5 数据迁移方案
+
+**步骤 1：创建 scene_knowledge_ref 表**
+
+在 `db_setup.py` 的建表流程中新增 `scene_knowledge_ref` 表 DDL（SQLite + MySQL 两套）。
+
+**步骤 2：回填 source 字段**
+
+执行 6.1 的回填 SQL。
+
+**步骤 3：为现有知识生成关联记录**
+
+```sql
+-- baseline 知识 → 全局关联
+INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by)
+SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge WHERE scope = 'baseline';
+
+-- project 知识 → 全局关联
+INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by)
+SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge WHERE scope = 'project';
+
+-- issue 知识 → 全局关联（issue_num 控制同 Issue 生效）
+INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by)
+SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge WHERE scope = 'issue';
+
+-- issue_agent 知识 → 指定 Agent 关联
+INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by)
+SELECT id, '', agent_type, 1, 'system' FROM agent_shared_knowledge WHERE scope = 'issue_agent' AND agent_type != '';
+
+-- member 知识（agent_type 非空）→ 指定 Agent 关联
+INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by)
+SELECT id, '', agent_type, 1, 'system' FROM agent_shared_knowledge WHERE scope = 'member' AND agent_type != '';
+
+-- member 知识（agent_type 空）→ 全局关联
+INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by)
+SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge WHERE scope = 'member' AND (agent_type = '' OR agent_type IS NULL);
+```
+
+MySQL 版本把 `INSERT OR IGNORE` 改为 `INSERT IGNORE`。
+
+**步骤 4：验证迁移**
+
+```sql
+-- 检查关联记录数 = 知识记录数（每条知识至少一条关联）
+SELECT
+    (SELECT COUNT(*) FROM agent_shared_knowledge) AS knowledge_count,
+    (SELECT COUNT(DISTINCT knowledge_id) FROM scene_knowledge_ref) AS ref_distinct_count;
+-- 两个数应该相等
+```
+
+### 6.6 知识 CRUD API 详细设计
+
+**POST /api/knowledge/entry（新增知识）**：
+
+```python
+@router.post("/entry")
+async def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_current_user)):
+    """用户直接输入文本创建知识条目（source=manual）。"""
+    if not body.content.strip():
+        raise HTTPException(status_code=400, ...)
+    if not body.repo:
+        raise HTTPException(status_code=400, ...)
+
+    repo_key = to_repo_key(body.repo)
+    # 写入文件 + DB
+    fp = write_knowledge(
+        repo_key=repo_key, scope="member", content=body.content,
+        status="accepted", agent_type=body.agent_type or "",
+        issue_num=0, source_seq=0, created_by=user.get("username", ""),
+    )
+    # write_knowledge 内部会自动生成关联记录（6.4）
+    # 但 manual 知识不自动关联——用户手动选择关联
+    # 所以 write_knowledge 对 scope=member 不自动生成关联
+    # 用户创建后通过 POST /api/knowledge/{id}/refs 手动关联
+
+    return {"ok": True, "message": "知识已创建"}
+```
+
+**PUT /api/knowledge/{id}（编辑知识）**：
+
+```python
+@router.put("/{knowledge_id}")
+async def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
+                           user: dict = Depends(get_current_user)):
+    """编辑知识内容，仅 source=manual 可编辑。"""
+    # 查知识记录
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, ...)
+
+    # 权限校验：source=manual 且创建者是本人
+    if row["source"] != "manual":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "系统生成的知识不可编辑"})
+    if row["created_by"] != user.get("username"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可编辑"})
+
+    # 更新内容：写文件 + OBS + DB content_hash + updated_at
+    _update_knowledge_content(knowledge_id, row, body.content)
+
+    return {"ok": True, "message": "知识已更新"}
+```
+
+**DEL /api/knowledge/{id}（删除知识）**：
+
+```python
+@router.delete("/{knowledge_id}")
+async def delete_knowledge(knowledge_id: int, user: dict = Depends(get_current_user)):
+    """删除 source=manual 的知识条目。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, ...)
+
+    if row["source"] != "manual":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "系统生成的知识不可删除"})
+    if row["created_by"] != user.get("username"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可删除"})
+
+    # 删除 OBS 对象 + 本地文件 + DB 记录 + 关联记录
+    _delete_knowledge_full(knowledge_id, row)
+
+    return {"ok": True, "message": "知识已删除"}
+```
+
+### 6.7 关联管理 API 详细设计
+
+**GET /api/knowledge/{id}/refs（查看关联列表）**：
+
+```python
+@router.get("/{knowledge_id}/refs")
+def get_knowledge_refs(knowledge_id: int, user: dict = Depends(get_current_user)):
+    """获取知识的所有关联关系。"""
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT id, scene_id, agent_type, enabled, created_by, created_at, updated_at "
+            "FROM scene_knowledge_ref WHERE knowledge_id = ? ORDER BY id",
+            (knowledge_id,)
+        ).fetchall()
+    return {"refs": [...]}
+```
+
+**POST /api/knowledge/{id}/refs（新增关联）**：
+
+```python
+@router.post("/{knowledge_id}/refs")
+def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
+                      user: dict = Depends(get_current_user)):
+    """为知识新增场景/Agent 关联。"""
+    try:
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO scene_knowledge_ref "
+                "(knowledge_id, scene_id, agent_type, enabled, created_by) "
+                "VALUES (?, ?, ?, 1, ?)",
+                (knowledge_id, body.scene_id or "", body.agent_type or "",
+                 user.get("username", ""))
+            )
+            db.commit()
+    except Exception as e:
+        if "UNIQUE" in str(e).upper():
+            raise HTTPException(status_code=409, detail={"code": 409, "message": "该知识已绑定此场景/Agent 类型"})
+        raise
+    return {"ok": True}
+```
+
+**PUT /api/knowledge/ref/{ref_id}（修改关联——开关 enabled）**：
+
+```python
+@router.put("/ref/{ref_id}")
+def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
+                         user: dict = Depends(get_current_user)):
+    """修改关联的 enabled 开关。"""
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE scene_knowledge_ref SET enabled = ?, updated_by = ? WHERE id = ?",
+            (1 if body.enabled else 0, user.get("username", ""), ref_id)
+        )
+        db.commit()
+    return {"ok": True}
+```
+
+**DEL /api/knowledge/ref/{ref_id}（删除关联）**：
+
+```python
+@router.delete("/ref/{ref_id}")
+def delete_knowledge_ref(ref_id: int, user: dict = Depends(get_current_user)):
+    """删除知识的某条关联。"""
+    with db_lock:
+        db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE id = ?", (ref_id,))
+        db.commit()
+    return {"ok": True}
+```
+
+### 6.8 write_knowledge() 对 scope=member 的特殊处理
+
+系统写入时自动生成关联记录（6.4），但用户创建的知识（scope=member）不自动关联——由用户手动选择：
+
+```python
+def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
+    ref_map = {
+        "baseline":     {"scene_id": "", "agent_type": ""},
+        "project":      {"scene_id": "", "agent_type": ""},
+        "issue":        {"scene_id": "", "agent_type": ""},
+        "issue_agent":  {"scene_id": "", "agent_type": agent_type},
+        # member 不自动关联——用户手动选择
+    }
+    ref = ref_map.get(scope)
+    if not ref:
+        return  # member 跳过
+    ...
+```
+
+### 6.9 知识列表 API 改动
+
+`GET /api/knowledge` 返回数据以 id 为主键，所有后续操作（编辑/查询详情/删除/关联管理）都以 id 为准：
+
+```python
+# 每条知识必须返回 id 主键，后续接口都以 id 操作：
+{
+    "id": 42,                    # 知识主键（必须返回，后续 CRUD 以此为准）
+    "source": "manual",          # 新增：来源
+    "scope": "member",           # 保留：注入范围（向后兼容）
+    "repo_key": "gitcode:xxx/yyy",
+    "agent_type": "coding",
+    "issue_num": 0,
+    "file_path": "project-info/member/user/xxx.md",
+    "obs_key": "knowledge/xxx/yyy/member/user/xxx.md",
+    "status": "accepted",
+    "source_seq": 0,
+    "created_by": "user1",
+    "created_at": "2026-09-09 10:00:00",
+    "updated_at": "2026-09-09 10:00:00",
+    "content": "知识正文预览...",  # 前 500 字符
+    "archived": 0,               # 新增：归档标记
+    "refs": [                    # 新增：关联列表
+        {"id": 1, "scene_id": "", "agent_type": "coding", "enabled": 1},
+        {"id": 2, "scene_id": "uuid-xxx", "agent_type": "", "enabled": 1},
+    ],
+    "ref_summary": "全局",       # 新增：关联摘要（前端展示用）
+    "issue_tag": "",             # 新增：Issue 标签（issue/issue_agent 级知识专用）
+}
+```
+
+**所有后续接口都以 id 主键为准**：
+
+| 接口 | 方法 | URL | 说明 |
+|------|------|-----|------|
+| 查询详情 | GET | `/api/knowledge/{id}` | 按 id 查询单条知识全文 |
+| 编辑 | PUT | `/api/knowledge/{id}` | 按 id 编辑知识内容 |
+| 删除 | DEL | `/api/knowledge/{id}` | 按 id 删除知识 |
+| 查看关联 | GET | `/api/knowledge/{id}/refs` | 按 id 查询关联列表 |
+| 新增关联 | POST | `/api/knowledge/{id}/refs` | 按 id 新增关联 |
+| 修改关联 | PUT | `/api/knowledge/ref/{ref_id}` | 按 ref_id 修改关联开关 |
+| 删除关联 | DEL | `/api/knowledge/ref/{ref_id}` | 按 ref_id 删除关联 |
+| 标记归档 | PUT | `/api/knowledge/{id}/archive` | 按 id 标记/取消归档 |
+| 读取全文 | GET | `/api/knowledge/content?repo=xxx&obs_key=xxx` | 保留现有（按 obs_key 读全文） |
+
+**`ref_summary` 生成规则**：
+- 有 `scene_id='' AND agent_type=''` 的关联 → "全局"
+- 有特定 `scene_id` 的关联 → "已关联 N 个场景"
+- 有特定 `agent_type` 的关联 → "已关联 {agent_type}"
+- 无关联记录 → "未关联"
+
+**`list_knowledge` 端点改动**（`knowledge.py:346`）：
+
+返回数据改为统一列表格式——不再分 `project` / `agents` 两层，改为 `knowledge` 统一数组：
+
+```python
+return {
+    "repo_key": repo_key,
+    "knowledge": all_knowledge,  # 统一列表，每条含 id + source + refs + ref_summary
+    "stats": {                   # 新增：统计数（前端统计卡片用）
+        "system": sum(1 for k in all_knowledge if k["source"] == "system"),
+        "agent": sum(1 for k in all_knowledge if k["source"] == "agent"),
+        "manual": sum(1 for k in all_knowledge if k["source"] == "manual"),
+        "unlinked": sum(1 for k in all_knowledge if not k.get("refs")),
+    },
+}
+```
+
+前端 `_flattenList` 简化为直接用 `d.knowledge` + `d.stats`。
+
+---
+
+### 6.10 前端 knowledge.js 改动方案——Vue 3 实现
+
+**当前 knowledge.js 结构**（340 行）：纯原生 JS，项目 tab / Agent tab 两 tab 切换 + 搜索过滤 + 查看全文 + 上传文档 + 删除文档。
+
+**改动方案**：知识库页面改用 Vue 3 本地 vendor 方式实现，不影响其他页面。
+
+**引入 Vue 3**：
+
+下载 Vue 3.4.30 prod min JS 到 `src/api/static/js/vendor/` 目录，`index.html` 新增引入，放在其他 JS 之前：
+
+```html
+<script src="/static/js/vendor/vue.global.prod.min.js?v=1"></script>
+```
+
+**Vue 应用结构**：
+
+`renderKnowledge()` 不再手动操作 DOM，改为创建 Vue 应用挂载到 `pageContent`：
+
+```javascript
+function renderKnowledge() {
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+
+  const app = Vue.createApp({
+    data() {
+      return {
+        list: [],           // 知识列表（统一，不分 tab）
+        loading: true,
+        filter: { source: '', refStatus: '', query: '' },
+        stats: { system: 0, agent: 0, user: 0, unlinked: 0 },
+        showArchived: false,
+        // modals
+        editModal: null,    // 编辑的知识对象
+        refModal: null,     // 关联设置的知识对象
+        entryModal: false,  // 新增知识 modal
+        uploadModal: false, // 上传 modal
+        _vueApp: null,      // Vue 实例引用
+      };
+    },
+    computed: {
+      filteredList() {
+        let result = this.list;
+        // 来源筛选
+        if (this.filter.source === 'system') {
+          result = result.filter(k => k.source === 'system' || k.source === 'agent');
+        } else if (this.filter.source === 'manual') {
+          result = result.filter(k => k.source === 'manual');
+        }
+        // 关联状态筛选
+        if (this.filter.refStatus === 'linked') {
+          result = result.filter(k => k.refs && k.refs.length > 0);
+        } else if (this.filter.refStatus === 'unlinked') {
+          result = result.filter(k => !k.refs || k.refs.length === 0);
+        }
+        // 搜索
+        if (this.filter.query) {
+          const q = this.filter.query.toLowerCase();
+          result = result.filter(k =>
+            (k.content || '').toLowerCase().includes(q) ||
+            (k.path || '').toLowerCase().includes(q) ||
+            (k.created_by || '').toLowerCase().includes(q)
+          );
+        }
+        return result;
+      },
+    },
+    async mounted() {
+      await this.loadList();
+    },
+    methods: {
+      t(key, params) {
+        return I18N.t('knowledge.' + key, params || {});
+      },
+      currentRepo() {
+        try {
+          const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+          return c ? (c.fullName || '') : '';
+        } catch { return ''; }
+      },
+      async loadList() {
+        this.loading = true;
+        try {
+          const repo = this.currentRepo();
+          if (!repo) { this.loading = false; return; }
+          const d = await API.get('/knowledge?repo=' + encodeURIComponent(repo));
+          if (window._currentView !== 'knowledge') return;  // stale guard
+          this.list = this._flattenList(d);
+          this._updateStats();
+        } catch (e) {
+          if (e.name === 'AbortError' && e.silent) return;
+          if (window._currentView !== 'knowledge') return;
+          this.loading = false;
+        } finally {
+          if (window._currentView === 'knowledge') this.loading = false;
+        }
+      },
+      _flattenList(d) {
+        // 把 project + agents + issue 级知识合并成统一列表
+        const list = [];
+        (d.project.files || []).forEach(f => list.push({...f, source: 'system', scope: 'baseline'}));
+        (d.project.knowledge || []).forEach(k => list.push({...k, source: k.source || 'agent'}));
+        (d.project.member_docs || []).forEach(doc => list.push({...doc, source: 'manual', scope: 'member'}));
+        (d.issue_knowledge || []).forEach(k => list.push({...k, source: k.source || 'agent'}));
+        Object.entries(d.agents || {}).forEach(([type, entries]) => {
+          entries.forEach(e => list.push({...e, source: e.source || 'agent', agent_type: type}));
+        });
+        return list;
+      },
+      _updateStats() {
+        this.stats.system = this.list.filter(k => k.source === 'system').length;
+        this.stats.agent = this.list.filter(k => k.source === 'agent').length;
+        this.stats.user = this.list.filter(k => k.source === 'manual').length;
+        this.stats.unlinked = this.list.filter(k => !k.refs || k.refs.length === 0).length;
+      },
+      // 统计卡片点击筛选
+      filterByStats(type) {
+        if (type === 'system') this.filter.source = 'system';
+        else if (type === 'user') this.filter.source = 'manual';
+        else if (type === 'unlinked') this.filter.refStatus = 'unlinked';
+      },
+      // 查看全文
+      viewContent(k) {
+        loadKnowledgeContent(k.obs_key || k.path);
+      },
+      // 编辑
+      editKnowledge(k) {
+        this.editModal = {...k};
+      },
+      async saveEdit() {
+        try {
+          await API.put('/knowledge/' + this.editModal.id, { content: this.editModal.content });
+          app.showToast(this.t('knowledge_updated'));
+          this.editModal = null;
+          await this.loadList();
+        } catch (e) {
+          app.showToast(e.message || I18N.t('common.load_failed'));
+        }
+      },
+      // 删除——苹果风格 modal 确认
+      async deleteKnowledge(k) {
+        if (!await this._confirmModal(this.t('delete_confirm'))) return;
+        try {
+          await API.del('/knowledge/' + k.id);
+          app.showToast(this.t('knowledge_deleted'));
+          await this.loadList();
+        } catch (e) {
+          app.showToast(e.message || I18N.t('common.load_failed'));
+        }
+      },
+      // 关联设置
+      async openRefModal(k) {
+        try {
+          const d = await API.get('/knowledge/' + k.id + '/refs');
+          this.refModal = { knowledge: k, refs: d.refs || [], newScene: '', newAgent: '' };
+        } catch (e) {
+          app.showToast(e.message);
+        }
+      },
+      async addRef() {
+        const sceneId = this.refModal.newScene || '';
+        const agentType = this.refModal.newAgent || '';
+        try {
+          await API.post('/knowledge/' + this.refModal.knowledge.id + '/refs', {
+            scene_id: sceneId, agent_type: agentType
+          });
+          const d = await API.get('/knowledge/' + this.refModal.knowledge.id + '/refs');
+          this.refModal.refs = d.refs || [];
+          this.refModal.newScene = '';
+          this.refModal.newAgent = '';
+          app.showToast(this.t('ref_add'));
+        } catch (e) {
+          if (e.detail && e.detail.message && e.detail.message.includes('已绑定')) {
+            app.showToast(this.t('ref_already_bound'));
+          } else {
+            app.showToast(e.message);
+          }
+        }
+      },
+      async toggleRef(ref) {
+        try {
+          await API.put('/knowledge/ref/' + ref.id, { enabled: !ref.enabled });
+          ref.enabled = !ref.enabled;
+        } catch (e) {
+          app.showToast(e.message);
+        }
+      },
+      async deleteRef(ref) {
+        // 提示受影响场景
+        const affected = this.refModal.refs.filter(r => r.enabled && r.id !== ref.id).length;
+        if (!await this._confirmModal(
+          this.t('ref_delete_confirm') + (affected > 0 ? '（会影响 ' + affected + ' 个场景）' : '')
+        )) return;
+        try {
+          await API.del('/knowledge/ref/' + ref.id);
+          this.refModal.refs = this.refModal.refs.filter(r => r.id !== ref.id);
+          app.showToast(this.t('ref_delete'));
+        } catch (e) {
+          app.showToast(e.message);
+        }
+      },
+      // 新增知识
+      async createEntry() {
+        const content = this.entryModal.content || '';
+        if (!content.trim()) { app.showToast(this.t('entry_content')); return; }
+        try {
+          await API.post('/knowledge/entry', {
+            repo: this.currentRepo(),
+            content: content,
+            agent_type: this.entryModal.agentType || ''
+          });
+          app.showToast(this.t('knowledge_created'));
+          this.entryModal = false;
+          await this.loadList();
+        } catch (e) {
+          app.showToast(e.message);
+        }
+      },
+      // 苹果风格确认 modal
+      _confirmModal(message) {
+        return new Promise((resolve) => {
+          // 复用 skills.js 的苹果风格 modal 组件
+          _showAppleConfirm(message, () => resolve(true), () => resolve(false));
+        });
+      },
+    },
+    template: `
+      <div class="knowledge-page">
+        <!-- 统计卡片栏 -->
+        <div class="stats-bar" v-if="!loading">
+          <div class="stat-card" @click="filterByStats('system')">
+            <span class="stat-num">{{ stats.system + stats.agent }}</span>
+            <span class="stat-label">{{ t('stats_system') }}</span>
+          </div>
+          <div class="stat-card" @click="filterByStats('user')">
+            <span class="stat-num">{{ stats.user }}</span>
+            <span class="stat-label">{{ t('stats_user') }}</span>
+          </div>
+          <div class="stat-card" @click="filterByStats('unlinked')">
+            <span class="stat-num">{{ stats.unlinked }}</span>
+            <span class="stat-label">{{ t('stats_unlinked') }}</span>
+          </div>
+        </div>
+        <!-- 筛选器 -->
+        <div class="filter-bar" v-if="!loading">
+          <select v-model="filter.source">
+            <option value="">{{ t('filter_source_all') }}</option>
+            <option value="system">{{ t('source_system') }}</option>
+            <option value="manual">{{ t('source_manual') }}</option>
+          </select>
+          <select v-model="filter.refStatus">
+            <option value="">{{ t('filter_ref_all') }}</option>
+            <option value="linked">{{ t('filter_ref_linked') }}</option>
+            <option value="unlinked">{{ t('filter_ref_unlinked') }}</option>
+          </select>
+          <input v-model="filter.query" :placeholder="t('search_placeholder')">
+          <button @click="entryModal = { content: '', agentType: '' }">{{ t('entry_create') }}</button>
+          <button @click="uploadModal = true">{{ t('upload_btn') }}</button>
+        </div>
+        <!-- 知识列表 -->
+        <div v-if="loading" class="loading">{{ t('loading') }}</div>
+        <div v-else-if="filteredList.length === 0" class="empty">{{ t('empty') }}</div>
+        <div v-else class="knowledge-list">
+          <div v-for="k in filteredList" :key="k.id" class="cd skill-card knowledge-card"
+               :class="{ archived: k.archived }">
+            <!-- 卡片头部 -->
+            <div class="card-header">
+              <span class="source-tag" :class="'source-' + k.source">{{ t('source_' + k.source) }}</span>
+              <span class="ref-tag" v-if="k.ref_summary">{{ k.ref_summary }}</span>
+              <span class="ref-tag unlinked" v-else>{{ t('ref_unlinked') }}</span>
+              <span class="issue-tag" v-if="k.issue_tag">{{ k.issue_tag }}</span>
+              <span class="archived-tag" v-if="k.archived">{{ t('archived') }}</span>
+            </div>
+            <!-- 文件过大提示 -->
+            <div class="size-warning" v-if="k.scope === 'project' && k.content && k.content.length > 10240">
+              ⚠ {{ t('file_too_large', { size: (k.content.length / 1024).toFixed(1) }) }}
+            </div>
+            <!-- 内容预览 -->
+            <div class="card-content">{{ (k.content || '').substring(0, 200) }}</div>
+            <!-- 卡片底部 -->
+            <div class="card-footer">
+              <span class="card-meta">{{ k.created_by }} · {{ (k.created_at || '').substring(0, 16) }}</span>
+              <div class="card-actions">
+                <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
+                <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" @click="editKnowledge(k)">{{ t('edit_save') }}</button>
+                <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s danger" @click="deleteKnowledge(k)">{{ t('delete') }}</button>
+                <button v-if="!k.archived" class="bt bt-o bt-s" @click="openRefModal(k)">{{ t('ref_settings') }}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- 编辑 modal -->
+        <div v-if="editModal" class="modal-overlay" @click.self="editModal = null">
+          <div class="modal cd">
+            <h3>{{ t('edit_title') }}</h3>
+            <textarea v-model="editModal.content" rows="12" class="edit-textarea"></textarea>
+            <div class="modal-actions">
+              <button @click="editModal = null">{{ t('cancel') }}</button>
+              <button class="bt bt-p" @click="saveEdit">{{ t('edit_save') }}</button>
+            </div>
+          </div>
+        </div>
+        <!-- 关联设置 modal -->
+        <div v-if="refModal" class="modal-overlay" @click.self="refModal = null">
+          <div class="modal cd">
+            <h3>{{ t('ref_modal_title') }}</h3>
+            <!-- 新增关联 -->
+            <div class="ref-add-row">
+              <input v-model="refModal.newScene" :placeholder="t('ref_scene')" class="ref-input">
+              <select v-model="refModal.newAgent" class="ref-input">
+                <option value="">{{ t('ref_agent_all') }}</option>
+                <option value="vod">VOD</option>
+                <option value="coding">Coding</option>
+                <option value="qa">QA</option>
+                <option value="sre">SRE</option>
+                <option value="chat">Chat</option>
+              </select>
+              <button @click="addRef">{{ t('ref_add') }}</button>
+            </div>
+            <!-- 已有关联列表 -->
+            <div class="ref-list">
+              <div v-for="ref in refModal.refs" :key="ref.id" class="ref-item">
+                <span>{{ ref.scene_id || t('ref_scene_all') }} · {{ ref.agent_type || t('ref_agent_all') }}</span>
+                <label class="switch">
+                  <input type="checkbox" :checked="ref.enabled" @change="toggleRef(ref)">
+                </label>
+                <button @click="deleteRef(ref)" class="danger">{{ t('ref_delete') }}</button>
+              </div>
+            </div>
+            <div class="modal-actions">
+              <button @click="refModal = null">{{ t('cancel') }}</button>
+            </div>
+          </div>
+        </div>
+        <!-- 新增知识 modal -->
+        <div v-if="entryModal" class="modal-overlay" @click.self="entryModal = false">
+          <div class="modal cd">
+            <h3>{{ t('entry_title') }}</h3>
+            <textarea v-model="entryModal.content" rows="10" :placeholder="t('entry_content')" class="edit-textarea"></textarea>
+            <select v-model="entryModal.agentType" class="ref-input">
+              <option value="">{{ t('ref_agent_all') }}</option>
+              <option value="vod">VOD</option>
+              <option value="coding">Coding</option>
+              <option value="qa">QA</option>
+              <option value="sre">SRE</option>
+              <option value="chat">Chat</option>
+            </select>
+            <div class="modal-actions">
+              <button @click="entryModal = false">{{ t('cancel') }}</button>
+              <button class="bt bt-p" @click="createEntry">{{ t('entry_create') }}</button>
+            </div>
+          </div>
+        </div>
+        <!-- 上传 modal（保留现有上传逻辑，加关联选择） -->
+        <!-- ... -->
+      </div>
+    `,
+  });
+
+  app.mount(el);
+}
+```
+
+**Vue 带来的好处**：
+- 不用手动操作 DOM——数据变了视图自动更新
+- 筛选/搜索响应式——`filter` 变了 `filteredList` computed 自动重算
+- 不用 stale guard 检查 DOM——Vue 组件卸载时自动清理（用户切走时 `pageContent.innerHTML` 被替换，Vue 应用自动卸载）
+- 组件化——modal 通过 `v-if` 控制显示隐藏，不用手动 `appendChild`/`remove`
+
+**和现有代码的兼容**：
+- `renderKnowledge()` 仍然是全局函数，`app.nav('knowledge')` 调用它
+- `loadKnowledgeContent()` 保留原生 JS（查看全文页面不需要 Vue）
+- `API` 对象继续用现有的 `api.js`
+- `I18N` 继续用现有的 `i18n.js`
+- `app.showToast` 继续用现有的 `app.js`
+- `_showAppleConfirm` 复用 skills.js 的苹果风格 modal 组件
+
+**Vue 应用生命周期管理**：
+- `renderKnowledge()` 创建 Vue 应用并 mount 到 `pageContent`
+- 用户切走时 `app.nav()` 替换 `pageContent.innerHTML`——Vue 应用自动卸载
+- 切回来时重新调 `renderKnowledge()` 重新创建
+
+**CSS 样式**：
+
+新增 `app.css` 里知识库页面的 Vue 组件样式：
+
+```css
+/* 统计卡片栏 */
+.knowledge-page .stats-bar { display: flex; gap: 12px; margin-bottom: 16px; }
+.knowledge-page .stat-card {
+  flex: 1; padding: 16px; border-radius: 12px; background: var(--c);
+  cursor: pointer; transition: transform 0.2s;
+  display: flex; flex-direction: column; align-items: center;
+}
+.knowledge-page .stat-card:hover { transform: translateY(-2px); }
+.knowledge-page .stat-num { font-size: 24px; font-weight: 700; color: var(--t); }
+.knowledge-page .stat-label { font-size: 11px; color: var(--t3); margin-top: 4px; }
+
+/* 来源标签颜色 */
+.source-tag { font-size: 10px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+.source-system { background: rgba(0,113,227,0.1); color: #0071e3; }
+.source-agent { background: rgba(255,149,0,0.1); color: #ff9500; }
+.source-manual { background: rgba(52,199,89,0.1); color: #34c759; }
+
+/* 关联状态标签 */
+.ref-tag { font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(0,113,227,0.08); color: var(--t2); }
+.ref-tag.unlinked { background: rgba(142,142,147,0.1); color: var(--t3); }
+
+/* 归档标签 */
+.archived-tag { font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(142,142,147,0.15); color: var(--t3); }
+
+/* 文件过大提示 */
+.size-warning { font-size: 10px; color: var(--or); padding: 4px 0; }
+
+/* modal */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 999; }
+.modal { width: 500px; max-width: 90vw; padding: 24px; border-radius: 14px; background: var(--c); }
+.edit-textarea { width: 100%; min-height: 200px; padding: 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 13px; font-family: monospace; }
+```
+
+### 6.11 i18n 改动
+
+新增 i18n key（zh + en `src/api/static/locales/{zh,en}/knowledge.json`）：
+
+```json
+{
+  "stats_system": "系统知识",
+  "stats_agent": "Agent 知识",
+  "stats_user": "用户知识",
+  "stats_unlinked": "未关联",
+  "filter_source": "来源",
+  "filter_source_all": "全部",
+  "filter_ref_status": "关联状态",
+  "filter_ref_all": "全部",
+  "filter_ref_linked": "已关联",
+  "filter_ref_unlinked": "未关联",
+  "source_system": "系统",
+  "source_agent": "Agent",
+  "source_manual": "用户",
+  "ref_global": "全局",
+  "ref_linked_scenes": "已关联 {count} 个场景",
+  "ref_linked_agent": "已关联 {agent}",
+  "ref_unlinked": "未关联",
+  "ref_settings": "关联设置",
+  "ref_modal_title": "管理知识关联",
+  "ref_scene": "关联场景",
+  "ref_scene_all": "所有场景",
+  "ref_agent": "关联 Agent",
+  "ref_agent_all": "所有 Agent",
+  "ref_enabled": "启用",
+  "ref_disabled": "禁用",
+  "ref_add": "新增关联",
+  "ref_delete": "删除关联",
+  "ref_delete_confirm": "确认删除此关联？",
+  "ref_already_bound": "该知识已绑定此场景/Agent 类型",
+  "edit_title": "编辑知识",
+  "edit_content": "内容",
+  "edit_save": "保存",
+  "entry_title": "新增知识",
+  "entry_content": "输入知识内容（支持 Markdown）",
+  "entry_create": "创建",
+  "knowledge_deleted": "知识已删除",
+  "knowledge_updated": "知识已更新",
+  "knowledge_created": "知识已创建",
+  "delete_confirm": "确认删除此知识？关联关系将一并删除。",
+  "system_readonly": "系统生成的知识不可编辑"
+}
+```
+
+### 6.12 统计卡片数据接口
+
+统计数据前端计算——不单独加后端接口。
+
+`GET /api/knowledge` 返回的统一列表里每条知识有 `source` + `refs` 字段，前端计算统计数：
+
+```javascript
+const stats = {
+    system: list.filter(k => k.source === 'system' || k.source === 'agent').length,
+    user: list.filter(k => k.source === 'manual').length,
+    unlinked: list.filter(k => !k.refs || k.refs.length === 0).length,
+};
+```
+
+注意：统计卡片"系统知识"包含 system + agent 两类——因为它们都是系统/Agent 产生的，用户视角是一样的（只读）。如果用户要分来源看，用筛选器按来源筛选。
+
+### 6.13 issue/issue_agent 级知识在统一列表的展示
+
+当前 `GET /api/knowledge` 只返回 project tab 和 agent tab 的知识，不返回 issue/issue_agent 级。
+
+改动 `list_knowledge` 端点（`knowledge.py:346`）——新增返回 issue 级知识：
+
+```python
+# 在返回数据中新增 issue 级知识
+issue_knowledge = []
+try:
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT id, scope, agent_type, issue_num, file_path, obs_key, "
+            "source_seq, created_by, created_at, content_hash, source "
+            "FROM agent_shared_knowledge "
+            "WHERE repo_key = ? AND scope IN ('issue', 'issue_agent') "
+            "ORDER BY issue_num DESC, id DESC",
+            (repo_key,)
+        ).fetchall()
+    for r in rows:
+        content = _read_entry_content(repo_key, r[5] or "", r[4] or "")
+        issue_knowledge.append({
+            "id": r[0], "scope": r[1], "agent_type": r[2] or "",
+            "issue_num": r[3] or 0, "path": r[4], "obs_key": r[5] or "",
+            "source_seq": r[6] or 0, "created_by": r[7] or "",
+            "created_at": normalize_event_time(r[8] or ""),
+            "content": content, "source": r[10] or "agent",
+            "issue_tag": f"Issue #{r[3]}" if r[3] else "",
+        })
+except Exception:
+    pass
+```
+
+统一列表里 issue 级知识卡片显示 `Issue #N` 标签——用户能区分这条知识是哪个 Issue 产生的。Agent 级的显示 `Issue #N · {agent_type}`。
+
+### 6.14 _update_knowledge_content 实现细节
+
+```python
+def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
+    """更新知识内容：写文件 + OBS + DB content_hash + updated_at。"""
+    from src.repo_key import to_repo_key
+    repo_key = row["repo_key"]
+    file_path = row["file_path"]
+
+    # 1. 写本地文件（覆盖，不是追加）
+    base = _repo_base(repo_key)
+    full = os.path.normpath(os.path.join(base, file_path))
+    # 安全检查
+    if full != base and not full.startswith(base + os.sep):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    # 2. 写 OBS（启用时）+ 更新 content_hash
+    obs_key = row.get("obs_key", "")
+    content_hash = ""
+    try:
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None and obs_key:
+            with open(full, "rb") as f:
+                file_bytes = f.read()
+            storage.save_bytes(obs_key, file_bytes)
+            import hashlib
+            content_hash = hashlib.sha256(file_bytes).hexdigest()
+    except Exception as e:
+        log.warning(f"[knowledge] OBS update failed for {obs_key}: {e}")
+
+    # 3. 更新 DB
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE agent_shared_knowledge "
+            "SET content_hash = ?, updated_at = datetime('now') WHERE id = ?",
+            (content_hash, knowledge_id)
+        )
+        db.commit()
+```
+
+### 6.15 _delete_knowledge_full 实现细节
+
+```python
+def _delete_knowledge_full(knowledge_id: int, row: dict):
+    """删除知识：OBS 对象 + 本地文件 + DB 记录 + 关联记录。"""
+    from src.session_manager import db, db_lock
+
+    # 1. 删除 OBS 对象
+    obs_key = row.get("obs_key", "")
+    if obs_key:
+        try:
+            from src.storage import get_storage
+            storage = get_storage()
+            if storage is not None:
+                storage.delete_object(obs_key)
+        except Exception as e:
+            log.warning(f"[knowledge] OBS delete failed for {obs_key}: {e}")
+
+    # 2. 删除本地文件
+    file_path = row.get("file_path", "")
+    if file_path:
+        base = _repo_base(row["repo_key"])
+        full = os.path.normpath(os.path.join(base, file_path))
+        if os.path.isfile(full):
+            try:
+                os.remove(full)
+            except Exception:
+                pass
+
+    # 3. 删除 DB 记录 + 关联记录（MySQL 外键 CASCADE 自动删 ref，SQLite 手动删）
+    with db_lock:
+        db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id = ?", (knowledge_id,))
+        db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE id = ?", (knowledge_id,))
+        db.commit()
+```
+
+### 6.16 全文搜索实现
+
+前端实现——从 `GET /api/knowledge` 返回的列表数据里搜索。
+
+每条知识返回 `content` 字段（前 500 字符的预览文本）。搜索时匹配 `content` + `file_path` + `created_by`：
+
+```javascript
+function _filterKnowledge(list, filterState) {
+    let result = list;
+    // 来源筛选
+    if (filterState.source) {
+        if (filterState.source === 'system') {
+            result = result.filter(k => k.source === 'system' || k.source === 'agent');
+        } else if (filterState.source === 'manual') {
+            result = result.filter(k => k.source === 'manual');
+        }
+    }
+    // 关联状态筛选
+    if (filterState.refStatus === 'linked') {
+        result = result.filter(k => k.refs && k.refs.length > 0);
+    } else if (filterState.refStatus === 'unlinked') {
+        result = result.filter(k => !k.refs || k.refs.length === 0);
+    }
+    // 搜索
+    if (filterState.query) {
+        const q = filterState.query.toLowerCase();
+        result = result.filter(k =>
+            (k.content || '').toLowerCase().includes(q) ||
+            (k.path || '').toLowerCase().includes(q) ||
+            (k.created_by || '').toLowerCase().includes(q)
+        );
+    }
+    return result;
+}
+```
+
+后端 `GET /api/knowledge` 的 `_read_entry_content` 已经返回了 content 预览，前端直接搜索即可。不需要后端全文搜索接口——数据量不大（几百条），前端过滤足够。
+
+### 6.17 关联管理 API 权限校验
+
+关联管理 API 的权限规则：
+
+| 操作 | 系统/Agent 知识 | 用户知识（本人创建） | 用户知识（他人创建） |
+|------|----------------|-------------------|-------------------|
+| 查看关联（GET refs） | ✅ 所有登录用户 | ✅ 所有登录用户 | ✅ 所有登录用户 |
+| 新增关联（POST refs） | ✅ 仓库托管者 | ✅ 创建者本人 | ❌ 403 |
+| 修改关联 enabled（PUT ref） | ✅ 仓库托管者 | ✅ 创建者本人 | ❌ 403 |
+| 删除关联（DEL ref） | ✅ 仓库托管者 | ✅ 创建者本人 | ❌ 403 |
+
+在关联管理 API 里加权限校验：
+
+```python
+def _check_ref_permission(knowledge_id: int, user: dict):
+    """校验用户是否有权限管理该知识的关联。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+
+    if row["source"] == "manual":
+        # 用户创建的知识——仅创建者本人可管理关联
+        if row["created_by"] != user.get("username"):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可管理关联"})
+    # system/agent 知识——仓库托管者可管理关联
+    # TODO: 检查 user 是否是该仓库的托管者（复用现有 is_admin 逻辑）
+```
+
+### 6.18 用户手动创建知识的存储路径
+
+通过 `POST /api/knowledge/entry` 创建的知识，scope=member，写入路径：
+
+```
+{WORKSPACE_DIR}/{owner}/{repo}/project-info/member/{username}/{timestamp}_{random}.md
+```
+
+和上传文件一样落在 `project-info/member/{username}/` 目录下。区别是上传文件用原始文件名，手动创建用时间戳命名（因为没有文件名）：
+
+```python
+import time, uuid
+filename = f"entry_{int(time.time())}_{uuid.uuid4().hex[:6]}.md"
+member_dir = os.path.join(base, "project-info", "member", str(user.get("username", "user")))
+file_path = os.path.join(member_dir, filename)
+```
+
+OBS 模式下 obs_key 格式：`knowledge/{owner}/{repo}/member/{username}/{filename}`
+
+### 6.19 事件详情页知识引用链路
+
+**P9 问题**：Agent 执行任务时注入了哪些知识，用户完全不知道。
+
+**方案**：Agent 执行任务后，记录注入的知识 ID 列表到事件线程。
+
+`prompt_builder` 注入知识时记录引用的知识 ID：
+
+```python
+def _build_knowledge_section(repo_key, agent_type, issue_num, scene_id):
+    injected_ids = []  # 记录注入的知识 ID
+
+    # ... 查 scene_knowledge_ref 表注入 ...
+    for kid, content, ... in rows:
+        injected_ids.append(kid)
+        ...
+
+    # 返回注入的知识 ID 列表（调用方可记录到事件线程）
+    return "\n".join(lines), injected_ids
+```
+
+`build_event_chat_prompt` 调用时拿到 `injected_ids`，记录到事件线程消息：
+
+```python
+# 在 _execute_conv_task 里
+prompt, injected_ids = build_event_chat_prompt(...)
+# 执行完成后记录
+_add_thread_message(seq, repo_key, issue_id, agent_type, "system",
+                    f"📌 本次注入知识：{', '.join(str(i) for i in injected_ids)}")
+```
+
+前端事件详情页展示——在对话线程里显示"本次注入了 N 条知识"，点击展开看知识列表。
+
+### 6.20 测试方案
+
+**后端测试**（`tests/test_knowledge_ref.py` 新增）：
+
+| 测试类 | 测试用例 | 说明 |
+|--------|---------|------|
+| TestKnowledgeRefTable | test_table_creation | scene_knowledge_ref 表创建成功 |
+| | test_unique_constraint | 三元组唯一约束生效——重复插入报错 |
+| | test_cascade_delete | 知识删除时关联记录自动删除（MySQL）/手动删除（SQLite） |
+| TestKnowledgeCRUD | test_create_entry | POST /entry 创建知识成功 |
+| | test_create_entry_no_content | 空内容返回 400 |
+| | test_update_manual | PUT /{id} 编辑 manual 知识成功 |
+| | test_update_system_forbidden | PUT /{id} 编辑 system 知识返回 403 |
+| | test_update_other_user_forbidden | PUT /{id} 编辑他人知识返回 403 |
+| | test_delete_manual | DEL /{id} 删除 manual 知识成功 |
+| | test_delete_system_forbidden | DEL /{id} 删除 system 知识返回 403 |
+| TestKnowledgeRef | test_add_ref | POST /{id}/refs 新增关联成功 |
+| | test_add_ref_duplicate | 重复关联返回 409 |
+| | test_update_ref_enabled | PUT /ref/{id} 开关 enabled 成功 |
+| | test_delete_ref | DEL /ref/{id} 删除关联成功 |
+| | test_get_refs | GET /{id}/refs 返回关联列表 |
+| TestPromptBuilder | test_inject_by_ref | 有关联记录时按 ref 注入 |
+| | test_inject_fallback | 无 scene_knowledge_ref 表时回退 scope 注入 |
+| | test_inject_distinct | 多条 ref 命中同一知识时去重 |
+| TestDataMigration | test_source_backfill | source 字段回填正确 |
+| | test_ref_auto_generate | 现有知识自动生成关联记录 |
+
+**前端测试**（Playwright）：
+
+| 测试项 | 说明 |
+|--------|------|
+| 统计卡片显示 | 3 个卡片数量正确 |
+| 点击统计卡片筛选 | 点击后列表联动筛选 |
+| 来源筛选 | 按系统/Agent/用户筛选正确 |
+| 关联状态筛选 | 按已关联/未关联筛选正确 |
+| 全文搜索 | 搜索内容匹配 |
+| 知识卡片来源标签 | 颜色和文字正确 |
+| 知识卡片操作按钮权限 | system 只有查看+关联，manual 有编辑+删除+关联 |
+| 编辑 modal | 编辑后内容更新 |
+| 关联设置 modal | 新增/删除/开关关联 |
+| 新增知识 modal | 创建后出现在列表 |
+| issue 级知识展示 | 显示 Issue #N 标签 |
+
+### 6.21 知识过期处理逻辑
+
+**设计原则**：不同来源的知识有不同的生命周期策略。
+
+| source | scope | 过期策略 | 理由 |
+|--------|-------|---------|------|
+| system | baseline | 不过期 | 项目基线，Issue 打开时自动刷新覆盖 |
+| agent | project | 不过期，但用户可标记"过时" | 全局知识，用户判断是否还有效 |
+| agent | issue | Issue 关闭后归档，90 天后清理 | Issue 级知识，关闭后无 Agent 再读 |
+| agent | issue_agent | Issue 关闭后归档，90 天后清理 | 同上 |
+| manual | member | 不过期 | 用户创建，用户自己管理删除 |
+
+**归档机制**：
+
+`agent_shared_knowledge` 表新增 `archived` 字段：
+
+```sql
+-- SQLite
+ALTER TABLE agent_shared_knowledge ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+
+-- MySQL
+ALTER TABLE agent_shared_knowledge ADD COLUMN archived TINYINT NOT NULL DEFAULT 0 COMMENT '0正常 1归档';
+```
+
+归档后的知识：
+- 不再注入到 Agent prompt（`prompt_builder` 查关联表时过滤 `archived=0`）
+- 知识库页面仍可查看，卡片标记"已归档"标签
+- 关联记录保留但 `enabled` 自动设为 0
+
+**Issue 关闭触发归档**：
+
+在 Issue 关闭时（event_pipeline 处理 Issue closed 事件），把该 Issue 的 issue/issue_agent 级知识标记为归档：
+
+```python
+def _archive_issue_knowledge(repo_key: str, issue_num: int):
+    """Issue 关闭时归档该 Issue 的知识。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        # 归档知识记录
+        c.execute(
+            "UPDATE agent_shared_knowledge SET archived = 1 "
+            "WHERE repo_key = ? AND scope IN ('issue', 'issue_agent') "
+            "AND issue_num = ?",
+            (repo_key, issue_num)
+        )
+        # 关联记录 enabled 设为 0
+        c.execute(
+            "UPDATE scene_knowledge_ref SET enabled = 0, updated_by = 'system' "
+            "WHERE knowledge_id IN ("
+            "  SELECT id FROM agent_shared_knowledge "
+            "  WHERE repo_key = ? AND scope IN ('issue', 'issue_agent') AND issue_num = ?"
+            ")",
+            (repo_key, issue_num)
+        )
+        db.commit()
+```
+
+**调用方**：在 `event_pipeline.py` 处理 `issue_closed` 事件时调用 `_archive_issue_knowledge`。
+
+**过期清理**：
+
+定时任务清理超过 90 天的归档知识（和 `skill_sync_scheduler` 类似，加一个定时器）：
+
+```python
+def cleanup_archived_knowledge():
+    """清理超过 90 天的归档知识。"""
+    from src.session_manager import db, db_lock
+    cutoff = (datetime.now() - timedelta(days=90)).isoformat()
+
+    with db_lock:
+        c = db.cursor()
+        # 查过期归档知识
+        rows = c.execute(
+            "SELECT id, obs_key, file_path FROM agent_shared_knowledge "
+            "WHERE archived = 1 AND updated_at < ?",
+            (cutoff,)
+        ).fetchall()
+
+        for kid, obs_key, file_path in rows:
+            # 删 OBS 对象
+            if obs_key:
+                try:
+                    from src.storage import get_storage
+                    storage = get_storage()
+                    if storage is not None:
+                        storage.delete_object(obs_key)
+                except Exception:
+                    pass
+            # 删本地文件
+            if file_path:
+                # ... 删本地文件逻辑 ...
+                pass
+            # 删关联记录 + DB 记录
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id = ?", (kid,))
+            c.execute("DELETE FROM agent_shared_knowledge WHERE id = ?", (kid,))
+
+        db.commit()
+        log.info(f"[knowledge] cleaned up {len(rows)} archived knowledge entries")
+```
+
+**定时触发**：在 `main.py` 的 `start_skill_sync_scheduler` 旁边加一个 `start_knowledge_cleanup_scheduler`，每天执行一次。
+
+**project 级知识文件过大处理**：
+
+project 级知识一直在追加，不会自动过期。文件越来越大时，提示用户整理：
+
+- 知识库页面读取 project 级知识文件大小，超过阈值（10KB）时卡片上显示"文件较大（15KB），建议整理"提示
+- 用户点击"整理"→ 打开编辑 modal，看到全文内容，手动删除不需要的行，保存后覆盖写回文件 + OBS
+- 用户主动清理，不是系统自动瘦身——保留有用的，去掉过时的
+- 知识卡片同时显示"标记过时"按钮——如果用户觉得整个 project 级知识都没用了，标记后 `archived=1` 不再注入
+
+**前端展示**：
+
+归档/过时的知识卡片：
+- 显示"已归档"标签（灰色）
+- 操作按钮只有"查看"，无编辑/删除/关联设置
+- 默认不显示归档知识——筛选器加"显示归档"开关
+
+**文件大小提示前端实现**：
+
+```javascript
+// _renderKnowledgeCard 里判断文件大小
+const sizeBytes = k.content ? k.content.length : 0;
+const SIZE_THRESHOLD = 10 * 1024;  // 10KB
+if (k.scope === 'project' && sizeBytes > SIZE_THRESHOLD) {
+    const sizeKB = (sizeBytes / 1024).toFixed(1);
+    html += `<div class="tr" style="font-size:10px;color:var(--or);margin-top:4px">⚠ ${I18N.t('knowledge.file_too_large', {size: sizeKB})}</div>`;
+    // "整理"按钮和"编辑"按钮共用同一个编辑 modal
+}
+```
+
+i18n 新增 key：
+```json
+{
+  "file_too_large": "文件较大（{size}KB），建议整理去除不需要的知识"
+}
+```
+
+**影响范围**：
+- `agent_shared_knowledge` 表：新增 `archived` 字段
+- `event_pipeline.py`：Issue closed 事件处理时调 `_archive_issue_knowledge`
+- `main.py`：新增 `start_knowledge_cleanup_scheduler` 定时任务
+- `knowledge.py`：`list_knowledge` 返回 `archived` 字段 + 归档知识默认不返回（加 `archived=0` 过滤）
+- `prompt_builder.py`：注入时过滤 `archived=0`
+- `knowledge.js`：归档知识卡片样式 + "标记过时"按钮 + "显示归档"筛选开关
+
+### 6.22 共用文件多条记录问题处理
+
+**问题**：`write_knowledge` 每次追加一行到同一个文件，但每次都插入一条新 DB 记录。导致 9 条 DB 记录指向同一个文件（同一个 obs_key + 同一个 file_path），但 OBS 只有一份（最后一次写入覆盖了前面所有版本）。前 8 条的 content_hash 和实际文件内容不匹配。
+
+**处理方案**：写入时先查 DB 有无同 scope + repo_key + agent_type + issue_num 的记录：
+
+- **有记录** → 追加内容到文件 + 更新 OBS + 更新已有记录的 content_hash + updated_at（不插入新记录）
+- **没记录** → 追加内容到文件 + 写 OBS + 插入新记录
+
+这样一个 scope 一个文件一条 DB 记录。多次写入只追加文件内容，DB 记录只更新不新增。
+
+**三个 scope 都适用**——`write_knowledge` 是统一入口，不管 scope 是 project / issue / issue_agent 都走同一段逻辑：
+
+| scope | agent_type | issue_num | 文件路径 | DB 查询条件 | 效果 |
+|-------|------------|-----------|---------|------------|------|
+| project | '' | 0 | `project-info/knowledge.md` | scope + repo_key | 一个项目一条记录 |
+| issue | '' | 15 | `issues/15/knowledge.md` | scope + repo_key + issue_num | 一个 Issue 一条记录 |
+| issue_agent | coding | 15 | `issues/15/coding/knowledge.md` | scope + repo_key + agent_type + issue_num | 一个 Issue 的一个 Agent 一条记录 |
+
+三个 scope 的文件路径本来就不同（`knowledge_path` 返回不同路径），现在 DB 记录也对齐了——一个文件一条记录，不再重复。
+
+**改动函数**：`write_knowledge()`（`src/api/knowledge.py:184`）
+
+```python
+def write_knowledge(*, repo_key, scope, content, status="accepted",
+                    agent_type="", issue_num=0, source_seq=0, created_by=""):
+    # ... 现有写入逻辑不变（追加到文件 + 写 OBS）...
+
+    # 改动：DB 写入逻辑——先查有无已存在记录
+    with db_lock:
+        c = db.cursor()
+        existing = c.execute(
+            "SELECT id FROM agent_shared_knowledge "
+            "WHERE repo_key=? AND scope=? "
+            "AND (agent_type=? OR (agent_type='' AND ?='')) "
+            "AND issue_num=?",
+            (repo_key, scope, agent_type, agent_type, issue_num)
+        ).fetchone()
+
+        if existing:
+            # 有记录 → 更新 content_hash + updated_at，不插入新记录
+            c.execute(
+                "UPDATE agent_shared_knowledge "
+                "SET content_hash=?, obs_key=?, updated_at=datetime('now') "
+                "WHERE id=?",
+                (content_hash, obs_key, existing[0])
+            )
+            knowledge_id = existing[0]
+        else:
+            # 无记录 → 插入新记录
+            c.execute(
+                "INSERT INTO agent_shared_knowledge "
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, "
+                " content_hash, status, source_seq, created_by, source) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (scope, repo_key, agent_type, issue_num, rel_path, obs_key,
+                 content_hash, status, source_seq, created_by, source or "agent")
+            )
+            knowledge_id = c.lastrowid
+        db.commit()
+
+    # 自动生成关联记录（6.4）
+    if status == "accepted":
+        _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num)
+
+    return file_path
+```
+
+**影响**：
+- DB 记录数大幅减少——一个 scope 一条记录，不再每次写入都新增
+- content_hash 始终和文件内容一致——每次写入后更新
+- OBS 对象数不增加——同一个 scope 始终是同一个 obs_key
+- 关联记录只生成一次——已有记录时不重复生成
+
+**对 CRUD 的影响**：
+- 编辑/删除：操作的是整个文件（整个 scope 的知识），不是单条。用户标记"过时"时整个 scope 标记，不删单行
+- 归档：Issue 关闭时按 issue_num 归档，一个 issue_num 一条记录，归档操作干净
+- 知识库页面：一个 scope 一张卡片，不再显示 9 张指向同一文件的卡片
+
+**现有数据迁移**：
+
+```sql
+-- 删除重复记录，每个 scope + repo_key + agent_type + issue_num 只保留最新一条
+DELETE FROM agent_shared_knowledge
+WHERE id NOT IN (
+    SELECT MAX(id) FROM agent_shared_knowledge
+    GROUP BY repo_key, scope, agent_type, issue_num
+);
+```
+
+MySQL 版本相同。
+
+---
+
+### 6.23 遗漏点补充
+
+#### 6.23.1 source_seq 在 UPDATE 时更新为最新值
+
+6.22 的 UPDATE 语句没更新 source_seq。一个 scope 一条记录后，文件里有多行不同 seq，DB 里 source_seq 存最后一次写入的 seq——表示这个知识文件最近一次被哪个事件更新。虽然不能代表全部行，但记录最新更新事件有追溯价值。
+
+```python
+if existing:
+    c.execute(
+        "UPDATE agent_shared_knowledge "
+        "SET content_hash=?, obs_key=?, source_seq=?, updated_at=datetime('now') "
+        "WHERE id=?",
+        (content_hash, obs_key, source_seq, existing[0])
+    )
+```
+
+前端统一列表里不单独展示 seq（一条记录对应多行，展示单个 seq 误导用户），但在详情页可以展示"最近更新事件 seq"。
+
+#### 6.23.2 status=rejected 的处理
+
+`write_knowledge` 收到 `status=rejected` 时，不追加文件、不写 OBS。DB 逻辑：
+
+- **有已存在记录**（不管 accepted 还是 rejected）→ 直接跳过，什么都不做
+- **无已存在记录** → 插入一条 rejected 记录（登记备查，不注入）
+
+```python
+if status == "rejected":
+    # rejected 只登记索引，不落文件
+    if existing:
+        return ""  # 已有记录，跳过——不覆盖已有 accepted
+    # 无记录 → 插入 rejected 记录
+    c.execute("INSERT INTO agent_shared_knowledge (...) VALUES (...)", (...))
+    db.commit()
+    return ""  # 不写文件
+```
+
+永远只有一条记录。rejected 来了如果已有记录就忽略——已有的要么是 accepted（已有知识，rejected 不影响），要么是 rejected（之前已登记过）。
+
+rejected 的使用场景：event-dialogue skill 里用户提了建议，Agent 判断"不值得沉淀"，用 rejected 登记留痕"考虑过但不采纳"。实际使用频率很低。
+
+#### 6.23.3 upload_knowledge 不存在重复记录问题
+
+`upload_knowledge`（`knowledge.py:472`）上传文件时已有重名检查（第 514-535 行）——同名文件自动加时间戳后缀（`design-1234567890.md`），每次上传文件名不同，DB 记录的 `file_path` 天然不同，不会产生重复记录。
+
+不需要改动 `upload_knowledge` 的 DB 写入逻辑。
+
+仅需要补充：上传时设置 `source='manual'`（6.1 已写）。
+
+#### 6.23.4 建表 DDL 写进 db_setup.py
+
+新部署实例需要在建表 DDL 里直接包含 `source` + `archived` 字段，不等 ALTER TABLE。
+
+`agent_shared_knowledge` 建表 DDL 更新（`db_setup.py:420`）：
+
+```sql
+CREATE TABLE IF NOT EXISTS agent_shared_knowledge (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope       TEXT NOT NULL,
+    repo_key    TEXT NOT NULL,
+    agent_type  TEXT DEFAULT '',
+    issue_num   INTEGER DEFAULT 0,
+    file_path   TEXT NOT NULL,
+    status      TEXT DEFAULT 'accepted',
+    source_seq  INTEGER DEFAULT 0,
+    created_by  TEXT DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now')),
+    obs_key      VARCHAR(512) DEFAULT '',
+    content_hash VARCHAR(64) DEFAULT '',
+    updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    source       TEXT NOT NULL DEFAULT '',          -- 新增：system/agent/manual
+    archived     INTEGER NOT NULL DEFAULT 0          -- 新增：0正常 1归档
+);
+```
+
+`scene_knowledge_ref` 建表 DDL（新增，放在 `agent_shared_knowledge` 之后）：
+
+```sql
+-- SQLite 版
+CREATE TABLE IF NOT EXISTS scene_knowledge_ref (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    knowledge_id  INTEGER NOT NULL,
+    scene_id      TEXT NOT NULL DEFAULT '',
+    agent_type    TEXT NOT NULL DEFAULT '',
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_by    TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by    TEXT NOT NULL DEFAULT '',
+    UNIQUE (knowledge_id, scene_id, agent_type)
+);
+```
+
+对已有部署，通过 `_ensure_column` 幂等添加 source + archived 字段（6.1 + 6.21 已写）。
+
+#### 6.23.5 MySQL 原生 DDL 执行机制
+
+grape 没有绕过翻译层执行原生 MySQL DDL 的机制。在 `db_setup.py` 新增 `_execute_raw_mysql_ddl` 函数：
+
+```python
+def _execute_raw_mysql_ddl(ddl: str):
+    """执行原生 MySQL DDL，绕过 mysql_compat 翻译层。仅在 MySQL 后端时执行。"""
+    from src.mysql_compat import get_db_backend
+    if get_db_backend() != "mysql":
+        return  # SQLite 模式跳过
+    from src.mysql_compat import mysql_config
+    import pymysql
+    cfg = mysql_config()
+    conn = pymysql.connect(
+        host=cfg.get("host", ""), port=cfg.get("port", 3306),
+        user=cfg.get("user", ""), password=cfg.get("password", ""),
+        database=cfg.get("database", ""), charset="utf8mb4",
+        autocommit=True
+    )
+    try:
+        conn.execute(ddl)
+    finally:
+        conn.close()
+```
+
+在 `db_setup.py` 建表流程中，`scene_knowledge_ref` 表用两套 DDL：
+- SQLite：走翻译层（现有机制）
+- MySQL：调 `_execute_raw_mysql_ddl` 执行 6.1 里的原生 MySQL DDL
+
+#### 6.23.6 prompt_builder 返回值统一
+
+6.2 和 6.19 的返回值不一致。统一为返回 `(str, list)`：
+
+```python
+def _build_knowledge_section(repo_key, agent_type="", issue_num=0, scene_id=""):
+    """返回 (知识段落文本, 注入的知识 ID 列表)。"""
+    lines = [...]
+    injected_ids = []
+    # ... 注入逻辑 ...
+    for kid, ... in rows:
+        injected_ids.append(kid)
+        ...
+    return "\n".join(lines), injected_ids
+```
+
+调用方改动：
+- `build_event_chat_prompt`：`knowledge, injected_ids = _build_knowledge_section(...)`
+- `GET /api/knowledge/context`：`knowledge, _ = _build_knowledge_section(...)`
+
+如果不需要 injected_ids 的调用方用 `_` 忽略。
+
+#### 6.23.7 关联管理权限校验完善
+
+system/agent 知识的关联管理权限——仓库托管者可管理。复用 `host_repo` 的 `is_admin` 逻辑：
+
+```python
+def _check_ref_permission(knowledge_id: int, user: dict):
+    """校验用户是否有权限管理该知识的关联。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+
+    if row["source"] == "manual":
+        # 用户创建的知识——仅创建者本人可管理关联
+        if row["created_by"] != user.get("username"):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可管理关联"})
+    else:
+        # system/agent 知识——仓库托管者可管理关联
+        from src.user.db import is_repo_admin
+        if not is_repo_admin(user["id"], row["repo_key"]):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库托管者可管理系统知识的关联"})
+```
+
+`is_repo_admin` 复用 `user_db.mark_user_repo_join` 里已有的 `is_admin` 字段。
+
+#### 6.23.8 _project_knowledge_entries() 和 _agent_knowledge_entries() 改动
+
+6.22 改了记录结构后（一个 scope 一条记录），这两个聚合函数简化：
+
+`_project_knowledge_entries`（`knowledge.py:263`）——查 DB 从 `GROUP BY` 改为直接查唯一记录：
+
+```python
+def _project_knowledge_entries(repo_key: str) -> list:
+    """项目级知识沉淀——一个 scope 一条记录。"""
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT id, scope, agent_type, issue_num, file_path, status, "
+            "source_seq, created_by, created_at, obs_key, source, archived "
+            "FROM agent_shared_knowledge "
+            "WHERE repo_key=? AND scope='project' AND archived=0 "
+            "ORDER BY id DESC",
+            (repo_key,)
+        ).fetchall()
+    # 每条返回 id + source + archived + content + refs + ref_summary
+    ...
+```
+
+`_agent_knowledge_entries`（`knowledge.py:279`）——同理简化，不再有重复记录：
+
+```python
+def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
+    """Agent 级知识——按 agent_type 分组，每组一个 scope 一条记录。"""
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT id, scope, agent_type, issue_num, file_path, status, "
+            "source_seq, created_by, created_at, obs_key, source, archived "
+            "FROM agent_shared_knowledge "
+            "WHERE repo_key=? AND scope IN ('issue','issue_agent') AND archived=0 "
+            "ORDER BY agent_type, id DESC",
+            (repo_key,)
+        ).fetchall()
+    ...
+```
+
+#### 6.23.9 knowledge_files() 给远端 worker 交付知识
+
+`knowledge_files()`（`knowledge.py:252`）调 `read_knowledge()` 读取知识内容。6.22 改了记录结构但不影响 `read_knowledge`——`read_knowledge` 按文件路径读取，文件还是同一个文件，内容是追加的全文。不受影响。
+
+#### 6.23.10 obs.py 知识同步逻辑
+
+`obs.py:202` 按 scope 循环查 `_query_knowledge_obs` 获取 obs_key。6.22 改了记录结构后，一个 scope 只有一条记录，`_query_knowledge_obs` 查到的 obs_key 唯一——不受影响。反而更干净，不会再查到多条同 obs_key 的记录。
+
+#### 6.23.11 Vue 引入方式——本地 vendor
+
+下载 Vue 3 prod min JS 到 `src/api/static/js/vendor/` 目录，和其他 vendor 文件（jQuery、marked、select2）一起托管：
+
+```html
+<script src="/static/js/vendor/vue.global.prod.min.js?v=1"></script>
+```
+
+不依赖外部 CDN，不受网络影响，公网/内网都能用。只需要一行 `<script>` 标签，不需要链式加载逻辑。
+
+版本：Vue 3.4.30（写死版本号，不用 @latest）
+
+升级时：下载新版 vendor 文件 + 升 `?v=` 版本号。
+
+#### 6.23.12 关联数量限制 20 条后端校验
+
+`POST /api/knowledge/{id}/refs` 新增关联时校验数量：
+
+```python
+@router.post("/{knowledge_id}/refs")
+def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody, user: dict = Depends(get_current_user)):
+    _check_ref_permission(knowledge_id, user)
+
+    # 校验关联数量——同一 scene_id + agent_type 最多 20 条
+    with db_lock:
+        count = db.cursor().execute(
+            "SELECT COUNT(*) FROM scene_knowledge_ref "
+            "WHERE knowledge_id=? AND scene_id=? AND agent_type=? AND enabled=1",
+            (knowledge_id, body.scene_id or "", body.agent_type or "")
+        ).fetchone()[0]
+
+    if count >= 20:
+        raise HTTPException(status_code=400,
+            detail={"code": 400, "message": "每个场景每个 Agent 节点最多关联 20 条知识"})
+
+    # ... 新增关联逻辑 ...
+```
+
+#### 6.23.13 标记归档接口实现
+
+```python
+@router.put("/{knowledge_id}/archive")
+def archive_knowledge(knowledge_id: int, body: ArchiveBody, user: dict = Depends(get_current_user)):
+    """标记/取消归档。body.archived=true 标记归档，false 取消归档。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+
+    # 权限：仓库托管者可操作
+    from src.user.db import is_repo_admin
+    if not is_repo_admin(user["id"], row["repo_key"]):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库托管者可操作"})
+
+    archived = 1 if body.archived else 0
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE agent_shared_knowledge SET archived=? WHERE id=?",
+            (archived, knowledge_id)
+        )
+        # 归档时关联记录 enabled 设为 0，取消归档时恢复
+        c.execute(
+            "UPDATE scene_knowledge_ref SET enabled=? WHERE knowledge_id=?",
+            (0 if archived else 1, knowledge_id)
+        )
+        db.commit()
+    return {"ok": True, "archived": archived}
+```
+
+#### 6.23.14 GET /api/knowledge/{id} 查询详情接口实现
+
+```python
+@router.get("/{knowledge_id}", operation_id="knowledge_detail")
+def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_user_or_api_key)):
+    """按 id 查询单条知识全文。"""
+    row = _get_knowledge_by_id(knowledge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+
+    # 读取全文
+    content = _read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""))
+
+    # 查关联
+    with db_lock:
+        refs = db.cursor().execute(
+            "SELECT id, scene_id, agent_type, enabled, created_by, created_at "
+            "FROM scene_knowledge_ref WHERE knowledge_id=? ORDER BY id",
+            (knowledge_id,)
+        ).fetchall()
+
+    return {
+        "id": knowledge_id,
+        "source": row["source"],
+        "scope": row["scope"],
+        "repo_key": row["repo_key"],
+        "agent_type": row["agent_type"],
+        "issue_num": row["issue_num"],
+        "file_path": row["file_path"],
+        "obs_key": row["obs_key"],
+        "content": content,
+        "archived": row["archived"],
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "refs": [...],
+    }
+```
+
+#### 6.23.15 events.py add_knowledge 调用不受影响
+
+`events.py:1286` 调 `write_knowledge()` 传 `scope` + `content` + `status` + `agent_type` + `issue_num` + `source_seq` + `created_by`。
+
+6.22 改的是 `write_knowledge` 内部的 DB 写入逻辑（先查再 INSERT/UPDATE），调用方式不变——`add_knowledge` 不需要改。
+
+`write_knowledge` 新增 `source` 参数，默认值 `"agent"`——`add_knowledge` 不传 source 时自动用 `"agent"`，行为正确。
+
+---
+
+### 6.24 补充遗漏点
+
+#### 6.24.1 Vue 应用卸载
+
+`Vue.createApp().mount()` 返回的实例需要手动调 `unmount()` 清理响应式系统和事件监听。innerHTML 替换只移除 DOM，Vue 内部的 watcher / computed 不会被清理——内存泄漏。
+
+**方案**：`renderKnowledge()` 保存 Vue 实例引用，`nav()` 切走时调 unmount：
+
+```javascript
+// knowledge.js 全局变量
+var _knowledgeVueApp = null;
+
+function renderKnowledge() {
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+  if (_knowledgeVueApp) { _knowledgeVueApp.unmount(); _knowledgeVueApp = null; }
+  _knowledgeVueApp = Vue.createApp({ ... });
+  _knowledgeVueApp.mount(el);
+}
+```
+
+`app.js` 的 `nav()` 里切走 knowledge 时：`if (window._knowledgeVueApp) { window._knowledgeVueApp.unmount(); window._knowledgeVueApp = null; }`
+
+#### 6.24.2 _get_knowledge_by_id 函数实现
+
+```python
+def _get_knowledge_by_id(knowledge_id: int) -> dict | None:
+    from src.session_manager import db, db_lock
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT id, scope, repo_key, agent_type, issue_num, file_path, "
+            "status, source_seq, created_by, created_at, obs_key, content_hash, "
+            "updated_at, source, archived FROM agent_shared_knowledge WHERE id = ?",
+            (knowledge_id,)).fetchone()
+    if not row: return None
+    return {"id": row[0], "scope": row[1], "repo_key": row[2], ...}
+```
+
+#### 6.24.3 Pydantic Body 模型定义
+
+```python
+class KnowledgeEntryBody(BaseModel):
+    repo: str = ""
+    content: str = ""
+    agent_type: str = ""
+
+class KnowledgeUpdateBody(BaseModel):
+    content: str = ""
+
+class KnowledgeRefBody(BaseModel):
+    scene_id: str = ""
+    agent_type: str = ""
+
+class KnowledgeRefUpdateBody(BaseModel):
+    enabled: bool = True
+
+class ArchiveBody(BaseModel):
+    archived: bool = True
+```
+
+#### 6.24.4 路由冲突解决
+
+FastAPI 按声明顺序匹配。固定路径路由（`/entry`、`/content`、`/context`、`/ref/{id}`）放在 `{id}` 路由之前声明。现有 `DEL /api/knowledge?repo=xxx&file=xxx` 和新增 `DEL /api/knowledge/{id}` 不冲突——前者无 path param。
+
+#### 6.24.5 Vue _loadData 和 API 返回格式对齐
+
+6.9 改后 API 返回 `d.knowledge` + `d.stats`，Vue 直接用：
+
+```javascript
+_loadData(d) {
+    this.list = d.knowledge || [];
+    this.stats = d.stats || { system: 0, agent: 0, manual: 0, unlinked: 0 };
+},
+```
+
+不再需要 `_flattenList`。
+
+#### 6.24.6 苹果风格确认 modal 提取为全局函数
+
+skills.js 里内联实现的 modal 提取到 `app.js` 作为全局 `_showAppleConfirm(message, onConfirm, onCancel)`。knowledge.js 和 skills.js 都调用这个全局函数。
+
+#### 6.24.7 MySQL 数据迁移去重 SQL
+
+MySQL 不允许子查询引用要删除的表，用临时表：
+
+```sql
+CREATE TEMPORARY TABLE _keep_ids AS
+SELECT MAX(id) AS keep_id FROM agent_shared_knowledge
+GROUP BY repo_key, scope, agent_type, issue_num;
+DELETE FROM agent_shared_knowledge WHERE id NOT IN (SELECT keep_id FROM _keep_ids);
+DROP TEMPORARY TABLE _keep_ids;
+```
+
+#### 6.24.8 upload_knowledge 和 build_project_info 设置 source
+
+- `upload_knowledge`：INSERT 语句加 `source='manual'`
+- `build_project_info`：写 baseline 到 DB 时加 `source='system'`
+
+#### 6.24.9 事件详情页知识引用链路前端展示
+
+events.js 渲染线程消息时，判断 `msg.content.startsWith('📌 本次注入知识：')`，解析知识 ID 列表，渲染为"📌 本次注入 N 条知识"+ 查看详情按钮。点击调 `GET /api/knowledge/{id}` 查询知识标题展示在 modal 里。
+
+i18n 新增：`injected_knowledge_count`、`view_injected_detail`
