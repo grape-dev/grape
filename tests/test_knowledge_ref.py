@@ -59,6 +59,14 @@ def test_knowledge():
     """插入测试知识并返回 id。"""
     with db_lock:
         c = db.cursor()
+        # 给测试用户加仓库托管者记录（system/agent 知识关联管理需要）
+        from src.repo_key import from_repo_key
+        c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key=?", (_uid["id"], TEST_REPO))
+        c.execute(
+            "INSERT INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join, created_at) "
+            "VALUES (?, ?, 'test-org67', 'test-repo', '', 'admin', 1, 1, datetime('now'))",
+            (_uid["id"], TEST_REPO)
+        )
         # manual 知识
         c.execute(
             "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, archived) "

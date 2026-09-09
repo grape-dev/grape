@@ -806,8 +806,18 @@ def _check_ref_permission(knowledge_id: int, user: dict):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可管理关联"})
     else:
         # system/agent 知识——仓库托管者可管理
-        # TODO: is_repo_admin 检查（当前先放行，后续补全）
-        pass
+        from src.user.db import get_user_repos
+        user_id = user.get("id")
+        repo_key = row.get("repo_key", "")
+        try:
+            repos = get_user_repos(user_id) or []
+            is_admin = any(r.get("repo_key") == repo_key and r.get("is_admin") for r in repos)
+            if not is_admin:
+                raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库托管者可管理系统知识的关联"})
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "权限校验失败"})
     return row
 
 

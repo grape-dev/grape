@@ -10,11 +10,6 @@ function _currentRepo() {
   } catch { return ''; }
 }
 
-function _repoQS() {
-  const repo = _currentRepo();
-  return repo ? '?repo=' + encodeURIComponent(repo) : '';
-}
-
 function renderKnowledge() {
   const el = document.getElementById('pageContent');
   if (!el) return;
