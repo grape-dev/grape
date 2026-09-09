@@ -545,8 +545,7 @@ function renderKnowledge() {
         <!-- ===== 列表视图 ===== -->
         <template v-if="view === 'list'">
           <template v-if="!firstLoad">
-            <div class="apple-card" style="padding:20px">
-              <!-- 统计卡片（纯展示，不联动） -->
+            <!-- 统计卡片（纯展示，在 apple-card 外面） -->
             <div class="stats-bar">
               <div class="stat-card">
                 <span class="stat-num">{{ statSystem() }}</span>
@@ -562,7 +561,8 @@ function renderKnowledge() {
               </div>
             </div>
 
-            <!-- Tab 栏（切换数据源） -->
+            <div class="apple-card" style="padding:20px">
+              <!-- Tab 栏（切换数据源） -->
             <div class="kb-tab-bar">
               <button class="kb-tab" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">{{ t('stats_system') }}</button>
               <button class="kb-tab" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">{{ t('stats_agent') }}</button>
