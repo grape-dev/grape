@@ -583,13 +583,13 @@
 
 /* ===== Issue #67: 知识库页面 Vue 组件样式 ===== */
 .knowledge-page .stats-bar{display:flex;gap:12px;margin-bottom:16px}
-.knowledge-page .stat-card{flex:1;padding:18px 20px;border-radius:14px;background:var(--c);border:none;transition:transform .2s,box-shadow .2s;display:flex;flex-direction:column;align-items:center}
-.knowledge-page .stat-card:hover{transform:translateY(-2px);box-shadow:0 2px 8px rgba(0,0,0,0.04),0 8px 24px rgba(0,0,0,0.08)}
+.knowledge-page .stat-card{flex:1;padding:16px 20px;border-radius:12px;background:var(--bg);border:none;transition:none;display:flex;flex-direction:column;align-items:center}
+.knowledge-page .stat-card:hover{transform:none;box-shadow:none}
 .knowledge-page .stat-num{font-size:28px;font-weight:700;color:var(--t);letter-spacing:-.02em}
 .knowledge-page .stat-label{font-size:11px;color:var(--t3);margin-top:4px;font-weight:500}
 .knowledge-page .filter-bar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
-.knowledge-page .skill-card{background:var(--c);border:none;border-radius:18px;overflow:hidden;transition:all .3s cubic-bezier(.25,.1,.25,1);box-shadow:0 1px 3px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.04);display:flex;flex-direction:column}
-.knowledge-page .skill-card:hover{transform:translateY(-4px);box-shadow:0 4px 12px rgba(0,0,0,.06),0 12px 32px rgba(0,0,0,.08)}
+.knowledge-page .skill-card{background:var(--c);border:1px solid var(--b);border-radius:14px;overflow:hidden;transition:all .3s cubic-bezier(.25,.1,.25,1);box-shadow:none;display:flex;flex-direction:column}
+.knowledge-page .skill-card:hover{transform:translateY(-2px);box-shadow:0 4px 16px rgba(0,0,0,.06);border-color:rgba(0,113,227,.12)}
 .knowledge-page .card-header{flex-shrink:0;display:flex;align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap}
 .knowledge-page .card-content{flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px}
 .knowledge-page .card-footer{flex-shrink:0;font-size:10px;color:var(--t3);margin-bottom:10px}

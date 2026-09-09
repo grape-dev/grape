@@ -545,7 +545,8 @@ function renderKnowledge() {
         <!-- ===== 列表视图 ===== -->
         <template v-if="view === 'list'">
           <template v-if="!firstLoad">
-            <!-- 统计卡片（纯展示，不联动） -->
+            <div class="apple-card" style="padding:20px">
+              <!-- 统计卡片（纯展示，不联动） -->
             <div class="stats-bar">
               <div class="stat-card">
                 <span class="stat-num">{{ statSystem() }}</span>
@@ -622,6 +623,7 @@ function renderKnowledge() {
                 <option :value="20">20/页</option>
                 <option :value="50">50/页</option>
               </select>
+            </div>
             </div>
           </template>
         </template>
