@@ -371,7 +371,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          source: str = Query("", description="按来源筛选：system/agent/manual"),
                          page: int = Query(1, description="页码，从1开始"),
                          page_size: int = Query(50, description="每页条数，默认50")):
-    """统一知识列表——只查 DB agent_shared_knowledge 表，返回分页列表 + 统计。"""
+    """统一知识列表——只查 DB 返回分页列表（不含统计，统计走独立接口）。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
     from src.repo_key import to_repo_key
@@ -387,27 +387,9 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
         where += " AND source=?"
         params.append(source)
 
-    # 查总数 + 统计
     with db_lock:
         c = db.cursor()
         total = c.execute(f"SELECT COUNT(*) FROM agent_shared_knowledge {where}", params).fetchone()[0]
-
-        # 统计（不受 source 筛选影响——返回全部统计数）
-        stats_row = c.execute(
-            "SELECT "
-            "SUM(CASE WHEN source='system' AND archived=0 THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN source='agent' AND archived=0 THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN source='manual' AND archived=0 THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN archived=0 AND id NOT IN (SELECT DISTINCT knowledge_id FROM scene_knowledge_ref WHERE enabled=1) THEN 1 ELSE 0 END) "
-            "FROM agent_shared_knowledge WHERE repo_key=?",
-            (repo_key,)
-        ).fetchone()
-        stats = {
-            "system": stats_row[0] or 0,
-            "agent": stats_row[1] or 0,
-            "manual": stats_row[2] or 0,
-            "unlinked": stats_row[3] or 0,
-        }
 
         # 分页查询
         offset = (page - 1) * page_size
@@ -471,10 +453,38 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
     return {
         "repo_key": repo_key,
         "knowledge": all_knowledge,
-        "stats": stats,
         "total": total,
         "page": page,
         "page_size": page_size,
+    }
+
+
+@router.get("/stats", operation_id="knowledge_stats", summary="知识统计")
+def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
+                     repo: str = Query("")):
+    """独立统计接口——返回 system/agent/manual/unlinked 数量。"""
+    if not repo:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo)
+    _check_repo_member(user, repo_key)
+
+    from src.session_manager import db, db_lock
+    with db_lock:
+        stats_row = db.cursor().execute(
+            "SELECT "
+            "SUM(CASE WHEN source='system' AND archived=0 THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN source='agent' AND archived=0 THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN source='manual' AND archived=0 THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN archived=0 AND id NOT IN (SELECT DISTINCT knowledge_id FROM scene_knowledge_ref WHERE enabled=1) THEN 1 ELSE 0 END) "
+            "FROM agent_shared_knowledge WHERE repo_key=?",
+            (repo_key,)
+        ).fetchone()
+    return {
+        "system": stats_row[0] or 0,
+        "agent": stats_row[1] or 0,
+        "manual": stats_row[2] or 0,
+        "unlinked": stats_row[3] or 0,
     }
 
 

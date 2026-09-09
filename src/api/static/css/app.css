@@ -589,7 +589,7 @@
 .knowledge-page .stat-card.active .stat-num{color:var(--a)}
 .knowledge-page .stat-num{font-size:24px;font-weight:700;color:var(--t)}
 .knowledge-page .stat-label{font-size:11px;color:var(--t3);margin-top:4px}
-.knowledge-page .filter-bar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.knowledge-page .filter-bar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;justify-content:flex-end}
 .knowledge-page .skill-card{display:flex;flex-direction:column;height:200px;overflow:hidden;border-radius:14px;transition:box-shadow .3s ease,transform .3s ease}
 .knowledge-page .skill-card:hover{box-shadow:0 2px 8px rgba(0,0,0,0.04),0 8px 24px rgba(0,0,0,0.08);transform:translateY(-2px)}
 .knowledge-page .card-header{flex-shrink:0;display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap}

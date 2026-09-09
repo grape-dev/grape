@@ -120,6 +120,7 @@ function renderKnowledge() {
       },
     },
     async mounted() {
+      await this.loadStats();
       await this.loadList();
     },
     methods: {
@@ -140,16 +141,27 @@ function renderKnowledge() {
           const params = new URLSearchParams({ repo: repo, page: this.page, page_size: this.pageSize });
           const tabSource = { system: 'system', agent: 'agent', user: 'manual' };
           if (tabSource[this.activeTab]) params.set('source', tabSource[this.activeTab]);
+          if (this.filter.query) params.set('q', this.filter.query);
           const d = await API.get('/knowledge?' + params.toString());
           if (window._currentView !== 'knowledge') return;
           this.list = d.knowledge || [];
-          this.stats = d.stats || { system: 0, agent: 0, manual: 0, unlinked: 0 };
           this.total = d.total || 0;
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
           if (window._currentView !== 'knowledge') return;
         } finally {
           if (window._currentView === 'knowledge') this.loading = false;
+        }
+      },
+      async loadStats() {
+        try {
+          const repo = this.currentRepo();
+          if (!repo) return;
+          const d = await API.get('/knowledge/stats?repo=' + encodeURIComponent(repo));
+          if (window._currentView !== 'knowledge') return;
+          this.stats = d || { system: 0, agent: 0, manual: 0, unlinked: 0 };
+        } catch (e) {
+          if (e.name === 'AbortError' && e.silent) return;
         }
       },
       switchTab(tab) {

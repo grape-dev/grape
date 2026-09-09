@@ -252,9 +252,16 @@ class TestKnowledgeList:
         assert r.status_code == 200
         data = r.json()
         assert "knowledge" in data
-        assert "stats" in data
+        assert "total" in data
         assert isinstance(data["knowledge"], list)
-        assert isinstance(data["stats"], dict)
+
+    def test_stats_independent(self, auth_headers, test_knowledge):
+        r = client.get(f"/api/knowledge/stats?repo={TEST_REPO}", headers=auth_headers)
+        assert r.status_code == 200
+        data = r.json()
+        assert "system" in data
+        assert "agent" in data
+        assert "manual" in data
 
     def test_list_has_source_field(self, auth_headers, test_knowledge):
         r = client.get(f"/api/knowledge?repo={TEST_REPO}", headers=auth_headers)
