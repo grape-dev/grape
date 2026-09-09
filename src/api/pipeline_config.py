@@ -196,7 +196,7 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
 
 
 def get_scenes(repo_key: str = "") -> list[dict]:
-    """Return scene list [{id, name, display_name, scope, description, work_branch, created_by}] for this repo."""
+    """Return scene list [{id, name, display_name, scope, description, work_branch, created_by, icon, nodes, onboarding}] for this repo."""
     db_scenes = _query_scenes_from_db(repo_key=repo_key)
     return [{"id": s["scene_id"], "name": s["name"],
              "display_name": s.get("display_name") or s["name"],
@@ -204,7 +204,9 @@ def get_scenes(repo_key: str = "") -> list[dict]:
              "description": s.get("description") or "",
              "work_branch": s.get("work_branch") or "main",
              "created_by": s.get("created_by") or "",
-             "icon": s.get("icon") or ""} for s in db_scenes]
+             "icon": s.get("icon") or "",
+             "nodes": s.get("nodes") or [],
+             "onboarding": s.get("onboarding") or "repo-onboarding"} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:

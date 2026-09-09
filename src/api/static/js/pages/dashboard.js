@@ -386,6 +386,77 @@ window.addEventListener('resize', function() {
 // ═══════════════════════════════════════════════════════════════
 // 场景详情页（点击卡片后进入）
 // ═══════════════════════════════════════════════════════════════
+// 构建相关流水线 HTML（从 pipeData 提取当前场景的流水线统计+表格）
+function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
+  const allPipesRaw = (pipeData.active ? [pipeData.active] : []).concat(pipeData.history || []);
+  const scenePipes = allPipesRaw.filter(p => p.scene_id === sceneId);
+  const _stageLabel = function(stage) { var map = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',done:I18N.t('pipeline.stage_done')||'完成'}; return map[stage] ? map[stage] : stage; };
+  const sceneActiveCount = scenePipes.filter(p => p.executing).length;
+  const sceneFailedCount = scenePipes.filter(p => p.statuses && p.statuses.some(s => s === 3)).length;
+
+  let html = `<div class="det-card-wrap" id="relatedPipelineSection">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h2 style="font-size:15px;font-weight:600">${I18N.t('dashboard.related_pipeline')||'相关流水线'}</h2>
+      <div style="display:flex;gap:8px">
+        <div class="pl-stat"><div class="v" style="color:#34c759">${sceneActiveCount}</div><div class="l">${I18N.t('pipeline.stat_active')||'活跃'}</div></div>
+        <div class="pl-stat"><div class="v" style="color:#ff3b30">${sceneFailedCount}</div><div class="l">${I18N.t('pipeline.stat_failed')||'失败'}</div></div>
+        <div class="pl-stat"><div class="v" style="color:#0071e3">${scenePipes.length}</div><div class="l">${I18N.t('dashboard.stat_total')||'总数'}</div></div>
+      </div>
+    </div>`;
+
+  if (scenePipes.length === 0) {
+    html += `<div style="text-align:center;padding:24px;color:#86868b;font-size:13px">${I18N.t('pipeline.no_issues')||'暂无 Issue'}</div>`;
+  } else {
+    const _repoParts = (dashData.repo || '').replace(/^gitcode:/, '').split('/');
+    html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap" style="max-height:320px"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
+    scenePipes.slice(0, 20).forEach(p => {
+      const _issueNum = String(p.issue_id || '').replace(/^#/, '');
+      const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
+      const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
+        const hasAgent = p.statuses && p.statuses[j] > 0;
+        const cls = ['tg-v','tg-i','tg-c','tg-q','tg-s'][j];
+        const evSeq = (p.stages && p.stages[j] && p.stages[j].latest_event && p.stages[j].latest_event.seq) || '';
+        if (hasAgent && evSeq) {
+          return `<span class="tg ${cls}" style="cursor:pointer;transition:transform .15s" onclick="event.stopPropagation();app.nav('event','${evSeq}')" onmouseover="this.style.transform='scale(1.25)'" onmouseout="this.style.transform='scale(1)'">${at.charAt(0).toUpperCase()}</span>`;
+        }
+        return `<span class="tg ${cls}" style="opacity:0.3;cursor:default">${at.charAt(0).toUpperCase()}</span>`;
+      }).join('');
+      const stageName = p.stage ? _stageLabel(p.stage) : '—';
+      const _dur = p.duration;
+      const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';
+      const execBadge = p.executing ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡</span>' : '';
+      let latestSeq = '';
+      if (p.stages) {
+        for (let si = p.stages.length - 1; si >= 0; si--) {
+          if (p.statuses && p.statuses[si] > 0) {
+            const ev = p.stages[si] && p.stages[si].latest_event;
+            if (ev && ev.seq) { latestSeq = ev.seq; break; }
+          }
+        }
+      }
+      html += `<tr onclick="if('${latestSeq}')app.nav('event','${latestSeq}')">
+        <td><b>${p.issue_id || '?'}</b> ${execBadge}</td>
+        <td><a href="${_issueUrl||'#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${(p.title || '—').substring(0, 40)}</a></td>
+        <td>${dur}</td>
+        <td>${agentTags}</td>
+        <td><span style="font-size:11px;color:${p.stage === 'done' ? '#34c759' : '#86868b'}">${stageName}</span></td>
+        <td>${p.current_owner || '—'}</td>
+      </tr>`;
+    });
+    html += `</table></div></div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+// 延迟填充相关流水线区域
+function _fillRelatedPipeline(pipeData, sceneId, dashData) {
+  const section = document.getElementById('relatedPipelineSection');
+  if (section) {
+    section.outerHTML = _buildRelatedPipelineHTML(pipeData, sceneId, dashData);
+  }
+}
+
 function renderSceneDetailLocal(sceneId) {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -404,13 +475,13 @@ function renderSceneDetailLocal(sceneId) {
     name = parts[1] || '';
   }
 
-  // 并行加载：dashboard data + pipeline config + pipeline(issues)
+  // 并行加载：dashboard data + pipeline config（首屏必要）
+  // pipeline(issues) 延迟加载，不阻塞首屏渲染
   const dashPromise = (data.agents ? Promise.resolve(data) :
     API.get('/dashboard/' + owner + '/' + name));
   const pipeCfgPromise = API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name));
-  const pipelinePromise = API.get('/pipeline/' + owner + '/' + name).catch(() => null);
 
-  Promise.all([dashPromise, pipeCfgPromise, pipelinePromise]).then(([dashData, scenesData, pipeData]) => {
+  Promise.all([dashPromise, pipeCfgPromise]).then(([dashData, scenesData]) => {
     const scenes = dashData._scenes || (scenesData.scenes || []).map(s => ({id: s.id, name: s.name, display_name: s.display_name, scope: 'repo'}));
     const scene = scenes.find(s => s.id === sceneId);
     if (!scene) {
@@ -427,7 +498,12 @@ function renderSceneDetailLocal(sceneId) {
     const isCustomScene = scene.scope !== 'official';
     const m = dashData.metrics || {};
 
-    _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isApplied, isCustomScene, pipeData, owner, name, m, dashData);
+    _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isApplied, isCustomScene, null, owner, name, m, dashData);
+
+    // 延迟加载相关流水线数据，到了再填充底部表格
+    API.get('/pipeline/' + owner + '/' + name).then(pipeData => {
+      _fillRelatedPipeline(pipeData, scene.id, dashData);
+    }).catch(() => {});
   }).catch(e => {
     el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + (e.message||'') + '</div>';
   });
@@ -560,68 +636,11 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   </div>`;
 
   // 相关流水线（统计 + 表格，无流程图）— 只显示当前场景的流水线
+  // pipeData=null 时先占位，数据到了由 _fillRelatedPipeline 填充
   if (pipeData) {
-    const allPipesRaw = (pipeData.active ? [pipeData.active] : []).concat(pipeData.history || []);
-    // 过滤：只显示使用当前场景的 issue
-    const scenePipes = allPipesRaw.filter(p => p.scene_id === scene.id);
-    const _stageLabel = function(stage) { var map = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',done:I18N.t('pipeline.stage_done')||'完成'}; return map[stage] ? map[stage] : stage; };
-    const sceneActiveCount = scenePipes.filter(p => p.executing).length;
-    const sceneFailedCount = scenePipes.filter(p => p.statuses && p.statuses.some(s => s === 3)).length;
-
-    html += `<div class="det-card-wrap">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-        <h2 style="font-size:15px;font-weight:600">${I18N.t('dashboard.related_pipeline')||'相关流水线'}</h2>
-        <div style="display:flex;gap:8px">
-          <div class="pl-stat"><div class="v" style="color:#34c759">${sceneActiveCount}</div><div class="l">${I18N.t('pipeline.stat_active')||'活跃'}</div></div>
-          <div class="pl-stat"><div class="v" style="color:#ff3b30">${sceneFailedCount}</div><div class="l">${I18N.t('pipeline.stat_failed')||'失败'}</div></div>
-          <div class="pl-stat"><div class="v" style="color:#0071e3">${scenePipes.length}</div><div class="l">${I18N.t('dashboard.stat_total')||'总数'}</div></div>
-        </div>
-      </div>`;
-
-    if (scenePipes.length === 0) {
-      html += `<div style="text-align:center;padding:24px;color:#86868b;font-size:13px">${I18N.t('pipeline.no_issues')||'暂无 Issue'}</div>`;
-    } else {
-      const _repoParts = (dashData.repo || '').replace(/^gitcode:/, '').split('/');
-      html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap" style="max-height:320px"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
-      scenePipes.slice(0, 20).forEach(p => {
-        const _issueNum = String(p.issue_id || '').replace(/^#/, '');
-        const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
-        // agent 标签：活跃的可点击进入 event，灰色的不可点击
-        const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
-          const hasAgent = p.statuses && p.statuses[j] > 0;
-          const cls = ['tg-v','tg-i','tg-c','tg-q','tg-s'][j];
-          const evSeq = (p.stages && p.stages[j] && p.stages[j].latest_event && p.stages[j].latest_event.seq) || '';
-          if (hasAgent && evSeq) {
-            return `<span class="tg ${cls}" style="cursor:pointer;transition:transform .15s" onclick="event.stopPropagation();app.nav('event','${evSeq}')" onmouseover="this.style.transform='scale(1.25)'" onmouseout="this.style.transform='scale(1)'">${at.charAt(0).toUpperCase()}</span>`;
-          }
-          return `<span class="tg ${cls}" style="opacity:0.3;cursor:default">${at.charAt(0).toUpperCase()}</span>`;
-        }).join('');
-        const stageName = p.stage ? _stageLabel(p.stage) : '—';
-        const _dur = p.duration;
-        const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';
-        const execBadge = p.executing ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡</span>' : '';
-        // 找到最新活跃 agent 的 event seq 用于行点击
-        let latestSeq = '';
-        if (p.stages) {
-          for (let si = p.stages.length - 1; si >= 0; si--) {
-            if (p.statuses && p.statuses[si] > 0) {
-              const ev = p.stages[si] && p.stages[si].latest_event;
-              if (ev && ev.seq) { latestSeq = ev.seq; break; }
-            }
-          }
-        }
-        html += `<tr onclick="if('${latestSeq}')app.nav('event','${latestSeq}')">
-          <td><b>${p.issue_id || '?'}</b> ${execBadge}</td>
-          <td><a href="${_issueUrl||'#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${(p.title || '—').substring(0, 40)}</a></td>
-          <td>${dur}</td>
-          <td>${agentTags}</td>
-          <td><span style="font-size:11px;color:${p.stage === 'done' ? '#34c759' : '#86868b'}">${stageName}</span></td>
-          <td>${p.current_owner || '—'}</td>
-        </tr>`;
-      });
-      html += `</table></div></div>`;
-    }
-    html += `</div>`;
+    html += _buildRelatedPipelineHTML(pipeData, scene.id, dashData);
+  } else {
+    html += `<div class="det-card-wrap" id="relatedPipelineSection" style="display:flex;align-items:center;justify-content:center;min-height:80px;color:#86868b;font-size:13px">${I18N.t('common.loading')||'加载中...'}</div>`;
   }
 
   el.innerHTML = html;

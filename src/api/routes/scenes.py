@@ -40,7 +40,11 @@ def list_scenes(user: dict = Depends(get_current_user), repo: str = ""):
 
 @router.get("/with-pipeline")
 def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str = ""):
-    """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）"""
+    """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）。
+    
+    优化：get_scenes 已在单次 DB 查询中返回 nodes_json，直接复用，
+    不再逐场景调 get_pipeline_config 做二次 DB 查询。
+    """
     from src.api.pipeline_config import get_scenes, get_pipeline_config
     from src.repo_key import to_repo_key
     repo_key = ""
@@ -56,7 +60,12 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
     scene_list = get_scenes(repo_key=repo_key)
     result = []
     for s in scene_list:
-        cfg = get_pipeline_config(s["id"], repo_key=repo_key)
+        # get_scenes 已返回 nodes，直接用；DB 查不到的（official 模板）回退 get_pipeline_config
+        nodes = s.get("nodes")
+        if nodes is not None:
+            cfg = {"name": s["name"], "nodes": nodes, "onboarding": s.get("onboarding") or "repo-onboarding"}
+        else:
+            cfg = get_pipeline_config(s["id"], repo_key=repo_key)
         result.append({"id": s["id"], "name": s["name"],
                        "display_name": s.get("display_name") or s["name"],
                        "description": s.get("description") or "",
