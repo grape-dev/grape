@@ -503,410 +503,192 @@ return {
 <script src="/static/js/vendor/vue.global.prod.min.js?v=1"></script>
 ```
 
-**Vue 应用结构**：
+**Vue 应用结构**（v=18，最终版）：
 
-`renderKnowledge()` 不再手动操作 DOM，改为创建 Vue 应用挂载到 `pageContent`：
+`renderKnowledge()` 创建 Vue 应用挂载到 `pageContent`，包含两个视图：列表视图 + 详情视图。
 
 ```javascript
 function renderKnowledge() {
   const el = document.getElementById('pageContent');
   if (!el) return;
 
-  const app = Vue.createApp({
+  // 卸载旧的 Vue 应用
+  if (_knowledgeVueApp) { _knowledgeVueApp.unmount(); _knowledgeVueApp = null; }
+
+  _knowledgeVueApp = Vue.createApp({
     data() {
       return {
-        list: [],           // 知识列表（统一，不分 tab）
+        view: 'list',          // 'list' | 'detail'
+        list: [],              // 知识列表
         loading: true,
         filter: { source: '', refStatus: '', query: '' },
-        stats: { system: 0, agent: 0, user: 0, unlinked: 0 },
+        stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
         showArchived: false,
-        // modals
-        editModal: null,    // 编辑的知识对象
-        refModal: null,     // 关联设置的知识对象
-        entryModal: false,  // 新增知识 modal
-        uploadModal: false, // 上传 modal
-        _vueApp: null,      // Vue 实例引用
+        page: 1, pageSize: 50, total: 0,
+        editModal: null,       // 编辑 modal
+        entryModal: null,      // 新增 modal
+        detail: null,          // 详情数据
+        scenes: [],            // 场景列表（从 /api/scenes 加载）
+        agentTypes: AGENT_TYPES,  // 固定 Agent 类型列表
+        addAgentPopover: false,
+        addScenePopover: false,
+        sceneSearch: '',       // 场景搜索关键词
+        sceneSelected: [],     // 场景多选选中列表
       };
     },
-    computed: {
-      filteredList() {
-        let result = this.list;
-        // 来源筛选
-        if (this.filter.source === 'system') {
-          result = result.filter(k => k.source === 'system' || k.source === 'agent');
-        } else if (this.filter.source === 'manual') {
-          result = result.filter(k => k.source === 'manual');
-        }
-        // 关联状态筛选
-        if (this.filter.refStatus === 'linked') {
-          result = result.filter(k => k.refs && k.refs.length > 0);
-        } else if (this.filter.refStatus === 'unlinked') {
-          result = result.filter(k => !k.refs || k.refs.length === 0);
-        }
-        // 搜索
-        if (this.filter.query) {
-          const q = this.filter.query.toLowerCase();
-          result = result.filter(k =>
-            (k.content || '').toLowerCase().includes(q) ||
-            (k.path || '').toLowerCase().includes(q) ||
-            (k.created_by || '').toLowerCase().includes(q)
-          );
-        }
-        return result;
-      },
-    },
-    async mounted() {
-      await this.loadList();
-    },
-    methods: {
-      t(key, params) {
-        return I18N.t('knowledge.' + key, params || {});
-      },
-      currentRepo() {
-        try {
-          const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
-          return c ? (c.fullName || '') : '';
-        } catch { return ''; }
-      },
-      async loadList() {
-        this.loading = true;
-        try {
-          const repo = this.currentRepo();
-          if (!repo) { this.loading = false; return; }
-          const d = await API.get('/knowledge?repo=' + encodeURIComponent(repo));
-          if (window._currentView !== 'knowledge') return;  // stale guard
-          this.list = this._flattenList(d);
-          this._updateStats();
-        } catch (e) {
-          if (e.name === 'AbortError' && e.silent) return;
-          if (window._currentView !== 'knowledge') return;
-          this.loading = false;
-        } finally {
-          if (window._currentView === 'knowledge') this.loading = false;
-        }
-      },
-      _flattenList(d) {
-        // 把 project + agents + issue 级知识合并成统一列表
-        const list = [];
-        (d.project.files || []).forEach(f => list.push({...f, source: 'system', scope: 'baseline'}));
-        (d.project.knowledge || []).forEach(k => list.push({...k, source: k.source || 'agent'}));
-        (d.project.member_docs || []).forEach(doc => list.push({...doc, source: 'manual', scope: 'member'}));
-        (d.issue_knowledge || []).forEach(k => list.push({...k, source: k.source || 'agent'}));
-        Object.entries(d.agents || {}).forEach(([type, entries]) => {
-          entries.forEach(e => list.push({...e, source: e.source || 'agent', agent_type: type}));
-        });
-        return list;
-      },
-      _updateStats() {
-        this.stats.system = this.list.filter(k => k.source === 'system').length;
-        this.stats.agent = this.list.filter(k => k.source === 'agent').length;
-        this.stats.user = this.list.filter(k => k.source === 'manual').length;
-        this.stats.unlinked = this.list.filter(k => !k.refs || k.refs.length === 0).length;
-      },
-      // 统计卡片点击筛选
-      filterByStats(type) {
-        if (type === 'system') this.filter.source = 'system';
-        else if (type === 'user') this.filter.source = 'manual';
-        else if (type === 'unlinked') this.filter.refStatus = 'unlinked';
-      },
-      // 查看全文
-      viewContent(k) {
-        loadKnowledgeContent(k.obs_key || k.path);
-      },
-      // 编辑
-      editKnowledge(k) {
-        this.editModal = {...k};
-      },
-      async saveEdit() {
-        try {
-          await API.put('/knowledge/' + this.editModal.id, { content: this.editModal.content });
-          app.showToast(this.t('knowledge_updated'));
-          this.editModal = null;
-          await this.loadList();
-        } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
-        }
-      },
-      // 删除——苹果风格 modal 确认
-      async deleteKnowledge(k) {
-        if (!await this._confirmModal(this.t('delete_confirm'))) return;
-        try {
-          await API.del('/knowledge/' + k.id);
-          app.showToast(this.t('knowledge_deleted'));
-          await this.loadList();
-        } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
-        }
-      },
-      // 关联设置
-      async openRefModal(k) {
-        try {
-          const d = await API.get('/knowledge/' + k.id + '/refs');
-          this.refModal = { knowledge: k, refs: d.refs || [], newScene: '', newAgent: '' };
-        } catch (e) {
-          app.showToast(e.message);
-        }
-      },
-      async addRef() {
-        const sceneId = this.refModal.newScene || '';
-        const agentType = this.refModal.newAgent || '';
-        try {
-          await API.post('/knowledge/' + this.refModal.knowledge.id + '/refs', {
-            scene_id: sceneId, agent_type: agentType
-          });
-          const d = await API.get('/knowledge/' + this.refModal.knowledge.id + '/refs');
-          this.refModal.refs = d.refs || [];
-          this.refModal.newScene = '';
-          this.refModal.newAgent = '';
-          app.showToast(this.t('ref_add'));
-        } catch (e) {
-          if (e.detail && e.detail.message && e.detail.message.includes('已绑定')) {
-            app.showToast(this.t('ref_already_bound'));
-          } else {
-            app.showToast(e.message);
-          }
-        }
-      },
-      async toggleRef(ref) {
-        try {
-          await API.put('/knowledge/ref/' + ref.id, { enabled: !ref.enabled });
-          ref.enabled = !ref.enabled;
-        } catch (e) {
-          app.showToast(e.message);
-        }
-      },
-      async deleteRef(ref) {
-        // 提示受影响场景
-        const affected = this.refModal.refs.filter(r => r.enabled && r.id !== ref.id).length;
-        if (!await this._confirmModal(
-          this.t('ref_delete_confirm') + (affected > 0 ? '（会影响 ' + affected + ' 个场景）' : '')
-        )) return;
-        try {
-          await API.del('/knowledge/ref/' + ref.id);
-          this.refModal.refs = this.refModal.refs.filter(r => r.id !== ref.id);
-          app.showToast(this.t('ref_delete'));
-        } catch (e) {
-          app.showToast(e.message);
-        }
-      },
-      // 新增知识
-      async createEntry() {
-        const content = this.entryModal.content || '';
-        if (!content.trim()) { app.showToast(this.t('entry_content')); return; }
-        try {
-          await API.post('/knowledge/entry', {
-            repo: this.currentRepo(),
-            content: content,
-            agent_type: this.entryModal.agentType || ''
-          });
-          app.showToast(this.t('knowledge_created'));
-          this.entryModal = false;
-          await this.loadList();
-        } catch (e) {
-          app.showToast(e.message);
-        }
-      },
-      // 苹果风格确认 modal
-      _confirmModal(message) {
-        return new Promise((resolve) => {
-          // 复用 skills.js 的苹果风格 modal 组件
-          _showAppleConfirm(message, () => resolve(true), () => resolve(false));
-        });
-      },
-    },
-    template: `
-      <div class="knowledge-page">
-        <!-- 统计卡片栏 -->
-        <div class="stats-bar" v-if="!loading">
-          <div class="stat-card" @click="filterByStats('system')">
-            <span class="stat-num">{{ stats.system + stats.agent }}</span>
-            <span class="stat-label">{{ t('stats_system') }}</span>
-          </div>
-          <div class="stat-card" @click="filterByStats('user')">
-            <span class="stat-num">{{ stats.user }}</span>
-            <span class="stat-label">{{ t('stats_user') }}</span>
-          </div>
-          <div class="stat-card" @click="filterByStats('unlinked')">
-            <span class="stat-num">{{ stats.unlinked }}</span>
-            <span class="stat-label">{{ t('stats_unlinked') }}</span>
-          </div>
-        </div>
-        <!-- 筛选器 -->
-        <div class="filter-bar" v-if="!loading">
-          <select v-model="filter.source">
-            <option value="">{{ t('filter_source_all') }}</option>
-            <option value="system">{{ t('source_system') }}</option>
-            <option value="manual">{{ t('source_manual') }}</option>
-          </select>
-          <select v-model="filter.refStatus">
-            <option value="">{{ t('filter_ref_all') }}</option>
-            <option value="linked">{{ t('filter_ref_linked') }}</option>
-            <option value="unlinked">{{ t('filter_ref_unlinked') }}</option>
-          </select>
-          <input v-model="filter.query" :placeholder="t('search_placeholder')">
-          <button @click="entryModal = { content: '', agentType: '' }">{{ t('entry_create') }}</button>
-          <button @click="uploadModal = true">{{ t('upload_btn') }}</button>
-        </div>
-        <!-- 知识列表 -->
-        <div v-if="loading" class="loading">{{ t('loading') }}</div>
-        <div v-else-if="filteredList.length === 0" class="empty">{{ t('empty') }}</div>
-        <div v-else class="knowledge-list">
-          <div v-for="k in filteredList" :key="k.id" class="cd skill-card knowledge-card"
-               :class="{ archived: k.archived }">
-            <!-- 卡片头部 -->
-            <div class="card-header">
-              <span class="source-tag" :class="'source-' + k.source">{{ t('source_' + k.source) }}</span>
-              <span class="ref-tag" v-if="k.ref_summary">{{ k.ref_summary }}</span>
-              <span class="ref-tag unlinked" v-else>{{ t('ref_unlinked') }}</span>
-              <span class="issue-tag" v-if="k.issue_tag">{{ k.issue_tag }}</span>
-              <span class="archived-tag" v-if="k.archived">{{ t('archived') }}</span>
-            </div>
-            <!-- 文件过大提示 -->
-            <div class="size-warning" v-if="k.scope === 'project' && k.content && k.content.length > 10240">
-              ⚠ {{ t('file_too_large', { size: (k.content.length / 1024).toFixed(1) }) }}
-            </div>
-            <!-- 内容预览 -->
-            <div class="card-content">{{ (k.content || '').substring(0, 200) }}</div>
-            <!-- 卡片底部 -->
-            <div class="card-footer">
-              <span class="card-meta">{{ k.created_by }} · {{ (k.created_at || '').substring(0, 16) }}</span>
-              <div class="card-actions">
-                <button class="bt bt-o bt-s" @click="viewContent(k)">{{ t('view') }}</button>
-                <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" @click="editKnowledge(k)">{{ t('edit_save') }}</button>
-                <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s danger" @click="deleteKnowledge(k)">{{ t('delete') }}</button>
-                <button v-if="!k.archived" class="bt bt-o bt-s" @click="openRefModal(k)">{{ t('ref_settings') }}</button>
-              </div>
-            </div>
-          </div>
-        </div>
-        <!-- 编辑 modal -->
-        <div v-if="editModal" class="modal-overlay" @click.self="editModal = null">
-          <div class="modal cd">
-            <h3>{{ t('edit_title') }}</h3>
-            <textarea v-model="editModal.content" rows="12" class="edit-textarea"></textarea>
-            <div class="modal-actions">
-              <button @click="editModal = null">{{ t('cancel') }}</button>
-              <button class="bt bt-p" @click="saveEdit">{{ t('edit_save') }}</button>
-            </div>
-          </div>
-        </div>
-        <!-- 关联设置 modal -->
-        <div v-if="refModal" class="modal-overlay" @click.self="refModal = null">
-          <div class="modal cd">
-            <h3>{{ t('ref_modal_title') }}</h3>
-            <!-- 新增关联 -->
-            <div class="ref-add-row">
-              <input v-model="refModal.newScene" :placeholder="t('ref_scene')" class="ref-input">
-              <select v-model="refModal.newAgent" class="ref-input">
-                <option value="">{{ t('ref_agent_all') }}</option>
-                <option value="vod">VOD</option>
-                <option value="coding">Coding</option>
-                <option value="qa">QA</option>
-                <option value="sre">SRE</option>
-                <option value="chat">Chat</option>
-              </select>
-              <button @click="addRef">{{ t('ref_add') }}</button>
-            </div>
-            <!-- 已有关联列表 -->
-            <div class="ref-list">
-              <div v-for="ref in refModal.refs" :key="ref.id" class="ref-item">
-                <span>{{ ref.scene_id || t('ref_scene_all') }} · {{ ref.agent_type || t('ref_agent_all') }}</span>
-                <label class="switch">
-                  <input type="checkbox" :checked="ref.enabled" @change="toggleRef(ref)">
-                </label>
-                <button @click="deleteRef(ref)" class="danger">{{ t('ref_delete') }}</button>
-              </div>
-            </div>
-            <div class="modal-actions">
-              <button @click="refModal = null">{{ t('cancel') }}</button>
-            </div>
-          </div>
-        </div>
-        <!-- 新增知识 modal -->
-        <div v-if="entryModal" class="modal-overlay" @click.self="entryModal = false">
-          <div class="modal cd">
-            <h3>{{ t('entry_title') }}</h3>
-            <textarea v-model="entryModal.content" rows="10" :placeholder="t('entry_content')" class="edit-textarea"></textarea>
-            <select v-model="entryModal.agentType" class="ref-input">
-              <option value="">{{ t('ref_agent_all') }}</option>
-              <option value="vod">VOD</option>
-              <option value="coding">Coding</option>
-              <option value="qa">QA</option>
-              <option value="sre">SRE</option>
-              <option value="chat">Chat</option>
-            </select>
-            <div class="modal-actions">
-              <button @click="entryModal = false">{{ t('cancel') }}</button>
-              <button class="bt bt-p" @click="createEntry">{{ t('entry_create') }}</button>
-            </div>
-          </div>
-        </div>
-        <!-- 上传 modal（保留现有上传逻辑，加关联选择） -->
-        <!-- ... -->
-      </div>
-    `,
+    // ... computed / methods / template
   });
-
-  app.mount(el);
+  _knowledgeVueApp.mount(el);
 }
 ```
 
-**Vue 带来的好处**：
-- 不用手动操作 DOM——数据变了视图自动更新
-- 筛选/搜索响应式——`filter` 变了 `filteredList` computed 自动重算
-- 不用 stale guard 检查 DOM——Vue 组件卸载时自动清理（用户切走时 `pageContent.innerHTML` 被替换，Vue 应用自动卸载）
-- 组件化——modal 通过 `v-if` 控制显示隐藏，不用手动 `appendChild`/`remove`
+**列表视图**：
 
-**和现有代码的兼容**：
-- `renderKnowledge()` 仍然是全局函数，`app.nav('knowledge')` 调用它
-- `loadKnowledgeContent()` 保留原生 JS（查看全文页面不需要 Vue）
-- `API` 对象继续用现有的 `api.js`
-- `I18N` 继续用现有的 `i18n.js`
-- `app.showToast` 继续用现有的 `app.js`
-- `_showAppleConfirm` 复用 skills.js 的苹果风格 modal 组件
+- 4 个统计卡片（系统 / Agent / 用户 / 未关联），点击筛选
+- 筛选器：来源下拉（system/agent/manual）+ 关联状态下拉 + 全文搜索 + 归档开关
+- 知识卡片网格：固定高度 200px，内容 -webkit-line-clamp:4 截断，底部操作按钮
+- 卡片操作：查看（进详情页）/ 编辑 / 删除 / 归档
+
+**详情视图**（点击"查看"进入，按 id 查询 `GET /api/knowledge/{id}`）：
+
+- 返回按钮回到列表
+- 知识全文展示（Markdown 渲染）
+- 编辑 / 删除 / 归档操作按钮
+- 关联管理区域（3 个部分）：
+
+1. **生效范围**：全局标签（pill），带 X 删除 / + 添加
+2. **关联 Agent 类型**：标签式（pill），已选显示为圆角标签带 X 删除，点 + 打开弹出层选择
+3. **关联场景**：卡片式，已选显示为卡片带 X 删除，点 + 打开弹出层支持搜索 + 多选
+
+**Agent 标签交互**：
+
+```
+[全局生效 ×]                    ← 全局标签（蓝色 pill）
+[VOD ×] [Coding ×] [+ 添加 Agent] ← Agent 标签（橙色 pill）+ 添加按钮
+         ↓ 点击 + 添加 Agent
+    [弹出层]
+    VOD / Coding / QA / SRE / Chat  ← 未选的 Agent 类型
+```
+
+**场景卡片交互**：
+
+```
+[+ 添加场景]
+┌─────────────┐ ┌─────────────┐
+│ ×           │ │ ×           │   ← 已选场景卡片（带 X 删除）
+│ 场景名称     │ │ 另一个场景   │
+│ 64a98e90... │ │ df38599d... │   ← 场景 ID 缩略
+└─────────────┘ └─────────────┘
+
+    ↓ 点击 + 添加场景
+┌──────────────────────────────────┐
+│ 选择场景                          │
+│ [搜索场景名称或 ID...]            │   ← 搜索框
+│ ┌──────┐ ┌──────┐ ┌──────┐      │
+│ │测试图标│ │通用开发│ │华为云  │      │   ← 可选场景卡片（多选）
+│ │94781c │ │df3859 │ │f4d4c6 │      │   ← 选中后蓝色边框
+│ └──────┘ └──────┘ └──────┘      │
+│ 已选 2 个          [取消] [确认]   │   ← 底部统计 + 操作
+└──────────────────────────────────┘
+```
+
+**关键方法**：
+
+| 方法 | 用途 |
+|------|------|
+| `viewContent(k)` | 按 id 查询 `GET /api/knowledge/{id}`，进入详情视图 |
+| `backToList()` | 返回列表视图，重新加载 |
+| `loadScenes()` | 从 `GET /api/scenes?repo=xxx` 加载场景列表 |
+| `loadRefs(kid)` | 从 `GET /api/knowledge/{id}/refs` 加载关联记录 |
+| `removeAgentRef(tag)` | `PUT /api/knowledge/ref/{id}` enabled=false |
+| `addAgentByType(type)` | `POST /api/knowledge/{id}/refs` scene_id='', agent_type=type |
+| `toggleGlobalRef()` | 全局关联的添加/移除 |
+| `removeSceneRef(tag)` | `PUT /api/knowledge/ref/{id}` enabled=false |
+| `openScenePopover()` | 打开场景选择弹出层，清空搜索和选中 |
+| `toggleSceneSelect(id)` | 多选切换 |
+| `confirmAddScenes()` | 批量 POST 添加选中的场景 |
+| `quickDelete(k)` | 列表卡片快速删除 |
+| `quickArchive(k)` | 列表卡片快速归档 |
+| `quickEdit(k)` | 列表卡片快速编辑（进详情后打开编辑 modal） |
+
+**computed**：
+
+| 属性 | 用途 |
+|------|------|
+| `filteredList` | 列表筛选（source/refStatus/query/showArchived） |
+| `selectedAgentTags` | 已选 Agent 标签列表（enabled 的） |
+| `availableAgentTypes` | 未选的 Agent 类型（排除已选） |
+| `selectedSceneTags` | 已选场景标签列表（enabled 的） |
+| `availableScenes` | 未选的场景（排除已选 + 搜索过滤） |
 
 **Vue 应用生命周期管理**：
-- `renderKnowledge()` 创建 Vue 应用并 mount 到 `pageContent`
-- 用户切走时 `app.nav()` 替换 `pageContent.innerHTML`——Vue 应用自动卸载
+
+- `renderKnowledge()` 创建 Vue 应用并 mount
+- `app.nav()` 切走时调 `_knowledgeVueApp.unmount()` 清理
 - 切回来时重新调 `renderKnowledge()` 重新创建
 
-**CSS 样式**：
-
-新增 `app.css` 里知识库页面的 Vue 组件样式：
+**CSS 样式**（`app.css` 追加）：
 
 ```css
-/* 统计卡片栏 */
-.knowledge-page .stats-bar { display: flex; gap: 12px; margin-bottom: 16px; }
-.knowledge-page .stat-card {
-  flex: 1; padding: 16px; border-radius: 12px; background: var(--c);
-  cursor: pointer; transition: transform 0.2s;
-  display: flex; flex-direction: column; align-items: center;
-}
-.knowledge-page .stat-card:hover { transform: translateY(-2px); }
-.knowledge-page .stat-num { font-size: 24px; font-weight: 700; color: var(--t); }
-.knowledge-page .stat-label { font-size: 11px; color: var(--t3); margin-top: 4px; }
+/* 列表卡片 */
+.kb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.kb-select { padding: 7px 10px; border: 1px solid var(--b); border-radius: var(--rd); font-size: 12px; background: var(--c); }
+.kb-input { padding: 7px 14px; border: 1px solid var(--b); border-radius: var(--rd); font-size: 12px; outline: none; background: var(--c); width: 200px; }
+.kb-textarea { width: 100%; min-height: 200px; padding: 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 13px; font-family: monospace; resize: vertical; }
+.kb-detail-content { font-size: 13px; line-height: 1.6; overflow-x: auto; }
+.kb-checkbox-label { font-size: 11px; color: var(--t3); display: flex; align-items: center; gap: 4px; cursor: pointer; }
 
-/* 来源标签颜色 */
-.source-tag { font-size: 10px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
-.source-system { background: rgba(0,113,227,0.1); color: #0071e3; }
-.source-agent { background: rgba(255,149,0,0.1); color: #ff9500; }
-.source-manual { background: rgba(52,199,89,0.1); color: #34c759; }
+/* 标签（pill） */
+.kb-tag-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.kb-tag { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 980px; font-size: 11px; font-weight: 500; line-height: 1.4; }
+.kb-tag-global { background: rgba(0,113,227,0.1); color: #0071e3; }
+.kb-tag-agent { background: rgba(255,149,0,0.1); color: #ff9500; }
+.kb-tag-x { border: none; background: none; color: inherit; font-size: 14px; cursor: pointer; padding: 0; line-height: 1; opacity: 0.6; }
+.kb-tag-x:hover { opacity: 1; }
+.kb-tag-add { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 980px; border: 1px dashed var(--b); background: none; font-size: 11px; color: var(--t3); cursor: pointer; transition: background .15s, border-color .15s; }
+.kb-tag-add:hover { background: var(--bg); border-color: var(--a); color: var(--a); }
 
-/* 关联状态标签 */
-.ref-tag { font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(0,113,227,0.08); color: var(--t2); }
-.ref-tag.unlinked { background: rgba(142,142,147,0.1); color: var(--t3); }
+/* Agent 弹出层 */
+.kb-popover { position: absolute; margin-top: 4px; padding: 6px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.08); z-index: 100; min-width: 200px; }
+.kb-popover-list { display: flex; flex-direction: column; gap: 2px; }
+.kb-popover-item { padding: 8px 12px; border: none; background: none; text-align: left; font-size: 12px; color: var(--t); cursor: pointer; border-radius: 8px; transition: background .1s; }
+.kb-popover-item:hover { background: rgba(0,113,227,0.06); color: var(--a); }
 
-/* 归档标签 */
-.archived-tag { font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(142,142,147,0.15); color: var(--t3); }
+/* 场景卡片 */
+.kb-scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.kb-scene-card { position: relative; padding: 14px; border-radius: 12px; transition: box-shadow .2s, transform .2s; }
+.kb-scene-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.08); transform: translateY(-1px); }
+.kb-scene-x { position: absolute; top: 8px; right: 8px; border: none; background: rgba(0,0,0,0.05); color: var(--t3); font-size: 14px; cursor: pointer; width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; line-height: 1; transition: background .15s; }
+.kb-scene-x:hover { background: rgba(0,0,0,0.1); color: var(--t); }
+.kb-scene-name { font-size: 12px; font-weight: 600; color: var(--t); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 20px; }
+.kb-scene-id { font-size: 10px; color: var(--t3); font-family: monospace; }
 
-/* 文件过大提示 */
-.size-warning { font-size: 10px; color: var(--or); padding: 4px 0; }
+/* 场景选择弹出层 */
+.kb-scene-pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+.kb-scene-pick-item { padding: 10px 12px; border-radius: 10px; border: 2px solid var(--b); cursor: pointer; transition: border-color .15s, background .15s; }
+.kb-scene-pick-item:hover { background: rgba(0,113,227,0.04); }
+.kb-scene-pick-item.selected { border-color: var(--a); background: rgba(0,113,227,0.08); }
+.kb-scene-pick-name { font-size: 12px; font-weight: 500; color: var(--t); margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-scene-pick-id { font-size: 10px; color: var(--t3); font-family: monospace; }
 
-/* modal */
+/* 关联管理区域 */
+.kb-ref-section { margin-bottom: 16px; }
+.kb-ref-section-title { font-size: 12px; font-weight: 600; color: var(--t2); margin-bottom: 8px; }
+
+/* Modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 999; }
-.modal { width: 500px; max-width: 90vw; padding: 24px; border-radius: 14px; background: var(--c); }
-.edit-textarea { width: 100%; min-height: 200px; padding: 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 13px; font-family: monospace; }
+.modal { width: 500px; max-width: 90vw; padding: 24px; border-radius: 14px; background: var(--c); box-shadow: 0 8px 32px rgba(0,0,0,0.15); }
 ```
+
+**Playwright 验证结果**：
+
+- 列表 5 张卡片 + 4 统计卡片 ✅
+- 点击查看调 `GET /api/knowledge/{id}` ✅
+- 详情页面全文展示 ✅
+- Agent 标签（pill）+ X 删除 + 弹出层选择 ✅
+- 场景卡片 + X 删除 + 弹出层搜索 + 多选 + 确认回显 ✅
+- 返回列表 ✅
+- 无 console 错误 ✅
 
 ### 6.11 i18n 改动
 
