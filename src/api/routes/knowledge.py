@@ -1075,7 +1075,8 @@ def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
             )
             db.commit()
     except Exception as e:
-        if "UNIQUE" in str(e).upper():
+        err_msg = str(e).upper()
+        if "UNIQUE" in err_msg or "DUPLICATE" in err_msg:
             raise HTTPException(status_code=409,
                 detail={"code": 409, "message": "该知识已绑定此场景/Agent 类型"})
         raise
