@@ -775,6 +775,10 @@ class KnowledgeRefBody(BaseModel):
     scene_id: str = ""
     agent_type: str = ""
 
+class KnowledgeRefBatchBody(BaseModel):
+    scene_ids: list[str] = []
+    agent_types: list[str] = []
+
 class KnowledgeRefUpdateBody(BaseModel):
     enabled: bool = True
 
@@ -1169,6 +1173,39 @@ def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
                 detail={"code": 409, "message": "该知识已绑定此场景/Agent 类型"})
         raise
     return {"ok": True}
+
+
+@router.post("/{knowledge_id}/refs/batch", operation_id="knowledge_add_refs_batch")
+def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
+                              user: dict = Depends(get_current_user)):
+    """批量新增场景/Agent 关联（幂等，跳过已存在的）。"""
+    _check_ref_permission(knowledge_id, user)
+    username = str(user.get("username") or "")
+    from src.session_manager import db, db_lock
+    added = 0
+    items = []
+    for sid in (body.scene_ids or []):
+        items.append((sid, ""))
+    for at in (body.agent_types or []):
+        items.append(("", at))
+    with db_lock:
+        c = db.cursor()
+        for scene_id, agent_type in items:
+            existing = c.execute(
+                "SELECT id FROM scene_knowledge_ref "
+                "WHERE knowledge_id=? AND scene_id=? AND agent_type=?",
+                (knowledge_id, scene_id, agent_type)
+            ).fetchone()
+            if not existing:
+                c.execute(
+                    "INSERT INTO scene_knowledge_ref "
+                    "(knowledge_id, scene_id, agent_type, enabled, created_by) "
+                    "VALUES (?, ?, ?, 1, ?)",
+                    (knowledge_id, scene_id, agent_type, username)
+                )
+                added += 1
+        db.commit()
+    return {"ok": True, "added": added}
 
 
 @router.put("/ref/{ref_id}")

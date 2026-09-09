@@ -273,15 +273,11 @@ function renderKnowledge() {
       async addAgentByType(agentType) {
         const kid = this.detail.id;
         try {
-          await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: agentType });
+          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [agentType] });
           await this.loadRefs(kid);
           app.showToast(this.t('ref_add'));
         } catch (e) {
-          if (e.detail && e.detail.message && (e.detail.message.includes('已绑定') || e.detail.message.includes('Duplicate'))) {
-            app.showToast(this.t('ref_already_bound'));
-          } else {
-            app.showToast(e.message || I18N.t('common.load_failed'));
-          }
+          app.showToast(e.message || I18N.t('common.load_failed'));
         }
       },
 
@@ -301,7 +297,7 @@ function renderKnowledge() {
           }
         } else {
           try {
-            await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: '' });
+            await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [] });
             await this.loadRefs(kid);
             app.showToast(this.t('ref_add'));
           } catch (e) {
@@ -322,15 +318,11 @@ function renderKnowledge() {
       async addSceneById(sceneId) {
         const kid = this.detail.id;
         try {
-          await API.post('/knowledge/' + kid + '/refs', { scene_id: sceneId, agent_type: '' });
+          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [sceneId], agent_types: [] });
           await this.loadRefs(kid);
           app.showToast(this.t('ref_add'));
         } catch (e) {
-          if (e.detail && e.detail.message && (e.detail.message.includes('已绑定') || e.detail.message.includes('Duplicate'))) {
-            app.showToast(this.t('ref_already_bound'));
-          } else {
-            app.showToast(e.message || I18N.t('common.load_failed'));
-          }
+          app.showToast(e.message || I18N.t('common.load_failed'));
         }
       },
       openScenePopover() {
@@ -398,16 +390,12 @@ function renderKnowledge() {
       },
       async confirmAddScenes() {
         const kid = this.detail.id;
-        let ok = 0;
-        for (const sid of this.sceneSelected) {
-          try {
-            await API.post('/knowledge/' + kid + '/refs', { scene_id: sid, agent_type: '' });
-            ok++;
-          } catch (e) { /* ignore duplicates */ }
-        }
-        if (ok > 0) {
+        try {
+          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: this.sceneSelected, agent_types: [] });
           await this.loadRefs(kid);
-          app.showToast(this.t('ref_added_count', { count: ok }));
+          app.showToast(this.t('ref_added_count', { count: this.sceneSelected.length }));
+        } catch (e) {
+          app.showToast(e.message || I18N.t('common.load_failed'));
         }
         this.addScenePopover = false;
         this.sceneSelected = [];
@@ -428,16 +416,12 @@ function renderKnowledge() {
       },
       async confirmAddAgents() {
         const kid = this.detail.id;
-        let ok = 0;
-        for (const at of this.agentSelected) {
-          try {
-            await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: at });
-            ok++;
-          } catch (e) { /* ignore duplicates */ }
-        }
-        if (ok > 0) {
+        try {
+          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: this.agentSelected });
           await this.loadRefs(kid);
-          app.showToast(this.t('ref_added_count', { count: ok }));
+          app.showToast(this.t('ref_added_count', { count: this.agentSelected.length }));
+        } catch (e) {
+          app.showToast(e.message || I18N.t('common.load_failed'));
         }
         this.addAgentPopover = false;
         this.agentSelected = [];
@@ -567,17 +551,14 @@ function renderKnowledge() {
             description: this.createForm.description || ''
           });
           const kid = d.id || d.knowledge_id;
-          // 批量关联 Agent
-          if (kid && this.createForm.agentSelected.length > 0) {
-            for (const at of this.createForm.agentSelected) {
-              try { await API.post('/knowledge/' + kid + '/refs', { scene_id: '', agent_type: at }); } catch(e) {}
-            }
-          }
-          // 批量关联场景
-          if (kid && this.createForm.sceneSelected.length > 0) {
-            for (const sid of this.createForm.sceneSelected) {
-              try { await API.post('/knowledge/' + kid + '/refs', { scene_id: sid, agent_type: '' }); } catch(e) {}
-            }
+          // 批量关联 Agent + 场景
+          if (kid && (this.createForm.agentSelected.length > 0 || this.createForm.sceneSelected.length > 0)) {
+            try {
+              await API.post('/knowledge/' + kid + '/refs/batch', {
+                scene_ids: this.createForm.sceneSelected,
+                agent_types: this.createForm.agentSelected
+              });
+            } catch(e) {}
           }
           app.showToast(this.t('knowledge_created'));
           this.createForm = null;
