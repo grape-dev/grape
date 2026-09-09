@@ -258,7 +258,7 @@ def _project_knowledge_entries(repo_key: str) -> list[dict]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT scope, agent_type, issue_num, file_path, status, source_seq, created_by, created_at, obs_key "
+                "SELECT id, scope, agent_type, issue_num, file_path, status, source_seq, created_by, created_at, obs_key, source, archived "
                 "FROM agent_shared_knowledge WHERE repo_key=? AND scope='project' ORDER BY id DESC LIMIT 100",
                 (repo_key,))
             rows = c.fetchall()
@@ -266,13 +266,15 @@ def _project_knowledge_entries(repo_key: str) -> list[dict]:
             rows = []
     out = []
     for r in rows:
-        content = _read_entry_content(repo_key, r[8], r[3])
+        content = _read_entry_content(repo_key, r[9], r[4])
         out.append({
-            "scope": r[0], "agent_type": r[1] or "", "issue_num": r[2] or 0,
-            "file_path": r[3] or "", "path": _repo_root_rel(r[3], repo_key),
-            "status": r[4] or "", "source_seq": r[5] or 0,
-            "created_by": r[6] or "", "created_at": normalize_event_time(r[7] or ""),
-            "content": content, "obs_key": r[8] or "",
+            "id": r[0],
+            "scope": r[1], "agent_type": r[2] or "", "issue_num": r[3] or 0,
+            "file_path": r[4] or "", "path": _repo_root_rel(r[4], repo_key),
+            "status": r[5] or "", "source_seq": r[6] or 0,
+            "created_by": r[7] or "", "created_at": normalize_event_time(r[8] or ""),
+            "content": content, "obs_key": r[9] or "",
+            "source": r[10] or "agent", "archived": r[11] or 0,
         })
     return out
 
@@ -395,7 +397,22 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
     # ===== Issue #67：统一列表 + stats =====
     all_knowledge = []
 
-    # baseline 知识
+    # baseline 知识——从 DB 查 id
+    baseline_db_ids = {}
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            b_rows = db.cursor().execute(
+                "SELECT id, file_path, obs_key, archived FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope='baseline'",
+                (repo_key,)
+            ).fetchall()
+        for bid, fp, ok, arch in b_rows:
+            fname = os.path.basename(fp) if fp else ""
+            baseline_db_ids[fname] = {"id": bid, "obs_key": ok or "", "archived": arch or 0}
+    except Exception:
+        pass
+
     for f in project_files:
         content = ""
         try:
@@ -405,11 +422,14 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                 content = files[f["name"]]
         except Exception:
             pass
+        fname = os.path.basename(f["name"]) if f["name"] else ""
+        db_info = baseline_db_ids.get(fname, {})
         all_knowledge.append({
-            "id": 0, "source": "system", "scope": "baseline",
+            "id": db_info.get("id", 0),
+            "source": "system", "scope": "baseline",
             "repo_key": repo_key, "agent_type": "", "issue_num": 0,
             "file_path": f["name"], "obs_key": f.get("obs_key", ""),
-            "content": (content or "")[:500], "archived": 0,
+            "content": (content or "")[:500], "archived": db_info.get("archived", 0),
             "created_by": "", "created_at": f.get("updated", ""),
             "issue_tag": "",
         })
