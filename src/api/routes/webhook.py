@@ -2,6 +2,7 @@
 import json, os, time
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from src.config import log
 from src.api.deps import get_user_or_none
 from src.api.event_pipeline import run_pipeline
@@ -147,12 +148,16 @@ def _authorize_a2a(request: Request, repo_key: str):
     raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid token"})
 
 
+class A2AHandoffBody(BaseModel):
+    agent: str = ""
+    payload: dict = {}
+
+
 @router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Agent 交办（A2A，grape a2a handoff）")
-async def a2a_endpoint(request: Request, user: dict | None = Depends(get_user_or_none)):
+async def a2a_endpoint(body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
     """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
-    body = await request.json()
-    agent_name = body.get("agent", "")
-    payload = body.get("payload", {})
+    agent_name = body.agent or ""
+    payload = body.payload or {}
 
     if not agent_name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing agent field"})
