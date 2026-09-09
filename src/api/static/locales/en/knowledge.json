@@ -80,5 +80,6 @@
   "archived": "Archived",
   "unarchive": "Unarchive",
   "archive": "Archive",
-  "file_too_large": "File is large ({{size}}KB), consider cleaning up outdated entries"
+  "file_too_large": "File is large ({{size}}KB), consider cleaning up outdated entries",
+  "error_no_id": "No valid ID for this knowledge"
 }

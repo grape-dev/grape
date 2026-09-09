@@ -52,7 +52,9 @@ function renderKnowledge() {
           result = result.filter(k => !k.archived);
         }
         if (this.filter.source === 'system') {
-          result = result.filter(k => k.source === 'system' || k.source === 'agent');
+          result = result.filter(k => k.source === 'system');
+        } else if (this.filter.source === 'agent') {
+          result = result.filter(k => k.source === 'agent');
         } else if (this.filter.source === 'manual') {
           result = result.filter(k => k.source === 'manual');
         }
@@ -95,6 +97,7 @@ function renderKnowledge() {
       },
       filterByStats(type) {
         if (type === 'system') this.filter.source = 'system';
+        else if (type === 'agent') this.filter.source = 'agent';
         else if (type === 'user') this.filter.source = 'manual';
         else if (type === 'unlinked') this.filter.refStatus = 'unlinked';
       },
@@ -106,15 +109,20 @@ function renderKnowledge() {
       sourceClass(s) {
         return 'source-' + (s || 'agent');
       },
-      statSystem() { return this.stats.system + this.stats.agent; },
+      statSystem() { return this.stats.system; },
+      statAgent() { return this.stats.agent; },
       statUser() { return this.stats.manual; },
       statUnlinked() { return this.stats.unlinked; },
 
       // 查看全文
+      // 查看全文——按 id 查询
       async viewContent(k) {
+        if (!k.id) {
+          app.showToast(this.t('error_no_id'));
+          return;
+        }
         try {
-          const key = k.obs_key || k.file_path || k.path;
-          const d = await API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&obs_key=' + encodeURIComponent(key));
+          const d = await API.get('/knowledge/' + k.id);
           if (window._currentView !== 'knowledge') return;
           this.detailView = d;
         } catch (e) {
@@ -267,6 +275,10 @@ function renderKnowledge() {
               <span class="stat-num">{{ statSystem() }}</span>
               <span class="stat-label">{{ t('stats_system') }}</span>
             </div>
+            <div class="stat-card" @click="filterByStats('agent')">
+              <span class="stat-num">{{ statAgent() }}</span>
+              <span class="stat-label">{{ t('stats_agent') }}</span>
+            </div>
             <div class="stat-card" @click="filterByStats('user')">
               <span class="stat-num">{{ statUser() }}</span>
               <span class="stat-label">{{ t('stats_user') }}</span>
@@ -281,6 +293,7 @@ function renderKnowledge() {
             <select v-model="filter.source" style="padding:7px 10px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;background:var(--c)">
               <option value="">{{ t('filter_source_all') }}</option>
               <option value="system">{{ t('source_system') }}</option>
+              <option value="agent">{{ t('source_agent') }}</option>
               <option value="manual">{{ t('source_manual') }}</option>
             </select>
             <select v-model="filter.refStatus" style="padding:7px 10px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;background:var(--c)">
@@ -398,41 +411,10 @@ function renderKnowledge() {
   _knowledgeVueApp.mount(el);
 }
 
+// renderMarkdown 供 Vue template 的 v-html 调用
 function renderMarkdown(content) {
   if (typeof marked !== 'undefined' && marked.parse) {
     return marked.parse(content);
   }
-  return '<pre>' + content.replace(/</g, '&lt;') + '</pre>';
-}
-
-// 保留旧函数兼容（loadKnowledgeContent 可能被其他地方调用）
-function loadKnowledgeContent(key) {
-  const el = document.getElementById('pageContent');
-  if (!el) return;
-  // 如果 Vue 应用还在，用 detailView 模式
-  if (_knowledgeVueApp && _knowledgeVueApp._instance) {
-    const vm = _knowledgeVueApp._instance.proxy;
-    API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&obs_key=' + encodeURIComponent(key)).then(d => {
-      vm.detailView = d;
-    }).catch(e => {
-      if (e.name === 'AbortError' && e.silent) return;
-      app.showToast(e.message || I18N.t('common.load_failed'));
-    });
-    return;
-  }
-  el.innerHTML = '<div class="loading">' + I18N.t('knowledge.loading') + '</div>';
-  API.get('/knowledge/content?repo=' + encodeURIComponent(_currentRepo()) + '&obs_key=' + encodeURIComponent(key)).then(d => {
-    if (window._currentView !== 'knowledge') return;
-    const fileLabel = d.file || d.obs_key || '';
-    const isJson = fileLabel.toLowerCase().endsWith('.json');
-    const content = d.content || '';
-    const rendered = isJson
-      ? '<pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">' + content.replace(/</g, '&lt;') + '</pre>'
-      : renderMarkdown(content);
-    el.innerHTML = '<button class="bt bt-o bt-s" onclick="app.nav(\'knowledge\')" style="margin-bottom:12px">' + I18N.t('knowledge.back_to_knowledge') + '</button><div class="cd" style="padding:16px 20px"><h3 style="font-size:15px;font-weight:600;margin-bottom:12px">📄 ' + fileLabel + '</h3>' + (rendered || '<div class="ts t2">' + I18N.t('knowledge.empty') + '</div>') + '</div>';
-  }).catch(e => {
-    if (e.name === 'AbortError' && e.silent) return;
-    if (window._currentView !== 'knowledge') return;
-    el.innerHTML = '<div class="error">' + I18N.t('knowledge.load_detail_failed', { msg: e.message }) + '</div>';
-  });
+  return '<pre>' + (content || '').replace(/</g, '&lt;') + '</pre>';
 }

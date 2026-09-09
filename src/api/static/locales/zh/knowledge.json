@@ -80,5 +80,6 @@
   "archived": "已归档",
   "unarchive": "取消归档",
   "archive": "归档",
-  "file_too_large": "文件较大（{{size}}KB），建议整理去除不需要的知识"
+  "file_too_large": "文件较大（{{size}}KB），建议整理去除不需要的知识",
+  "error_no_id": "该知识没有有效ID，无法操作"
 }
