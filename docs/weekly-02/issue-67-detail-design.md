@@ -82,6 +82,53 @@ UPDATE agent_shared_knowledge SET description=CONCAT('Issue #', issue_num, ' 对
 UPDATE agent_shared_knowledge SET description=CONCAT('Issue #', issue_num, ' ', agent_type, ' Agent 沉淀的经验') WHERE scope='issue_agent' AND (description IS NULL OR description='');
 ```
 
+### 6.1.6 name 字段
+
+**DDL**（建表 + 迁移）：
+
+```sql
+-- 建表 DDL（db_setup.py）
+name VARCHAR(256) DEFAULT ''  -- 知识名称：system/agent 自动生成，manual 用户必填
+
+-- 迁移（幂等 ALTER）
+ALTER TABLE agent_shared_knowledge ADD COLUMN name VARCHAR(256) DEFAULT '';
+```
+
+**生成规则**：
+
+| source | 规则 |
+|--------|------|
+| system | 从 file_path 文件名截取（去扩展名，`-_` 替换空格），如 `project-capabilities.md` → `project capabilities` |
+| agent | 同 system，从 file_path 文件名截取 |
+| manual | 用户必填（前端校验 + 后端校验），最长 256 字符 |
+
+**write_knowledge**：加 `name` 参数，system/agent 自动生成，manual 传入。
+
+**KnowledgeEntryBody**：加 `name: str`（必填）。
+
+**KnowledgeUpdateBody**：加 `name: str`（编辑时可修改）。
+
+**list_knowledge**：SELECT 加 name，返回。
+
+**详情 API**（`GET /api/knowledge/{id}`）：返回 name 字段，详情页面头部标题展示。
+
+**前端**：
+- 卡片标题：用 `k.name` 代替从 file_path 截取
+- 详情页头部：用 `detail.name` 展示
+- 新增页面：加 name 输入框（必填）
+- 编辑页面：加 name 输入框
+
+**数据回填**（已有数据）：从 file_path 文件名截取（去扩展名，`-_` 替换空格）；如果 file_path 也为空就从 obs_key 截取。
+
+```sql
+-- 回填 name：从 file_path 文件名截取
+UPDATE agent_shared_knowledge
+SET name = REPLACE(REPLACE(
+    REPLACE(file_path, '/', ''),
+    '_', ' '), '-', ' ')
+WHERE (name IS NULL OR name = '');
+```
+
 ### 6.2 prompt_builder 注入逻辑改动
 
 **当前逻辑**（`src/prompt_builder.py:907-934`）：
