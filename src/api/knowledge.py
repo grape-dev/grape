@@ -288,11 +288,13 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
         if scope == "baseline":
             name = "项目基线分析"
         elif scope == "project":
-            name = f"项目知识 - {_agent_name.get(agent_type, agent_type or 'Agent')}"
+            _an = _agent_name.get(agent_type)
+            name = f"项目知识 - {_an}" if _an else "项目知识"
         elif scope == "issue":
             name = f"Issue #{issue_num} 知识"
         elif scope == "issue_agent":
-            name = f"Issue #{issue_num} - {_agent_name.get(agent_type, agent_type or 'Agent')} 知识"
+            _an = _agent_name.get(agent_type, agent_type or "Agent")
+            name = f"Issue #{issue_num} - {_an} 知识"
 
     knowledge_id = None
     with db_lock:
