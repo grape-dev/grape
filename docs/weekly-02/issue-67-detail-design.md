@@ -445,56 +445,47 @@ def get_knowledge_refs(knowledge_id: int, user: dict = Depends(get_current_user)
     return {"refs": [...]}
 ```
 
-**POST /api/knowledge/{id}/refs（新增关联）**：
+**POST /api/knowledge/{id}/refs（新增关联——已废弃，保留兼容）**：
+
+> 已被批量接口替代。前端统一使用 `POST /{id}/refs/batch`。
+
+**POST /api/knowledge/{id}/refs/batch（批量新增关联——幂等）**：
 
 ```python
-@router.post("/{knowledge_id}/refs")
-def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
-                      user: dict = Depends(get_current_user)):
-    """为知识新增场景/Agent 关联。"""
-    try:
-        with db_lock:
-            db.cursor().execute(
-                "INSERT INTO scene_knowledge_ref "
-                "(knowledge_id, scene_id, agent_type, enabled, created_by) "
-                "VALUES (?, ?, ?, 1, ?)",
-                (knowledge_id, body.scene_id or "", body.agent_type or "",
-                 user.get("username", ""))
-            )
-            db.commit()
-    except Exception as e:
-        if "UNIQUE" in str(e).upper():
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "该知识已绑定此场景/Agent 类型"})
-        raise
-    return {"ok": True}
+class KnowledgeRefBatchBody(BaseModel):
+    scene_ids: list[str] = []
+    agent_types: list[str] = []
+
+@router.post("/{knowledge_id}/refs/batch")
+def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
+                              user: dict = Depends(get_current_user)):
+    """批量新增场景/Agent 关联（幂等，跳过已存在的）。"""
+    _check_ref_permission(knowledge_id, user)
+    # 先查有无已存在记录（含硬删除后重新添加），有就跳过，没有才 INSERT
+    # 返回 {ok: True, added: N}
 ```
 
-**PUT /api/knowledge/ref/{ref_id}（修改关联——开关 enabled）**：
+> 入参分离：`scene_ids` 只含场景 ID，`agent_types` 只含 Agent 类型。不再混传 `agent_type: ''` 或 `scene_id: ''`。
+
+**PUT /api/knowledge/ref/{ref_id}（修改关联——保留兼容）**：
 
 ```python
 @router.put("/ref/{ref_id}")
-def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
-                         user: dict = Depends(get_current_user)):
+def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody, ...):
     """修改关联的 enabled 开关。"""
-    with db_lock:
-        db.cursor().execute(
-            "UPDATE scene_knowledge_ref SET enabled = ?, updated_by = ? WHERE id = ?",
-            (1 if body.enabled else 0, user.get("username", ""), ref_id)
-        )
-        db.commit()
-    return {"ok": True}
 ```
 
-**DEL /api/knowledge/ref/{ref_id}（删除关联）**：
+> 前端不再使用此接口做软删除——改用 DELETE 硬删除。
+
+**DEL /api/knowledge/ref/{ref_id}（删除关联——硬删除）**：
 
 ```python
 @router.delete("/ref/{ref_id}")
-def delete_knowledge_ref(ref_id: int, user: dict = Depends(get_current_user)):
-    """删除知识的某条关联。"""
-    with db_lock:
-        db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE id = ?", (ref_id,))
-        db.commit()
-    return {"ok": True}
+def delete_knowledge_ref(ref_id: int, ...):
+    """硬删除知识的某条关联（DELETE FROM，不软删除）。"""
+```
+
+> 前端 `removeAgentRef` / `removeSceneRef` / `toggleGlobalRef` 都用 `DELETE /ref/{id}` 硬删除。
 ```
 
 ### 6.8 write_knowledge() 对 scope=member 的特殊处理
@@ -546,6 +537,7 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
     "created_by": "user1",
     "created_at": "2026-09-09 10:00:00",
     "description": "用户填写的知识描述",
+    "name": "用户填写的知识名称",
     "archived": 0,
     "refs": [...],
     "ref_summary": "全局",
@@ -558,40 +550,71 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 **引入 Vue 3**：下载到本地 vendor（`/static/js/vendor/vue.global.prod.min.js`），不影响其他页面。
 
 **页面结构**：
-- 列表视图 + 详情视图（`view: 'list' | 'detail'`）
-- 列表视图：统计卡片（纯展示不联动）→ Tab 栏（系统/Agent/用户）→ 筛选器（搜索 + 查询按钮 + 归档开关 + 新增按钮）→ 卡片网格 → 分页器
-- 详情视图：返回按钮 → 头部卡片（标签 + 描述 + 元数据 + 操作按钮）→ 内容卡片（固定高度滚动）→ 关联管理（按 source 控制权限）
+- 列表视图 + 详情视图 + 编辑视图 + 新增视图（`view: 'list' | 'detail' | 'create'`，`editMode: bool`）
+- 统计卡片在 apple-card 外面（点击联动切换 tab）
+- Tab 栏在 apple-card 外面（药丸式 3 tab）
+- apple-card 包裹：筛选器 + 卡片网格 + 分页器
+- 详情视图：返回按钮 → 头部卡片（标签 + name + description + 元数据 + 操作按钮靠右）→ 内容卡片（固定高度滚动）→ Agent 关联卡片（标签式）→ 场景关联卡片（横向滚动）
+- 编辑视图：返回按钮 → name 输入框（必填）→ description 输入框 → content textarea → 取消/确认
+- 新增视图：返回按钮 → name 输入框（必填）→ description 输入框 → content textarea → Agent 标签（带描述）→ 场景卡片（弹出层选择）→ 取消/确认
 
-**Tab 栏**：药丸式（pill）风格，3 个 tab，无"全部"。切换时只调 `loadList()` 局部刷新，不重建 Vue。
+**统计卡片**：点击联动切换 tab（`switchTab(source)`），选中态高亮。
+
+**Tab 栏**：药丸式（pill）风格，3 个 tab（系统/Agent/用户），无"全部"。切换时只调 `loadList()` 局部刷新。
 
 **局部刷新**：
 - `firstLoad` 标记：首次加载时隐藏内容显示 loading，之后 loading 时只显示 spinner overlay
 - `v-show` 代替 `v-if` 控制列表显隐（保留 DOM，不重新创建）
 - `loadList` 只更新 `this.list` 和 `this.total`，Vue 响应式更新
 - `loadStats` 独立调用 `/api/knowledge/stats`，不影响列表
-- loading 时：spinner overlay + grid opacity 0.4（不消失，不闪烁）
+- loading 时：spinner overlay + grid `min-height:320px`（不消失，不闪烁）
 
 **卡片样式**（参考场景中心 scene-market）：
+- `.scn-card` 结构：色条 + 图标 + 标题(name) + 描述(description) + 技能链路 + 底部按钮区
 - `border-radius:18px` + `box-shadow:var(--sh)` + hover `translateY(-4px)` + 加重阴影
 - 底部按钮区：`border-top:1px solid var(--b)` 横线隔离 + `justify-content:flex-end` 靠右
+- 卡片标题用 `k.name`（为空时回退到 `knowledgeTitle(k)` 从 file_path 截取）
 - 卡片内容展示 description（不展示 content）
-- `min-height:320px` 防止 loading 切换时高度抖动
+- 点击卡片进入详情页面
 
 **详情页面按 source 控制权限**：
 | source | Agent 关联卡片 | 场景关联卡片 | 操作 |
 |--------|---------------|-------------|------|
 | system | 不显示 | 不显示 | 显示"自动加载"提示 |
-| agent | 只读（无增删按钮） | 只读（无增删按钮） | 只查看 |
-| manual | 完整配置（+按钮 + X 删除） | 完整配置（+按钮 + 搜索多选弹出层） | 可增删 |
+| agent | 不显示 | 不显示 | 只查看 |
+| manual | 标签式（点击切换选中/取消） | 卡片 + "+添加场景"弹出层 | 可编辑/删除 |
 
-**关联管理交互**：
-- Agent 关联：卡片式 + "+"按钮打开多选弹出层 + 已选项带 X 删除
-- 场景关联：卡片式 + "+"按钮打开弹窗（tab 切换场景市场/仓库场景 + 搜索 + 多选 + 分页）
-- 全局关联：pill 标签 + X 删除
+**Agent 关联交互**（标签式，同新增页面）：
+- 6 个 Agent 类型标签（VOD/Issue/Coding/QA/SRE/Chat），每个带职责描述
+- 点击切换选中/取消（`toggleAgentRef` → 批量 API 添加 / DELETE 删除）
+- 选中态：蓝色边框 + 背景高亮
+- 全局关联：pill 标签 + 点击取消
+
+**场景关联交互**（卡片 + 弹出层）：
+- 已选场景：`.scn-card` 卡片横向滚动（`scn-scroll-wrap` + `scn-scroll-track`）+ 左右箭头按钮
+- 卡片展示：色条 + 图标 + 标题(scene_display_name) + 描述 + 技能链路(pipeline)
+- 每个卡片有 X 按钮删除（硬删除 `DELETE /ref/{id}`）
+- "+添加场景"打开弹出层：仓库场景列表（scn-card 网格 + 搜索 + 选中勾号 + 确认）
+
+**场景选择弹出层**：
+- 只显示当前仓库的场景（`GET /api/scenes?repo=xxx`，不显示场景市场）
+- `.scn-card` 网格布局 + 搜索框
+- 点击选中/取消（蓝色边框 + 勾号标识）
+- 底部：已选数量 + 取消/确认按钮
+- 新增页面用临时选中（`createSceneTempSelected`），确认后才写入 `createForm.sceneSelected`
 
 **分页器**：始终显示，`page / totalPages (total)` + 20/50 每页切换。
 
-**新增知识 modal**：描述输入框 + 内容 textarea + Agent 类型下拉。
+**关联管理 API**：
+- 批量新增：`POST /{id}/refs/batch` → `{scene_ids: [], agent_types: []}`（幂等，跳过已存在的）
+- 单个新增：同批量接口，传单个元素
+- 删除：`DELETE /ref/{id}`（硬删除，不软删除）
+- `loadRefs` 调详情接口（`GET /{id}`）刷新完整 refs（含 scene_name/pipeline 等）
+
+**新增/编辑页面**（非 modal）：
+- 新增：`view='create'`，name 必填 + description + content + Agent 标签 + 场景选择
+- 编辑：`editMode=true`，name 必填 + description + content
+- 创建后批量关联 Agent + 场景：`POST /{id}/refs/batch`
 
 **Vue 生命周期管理**：
 - `nav('knowledge')` 调 `renderKnowledge()` 创建 Vue 应用
@@ -636,10 +659,14 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
   "ref_already_bound": "该知识已绑定此场景/Agent 类型",
   "edit_title": "编辑知识",
   "edit_content": "内容",
-  "edit_save": "保存",
+  "edit_save": "编辑",
   "entry_title": "新增知识",
   "entry_content": "输入知识内容（支持 Markdown）",
   "entry_create": "创建",
+  "entry_description": "知识描述（简述这条知识的用途）",
+  "entry_name": "知识名称",
+  "entry_name_ph": "请输入知识名称（必填）",
+  "name_required": "知识名称必填",
   "knowledge_deleted": "知识已删除",
   "knowledge_updated": "知识已更新",
   "knowledge_created": "知识已创建",
@@ -647,6 +674,8 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
   "system_readonly": "系统生成的知识不可编辑"
 }
 ```
+
+> 当前实际 i18n 共 **114 keys**（zh/en 对称）。
 
 ### 6.12 统计卡片数据接口
 
@@ -1480,13 +1509,19 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
     # 读取全文
     content = _read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""))
 
-    # 查关联
+    # 查关联——LEFT JOIN devops_pipeline_scene 获取场景名称 + 描述 + pipeline
     with db_lock:
         refs = db.cursor().execute(
-            "SELECT id, scene_id, agent_type, enabled, created_by, created_at "
-            "FROM scene_knowledge_ref WHERE knowledge_id=? ORDER BY id",
-            (knowledge_id,)
+            "SELECT r.id, r.scene_id, r.agent_type, r.enabled, r.created_by, r.created_at, "
+            "s.name, s.description, s.display_name, s.scene_id "
+            "FROM scene_knowledge_ref r "
+            "LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? "
+            "WHERE r.knowledge_id = ? ORDER BY r.id",
+            (row["repo_key"], knowledge_id)
         ).fetchall()
+
+    # 为每个场景关联补充 pipeline 技能链路
+    # ref_list 包含：scene_name, scene_display_name, scene_description, scene_pipeline
 
     return {
         "id": knowledge_id,
@@ -1501,7 +1536,9 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
         "archived": row["archived"],
         "created_by": row["created_by"],
         "created_at": row["created_at"],
-        "refs": [...],
+        "description": row.get("description", ""),
+        "name": row.get("name", ""),
+        "refs": ref_list,  # 含 scene_name/scene_display_name/scene_description/scene_pipeline
     }
 ```
 
