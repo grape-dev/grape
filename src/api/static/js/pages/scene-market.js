@@ -21,11 +21,11 @@
 
 // Agent 图标+颜色映射
 const _AGENT_META = {
-  vod:    {icon:'🔍', label:'VOD',    color:'#ff2d92', tag:'tg-v'},
-  issue:  {icon:'📋', label:'Issue',  color:'#ff3b30', tag:'tg-i'},
-  coding: {icon:'💻', label:'Coding', color:'#0071e3', tag:'tg-c'},
-  qa:     {icon:'🧪', label:'QA',     color:'#af52de', tag:'tg-q'},
-  sre:    {icon:'⚙️', label:'SRE',    color:'#ff9f0a', tag:'tg-s'},
+  vod:    {icon:'🔍', label:'VOD',    color:'#B07A8B', tag:'tg-v'},
+  issue:  {icon:'📋', label:'Issue',  color:'#B8857A', tag:'tg-i'},
+  coding: {icon:'💻', label:'Coding', color:'#7A92B0', tag:'tg-c'},
+  qa:     {icon:'🧪', label:'QA',     color:'#9A85A8', tag:'tg-q'},
+  sre:    {icon:'⚙️', label:'SRE',    color:'#B89B6A', tag:'tg-s'},
   chat:   {icon:'💬', label:'Chat',   color:'#34c759', tag:'tg-ch'},
 };
 const _AGENT_ORDER = ['vod','issue','coding','qa','sre'];
@@ -65,7 +65,7 @@ function renderSceneMarket() {
   if (!el) return;
 
   // 渲染一级 Tab 栏（场景 / 技能）+ 子容器
-  el.innerHTML = `<div style="margin-bottom:20px;background:var(--c);border-radius:14px;padding:20px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.06)">
+  el.innerHTML = `<div style="margin-bottom:20px;background:rgba(255,255,255,.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-radius:18px;padding:24px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.04)">
     <div class="seg-bar" style="margin-top:0">
       <a class="ac">🏪 ${I18N.t('skills.scenes_tab')||'场景'}</a>
       <a onclick="app.nav('skills')">⚙ ${I18N.t('skills.skills_tab')||'技能'}</a>
@@ -93,6 +93,11 @@ function _switchSceneTab(tab) {
   _sceneMarketPage = 1;
   _sceneMarketQ = '';
   _sceneMarketActiveCat = 0;
+  // Issue #63: 页面内 tab 切换——取消旧 tab 请求 + 更新标识
+  if (window._tabAbortController) window._tabAbortController.abort();
+  window._tabAbortController = new AbortController();
+  window._tabSignal = window._tabAbortController.signal;
+  window._currentView = 'scene-market:' + tab;
   const el = document.getElementById('marketTabContent');
   if (!el) return;
 
@@ -161,6 +166,7 @@ function _loadSceneMarketList() {
   var gridEl = document.getElementById('officialSceneGrid');
   if (gridEl) gridEl.innerHTML = '<div class="scn-loading"><span class="scn-spinner"></span></div>';
   API.get('/scenes/market' + qs).then(d => {
+    if (window._currentView !== 'scene-market:official') return;  // stale guard
     _sceneMarketScenes = d.scenes || [];
     _sceneMarketTotal = d.total || 0;
     // 首次渲染完整页面，后续只刷新网格
@@ -170,6 +176,8 @@ function _loadSceneMarketList() {
       _renderSceneMarketPage();
     }
   }).catch(e => {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'scene-market:official') return;  // stale guard
     el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + (e.message||'') + '</div>';
   });
 }
@@ -210,7 +218,7 @@ function _renderOfficialSceneGrid() {
     <button class="bt bt-o bt-s${prevDisabled}" ${prevDisabled ? 'disabled' : ''} onclick="_sceneMarketPage=${Math.max(1,_sceneMarketPage-1)};_loadSceneMarketList()">‹</button>
     <span style="font-size:12px;color:var(--t2)">${_sceneMarketPage} / ${totalPages} (${_sceneMarketTotal}${I18N.t('skills.items_count_suffix')||'条'})</span>
     <button class="bt bt-o bt-s${nextDisabled}" ${nextDisabled ? 'disabled' : ''} onclick="_sceneMarketPage=${Math.min(totalPages,_sceneMarketPage+1)};_loadSceneMarketList()">›</button>
-    <select onchange="_sceneMarketPageSize=parseInt(this.value);_sceneMarketPage=1;_loadSceneMarketList()" style="padding:4px 8px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);color:var(--t);outline:none">
+    <select onchange="_sceneMarketPageSize=parseInt(this.value);_sceneMarketPage=1;_loadSceneMarketList()" style="padding:4px 8px;border-radius:999px;font-size:11px;background:rgba(255,255,255,.72);color:var(--t);outline:none">
       <option value="20" ${_sceneMarketPageSize===20?'selected':''}>20${I18N.t('skills.per_page_suffix')||'/页'}</option>
       <option value="50" ${_sceneMarketPageSize===50?'selected':''}>50${I18N.t('skills.per_page_suffix')||'/页'}</option>
       <option value="100" ${_sceneMarketPageSize===100?'selected':''}>100${I18N.t('skills.per_page_suffix')||'/页'}</option>
@@ -249,6 +257,7 @@ function _loadCustomScenes(scope) {
   })();
 
   Promise.all([loadScenes, loadCats]).then(([d, catData]) => {
+    if (window._currentView !== 'scene-market:' + scope) return;  // stale guard
     _sceneMarketScenes = d.scenes || [];
     _sceneMarketTotal = d.total || 0;
     _sceneMarketCats = catData.categories || _sceneMarketCats;
@@ -264,6 +273,8 @@ function _loadCustomScenes(scope) {
       _renderCustomSceneGrid(scope);
     }
   }).catch(e => {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'scene-market:' + scope) return;  // stale guard
     const listEl = document.getElementById('customSceneList');
     if (listEl) {
       listEl.classList.remove('loading');
@@ -284,7 +295,7 @@ function _renderCustomSceneList(scope) {
     <input id="sceneMarketSearch" placeholder="${I18N.t('skills.search_placeholder')||'搜索场景名称或描述'}" value="${_sceneMarketQ}" onkeyup="if(event.key==='Enter'){_sceneMarketQ=this.value;_sceneMarketPage=1;_loadCustomScenes('${scope}')}" style="">
     <button class="bt bt-o bt-s" onclick="_sceneMarketQ=document.getElementById('sceneMarketSearch').value;_sceneMarketPage=1;_loadCustomScenes('${scope}')">🔍 ${I18N.t('skills.query')||'查询'}</button>
     <button class="bt ${_sceneMarketSort==='latest'?'bt-tg':'bt-o'} bt-s" id="sort-latest" onclick="_sceneMarketSort='latest';_sceneMarketPage=1;_loadCustomScenes('${scope}')">${I18N.t('skills.sort_latest')||'最新'}</button>
-    <button class="bt bt-p bt-s" onclick="_enterSceneEditor('create','${scope}')" style="color:#fff;background:var(--g);border-color:var(--g)">＋ ${I18N.t('skills.create_scene')||'创建场景'}</button>
+    <button class="bt bt-p bt-s" onclick="_enterSceneEditor('create','${scope}')" style="color:#fff;background:var(--g);border:none;border-radius:999px">＋ ${I18N.t('skills.create_scene')||'创建场景'}</button>
   </div>`;
 
   // 分类 tab
@@ -344,7 +355,7 @@ function _renderCustomSceneGrid(scope) {
     <button class="bt bt-o bt-s${prevDisabled}" ${prevDisabled ? 'disabled' : ''} onclick="_sceneMarketPage=${Math.max(1,_sceneMarketPage-1)};_loadCustomScenes('${scope}')">‹</button>
     <span style="font-size:12px;color:var(--t2)">${_sceneMarketPage} / ${totalPages} (${_sceneMarketTotal}${I18N.t('skills.items_count_suffix')||'条'})</span>
     <button class="bt bt-o bt-s${nextDisabled}" ${nextDisabled ? 'disabled' : ''} onclick="_sceneMarketPage=${Math.min(totalPages,_sceneMarketPage+1)};_loadCustomScenes('${scope}')">›</button>
-    <select onchange="_sceneMarketPageSize=parseInt(this.value);_sceneMarketPage=1;_loadCustomScenes('${scope}')" style="padding:4px 8px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);color:var(--t);outline:none">
+    <select onchange="_sceneMarketPageSize=parseInt(this.value);_sceneMarketPage=1;_loadCustomScenes('${scope}')" style="padding:4px 8px;border-radius:999px;font-size:11px;background:rgba(255,255,255,.72);color:var(--t);outline:none">
       <option value="20" ${_sceneMarketPageSize===20?'selected':''}>20${I18N.t('skills.per_page_suffix')||'/页'}</option>
       <option value="50" ${_sceneMarketPageSize===50?'selected':''}>50${I18N.t('skills.per_page_suffix')||'/页'}</option>
       <option value="100" ${_sceneMarketPageSize===100?'selected':''}>100${I18N.t('skills.per_page_suffix')||'/页'}</option>
@@ -416,7 +427,7 @@ function _renderSceneMarketPage() {
     <button class="bt bt-o bt-s${prevDisabled}" ${prevDisabled ? 'disabled' : ''} onclick="_sceneMarketPage=${Math.max(1,_sceneMarketPage-1)};_loadSceneMarketList()">‹</button>
     <span style="font-size:12px;color:var(--t2)">${_sceneMarketPage} / ${totalPages} (${_sceneMarketTotal}${I18N.t('skills.items_count_suffix')||'条'})</span>
     <button class="bt bt-o bt-s${nextDisabled}" ${nextDisabled ? 'disabled' : ''} onclick="_sceneMarketPage=${Math.min(totalPages,_sceneMarketPage+1)};_loadSceneMarketList()">›</button>
-    <select onchange="_sceneMarketPageSize=parseInt(this.value);_sceneMarketPage=1;_loadSceneMarketList()" style="padding:4px 8px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);color:var(--t);outline:none">
+    <select onchange="_sceneMarketPageSize=parseInt(this.value);_sceneMarketPage=1;_loadSceneMarketList()" style="padding:4px 8px;border-radius:999px;font-size:11px;background:rgba(255,255,255,.72);color:var(--t);outline:none">
       <option value="20" ${_sceneMarketPageSize===20?'selected':''}>20${I18N.t('skills.per_page_suffix')||'/页'}</option>
       <option value="50" ${_sceneMarketPageSize===50?'selected':''}>50${I18N.t('skills.per_page_suffix')||'/页'}</option>
       <option value="100" ${_sceneMarketPageSize===100?'selected':''}>100${I18N.t('skills.per_page_suffix')||'/页'}</option>
@@ -499,9 +510,9 @@ function _renderSceneCard(s) {
         ${btns}
       </div>
     </div>
-    ${scope!=='official' ? `<div class="scn-card-overlay" onclick="event.stopPropagation()" style="position:absolute;top:10px;right:10px;display:none;flex-direction:row;gap:1px;background:rgba(255,255,255,0.8);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-radius:12px;padding:3px;box-shadow:0 2px 12px rgba(0,0,0,0.08),inset 0 0 0 0.5px rgba(0,0,0,0.04);z-index:10">
-      <button onclick="event.stopPropagation();_editScene(${s.id})" title="${I18N.t('skills.edit_scene')||'编辑'}" style="padding:6px 10px;font-size:14px;border:none;background:transparent;color:#1d1d1f;cursor:pointer;border-radius:8px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,0.06)'" onmouseout="this.style.background='transparent'">✎</button>
-      <button onclick="event.stopPropagation();_deleteScene(${s.id})" title="${I18N.t('skills.delete_scene')||'删除'}" style="padding:6px 10px;font-size:14px;border:none;background:transparent;color:#ff3b30;cursor:pointer;border-radius:8px;transition:background .15s" onmouseover="this.style.background='rgba(255,59,48,0.08)'" onmouseout="this.style.background='transparent'">🗑</button>
+    ${scope!=='official' ? `<div class="scn-card-overlay" onclick="event.stopPropagation()" style="position:absolute;top:10px;right:10px;display:none;flex-direction:row;gap:1px;background:rgba(255,255,255,0.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-radius:14px;padding:3px;box-shadow:0 1px 3px rgba(0,0,0,.04);z-index:10">
+      <button onclick="event.stopPropagation();_editScene(${s.id})" title="${I18N.t('skills.edit_scene')||'编辑'}" style="padding:6px 10px;font-size:14px;border:none;background:transparent;color:#1d1d1f;cursor:pointer;border-radius:999px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,0.06)'" onmouseout="this.style.background='transparent'">✎</button>
+      <button onclick="event.stopPropagation();_deleteScene(${s.id})" title="${I18N.t('skills.delete_scene')||'删除'}" style="padding:6px 10px;font-size:14px;border:none;background:transparent;color:#ff3b30;cursor:pointer;border-radius:999px;transition:background .15s" onmouseover="this.style.background='rgba(255,59,48,0.08)'" onmouseout="this.style.background='transparent'">🗑</button>
     </div>` : ''}
   </div>`;
 }
@@ -515,11 +526,11 @@ function _showCardMenu(sceneId, el) {
   var rect = el.getBoundingClientRect();
   var menu = document.createElement('div');
   menu.id = 'cardMenu';
-  menu.style.cssText = 'position:fixed;top:' + (rect.bottom + 4) + 'px;left:' + rect.right + 'px;transform:translateX(-100%);background:rgba(255,255,255,0.98);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(0,0,0,0.08);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.12);z-index:9999;overflow:hidden;min-width:120px';
+  menu.style.cssText = 'position:fixed;top:' + (rect.bottom + 4) + 'px;left:' + rect.right + 'px;transform:translateX(-100%);background:rgba(255,255,255,0.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-radius:18px;box-shadow:0 8px 30px rgba(0,0,0,.12);z-index:9999;overflow:hidden;min-width:120px';
   
   menu.innerHTML = 
-    '<div onclick="_editScene(' + sceneId + ');document.getElementById(\'cardMenu\').remove()" style="padding:10px 16px;cursor:pointer;font-size:13px;color:#1d1d1f;border-bottom:1px solid rgba(0,0,0,0.04)" onmouseover="this.style.background=\'rgba(0,0,0,0.04)\'" onmouseout="this.style.background=\'transparent\'">' + (I18N.t('skills.edit_scene')||'编辑') + '</div>' +
-    '<div onclick="_deleteScene(' + sceneId + ');document.getElementById(\'cardMenu\').remove()" style="padding:10px 16px;cursor:pointer;font-size:13px;color:#dc2828" onmouseover="this.style.background=\'rgba(0,0,0,0.04)\'" onmouseout="this.style.background=\'transparent\'">' + (I18N.t('skills.delete_scene')||'删除') + '</div>';
+    '<div onclick="_editScene(' + sceneId + ');document.getElementById(\'cardMenu\').remove()" style="padding:10px 16px;cursor:pointer;font-size:13px;color:#1d1d1f" onmouseover="this.style.background=\'rgba(0,0,0,0.04)\'" onmouseout="this.style.background=\'transparent\'">' + (I18N.t('skills.edit_scene')||'编辑') + '</div>' +
+    '<div onclick="_deleteScene(' + sceneId + ');document.getElementById(\'cardMenu\').remove()" style="padding:10px 16px;cursor:pointer;font-size:13px;color:#ff3b30" onmouseover="this.style.background=\'rgba(0,0,0,0.04)\'" onmouseout="this.style.background=\'transparent\'">' + (I18N.t('skills.delete_scene')||'删除') + '</div>';
   
   document.body.appendChild(menu);
   
@@ -570,8 +581,8 @@ function _applyScene(sceneId) {
 function _showApplyConfirm(sceneId, owner, repoName, sceneName) {
   var modal = document.createElement('div');
   modal.id = 'applyConfirmModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px)';
-  modal.innerHTML = '<div class="cd" style="width:400px;padding:24px;border-radius:14px">' +
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
+  modal.innerHTML = '<div class="cd" style="width:400px;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
     '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:14px">' +
       '<span style="font-size:22px;flex-shrink:0">⚠️</span>' +
       '<div>' +
@@ -612,8 +623,8 @@ function _doApplyScene(sceneId, owner, repoName) {
 function _showSceneNameConflict(message, fullName) {
   var modal = document.createElement('div');
   modal.id = 'sceneNameConflictModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px)';
-  modal.innerHTML = '<div class="cd" style="width:400px;padding:24px;border-radius:14px">' +
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
+  modal.innerHTML = '<div class="cd" style="width:400px;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
     '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:14px">' +
       '<span style="font-size:22px;flex-shrink:0">⚠️</span>' +
       '<div>' +
@@ -657,7 +668,7 @@ function _experienceScene(sceneId) {
 function _showExperienceConfirm(sceneId, fullName, sceneName, sceneApplied) {
   var modal = document.createElement('div');
   modal.id = 'expConfirmModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px)';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
   var title, desc;
   if (sceneApplied) {
     title = I18N.t('skills.exp_confirm_overwrite_title')||'确认覆盖场景配置';
@@ -668,7 +679,7 @@ function _showExperienceConfirm(sceneId, fullName, sceneName, sceneApplied) {
     desc = (I18N.t('skills.exp_confirm_exists_desc')||'项目') + ' ' + fullName + ' ' +
            (I18N.t('skills.exp_confirm_exists_warning')||'已存在，体验将在此项目上应用场景配置。');
   }
-  modal.innerHTML = '<div class="cd" style="width:420px;padding:24px;border-radius:14px">' +
+  modal.innerHTML = '<div class="cd" style="width:420px;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
     '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:14px">' +
       '<span style="font-size:22px;flex-shrink:0">⚠️</span>' +
       '<div>' +
@@ -692,8 +703,8 @@ function _showExperienceConfirm(sceneId, fullName, sceneName, sceneApplied) {
 function _doExperienceScene(sceneId) {
   var modal = document.createElement('div');
   modal.id = 'expSceneModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px)';
-  modal.innerHTML = '<div class="cd" style="width:440px;padding:24px;border-radius:14px">' +
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
+  modal.innerHTML = '<div class="cd" style="width:440px;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
     '<h3 style="font-size:15px;font-weight:600;margin-bottom:14px">' + (I18N.t('skills.experience')||'体验') + '</h3>' +
     '<div id="expProgress" style="margin-top:6px"></div>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">' +
@@ -715,8 +726,8 @@ function _doExperienceScene(sceneId) {
   function setProgress(pct, text) {
     progressEl.innerHTML =
       '<div style="font-size:12px;color:var(--t2);margin-bottom:6px">' + text + '</div>' +
-      '<div style="height:6px;background:var(--bg);border-radius:3px;overflow:hidden">' +
-        '<div style="height:100%;width:' + pct + '%;background:var(--a);border-radius:3px;transition:width .4s ease"></div>' +
+      '<div style="height:6px;background:rgba(0,0,0,.05);border-radius:999px;overflow:hidden">' +
+        '<div style="height:100%;width:' + pct + '%;background:var(--a);border-radius:999px;transition:width .4s ease"></div>' +
       '</div>' +
       '<div style="text-align:right;font-size:10px;color:var(--t3);margin-top:3px">' + pct + '%</div>';
   }
@@ -810,23 +821,23 @@ function _renderSceneDetailPage(s) {
   let html = `<button class="bt bt-o bt-s" onclick="app.nav('scene-market')" style="margin-bottom:16px">← ${I18N.t('skills.back_to_scene_market')||'返回场景市场'}</button>`;
 
   // 头部卡片：图标 + 标题 + 描述 + 元数据 + 操作按钮
-  html += `<div class="cd" style="padding:28px 32px;margin-bottom:20px;border-radius:20px">
+  html += `<div class="cd" style="padding:28px 32px;margin-bottom:20px;border-radius:18px;background:rgba(255,255,255,.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 1px 3px rgba(0,0,0,.04)">
     <div style="display:flex;align-items:flex-start;gap:20px;margin-bottom:20px">
-      <div class="scn-ic ${catBg}" style="width:80px;height:80px;border-radius:20px;font-size:36px">${iconHtml}</div>
+      <div class="scn-ic ${catBg}" style="width:80px;height:80px;border-radius:18px;font-size:36px">${iconHtml}</div>
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
           <h2 style="font-size:22px;font-weight:700;letter-spacing:-.02em">${s.display_name || s.name}</h2>
-          ${s.name && s.name !== (s.display_name || s.name) ? `<span style="font-size:11px;color:var(--t3);background:var(--bg);padding:3px 10px;border-radius:8px;font-weight:400">${s.name}</span>` : ''}
+          ${s.name && s.name !== (s.display_name || s.name) ? `<span style="font-size:11px;color:#86868b;background:rgba(0,0,0,.04);padding:3px 10px;border-radius:999px;font-weight:400">${s.name}</span>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;flex-wrap:wrap">
           ${s.category_name ? `<span class="tg tg-d" style="font-size:10px">${s.category_name}</span>` : ''}
-          ${isOfficial && s.is_featured ? `<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:10px">🌟 ${I18N.t('skills.featured_tag')||'精选'}</span>` : ''}
+          ${isOfficial && s.is_featured ? `<span class="tg" style="background:rgba(184,155,106,.12);color:#B89B6A;font-size:10px">🌟 ${I18N.t('skills.featured_tag')||'精选'}</span>` : ''}
           ${s.version ? `<span class="tg tg-d" style="font-size:9px">v${s.version}</span>` : ''}
         </div>
         <div style="font-size:13px;color:var(--t2);line-height:1.6">${s.market_description || s.description || ''}</div>
       </div>
     </div>
-    <div style="display:flex;align-items:center;gap:16px;padding-top:16px;border-top:1px solid var(--b)">
+    <div style="display:flex;align-items:center;gap:16px;padding-top:16px;border-top:1px solid rgba(0,0,0,.04)">
       ${isOfficial ? `<span style="cursor:pointer;font-size:13px;color:var(--t2);display:flex;align-items:center;gap:4px" onclick="_toggleSceneLike(${s.id},this)">${likeIcon} <span data-scene-like="${s.id}">${s.like_count||0}</span></span>
       <span style="font-size:11px;color:var(--t3)">${s.repo_count||0} ${I18N.t('skills.repos_in_use')||'仓库在用'}</span>` : ''}
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
@@ -841,19 +852,19 @@ function _renderSceneDetailPage(s) {
   // 执行流程图
   if (skills.length > 0) {
     html += `<style>
-      .det-card-wrap{background:#fff;border:1px solid #e8e8ed;border-radius:18px;padding:24px;margin-bottom:16px}
+      .det-card-wrap{background:rgba(255,255,255,.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-radius:18px;padding:24px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
       .det-grid{display:flex;gap:12px;overflow-x:auto;min-height:280px;scrollbar-width:none}
       .det-grid::-webkit-scrollbar{display:none}
-      .det-card{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:#f5f5f7;border:1px solid #e8e8ed;border-radius:14px;padding:16px;display:flex;flex-direction:column;transition:all .2s;position:relative}
-      .det-card:hover{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
+      .det-card{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:rgba(255,255,255,.6);border-radius:18px;padding:16px;display:flex;flex-direction:column;transition:all .2s;position:relative;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+      .det-card:hover{background:rgba(255,255,255,.85);box-shadow:0 2px 8px rgba(0,0,0,.06);transform:translateY(-1px)}
       .det-card-top{width:36px;height:4px;border-radius:2px;margin-bottom:12px}
       .det-card-desc{font-size:10px;color:#86868b;line-height:1.5;margin-bottom:10px;flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
-      .det-card-sep{height:1px;background:#e8e8ed;margin:8px 0}
-      .det-card-box{background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center}
+      .det-card-sep{height:1px;background:rgba(0,0,0,.04);margin:8px 0}
+      .det-card-box{background:rgba(255,255,255,.6);border-radius:12px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center}
       .det-card-label{font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px}
       .det-card-val{font-size:11px;font-weight:500;color:#1d1d1f}
-      .det-card-eng{background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center}
-      .det-arrow{font-size:18px;color:#0071e3;font-weight:700;align-self:center;margin:0 4px;flex-shrink:0}
+      .det-card-eng{background:rgba(255,255,255,.6);border-radius:12px;padding:8px 10px;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center}
+      .det-arrow{font-size:18px;color:#7A92B0;font-weight:700;align-self:center;margin:0 4px;flex-shrink:0}
     </style>`;
     html += `<div class="cd-h" style="margin-bottom:12px"><h2 style="font-size:16px;font-weight:600">${I18N.t('skills.execution_flow')||'执行流程'}</h2></div>`;
     html += `<div class="det-card-wrap"><div class="det-grid">`;
@@ -868,7 +879,7 @@ function _renderSceneDetailPage(s) {
       html += `<div class="det-card"${skDeleted ? ' style="border-color:var(--r);opacity:.7"' : ''}>
         <div class="det-card-top" style="background:${skDeleted ? 'var(--r)' : bgColor}"></div>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="width:22px;height:22px;border-radius:6px;background:${skDeleted ? 'var(--r)22' : bgColor+'22'};color:${skDeleted ? 'var(--r)' : bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
+          <span style="width:22px;height:22px;border-radius:999px;background:${skDeleted ? 'var(--r)22' : bgColor+'22'};color:${skDeleted ? 'var(--r)' : bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
           <span style="font-size:14px;font-weight:600;color:#1d1d1f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${skIcon} ${skLabel}</span>
           ${skDeleted ? '<span style="font-size:9px;color:var(--r);font-weight:600;flex-shrink:0">⚠ 已删除</span>' : ''}
         </div>
@@ -876,7 +887,7 @@ function _renderSceneDetailPage(s) {
         <div class="det-card-sep"></div>
         <div class="det-card-box">
           <div class="det-card-label">${I18N.t('dashboard.label_skill')||'技能'}</div>
-          ${skDeleted ? `<span class="det-card-val" style="color:var(--r)">${skName}</span>` : `<span class="det-card-val" style="color:#0071e3;cursor:pointer" onclick="app.nav('skill','${sk.skill_id||''}')">${skName}</span>`}
+          ${skDeleted ? `<span class="det-card-val" style="color:var(--r)">${skName}</span>` : `<span class="det-card-val" style="color:#7A92B0;cursor:pointer" onclick="app.nav('skill','${sk.skill_id||''}')">${skName}</span>`}
         </div>
         <div class="det-card-eng">
           <div class="det-card-label">${I18N.t('dashboard.label_engine')||'引擎'}</div>
@@ -894,9 +905,9 @@ function _renderSceneDetailPage(s) {
   if (skills.length > 0) {
     html += `<style>
       .det-suite-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
-      .det-suite-card{background:#f5f5f7;border:1px solid #e8e8ed;border-radius:14px;padding:16px;display:flex;align-items:flex-start;gap:12px;transition:all .2s;cursor:pointer}
-      .det-suite-card:hover{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
-      .det-suite-num{width:28px;height:28px;border-radius:8px;color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0}
+      .det-suite-card{background:rgba(255,255,255,.6);border-radius:18px;padding:16px;display:flex;align-items:flex-start;gap:12px;transition:all .2s;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+      .det-suite-card:hover{background:rgba(255,255,255,.85);box-shadow:0 2px 8px rgba(0,0,0,.06);transform:translateY(-1px)}
+      .det-suite-num{width:28px;height:28px;border-radius:999px;color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0}
       .det-suite-body{flex:1;min-width:0}
       .det-suite-name{font-size:14px;font-weight:600;color:#1d1d1f;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       .det-suite-role{font-size:11px;color:#86868b;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -937,8 +948,8 @@ function _renderSceneDetailPage(s) {
     const isRemote = tplSource === 'git' && tplRepo;
     const tplUrl = isRemote ? `https://gitcode.com/${tplRepo}` : '';
     const sourceBadge = isRemote
-      ? `<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:#34c75914;color:#34c759">${I18N.t('skills.gitcode_remote')||'GitCode 远程'}</span>`
-      : `<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--bg);color:var(--t3)">${I18N.t('skills.local_template')||'本地模板'}</span>`;
+      ? `<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(52,199,89,.12);color:#34c759">${I18N.t('skills.gitcode_remote')||'GitCode 远程'}</span>`
+      : `<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(0,0,0,.04);color:#86868b">${I18N.t('skills.local_template')||'本地模板'}</span>`;
     html += `<div class="cd-h" style="margin:24px 0 12px"><h2 style="font-size:16px;font-weight:600">${I18N.t('skills.sample_template')||'样例项目模板'}</h2></div>`;
     html += `<div class="det-card-wrap"${isRemote ? ` style="cursor:pointer" onclick="window.open('${tplUrl}','_blank')"` : ''}>
       <div style="display:flex;align-items:center;gap:16px;padding:8px 0">
@@ -947,12 +958,12 @@ function _renderSceneDetailPage(s) {
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">
             <span style="font-size:15px;font-weight:600;color:#1d1d1f">${tplName}</span>
             ${sourceBadge}
-            ${tplLang ? `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;background:#0071e314;color:#0071e3">${tplLang}</span>` : ''}
+            ${tplLang ? `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(122,146,176,.14);color:#7A92B0">${tplLang}</span>` : ''}
             ${tplStars ? `<span style="font-size:11px;color:#86868b">⭐ ${tplStars}</span>` : ''}
           </div>
           <div style="font-size:12px;color:#86868b;line-height:1.5">${tplDesc || (I18N.t('skills.template_desc')||'点击体验可基于此模板创建项目')}</div>
         </div>
-        ${isRemote ? `<span style="font-size:12px;color:#0071e3;font-weight:500;flex-shrink:0;padding:6px 14px;border:1px solid #0071e3;border-radius:8px;transition:all .15s" onmouseover="this.style.background='#0071e3';this.style.color='#fff'" onmouseout="this.style.background='';this.style.color='#0071e3'">${I18N.t('skills.view_project')||'查看项目'} ↗</span>` : ''}
+        ${isRemote ? `<span style="font-size:12px;color:#0071e3;font-weight:500;flex-shrink:0;padding:6px 16px;border-radius:999px;transition:all .15s" onmouseover="this.style.background='rgba(122,146,176,.12)';this.style.color='#7A92B0'" onmouseout="this.style.background='';this.style.color='#0071e3'">${I18N.t('skills.view_project')||'查看项目'} ↗</span>` : ''}
       </div>
     </div>`;
   }
@@ -992,15 +1003,15 @@ function _deleteScene(sceneId) {
   modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
 
   modal.innerHTML = `
-    <div style="background:rgba(255,255,255,0.98);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.15);width:360px;max-width:90vw;overflow:hidden">
+    <div style="background:rgba(255,255,255,0.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-radius:18px;box-shadow:0 8px 30px rgba(0,0,0,.12);width:360px;max-width:90vw;overflow:hidden">
       <div style="padding:24px 24px 20px;text-align:center">
-        <div style="width:48px;height:48px;border-radius:50%;background:rgba(255,59,48,0.1);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:22px">🗑</div>
+        <div style="width:48px;height:48px;border-radius:50%;background:rgba(255,59,48,0.08);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:22px">🗑</div>
         <h3 style="font-size:16px;font-weight:600;color:#1d1d1f;margin-bottom:6px">${I18N.t('skills.confirm_delete_scene')||'确认删除此场景？'}</h3>
         <div style="font-size:12px;color:#86868b">${I18N.t('skills.delete_scene_tip')||'删除后不可恢复，场景数据将被永久移除'}</div>
       </div>
       <div style="padding:0 24px 20px;display:flex;gap:10px">
-        <button onclick="document.getElementById('deleteSceneModal').remove()" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">${I18N.t('skills.cancel_save')||'取消'}</button>
-        <button id="deleteConfirmBtn" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#ff3b30;color:#fff;cursor:pointer">${I18N.t('skills.confirm_delete')||'确认删除'}</button>
+        <button onclick="document.getElementById('deleteSceneModal').remove()" style="flex:1;padding:10px 16px;font-size:13px;border-radius:999px;background:rgba(0,0,0,.05);color:#1d1d1f;cursor:pointer">${I18N.t('skills.cancel_save')||'取消'}</button>
+        <button id="deleteConfirmBtn" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:999px;background:#ff3b30;color:#fff;cursor:pointer">${I18N.t('skills.confirm_delete')||'确认删除'}</button>
       </div>
     </div>
   `;
@@ -1117,17 +1128,17 @@ function _renderSceneEditor(prefillSceneName, prefillName, prefillDesc, prefillC
   let html = `<button class="bt bt-o bt-s" onclick="app.nav('scene-market')" style="margin-bottom:12px">← ${I18N.t('skills.back_to_scene_market')||'返回场景市场'}</button>`;
 
   // 顶部：图标 → 名称 → 描述 → 分类（垂直布局，苹果风格）
-  html += `<div class="cd" style="padding:24px;margin-bottom:16px">
+  html += `<div class="cd" style="padding:24px;margin-bottom:16px;border-radius:18px;background:rgba(255,255,255,.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 1px 3px rgba(0,0,0,.04)">
     <div style="margin-bottom:16px">
-      <div style="font-size:12px;color:#86868b;margin-bottom:8px;display:flex;align-items:center;gap:6px">${I18N.t('skills.scene_icon')||'场景图标'}<span onclick="var b=document.getElementById('iconTipBubble');if(b.style.display==='none'){b.style.display='block';setTimeout(function(){document.addEventListener('click',function close(){b.style.display='none';document.removeEventListener('click',close)})},0)}else{b.style.display='none'}" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#e8e8ed;color:#86868b;font-size:11px;cursor:pointer;position:relative">ⓘ<span id="iconTipBubble" style="display:none;position:absolute;bottom:24px;left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;font-size:11px;padding:8px 12px;border-radius:8px;white-space:nowrap;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,.15)">${I18N.t('skills.icon_format_tip')||'支持 jpg/png/webp/gif/svg，≤2MB'}<span style="position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:4px solid #1d1d1f"></span></span></span></div>
-      <div id="editorIconPreview" style="width:72px;height:72px;border-radius:16px;background:#f5f5f7;display:flex;align-items:center;justify-content:center;font-size:32px;cursor:pointer;border:1px solid #e8e8ed" onclick="document.getElementById('editorIconInput').click()">
-        ${_sceneEditorIconUrl ? `<img src="${_sceneEditorIconUrl}" style="width:100%;height:100%;border-radius:16px;object-fit:cover" onerror="this.style.display='none';this.parentElement.innerText='📷'">` : '📷'}
+      <div style="font-size:12px;color:#86868b;margin-bottom:8px;display:flex;align-items:center;gap:6px">${I18N.t('skills.scene_icon')||'场景图标'}<span onclick="var b=document.getElementById('iconTipBubble');if(b.style.display==='none'){b.style.display='block';setTimeout(function(){document.addEventListener('click',function close(){b.style.display='none';document.removeEventListener('click',close)})},0)}else{b.style.display='none'}" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(0,0,0,.05);color:#86868b;font-size:11px;cursor:pointer;position:relative">ⓘ<span id="iconTipBubble" style="display:none;position:absolute;bottom:24px;left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;font-size:11px;padding:8px 12px;border-radius:8px;white-space:nowrap;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,.15)">${I18N.t('skills.icon_format_tip')||'支持 jpg/png/webp/gif/svg，≤2MB'}<span style="position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:4px solid #1d1d1f"></span></span></span></div>
+      <div id="editorIconPreview" style="width:72px;height:72px;border-radius:18px;background:#f5f5f7;display:flex;align-items:center;justify-content:center;font-size:32px;cursor:pointer" onclick="document.getElementById('editorIconInput').click()">
+        ${_sceneEditorIconUrl ? `<img src="${_sceneEditorIconUrl}" style="width:100%;height:100%;border-radius:18px;object-fit:cover" onerror="this.style.display='none';this.parentElement.innerText='📷'">` : '📷'}
       </div>
       <input type="file" id="editorIconInput" accept="image/jpeg,image/png,image/webp,image/gif,image/svg+xml" style="display:none" onchange="_uploadSceneIcon(this)">
     </div>
     <div style="margin-bottom:16px">
       <div style="font-size:12px;color:#86868b;margin-bottom:6px">${I18N.t('skills.scene_id')||'场景标识'}</div>
-      <input id="editorSceneId" type="text" maxlength="40" placeholder="${I18N.t('skills.scene_id_placeholder')||'英文短横线，如 iac-dev'}" value="${(prefillSceneName||'').replace(/"/g,'&quot;')}" style="width:100%;padding:10px 14px;border:1px solid #e8e8ed;border-radius:10px;font-size:14px;background:#f5f5f7;color:#1d1d1f;outline:none;transition:border-color .15s" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='#e8e8ed'" oninput="this.value=this.value.replace(/[^a-z0-9-]/g,'').toLowerCase();_checkSceneNameDebounced()">
+      <input id="editorSceneId" type="text" maxlength="40" placeholder="${I18N.t('skills.scene_id_placeholder')||'英文短横线，如 iac-dev'}" value="${(prefillSceneName||'').replace(/"/g,'&quot;')}" style="width:100%;padding:10px 14px;border-radius:12px;font-size:14px;background:#f5f5f7;color:#1d1d1f;outline:none;transition:background .15s" onfocus="this.style.background='#ebebed'" onblur="this.style.background='#f5f5f7'" oninput="this.value=this.value.replace(/[^a-z0-9-]/g,'').toLowerCase();_checkSceneNameDebounced()">
       <div id="editorSceneIdHint" style="font-size:11px;color:#86868b;margin-top:4px"></div>
     </div>
     <div style="margin-bottom:16px">
@@ -1135,7 +1146,7 @@ function _renderSceneEditor(prefillSceneName, prefillName, prefillDesc, prefillC
         <span>${I18N.t('skills.scene_name')||'场景名称'}</span>
         <span id="editorNameCount" style="font-size:11px;color:#86868b">0/40</span>
       </div>
-      <input id="editorName" type="text" maxlength="40" placeholder="${I18N.t('skills.scene_name_placeholder')||'请输入场景名称'}" value="${(prefillName||'').replace(/"/g,'&quot;')}" style="width:100%;padding:10px 14px;border:1px solid #e8e8ed;border-radius:10px;font-size:14px;background:#f5f5f7;color:#1d1d1f;outline:none;transition:border-color .15s" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='#e8e8ed'" oninput="document.getElementById('editorNameCount').textContent=this.value.length+'/40'">
+      <input id="editorName" type="text" maxlength="40" placeholder="${I18N.t('skills.scene_name_placeholder')||'请输入场景名称'}" value="${(prefillName||'').replace(/"/g,'&quot;')}" style="width:100%;padding:10px 14px;border-radius:12px;font-size:14px;background:#f5f5f7;color:#1d1d1f;outline:none;transition:border-color .15s" onfocus="this.style.background='#ebebed'" onblur="this.style.background='#f5f5f7'" oninput="document.getElementById('editorNameCount').textContent=this.value.length+'/40'">
       <div id="editorNameHint" style="font-size:11px;color:#86868b;margin-top:4px"></div>
     </div>
     <div style="margin-bottom:16px">
@@ -1143,11 +1154,11 @@ function _renderSceneEditor(prefillSceneName, prefillName, prefillDesc, prefillC
         <span>${I18N.t('skills.scene_desc')||'场景描述'}</span>
         <span id="editorDescCount" style="font-size:11px;color:#86868b">0/200</span>
       </div>
-      <textarea id="editorDesc" maxlength="200" placeholder="${I18N.t('skills.scene_desc_placeholder')||'请输入场景描述'}" rows="3" style="width:100%;padding:10px 14px;border:1px solid #e8e8ed;border-radius:10px;font-size:14px;background:#f5f5f7;color:#1d1d1f;outline:none;resize:vertical;transition:border-color .15s" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='#e8e8ed'" oninput="document.getElementById('editorDescCount').textContent=this.value.length+'/200'">${(prefillDesc||'').replace(/</g,'&lt;')}</textarea>
+      <textarea id="editorDesc" maxlength="200" placeholder="${I18N.t('skills.scene_desc_placeholder')||'请输入场景描述'}" rows="3" style="width:100%;padding:10px 14px;border-radius:12px;font-size:14px;background:#f5f5f7;color:#1d1d1f;outline:none;resize:vertical;transition:background .15s" onfocus="this.style.background='#ebebed'" onblur="this.style.background='#f5f5f7'" oninput="document.getElementById('editorDescCount').textContent=this.value.length+'/200'">${(prefillDesc||'').replace(/</g,'&lt;')}</textarea>
     </div>
     <div>
       <div style="font-size:12px;color:#86868b;margin-bottom:6px">${I18N.t('skills.scene_category')||'场景分类'}</div>
-      <select id="editorCategory" style="width:100%;padding:10px 14px;border:1px solid #e8e8ed;border-radius:10px;font-size:14px;background:#f5f5f7;color:#1d1d1f;outline:none">
+      <select id="editorCategory" style="width:100%;padding:10px 14px;border-radius:12px;font-size:14px;background:#f5f5f7;color:#1d1d1f;outline:none">
         <option value="1">${I18N.t('skills.category_general')||'通用'}</option>
       </select>
     </div>
@@ -1155,23 +1166,23 @@ function _renderSceneEditor(prefillSceneName, prefillName, prefillDesc, prefillC
 
   // 执行流程（det-card 样式，和详情页一致）
   html += `<style>
-    .det-card-wrap{background:#fff;border:1px solid #e8e8ed;border-radius:18px;padding:24px;margin-bottom:16px}
+    .det-card-wrap{background:rgba(255,255,255,.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-radius:18px;padding:24px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
     .det-grid{display:flex;gap:12px;overflow-x:auto;min-height:280px;scrollbar-width:none}
     .det-grid::-webkit-scrollbar{display:none}
-    .det-card{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:#f5f5f7;border:1px solid #e8e8ed;border-radius:14px;padding:16px;display:flex;flex-direction:column;transition:all .2s;position:relative}
-    .det-card:hover{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.08);transform:translateY(-1px)}
+    .det-card{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:rgba(255,255,255,.6);border-radius:18px;padding:16px;display:flex;flex-direction:column;transition:all .2s;position:relative;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+    .det-card:hover{background:rgba(255,255,255,.85);box-shadow:0 2px 8px rgba(0,0,0,.06);transform:translateY(-1px)}
     .det-card.disabled{opacity:0.4}
     .det-card-top{width:36px;height:4px;border-radius:2px;margin-bottom:12px}
     .det-card-desc{font-size:10px;color:#86868b;line-height:1.5;margin-bottom:10px;flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
-    .det-card-sep{height:1px;background:#e8e8ed;margin:8px 0}
-    .det-card-box{background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center}
+    .det-card-sep{height:1px;background:rgba(0,0,0,.04);margin:8px 0}
+    .det-card-box{background:rgba(255,255,255,.6);border-radius:12px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center}
     .det-card-label{font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px}
     .det-card-val{font-size:11px;font-weight:500;color:#1d1d1f}
-    .det-card-eng{background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center}
-    .det-arrow{font-size:18px;color:#0071e3;font-weight:700;align-self:center;margin:0 4px;flex-shrink:0}
+    .det-card-eng{background:rgba(255,255,255,.6);border-radius:12px;padding:8px 10px;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center}
+    .det-arrow{font-size:18px;color:#7A92B0;font-weight:700;align-self:center;margin:0 4px;flex-shrink:0}
     .det-suite-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
-    .det-suite-card{background:#f5f5f7;border:1px solid #e8e8ed;border-radius:14px;padding:16px;display:flex;align-items:flex-start;gap:12px;transition:all .2s}
-    .det-suite-num{width:28px;height:28px;border-radius:8px;color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0}
+    .det-suite-card{background:rgba(255,255,255,.6);border-radius:18px;padding:16px;display:flex;align-items:flex-start;gap:12px;transition:all .2s;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+    .det-suite-num{width:28px;height:28px;border-radius:999px;color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0}
     .det-suite-body{flex:1;min-width:0}
     .det-suite-name{font-size:14px;font-weight:600;color:#1d1d1f;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .det-suite-role{font-size:11px;color:#86868b;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1187,7 +1198,7 @@ function _renderSceneEditor(prefillSceneName, prefillName, prefillDesc, prefillC
     html += `<div class="det-card${node.enabled?'':' disabled'}" data-idx="${i}"${node.skill_deleted ? ' style="border-color:var(--r)"' : ''}>
       <div class="det-card-top" style="background:${node.skill_deleted ? 'var(--r)' : bgColor}"></div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="width:22px;height:22px;border-radius:6px;background:${node.skill_deleted ? 'var(--r)22' : bgColor+'22'};color:${node.skill_deleted ? 'var(--r)' : bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
+        <span style="width:22px;height:22px;border-radius:999px;background:${node.skill_deleted ? 'var(--r)22' : bgColor+'22'};color:${node.skill_deleted ? 'var(--r)' : bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
         <span style="font-size:14px;font-weight:600;color:#1d1d1f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${meta.icon||''} ${meta.label||node.id}</span>
         ${node.skill_deleted ? '<span style="font-size:9px;color:var(--r);font-weight:600;flex-shrink:0">⚠ 技能已删除</span>' : ''}
         ${showToggle ? `<button class="bt bt-o bt-s" style="font-size:9px;padding:2px 8px" onclick="_toggleAgentEnabled(${i})">${node.enabled ? '✕' : '✓'}</button>` : ''}
@@ -1196,7 +1207,7 @@ function _renderSceneEditor(prefillSceneName, prefillName, prefillDesc, prefillC
       <div class="det-card-sep"></div>
       <div class="det-card-box">
         <div class="det-card-label">${I18N.t('dashboard.label_skill')||'技能'}</div>
-        ${node.enabled ? `<div class="ed-skill-tabs" data-idx="${i}" style="display:flex;gap:0;margin-bottom:4px;border-bottom:1px solid var(--b)">
+        ${node.enabled ? `<div class="ed-skill-tabs" data-idx="${i}" style="display:flex;gap:0;margin-bottom:4px;border-bottom:1px solid rgba(0,0,0,.04)">
           <a class="ed-skill-tab-opt ac" data-scope="official" data-idx="${i}" style="flex:1;padding:3px 2px;text-align:center;font-size:9px;font-weight:500;cursor:pointer;border-bottom:2px solid var(--a);color:var(--a);transition:all .15s">${I18N.t('skills.skill_tab_official')||'技能市场'}</a>
           <a class="ed-skill-tab-opt" data-scope="repo" data-idx="${i}" style="flex:1;padding:3px 2px;text-align:center;font-size:9px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;color:var(--t3);transition:all .15s">${I18N.t('skills.skill_tab_repo')||'仓库技能'}</a>
         </div>
@@ -1577,7 +1588,7 @@ function _toggleAgentEnabled(idx) {
         // tab 栏
         var tabBar = document.createElement('div');
         tabBar.className = 'ed-skill-tabs';
-        tabBar.style.cssText = 'display:flex;gap:0;margin-bottom:4px;border-bottom:1px solid var(--b)';
+        tabBar.style.cssText = 'display:flex;gap:0;margin-bottom:4px;border-bottom:1px solid rgba(0,0,0,.04)';
         tabBar.innerHTML =
           '<a class="ed-skill-tab-opt ac" data-scope="official" data-idx="' + idx + '" style="flex:1;padding:3px 2px;text-align:center;font-size:9px;font-weight:500;cursor:pointer;border-bottom:2px solid var(--a);color:var(--a);transition:all .15s">' + (I18N.t('skills.skill_tab_official')||'技能市场') + '</a>' +
           '<a class="ed-skill-tab-opt" data-scope="repo" data-idx="' + idx + '" style="flex:1;padding:3px 2px;text-align:center;font-size:9px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;color:var(--t3);transition:all .15s">' + (I18N.t('skills.skill_tab_repo')||'仓库技能') + '</a>';

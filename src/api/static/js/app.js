@@ -94,19 +94,20 @@ function loadAgentTypes() {
         // 后台刷新后若数据变化，轻量更新侧边栏
         initSidebarRepos();
       } else {
-        renderReposFromData(repos);
+        // Issue #63: 异步回调里调 renderReposFromData 会操作布局 DOM
+        // 如果 nav 已经执行了（_currentView 已设），说明用户已进入某页面，
+        // 不应覆盖——只更新缓存，不渲染
+        if (window._currentView && window._currentView !== '') {
+          initSidebarRepos();
+        } else {
+          renderReposFromData(repos);
+        }
       }
-    }).catch(() => {
+    }).catch(e => {
       if (cachedRepos) return; // 有缓存时静默，避免覆盖已渲染内容
-      console.error("[loadRepos] FAILED");
-      $('sidebar').style.display = 'none';
-      $('tb').style.display = 'none';
-      $('mainView').style.display = 'flex';
-      $('mainView').style.position = 'fixed';
-      $('mainView').style.inset = '0';
-      $('mainView').style.zIndex = '100';
-      const el = $('pageContent');
-      if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + I18N.t('app.repo.load_failed') + '</div></div>';
+      // Issue #63: loadRepos 失败时不隐藏侧边栏、不覆盖 pageContent
+      // 无缓存时侧边栏保持默认状态，用户切 tab 时 nav() 会重新加载页面内容
+      console.error('[loadRepos] FAILED:', e.name, e.message);
     });
   }
 
@@ -190,6 +191,7 @@ function loadAgentTypes() {
     _pushHistory('repos', null);
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     localStorage.setItem('sidebarTab', 'projects');
+    window._currentView = 'repos';
 
     // 叠加轻量 loading 遮罩，不改动当前 DOM 布局
     let ov = document.getElementById('gotoReposOverlay');
@@ -202,6 +204,7 @@ function loadAgentTypes() {
     }
 
     API.get('/repos/member').then(d => {
+      if (window._currentView !== 'repos') return;  // stale guard
       // 数据就绪，一次性切换 UI
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
@@ -214,6 +217,7 @@ function loadAgentTypes() {
       $('pageTitle').textContent = I18N.t('app.current_project');
       renderRepoSelection(d.repos || []);
     }).catch(e => {
+      if (window._currentView !== 'repos') return;  // stale guard
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
       $('tb').style.display = 'none';
@@ -229,16 +233,15 @@ function loadAgentTypes() {
   }
 
   let _refreshTimer = null;
-  let _currentView = '';
   let _currentParam = null;
   let _hiddenSince = 0;
   // 页面从后台回到前台时，若隐藏超过 30 秒才刷新（避免短时间切换标签页频繁刷新）
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'hidden') {
       _hiddenSince = Date.now();
-    } else if (document.visibilityState === 'visible' && _currentView && _hiddenSince) {
+    } else if (document.visibilityState === 'visible' && window._currentView && _hiddenSince) {
       if (Date.now() - _hiddenSince > 60000) {
-        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(_currentView, _currentParam); }, 300);
+        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(window._currentView, window._currentParam); }, 300);
       }
       _hiddenSince = 0;
     }
@@ -264,8 +267,7 @@ function loadAgentTypes() {
       window._skillDetailFrom = (_prev && _prev.view) ? {view: _prev.view, param: _prev.param || null} : null;
     }
 
-    _currentView = view;
-    _currentParam = param;
+    window._currentParam = param;
     _pushHistory(view, param);
 
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
@@ -288,10 +290,26 @@ function loadAgentTypes() {
     pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    // Issue #63: 切 tab 时主动取消旧请求 + 设全局 signal + 停定时轮询
+    if (window._navAbortController) window._navAbortController.abort();
+    window._navAbortController = new AbortController();
+    window._navSignal = window._navAbortController.signal;
+    window._tabSignal = null;  // 重置 tab signal
+    window._currentView = view;
+    // 离开 repos 全屏页时恢复 sidebar/tb/mainView 默认布局
+    if (view !== 'repos') {
+      var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
+      var tb = $('tb'); if (tb) tb.style.display = 'flex';
+      var mv = $('mainView'); if (mv) { mv.style.position = ''; mv.style.inset = ''; mv.style.zIndex = ''; }
+    }
     // 离开任务中心时停止场景识别轮询
     if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
+    // 离开 observability 时停止定时轮询
+    if (view !== 'observability' && typeof stopObsAuto === 'function') stopObsAuto();
+    // 离开 chat 时停止飞书接入轮询
+    if (view !== 'chat' && typeof _stopOnboardPoll === 'function') _stopOnboardPoll();
     // 离开场景中心时清除编辑标志（防止 _dashboardEditing 泄漏导致重新进入时卡在加载中）
-    if (view !== 'dash') window._dashboardEditing = false;
+    window._dashboardEditing = false;
 
     if (repo) {
       repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.fullName || (repo.owner + '/' + repo.name)}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
@@ -307,6 +325,7 @@ function loadAgentTypes() {
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
       ]).then(([dashData, scenesData]) => {
+        if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;
         dashData._scenes = scenesData.scenes || [];
@@ -314,6 +333,8 @@ function loadAgentTypes() {
         dashData._name = repo.name;
         renderDashboard(dashData);
       }).catch(e => {
+        if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+        if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中出错只 toast 不覆盖 UI；非编辑中清 loading 显示错误
         if (window._dashboardEditing) { app.showToast && app.showToast('刷新失败: ' + e.message); return; }
         pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
@@ -322,13 +343,13 @@ function loadAgentTypes() {
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
-      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
-      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'event') {
       title.textContent = I18N.t('app.current_project');
-      API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/events/detail/' + param).then(d => { if (window._currentView !== 'event') return; renderEventDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'event') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
       // 切换回事件详情时恢复活跃对话查询
       if (typeof resumeConvTask === 'function') setTimeout(resumeConvTask, 500);
     } else if (view === 'chat') {
@@ -355,22 +376,22 @@ function loadAgentTypes() {
         window.location.reload();
         return;
       }
-      API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/settings/agent-runtimes').then(d => { if (window._currentView !== 'runtimes') return; renderRuntimes(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'runtimes') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'observability') {
       title.textContent = I18N.t('app.current_project');
       if (typeof renderObservability === 'function') renderObservability();
     } else if (view === 'repos') {
       title.textContent = I18N.t('app.current_project');
-      loadRepos();
+      goToRepos();
     } else if (view === 'skill') {
       title.textContent = I18N.t('app.current_project');
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
-      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(d => { if (window._currentView !== 'skill') return; renderSkillDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'skill') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'skill-sub') {
       // 技能包子技能详情（如 "38/huawei-ecs"）
       title.textContent = I18N.t('app.current_project');
-      API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/skills/package-sub/' + param).then(d => { if (window._currentView !== 'skill-sub') return; renderSkillDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'skill-sub') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'scene-market') {
       title.textContent = I18N.t('app.current_project');
       renderSceneMarket();

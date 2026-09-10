@@ -175,6 +175,20 @@ async def a2a_endpoint(body: A2AHandoffBody, user: dict | None = Depends(get_use
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"gitcode:{repository}") if repository else ""
     log.info(f"A2A: agent={agent_name}, repo={repository}")
+
+    # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
+    if issue_number and repo_key:
+        try:
+            from src.session_manager import db as _ck_db, db_lock as _ck_lock
+            with _ck_lock:
+                _ck_c = _ck_db.cursor()
+                _ck_c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_id=? AND status='cancelled' LIMIT 1",
+                              (repo_key, f"#{issue_number}"))
+                if _ck_c.fetchone():
+                    log.info(f"A2A: rejected — task cancelled, issue=#{issue_number}, agent={agent_name}")
+                    return {"ok": False, "skipped": "task_cancelled"}
+        except Exception as _ck_e:
+            log.warning(f"A2A: cancelled check failed: {_ck_e}")
     seq = 0
 
     # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
@@ -436,7 +450,13 @@ async def a2a_endpoint(body: A2AHandoffBody, user: dict | None = Depends(get_use
 
             try:
                 from src.api.session_store import set_issue_stage
-                _stage = agent_name if agent_name in ("vod", "issue", "coding", "qa", "sre", "done") else "issue"
+                # Issue #51: 最后节点完成后不再自动 done，改为 pending_review 等待开发者审核
+                _expected_next = _pipeline_next.get(_current_stage, "") if _pipeline_next else ""
+                if agent_name == "done" or (_expected_next == "done" and agent_name not in (_stage_order or [])):
+                    _stage = "pending_review"
+                    log.info(f"A2A: last node completed → pending_review issue=#{issue_number} (awaiting user review)")
+                else:
+                    _stage = agent_name if agent_name in ("vod", "issue", "coding", "qa", "sre", "pending_review", "done") else "issue"
                 set_issue_stage(repo_key, f"#{issue_number}", _stage, agent_name, a2a_seq=None)
                 log.info(f"A2A: issue_state updated issue=#{issue_number} stage={_stage} owner={agent_name}")
             except Exception as _e:

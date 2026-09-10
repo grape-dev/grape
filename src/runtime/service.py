@@ -20,6 +20,49 @@ EXEC_MODE_REMOTE = "queue_remote"
 _DEFAULT_MODE = EXEC_MODE_AUTO
 
 
+def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = "") -> bool:
+    """检查 pool_engine_ids 中的引擎是否有任何一个能真正认领该 tag 的任务。
+
+    检查三个维度：在线 + 有 tag 能力（engine_capabilities）+ scope 匹配（repo scope 的 owner_id 对齐 repo_key）。
+    返回 True = 池里有能干的引擎，不应清空 pool_engine_ids。
+    返回 False = 池里全不可达（离线/无 tag/scope 不匹配），应清空 pool_engine_ids 放行。
+    """
+    from src.repo_key import from_repo_key
+    _repo_norm = (from_repo_key(repo_key) or "").strip()
+    for eid in engine_ids:
+        try:
+            with db_lock:
+                c = db.cursor()
+                # 引擎在线？
+                c.execute("SELECT status FROM agent_runtimes WHERE id=?", (eid,))
+                r = c.fetchone()
+                if not r or (r[0] or "") != "online":
+                    continue
+                # 有 tag 能力？
+                c.execute(
+                    "SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
+                    "AND (tag=? OR tag='all') LIMIT 1", (eid, tag))
+                if not c.fetchone():
+                    continue
+                # scope 匹配？
+                c.execute(
+                    "SELECT rc.scope, rc.owner_id FROM agent_runtimes r "
+                    "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id WHERE r.id=?", (eid,))
+                sr = c.fetchone()
+                if sr:
+                    _scope = sr[0] or "global"
+                    _owner = sr[1] or ""
+                    if _scope == "repo" and _owner:
+                        _owner_norm = (from_repo_key(_owner) or "").strip()
+                        if _repo_norm and _owner_norm != _repo_norm:
+                            continue  # repo scope 但仓库不匹配
+                # 三项全部通过：有能干的引擎
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def get_execution_mode() -> str:
     """返回当前执行模式：env 优先，其次 meta 表。"""
     _m = os.environ.get("DEVOPS_EXECUTION_MODE", "")
@@ -714,17 +757,22 @@ def claim(runtime_id) -> dict | None:
                     try:
                         _allowed = _json.loads(_pe_row[0])
                         if _allowed and runtime_id not in _allowed:
-                            # 检查 pool_engine_ids 中的 id 是否全部 offline
-                            # 如果全部 offline，清空 pool_engine_ids 让 task 可被任意引擎认领
-                            _all_offline = True
-                            for _eid in _allowed:
-                                c.execute("SELECT status FROM agent_runtimes WHERE id=?", (_eid,))
-                                _e_row = c.fetchone()
-                                if _e_row and (_e_row[0] or "") == "online":
-                                    _all_offline = False
-                                    break
-                            if _all_offline:
-                                log.info(f"pool_engine_ids {_allowed} all offline, clearing for task {task_id}")
+                            # 兜底：检查 pool_engine_ids 中的引擎是否全部不可达
+                            # 不可达 = 离线 / 无对应 tag 能力 / scope 不匹配
+                            # 全部不可达时清空 pool_engine_ids，让 task 可被任意引擎认领
+                            _task_tag = ""
+                            _task_repo = ""
+                            try:
+                                c.execute("SELECT pool_tag, repo_key FROM agent_tasks WHERE id=?", (task_id,))
+                                _trow = c.fetchone()
+                                if _trow:
+                                    _task_tag = _trow[0] or ""
+                                    _task_repo = _trow[1] or ""
+                            except Exception:
+                                pass
+                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo)
+                            if not _has_capable:
+                                log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
                                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
                                 db.commit()
                                 break  # 清空后当前 task 可认领
@@ -953,17 +1001,22 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     try:
                         _allowed = _json.loads(_pe_row[0])
                         if _allowed and runtime_id not in _allowed:
-                            # 检查 pool_engine_ids 中的 id 是否全部 offline
-                            # 如果全部 offline，清空 pool_engine_ids 让 task 可被任意引擎认领
-                            _all_offline = True
-                            for _eid in _allowed:
-                                c.execute("SELECT status FROM agent_runtimes WHERE id=?", (_eid,))
-                                _e_row = c.fetchone()
-                                if _e_row and (_e_row[0] or "") == "online":
-                                    _all_offline = False
-                                    break
-                            if _all_offline:
-                                log.info(f"pool_engine_ids {_allowed} all offline, clearing for task {task_id}")
+                            # 兜底：检查 pool_engine_ids 中的引擎是否全部不可达
+                            # 不可达 = 离线 / 无对应 tag 能力 / scope 不匹配
+                            # 全部不可达时清空 pool_engine_ids，让 task 可被任意引擎认领
+                            _task_tag = ""
+                            _task_repo = ""
+                            try:
+                                c.execute("SELECT pool_tag, repo_key FROM agent_tasks WHERE id=?", (task_id,))
+                                _trow = c.fetchone()
+                                if _trow:
+                                    _task_tag = _trow[0] or ""
+                                    _task_repo = _trow[1] or ""
+                            except Exception:
+                                pass
+                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo)
+                            if not _has_capable:
+                                log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
                                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
                                 db.commit()
                                 break  # 清空后当前 task 可认领
@@ -1344,6 +1397,29 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                                   duration=duration,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=_conclusion or (result_text or "")[:200])
+            # Issue #51: 最后节点完成后 → 设 stage=pending_review 等待开发者审核
+            # 统一处理：检查 agent 是否是 pipeline 最后节点（非 done 的 next=done）
+            if status == "completed" and task.get("issue_id"):
+                try:
+                    _ag = task.get("agent_type") or ""
+                    _rk = task.get("repo_key") or ""
+                    _iid = task.get("issue_id") or ""
+                    if _ag and _rk and _iid:
+                        from src.api.session_store import get_issue_stage, get_issue_scene, set_issue_stage
+                        from src.api.pipeline_config import get_pipeline_config
+                        _st = get_issue_stage(_rk, _iid)
+                        _cur_stage = (_st or {}).get("stage", "") if _st else ""
+                        if _cur_stage == _ag:  # 当前 stage 就是完成的 agent → 检查是否最后节点
+                            _scene_id = get_issue_scene(_rk, _iid) or "default"
+                            _pipe_cfg = get_pipeline_config(_scene_id, repo_key=_rk)
+                            _nodes = (_pipe_cfg or {}).get("nodes", [])
+                            for _n in _nodes:
+                                if _n.get("id") == _ag and _n.get("next") == "done":
+                                    set_issue_stage(_rk, _iid, "pending_review", _ag)
+                                    log.info(f"Last node {_ag} completed → pending_review issue={_iid}")
+                                    break
+                except Exception as _e:
+                    log.warning(f"complete_task: pending_review check failed: {_e}")
         except Exception as e:
             log.warning(f"complete_task finalize failed: {e}")
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",

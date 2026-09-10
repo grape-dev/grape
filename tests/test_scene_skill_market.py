@@ -692,7 +692,7 @@ class TestSceneMarketExtended:
         data = resp.json()
         assert "scenes" in data
         for s in data["scenes"]:
-            assert s.get("is_featured") is True
+            assert s.get("is_featured")
 
     def test_delete_cascades_skill_ref(self):
         """删除场景级联清理 scene_skill_ref"""

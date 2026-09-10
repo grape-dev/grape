@@ -170,8 +170,16 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                      1 if rt.get("healthy", True) else 0, 1, "online",
                      datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version))
                 rid = c.lastrowid
-            # 不再自动写入默认 "all" 标签——新引擎默认无标签，由用户在控制台手动配置。
-            # 空标签引擎不参与任务分发（claim_by_tag 的 SQL 查 engine_capabilities 表，无行即不匹配）。
+            # 自动写入默认 "all" 标签——新引擎默认可认领任意角色任务。
+            # 若已有 capabilities 行则跳过（用户手动配置过标签的不覆盖）。
+            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
+            if not c.fetchone():
+                from datetime import datetime as _dt, timezone as _tz
+                _now_ec = _dt.now(_tz.utc).isoformat()
+                c.execute(
+                    "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?, 'all', 1, 50, 1, ?, ?)",
+                    (rid, _now_ec, _now_ec))
             registered.append({"id": rid, "name": name})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，

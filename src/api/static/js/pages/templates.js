@@ -12,7 +12,6 @@ let _tmplState = {
   page: 0,
   search: '',
   featuredIdx: null,
-  top1000Cache: {},
   _favState: JSON.parse(localStorage.getItem('grape_template_favs') || '{}'),
 };
 
@@ -22,8 +21,7 @@ function renderTemplates() {
   renderSelectionShell('templates', '<div class="loading">' + I18N.t('templates.loading') + '</div>');
   API.get('/project-templates').then(data => {
     const rawCats = data.categories || [];
-    const nonTop1000Cats = rawCats.filter(cat => !cat.top1000);
-    const allTemplates = nonTop1000Cats.flatMap(cat =>
+    const allTemplates = rawCats.flatMap(cat =>
       (cat.templates || []).map(t => ({...t, _cat_name: cat.name, _cat_icon: cat.icon || '📦'}))
     );
     var _favTemplates = allTemplates.filter(function(t) { return _tmplState._favState[t.id]; });
@@ -39,24 +37,7 @@ function renderTemplates() {
     _tmplState.activeCat = 1;
     _tmplState.page = 0;
     _tmplState.search = '';
-    _tmplState.top1000Cache = {};
-    rawCats.forEach(function(c) {
-      if (c.top1000 || (c.name || '').indexOf('GitHub') >= 0 || (c.name || '').indexOf('GitCode') >= 0) {
-        _tmplState.top1000Cache[c.id] = {
-          items: c.templates || [], total: (c.templates || []).length,
-          page: 0, loading: false, error: null,
-          search: '', sortBy: 'stars', totalPages: 1, loaded: true,
-          fallbackItems: c.templates || [],
-        };
-      }
-    });
     renderTemplateCategory();
-    rawCats.forEach(function(c) {
-      if (_tmplState.top1000Cache[c.id]) {
-        var idx = _tmplState.categories.findIndex(function(x) { return x.id === c.id; });
-        if (idx >= 0) loadTop1000(idx);
-      }
-    });
   }).catch(e => {
     if (localStorage.getItem('sidebarTab') !== 'templates') return;
     const c = document.getElementById('ptContent');
@@ -73,20 +54,7 @@ function switchTemplateCat(idx) {
   } else {
     _tmplState.featuredIdx = idx - 2;
   }
-  if (cat && (cat.top1000 || (cat.name || '').indexOf('GitHub') >= 0 || (cat.name || '').indexOf('GitCode') >= 0)) {
-    var cache = _tmplState.top1000Cache[cat.id];
-    if (!cache || !cache.loaded || cache.search !== _tmplState.search) {
-      loadTop1000(idx);
-    } else {
-      renderTemplateCategory();
-    }
-    return;
-  }
   renderTemplateCategory();
-}
-
-function _tmplPageSize(cat) {
-  return 12;
 }
 
 function goTemplatePage(dir) {
@@ -95,14 +63,6 @@ function goTemplatePage(dir) {
   var pages = Math.max(1, Math.ceil(total / 12));
   _tmplState.page = (_tmplState.page + dir + pages) % pages;
   renderTemplateCategory();
-}
-
-function _sceneClass(sceneId) {
-  var s = (sceneId || '').toLowerCase();
-  if (s.includes('web') || s.includes('app')) return 'sc-web';
-  if (s.includes('data') || s.includes('ml') || s.includes('etl')) return 'sc-data';
-  if (s.includes('infra') || s.includes('devops') || s.includes('k8s')) return 'sc-infra';
-  return 'sc-default';
 }
 
 // ====== 精选模板竖排卡片 ======
@@ -116,13 +76,7 @@ function _renderFeaturedCarousel() {
     var x = cats[si];
     var tmplItem = null;
 
-    // 第一步：查 top1000Cache（最新异步数据）
-    var cache = _tmplState.top1000Cache[x.id];
-    if (cache && cache.items && cache.items.length > 0) {
-      tmplItem = cache.items[0];
-    }
-    // 第二步：回退到 cat.templates（初始化时 API 就已包含的数据）
-    if (!tmplItem && x.templates && x.templates.length > 0) {
+    if (x.templates && x.templates.length > 0) {
       tmplItem = x.templates[0];
     }
 
@@ -163,6 +117,15 @@ function onFeaturedClick(idx) {
   }
 }
 
+// ====== 平台来源标签 ======
+function _platformTagHtml(t) {
+  var p = t.source_platform || '';
+  if (!p) return '';
+  var label = p === 'github' ? 'GitHub' : p === 'gitcode' ? 'GitCode' : '';
+  if (!label) return '';
+  return '<span class="tg tg-d tmpl-platform-tag">' + label + '</span>';
+}
+
 // ====== 紧凑模板卡片 ======
 function _renderHorizontalCards(templates, cat, skipPager) {
   var total = templates.length;
@@ -179,11 +142,14 @@ function _renderHorizontalCards(templates, cat, skipPager) {
     var isFav = _tmplState._favState[t.id] ? true : false;
     var favStar = isFav ? '★' : '☆';
     var favCls = isFav ? 'tmpl-fav-btn tmpl-fav-act' : 'tmpl-fav-btn';
+    var platformTag = _platformTagHtml(t);
 
     return '<div class="template-card-item" onclick="' + cardClick + '">' +
       '<span class="template-card-item-ic">' + (t.icon || '📦') + '</span>' +
       '<div class="template-card-item-info">' +
-        '<div class="template-card-item-name" title="' + (t.name || '').replace(/"/g, '&quot;') + '">' + (t.name || t.id || '') + '</div>' +
+        '<div class="template-card-item-name" title="' + (t.name || '').replace(/"/g, '&quot;') + '">' +
+          (t.name || t.id || '') + platformTag +
+        '</div>' +
         '<div class="template-card-item-cat">' + catName + '</div>' +
         '<div class="template-card-item-desc">' + (t.description || I18N.t('templates.no_description')) + '</div>' +
         (t.recommend_reason ? '<div class="template-card-item-reason" title="' + t.recommend_reason.replace(/"/g, '&quot;') + '">💡 ' + t.recommend_reason + '</div>' : '') +
@@ -234,18 +200,7 @@ function doSearch() {
   var kw = (input && input.value || '').trim();
   _tmplState.search = kw;
   _tmplState.page = 0;
-  var cat = _tmplState.categories[_tmplState.activeCat];
-  if (cat && (cat.top1000 || (cat.name || '').indexOf('GitHub') >= 0 || (cat.name || '').indexOf('GitCode') >= 0)) {
-    var cache = _tmplState.top1000Cache[cat.id];
-    if (!cache) return;
-    cache.search = kw;
-    cache.page = 0;
-    cache.loaded = false;
-    _tmplState.top1000Cache[cat.id] = cache;
-    loadTop1000(_tmplState.activeCat);
-  } else {
-    renderTemplateCategory();
-  }
+  renderTemplateCategory();
 }
 
 // ====== 主渲染 ======
@@ -262,25 +217,9 @@ function renderTemplateCategory() {
 
   if (cat.id === '_fav') {
     var _allTmpls = cats.filter(function(x) { return x.id !== '_fav' && x.id !== 'all'; }).flatMap(function(x) { return x.templates || []; });
-    // 补充 top1000 缓存中的收藏项
-    Object.keys(_tmplState.top1000Cache).forEach(function(catId) {
-      var cache = _tmplState.top1000Cache[catId];
-      if (cache && cache.items) {
-        var parentCat = cats.find(function(c) { return c.id === catId; });
-        cache.items.forEach(function(t) {
-          _allTmpls.push({...t, _cat_name: (parentCat || {}).name || '', _cat_icon: (parentCat || {}).icon || '📦'});
-        });
-      }
-    });
     cat.templates = _allTmpls.filter(function(t) { return _tmplState._favState[t.id]; });
   }
 
-  if (cat.top1000 || (cat.name || '').indexOf('GitHub') >= 0 || (cat.name || '').indexOf('GitCode') >= 0) {
-    renderTop1000Tab(c, cat);
-    return;
-  }
-
-  var realCats = cats.filter(function(x) { return x.id !== 'all'; });
   var tabs = cats.map(function(x, i) {
     var cnt = (x.templates || []).length;
     var act = i === _tmplState.activeCat ? ' tmpl-tab-act' : '';
@@ -319,188 +258,149 @@ function renderTemplateCategory() {
   '</div>';
 }
 
-// ====== Top1000 数据加载 ======
-function loadTop1000(catIdx) {
-  var cat = _tmplState.categories[catIdx];
-  if (!cat) return;
-  var prev = _tmplState.top1000Cache[cat.id] || {};
-  var cache = {
-    items: prev.items || [],
-    total: prev.total || 0,
-    page: prev.page || 0,
-    loading: true,
-    error: null,
-    search: _tmplState.search,
-    sortBy: 'stars',
-    totalPages: 1,
-    fallbackItems: prev.fallbackItems || [],
-  };
-  _tmplState.top1000Cache[cat.id] = cache;
-  renderTemplateCategory();
-
-  var params = new URLSearchParams({
-    platform: cat.platform || (cat.id.indexOf('gitcode') >= 0 ? 'gitcode' : cat.id.indexOf('github') >= 0 ? 'github' : cat.platform),
-    page: cache.page,
-    size: 20,
-    sort_by: cache.sortBy,
-  });
-  if (cache.search) params.set('keyword', cache.search);
-
-  console.log('[top1000] loading:', cat.id, 'platform:', cat.platform, 'params:', params.toString());
-
-  API.get('/project-templates/top1000?' + params.toString())
-    .then(function(data) {
-      var c2 = _tmplState.top1000Cache[cat.id];
-      if (!c2) return;
-      var apiItems = data.templates || [];
-      // Issue #56：API 返回空（DB 表空且种子未生效）时回退 JSON 兜底数据，避免 Tab 空白
-      if (apiItems.length === 0 && c2.fallbackItems && c2.fallbackItems.length > 0) {
-        c2.items = c2.fallbackItems;
-        c2.total = c2.fallbackItems.length;
-        c2.totalPages = 1;
-        console.warn('[top1000] API returned empty, fallback to JSON data:', cat.id);
-      } else {
-        c2.items = apiItems;
-        c2.total = data.total || 0;
-        c2.totalPages = Math.max(1, Math.ceil(c2.total / 20));
-      }
-      c2.loading = false;
-      c2.loaded = true;
-      _tmplState.top1000Cache[cat.id] = c2;
-      renderTemplateCategory();
-    })
-    .catch(function(err) {
-      var c2 = _tmplState.top1000Cache[cat.id];
-      if (!c2) return;
-      if (c2.fallbackItems && c2.fallbackItems.length > 0) {
-        c2.items = c2.fallbackItems;
-        c2.total = c2.fallbackItems.length;
-        c2.totalPages = 1;
-        c2.error = null;
-      } else {
-        c2.error = err.message || I18N.t('templates.load_failed_simple');
-      }
-      c2.loading = false;
-      c2.loaded = true;
-      _tmplState.top1000Cache[cat.id] = c2;
-      renderTemplateCategory();
-    });
-}
-
-function sortTop1000(col) {
-  var cat = _tmplState.categories[_tmplState.activeCat];
-  if (!cat) return;
-  var cache = _tmplState.top1000Cache[cat.id] || {};
-  cache.sortBy = col;
-  cache.page = 0;
-  cache.loaded = false;
-  _tmplState.top1000Cache[cat.id] = cache;
-  loadTop1000(_tmplState.activeCat);
-}
-
-function goTop1000Page(dir) {
-  var cat = _tmplState.categories[_tmplState.activeCat];
-  if (!cat) return;
-  var cache = _tmplState.top1000Cache[cat.id];
-  if (!cache) return;
-  var newPage = cache.page + dir;
-  if (newPage < 0 || newPage >= cache.totalPages) return;
-  cache.page = newPage;
-  cache.loaded = false;
-  _tmplState.top1000Cache[cat.id] = cache;
-  loadTop1000(_tmplState.activeCat);
-}
-
-// ====== Top1000 渲染 ======
-function renderTop1000Tab(c, cat) {
-  var cats = _tmplState.categories;
-  var tabs = cats.map(function(x, i) {
-    var cnt = x.id === '_fav' ? Object.keys(_tmplState._favState).length : (x.top1000 ? (x.total || 0) : (x.templates || []).length);
-    var act = i === _tmplState.activeCat ? ' tmpl-tab-act' : '';
-    var favCls = x.id === '_fav' ? ' tmpl-tab-fav' : '';
-    return '<button class="tmpl-tab' + act + favCls + '" onclick="switchTemplateCat(' + i + ')"><span class="tmpl-tab-ic">' + (x.icon || '📦') + '</span><span class="tmpl-tab-name">' + _tmplCatName(x.name) + '</span><span class="tmpl-tab-cnt">' + cnt + '</span></button>';
-  }).join('');
-
-  var cache = _tmplState.top1000Cache[cat.id] || {
-    items: [], total: 0, page: 0, loading: false, error: null,
-    search: '', sortBy: 'stars', totalPages: 1,
-  };
-
-  var featuredHtml = _renderFeaturedCarousel();
-  var contentHtml = '';
-
-  if (cache.loading) {
-    contentHtml = '<div class="loading" style="padding:45px;text-align:center">' + I18N.t('templates.loading_top1000') + '</div>';
-  } else if (cache.error) {
-    contentHtml = '<div class="error" style="padding:40px;text-align:center">❌ ' + cache.error + '</div>';
-  } else {
-    var items = cache.items || [];
-    var top1000Tmpls = items.map(function(t) {
-      return {
-        id: t.id,
-        name: t.name || t.display_name || '',
-        description: t.description || '',
-        recommend_reason: t.recommend_reason || '',
-        icon: t.icon || '#' + (t.rank || ''),
-        tags: t.tags || [],
-        source_repo: t.source_repo || '',
-        html_url: t.html_url || '',
-        source_platform: t.source_platform || '',
-        default_repo_name: t.default_repo_name || t.id,
-        _cat_name: _tmplCatName(cat.name),
-      };
-    });
-    contentHtml = _renderHorizontalCards(top1000Tmpls, cat, true);
-
-    var pagerHtml = '';
-    if (cache.totalPages > 1) {
-      var prevDisabled = cache.page <= 0 ? ' disabled' : '';
-      var nextDisabled = cache.page >= cache.totalPages - 1 ? ' disabled' : '';
-      pagerHtml = '<div class="top1000-pager">' +
-        '<button' + prevDisabled + ' onclick="goTop1000Page(-1)">‹</button>' +
-        '<span>' + (cache.page + 1) + ' / ' + cache.totalPages + ' (' + I18N.t('templates.page_count', {count: cache.total}) + ')</span>' +
-        '<button' + nextDisabled + ' onclick="goTop1000Page(1)">›</button>' +
-      '</div>';
+function _findTemplateById(id) {
+  for (var i = 0; i < _tmplState.categories.length; i++) {
+    var cat = _tmplState.categories[i];
+    for (var j = 0; j < (cat.templates || []).length; j++) {
+      if (cat.templates[j].id === id) return cat.templates[j];
     }
-    contentHtml += pagerHtml;
   }
-
-  c.innerHTML = '<div class="project-page">' +
-    '<div class="tmpl-search-wide">' +
-      '<h2>' + I18N.t('templates.gallery_title') + '</h2>' +
-      '<div class="tmpl-search-bar-inline">' +
-        '<input id="tmplSearchInput" type="text" placeholder="' + I18N.t('templates.search_placeholder') + '" value="' + (cache.search || _tmplState.search || '') + '" onkeydown="if(event.key===\'Enter\')doSearch()">' +
-        '<button onclick="doSearch()">' + I18N.t('templates.search_btn') + '</button>' +
-      '</div>' +
-    '</div>' +
-    '<div class="template-layout">' +
-      '<div class="template-layout-main">' +
-        '<div class="tmpl-tabs">' + tabs + '</div>' +
-        contentHtml +
-      '</div>' +
-      '<div class="template-layout-side">' +
-        featuredHtml +
-      '</div>' +
-    '</div>' +
-  '</div>';
+  return null;
 }
+
+var _PIPELINE_STAGES = {
+  'default':       ['\u9700\u6c42\u5206\u6790','Issue\u8fd0\u8425','\u7f16\u7801\u5b9e\u73b0','PR\u5ba1\u67e5','\u4e91\u90e8\u7f72'],
+  'hello-demo':    ['\u9700\u6c42\u5206\u6790','Issue\u5206\u7c7b','\u7f16\u7801\u5b9e\u73b0','PR\u5ba1\u67e5','\u4e91\u90e8\u7f72'],
+  'cloud-native':  ['\u9700\u6c42\u5206\u6790','Issue\u8fd0\u8425','\u7f16\u7801\u5b9e\u73b0','PR\u5ba1\u67e5','\u4e91\u90e8\u7f72'],
+  'iac':           ['IaC\u9700\u6c42','IaC Issue','IaC\u7f16\u7801','IaC\u5ba1\u67e5','IaC\u90e8\u7f72'],
+  'agent-dev':     ['\u9700\u6c42\u5206\u6790','Issue\u8fd0\u8425','\u7f16\u7801\u5b9e\u73b0','PR\u5ba1\u67e5','\u4e91\u90e8\u7f72'],
+  'skill-dev':     ['\u9700\u6c42\u5206\u6790','Skill Issue','Skill\u521b\u5efa','Skill\u6d4b\u8bd5','Skill\u53d1\u5e03'],
+  'api-skill-dev': ['\u9700\u6c42\u5206\u6790','Skill Issue','API Skill\u521b\u5efa','API Skill\u6d4b\u8bd5','Skill\u53d1\u5e03'],
+  'blog-publish':  ['\u535a\u5ba2\u9700\u6c42','Issue\u8fd0\u8425','\u535a\u5ba2\u751f\u6210','\u535a\u5ba2\u53d1\u5e03'],
+  'harmony':       ['\u9700\u6c42\u5206\u6790','Issue\u8fd0\u8425','\u7f16\u7801\u5b9e\u73b0','PR\u5ba1\u67e5','\u4e91\u90e8\u7f72'],
+};
 
 function createFromTemplate(templateId, defaultName) {
+  var t = _findTemplateById(templateId) || {};
+  var tplName = t.name || templateId;
+  var tplIcon = t.icon || '📦';
+  var tplDesc = t.description || '';
+  var tplTags = t.tags || [];
+  var tplScene = t.scene_id || 'default';
+  var tplPlatform = t.source_platform || '';
+  var tplSource = t.source || '';
+  var tplStats = t.stats || {};
+  var tplReason = t.recommend_reason || '';
+  var tplUrl = t.html_url || '';
+
+  var platformTag = tplPlatform === 'github' ? '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">GitHub</span>'
+    : tplPlatform === 'gitcode' ? '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">GitCode</span>' : '';
+
+  var sourceBadge = tplSource === 'local'
+    ? '<span style="font-size:10px;color:var(--g);background:#e8f5e9;padding:2px 8px;border-radius:4px">\u672c\u5730\u6a21\u677f</span>'
+    : tplSource === 'git'
+    ? '<span style="font-size:10px;color:var(--sk);background:#e3f2fd;padding:2px 8px;border-radius:4px">\u4e91\u7aef\u9879\u76ee</span>'
+    : '';
+
+  var starsHtml = '';
+  if (tplStats.show && tplStats.stars) {
+    starsHtml = '<span style="font-size:11px;color:var(--y)">\u2b50 ' + (tplStats.stars >= 1000 ? (tplStats.stars / 1000).toFixed(1) + 'k' : tplStats.stars) + '</span>';
+  }
+
+  var langHtml = '';
+  if (tplStats.language) {
+    langHtml = '<span style="font-size:11px;color:var(--t3)">' + tplStats.language + '</span>';
+  }
+
+  var tagsHtml = tplTags.length
+    ? '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:5px">' + tplTags.map(function(tg) {
+        return '<span class="tg tg-d" style="font-size:10px">#' + tg + '</span>';
+      }).join('') + '</div>'
+    : '';
+
+  var reasonHtml = tplReason
+    ? '<div style="margin-top:6px;font-size:11px;color:var(--a);background:#f0f4f8;padding:6px 10px;border-radius:6px">\ud83d\udca1 ' + tplReason + '</div>'
+    : '';
+
+  var stages = _PIPELINE_STAGES[tplScene] || _PIPELINE_STAGES['default'];
+  var stagesHtml = stages.map(function(s, i) {
+    var num = i + 1;
+    var isLast = i === stages.length - 1;
+    var arrow = isLast ? '' : '<span style="color:var(--t3);font-size:10px;margin:0 3px">\u2192</span>';
+    return '<span style="display:inline-flex;align-items:center"><span style="width:16px;height:16px;border-radius:50%;background:var(--a);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0">' + num + '</span><span style="font-size:11px;color:var(--t2);margin-left:3px">' + s + '</span></span>' + arrow;
+  }).join('');
+
+  var steps = [
+    '\u521b\u5efa GitCode \u4ed3\u5e93\uff08\u4f60\u7684\u4e2a\u4eba\u540d\u4e0b\uff09',
+    '\u63a8\u9001\u6a21\u677f\u4ee3\u7801\u5230\u4ed3\u5e93',
+    '\u914d\u7f6e\u4ed3\u5e93\u6258\u7ba1\u4e0e Webhook \u81ea\u52a8\u5316',
+    '\u5e94\u7528 ' + tplScene + ' \u5f00\u53d1\u573a\u666f\uff08' + stages.length + ' \u9636\u6bb5\u6d41\u6c34\u7ebf\uff09',
+    '\u521b\u5efa\u5f15\u5bfc Issue\uff0c\u81ea\u52a8\u89e6\u53d1\u6d41\u6c34\u7ebf',
+  ];
+  var stepsHtml = steps.map(function(s) {
+    return '<div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:5px">' +
+      '<span style="color:var(--g);font-size:11px;flex-shrink:0;margin-top:1px">\u2713</span>' +
+      '<span style="font-size:11px;color:var(--t2);line-height:1.5">' + s + '</span>' +
+    '</div>';
+  }).join('');
+
+  var externalLink = tplUrl
+    ? '<a href="' + tplUrl + '" target="_blank" style="font-size:10px;color:var(--a);text-decoration:none;margin-left:8px">\u67e5\u770b\u539f\u9879\u76ee \u2197</a>'
+    : '';
+
   var modal = document.createElement('div');
   modal.id = 'ptCreateModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
-  modal.innerHTML = '<div class="cd" style="width:440px;padding:20px;border-radius:10px">' +
-    '<h3 style="font-size:14px;font-weight:600;margin-bottom:6px">' + I18N.t('templates.create_modal_title') + '</h3>' +
-    '<p class="ts t2" style="margin-bottom:14px">' + I18N.t('templates.create_modal_desc') + '</p>' +
-    '<label class="ts t2" style="display:block;margin-bottom:4px">' + I18N.t('templates.repo_name') + '</label>' +
-    '<input id="ptRepoName" value="'+ defaultName + '" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c)">' +
-    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">' +
-      '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">' + I18N.t('templates.cancel') + '</button>' +
-      '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')">' + I18N.t('templates.create_btn') + '</button>' +
-    '</div>' +
-  '</div>';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.innerHTML =
+    '<div class="cd" style="width:520px;padding:24px;border-radius:12px;max-height:90vh;overflow-y:auto">' +
+      '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="display:flex;align-items:center;gap:10px">' +
+            '<span style="font-size:28px;flex-shrink:0">' + tplIcon + '</span>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="display:flex;align-items:center;flex-wrap:wrap">' +
+                '<span style="font-size:16px;font-weight:700;color:var(--t)">' + tplName + '</span>' +
+                platformTag +
+              '</div>' +
+              '<div style="display:flex;align-items:center;gap:8px;margin-top:3px">' +
+                sourceBadge + starsHtml + langHtml + externalLink +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          '<p style="font-size:12px;color:var(--t2);line-height:1.6;margin-top:8px">' + tplDesc + '</p>' +
+          tagsHtml +
+          reasonHtml +
+        '</div>' +
+        '<span style="font-size:18px;color:var(--t3);cursor:pointer;flex-shrink:0;margin:-4px -4px 0 0;padding:4px" onclick="document.getElementById(\'ptCreateModal\').remove()">\u00d7</span>' +
+      '</div>' +
+
+      '<div style="height:1px;background:var(--b);margin:14px 0"></div>' +
+
+      '<div style="margin-bottom:14px">' +
+        '<div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:8px">\ud83d\ude80 \u521b\u5efa\u540e\u5c06\u81ea\u52a8\u5b8c\u6210</div>' +
+        stepsHtml +
+      '</div>' +
+
+      '<div style="margin-bottom:16px">' +
+        '<div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:8px">\ud83d\udca1 \u6d41\u6c34\u7ebf\u9884\u89c8\uff08' + tplScene + '\uff09</div>' +
+        '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0;background:var(--bg);padding:10px 12px;border-radius:8px">' +
+          stagesHtml +
+        '</div>' +
+      '</div>' +
+
+      '<div style="height:1px;background:var(--b);margin:0 0 14px"></div>' +
+
+      '<label class="ts t2" style="display:block;margin-bottom:4px;font-size:12px">' + I18N.t('templates.repo_name') + '</label>' +
+      '<input id="ptRepoName" value="' + defaultName + '" style="width:100%;padding:9px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:13px;outline:none;background:var(--c);box-sizing:border-box">' +
+
+      '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">' +
+        '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">' + I18N.t('templates.cancel') + '</button>' +
+        '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')" style="padding:6px 18px">' + I18N.t('templates.create_from_template_arrow') + '</button>' +
+      '</div>' +
+    '</div>';
   document.body.appendChild(modal);
   document.getElementById('ptRepoName').focus();
+  document.getElementById('ptRepoName').select();
 }
 
 function doCreateFromTemplate(templateId) {
