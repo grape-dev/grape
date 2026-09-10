@@ -410,13 +410,8 @@ def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                 import asyncio as _aio
                 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
                 from src.api.pipeline_config import get_node_by_tag
-                scene_id = "default"
-                try:
-                    from src.user.db import get_repo_scene
-                    scene_id = get_repo_scene(evt["repo_key"]) or "default"
-                except Exception:
-                    pass
-                node = get_node_by_tag(scene_id, evt["agent_type"] or "")
+                scene_id = ""
+                node = get_node_by_tag(scene_id, evt["agent_type"] or "") if scene_id else None
                 _bus = get_event_bus()
                 _redispatch_event = GrapeEvent(
                     domain=EventDomain.PIPELINE,
@@ -712,14 +707,21 @@ def _list_thread(anchor_seq: int, limit: int = 50) -> list:
 
 
 def _require_event_bot_token(request: Request, repo_key: str):
-    """agent 端点鉴权：与 a2a_endpoint 同款（仓库 bot token）。"""
+    """agent 端点鉴权：bot token 或会话级临时 token（复作用域）二选一通过。
+
+    与 a2a_endpoint 同款（仓库级鉴权）；会话 token 校验 repo 作用域匹配（M2）。
+    """
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not token:
         token = request.headers.get("X-Bot-Token", "") or ""
     from src.user.db import get_repo_bot_token_no_global
+    from src.api.auth_token import verify_session_token_for_repo
     expected = get_repo_bot_token_no_global(repo_key) or ""
-    if not expected or token != expected:
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid bot token"})
+    if expected and token == expected:
+        return
+    if verify_session_token_for_repo(token, repo_key):
+        return
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid token"})
 
 
 def _cancel_issue_tasks(repo_key: str, issue_id: str) -> int:

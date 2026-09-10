@@ -5,3 +5,6 @@
 # 需 Python >= 3.10（代码使用 X | None 联合类型语法），推荐 python3.12 建 venv：
 #   python3.12 -m venv .venv && .venv/bin/pip install -r requirements-worker.txt
 aiohttp>=3.9
+# grape CLI（agent 调对外 Git 仓库接口用，见 vod 试点 grape-cli-reference.md）
+click>=8.0
+httpx>=0.24

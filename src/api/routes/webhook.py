@@ -1,8 +1,10 @@
 """Webhook & A2A 端点 — 集成事件管道"""
 import json, os, time
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from src.config import log
+from src.api.deps import get_user_or_none
 from src.api.event_pipeline import run_pipeline
 
 router = APIRouter(tags=["webhook"])
@@ -118,12 +120,44 @@ async def gitcode_webhook(request: Request):
     return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
 
 
-@router.post("/api/a2a")
-async def a2a_endpoint(request: Request):
-    """Agent-to-Agent 协议端点：仅限内网调用"""
-    body = await request.json()
-    agent_name = body.get("agent", "")
-    payload = body.get("payload", {})
+def _authorize_a2a(request: Request, repo_key: str):
+    """A2A 端点仓库级鉴权：bot token 或会话级临时 token（repo 作用域）二选一通过。
+
+    - bot token：仓库级（managed_repos / devops_agent_session），支持远端 worker；
+    - 会话 token（GRAPE_SESSION_TOKEN，M2）：校验 repo_key 匹配——该仓库执行期 agent 凭据。
+    仅当仓库已托管（有 bot token）才严格校验 bot；未托管仓库允许会话 token 或交由后续校验。
+    """
+    _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
+    if not _auth:
+        _auth = request.headers.get("X-Bot-Token", "") or ""
+    if not repo_key:
+        log.warning("A2A: missing repository, reject")
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
+    from src.user.db import get_repo_bot_token_no_global
+    from src.api.auth_token import verify_session_token_for_repo
+    _expected = get_repo_bot_token_no_global(repo_key) or ""
+    _bot_ok = bool(_expected) and _auth == _expected
+    _session_ok = bool(verify_session_token_for_repo(_auth, repo_key))
+    if _bot_ok or _session_ok:
+        log.info(f"A2A: token OK (bot={_bot_ok}, session={_session_ok}) repo={repo_key}")
+        return
+    if not _expected:
+        log.warning(f"A2A: repo not managed (no bot token) & no matching session token, defer to downstream: {repo_key}")
+        return
+    log.warning(f"A2A: unauthorized (token mismatch) for repo={repo_key}")
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid token"})
+
+
+class A2AHandoffBody(BaseModel):
+    agent: str = ""
+    payload: dict = {}
+
+
+@router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Agent 交办（A2A，grape a2a handoff）")
+async def a2a_endpoint(body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
+    """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
+    agent_name = body.agent or ""
+    payload = body.payload or {}
 
     if not agent_name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing agent field"})
@@ -132,14 +166,11 @@ async def a2a_endpoint(request: Request):
     if not payload.get("issue_number"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing issue_number in payload: 所有 A2A 事件必须关联一个 Issue"})
 
-    # 仓库级 bot token 鉴权（替代纯内网 IP 校验，支持远端 worker）
-    # Agent 调用时带 Authorization: Bearer <BOT_GITCODE_TOKEN>（或 X-Bot-Token header）
     repository = payload.get("repository", "")
     account = payload.get("account", "") or repository
     context = payload.get("context", "")
     issue_number = payload.get("issue_number", "")
     pr_number = payload.get("pr_number", "")
-    issue_creator = payload.get("issue_creator", "")  # Issue #76: A2A 携带 Issue 创建者
 
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"gitcode:{repository}") if repository else ""
@@ -160,25 +191,15 @@ async def a2a_endpoint(request: Request):
             log.warning(f"A2A: cancelled check failed: {_ck_e}")
     seq = 0
 
-    # 鉴权：Bearer token 对比该 repo 的 bot token（Agent 的 BOT_GITCODE_TOKEN）
-    # 复用仓库级 bot token 机制（对齐 webhook 鉴权思路），支持远端 worker 调用。
-    # 仅当仓库已托管（库中有 bot token）时严格校验；未托管仓库放行，交由后续 agent 配置查找处理。
-    _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
-    if not _auth:
-        _auth = request.headers.get("X-Bot-Token", "") or ""
-    if repo_key:
-        from src.user.db import get_repo_bot_token_no_global
-        _expected = get_repo_bot_token_no_global(repo_key) or ""
-        if _expected and _auth == _expected:
-            log.info(f"A2A: bot token OK, agent={agent_name}")
-        elif not _expected:
-            log.warning(f"A2A: repo not managed (no bot token), defer to downstream: {repo_key}")
-        else:
-            log.warning(f"A2A: unauthorized (token mismatch) for repo={repo_key}")
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid bot token"})
+    # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
+    if user and user.get("auth_type") in ("jwt", "api_key"):
+        from src.user.db import get_managed_repos
+        managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
+        if repo_key not in managed:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
     else:
-        log.warning(f"A2A: missing repository, reject")
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
+        # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
+        _authorize_a2a(request, repo_key)
 
     # Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
     from src.api.session_store import is_agent_enabled
@@ -477,23 +498,6 @@ async def a2a_endpoint(request: Request):
             except Exception as _de:
                 log.warning(f"A2A: duplicate check failed: {_de}")
 
-        # VOD A2A 交办时携带 recommended_scene → 持久化到 issue_state.scene_id（受 allow_scene_override 开关控制）
-        _recommended_scene = payload.get("recommended_scene", "")
-        if _recommended_scene and issue_number:
-            try:
-                from src.api.session_store import get_scene_override_flag
-                _allow_override = get_scene_override_flag(repo_key, f"#{issue_number}")
-                if _allow_override:
-                    from src.api.session_store import set_issue_scene
-                    from src.runtime.engine_select import _repo_user_id
-                    _scene_uid = _repo_user_id(repo_key, issue_creator=issue_creator)
-                    set_issue_scene(repo_key, f"#{issue_number}", _recommended_scene, scene_user_id=_scene_uid)
-                    log.info(f"A2A: scene_id={_recommended_scene} uid={_scene_uid} set for issue=#{issue_number} (override enabled)")
-                else:
-                    log.info(f"A2A: scene override disabled for issue=#{issue_number}, skip recommended_scene")
-            except Exception as _sce:
-                log.warning(f"A2A: set_issue_scene failed: {_sce}")
-
         # 多任务模式：VOD A2A 交办时携带 is_subtask_mode → 持久化
         _is_subtask_mode = payload.get("is_subtask_mode", False)
         if _is_subtask_mode and issue_number:
@@ -535,7 +539,7 @@ async def a2a_endpoint(request: Request):
             agent_type=agent_name,
             actor="",
             summary=f"A2A: → {agent_name}",
-            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "recommended_scene": _recommended_scene, "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue},
+            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue},
             status="running",
         )
         log.info(f"A2A: event created, seq={seq}")
@@ -605,7 +609,7 @@ async def a2a_endpoint(request: Request):
         # Legacy dispatch (also serves as fallback for plugin mode)
         from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
-        # A2A 交办的场景来自 issue_state（VOD recommended_scene 已持久化）
+        # A2A 交办的场景来自 issue_state（智能推荐完成或用户手动选择已持久化）
         _a2a_scene, _a2a_scene_uid = "default", 0
         if issue_number:
             try:

@@ -71,23 +71,52 @@ def _provider(header: str = Header("", alias="X-Git-Provider"),
 
 
 def _repo_token(owner: str, repo: str, user: dict) -> str:
-    """解析仓库平台 token：优先仓库 bot token，回退调用者 gitcode token。"""
-    try:
-        from src.repo_key import to_repo_key
-        from src.user.db import get_gitcode_token
-        rk = to_repo_key(f"{owner}/{repo}")
-        tok = get_gitcode_token(repo_key=rk) or ""
+    """解析仓库平台 token（git-repo / git-credential 共用）。
+
+    ⚠️ 本接口**仅服务会话级临时 token（tk_）**——用户级 API Key（`grape_`）/ Web JWT **不适用**（403）。
+    token 按会话 agent_type 决定平台凭据（issue-45-api-token-design §2.5.1）：
+    - chat agent → **用户 gitcode token**（用户身份）
+    - devops 事件 agent（vod/issue/coding/qa/sre）→ **仓库 bot token**（仓库身份）
+    - 一种缺失 → 交叉回退；均缺失 → 502。
+    """
+    if user.get("auth_type") != "session_token":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(f"{owner}/{repo}")
+
+    def _bot() -> str:
+        try:
+            from src.user.db import get_gitcode_token
+            return get_gitcode_token(repo_key=rk) or ""
+        except Exception:
+            return ""
+
+    def _user() -> str:
+        try:
+            from src.api.deps import get_user_token_with_refresh
+            uid = user.get("id") or 0
+            username = user.get("username") or ""
+            if not username and uid > 0:
+                from src.user.db import get_user
+                username = (get_user(uid) or {}).get("username", "")
+            return get_user_token_with_refresh(username, user_id=uid)
+        except Exception:
+            return ""
+
+    if user.get("agent_type") == "chat":
+        tok = _user()
         if tok:
             return tok
-    except Exception:
-        pass
-    try:
-        from src.api.deps import get_user_token_with_refresh
-        tok = get_user_token_with_refresh(user.get("username", ""), user_id=user.get("id") or 0)
+        tok = _bot()
         if tok:
             return tok
-    except Exception:
-        pass
+    else:
+        tok = _bot()
+        if tok:
+            return tok
+        tok = _user()
+        if tok:
+            return tok
     raise HTTPException(status_code=502, detail={"code": 502, "message": "Git 仓库 token 解析失败"})
 
 

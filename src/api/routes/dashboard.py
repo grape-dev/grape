@@ -995,16 +995,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         if s in event_counts:
             event_counts[s] += 1
 
-    # 获取当前场景和场景列表（从 DB 读取，方案 B：无 default 场景）
+    # dev_scene 已退役，始终为空（前端自动选第一个场景展示）
     dev_scene = ""
-    try:
-        with db_lock:
-            c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
-            row = c.fetchone()
-            if row and row[0]:
-                dev_scene = row[0]
-    except Exception:
-        pass
 
     scenes = []
     scene_nodes = []

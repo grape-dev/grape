@@ -283,14 +283,6 @@ function unhostFromSettings(fullName) {
   }).catch(e => app.showToast(I18N.t('settings.host.unhost_failed', {msg: e.message})));
 }
 
-function applyScene(owner, repo) {
-  const sceneId = document.getElementById('sceneSelect').value;
-  if (!sceneId) return app.showToast(I18N.t('settings.scene.select_first'));
-  API.post('/scenes/apply/' + owner + '/' + repo, {scene_id: sceneId})
-    .then(r => app.showToast(r.message || I18N.t('settings.scene.applied')))
-    .catch(e => app.showToast(I18N.t('settings.scene.apply_failed', {msg: e.message || e})));
-}
-
 // ── Theme switching ──
 function selectTheme(theme) {
   if (!app.setTheme) { app.showToast(I18N.t('settings.theme.switch_unavailable')); return; }

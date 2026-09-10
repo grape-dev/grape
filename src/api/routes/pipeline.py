@@ -305,13 +305,8 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
 
     # Pipeline config (event-dispatch-redesign-v2.md Phase 2)
     from src.api.pipeline_config import get_pipeline_config
-    from src.user.db import get_repo_scene
-    scene_id = "default"
-    try:
-        scene_id = get_repo_scene(repo_key) or "default"
-    except Exception:
-        pass
-    pipeline_config = get_pipeline_config(scene_id)
+    scene_id = ""
+    pipeline_config = get_pipeline_config(scene_id) if scene_id else None
 
     return {
         "repo": f"{owner}/{repo}",
