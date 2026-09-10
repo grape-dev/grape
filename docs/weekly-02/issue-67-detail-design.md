@@ -553,9 +553,10 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 - 统计卡片在 apple-card 外面（点击联动切换 tab）
 - Tab 栏在 apple-card 外面（药丸式 3 tab）
 - apple-card 包裹：筛选器 + 卡片网格 + 分页器
-- 详情视图：返回按钮 → 头部卡片（标签 + name + description + 元数据 + 操作按钮靠右）→ 内容卡片（固定高度滚动）→ Agent 关联卡片（标签式）→ 场景关联卡片（横向滚动）
-- 编辑视图：返回按钮 → name 输入框（必填）→ description 输入框 → content textarea → 取消/确认
-- 新增视图：返回按钮 → name 输入框（必填）→ description 输入框 → content textarea → Agent 标签（带描述）→ 场景卡片（弹出层选择）→ 取消/确认
+- 详情视图：返回按钮 → 头部卡片（source 标签 + name + description + 元数据 + 操作按钮靠右）→ 内容卡片（固定高度滚动）→ Agent 关联卡片（标签式）→ 场景关联卡片（横向滚动）
+- 详情头部不显示 scope（baseline/member/project）和 file_path——内部标识对用户无价值
+- 编辑视图：返回按钮 → name 输入框（必填，红色 `*`，maxlength=50）→ description 输入框（maxlength=200）→ content textarea（必填，红色 `*`）+ 还原按钮（条件渲染）+ 导入文件按钮 → 取消/确认
+- 新增视图：返回按钮 → name 输入框（必填，红色 `*`，maxlength=50）→ description 输入框（maxlength=200）→ content textarea（必填，红色 `*`）+ 导入文件按钮 → Agent 标签（带描述）→ 场景卡片（弹出层选择）→ 取消/确认
 
 **统计卡片**：点击联动切换 tab（`switchTab(source)`），选中态高亮。
 
@@ -587,7 +588,8 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 - 6 个 Agent 类型标签（VOD/Issue/Coding/QA/SRE/Chat），每个带职责描述
 - 点击切换选中/取消（`toggleAgentRef` → 批量 API 添加 / DELETE 删除）
 - 选中态：蓝色边框 + 背景高亮
-- 全局关联：pill 标签 + 点击取消
+
+> 全局关联（scene_id='' + agent_type=''）已移除——概念多余，system/agent 知识自动注入，manual 通过 Agent 标签 + 场景关联覆盖。
 
 **场景关联交互**（卡片 + 弹出层）：
 - 已选场景：`.scn-card` 卡片横向滚动（`scn-scroll-wrap` + `scn-scroll-track`）+ 左右箭头按钮
@@ -615,6 +617,26 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 - 编辑：`editMode=true`，name 必填 + description + content
 - 创建后批量关联 Agent + 场景：`POST /{id}/refs/batch`
 
+**文件导入**（前端 FileReader，不走后端接口）：
+- 支持格式：`.md`、`.json`、`.txt`
+- 大小限制：10KB（`file.size > 10240` 拒绝）
+- 行为：FileReader 读取文件内容覆盖 textarea（用户可预览编辑后再提交）
+- 导入后自动填充 name（如果 name 为空，从文件名截取）
+- 新增和编辑页面都支持
+
+**还原按钮**（编辑页面）：
+- 语义：还原（Revert）——一步回到编辑打开时的快照，不是撤销（Undo）栈式多步回退
+- 条件渲染：`v-if editForm.content !== editFormSnapshot.content`（内容变化才显示）
+- 位置：content textarea 上方，和导入文件按钮并排（内容区局部操作，不放底部按钮栏）
+- tooltip：放弃本次所有修改，恢复到进入编辑时的内容
+
+**表单校验**（前端 + 后端双重）：
+- name：必填，≤50 字符（maxlength + 后端校验）
+- content：必填，≤10KB（UTF-8 字节数，`new Blob([text]).size` + 后端 `len(content.encode("utf-8"))`）
+- description：≤200 字符（maxlength + 后端校验）
+- name 不强制唯一——展示名，用 id 做唯一标识
+- 必填标记：红色 `*`（`.kb-required` class，`color:var(--r)`）
+
 **Vue 生命周期管理**：
 - `nav('knowledge')` 调 `renderKnowledge()` 创建 Vue 应用
 - `nav()` 切走时先 `unmount()` 再 `innerHTML = ''`
@@ -640,7 +662,6 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
   "source_system": "系统",
   "source_agent": "Agent",
   "source_manual": "用户",
-  "ref_global": "全局",
   "ref_linked_scenes": "已关联 {count} 个场景",
   "ref_linked_agent": "已关联 {agent}",
   "ref_unlinked": "未关联",

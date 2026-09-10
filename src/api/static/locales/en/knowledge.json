@@ -117,5 +117,6 @@
   "import_file": "Import File",
   "file_imported": "File imported",
   "reset": "Revert",
-  "reset_tip": "Discard all changes, restore to original content"
+  "reset_tip": "Discard all changes, restore to original content",
+  "scenes_unit": "scenes"
 }

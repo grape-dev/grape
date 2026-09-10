@@ -117,5 +117,6 @@
   "import_file": "导入文件",
   "file_imported": "文件已导入",
   "reset": "还原",
-  "reset_tip": "放弃本次所有修改，恢复到进入编辑时的内容"
+  "reset_tip": "放弃本次所有修改，恢复到进入编辑时的内容",
+  "scenes_unit": "场景"
 }

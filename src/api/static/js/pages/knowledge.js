@@ -199,6 +199,14 @@ function renderKnowledge() {
         const fname = k.file_path.split('/').pop().replace(/\.\w+$/, '');
         return fname.replace(/[-_]/g, ' ');
       },
+      agentRefCount(k) {
+        if (!k.refs) return 0;
+        return k.refs.filter(r => r.agent_type !== '' && r.scene_id === '' && r.enabled).length;
+      },
+      sceneRefCount(k) {
+        if (!k.refs) return 0;
+        return k.refs.filter(r => r.scene_id !== '' && r.enabled).length;
+      },
       sourceBarClass(s) {
         if (s === 'system') return 'bg-default';
         if (s === 'agent') return 'bg-skill';
@@ -721,6 +729,14 @@ function renderKnowledge() {
                     <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
                   <div class="scn-card-desc">{{ k.description || t('no_description') }}</div>
+                  <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+                    <span v-if="agentRefCount(k) > 0" style="font-size:10px;color:var(--t3);display:flex;align-items:center;gap:3px">
+                      <span style="background:rgba(0,113,227,0.08);color:var(--a);padding:2px 8px;border-radius:980px;font-weight:500">{{ agentRefCount(k) }} Agent</span>
+                    </span>
+                    <span v-if="sceneRefCount(k) > 0" style="font-size:10px;color:var(--t3);display:flex;align-items:center;gap:3px">
+                      <span style="background:rgba(0,113,227,0.08);color:var(--a);padding:2px 8px;border-radius:980px;font-weight:500">{{ sceneRefCount(k) }} {{ t('scenes_unit') }}</span>
+                    </span>
+                  </div>
                   <div class="scn-card-foot">
                     <span class="scn-meta">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
                     <div class="scn-card-btns">
