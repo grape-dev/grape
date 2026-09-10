@@ -790,7 +790,7 @@ function renderKnowledge() {
                   <span v-if="detail.archived" class="archived-tag">{{ t('archived') }}</span>
                 </div>
                 <h2 style="font-size:17px;font-weight:600;color:var(--t);margin-bottom:8px">{{ detail.name || knowledgeTitle(detail) }}</h2>
-                <div style="font-size:13px;color:var(--t2);line-height:1.5;margin-bottom:8px;font-weight:500">
+                <div style="font-size:13px;color:var(--t2);line-height:1.5;margin-bottom:8px;font-weight:500;white-space:pre-line;word-break:break-word">
                   {{ detail.description || t('no_description') }}
                 </div>
                 <div style="font-size:11px;color:var(--t3);line-height:1.6">
