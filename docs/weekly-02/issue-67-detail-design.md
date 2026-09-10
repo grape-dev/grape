@@ -96,13 +96,17 @@ ALTER TABLE agent_shared_knowledge ADD COLUMN name VARCHAR(256) DEFAULT '';
 
 **生成规则**：
 
-| source | 规则 |
-|--------|------|
-| system | 从 file_path 文件名截取（去扩展名，`-_` 替换空格），如 `project-capabilities.md` → `project capabilities` |
-| agent | 同 system，从 file_path 文件名截取 |
-| manual | 用户必填（前端校验 + 后端校验），最长 256 字符 |
+| source | 规则 | 示例 |
+|--------|------|------|
+| system (baseline) | 固定名称 "项目基线分析" | 项目基线分析 |
+| agent (project) | "项目知识 - {Agent职责}" | 项目知识 - Coding |
+| agent (issue) | "Issue #{N} 知识" | Issue #12 知识 |
+| agent (issue_agent) | "Issue #{N} - {Agent职责} 知识" | Issue #12 - Coding 知识 |
+| manual | 用户必填（前端校验 + 后端校验），最长 256 字符 | 自定义名称 |
 
-**write_knowledge**：加 `name` 参数，system/agent 自动生成，manual 传入。
+> 注意：system/agent 的 file_path 固定为 `knowledge.md`，不能从文件名截取 name（会全部变成 "knowledge" 重名），必须按 scope + agent_type + issue_num 组合生成。
+
+**write_knowledge**：加 `name` 参数，system/agent 按上述规则自动生成，manual 传入。
 
 **KnowledgeEntryBody**：加 `name: str`（必填）。
 
@@ -118,15 +122,18 @@ ALTER TABLE agent_shared_knowledge ADD COLUMN name VARCHAR(256) DEFAULT '';
 - 新增页面：加 name 输入框（必填）
 - 编辑页面：加 name 输入框
 
-**数据回填**（已有数据）：从 file_path 文件名截取（去扩展名，`-_` 替换空格）；如果 file_path 也为空就从 obs_key 截取。
+**数据回填**（已有数据）：按 scope + agent_type + issue_num 组合生成 name。
 
 ```sql
--- 回填 name：从 file_path 文件名截取
-UPDATE agent_shared_knowledge
-SET name = REPLACE(REPLACE(
-    REPLACE(file_path, '/', ''),
-    '_', ' '), '-', ' ')
-WHERE (name IS NULL OR name = '');
+-- 回填 name：按 scope 生成
+UPDATE agent_shared_knowledge SET name='项目基线分析' WHERE scope='baseline' AND (name IS NULL OR name='');
+UPDATE agent_shared_knowledge SET name=CONCAT('项目知识 - ', agent_type) WHERE scope='project' AND (name IS NULL OR name='');
+UPDATE agent_shared_knowledge SET name=CONCAT('Issue #', issue_num, ' 知识') WHERE scope='issue' AND (name IS NULL OR name='');
+UPDATE agent_shared_knowledge SET name=CONCAT('Issue #', issue_num, ' - ', agent_type, ' 知识') WHERE scope='issue_agent' AND (name IS NULL OR name='');
+-- manual：从 file_path 文件名截取（去扩展名，`-_` 替换空格）
+UPDATE agent_shared_knowledge SET name=REPLACE(REPLACE(REPLACE(
+    SUBSTR(file_path, INSTR(file_path, '/') + 1), '_', ' '), '-', ' '), '.md', '')
+WHERE scope='member' AND (name IS NULL OR name='');
 ```
 
 ### 6.2 prompt_builder 注入逻辑改动
