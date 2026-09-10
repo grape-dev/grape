@@ -207,6 +207,18 @@ function renderKnowledge() {
         if (!k.refs) return 0;
         return k.refs.filter(r => r.scene_id !== '' && r.enabled).length;
       },
+      agentNames(k) {
+        if (!k.refs) return [];
+        return k.refs.filter(r => r.agent_type !== '' && r.scene_id === '' && r.enabled).map(r => {
+          const at = AGENT_TYPES.find(a => a.value === r.agent_type);
+          return at ? at.label : r.agent_type;
+        });
+      },
+      sceneNames(k) {
+        if (!k.refs) return [];
+        const names = k.refs.filter(r => r.scene_id !== '' && r.enabled).map(r => r.scene_name || r.scene_id.substring(0, 8));
+        return names.slice(0, 3);
+      },
       sourceBarClass(s) {
         if (s === 'system') return 'bg-default';
         if (s === 'agent') return 'bg-skill';
@@ -729,13 +741,16 @@ function renderKnowledge() {
                     <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
                   <div class="scn-card-desc">{{ k.description || t('no_description') }}</div>
-                  <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-                    <span v-if="agentRefCount(k) > 0" style="font-size:11px;font-weight:500;color:var(--a);background:rgba(0,113,227,0.08);padding:4px 10px;border-radius:980px">
-                      {{ agentRefCount(k) }} Agent
-                    </span>
-                    <span v-if="sceneRefCount(k) > 0" style="font-size:11px;font-weight:500;color:var(--a);background:rgba(0,113,227,0.08);padding:4px 10px;border-radius:980px">
-                      {{ sceneRefCount(k) }} {{ t('scenes_unit') }}
-                    </span>
+                  <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:4px;margin-bottom:10px;flex-wrap:wrap;font-size:10px;color:var(--t3)">
+                    <span v-if="sceneRefCount(k) > 0" style="color:var(--t3)">{{ t('scenes_unit') }}</span>
+                    <template v-if="sceneRefCount(k) > 0">
+                      <span v-for="(s, i) in sceneNames(k)" :key="'s'+i" class="tg tg-d" style="margin-right:2px">{{ s }}</span>
+                      <span v-if="sceneRefCount(k) > sceneNames(k).length" style="color:var(--t3)">+{{ sceneRefCount(k) - sceneNames(k).length }}</span>
+                    </template>
+                    <span v-if="agentRefCount(k) > 0" style="color:var(--t3);margin-left:4px">Agent</span>
+                    <template v-if="agentRefCount(k) > 0">
+                      <span v-for="(a, i) in agentNames(k)" :key="'a'+i" class="tg tg-d" style="margin-right:2px">{{ a }}</span>
+                    </template>
                   </div>
                   <div class="scn-card-foot">
                     <span class="scn-meta">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>

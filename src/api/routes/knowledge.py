@@ -430,14 +430,16 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
         try:
             with db_lock:
                 ref_rows = db.cursor().execute(
-                    f"SELECT knowledge_id, scene_id, agent_type, enabled FROM scene_knowledge_ref "
-                    f"WHERE knowledge_id IN ({placeholders})",
-                    kid_list
+                    f"SELECT r.knowledge_id, r.scene_id, r.agent_type, r.enabled, s.name "
+                    f"FROM scene_knowledge_ref r "
+                    f"LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? "
+                    f"WHERE r.knowledge_id IN ({placeholders})",
+                    [repo_key] + kid_list
                 ).fetchall()
             ref_map = {}
-            for kid, sid, at, en in ref_rows:
+            for kid, sid, at, en, sname in ref_rows:
                 ref_map.setdefault(kid, []).append(
-                    {"scene_id": sid, "agent_type": at, "enabled": en})
+                    {"scene_id": sid, "agent_type": at, "enabled": en, "scene_name": sname or ""})
             for k in all_knowledge:
                 refs = ref_map.get(k["id"], [])
                 k["refs"] = refs
