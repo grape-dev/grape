@@ -94,10 +94,6 @@ function renderKnowledge() {
         if (!this.detail || !this.detail.refs) return [];
         return this.detail.refs.filter(r => r.scene_id !== '');
       },
-      detailGlobalRef() {
-        if (!this.detail || !this.detail.refs) return null;
-        return this.detail.refs.find(r => r.scene_id === '' && r.agent_type === '');
-      },
       selectedAgentTags() {
         if (!this.detail || !this.detail.refs) return [];
         return this.detail.refs
@@ -312,31 +308,6 @@ function renderKnowledge() {
           app.showToast(this.t('ref_add'));
         } catch (e) {
           app.showToast(e.message || I18N.t('common.load_failed'));
-        }
-      },
-
-      // 全局标签操作
-      isGlobalChecked() {
-        return this.detailGlobalRef && this.detailGlobalRef.enabled;
-      },
-      async toggleGlobalRef() {
-        const kid = this.detail.id;
-        const existing = this.detailGlobalRef;
-        if (existing) {
-          try {
-            await API.del('/knowledge/ref/' + existing.id);
-            existing.enabled = false;
-          } catch (e) {
-            app.showToast(e.message);
-          }
-        } else {
-          try {
-            await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [] });
-            await this.loadRefs(kid);
-            app.showToast(this.t('ref_add'));
-          } catch (e) {
-            app.showToast(e.message || I18N.t('common.load_failed'));
-          }
         }
       },
 
@@ -827,10 +798,6 @@ function renderKnowledge() {
             <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
               <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
                 <h2 style="font-size:16px;font-weight:600">{{ t('ref_agent_title') }}</h2>
-                <span v-if="isGlobalChecked()" class="kb-tag kb-tag-global" style="font-size:10px;cursor:pointer" @click="toggleGlobalRef">
-                  {{ t('ref_global_short') }} ×
-                </span>
-                <button v-else class="kb-tag-add" style="font-size:10px" @click="toggleGlobalRef">+ {{ t('ref_add_global') }}</button>
               </div>
               <div style="display:flex;flex-wrap:wrap;gap:8px">
                 <div v-for="at in agentTypes.filter(a => a.value)" :key="at.value"
