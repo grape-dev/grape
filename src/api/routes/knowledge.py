@@ -1012,6 +1012,9 @@ def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
     with db_lock:
         c = db.cursor()
         for scene_id, agent_type in items:
+            # 禁止空关联——scene_id 和 agent_type 不能同时为空（否则全局注入）
+            if not scene_id and not agent_type:
+                continue
             existing = c.execute(
                 "SELECT id FROM scene_knowledge_ref "
                 "WHERE knowledge_id=? AND scene_id=? AND agent_type=?",
