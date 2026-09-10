@@ -780,7 +780,6 @@ function renderKnowledge() {
               <div style="flex:1;min-width:0">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
                   <span class="source-tag" :class="sourceClass(detail.source)" style="font-size:11px;padding:3px 12px">{{ sourceLabel(detail.source) }}</span>
-                  <span class="tg tg-d" style="font-size:10px">{{ detail.scope }}</span>
                   <span v-if="detail.issue_tag" class="issue-tag">{{ detail.issue_tag }}</span>
                   <span v-if="detail.archived" class="archived-tag">{{ t('archived') }}</span>
                 </div>
