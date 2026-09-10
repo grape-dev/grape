@@ -892,21 +892,22 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
             (row["repo_key"], knowledge_id)
         ).fetchall()
 
-    # 为每个场景关联补充 pipeline 信息
+    # 为每个场景关联补充 pipeline 信息（批量查，不循环加锁）
     ref_list = []
+    scene_ids = [r[9] for r in refs if r[9] and row["repo_key"]]
+    pipeline_map = {}
+    for sid in scene_ids:
+        try:
+            pc = get_pipeline_config(sid, repo_key=row["repo_key"])
+            if pc and pc.get("nodes"):
+                pipeline_map[sid] = " → ".join(n.get("tag", n.get("id", "")) for n in pc["nodes"] if n.get("enabled", True))
+        except Exception:
+            pass
     for r in refs:
         scene_name = r[6] or ""
         scene_description = r[7] or ""
         scene_display_name = r[8] or scene_name
-        # 查 pipeline 技能链路
-        pipeline_chain = ""
-        if r[9] and row["repo_key"]:
-            try:
-                pc = get_pipeline_config(r[9], repo_key=row["repo_key"])
-                if pc and pc.get("nodes"):
-                    pipeline_chain = " → ".join(n.get("tag", n.get("id", "")) for n in pc["nodes"] if n.get("enabled", True))
-            except Exception:
-                pass
+        pipeline_chain = pipeline_map.get(r[9], "")
         ref_list.append({
             "id": r[0], "scene_id": r[1], "agent_type": r[2], "enabled": r[3],
             "created_by": r[4], "created_at": r[5],
