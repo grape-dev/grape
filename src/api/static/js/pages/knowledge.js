@@ -33,6 +33,7 @@ function renderKnowledge() {
         editForm: null,
         editFormSnapshot: null,
         createForm: null,
+        submitting: false,
         sceneScrollLeft: false,
         sceneScrollRight: false,
         createScenePopover: false,
@@ -292,18 +293,20 @@ function renderKnowledge() {
         return at ? at.label : agentType;
       },
       async toggleAgentRef(agentType) {
+        if (this.submitting) return; this.submitting = true;
+        const _t = setTimeout(() => this.submitting = false, 10000);
+        try {
         const kid = this.detail.id;
         if (this.isAgentSelected(agentType)) {
-          // 已选 → 删除
           const ref = this.detail.refs.find(r => r.agent_type === agentType && r.scene_id === '' && r.enabled);
           if (ref) {
             try { await API.del('/knowledge/ref/' + ref.id); } catch(e) { app.showToast(e.message); }
           }
         } else {
-          // 未选 → 添加
           try { await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [agentType] }); } catch(e) { app.showToast(e.message); }
         }
         await this.loadRefs(kid);
+        } finally { clearTimeout(_t); this.submitting = false; }
       },
       async removeAgentRef(tag) {
         try {
@@ -326,12 +329,14 @@ function renderKnowledge() {
 
       // 场景标签操作
       async removeSceneRef(tag) {
+        if (this.submitting) return; this.submitting = true;
+        const _t = setTimeout(() => this.submitting = false, 10000);
         try {
           await API.del('/knowledge/ref/' + tag.ref.id);
           tag.ref.enabled = false;
         } catch (e) {
           app.showToast(e.message);
-        }
+        } finally { clearTimeout(_t); this.submitting = false; }
       },
       async addSceneById(sceneId) {
         const kid = this.detail.id;
@@ -408,6 +413,8 @@ function renderKnowledge() {
         }
       },
       async confirmAddScenes() {
+        if (this.submitting) return; this.submitting = true;
+        const _t = setTimeout(() => this.submitting = false, 10000);
         const kid = this.detail.id;
         try {
           await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: this.sceneSelected, agent_types: [] });
@@ -415,7 +422,7 @@ function renderKnowledge() {
           app.showToast(this.t('ref_added_count', { count: this.sceneSelected.length }));
         } catch (e) {
           app.showToast(e.message || I18N.t('common.load_failed'));
-        }
+        } finally { clearTimeout(_t); this.submitting = false; }
         this.addScenePopover = false;
         this.sceneSelected = [];
       },
@@ -506,6 +513,8 @@ function renderKnowledge() {
         if (this.editForm.description.length > 200) { app.showToast(this.t('desc_too_long')); return; }
         if (!this.editForm.content.trim()) { app.showToast(this.t('content_required')); return; }
         if (new Blob([this.editForm.content]).size > 10240) { app.showToast(this.t('content_too_large')); return; }
+        if (this.submitting) return; this.submitting = true;
+        const _t = setTimeout(() => this.submitting = false, 10000);
         try {
           await API.put('/knowledge/' + this.detail.id, {
             content: this.editForm.content || '',
@@ -517,7 +526,7 @@ function renderKnowledge() {
           await this.viewContent({ id: this.detail.id });
         } catch (e) {
           app.showToast(e.message || I18N.t('common.load_failed'));
-        }
+        } finally { clearTimeout(_t); this.submitting = false; }
       },
 
       // 删除
@@ -550,13 +559,15 @@ function renderKnowledge() {
       async quickDelete(k) {
         const self = this;
         _showAppleConfirm(this.t('delete_confirm'), async function() {
+          if (self.submitting) return; self.submitting = true;
+          const _t = setTimeout(() => self.submitting = false, 10000);
           try {
             await API.del('/knowledge/' + k.id);
             app.showToast(self.t('knowledge_deleted'));
             await self.loadList();
           } catch (e) {
             app.showToast(e.message || I18N.t('common.load_failed'));
-          }
+          } finally { clearTimeout(_t); self.submitting = false; }
         });
       },
       async quickArchive(k) {
@@ -640,6 +651,8 @@ function renderKnowledge() {
         if (this.createForm.description.length > 200) { app.showToast(this.t('desc_too_long')); return; }
         if (!this.createForm.content.trim()) { app.showToast(this.t('content_required')); return; }
         if (new Blob([this.createForm.content]).size > 10240) { app.showToast(this.t('content_too_large')); return; }
+        if (this.submitting) return; this.submitting = true;
+        const _t = setTimeout(() => this.submitting = false, 10000);
         try {
           const d = await API.post('/knowledge/entry', {
             repo: this.currentRepo(),
@@ -649,7 +662,6 @@ function renderKnowledge() {
             name: this.createForm.name.trim()
           });
           const kid = d.id || d.knowledge_id;
-          // 批量关联 Agent + 场景
           if (kid && (this.createForm.agentSelected.length > 0 || this.createForm.sceneSelected.length > 0)) {
             try {
               await API.post('/knowledge/' + kid + '/refs/batch', {
@@ -665,7 +677,7 @@ function renderKnowledge() {
           await this.loadList();
         } catch (e) {
           app.showToast(e.message || I18N.t('common.load_failed'));
-        }
+        } finally { clearTimeout(_t); this.submitting = false; }
       },
 
       // 文件过大提示
@@ -759,7 +771,7 @@ function renderKnowledge() {
                     <span class="scn-meta" :title="k.created_by + ' · ' + (k.created_at || '').substring(0, 16)">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
                     <div class="scn-card-btns">
                       <button class="bt bt-p bt-s" @click.stop="viewContent(k)">{{ t('view') }}</button>
-                      <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click.stop="quickDelete(k)">{{ t('delete') }}</button>
+                      <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" :disabled="submitting" @click.stop="quickDelete(k)">{{ t('delete') }}</button>
                     </div>
                   </div>
                 </div>
@@ -908,7 +920,7 @@ function renderKnowledge() {
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--b)">
               <button class="bt bt-o bt-s" @click="cancelEdit">{{ t('cancel') }}</button>
-              <button class="bt bt-p bt-s" @click="saveEdit">{{ t('confirm') }}</button>
+              <button class="bt bt-p bt-s" :disabled="submitting" @click="saveEdit">{{ t('confirm') }}</button>
             </div>
           </div>
         </template>
@@ -990,7 +1002,7 @@ function renderKnowledge() {
 
           <div style="display:flex;gap:8px;justify-content:flex-end">
             <button class="bt bt-o bt-s" @click="cancelCreate">{{ t('cancel') }}</button>
-            <button class="bt bt-p bt-s" @click="saveCreate">{{ t('confirm') }}</button>
+            <button class="bt bt-p bt-s" :disabled="submitting" @click="saveCreate">{{ t('confirm') }}</button>
           </div>
         </template>
 
@@ -1020,7 +1032,7 @@ function renderKnowledge() {
               <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
               <div style="display:flex;gap:8px">
                 <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
-                <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
+                <button class="bt bt-p bt-s" :disabled="submitting || sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
               </div>
             </div>
           </div>
