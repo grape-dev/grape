@@ -1431,7 +1431,13 @@ def _agent_knowledge_entries(repo_key: str) -> dict[str, list]:
 
 #### 6.23.9 knowledge_files() 给远端 worker 交付知识
 
-`knowledge_files()`（`knowledge.py:252`）调 `read_knowledge()` 读取知识内容。6.22 改了记录结构但不影响 `read_knowledge`——`read_knowledge` 按文件路径读取，文件还是同一个文件，内容是追加的全文。不受影响。
+**Issue #67 改动**：`knowledge_files()` 从 `read_knowledge()` 三级 scope + `member_files()` 全量扫描，改为走 `scene_knowledge_ref` 表——只交付关联的知识文件。
+
+和 prompt 注入逻辑一致：未关联的知识不打包给 worker（Agent 用 read tool 读不到）。
+
+- 新增 `scene_id` 参数：`enqueue_task` 从 `get_issue_scene(repo_key, issue_id)` 获取传入
+- SQL 和 `_build_knowledge_section` 一致：`(scene_id=? OR '') AND (agent_type=? OR '') AND (issue_num=? OR 0)`
+- 向后兼容：ref 表不存在时回退 `read_knowledge` 三级 scope
 
 #### 6.23.10 obs.py 知识同步逻辑
 

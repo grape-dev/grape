@@ -544,17 +544,6 @@ function renderKnowledge() {
         });
       },
 
-      // 归档
-      async toggleArchive() {
-        try {
-          await API.put('/knowledge/' + this.detail.id + '/archive', { archived: !this.detail.archived });
-          app.showToast(this.detail.archived ? this.t('unarchived') : this.t('archived'));
-          this.detail.archived = !this.detail.archived;
-        } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
-        }
-      },
-
       // 卡片上的快速操作
       async quickDelete(k) {
         const self = this;
@@ -569,15 +558,6 @@ function renderKnowledge() {
             app.showToast(e.message || I18N.t('common.load_failed'));
           } finally { clearTimeout(_t); self.submitting = false; }
         });
-      },
-      async quickArchive(k) {
-        try {
-          await API.put('/knowledge/' + k.id + '/archive', { archived: !k.archived });
-          app.showToast(k.archived ? this.t('unarchived') : this.t('archived'));
-          await this.loadList();
-        } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
-        }
       },
       quickEdit(k) {
         this.viewContent(k).then(() => {
