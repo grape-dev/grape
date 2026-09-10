@@ -326,18 +326,18 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
 
     # 4. 自动生成 scene_knowledge_ref 关联记录（scope=member 除外——用户手动关联）
     if knowledge_id and scope != "member":
-        _auto_generate_knowledge_ref(knowledge_id, scope, agent_type)
+        _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num)
 
     return file_path
 
 
-def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str = ""):
+def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str = "", issue_num: int = 0):
     """系统写入知识时按 scope 规则自动生成 scene_knowledge_ref 关联记录。"""
     ref_map = {
-        "baseline":    {"scene_id": "", "agent_type": ""},           # 全局（基线分析，所有 Agent 共享）
-        "project":     {"scene_id": "", "agent_type": agent_type},   # 项目级 Agent 知识——只注入给该 Agent
-        "issue":       {"scene_id": "", "agent_type": ""},           # 全局（Issue 级，所有 Agent 共享）
-        "issue_agent": {"scene_id": "", "agent_type": agent_type},   # Issue+Agent 级——只注入给该 Agent
+        "baseline":    {"scene_id": "", "agent_type": "",           "issue_num": 0},           # 全局（基线分析，所有 Agent 共享）
+        "project":     {"scene_id": "", "agent_type": agent_type,   "issue_num": 0},           # 项目级 Agent 知识——只注入给该 Agent
+        "issue":       {"scene_id": "", "agent_type": "",           "issue_num": issue_num},   # Issue 级——只匹配该 Issue
+        "issue_agent": {"scene_id": "", "agent_type": agent_type,   "issue_num": issue_num},   # Issue+Agent 级——只匹配该 Issue + 该 Agent
         # member 不自动关联——用户手动选择
     }
     ref = ref_map.get(scope)
@@ -347,9 +347,9 @@ def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str 
         with db_lock:
             db.cursor().execute(
                 "INSERT OR IGNORE INTO scene_knowledge_ref "
-                "(knowledge_id, scene_id, agent_type, enabled, created_by) "
-                "VALUES (?, ?, ?, 1, ?)",
-                (knowledge_id, ref["scene_id"], ref["agent_type"], "system")
+                "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+                "VALUES (?, ?, ?, ?, 1, ?)",
+                (knowledge_id, ref["scene_id"], ref["agent_type"], ref["issue_num"], "system")
             )
             db.commit()
     except Exception as e:

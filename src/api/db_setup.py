@@ -445,12 +445,13 @@ CREATE TABLE IF NOT EXISTS scene_knowledge_ref (
     knowledge_id  INTEGER NOT NULL,                        -- agent_shared_knowledge.id
     scene_id      TEXT NOT NULL DEFAULT '',                 -- 场景UUID，空字符串=全部场景，禁止NULL
     agent_type    TEXT NOT NULL DEFAULT '',                 -- Agent类型，空字符串=全部Agent，禁止NULL
+    issue_num     INTEGER NOT NULL DEFAULT 0,               -- Issue编号，0=全局（不限Issue），>0=只匹配该Issue
     enabled       INTEGER NOT NULL DEFAULT 1,               -- 1启用 0禁用
     created_by    TEXT NOT NULL DEFAULT '',                 -- 创建人
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),  -- 创建时间
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),  -- 更新时间
     updated_by    TEXT NOT NULL DEFAULT '',                 -- 最后修改人
-    UNIQUE (knowledge_id, scene_id, agent_type)
+    UNIQUE (knowledge_id, scene_id, agent_type, issue_num)
 )
 """
 
@@ -461,13 +462,14 @@ CREATE TABLE IF NOT EXISTS scene_knowledge_ref (
     knowledge_id  BIGINT UNSIGNED NOT NULL COMMENT 'agent_shared_knowledge主键',
     scene_id      VARCHAR(64) NOT NULL DEFAULT '' COMMENT '场景UUID，空字符串代表全部场景，禁止NULL',
     agent_type    VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'Agent类型，空字符串代表全部Agent，禁止NULL',
+    issue_num     INT NOT NULL DEFAULT 0 COMMENT 'Issue编号，0=全局不限Issue，>0=只匹配该Issue',
     enabled       TINYINT NOT NULL DEFAULT 1 COMMENT '1启用 0禁用',
     created_by    VARCHAR(64) NOT NULL DEFAULT '' COMMENT '创建人',
     created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间，自动刷新',
     updated_by    VARCHAR(64) NOT NULL DEFAULT '' COMMENT '最后修改人',
-    UNIQUE KEY uk_knowledge_scene_agent (knowledge_id, scene_id, agent_type),
-    KEY idx_query (enabled, scene_id, agent_type),
+    UNIQUE KEY uk_knowledge_scene_agent_issue (knowledge_id, scene_id, agent_type, issue_num),
+    KEY idx_query (enabled, scene_id, agent_type, issue_num),
     CONSTRAINT fk_scene_knowledge_ref_knowledge_id
         FOREIGN KEY (knowledge_id) REFERENCES agent_shared_knowledge(id)
         ON DELETE CASCADE
@@ -1334,36 +1336,39 @@ def _migrate_knowledge_issue67():
                 "  SELECT MAX(id) FROM agent_shared_knowledge "
                 "  GROUP BY repo_key, scope, agent_type, issue_num)")
 
-        # 3. scene_knowledge_ref 数据迁移——为现有知识生成关联记录
-        # baseline → 全局关联
+        # 3. scene_knowledge_ref 加 issue_num 列（幂等）
+        _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
+
+        # 4. scene_knowledge_ref 数据迁移——为现有知识生成关联记录
+        # baseline → 全局关联（issue_num=0）
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
-            "SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge "
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+            "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'baseline' AND source = 'system'")
-        # project → 全局关联
+        # project → 指定 Agent 关联（issue_num=0）
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
-            "SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge "
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+            "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'project' AND source = 'agent'")
-        # issue → 全局关联
+        # issue → 全局关联（issue_num=实际值）
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
-            "SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge "
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+            "SELECT id, '', '', issue_num, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'issue' AND source = 'agent'")
-        # issue_agent → 指定 Agent 关联
+        # issue_agent → 指定 Agent + Issue 关联
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
-            "SELECT id, '', agent_type, 1, 'system' FROM agent_shared_knowledge "
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+            "SELECT id, '', agent_type, issue_num, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'issue_agent' AND source = 'agent' AND agent_type != ''")
-        # member（agent_type 非空）→ 指定 Agent 关联
+        # member（agent_type 非空）→ 指定 Agent 关联（issue_num=0）
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
-            "SELECT id, '', agent_type, 1, 'system' FROM agent_shared_knowledge "
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+            "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'member' AND source = 'manual' AND agent_type != ''")
-        # member（agent_type 空）→ 全局关联
+        # member（agent_type 空）→ 全局关联（issue_num=0）
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, enabled, created_by) "
-            "SELECT id, '', '', 1, 'system' FROM agent_shared_knowledge "
+            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+            "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
 
         db.commit()

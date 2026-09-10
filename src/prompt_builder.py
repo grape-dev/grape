@@ -921,8 +921,9 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
     """共享知识段落：查 scene_knowledge_ref 表注入关联知识 + 基线文件。
 
     Issue #67 改动：
-    - 新增 scene_id 参数
+    - 新增 scene_id + issue_num 参数
     - 注入逻辑改为查 scene_knowledge_ref 表（DISTINCT knowledge_id 去重）
+    - issue_num 精确匹配：issue/issue_agent 知识只注入到对应 Issue
     - 向后兼容：表不存在或无关联记录时回退到 scope 三级注入
     - 返回 (知识段落文本, 注入的知识 ID 列表)
     """
@@ -941,10 +942,11 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
                 "WHERE r.enabled = 1 "
                 "AND (r.scene_id = ? OR r.scene_id = '') "
                 "AND (r.agent_type = ? OR r.agent_type = '') "
+                "AND (r.issue_num = ? OR r.issue_num = 0) "
                 "AND k.repo_key = ? "
                 "AND k.status = 'accepted' "
                 "AND k.archived = 0",
-                (scene_id, agent_type, repo_key)
+                (scene_id, agent_type, issue_num, repo_key)
             ).fetchall()
 
         from src.api.routes.knowledge import _read_entry_content
