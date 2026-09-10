@@ -680,8 +680,6 @@
 .kb-agent-selected .kb-agent-check .kb-check-yes{display:inline}
 .kb-ref-pill{display:inline-flex;align-items:center;gap:3px;padding:3px 10px;border-radius:980px;font-size:10px;font-weight:500;color:var(--a);background:rgba(0,113,227,0.08);cursor:pointer;transition:all .15s;position:relative}
 .kb-ref-pill:hover{background:rgba(0,113,227,0.15)}
-.kb-ref-tooltip{position:fixed;z-index:9999;background:rgba(29,29,31,0.95);color:#fff;padding:8px 14px;border-radius:10px;font-size:11px;font-weight:400;white-space:nowrap;max-width:400px;overflow:hidden;text-overflow:ellipsis;box-shadow:0 4px 16px rgba(0,0,0,.12);line-height:1.4;pointer-events:none}
-.kb-ref-tooltip::before{content:'';position:absolute;top:-6px;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:rgba(29,29,31,0.95)}
 .kb-tab-bar{display:inline-flex;gap:4px;padding:3px;background:var(--bg);border-radius:10px;margin-bottom:14px}
 .kb-tab{padding:6px 16px;font-size:12px;font-weight:500;color:var(--t3);border:none;background:none;cursor:pointer;border-radius:8px;transition:all .2s}
 .kb-tab:hover{color:var(--t)}
