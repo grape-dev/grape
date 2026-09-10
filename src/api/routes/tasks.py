@@ -1476,6 +1476,18 @@ async def my_tasks(status: str = Query("", pattern="^(active|processing|awaiting
                 _scene_name = _cfg.get("name", _scene_id)
         except Exception:
             pass
+        # 检查是否有正在运行的 agent_task（Issue #85: 雷达动画依据）
+        _has_running_agent = False
+        if r[3] and _stage in ("vod", "issue", "coding", "qa", "sre"):
+            try:
+                with db_lock:
+                    _rc = db.cursor()
+                    _rc.execute(
+                        "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running') LIMIT 1",
+                        (_rk, _issue_id))
+                    _has_running_agent = _rc.fetchone() is not None
+            except Exception:
+                pass
         tasks_out.append({
             "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
             "title": r[4] or "", "task_description": r[5] or "",
@@ -1487,5 +1499,6 @@ async def my_tasks(status: str = Query("", pattern="^(active|processing|awaiting
             "scene_name": _scene_name,
             "scene_source": _scene_source,
             "stage": _stage,
+            "is_running": _has_running_agent,
         })
     return {"tasks": tasks_out, "sort_order": sort_order, "mode": mode}
