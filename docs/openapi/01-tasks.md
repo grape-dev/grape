@@ -121,8 +121,24 @@ Task 对象字段：`id / user_id / assignee / repo_key / issue_number / title /
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|:---:|------|
 | `task_id` | string | 会话 token 时可省 | 会话 token（`tk_`）下由 token 自动定位（`session_key`）；JWT/API Key 必填 |
-| `result_text` | string | ✅ | 结论/动作/产出摘要（写入事件 result，供事件对话/下游阅读） |
+| `result_text` | string | 非结构化时为 ✅ | 结论/动作/产出摘要（写入事件 result），未结构化时兜底为「任务自报完成…」 |
 | `next_step` | string | 否 | `a2a_issue` / `reply_comment` / `a2a_need_clarify` / `done` |
+| `actions` | string[] | 否 | 动作清单（如 `["修改代码修复审查意见", "grape git push 分支", "在 PR #N 评论告知重新审查"]） |
+| `conclusion` | string | 否 | 结论（如「已按审查意见完成哪些修复，测试结果，待 QA 重新审查」） |
+| `artifacts` | string[] | 否 | 产出/标识（如 `["PR #N 评论", "commit xxxxxx"]`） |
+| `issue_summary` | string | 否 | 一句话摘要（如「已按审查意见修复 \| 修改摘要 \| 待重新审查」） |
+
+> 结构化示例（agent 收尾 `grape tasks complete --json`）：
+> ```json
+> {
+>   "actions": ["修改代码修复审查意见", "grape git push 分支", "在 PR #N 评论告知重新审查"],
+>   "conclusion": "已按审查意见完成哪些修复，测试结果，待 QA 重新审查",
+>   "artifacts": ["PR #N 评论", "commit xxxxxx"],
+>   "next_step": "QA Agent 重新审查 PR #N",
+>   "issue_summary": "已按审查意见修复 | 修改摘要 | 待重新审查"
+> }
+> ```
+> 传入结构化字段后，服务端组装为结构化 `result_text`（含 `actions`/`conclusion`…），供事件对话与结构化解析识别；不传则用 `result_text` 原文。
 
 | 项 | 值 |
 |----|-----|
