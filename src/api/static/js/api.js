@@ -247,9 +247,11 @@ const API = (() => {
   var _latencyTimer = null;
   var _LATENCY_BATCH_SIZE = 10;
   var _LATENCY_FLUSH_INTERVAL = 30000;
+  var _LATENCY_THRESHOLD_MS = 200;  // 只上报耗时 ≥ 200ms 的请求，避免数据量爆炸
 
   function _reportLatency(url, method, status, durationMs) {
     try {
+      if (durationMs < _LATENCY_THRESHOLD_MS) return;  // 快请求不上报
       var path = url.replace(BASE, '');
       // 跳过 Worker 轮询和上报自身
       for (var i = 0; i < _LATENCY_SKIP_PREFIXES.length; i++) {

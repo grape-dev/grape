@@ -888,6 +888,11 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_scene_skill_ref_skill_name ON scene_skill_ref(skill_name)",
         "CREATE INDEX IF NOT EXISTS idx_skill_is_featured ON skill(is_featured)",
         "CREATE INDEX IF NOT EXISTS idx_market_scene_id ON devops_pipeline_scene(market_scene_id)",
+        # ===== API 慢请求监控索引 =====
+        "CREATE INDEX IF NOT EXISTS idx_latency_log_created ON api_latency_log(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_latency_log_path ON api_latency_log(path)",
+        "CREATE INDEX IF NOT EXISTS idx_latency_log_duration ON api_latency_log(duration_ms)",
+        "CREATE INDEX IF NOT EXISTS idx_latency_log_source ON api_latency_log(source)",
     ]
     for idx in indexes:
         try:

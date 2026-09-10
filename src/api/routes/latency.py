@@ -3,11 +3,41 @@
 无认证——时延数据不敏感，但单次上限 100 条防滥用。
 数据写入 api_latency_log 表，source='frontend'，与方案C（backend）共用同一张表。
 """
+import time
 from fastapi import APIRouter, Request
 from src.session_manager import db, db_lock
 from src.config import log
 
 router = APIRouter(prefix="/api/latency", tags=["latency"])
+
+# 定时清理：每 6 小时执行一次（模块级变量记录上次清理时间）
+_last_cleanup = 0
+_CLEANUP_INTERVAL = 6 * 3600  # 6 小时
+_CLEANUP_RETENTION_DAYS = 7
+_MAX_ROWS = 5000  # 表数据量上限，超过时清理最旧记录
+
+
+def _maybe_cleanup():
+    """定时清理：超过保留天期的记录 + 数据量超限时清理最旧记录。"""
+    global _last_cleanup
+    now = time.time()
+    if now - _last_cleanup < _CLEANUP_INTERVAL:
+        return
+    _last_cleanup = now
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 1. 删除超期记录
+            c.execute(f"DELETE FROM api_latency_log WHERE created_at < datetime('now', '-{_CLEANUP_RETENTION_DAYS} days')")
+            # 2. 数据量超限时删除最旧记录
+            count = c.execute("SELECT COUNT(*) FROM api_latency_log").fetchone()[0]
+            if count > _MAX_ROWS:
+                excess = count - _MAX_ROWS
+                c.execute(f"DELETE FROM api_latency_log WHERE id IN (SELECT id FROM api_latency_log ORDER BY id ASC LIMIT {excess})")
+                log.info(f"Latency log trimmed: {excess} oldest records removed (count was {count})")
+            db.commit()
+    except Exception as e:
+        log.warning(f"Latency log cleanup failed: {e}")
 
 
 @router.post("/report")
@@ -17,6 +47,9 @@ async def report_latency(request: Request):
     请求体：{"entries": [{"url": "/dashboard/...", "method": "GET", "status": 200, "durationMs": 45, "ts": 1234567890}]}
     返回：{"ok": true, "count": N}
     """
+    # 每次上报时检查是否需要清理
+    _maybe_cleanup()
+
     try:
         body = await request.json()
     except Exception:
@@ -41,7 +74,6 @@ async def report_latency(request: Request):
                 except Exception:
                     pass
             db.commit()
-        log.info(f"Latency report: {inserted}/{len(entries)} entries inserted (frontend)")
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
