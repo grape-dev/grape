@@ -411,6 +411,16 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
     return ""
 
 
+# Issue #85: agent 输出澄清意图检测
+_AWAITING_INPUT_MARKERS = ["澄清", "需要确认", "请问", "请提供", "需要补充", "请回复", "请说明", "需要以下信息"]
+
+def _detect_awaiting_input(result_text: str) -> bool:
+    """检测 agent 输出是否包含澄清意图（仅 vod/issue agent 调用）。"""
+    if not result_text:
+        return False
+    return any(marker in result_text for marker in _AWAITING_INPUT_MARKERS)
+
+
 # L2 阶段分派映射表（Issue #49 §5.3）：stage × 事件类型 → Agent
 # - 对应列 stage 命中 → 目标 Agent；"—" 表示该阶段下该事件不分发（返回空）
 # - 特例：PR updated + stage=coding + QA 有历史 → qa（复审）
@@ -2149,7 +2159,24 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)
-    log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")
+    log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}\n")
+
+    # Issue #85: agent 完成后检测澄清意图 → 设 task.status=awaiting_input
+    if new_status == "completed" and result_text and issue_id and agent_type in ("vod", "issue"):
+        try:
+            _issue_num = _issue_num_from(issue_id)
+            if _issue_num and _detect_awaiting_input(result_text):
+                with db_lock:
+                    _c = db.cursor()
+                    _c.execute(
+                        "UPDATE tasks SET status='awaiting_input' "
+                        "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+                        (repo_key, int(_issue_num)))
+                    db.commit()
+                    if _c.rowcount > 0:
+                        log.info(f"Issue #85: agent clarification detected → task awaiting_input for {repo_key}/#{_issue_num}")
+        except Exception as _e:
+            log.warning(f"Issue #85: awaiting_input detection failed: {_e}")
 
     # 多任务模式：父任务 Issue Agent 完成后 → stage=done（不 A2A coding，子任务由 webhook 自动触发）
     if new_status == "completed" and agent_type == "issue" and issue_id:

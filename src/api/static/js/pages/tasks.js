@@ -167,7 +167,7 @@ function loadTasks() {
 function _mapStatusL(t) {
   if (t.status === 'cancelled') return 'cancelled';
   if (t.status === 'completed' || t.stage === 'done') return 'done';
-  if (t.stage === 'pending_review') return 'pending_review';
+  if (t.status === 'pending_review' || t.stage === 'pending_review') return 'pending_review';
   if (t.status === 'awaiting_input') return 'awaiting_input';
   if (['vod','issue','coding','qa','sre'].includes(t.stage)) return 'in_progress';
   if (t.status === 'processing') return 'in_progress';
@@ -359,11 +359,11 @@ function _renderBoard(filtered) {
     vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7',
     sre: '#f59e0b', pending_review: '#10b981', done: '#34c759', '': '#86868b'
   };
-  // task.status → 看板列映射
+  // task.status → 看板列映射（Issue #85: 增加 task.status=pending_review 支持）
   function _mapStatus(t) {
     if (t.status === 'cancelled') return 'cancelled';
     if (t.status === 'completed' || t.stage === 'done') return 'done';
-    if (t.stage === 'pending_review') return 'pending_review';
+    if (t.status === 'pending_review' || t.stage === 'pending_review') return 'pending_review';
     if (t.status === 'awaiting_input') return 'awaiting_input';
     const _activeStages = ['vod','issue','coding','qa','sre'];
     if (_activeStages.includes(t.stage)) return 'in_progress';
