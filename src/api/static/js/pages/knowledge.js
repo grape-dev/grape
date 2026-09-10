@@ -133,6 +133,7 @@ function renderKnowledge() {
       await this.loadList();
     },
     beforeUnmount() {
+      this.hideRefTooltip();
     },
     methods: {
       t(key, params) {
