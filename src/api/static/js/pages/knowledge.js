@@ -32,6 +32,7 @@ function renderKnowledge() {
         editMode: false,
         editForm: null,
         editFormSnapshot: null,
+        refTooltip: { show: false, text: '', x: 0, y: 0 },
         createForm: null,
         sceneScrollLeft: false,
         sceneScrollRight: false,
@@ -194,6 +195,13 @@ function renderKnowledge() {
         if (!k.file_path) return k.description || '';
         const fname = k.file_path.split('/').pop().replace(/\.\w+$/, '');
         return fname.replace(/[-_]/g, ' ');
+      },
+      showRefTooltip(e, text) {
+        const r = e.target.getBoundingClientRect();
+        this.refTooltip = { show: true, text, x: r.left + r.width / 2, y: r.bottom + 8 };
+      },
+      hideRefTooltip() {
+        this.refTooltip.show = false;
       },
       agentRefCount(k) {
         if (!k.refs) return 0;
@@ -742,10 +750,10 @@ function renderKnowledge() {
                   </div>
                   <div class="scn-card-desc" :title="k.description || t('no_description')">{{ k.description || t('no_description') }}</div>
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;font-size:10px;min-height:17px">
-                    <span v-if="sceneRefCount(k) > 0" class="kb-ref-pill" :data-names="'场景：' + sceneNames(k).join('、')" @click.stop="viewContent(k)">
+                    <span v-if="sceneRefCount(k) > 0" class="kb-ref-pill" @mouseenter="showRefTooltip($event, '场景：' + sceneNames(k).join('、'))" @mouseleave="hideRefTooltip" @click.stop="viewContent(k)">
                       {{ t('scenes_unit') }}{{ sceneRefCount(k) }}
                     </span>
-                    <span v-if="agentRefCount(k) > 0" class="kb-ref-pill" :data-names="'Agent：' + agentNames(k).join('、')" @click.stop="viewContent(k)">
+                    <span v-if="agentRefCount(k) > 0" class="kb-ref-pill" @mouseenter="showRefTooltip($event, 'Agent：' + agentNames(k).join('、'))" @mouseleave="hideRefTooltip" @click.stop="viewContent(k)">
                       Agent {{ agentRefCount(k) }}
                     </span>
                   </div>
@@ -1028,6 +1036,9 @@ function renderKnowledge() {
           </div>
         </div>
       </div>
+      <teleport to="body">
+        <div v-if="refTooltip.show" class="kb-ref-tooltip" :style="{ left: refTooltip.x + 'px', top: refTooltip.y + 'px', transform: 'translateX(-50%)' }">{{ refTooltip.text }}</div>
+      </teleport>
     `,
   });
 
