@@ -419,27 +419,50 @@ def cleanup_archived_knowledge():
             log.info(f"[knowledge] cleaned up {len(rows)} archived knowledge entries")
 
 
-def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0) -> dict:
-    """任务级交付快照：{rel_path: content}（参照 project_info_files，供远端 worker materialize）。"""
-    files = {}
-    # OBS 模式：read_knowledge 返回的 content 已从 OBS 获取，直接用（不依赖本地磁盘）
-    # 非 OBS 模式：open 读本地文件（和 dev 一致，保留原始 strip 行为）
+def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> dict:
+    """任务级交付快照：{rel_path: content}（供远端 worker materialize）。
+
+    Issue #67：改为走 scene_knowledge_ref 表——只交付关联的知识文件。
+    未关联的知识不打包给 worker（和 prompt 注入逻辑一致）。
+    """
+    from src.session_manager import db, db_lock
+    from src.api.routes.knowledge import _read_entry_content
     from src.storage import get_storage
     _storage = get_storage()
-    for scope, content in read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num).items():
-        p = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-        rel = os.path.relpath(p, WORKSPACE_DIR)
-        if _storage is not None and content:
-            files[rel] = content
-        else:
-            try:
-                with open(p, encoding="utf-8") as f:
-                    files[rel] = f.read()
-            except Exception:
-                continue
-    # 成员上传文档（project-info/member/**）一并交付远端 worker（见 knowledge-board-design.md §2.5）
-    for rel, content in member_files(repo_key).items():
-        files.setdefault(rel, content)
+
+    files = {}
+    try:
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT DISTINCT k.id, k.obs_key, k.file_path "
+                "FROM scene_knowledge_ref r "
+                "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+                "WHERE r.enabled = 1 "
+                "AND (r.scene_id = ? OR r.scene_id = '') "
+                "AND (r.agent_type = ? OR r.agent_type = '') "
+                "AND (r.issue_num = ? OR r.issue_num = 0) "
+                "AND k.repo_key = ? "
+                "AND k.status = 'accepted' "
+                "AND k.archived = 0",
+                (scene_id, agent_type, issue_num, repo_key)
+            ).fetchall()
+
+        _owner, _rname = _owner_repo(repo_key)
+        _base = os.path.join(WORKSPACE_DIR, _owner, _rname)
+        for kid, obs_key, file_path in rows:
+            content = _read_entry_content(repo_key, obs_key or "", file_path or "")
+            if content:
+                # rel 相对 WORKSPACE_DIR（worker 物化用）
+                full = os.path.join(_base, file_path or "")
+                rel = os.path.relpath(full, WORKSPACE_DIR) if os.path.isabs(full) else file_path
+                files[rel] = content
+    except Exception:
+        # 向后兼容：ref 表不存在时回退到 read_knowledge 三级 scope
+        for scope, content in read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num).items():
+            p = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
+            rel = os.path.relpath(p, WORKSPACE_DIR)
+            if content:
+                files[rel] = content
     return files
 
 

@@ -290,20 +290,23 @@ class TestInjection:
         assert "灰度发布" in prompt
 
     def test_project_info_files_include_member_docs(self):
-        from src.config import WORKSPACE_DIR
-        p = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "member", "kb_user", "环境说明.json")
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write('{"env": "prod"}')
+        """Issue #67: knowledge_files 走 ref 表——关联了才打包给 worker。"""
+        # 创建知识
+        r = client.post("/api/knowledge/entry", json={
+            "name": "环境说明", "content": '{"env": "prod"}', "description": "环境说明", "repo": _REPO
+        }, headers=_headers)
+        assert r.status_code == 200, r.text
+        kid = r.json()["id"]
+        # 关联到 vod Agent
+        client.post(f"/api/knowledge/{kid}/refs/batch", json={"agent_types": ["vod"]}, headers=_headers)
+        # enqueue_task 应只打包关联的知识
         from src.runtime.service import enqueue_task
         tid = enqueue_task(agent_session_id="sess-kb", runtime_id=1, prompt="p",
                            repo_key=_REPO_KEY, agent_type="vod", issue_id="#5")
         from src.runtime import service
         task = service.get_task(tid)
-        pif = json.loads(task["project_info_files"] or "{}")
-        assert any("环境说明.json" in rel for rel in pif)
         kf = json.loads(task["knowledge_files"] or "{}")
-        assert any("环境说明.json" in rel for rel in kf)
+        assert any("env" in (content or "") for content in kf.values()), f"应包含关联的知识: {list(kf)}"
 
 
 class TestAgentScopedUpload:

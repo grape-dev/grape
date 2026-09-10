@@ -434,7 +434,13 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     if knowledge_files is None:
         try:
             from src.api.knowledge import knowledge_files as _know_files
-            knowledge_files = _know_files(repo_key, agent_type=agent_type, issue_num=_issue_num(issue_id))
+            from src.api.session_store import get_issue_scene
+            _scene_id = ""
+            try:
+                _scene_id, _ = get_issue_scene(repo_key, issue_id)
+            except Exception:
+                pass
+            knowledge_files = _know_files(repo_key, agent_type=agent_type, issue_num=_issue_num(issue_id), scene_id=_scene_id or "")
         except Exception as e:
             log.warning(f"enqueue: knowledge pack failed for {repo_key}: {e}")
             knowledge_files = {}
