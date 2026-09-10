@@ -2213,6 +2213,15 @@ def _migrate_tables():
             log.info("Added managed_repos.host_status column")
     except Exception as e:
         log.warning(f"Add managed_repos.host_status column failed: {e}")
+    # ===== managed_repos 智能推荐配置列 =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "managed_repos", "scene_recommend_config", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added managed_repos.scene_recommend_config column")
+    except Exception as e:
+        log.warning(f"Add managed_repos.scene_recommend_config column failed: {e}")
     # ===== devops_pipeline_scene 高级选项列（场景级工作分支 + 自定义 key:value）=====
     try:
         with db_lock:

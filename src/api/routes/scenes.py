@@ -432,11 +432,8 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
         except Exception as _e:
             log.warning(f"apply_market_scene: link market_scene_id failed: {_e}")
 
-    # 调用现有 apply_scene 逻辑更新 devops_agent_session
-    apply_scene(owner, repo, ApplySceneRequest(scene_id=scene_id), user)
-
     log.info(f"Market scene applied: market_id={market_id}, scene_id={scene_id}, repo={repo_key}")
-    return {"message": f"场景 '{scene['display_name']}' 已应用", "scene_id": scene_id}
+    return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id}
 
 
 @router.get("/market/{market_id}/experience-check")
@@ -677,17 +674,10 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
             )
             db.commit()
 
-    # 调 apply_scene 应用场景配置到仓库的 agent_session
-    _owner, _repo_name = full_name.split("/", 1) if "/" in full_name else (full_name, "")
-    try:
-        apply_scene(_owner, _repo_name, ApplySceneRequest(scene_id=scene_id), user)
-    except Exception as e:
-        log.warning(f"experience_market_scene: apply_scene failed: {e}")
-
     log.info(f"Market scene experienced: market_id={market_id}, repo={full_name}, already_exists={already_exists}")
-    msg = f"场景 '{scene['display_name']}' 已应用"
+    msg = f"场景 '{scene['display_name']}' 已创建"
     if already_exists:
-        msg = f"已跳转到现有项目 {full_name}，场景 '{scene['display_name']}' 已应用"
+        msg = f"已跳转到现有项目 {full_name}，场景 '{scene['display_name']}' 已创建"
     return {"full_name": full_name, "scene_id": scene_id,
             "already_exists": already_exists, "message": msg}
 
@@ -1471,15 +1461,6 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         db.commit()
 
     log.info(f"Scene applied: scene={body.scene_id}, repo={repo_key}, updated={updated} agents")
-
-    # 更新 managed_repos.dev_scene
-    try:
-        with db_lock:
-            c2 = db.cursor()
-            c2.execute("UPDATE managed_repos SET dev_scene=? WHERE repo_key=?", (body.scene_id, repo_key))
-            db.commit()
-    except Exception as e:
-        log.warning(f"Scene apply: failed to update dev_scene: {e}")
 
     return {"message": f"场景 '{cfg.get('name', body.scene_id)}' 已应用", "updated": updated}
 

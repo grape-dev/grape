@@ -402,6 +402,13 @@ def delete_custom_scene(scene_id: str, repo_key: str):
             (scene_id, repo_key))
         db.commit()
 
+    # 自检推荐配置：清理指向被删场景的规则/兜底
+    try:
+        from src.prompt_builder import _sanitize_recommend_config
+        _sanitize_recommend_config(repo_key)
+    except Exception:
+        pass
+
 
 def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int = 0):
     """[deprecated] 旧版：host_repo 自动 fork default 官方场景。
@@ -438,12 +445,6 @@ def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
             description=official.get("description", "") or "",
             repo_key=repo_key, nodes=official.get("nodes") or [],
             onboarding=official.get("onboarding", "repo-onboarding"))
-        # 同步写 managed_repos.dev_scene
-        try:
-            from src.user.db import set_repo_scene
-            set_repo_scene(repo_key, default_name)
-        except Exception as _e:
-            log.warning(f"apply_default_scene_to_repo: set dev_scene failed: {_e}")
         log.info(f"Applied default scene '{default_name}' to {repo_key}")
         return True
     except Exception as e:

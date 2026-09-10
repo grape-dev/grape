@@ -410,13 +410,8 @@ def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
                 import asyncio as _aio
                 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
                 from src.api.pipeline_config import get_node_by_tag
-                scene_id = "default"
-                try:
-                    from src.user.db import get_repo_scene
-                    scene_id = get_repo_scene(evt["repo_key"]) or "default"
-                except Exception:
-                    pass
-                node = get_node_by_tag(scene_id, evt["agent_type"] or "")
+                scene_id = ""
+                node = get_node_by_tag(scene_id, evt["agent_type"] or "") if scene_id else None
                 _bus = get_event_bus()
                 _redispatch_event = GrapeEvent(
                     domain=EventDomain.PIPELINE,

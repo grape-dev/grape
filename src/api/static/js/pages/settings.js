@@ -4,6 +4,7 @@ function renderSettings(tab) {
   const current = tab || 'credentials';
   const tabs = [
     {id:'credentials', label:I18N.t('settings.tab.credentials')},
+    {id:'apikeys', label: I18N.getLang() === 'zh' ? 'API Keys' : 'API Keys'},
     {id:'notifications', label:I18N.t('settings.tab.notifications')},
     {id:'appearance', label:I18N.t('settings.tab.appearance')},
   ];
@@ -39,6 +40,11 @@ function renderSettings(tab) {
         </div>
 `;
     }).catch(e => { var _sc = document.getElementById('sCredentials'); if (_sc) _sc.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}); });
+  } else if (current === 'apikeys') {
+    // ===== Issue #69: API Keys 管理面板 =====
+    html += `<div id="sApiKeys"><div class="loading">${I18N.getLang() === 'zh' ? '加载中...' : 'Loading...'}</div></div></div>`;
+    el.innerHTML = html;
+    loadApiKeys();
   } else if (current === 'notifications') {
     html += `<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.notifications.title')}</h3>
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> ${I18N.t('settings.notifications.issue_events')}</label>
@@ -283,14 +289,6 @@ function unhostFromSettings(fullName) {
   }).catch(e => app.showToast(I18N.t('settings.host.unhost_failed', {msg: e.message})));
 }
 
-function applyScene(owner, repo) {
-  const sceneId = document.getElementById('sceneSelect').value;
-  if (!sceneId) return app.showToast(I18N.t('settings.scene.select_first'));
-  API.post('/scenes/apply/' + owner + '/' + repo, {scene_id: sceneId})
-    .then(r => app.showToast(r.message || I18N.t('settings.scene.applied')))
-    .catch(e => app.showToast(I18N.t('settings.scene.apply_failed', {msg: e.message || e})));
-}
-
 // ── Theme switching ──
 function selectTheme(theme) {
   if (!app.setTheme) { app.showToast(I18N.t('settings.theme.switch_unavailable')); return; }
@@ -321,4 +319,110 @@ function togglePipelineModeSetting() {
     app.showToast(d.message);
     renderSettings('advanced');
   }).catch(e => app.showToast(I18N.t('settings.pipeline.switch_failed', {msg: e.message || I18N.t('settings.pipeline.unknown_error')})));
+}
+
+// ── Issue #69: API Keys 管理 ──
+
+function loadApiKeys() {
+  API.get('/settings/api-keys').then(d => {
+    const keys = d.keys || [];
+    const isZh = I18N.getLang() === 'zh';
+    const container = document.getElementById('sApiKeys');
+    if (!container) return;
+
+    let rowsHtml = '';
+    if (keys.length === 0) {
+      rowsHtml = `<div class="tx t2" style="padding:16px;text-align:center">${isZh ? '暂无 API Key，点击上方按钮生成' : 'No API Keys yet. Create one above.'}</div>`;
+    } else {
+      rowsHtml = keys.map(k => `
+        <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--b)">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:600;color:var(--t)">${_escApi(k.name)}</div>
+            <div style="font-size:11px;color:var(--t3);font-family:monospace;margin-top:2px">${_escApi(k.prefix)}</div>
+            <div style="font-size:10px;color:var(--t3);margin-top:2px">
+              ${isZh ? '创建' : 'Created'}: ${_escApi(k.created_at || '—')}
+              ${k.last_used_at ? ' · ' + (isZh ? '最近使用' : 'Last used') + ': ' + _escApi(k.last_used_at) : ''}
+            </div>
+          </div>
+          <button class="bt" style="font-size:11px;padding:5px 12px;background:var(--r);color:#fff;border:none;border-radius:6px;cursor:pointer"
+            onclick="revokeApiKey(${k.id}, '${_escApi(k.name).replace(/'/g, "\\'")}')">${isZh ? '吊销' : 'Revoke'}</button>
+        </div>
+      `).join('');
+    }
+
+    container.innerHTML = `
+      <div class="cd">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h3 style="font-size:13px;font-weight:600">${isZh ? 'API Keys' : 'API Keys'}</h3>
+          <button class="bt bt-p" style="font-size:12px;padding:7px 16px" onclick="showCreateApiKeyDialog()">${isZh ? '+ 生成新 Key' : '+ Generate Key'}</button>
+        </div>
+        <p class="tx t2" style="font-size:11px;line-height:1.6;margin-bottom:12px">
+          ${isZh
+            ? 'API Key 用于 grape-cli 认证和 CI/自动化场景。前缀 <code>grape_</code>，长效有效，可吊销。明文仅在生成时显示一次，请妥善保存。'
+            : 'API Keys are used for grape-cli authentication and CI/automation. Prefix <code>grape_</code>, long-lived, revocable. Plaintext is shown only once at creation.'}
+        </p>
+        <div id="apiKeyList">${rowsHtml}</div>
+      </div>
+    `;
+  }).catch(e => {
+    const isZh = I18N.getLang() === 'zh';
+    document.getElementById('sApiKeys').innerHTML =
+      `<div class="cd"><p style="color:var(--r);font-size:12px">${isZh ? '加载失败: ' : 'Load failed: '}${e.message}</p></div>`;
+  });
+}
+
+function _escApi(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function showCreateApiKeyDialog() {
+  const isZh = I18N.getLang() === 'zh';
+  const name = prompt(isZh ? '请输入 API Key 名称（如 CI Pipeline）：' : 'Enter API Key name (e.g. CI Pipeline):', '');
+  if (name === null) return;
+  if (!name.trim()) {
+    app.showToast(isZh ? '名称不能为空' : 'Name cannot be empty');
+    return;
+  }
+  API.post('/settings/api-keys', {name: name.trim()}).then(d => {
+    // 明文仅展示一次——弹窗显示完整 key
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999';
+    modal.innerHTML = `
+      <div style="background:var(--c);border-radius:14px;padding:24px;max-width:520px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.15)">
+        <h3 style="font-size:15px;font-weight:600;margin-bottom:8px">${isZh ? 'API Key 已生成' : 'API Key Created'}</h3>
+        <p style="font-size:12px;color:var(--r);margin-bottom:12px">${isZh ? '⚠ 明文仅显示此次，请立即复制保存！' : '⚠ Plaintext shown only once. Copy and save now!'}</p>
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          <input type="text" id="newApiKeyInput" value="${d.key}" readonly
+            style="flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-family:monospace;font-size:12px;background:#f8f9fa">
+          <button class="bt bt-p" style="padding:8px 16px;font-size:12px" onclick="copyApiKeyToClipboard()">${isZh ? '复制' : 'Copy'}</button>
+        </div>
+        <div style="display:flex;justify-content:flex-end">
+          <button class="bt bt-p" style="padding:8px 20px;font-size:12px" onclick="document.querySelector('body > div[style*=fixed]').remove()">${isZh ? '我已保存' : 'Saved'}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    // 选中 key 文本方便复制
+    setTimeout(() => { const inp = document.getElementById('newApiKeyInput'); if (inp) inp.select(); }, 100);
+    loadApiKeys(); // 刷新列表
+  }).catch(e => {
+    app.showToast(I18N.getLang() === 'zh' ? '生成失败: ' + e.message : 'Failed: ' + e.message);
+  });
+}
+
+function copyApiKeyToClipboard() {
+  const inp = document.getElementById('newApiKeyInput');
+  if (!inp) return;
+  inp.select();
+  try { navigator.clipboard.writeText(inp.value); } catch(e) { document.execCommand('copy'); }
+  app.showToast(I18N.getLang() === 'zh' ? '已复制到剪贴板' : 'Copied to clipboard');
+}
+
+function revokeApiKey(id, name) {
+  const isZh = I18N.getLang() === 'zh';
+  if (!confirm(isZh ? `确定吊销 "${name}" 吗？吊销后立即失效，不可恢复。` : `Revoke "${name}"? This is immediate and irreversible.`)) return;
+  API.del('/settings/api-keys/' + id).then(d => {
+    app.showToast(d.message);
+    loadApiKeys();
+  }).catch(e => app.showToast(isZh ? '吊销失败: ' + (e.message || e) : 'Revoke failed: ' + (e.message || e)));
 }

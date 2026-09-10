@@ -47,12 +47,6 @@ def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = 
     try:
         from src.api.pipeline_config import get_node_by_tag
         if not scene_id:
-            try:
-                from src.user.db import get_repo_scene
-                scene_id = get_repo_scene(repo_key) or ""
-            except Exception:
-                scene_id = ""
-        if not scene_id:
             return ""
         node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
         if node:
@@ -817,9 +811,31 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.warning(f"Pipeline: event_action_filter check failed: {e}")
 
     # 3. 路由判定（D9 阶段矩阵 + 非 Issue 静态映射，替代 agent_type.subscribe_events，见 vod-skill-upgrade-plan §3.0.4）
+    _is_scene_recommend = False  # 智能推荐模式标记
     if event_type == "issue_opened":
         agent_type = "vod"
         log.info(f"Pipeline: issue_opened -> VOD (stage init)")
+        # 判断是否需要推荐：issue_state 有 scene_id → 用户已选场景，跳过推荐
+        # GitCode 直接创建的 Issue 无 scene_id → 走智能推荐
+        # Task Center 创建 Issue 后 GitCode webhook 可能比 set_issue_scene 先到达，
+        # 最多重试 3 次、每次间隔 0.5s，等 scene_id 写入
+        _rid_early = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
+        _is_scene_recommend = True  # 默认走推荐
+        if _rid_early:
+            import time as _time
+            for _attempt in range(3):
+                try:
+                    from src.api.session_store import get_issue_scene
+                    _existing_scene, _ = get_issue_scene(repo_key, _rid_early)
+                    if _existing_scene:
+                        _is_scene_recommend = False
+                        log.info(f"Pipeline: issue_opened 已有场景 {_existing_scene}（attempt={_attempt+1}），跳过推荐")
+                        break
+                    if _attempt < 2:
+                        _time.sleep(0.5)
+                except Exception as _re:
+                    log.warning(f"Pipeline: issue_opened scene check failed: {_re}")
+                    break
         # project-info 后台刷新（服务端 codegraph 生成基线，不阻塞 webhook；见 codegraph-builder-plan.md）
         try:
             from src.project_info.builder import maybe_refresh_project_info
@@ -982,7 +998,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             pass
     log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
     # Issue 级场景优先：scene 非 default 时，用 issue scene 的 skill 覆盖 session 的 skill
-    if is_plugin_mode() and _issue_scene and _issue_scene != "default":
+    # 智能推荐模式：跳过 skill 解析（场景未知，prompt 不用 skill）
+    if _is_scene_recommend:
+        skill_name = ""
+        skill_id = 0
+        skill_path = ""
+        log.info("Pipeline (plugin): 智能推荐模式, skip skill resolution")
+    elif is_plugin_mode() and _issue_scene and _issue_scene != "default":
         _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene, user_id=_issue_scene_uid)
         if _pipe_skill:
             skill_name = _pipe_skill
@@ -998,8 +1020,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_id = 0
             log.info(f"Pipeline (plugin): issue scene skill override: {agent_type}={_pipe_skill} sid={skill_id} (scene={_issue_scene})")
     if not backend or not skill_name:
-        # Plugin mode: try pipelines.json first（用 Issue 级场景）
-        if is_plugin_mode():
+        # 智能推荐模式：skill_name 为空是正常的，用 recommender prompt，不走 fallback
+        if _is_scene_recommend:
+            skill_name = ""
+            backend = ""
+            log.info("Pipeline (plugin): 智能推荐模式, using recommender prompt (no skill)")
+        elif is_plugin_mode():
             _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene, user_id=_issue_scene_uid)
             if _pipe_skill:
                 skill_name = _pipe_skill
@@ -1160,15 +1186,34 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if engine_id == 0 and is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
         _be = backend or "opencode"
         _pool_engine_ids = get_scene_pool_engine_ids(_issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
+        # 智能推荐模式：强制限定 opencode 引擎认领（推荐任务轻量，opencode 最快）
+        if _is_scene_recommend:
+            try:
+                import json as _json
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT id FROM agent_runtimes WHERE name='opencode' AND status='online'")
+                    _oc_ids = [r[0] for r in c.fetchall()]
+                if _oc_ids:
+                    _pool_engine_ids = _json.dumps(_oc_ids)
+                    log.info(f"Pipeline (plugin broadcast): 智能推荐限定 opencode engines={_oc_ids}")
+                else:
+                    log.info("Pipeline (plugin broadcast): 智能推荐无 online opencode，不限定（兜底放行）")
+            except Exception as _oe:
+                log.warning(f"Pipeline: 智能推荐 opencode 过滤失败: {_oe}")
         log.info(f"Pipeline (plugin broadcast): engine_id=0 pool_tag={agent_type} pool_engine_ids={_pool_engine_ids} seq={seq}")
-        if _be and skill_name and seq > 0:
+        if _be and seq > 0 and (skill_name or _is_scene_recommend):
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
                                    skill_id, skill_path, engine_id, issue_id,
-                                   pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid)
+                                   pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid,
+                                   is_scene_recommend=_is_scene_recommend)
         return result
     # backend 必须取已注册引擎的类型名（不沿用会话/字面默认），确保执行 CLI 与选中引擎一致
     _be = engine_name(engine_id) or backend
-    if not _be or not skill_name or seq <= 0:
+    if not _be or seq <= 0:
+        return result
+    # 智能推荐模式允许 skill_name 为空（纯 prompt，不用 skill 文件）
+    if not skill_name and not _is_scene_recommend:
         return result
     # engine_id=0 且无可用引擎（plugin direct 兜底 / legacy 无绑定）→ 跳过执行，不创建空任务
     if not engine_id:
@@ -1178,8 +1223,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
         _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
-                               skill_id, skill_path, engine_id, issue_id, user_id=_issue_scene_uid)
-    elif _be and skill_name and seq > 0:
+                               skill_id, skill_path, engine_id, issue_id, user_id=_issue_scene_uid,
+                               is_scene_recommend=_is_scene_recommend)
+    elif _be and seq > 0 and (skill_name or _is_scene_recommend):
+        # 智能推荐模式 skill_name 可为空（纯 prompt）
         evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
         evt["_skill_id"] = skill_id
         # 先创建 agent_tasks + 设 started_at，防 sweeper 在排队期间误杀
@@ -1323,7 +1370,8 @@ def _fail_event(seq: int, reason: str):
 
 
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
-                           skill_id, skill_path, runtime_id, issue_id="", pool_engine_ids="", user_id=0):
+                           skill_id, skill_path, runtime_id, issue_id="", pool_engine_ids="", user_id=0,
+                           is_scene_recommend=False):
     """init_event_json -> enqueue_task (deterministic routing runtime_id).
     Local worker / remote RuntimeAgent consume.
 
@@ -1395,11 +1443,15 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
 
     # 4) 构建 prompt（含技能占位符化，见 skill-delivery-remote.md）
     try:
-        from src.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
         evt["_skill_path"] = skill_path
-        prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
-                              skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
+        if is_scene_recommend:
+            from src.prompt_builder import build_scene_recommender_prompt
+            prompt = build_scene_recommender_prompt(evt, repo_key)
+        else:
+            from src.prompt_builder import build_devops_agent_prompt
+            prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+                                  skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
@@ -1951,52 +2003,59 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 final_text = d.get("text", "")
                 new_oc_session_id = d.get("oc_session_id", "")
                 log.info(f"Agent done: [Agent:{agent_type}|repo:{repo_name}] exit={exit_code}, text_len={len(final_text)}, new_oc_session={new_oc_session_id[:20] if new_oc_session_id else 'none'}")
-                # VOD 场景推荐：解析 JSON 中的 recommended_scene / terminate（受 allow_scene_override 开关控制）
+                # 智能推荐完成处理：解析 scene_id → 持久化 → 重派 VOD
                 if agent_type == "vod" and final_text and issue_id:
+                    _task_prompt = ""
                     try:
-                        from src.api.session_store import get_scene_override_flag
-                        _allow_override = get_scene_override_flag(repo_key, issue_id)
-                        if not _allow_override:
-                            log.info(f"VOD done: scene override disabled for {issue_id}, skip recommended_scene")
-                        else:
-                            from src.api.event_store import parse_agent_output_json
-                            _scene_out = parse_agent_output_json(final_text) or {}
-                            # 宽松兜底：VOD 输出可能仅含 recommended_scene / terminate（不含 actions 等字段，
-                            # parse_agent_output_json 的 _is_valid_output 会过滤掉），用正则直接提取
-                            if "recommended_scene" not in _scene_out and _scene_out.get("terminate") is None:
-                                import re as _re
-                                _m_term = _re.search(r'"terminate"\s*:\s*true', final_text)
-                                _m_rec = _re.search(r'"recommended_scene"\s*:\s*"([^"]+)"', final_text)
-                                if _m_term:
-                                    _scene_out["terminate"] = True
-                                if _m_rec:
-                                    _scene_out["recommended_scene"] = _m_rec.group(1)
-                                _m_reason = _re.search(r'"reason"\s*:\s*"([^"]+)"', final_text)
-                                if _m_reason:
-                                    _scene_out["reason"] = _m_reason.group(1)
-                            # 方案 B：无场景终止信号——仓库未配置场景，VOD 不推荐场景（scene 清空，不触发场景流水线）
-                            if _scene_out.get("terminate") or _scene_out.get("reason") == "未配置场景":
-                                from src.api.session_store import set_issue_scene
-                                from src.runtime.engine_select import _repo_user_id
-                                _vod_uid = _repo_user_id(repo_key)
-                                set_issue_scene(repo_key, issue_id, "", scene_user_id=_vod_uid)
-                                log.info(f"VOD done: terminate (未配置场景) for {issue_id}, scene cleared (no pipeline)")
-                                _rec_scene = None   # 不进入正常场景覆写
-                            else:
-                                _rec_scene = _scene_out.get("recommended_scene", "") or ""
-                            if _rec_scene and _rec_scene == "default":
-                                # 方案 B：没有「default」场景，default 永不写入 issue_state.scene_id
-                                log.info(f"VOD done: rec='default' invalid (无 default 场景), skip override for {issue_id}")
-                            elif _rec_scene:
+                        from src.session_manager import db as _rdb, db_lock as _rdb_lock
+                        with _rdb_lock:
+                            c = _rdb.cursor()
+                            c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
+                            _trow = c.fetchone()
+                            _task_prompt = _trow[0] if _trow else ""
+                    except Exception:
+                        pass
+                    # 判断是否为智能推荐任务：prompt 含"智能推荐器"且无 {{SKILL_DIR}}
+                    if _task_prompt and "智能推荐器" in _task_prompt and "{{SKILL_DIR}}" not in _task_prompt:
+                        try:
+                            import re as _re
+                            _rec_scene = ""
+                            # 优先解析 JSON
+                            try:
+                                from src.api.event_store import parse_agent_output_json
+                                _scene_out = parse_agent_output_json(final_text) or {}
+                                _rec_scene = _scene_out.get("scene_id", "") or ""
+                            except Exception:
+                                pass
+                            # 正则兜底
+                            if not _rec_scene:
+                                _m_rec = _re.search(r'"scene_id"\s*:\s*"([^"]*)"', final_text)
+                                _rec_scene = _m_rec.group(1) if _m_rec else ""
+                            if _rec_scene:
                                 from src.api.session_store import set_issue_scene
                                 from src.runtime.engine_select import _repo_user_id
                                 _vod_uid = _repo_user_id(repo_key)
                                 set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
-                                log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id} (override enabled)")
+                                log.info(f"智能推荐完成: scene_id={_rec_scene} set for {issue_id}")
+                                # 重派 VOD（用匹配场景的 vod 技能）
+                                from src.api.pipeline_config import get_first_node, get_pipeline_config
+                                _vod_node = get_first_node(_rec_scene)
+                                # get_first_node 需要 repo_key，直接查 pipeline_config
+                                if not _vod_node:
+                                    _pcfg = get_pipeline_config(_rec_scene, repo_key=repo_key)
+                                    _nodes = (_pcfg or {}).get("nodes", [])
+                                    if _nodes:
+                                        _vod_node = _nodes[0]
+                                if _vod_node:
+                                    _vod_skill = _vod_node.get("skill", "vod")
+                                    log.info(f"智能推荐完成: redispatch VOD with skill={_vod_skill} for {issue_id}")
+                                    _redispatch_vod_after_recommend(repo_key, issue_id, _vod_skill, evt, runtime_id, repo_gitcode_token)
+                                else:
+                                    log.warning(f"智能推荐完成: no vod node for scene={_rec_scene}, skip redispatch")
                             else:
-                                log.info(f"VOD done: no recommended_scene for {issue_id}, keep issue scene")
-                    except Exception as _se:
-                        log.warning(f"VOD done: scene parse failed: {_se}")
+                                log.info(f"智能推荐完成: no scene_id for {issue_id}, pipeline terminated")
+                        except Exception as _se:
+                            log.warning(f"智能推荐完成处理失败: {_se}")
             elif evt_type == "error":
                 log.warning(f"Agent error: [Agent:{agent_type}|repo:{repo_name}] {data}")
             elif evt_type == "step_start":
@@ -2367,3 +2426,98 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
 
     if synced > 0:
         log.info(f"Sync issue comments: synced {synced} comments to conversation {conv_id} (issue #{issue_number})")
+
+
+def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str,
+                                     evt: dict, runtime_id: int, repo_gitcode_token: str):
+    """智能推荐完成后，重派 VOD 任务（用匹配场景的 vod 技能）。
+
+    创建新 event（a2a_event 类型，豁免 dedup），构建 VOD prompt 并派发。
+    """
+    from src.api.event_store import append_event
+    from src.runtime.engine_select import pick_engine, engine_name
+    from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT
+    from src.api.event_pipeline import is_plugin_mode
+
+    # 获取 Issue 标题
+    _title = ""
+    _issue_num = str(issue_id).lstrip("#")
+    try:
+        from src.api.routes.tasks import _get_issue_title
+        _title = _get_issue_title(repo_key, int(_issue_num)) or ""
+    except Exception:
+        pass
+    if not _title:
+        _title = f"VOD redispatch: {vod_skill}"
+
+    # 创建新 event
+    seq = append_event(
+        repo_key=repo_key,
+        event_type="a2a_event",
+        title=_title,
+        issue_id=issue_id,
+        source="a2a",
+        agent_type="vod",
+        actor="",
+        summary=f"智能推荐完成 → VOD ({vod_skill})",
+        payload={"repository": evt.get("repository", ""), "issue_number": _issue_num,
+                 "context": "智能推荐完成，重派 VOD 执行完整工作流"},
+        status="running",
+    )
+    log.info(f"智能推荐重派: event created, seq={seq}")
+
+    # 构建场景解析
+    from src.api.session_store import get_issue_scene
+    _scene_id, _scene_uid = get_issue_scene(repo_key, issue_id)
+    _scene_id = _scene_id or "default"
+    if not _scene_uid:
+        from src.runtime.engine_select import _repo_user_id
+        _scene_uid = _repo_user_id(repo_key)
+
+    # skill 解析
+    from src.user.db import resolve_skill_id, get_skill_by_id, get_skill_path
+    skill_name = vod_skill
+    skill_id = resolve_skill_id(vod_skill) or 0
+    skill_path = vod_skill
+    if skill_id:
+        _sk = get_skill_by_id(skill_id)
+        skill_path = (_sk.get("skill_path") or vod_skill) if _sk else vod_skill
+
+    # 构建 evt 副本（_enqueue_pipeline_task 内部会构建 prompt）
+    evt_copy = dict(evt)
+    evt_copy["repo_key"] = repo_key
+    evt_copy["_skill_path"] = skill_path
+    evt_copy["issue_id"] = issue_id
+
+    # 选引擎
+    engine_id = pick_engine(repo_key, "vod", fallback_runtime_id=runtime_id or 0,
+                            scene_id=_scene_id, user_id=_scene_uid)
+    if engine_id is None:
+        log.warning(f"智能推荐重派: no engine available, skip")
+        _fail_event(seq, "无可用引擎（engine_unavailable）")
+        return
+
+    _be = engine_name(engine_id) or "opencode"
+
+    # 入队或直接执行（_enqueue_pipeline_task 内部会构建 prompt）
+    kind = get_execution_mode()
+    if kind != EXEC_MODE_DIRECT and (engine_id > 0 or (engine_id == 0 and is_plugin_mode())):
+        _pool_eids = ""
+        if is_plugin_mode():
+            from src.runtime.engine_select import get_scene_pool_engine_ids
+            _pool_eids = get_scene_pool_engine_ids(_scene_id, "vod", repo_key=repo_key, user_id=_scene_uid)
+        _enqueue_pipeline_task(repo_key, seq, "vod", _be, vod_skill, evt_copy,
+                               skill_id, skill_path, engine_id, issue_id,
+                               pool_engine_ids=_pool_eids, user_id=_scene_uid,
+                               is_scene_recommend=False)
+        log.info(f"智能推荐重派: enqueued VOD task, seq={seq}, skill={vod_skill}")
+    else:
+        # direct 模式
+        evt_copy["_skill_path"] = skill_path
+        evt_copy["_skill_id"] = skill_id
+        _direct_tid = _create_direct_task(repo_key, seq, "vod", _be, vod_skill,
+                                          skill_path, engine_id, evt_copy, issue_id, skill_id=skill_id)
+        start_direct_agent(_execute_agent, (
+            repo_key, seq, "vod", _be, vod_skill, evt_copy, engine_id, _direct_tid,
+        ), name=f"ag-vod-{seq}")
+        log.info(f"智能推荐重派: started direct VOD, seq={seq}, skill={vod_skill}")
