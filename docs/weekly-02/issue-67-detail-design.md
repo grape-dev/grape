@@ -570,12 +570,15 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 - loading 时：spinner overlay + grid `min-height:320px`（不消失，不闪烁）
 
 **卡片样式**（参考场景中心 scene-market）：
-- `.scn-card` 结构：色条 + 图标 + 标题(name) + 描述(description) + 技能链路 + 底部按钮区
+- `.scn-card` 结构：色条 + 图标 + 标题(name) + 描述(description) + 关联 pill + 底部按钮区
 - `border-radius:18px` + `box-shadow:var(--sh)` + hover `translateY(-4px)` + 加重阴影
 - 底部按钮区：`border-top:1px solid var(--b)` 横线隔离 + `justify-content:flex-end` 靠右
 - 卡片标题用 `k.name`（为空时回退到 `knowledgeTitle(k)` 从 file_path 截取）
-- 卡片内容展示 description（不展示 content）
+- 描述：`white-space:pre-line` + `word-break:break-word` + `min-height:38px` + `line-clamp:2` + `title` 属性 tooltip
+- 关联 pill：`.kb-ref-pill`（场景 N + Agent N），hover 显示名称列表 tooltip
 - 点击卡片进入详情页面
+- **高度统一**：head `min-height:32px`(标题 nowrap) + desc `min/max-height:38px` + pill 行 `min-height:17px` → 所有卡片 foot 对齐
+- **CSS 隔离**：知识页面样式用 `.knowledge-page` 前缀覆盖，不影响场景市场全局样式
 
 **详情页面按 source 控制权限**：
 | source | Agent 关联卡片 | 场景关联卡片 | 操作 |
@@ -587,7 +590,9 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 **Agent 关联交互**（标签式，同新增页面）：
 - 6 个 Agent 类型标签（VOD/Issue/Coding/QA/SRE/Chat），每个带职责描述
 - 点击切换选中/取消（`toggleAgentRef` → 批量 API 添加 / DELETE 删除）
-- 选中态：蓝色边框 + 背景高亮
+- 选中态：蓝色边框 + 背景高亮 + 右上角蓝色实心圆（白色 ✓）
+- 未选中态：灰色空心圆（无符号）
+- iOS 风格 toggle 视觉
 
 > 全局关联（scene_id='' + agent_type=''）已移除——概念多余，system/agent 知识自动注入，manual 通过 Agent 标签 + 场景关联覆盖。
 
@@ -698,7 +703,7 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 }
 ```
 
-> 当前实际 i18n 共 **116 keys**（zh/en 对称）。
+> 当前实际 i18n 共 **120 keys**（zh/en 对称）。
 
 ### 6.12 统计卡片数据接口
 
@@ -1030,7 +1035,8 @@ ALTER TABLE agent_shared_knowledge ADD COLUMN archived TINYINT NOT NULL DEFAULT 
 
 归档后的知识：
 - 不再注入到 Agent prompt（`prompt_builder` 查关联表时过滤 `archived=0`）
-- 知识库页面仍可查看，卡片标记"已归档"标签
+- 知识库页面默认不显示（列表查询 `WHERE archived=0`）
+- 后端保留 `PUT /{id}/archive` 接口 + `show_archived` 查询参数，前端入口暂未开放
 - 关联记录保留但 `enabled` 自动设为 0
 
 **Issue 关闭触发归档**：
@@ -1116,12 +1122,12 @@ project 级知识一直在追加，不会自动过期。文件越来越大时，
 - 用户主动清理，不是系统自动瘦身——保留有用的，去掉过时的
 - 知识卡片同时显示"标记过时"按钮——如果用户觉得整个 project 级知识都没用了，标记后 `archived=1` 不再注入
 
-**前端展示**：
+**前端展示**（当前状态）：
 
-归档/过时的知识卡片：
-- 显示"已归档"标签（灰色）
-- 操作按钮只有"查看"，无编辑/删除/关联设置
-- 默认不显示归档知识——筛选器加"显示归档"开关
+归档功能前端入口已移除——后端接口保留，前端暂不展示归档知识。后续需要时加回：
+- 列表默认查询 `WHERE archived=0`
+- 后端 `show_archived=true` 参数 + `ORDER BY archived ASC, id DESC` 已就绪
+- `PUT /{id}/archive` 接口保留
 
 **文件大小提示前端实现**：
 
@@ -1686,3 +1692,29 @@ DROP TEMPORARY TABLE _keep_ids;
 events.js 渲染线程消息时，判断 `msg.content.startsWith('📌 本次注入知识：')`，解析知识 ID 列表，渲染为"📌 本次注入 N 条知识"+ 查看详情按钮。点击调 `GET /api/knowledge/{id}` 查询知识标题展示在 modal 里。
 
 i18n 新增：`injected_knowledge_count`、`view_injected_detail`
+
+### 6.25 性能优化
+
+#### 6.25.1 详情接口 pipeline 批量查询
+
+**问题**：`GET /api/knowledge/{id}` 在循环里为每个场景关联调 `get_pipeline_config`——每个场景 1 次 db_lock + PRAGMA + SELECT。8 个场景 = 8 次串行 DB 往返，MySQL 后端下导致请求卡住。
+
+**修复**：循环前预计算 `pipeline_map`：
+```python
+scene_ids = [r[9] for r in refs if r[9] and row["repo_key"]]
+pipeline_map = {}
+for sid in scene_ids:
+    pc = get_pipeline_config(sid, repo_key=row["repo_key"])
+    if pc and pc.get("nodes"):
+        pipeline_map[sid] = " → ".join(...)
+# 循环里只做 dict 查找
+pipeline_chain = pipeline_map.get(r[9], "")
+```
+
+#### 6.25.2 死代码清理
+
+删除从未被调用的函数：
+- `_project_knowledge_entries`：循环读 OBS，0 调用
+- `_agent_knowledge_entries`：循环读 OBS + agent_files，0 调用
+- `_repo_root_rel`：路径转换，0 调用
+- `_build_ref_summary` 里的 `has_global` 检查：全局关联已移除
