@@ -509,7 +509,7 @@
 .scn-card-head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
 .scn-card-title{font-size:17px;font-weight:600;letter-spacing:-.01em;color:var(--t);flex:1}
 .scn-star{font-size:14px}
-.scn-card-desc{font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:14px;flex:1;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+.scn-card-desc{font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:14px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;min-height:19px}
 .scn-chain{display:flex;align-items:center;gap:3px;flex-wrap:wrap;margin-bottom:16px}
 .scn-tag{font-size:10px;padding:3px 8px;border-radius:6px;background:var(--bg);color:var(--t2);font-weight:500}
 .scn-arr{font-size:9px;color:var(--t3)}
