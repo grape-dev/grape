@@ -937,16 +937,18 @@ function renderKnowledge() {
             <div style="margin-bottom:12px">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
                 <label style="font-size:11px;color:var(--t3)">{{ t('entry_content') }}<span class="kb-required">*</span></label>
-                <label class="bt bt-o bt-s" style="cursor:pointer;font-size:11px">
-                  {{ t('import_file') }}
-                  <input type="file" accept=".md,.json,.txt" style="display:none" @change="e => importFile(e, 'edit')">
-                </label>
+                <div style="display:flex;gap:6px">
+                  <button class="bt bt-o bt-s" style="cursor:pointer;font-size:11px" @click="resetEdit">{{ t('reset') }}</button>
+                  <label class="bt bt-o bt-s" style="cursor:pointer;font-size:11px">
+                    {{ t('import_file') }}
+                    <input type="file" accept=".md,.json,.txt" style="display:none" @change="e => importFile(e, 'edit')">
+                  </label>
+                </div>
               </div>
               <textarea v-model="editForm.content" rows="20" class="kb-textarea"></textarea>
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--b)">
               <button class="bt bt-o bt-s" @click="cancelEdit">{{ t('cancel') }}</button>
-              <button class="bt bt-o bt-s" @click="resetEdit">{{ t('reset') }}</button>
               <button class="bt bt-p bt-s" @click="saveEdit">{{ t('confirm') }}</button>
             </div>
           </div>
