@@ -391,6 +391,7 @@ function renderKnowledge() {
             name: s.display_name || s.name || '',
             desc: s.description || '',
             category: '',
+            pipeline: (s.nodes || []).filter(n => n.enabled !== false).map(n => n.tag || n.id || '').join(' → '),
           }));
         } catch (e) {
           this.repoScenes = [];
@@ -609,6 +610,10 @@ function renderKnowledge() {
       getSceneDesc(sid) {
         const s = (this.repoScenes || []).find(x => x.id === sid);
         return s ? (s.desc || '') : '';
+      },
+      getScenePipeline(sid) {
+        const s = (this.repoScenes || []).find(x => x.id === sid);
+        return s ? (s.pipeline || '') : '';
       },
       openCreateScenePopover(e) {
         this.createScenePopover = true;
@@ -985,6 +990,12 @@ function renderKnowledge() {
                       <div class="scn-card-title">{{ getSceneName(sid) }}</div>
                     </div>
                     <div v-if="getSceneDesc(sid)" class="scn-card-desc">{{ getSceneDesc(sid) }}</div>
+                    <div v-if="getScenePipeline(sid)" class="scn-chain">
+                      <template v-for="(node, i) in getScenePipeline(sid).split(' → ')" :key="i">
+                        <span v-if="i > 0" class="scn-arr">→</span>
+                        <span class="scn-tag">{{ node }}</span>
+                      </template>
+                    </div>
                   </div>
                 </div>
               </div>
