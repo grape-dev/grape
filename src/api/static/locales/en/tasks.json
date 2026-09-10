@@ -14,6 +14,7 @@
   "event_history": "Event History",
   "filter": "Filter",
   "filter_status": "Status",
+  "filter_creator": "Creator",
   "confirm_done": "Confirm Done",
   "cancel_task": "Cancel Task",
   "resume_task": "Resume Task",
@@ -99,6 +100,7 @@
   "detail": {
     "status": "Status",
     "task_id": "Task ID",
+    "assignee": "Creator",
     "repo": "Repository",
     "created_at": "Created",
     "completed_at": "Completed",
@@ -114,7 +116,7 @@
   "parent_task": "Parent",
   "pipeline_scene": "Pipeline Scene",
   "task_mode": "Task Mode",
-  "filter": {
+  "filter_options": {
     "created_by_me": "My Tasks"
   }
 }

@@ -151,9 +151,19 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         owner = split_owner_repo(repo_key)[0] or ""
     except Exception:
         owner = ""
+    # Issue #49: assignee 为空时，优先从 issue_state 读取 assignee，再 fallback 到 owner
+    if not assignee:
+        try:
+            from src.api.session_store import get_issue_stage
+            _st = get_issue_stage(repo_key, f"#{issue_number}")
+            if _st and _st.get("assignee"):
+                assignee = _st["assignee"]
+        except Exception:
+            pass
     target = assignee or owner or ""
     user_id = _get_user_id_by_gitcode(target) if target else 0
     if user_id is None:
+        # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
     with db_lock:
         c = db.cursor()
@@ -1347,23 +1357,35 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                    repo_key: str = Query("", description="按仓库过滤"),
                    sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                    mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
+                   created_by_me: str = Query("", description="仅我创建的任务"),
+                   assignee: str = Query("", description="按创建人筛选"),
                    user: dict = Depends(get_current_user_or_api_key)):
-    """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤 / 按时间排序）。
+    """任务中心：当前登录用户的待处理/已完成任务（可按 repo / 创建人过滤 / 按时间排序）。
 
     sort_order: desc（默认，最新在前）/ asc（最早在前）
     mode: default（状态优先 active→processing→completed，组内按时间）/ time（纯时间序）
+    created_by_me: 'true' 时仅返回当前用户创建的任务（user_id 匹配，排除 user_id=0）
+    assignee: 按创建人筛选（assignee 字段精确匹配）
     """
     from src.repo_key import to_repo_key, from_repo_key
     if repo_key:
         repo_key = to_repo_key(repo_key)
-    clauses = ["(user_id=? OR user_id=0)"]
-    params = [user["id"]]
+    if created_by_me and created_by_me.lower() == "true":
+        # 仅我创建的任务：严格匹配 user_id，排除 user_id=0（bot 创建）
+        clauses = ["user_id=?"]
+        params = [user["id"]]
+    else:
+        clauses = ["(user_id=? OR user_id=0)"]
+        params = [user["id"]]
     if status:
         clauses.append("status=?")
         params.append(status)
     if repo_key:
         clauses.append("repo_key=?")
         params.append(repo_key)
+    if assignee:
+        clauses.append("assignee=?")
+        params.append(assignee)
     where = " AND ".join(clauses)
     # 排序：白名单已由 FastAPI pattern 约束（desc/asc/default/time），此处直接拼（防注入）
     _order_dir = "DESC" if sort_order == "desc" else "ASC"

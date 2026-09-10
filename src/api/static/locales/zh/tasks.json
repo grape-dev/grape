@@ -14,6 +14,7 @@
   "event_history": "事件历史",
   "filter": "筛选",
   "filter_status": "状态",
+  "filter_creator": "创建人",
   "confirm_done": "确认任务完成",
   "cancel_task": "取消任务",
   "resume_task": "恢复任务",
@@ -99,6 +100,7 @@
   "detail": {
     "status": "状态",
     "task_id": "任务编号",
+    "assignee": "创建人",
     "repo": "仓库",
     "created_at": "创建时间",
     "completed_at": "完成时间",
@@ -114,7 +116,7 @@
   "parent_task": "父任务",
   "pipeline_scene": "流水线场景",
   "task_mode": "任务模式",
-  "filter": {
+  "filter_options": {
     "created_by_me": "我创建的任务"
   }
 }

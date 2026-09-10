@@ -2306,10 +2306,11 @@ def _migrate_tables():
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "event_action_filter", "block_changes", "TEXT DEFAULT ''")
+            _ensure_column(c, "event_action_filter", "vcs_source", "TEXT DEFAULT ''")
             db.commit()
-        log.info("Added event_action_filter.block_changes column")
+        log.info("Added event_action_filter.block_changes + vcs_source columns")
     except Exception as e:
-        log.warning(f"Add event_action_filter.block_changes column failed: {e}")
+        log.warning(f"Add event_action_filter columns failed: {e}")
     # ===== Phase 2: user_accounts.last_scene (event-dispatch-redesign-v2.md 3.1) =====
     try:
         with db_lock:

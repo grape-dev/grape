@@ -10,7 +10,7 @@ const _TASKS_PER_PAGE = 15;   // 每页任务数
 let _taskPollTimer = null;    // 场景识别轮询定时器
 let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
 let _tasksMode = 'default';   // default=状态优先 / time=纯时间序（Issue #42）
-let _tasksCreatedByMe = false; // 「我创建的任务」过滤（Issue #76）
+let _taskFilterAssignee = ''; // 按创建人筛选（空=全部）
 
 function _tasksSortPrefKey(repoKey) {
   return 'task_sort_' + (repoKey || 'all');
@@ -43,7 +43,9 @@ function toggleTasksMode() {
   loadTasks();
 }
 function toggleCreatedByMe() {
-  _tasksCreatedByMe = !_tasksCreatedByMe;
+  // 保留兼容：点击时切换到当前登录用户
+  const me = (window.app && app._user && app._user.username) || '';
+  _taskFilterAssignee = _taskFilterAssignee === me ? '' : me;
   _taskPage = 1;
   loadTasks();
 }
@@ -135,7 +137,7 @@ function loadTasks() {
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
   API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
           '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
-          (_tasksCreatedByMe ? '&created_by_me=true' : '')).then(d => {
+          (_taskFilterAssignee ? '&assignee=' + encodeURIComponent(_taskFilterAssignee) : '')).then(d => {
     if (window._currentView !== 'tasks') return;  // stale guard
     _tasksAll = d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
@@ -432,6 +434,22 @@ function _render() {
           <button onclick="if(_tasksMode!=='time'){_tasksMode='time';toggleTasksMode();document.getElementById('taskFilterPopover').style.display='none'}" style="flex:1;padding:5px 8px;border:0.5px solid var(--b,#e5e5ea);border-radius:8px;font-size:11px;cursor:pointer;background:${_tasksMode==='time'?'#3b82f6':'var(--bg)'};color:${_tasksMode==='time'?'#fff':'var(--t1)'}">${I18N.t('tasks.sort.time')||'时间序'}</button>
         </div>
         <button onclick="toggleTasksSort();document.getElementById('taskFilterPopover').style.display='none'" style="width:100%;padding:5px 8px;border:0.5px solid var(--b,#e5e5ea);border-radius:8px;font-size:11px;cursor:pointer;background:var(--bg);color:var(--t1)">${I18N.t('tasks.sort.order')||'排序'} ${_sortIcon}</button>
+        <div style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-top:10px;margin-bottom:6px">${I18N.t('tasks.filter_creator')||'创建人'}</div>
+        <div style="display:flex;flex-direction:column;gap:3px;max-height:180px;overflow-y:auto">
+          <label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;${!_taskFilterAssignee?'background:rgba(59,130,246,.06)':''}" onclick="_taskFilterAssignee='';_taskPage=1;document.getElementById('taskFilterPopover').style.display='none';loadTasks()">
+            <span style="width:14px;height:14px;border-radius:50%;border:1.5px solid ${!_taskFilterAssignee?'#3b82f6':'var(--b,#d0d7de)'};${!_taskFilterAssignee?'background:#3b82f6;box-shadow:inset 0 0 0 2px #fff':''}"></span>
+            ${I18N.t('tasks.tab.all')||'全部'} <span style="color:var(--t3,#86868b);font-size:11px">${cntAll}</span>
+          </label>
+          ${[...new Set(_tasksAll.map(t => t.assignee).filter(Boolean))].sort().map(a => {
+            const cnt = _tasksAll.filter(t => t.assignee === a).length;
+            const act = _taskFilterAssignee === a;
+            const safeA = a.replace(/'/g, "\\'");
+            return `<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;${act?'background:rgba(59,130,246,.06)':''}" onclick="_taskFilterAssignee='${safeA}';_taskPage=1;document.getElementById('taskFilterPopover').style.display='none';loadTasks()">
+              <span style="width:14px;height:14px;border-radius:50%;border:1.5px solid ${act?'#3b82f6':'var(--b,#d0d7de)'};${act?'background:#3b82f6;box-shadow:inset 0 0 0 2px #fff':''}"></span>
+              ${a} <span style="color:var(--t3,#86868b);font-size:11px">${cnt}</span>
+            </label>`;
+          }).join('')}
+        </div>
       </div>
     </div>`;
 
@@ -535,9 +553,6 @@ function _render() {
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:8px">${I18N.t('tasks.create.btn_new')}</button>
         ${_filterPanel}
-        <button class="tsk-tab" onclick="toggleCreatedByMe()" style="border:1px solid var(--b);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;background:${_tasksCreatedByMe ? 'var(--a,#34c759)' : 'var(--bg)'};color:${_tasksCreatedByMe ? '#fff' : 'inherit'};display:inline-flex;align-items:center;gap:4px;flex-shrink:0" title="${I18N.t('tasks.filter.created_by_me')}">
-          <span style="font-size:12px">👤</span> ${I18N.t('tasks.filter.created_by_me')}
-        </button>
         <div style="flex:1"></div>
         <div style="position:relative;display:inline-flex;align-items:center;flex-shrink:0">
           <button class="tsk-tab" onclick="document.getElementById('taskViewPopover').style.display=document.getElementById('taskViewPopover').style.display==='block'?'none':'block'" style="border:1px solid var(--b);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;background:var(--bg);display:inline-flex;align-items:center;gap:4px">
@@ -614,6 +629,7 @@ function _detailHtml(t) {
       <div style="${_cardTitle}">${I18N.t('tasks.detail_title')||'任务详情'}</div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.status')}</span><b style="${_valueStyle};color:${isDone?'#34c759':isCancelled?'#86868b':isProc?'#3b82f6':'#86868b'}">${tagText}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.task_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">Issue</span><b style="${_valueStyle}"><a href="https://gitcode.com/${t.repo_key}/issues/${t.issue_number}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">Stage</span><b style="${_valueStyle}">${_stageLabel}</b></div>
