@@ -118,7 +118,6 @@
   "desc_too_long": "描述不能超过 200 字符",
   "content_required": "内容必填",
   "content_too_large": "内容不能超过 10KB",
-  "name_duplicate": "该仓库下已存在同名知识",
   "import_file": "导入文件",
   "file_too_large": "文件超过 10KB 限制",
   "file_imported": "文件已导入"
