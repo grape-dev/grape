@@ -112,7 +112,7 @@ function _summaryStatsBar(data, devices) {
   return `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;margin-bottom:10px;font-size:12px;color:var(--t2);background:var(--bg);border-radius:8px">${parts.join('<span style="color:var(--t3)">·</span>')}</div>`;
 }
 
-// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts）
+// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts/codex）
 function _engineWatermark(name) {
   const n = (name || '').toLowerCase();
   if (n.includes('opencode')) {
@@ -123,6 +123,9 @@ function _engineWatermark(name) {
   }
   if (n.includes('codearts')) {
     return `<img src="/static/img/engines/codearts.jpg" style="position:absolute;right:12px;bottom:8px;width:50px;height:50px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
+  }
+  if (n.includes('codex')) {
+    return `<div style="position:absolute;right:12px;bottom:8px;width:48px;height:48px;border-radius:10px;background:linear-gradient(135deg,#10a37f,#0d8a6a);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:#fff;opacity:.25;pointer-events:none">C</div>`;
   }
   return '';
 }
@@ -189,6 +192,7 @@ function renderRuntimes(data) {
     if (n.includes('hermes')) return 'hermes';
     if (n.includes('opencode')) return 'opencode';
     if (n.includes('codearts')) return 'codearts';
+    if (n.includes('codex')) return 'codex';
     return '';
   }).filter(Boolean))];
   const _allScopes = ['local','user','repo','global'];
@@ -197,7 +201,7 @@ function renderRuntimes(data) {
     const list = _runtimeTab === 'engines' ? (data.runtimes||[]) : devices;
     return list.some(e => (e.scope || (e.is_local ? 'local' : 'global')) === sc || (sc === 'local' && e.is_local));
   };
-  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b' };
+  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
   // 收集可用场景和标签（从引擎数据提取）
   const _allRuntimes = (data.runtimes || []);
   const _availScenes = [...new Set(_allRuntimes.flatMap(rt => rt.scene_tags || []))].filter(Boolean);
