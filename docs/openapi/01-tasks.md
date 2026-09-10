@@ -1,6 +1,6 @@
 # Tasks 任务接口（/api/tasks）
 
-> 对外公开，认证：`get_current_user_or_api_key`（JWT 会话或 API Key 任一）。
+> 对外公开，认证：`get_current_user_or_api_key`（JWT 会话 / 会话 token（`tk_`）/ API Key 任一）。
 
 ## GET /api/tasks/mine — 当前用户任务列表
 
@@ -109,6 +109,40 @@ Task 对象字段：`id / user_id / assignee / repo_key / issue_number / title /
 | Path | `{task_id}` int |
 | 出参 | `{"ok": true, "task_id": ..., "status": "processing"}` |
 | 返回 | 200；400 非法迁移；403 无权；404 不存在 |
+
+---
+
+## POST /api/tasks/complete — 任务自报完成（grape tasks complete）
+
+请求头：`Content-Type: application/json`
+
+请求体（TaskSelfCompleteBody）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `task_id` | string | 会话 token 时可省 | 会话 token（`tk_`）下由 token 自动定位（`session_key`）；JWT/API Key 必填 |
+| `result_text` | string | ✅ | 结论/动作/产出摘要（写入事件 result，供事件对话/下游阅读） |
+| `next_step` | string | 否 | `a2a_issue` / `reply_comment` / `a2a_need_clarify` / `done` |
+
+| 项 | 值 |
+|----|-----|
+| 出参 | `{"ok": true, "task_id": "t_xxx", "status": "completed"}`；终态幂等返回 `already: true` |
+| 返回 | 200；401 未认证；400 缺 task_id；403 作用域不匹配/非本人托管仓库；404 任务不存在 |
+
+> 会话 token：任务 id 由 `session_key` 自动定位（M2 以 task_id 签发），agent 收尾直接
+> `grape tasks complete --json '{"result_text":"...","next_step":"a2a_issue"}'`，无需 `--task-id`。
+
+---
+
+## GET /api/tasks/{task_id}/status — 查询任务状态（轮询 wait 用）
+
+| 项 | 值 |
+|----|-----|
+| Path | `{task_id}` int |
+| 出参 | `{"id": ..., "status": "running", "repo_key": ..., "issue_number": ..., "title": ..., "completed_reason": ..., "completed_at": ...}` |
+| 返回 | 200；401；404 |
+
+> `grape tasks wait --json-out` 即轮询本端点直至终态（completed/failed/cancelled）。
 
 ---
 
