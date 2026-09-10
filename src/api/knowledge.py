@@ -335,10 +335,10 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
 def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str = ""):
     """系统写入知识时按 scope 规则自动生成 scene_knowledge_ref 关联记录。"""
     ref_map = {
-        "baseline":    {"scene_id": "", "agent_type": ""},           # 全局
-        "project":     {"scene_id": "", "agent_type": ""},           # 全局
-        "issue":       {"scene_id": "", "agent_type": ""},           # 全局
-        "issue_agent": {"scene_id": "", "agent_type": agent_type},   # 指定 Agent
+        "baseline":    {"scene_id": "", "agent_type": ""},           # 全局（基线分析，所有 Agent 共享）
+        "project":     {"scene_id": "", "agent_type": agent_type},   # 项目级 Agent 知识——只注入给该 Agent
+        "issue":       {"scene_id": "", "agent_type": ""},           # 全局（Issue 级，所有 Agent 共享）
+        "issue_agent": {"scene_id": "", "agent_type": agent_type},   # Issue+Agent 级——只注入给该 Agent
         # member 不自动关联——用户手动选择
     }
     ref = ref_map.get(scope)
