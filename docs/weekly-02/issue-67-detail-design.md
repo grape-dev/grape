@@ -575,7 +575,7 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 - 底部按钮区：`border-top:1px solid var(--b)` 横线隔离 + `justify-content:flex-end` 靠右
 - 卡片标题用 `k.name`（为空时回退到 `knowledgeTitle(k)` 从 file_path 截取）
 - 描述：`white-space:pre-line` + `word-break:break-word` + `min-height:38px` + `line-clamp:2` + `title` 属性 tooltip
-- 关联 pill：`.kb-ref-pill`（场景 N + Agent N），hover 显示名称列表 tooltip
+- 关联 pill：`.kb-ref-pill`（场景 N + Agent N），原生 `title` 属性显示名称列表（hover 浏览器自带 tooltip）
 - 点击卡片进入详情页面
 - **高度统一**：head `min-height:32px`(标题 nowrap) + desc `min/max-height:38px` + pill 行 `min-height:17px` → 所有卡片 foot 对齐
 - **CSS 隔离**：知识页面样式用 `.knowledge-page` 前缀覆盖，不影响场景市场全局样式
@@ -600,13 +600,15 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 - 已选场景：`.scn-card` 卡片横向滚动（`scn-scroll-wrap` + `scn-scroll-track`）+ 左右箭头按钮
 - 卡片展示：色条 + 图标 + 标题(scene_display_name) + 描述 + 技能链路(pipeline)
 - 每个卡片有 X 按钮删除（硬删除 `DELETE /ref/{id}`）
-- "+添加场景"打开弹出层：仓库场景列表（scn-card 网格 + 搜索 + 选中勾号 + 确认）
+- "+添加场景"打开 modal 弹出层：仓库场景列表（紧凑行列表 + 搜索 + 选中圆圈 + 确认）
 
-**场景选择弹出层**：
+**场景选择弹出层**（modal overlay + Teleport to body）：
 - 只显示当前仓库的场景（`GET /api/scenes?repo=xxx`，不显示场景市场）
-- `.scn-card` 网格布局 + 搜索框
-- 点击选中/取消（蓝色边框 + 勾号标识）
+- 紧凑行列表（`.kb-scene-row`）+ 搜索框
+- 点击选中/取消（空心圆 → 蓝色实心圆 ✓，同 Agent 标签风格）
+- 固定高度 480px，列表超出滚动
 - 底部：已选数量 + 取消/确认按钮
+- 点击遮罩关闭
 - 新增页面用临时选中（`createSceneTempSelected`），确认后才写入 `createForm.sceneSelected`
 
 **分页器**：始终显示，`page / totalPages (total)` + 20/50 每页切换。
@@ -703,7 +705,7 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 }
 ```
 
-> 当前实际 i18n 共 **120 keys**（zh/en 对称）。
+> 当前实际 i18n 共 **121 keys**（zh/en 对称）。
 
 ### 6.12 统计卡片数据接口
 
@@ -837,43 +839,15 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
         db.commit()
 ```
 
-### 6.16 全文搜索实现
+### 6.16 搜索实现
 
-前端实现——从 `GET /api/knowledge` 返回的列表数据里搜索。
+后端实现——`GET /api/knowledge` 接收 `q` 参数，WHERE 条件 `name LIKE %q% OR description LIKE %q%`。
 
-每条知识返回 `content` 字段（前 500 字符的预览文本）。搜索时匹配 `content` + `file_path` + `created_by`：
+前端传 `q` 参数给后端，后端 SQL 过滤后返回匹配结果。不做前端过滤——数据量可能大，后端分页 + LIKE 查询更高效。
 
-```javascript
-function _filterKnowledge(list, filterState) {
-    let result = list;
-    // 来源筛选
-    if (filterState.source) {
-        if (filterState.source === 'system') {
-            result = result.filter(k => k.source === 'system' || k.source === 'agent');
-        } else if (filterState.source === 'manual') {
-            result = result.filter(k => k.source === 'manual');
-        }
-    }
-    // 关联状态筛选
-    if (filterState.refStatus === 'linked') {
-        result = result.filter(k => k.refs && k.refs.length > 0);
-    } else if (filterState.refStatus === 'unlinked') {
-        result = result.filter(k => !k.refs || k.refs.length === 0);
-    }
-    // 搜索
-    if (filterState.query) {
-        const q = filterState.query.toLowerCase();
-        result = result.filter(k =>
-            (k.content || '').toLowerCase().includes(q) ||
-            (k.path || '').toLowerCase().includes(q) ||
-            (k.created_by || '').toLowerCase().includes(q)
-        );
-    }
-    return result;
-}
-```
+**最新排序**：`sort=latest` 参数 → `ORDER BY updated_at DESC`。前端"最新"按钮 toggle 切换，选中态蓝色填充。
 
-后端 `GET /api/knowledge` 的 `_read_entry_content` 已经返回了 content 预览，前端直接搜索即可。不需要后端全文搜索接口——数据量不大（几百条），前端过滤足够。
+**筛选器布局**（全部靠左对齐）：`[关联状态下拉] [搜索框] [查询] [最新] [新增知识]`
 
 ### 6.17 关联管理 API 权限校验
 
@@ -1718,3 +1692,22 @@ pipeline_chain = pipeline_map.get(r[9], "")
 - `_agent_knowledge_entries`：循环读 OBS + agent_files，0 调用
 - `_repo_root_rel`：路径转换，0 调用
 - `_build_ref_summary` 里的 `has_global` 检查：全局关联已移除
+
+#### 6.25.3 编辑/新增保存路径不一致修复
+
+**问题**：`_update_knowledge_content` 写文件用 `_repo_base(repo_key)` = `WORKSPACE_DIR/owner/repo/rel`，但 `_read_ws_file` 读文件用 `WORKSPACE_DIR/rel`（缺少 owner/repo 前缀）。`create_knowledge_entry` 存 DB 的 `rel` 用 `os.path.relpath(file_path, WORKSPACE_DIR)` 含 owner/repo 前缀，读时又拼一次——路径重复。
+
+**修复**：
+- `_read_ws_file`：本地 fallback 用 `_repo_base(repo_key)` + `rel`（和写文件一致）
+- `create_knowledge_entry`：`rel = os.path.relpath(file_path, base)`（相对仓库根，不含 owner/repo）
+
+#### 6.25.4 新增页面场景卡片补全
+
+新增页面的已选场景卡片之前只有标题，补全为和详情页一致的结构：
+- 色条 + 图标 + 标题 + 描述 + pipeline 链路（`nodes[].tag` 用 `→` 连接）
+- `loadRepoScenes`：从场景 API 的 `nodes` 字段提取 pipeline
+- `getSceneDesc` / `getScenePipeline` 方法
+
+#### 6.25.5 详情页内容英文换行
+
+`.kb-detail-content` 加 `word-break:break-word` + `white-space:pre-wrap`——长英文单词正常换行。
