@@ -759,7 +759,6 @@ function renderKnowledge() {
                 </div>
                 <div style="font-size:11px;color:var(--t3);line-height:1.6">
                   {{ detail.created_by || '' }} · {{ (detail.created_at || '').substring(0, 16) }}
-                  <span v-if="detail.file_path"> · {{ detail.file_path }}</span>
                 </div>
               </div>
             </div>
