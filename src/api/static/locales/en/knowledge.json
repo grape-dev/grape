@@ -105,6 +105,7 @@
   "ref_system_auto": "System knowledge loads automatically, no configuration needed",
   "no_description": "No description provided",
   "search_btn": "Search",
+  "latest": "Latest",
   "entry_description": "Description (brief summary)",
   "entry_name": "Name",
   "entry_name_ph": "Enter a name (required)",

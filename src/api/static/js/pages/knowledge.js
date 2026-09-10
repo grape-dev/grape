@@ -41,7 +41,7 @@ function renderKnowledge() {
         list: [],
         loading: false,
         firstLoad: true,
-        filter: { refStatus: '', query: '' },
+        filter: { refStatus: '', query: '', sortLatest: false },
         stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
         activeTab: 'system',
         page: 1,
@@ -150,6 +150,7 @@ function renderKnowledge() {
           const tabSource = { system: 'system', agent: 'agent', user: 'manual' };
           if (tabSource[this.activeTab]) params.set('source', tabSource[this.activeTab]);
           if (this.filter.query) params.set('q', this.filter.query);
+          if (this.filter.sortLatest) params.set('sort', 'latest');
           const d = await API.get('/knowledge?' + params.toString());
           if (window._currentView !== 'knowledge') return;
           this.list = d.knowledge || [];
@@ -175,6 +176,11 @@ function renderKnowledge() {
       },
       switchTab(tab) {
         this.activeTab = tab;
+        this.page = 1;
+        this.loadList();
+      },
+      toggleSortLatest() {
+        this.filter.sortLatest = !this.filter.sortLatest;
         this.page = 1;
         this.loadList();
       },
@@ -731,9 +737,8 @@ function renderKnowledge() {
               </select>
               <input v-model="filter.query" :placeholder="t('search_placeholder')" class="kb-input" @keyup.enter="loadList">
               <button class="bt bt-o bt-s" @click="loadList">{{ t('search_btn') }}</button>
-              <div style="margin-left:auto;display:flex;gap:8px">
-                <button v-if="activeTab === 'user'" class="bt bt-p bt-s" @click="openEntryModal">{{ t('entry_create') }}</button>
-              </div>
+              <button class="bt bt-s" :class="filter.sortLatest ? 'bt-p' : 'bt-o'" @click="toggleSortLatest">{{ t('latest') }}</button>
+              <button v-if="activeTab === 'user'" class="bt bt-p bt-s" @click="openEntryModal">{{ t('entry_create') }}</button>
             </div>
 
             <div v-if="loading" class="kb-loading-overlay">

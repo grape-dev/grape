@@ -105,6 +105,7 @@
   "ref_system_auto": "系统知识自动加载，无需配置关联",
   "no_description": "当前用户没有填写描述",
   "search_btn": "查询",
+  "latest": "最新",
   "entry_description": "描述（简述知识的用途）",
   "entry_name": "名称",
   "entry_name_ph": "请输入名称（必填）",

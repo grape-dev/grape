@@ -260,7 +260,8 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          source: str = Query("", description="按来源筛选：system/agent/manual"),
                          page: int = Query(1, description="页码，从1开始"),
                          page_size: int = Query(50, description="每页条数，默认50"),
-                         show_archived: bool = Query(False, description="是否包含归档知识")):
+                         show_archived: bool = Query(False, description="是否包含归档知识"),
+                         sort: str = Query("", description="排序：latest=按更新时间倒序")):
     """统一知识列表——只查 DB 返回分页列表（不含统计，统计走独立接口）。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
@@ -289,7 +290,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
             f"SELECT id, scope, repo_key, agent_type, issue_num, file_path, status, "
             f"source_seq, created_by, created_at, obs_key, content_hash, updated_at, source, archived, description, name "
             f"FROM agent_shared_knowledge {where} "
-            f"ORDER BY archived ASC, id DESC LIMIT ? OFFSET ?",
+            f"ORDER BY archived ASC, {'updated_at DESC,' if sort == 'latest' else ''} id DESC LIMIT ? OFFSET ?",
             params + [page_size, offset]
         ).fetchall()
 
