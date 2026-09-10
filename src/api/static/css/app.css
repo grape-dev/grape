@@ -519,6 +519,8 @@
 .scn-card-foot{display:flex;align-items:center;gap:8px;padding-top:14px;border-top:1px solid var(--b);margin-top:auto}
 .scn-meta{font-size:10px;color:var(--t3)}
 .scn-card-btns{display:flex;gap:6px;margin-left:auto}
+.knowledge-page .scn-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.knowledge-page .scn-card-btns{flex-shrink:0}
 .scn-scroll-wrap{position:relative}
 .scn-scroll-track{display:flex;gap:14px;overflow-x:auto;scroll-behavior:smooth;scrollbar-width:none;-ms-overflow-style:none}
 .scn-scroll-track::-webkit-scrollbar{display:none}
