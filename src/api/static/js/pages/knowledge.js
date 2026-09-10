@@ -683,16 +683,25 @@ function renderKnowledge() {
             <!-- 统计卡片（点击切换 tab，在 apple-card 外面） -->
             <div class="stats-bar">
               <div class="stat-card" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">
-                <span class="stat-num">{{ statSystem() }}</span>
-                <span class="stat-label">{{ t('stats_system') }}</span>
+                <div class="stat-info">
+                  <span class="stat-num">{{ statSystem() }}</span>
+                  <span class="stat-label">{{ t('stats_system') }}</span>
+                </div>
+                <div class="stat-icon" style="background:rgba(0,113,227,0.1);color:#0071e3">⚙</div>
               </div>
               <div class="stat-card" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">
-                <span class="stat-num">{{ statAgent() }}</span>
-                <span class="stat-label">{{ t('stats_agent') }}</span>
+                <div class="stat-info">
+                  <span class="stat-num">{{ statAgent() }}</span>
+                  <span class="stat-label">{{ t('stats_agent') }}</span>
+                </div>
+                <div class="stat-icon" style="background:rgba(255,149,0,0.1);color:#ff9500">🤖</div>
               </div>
               <div class="stat-card" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">
-                <span class="stat-num">{{ statUser() }}</span>
-                <span class="stat-label">{{ t('stats_user') }}</span>
+                <div class="stat-info">
+                  <span class="stat-num">{{ statUser() }}</span>
+                  <span class="stat-label">{{ t('stats_user') }}</span>
+                </div>
+                <div class="stat-icon" style="background:rgba(52,199,89,0.1);color:#34c759">👤</div>
               </div>
             </div>
 
@@ -714,7 +723,7 @@ function renderKnowledge() {
               <input v-model="filter.query" :placeholder="t('search_placeholder')" class="kb-input" @keyup.enter="loadList">
               <button class="bt bt-o bt-s" @click="loadList">{{ t('search_btn') }}</button>
               <div style="margin-left:auto;display:flex;gap:8px">
-                <button v-if="activeTab === 'user'" class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a)" @click="openEntryModal">{{ t('entry_create') }}</button>
+                <button v-if="activeTab === 'user'" class="bt bt-p bt-s" @click="openEntryModal">{{ t('entry_create') }}</button>
               </div>
             </div>
 
@@ -743,7 +752,7 @@ function renderKnowledge() {
                   <div class="scn-card-foot">
                     <span class="scn-meta">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
                     <div class="scn-card-btns">
-                      <button class="bt bt-o bt-s" @click.stop="viewContent(k)">{{ t('view') }}</button>
+                      <button class="bt bt-p bt-s" @click.stop="viewContent(k)">{{ t('view') }}</button>
                       <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click.stop="quickDelete(k)">{{ t('delete') }}</button>
                     </div>
                   </div>
@@ -788,7 +797,7 @@ function renderKnowledge() {
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:8px;padding-top:16px;border-top:1px solid var(--b);flex-wrap:wrap;justify-content:flex-end">
-              <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" @click="editKnowledge">{{ t('edit_save') }}</button>
+              <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-p bt-s" @click="editKnowledge">{{ t('edit_save') }}</button>
               <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="deleteKnowledge">{{ t('delete') }}</button>
             </div>
           </div>

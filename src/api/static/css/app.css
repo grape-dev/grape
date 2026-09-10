@@ -588,12 +588,14 @@
 
 /* ===== Issue #67: 知识库页面 Vue 组件样式 ===== */
 .knowledge-page .stats-bar{display:flex;gap:12px;margin-bottom:16px}
-.knowledge-page .stat-card{flex:1;padding:18px 20px;border-radius:14px;background:var(--c);border:none;cursor:pointer;transition:transform .2s,box-shadow .2s;display:flex;flex-direction:column;align-items:center;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-.knowledge-page .stat-card:hover{transform:translateY(-2px);box-shadow:0 2px 8px rgba(0,0,0,0.04),0 8px 24px rgba(0,0,0,0.08)}
-.knowledge-page .stat-card.active{box-shadow:0 0 0 2px rgba(0,113,227,0.12),0 1px 4px rgba(0,0,0,.06)}
+.knowledge-page .stat-card{flex:1;padding:16px 20px;border-radius:14px;background:var(--c);border:1px solid var(--b);cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:space-between;box-shadow:none}
+.knowledge-page .stat-card:hover{border-color:var(--a);background:rgba(0,113,227,0.02)}
+.knowledge-page .stat-card.active{border-color:var(--a);background:rgba(0,113,227,0.04)}
 .knowledge-page .stat-card.active .stat-num{color:var(--a)}
-.knowledge-page .stat-num{font-size:28px;font-weight:700;color:var(--t);letter-spacing:-.02em}
-.knowledge-page .stat-label{font-size:11px;color:var(--t3);margin-top:4px;font-weight:500}
+.knowledge-page .stat-info{display:flex;flex-direction:column}
+.knowledge-page .stat-num{font-size:24px;font-weight:700;color:var(--t);letter-spacing:-.02em}
+.knowledge-page .stat-label{font-size:11px;color:var(--t3);margin-top:2px;font-weight:500}
+.knowledge-page .stat-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
 .knowledge-page .filter-bar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
 .knowledge-page .skill-card{background:var(--c);border:1px solid var(--b);border-radius:18px;overflow:hidden;cursor:pointer;transition:all .3s cubic-bezier(.25,.1,.25,1);box-shadow:var(--sh);display:flex;flex-direction:column}
 .knowledge-page .skill-card:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08);border-color:rgba(0,113,227,.15)}
@@ -603,10 +605,12 @@
 .knowledge-page .card-content{flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px}
 .knowledge-page .card-footer{flex-shrink:0;font-size:10px;color:var(--t3);margin-bottom:10px}
 .knowledge-page .card-actions{flex-shrink:0;display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;padding-top:12px;border-top:1px solid var(--b);justify-content:flex-end}
-.kb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}.kb-select{padding:7px 10px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;background:var(--c)}
-.kb-input{padding:7px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);width:200px}
+.kb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}.kb-select{padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-size:12px;background:var(--c)}
+.kb-input{padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-size:12px;outline:none;background:var(--c);width:200px;transition:border-color .2s}
+.kb-input:focus{border-color:var(--a)}
 .kb-checkbox-label{font-size:11px;color:var(--t3);display:flex;align-items:center;gap:4px;cursor:pointer}
-.kb-textarea{width:100%;min-height:200px;padding:12px;border:1px solid var(--b);border-radius:8px;font-size:13px;font-family:monospace;resize:vertical}
+.kb-textarea{width:100%;min-height:200px;padding:12px;border:1px solid var(--b);border-radius:8px;font-size:13px;font-family:monospace;resize:vertical;transition:border-color .2s}
+.kb-textarea:focus{border-color:var(--a)}
 .kb-required{color:var(--r);margin-left:2px}
 .kb-detail-content { font-size: 13px; line-height: 1.6; overflow-x: auto; }
 .kb-detail-scroll { max-height: 400px; overflow-y: auto; padding-right: 8px; }
