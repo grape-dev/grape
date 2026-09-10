@@ -33,11 +33,32 @@ class GitCodeBackend(VcsBackend):
                 evt_type = "note_hook_pr"
             else:
                 evt_type = "issue_comment"
-        # 区分 merge 与非 merge 的 PR 事件
+        # 区分 merge / 非 merge 的 PR 事件（Issue #49 补充：按真实 action 细分，不再一律并成 opened）
+        # open/create → pull_request_opened；merge → pull_request_merged；
+        # update/reopen/close/审查(approve)等 → pull_request_updated，并上抛 action/actor/has_commits 供 L1 过滤。
+        _pr_action = ""
+        _pr_actor = ""
+        _pr_has_commits = False
         if evt_type == "pull_request_merged":
             obj = payload.get("object_attributes", {})
-            if isinstance(obj, dict) and obj.get("action", "") != "merge":
+            if isinstance(obj, dict):
+                _pr_action = str(obj.get("action") or "").lower()
+            else:
+                _pr_action = "merge"
+            if _pr_action == "merge":
+                evt_type = "pull_request_merged"
+            elif _pr_action in ("open", "create"):
                 evt_type = "pull_request_opened"
+            else:
+                # update / reopen / close / 审查类(approve...) → pull_request_updated
+                evt_type = "pull_request_updated"
+                _pr_has_commits = bool(payload.get("commits"))
+            # 操作者（供 L1 actor 判定）
+            _pr_actor = payload.get("user_name", "")
+            if not _pr_actor:
+                _s = payload.get("sender", {})
+                if isinstance(_s, dict):
+                    _pr_actor = _s.get("username") or _s.get("login") or ""
         repo = ""
         if "project" in payload:
             p = payload["project"]
@@ -82,11 +103,17 @@ class GitCodeBackend(VcsBackend):
             _pr = payload.get("pull_request", {}) or payload.get("merge_request", {})
             if isinstance(_pr, dict):
                 title = _pr.get("title", "") or ""
-        return {
+        evt = {
             "source": "gitcode", "type": evt_type,
             "repository": repo, "branch": branch,
             "actor": actor, "payload": payload, "title": title,
         }
+        # Issue #49 补充：PR 事件上抛 action/actor/has_commits（供 L1 action 过滤/L2 分派对账）
+        if evt_type in ("pull_request_opened", "pull_request_updated", "pull_request_merged"):
+            evt["pr_action"] = _pr_action
+            evt["pr_actor"] = _pr_actor
+            evt["has_commits"] = _pr_has_commits
+        return evt
 
     def get_collaborators_url(self, owner: str, repo: str) -> str:
         return f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators"

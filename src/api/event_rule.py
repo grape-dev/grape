@@ -109,6 +109,12 @@ def evaluate_event_action(event_type: str, payload: dict) -> dict:
         # 无 action（如 issue_comment/note_hook_pr 无 object_attributes.action）→ 规则缺失时放行
         return {"decision": "no_rule", "reason": "no_action", "actor_type": _get_actor(payload), "side_effect": ""}
 
+    # Issue #49 补充：PR update 无新 commit（审查/通过审查/纯元数据/reopen 等）→ 过滤
+    if action == "update" and event_type in ("pull_request_opened", "pull_request_updated"):
+        if not payload.get("commits"):
+            return {"decision": "skip", "reason": "no_commit_on_pr_update",
+                    "actor_type": _get_actor(payload), "side_effect": ""}
+
     rule = evt_rules.get(action)
     if rule is None:
         return {"decision": "no_rule", "reason": f"no_rule:{action}",
