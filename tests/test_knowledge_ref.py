@@ -156,7 +156,7 @@ class TestKnowledgeCRUD:
 
     def test_update_manual(self, auth_headers, test_knowledge):
         r = client.put(f"/api/knowledge/{test_knowledge['manual_id']}",
-                       json={"content": "updated content"}, headers=auth_headers)
+                       json={"name": "updated name", "content": "updated content"}, headers=auth_headers)
         assert r.status_code == 200
         assert r.json()["ok"] is True
 

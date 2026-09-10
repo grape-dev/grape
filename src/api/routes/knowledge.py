@@ -648,6 +648,23 @@ class KnowledgeUpdateBody(BaseModel):
     description: str = ""
     name: str = ""
 
+MAX_NAME_LEN = 50
+MAX_DESC_LEN = 200
+MAX_CONTENT_BYTES = 10 * 1024
+
+
+def _check_name_unique(repo_key: str, name: str, exclude_id: int = 0):
+    """校验同仓库下 name 唯一（排除自身）。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        existing = db.cursor().execute(
+            "SELECT id FROM agent_shared_knowledge "
+            "WHERE repo_key=? AND name=? AND archived=0 AND id!=?",
+            (repo_key, name, exclude_id)
+        ).fetchone()
+    if existing:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": "该仓库下已存在同名知识"})
+
 class KnowledgeRefBody(BaseModel):
     scene_id: str = ""
     agent_type: str = ""
@@ -804,16 +821,25 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
 @router.post("/entry")
 def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_current_user)):
     """用户直接输入文本创建知识条目（source=manual）。"""
-    if not (body.content or "").strip():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
-    if not body.repo:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
     if not (body.name or "").strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "name 必填"})
+    if len(body.name.strip()) > MAX_NAME_LEN:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"name 不能超过 {MAX_NAME_LEN} 字符"})
+    if not (body.content or "").strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
+    if len(body.content.encode("utf-8")) > MAX_CONTENT_BYTES:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "content 不能超过 10KB"})
+    if body.description and len(body.description) > MAX_DESC_LEN:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"description 不能超过 {MAX_DESC_LEN} 字符"})
+    if not body.repo:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
 
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(body.repo)
     _check_repo_member(user, repo_key)
+
+    # 名称唯一性校验（同仓库下 name 不可重复）
+    _check_name_unique(repo_key, body.name.strip())
     base = _repo_base(repo_key)
     username = str(user.get("username") or user.get("id") or "user")
     filename = f"entry_{int(time.time())}_{uuid.uuid4().hex[:6]}.md"
@@ -923,6 +949,21 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
         raise HTTPException(status_code=403, detail={"code": 403, "message": "系统生成的知识不可编辑"})
     if row["created_by"] != user.get("username"):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可编辑"})
+
+    # 校验
+    if not (body.name or "").strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "name 必填"})
+    if len(body.name.strip()) > MAX_NAME_LEN:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"name 不能超过 {MAX_NAME_LEN} 字符"})
+    if not (body.content or "").strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
+    if len(body.content.encode("utf-8")) > MAX_CONTENT_BYTES:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "content 不能超过 10KB"})
+    if body.description and len(body.description) > MAX_DESC_LEN:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"description 不能超过 {MAX_DESC_LEN} 字符"})
+
+    # 名称唯一性校验（排除自身）
+    _check_name_unique(row["repo_key"], body.name.strip(), exclude_id=knowledge_id)
 
     _update_knowledge_content(knowledge_id, row, body.content)
 

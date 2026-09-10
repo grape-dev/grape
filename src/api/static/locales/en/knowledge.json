@@ -113,7 +113,12 @@
   "entry_name": "Name",
   "entry_name_ph": "Enter a name (required)",
   "entry_content": "Content",
-  "name_required": "Knowledge name is required",
+  "name_required": "Name is required",
+  "name_too_long": "Name cannot exceed 50 characters",
+  "desc_too_long": "Description cannot exceed 200 characters",
+  "content_required": "Content is required",
+  "content_too_large": "Content cannot exceed 10KB",
+  "name_duplicate": "Duplicate name in this repo",
   "import_file": "Import File",
   "file_too_large": "File exceeds 10KB limit",
   "file_imported": "File imported"

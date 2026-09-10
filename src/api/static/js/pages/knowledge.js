@@ -509,6 +509,10 @@ function renderKnowledge() {
       async saveEdit() {
         if (!this.detail) return;
         if (!this.editForm.name.trim()) { app.showToast(this.t('name_required')); return; }
+        if (this.editForm.name.length > 50) { app.showToast(this.t('name_too_long')); return; }
+        if (this.editForm.description.length > 200) { app.showToast(this.t('desc_too_long')); return; }
+        if (!this.editForm.content.trim()) { app.showToast(this.t('content_required')); return; }
+        if (new Blob([this.editForm.content]).size > 10240) { app.showToast(this.t('content_too_large')); return; }
         try {
           await API.put('/knowledge/' + this.detail.id, {
             content: this.editForm.content || '',
@@ -631,7 +635,10 @@ function renderKnowledge() {
       },
       async saveCreate() {
         if (!this.createForm.name.trim()) { app.showToast(this.t('name_required')); return; }
-        if (!this.createForm.content.trim()) { app.showToast(this.t('entry_content')); return; }
+        if (this.createForm.name.length > 50) { app.showToast(this.t('name_too_long')); return; }
+        if (this.createForm.description.length > 200) { app.showToast(this.t('desc_too_long')); return; }
+        if (!this.createForm.content.trim()) { app.showToast(this.t('content_required')); return; }
+        if (new Blob([this.createForm.content]).size > 10240) { app.showToast(this.t('content_too_large')); return; }
         try {
           const d = await API.post('/knowledge/entry', {
             repo: this.currentRepo(),
@@ -914,11 +921,11 @@ function renderKnowledge() {
             </div>
             <div style="margin-bottom:12px">
               <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_name') }} *</label>
-              <input v-model="editForm.name" :placeholder="t('entry_name_ph')" class="kb-input" style="width:100%" maxlength="256">
+              <input v-model="editForm.name" :placeholder="t('entry_name_ph')" class="kb-input" style="width:100%" maxlength="50">
             </div>
             <div style="margin-bottom:12px">
               <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_description') }}</label>
-              <input v-model="editForm.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%">
+              <input v-model="editForm.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%" maxlength="200">
             </div>
             <div style="margin-bottom:12px">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
@@ -948,11 +955,11 @@ function renderKnowledge() {
             </div>
             <div style="margin-bottom:12px">
               <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_name') }} *</label>
-              <input v-model="createForm.name" :placeholder="t('entry_name_ph')" class="kb-input" style="width:100%" maxlength="256">
+              <input v-model="createForm.name" :placeholder="t('entry_name_ph')" class="kb-input" style="width:100%" maxlength="50">
             </div>
             <div style="margin-bottom:12px">
               <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_description') }}</label>
-              <input v-model="createForm.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%">
+              <input v-model="createForm.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%" maxlength="200">
             </div>
             <div style="margin-bottom:16px">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">

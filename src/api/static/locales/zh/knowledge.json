@@ -113,7 +113,12 @@
   "entry_name": "名称",
   "entry_name_ph": "请输入名称（必填）",
   "entry_content": "内容",
-  "name_required": "知识名称必填",
+  "name_required": "名称必填",
+  "name_too_long": "名称不能超过 50 字符",
+  "desc_too_long": "描述不能超过 200 字符",
+  "content_required": "内容必填",
+  "content_too_large": "内容不能超过 10KB",
+  "name_duplicate": "该仓库下已存在同名知识",
   "import_file": "导入文件",
   "file_too_large": "文件超过 10KB 限制",
   "file_imported": "文件已导入"
