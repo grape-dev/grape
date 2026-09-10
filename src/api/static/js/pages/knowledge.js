@@ -605,6 +605,10 @@ function renderKnowledge() {
         const s = (this.repoScenes || []).find(x => x.id === sid);
         return s ? s.name : String(sid || '').substring(0, 12);
       },
+      getSceneDesc(sid) {
+        const s = (this.repoScenes || []).find(x => x.id === sid);
+        return s ? (s.desc || '') : '';
+      },
       openCreateScenePopover(e) {
         this.createScenePopover = true;
         this.createSceneSearch = '';
@@ -979,6 +983,7 @@ function renderKnowledge() {
                       <div class="scn-ic bg-default">📦</div>
                       <div class="scn-card-title">{{ getSceneName(sid) }}</div>
                     </div>
+                    <div v-if="getSceneDesc(sid)" class="scn-card-desc">{{ getSceneDesc(sid) }}</div>
                   </div>
                 </div>
               </div>
