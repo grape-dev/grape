@@ -175,8 +175,7 @@
           "name": "贪吃蛇游戏",
           "description": "GitCode 热门项目（⭐6）：经典贪吃蛇小游戏，学习游戏逻辑、键盘控制与渲染",
           "icon": "🐍",
-          "source": "git",
-          "source_repo": "sanchong/SnakeGame",
+          "source": "local",
           "default_repo_name": "snake-game",
           "tags": [
             "python",
@@ -185,8 +184,7 @@
           ],
           "scene_id": "default",
           "stats": {
-            "show": true,
-            "stars": 6
+            "show": false
           }
         },
         {
@@ -232,8 +230,7 @@
           "name": "外星人入侵游戏",
           "description": "GitCode 项目（⭐1）：经典 pygame 外星人入侵射击游戏，学习游戏循环与事件处理",
           "icon": "👾",
-          "source": "git",
-          "source_repo": "tjip/alien_invasion",
+          "source": "local",
           "default_repo_name": "alien-invasion",
           "tags": [
             "python",
@@ -242,8 +239,7 @@
           ],
           "scene_id": "default",
           "stats": {
-            "show": true,
-            "stars": 1
+            "show": false
           }
         },
         {
@@ -251,8 +247,7 @@
           "name": "外星人小游戏",
           "description": "GitCode 项目（⭐1）：简单好玩的外星人小游戏，适合初学者上手 pygame",
           "icon": "🛸",
-          "source": "git",
-          "source_repo": "LannyQLT/Alien",
+          "source": "local",
           "default_repo_name": "alien-game",
           "tags": [
             "python",
@@ -261,8 +256,7 @@
           ],
           "scene_id": "default",
           "stats": {
-            "show": true,
-            "stars": 1
+            "show": false
           }
         },
         {
@@ -270,8 +264,7 @@
           "name": "HELLO-BLOG-SYS",
           "description": "基于 Flask 的博客系统：完整的博客网站骨架，适合学习 Web 开发与数据库操作",
           "icon": "📰",
-          "source": "git",
-          "source_repo": "XOcto/BLOG-SYS",
+          "source": "local",
           "default_repo_name": "HELLO-BLOG-SYS",
           "tags": [
             "python",
