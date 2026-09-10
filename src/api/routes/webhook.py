@@ -139,6 +139,7 @@ async def a2a_endpoint(request: Request):
     context = payload.get("context", "")
     issue_number = payload.get("issue_number", "")
     pr_number = payload.get("pr_number", "")
+    issue_creator = payload.get("issue_creator", "")  # Issue #76: A2A 携带 Issue 创建者
 
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"gitcode:{repository}") if repository else ""
@@ -465,7 +466,7 @@ async def a2a_endpoint(request: Request):
                 if _allow_override:
                     from src.api.session_store import set_issue_scene
                     from src.runtime.engine_select import _repo_user_id
-                    _scene_uid = _repo_user_id(repo_key)
+                    _scene_uid = _repo_user_id(repo_key, issue_creator=issue_creator)
                     set_issue_scene(repo_key, f"#{issue_number}", _recommended_scene, scene_user_id=_scene_uid)
                     log.info(f"A2A: scene_id={_recommended_scene} uid={_scene_uid} set for issue=#{issue_number} (override enabled)")
                 else:

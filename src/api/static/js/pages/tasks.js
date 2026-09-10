@@ -9,6 +9,7 @@ const _TASKS_PER_PAGE = 15;   // 每页任务数
 let _taskPollTimer = null;    // 场景识别轮询定时器
 let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
 let _tasksMode = 'default';   // default=状态优先 / time=纯时间序（Issue #42）
+let _tasksCreatedByMe = false; // 「我创建的任务」过滤（Issue #76）
 
 function _tasksSortPrefKey(repoKey) {
   return 'task_sort_' + (repoKey || 'all');
@@ -37,6 +38,11 @@ function toggleTasksMode() {
   _tasksMode = (_tasksMode === 'default') ? 'time' : 'default';
   const repo = app.currentRepo();
   _saveTasksSortPref(repo ? repo.fullName : '');
+  _taskPage = 1;
+  loadTasks();
+}
+function toggleCreatedByMe() {
+  _tasksCreatedByMe = !_tasksCreatedByMe;
   _taskPage = 1;
   loadTasks();
 }
@@ -127,7 +133,8 @@ function loadTasks() {
   _loadTasksSortPref(repoKey);
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
   API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
-          '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode).then(d => {
+          '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
+          (_tasksCreatedByMe ? '&created_by_me=true' : '')).then(d => {
     _tasksAll = d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
     if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
@@ -278,6 +285,7 @@ function _render() {
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:10px">${I18N.t('tasks.create.btn_new')}</button>
         ${tab('all', I18N.t('tasks.tab.all'), cntAll)}${tab('active', I18N.t('tasks.tab.active'), cntActive)}${tab('completed', I18N.t('tasks.tab.completed'), cntDone)}${_sortPanel}
+        <button class="tsk-tab" onclick="toggleCreatedByMe()" style="border:1px solid var(--b,var(--tg,#d0d7de));border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;background:${_tasksCreatedByMe ? 'var(--a,#34c759)' : 'transparent'};color:${_tasksCreatedByMe ? '#fff' : 'inherit'}" title="${I18N.t('tasks.filter.created_by_me')}">👤 ${I18N.t('tasks.filter.created_by_me')}</button>
         <div class="tsk-search"><span>🔍</span><input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_taskPage=1;_render()}" onchange="_taskQuery=this.value;_taskPage=1;_render()"></div>
       </div>
     </div>

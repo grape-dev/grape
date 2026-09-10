@@ -87,5 +87,8 @@
   "single_task_badge": "单任务",
   "parent_task": "父任务",
   "pipeline_scene": "流水线场景",
-  "task_mode": "任务模式"
+  "task_mode": "任务模式",
+  "filter": {
+    "created_by_me": "我创建的任务"
+  }
 }
