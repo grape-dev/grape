@@ -729,12 +729,12 @@ function renderKnowledge() {
                     <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
                   <div class="scn-card-desc">{{ k.description || t('no_description') }}</div>
-                  <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-                    <span v-if="agentRefCount(k) > 0" style="font-size:10px;color:var(--t3);display:flex;align-items:center;gap:3px">
-                      <span style="background:rgba(0,113,227,0.08);color:var(--a);padding:2px 8px;border-radius:980px;font-weight:500">{{ agentRefCount(k) }} Agent</span>
+                  <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+                    <span v-if="agentRefCount(k) > 0" style="font-size:11px;font-weight:500;color:var(--a);background:rgba(0,113,227,0.08);padding:4px 10px;border-radius:980px">
+                      {{ agentRefCount(k) }} Agent
                     </span>
-                    <span v-if="sceneRefCount(k) > 0" style="font-size:10px;color:var(--t3);display:flex;align-items:center;gap:3px">
-                      <span style="background:rgba(0,113,227,0.08);color:var(--a);padding:2px 8px;border-radius:980px;font-weight:500">{{ sceneRefCount(k) }} {{ t('scenes_unit') }}</span>
+                    <span v-if="sceneRefCount(k) > 0" style="font-size:11px;font-weight:500;color:var(--a);background:rgba(0,113,227,0.08);padding:4px 10px;border-radius:980px">
+                      {{ sceneRefCount(k) }} {{ t('scenes_unit') }}
                     </span>
                   </div>
                   <div class="scn-card-foot">
