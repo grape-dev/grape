@@ -219,7 +219,10 @@ function renderDashboard(data) {
     html += `<div class="apple-card" style="background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;box-shadow:0 1px 4px rgba(0,0,0,.05)">
       <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
         <h2>${I18N.t('dashboard.scene_center_title')} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${scenesData.length}</span></h2>
-        <button class="ap-btn" onclick="enterCreateMode()">＋ ${I18N.t('dashboard.add_scene')||'添加场景'}</button>
+        <div style="display:flex;gap:8px">
+          <button class="ap-btn" onclick="_openSceneRecommendModal('${owner}/${name}')">${I18N.t('dashboard.scene_recommend_rules')||'智能推荐规则'}</button>
+          <button class="ap-btn" onclick="enterCreateMode()">＋ ${I18N.t('dashboard.add_scene')||'添加场景'}</button>
+        </div>
       </div>
       <div id="dash-scenes" class="scn-list">`;
 
@@ -232,26 +235,6 @@ function renderDashboard(data) {
 
     el.innerHTML = html;
 
-    // 场景应用（从卡片快捷应用）
-    window._applySceneFromCard = function(sceneId, e) {
-      if (e) e.stopPropagation();
-      API.post('/scenes/apply/' + owner + '/' + name, {scene_id: sceneId}).then(r => {
-        app.showToast(r.message || I18N.t('dashboard.scene_applied'));
-        // 局部更新详情页按钮状态（不跳回列表）
-        const btn = document.getElementById('sceneApplyBtn');
-        if (btn) {
-          const badge = document.createElement('span');
-          badge.className = 'scn-applied-badge';
-          badge.id = 'sceneApplyBadge';
-          badge.style.cssText = 'margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500';
-          badge.textContent = '✓ ' + (I18N.t('dashboard.current_default')||'当前默认');
-          btn.replaceWith(badge);
-        } else {
-          // 卡片列表里点的，刷新列表
-          API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
-        }
-      }).catch(err => app.showToast(I18N.t('dashboard.apply_failed', {msg: (err.detail?.message || err.message)})));
-    };
   }
 
   // 删除模式切换
@@ -359,10 +342,7 @@ function _renderLocalSceneCard(s, isApplied, idx) {
     <div class="scn-row-chain">${chain}</div>
     <div class="scn-row-right">
       <span class="scn-branch-tag">🌿 ${workBranch}</span>
-      ${isApplied
-        ? `<span class="scn-applied-badge">✓ ${I18N.t('dashboard.current_default')||'当前默认'}</span>`
-        : `<button class="ap-btn" onclick="_applySceneFromCard('${s.id}',event)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`
-      }
+      ${isApplied ? '' : ''}
     </div>
   </div>`;
 }
@@ -587,7 +567,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
         <div id="sceneNameDisplay" style="font-size:20px;font-weight:700;cursor:text;padding:2px 6px;margin:-2px -6px 4px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneName')">${sceneName}</div>
         <div id="sceneDescDisplay" style="font-size:13px;color:#86868b;cursor:text;padding:2px 6px;margin:-2px -6px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneDesc')">${sceneDesc || '<span style="color:#c7c7cc;font-style:italic">' + (I18N.t('dashboard.desc_optional')||'描述（可选）') + '</span>'}</div>
       </div>
-      ${isApplied ? '<span class="scn-applied-badge" id="sceneApplyBadge" style="margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500">✓ ' + (I18N.t('dashboard.current_default')||'当前默认') + '</span>' : `<button class="ap-btn" id="sceneApplyBtn" style="margin-top:4px" onclick="_applySceneFromCard('${scene.id}',null)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`}
+
       ${isCustomScene ? `<button class="ap-btn ap-btn-d" style="margin-top:4px" onclick="_confirmDeleteScene('${scene.id}','${(scene.display_name||scene.name||'').replace(/'/g,'\\\'')}',null)">${I18N.t('common.delete')||'删除'}</button>` : ''}
     </div>
   </div>`;
@@ -774,23 +754,6 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   };
 
   // 详情页操作函数
-  window._applySceneFromCard = function(sceneId, e) {
-    if (e) e.stopPropagation();
-    API.post('/scenes/apply/' + owner + '/' + name, {scene_id: sceneId}).then(r => {
-      app.showToast(r.message || I18N.t('dashboard.scene_applied'));
-      // 原地将设为默认按钮变为当前默认标记，不刷新整个页面
-      const btn = document.getElementById('sceneApplyBtn');
-      if (btn) {
-        const badge = document.createElement('span');
-        badge.className = 'scn-applied-badge';
-        badge.id = 'sceneApplyBadge';
-        badge.style.cssText = 'margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500';
-        badge.textContent = '✓ ' + (I18N.t('dashboard.current_default')||'当前默认');
-        btn.replaceWith(badge);
-      }
-    }).catch(err => app.showToast(I18N.t('dashboard.apply_failed', {msg: (err.detail?.message || err.message)})));
-  };
-
   window._deleteSceneFromDetail = function(sceneId) {
     const sn = scene.display_name || scene.name;
     const overlay = document.createElement('div');
@@ -1560,5 +1523,128 @@ window._repairHost = function () {
     .catch(function (e) {
       app.showToast && app.showToast('修复请求失败：' + (e && (e.detail && e.detail.message || e.message) || '未知错误'));
     });
+};
+
+// ===== 智能推荐规则弹窗 =====
+window._openSceneRecommendModal = function(repoParam) {
+  var owner = repoParam.split('/')[0];
+  var name = repoParam.split('/')[1];
+  if (!owner || !name) return;
+
+  // 移除已有弹窗
+  var existing = document.getElementById('sceneRecommendOverlay');
+  if (existing) existing.remove();
+
+  // 创建 overlay
+  var ov = document.createElement('div');
+  ov.id = 'sceneRecommendOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:9999;display:flex;align-items:center;justify-content:center;animation:fadeIn .15s';
+
+  var modal = document.createElement('div');
+  modal.className = 'rdp-glass';
+  modal.style.cssText = 'width:680px;max-height:85vh;overflow-y:auto;background:rgba(255,255,255,0.92);backdrop-filter:blur(28px) saturate(200%);-webkit-backdrop-filter:blur(28px) saturate(200%);border-radius:18px;border:1px solid rgba(255,255,255,0.6);box-shadow:0 12px 40px rgba(0,0,0,0.12),0 2px 8px rgba(0,0,0,0.06);padding:28px;animation:rdpPop .25s cubic-bezier(0.34,1.56,0.64,1)';
+
+  modal.innerHTML = '\
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">\
+      <h2 style="font-size:15px;font-weight:600">' + (I18N.t('dashboard.scene_recommend_rules')||'智能推荐规则') + '</h2>\
+      <button class="ap-btn" style="padding:2px 8px;font-size:16px" onclick="document.getElementById(\'sceneRecommendOverlay\').remove()">×</button>\
+    </div>\
+    <div style="margin-bottom:20px">\
+      <div style="font-size:13px;font-weight:600;color:#1d1d1f;margin-bottom:8px">' + (I18N.t('dashboard.recommend_fallback')||'兜底场景') + '</div>\
+      <select id="recFallbackScene" style="width:100%;padding:8px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer"><option value="">' + (I18N.t('common.loading')||'加载中...') + '</option></select>\
+      <div style="font-size:11px;color:#86868b;margin-top:4px">' + (I18N.t('dashboard.recommend_fallback_hint')||'当任务无法精确匹配任何规则时，走此场景') + '</div>\
+    </div>\
+    <div style="border-top:1px solid rgba(0,0,0,.06);padding-top:16px">\
+      <div style="font-size:13px;font-weight:600;color:#1d1d1f;margin-bottom:8px">' + (I18N.t('dashboard.recommend_rules')||'场景功能') + '</div>\
+      <div id="recRulesContainer" style="display:flex;flex-direction:column;gap:8px"></div>\
+      <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addRecRuleRow()">+ ' + (I18N.t('dashboard.recommend_add_rule')||'添加规则') + '</button>\
+      <div style="font-size:11px;color:#86868b;margin-top:8px">' + (I18N.t('dashboard.recommend_rules_hint')||'key 从当前仓库已应用场景中选择，value 描述什么情况下推荐使用该场景') + '</div>\
+    </div>\
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px">\
+      <button class="ap-btn" onclick="document.getElementById(\'sceneRecommendOverlay\').remove()">' + (I18N.t('common.cancel')||'取消') + '</button>\
+      <button class="ap-btn" onclick="_saveSceneRecommendConfig(\'' + owner + '\',\'' + name + '\')">' + (I18N.t('common.save')||'保存') + '</button>\
+    </div>';
+
+  ov.appendChild(modal);
+  var _downOnOv = false;
+  ov.addEventListener('mousedown', function(e) { _downOnOv = (e.target === ov); });
+  ov.addEventListener('click', function(e) { if (e.target === ov && _downOnOv) ov.remove(); });
+  document.body.appendChild(ov);
+
+  // 加载场景列表 + 已有配置
+  var sceneOptions = '';
+  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name)).then(function(d) {
+    var scenes = (d && d.scenes) || [];
+    sceneOptions = scenes.map(function(s) {
+      var disp = s.display_name || s.name || s.id;
+      return '<option value="' + s.id + '">' + disp + '</option>';
+    }).join('');
+    var fallbackSel = document.getElementById('recFallbackScene');
+    if (fallbackSel) fallbackSel.innerHTML = sceneOptions;
+    // 加载已有配置
+    return API.get('/repos/' + owner + '/' + name + '/scene-recommend-config');
+  }).then(function(cfg) {
+    if (!cfg) cfg = {fallback_scene: '', rules: []};
+    // 设置兜底场景
+    var fallbackSel = document.getElementById('recFallbackScene');
+    if (fallbackSel && cfg.fallback_scene) fallbackSel.value = cfg.fallback_scene;
+    // 如果没有兜底场景但有场景列表，默认选第一个
+    if ((!cfg.fallback_scene || !cfg.fallback_scene) && sceneOptions) {
+      var firstId = (cfg.rules && cfg.rules.length > 0) ? '' : '';
+      // 从 sceneOptions 提取第一个 scene_id
+      var m = sceneOptions.match(/value="([^"]+)"/);
+      if (m && fallbackSel) {
+        fallbackSel.value = m[1];
+      }
+    }
+    // 填充规则
+    var container = document.getElementById('recRulesContainer');
+    if (container) container.innerHTML = '';
+    (cfg.rules || []).forEach(function(r) {
+      _addRecRuleRow(r.scene_id, r.condition);
+    });
+  }).catch(function(e) {
+    app.showToast && app.showToast('加载推荐配置失败: ' + ((e && e.message) || ''));
+  });
+
+  // 设置全局函数
+  window._addRecRuleRow = function(sceneId, condition) {
+    var container = document.getElementById('recRulesContainer');
+    if (!container) return;
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;align-items:center';
+    var selOpts = sceneOptions;
+    row.innerHTML = '\
+      <select class="rec-rule-scene" style="flex:0 0 200px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;background:#f5f5f7;outline:none;cursor:pointer">' + selOpts + '</select>\
+      <input class="rec-rule-cond" placeholder="' + (I18N.t('dashboard.recommend_condition_value')||'推荐条件') + '" value="' + (condition||'').replace(/"/g,'&quot;') + '" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'">\
+      <button class="ap-btn ap-btn-d" style="padding:4px 8px;font-size:14px" onclick="this.parentElement.remove()">×</button>';
+    container.appendChild(row);
+    if (sceneId) {
+      var sel = row.querySelector('.rec-rule-scene');
+      if (sel) sel.value = sceneId;
+    }
+  };
+
+  window._saveSceneRecommendConfig = function(owner, name) {
+    var fallback = (document.getElementById('recFallbackScene') || {}).value || '';
+    if (!fallback) { app.showToast && app.showToast(I18N.t('dashboard.recommend_fallback_required')||'兜底场景不能为空'); return; }
+    var rules = [];
+    var seen = {};
+    document.querySelectorAll('#recRulesContainer > div').forEach(function(row) {
+      var sid = (row.querySelector('.rec-rule-scene') || {}).value || '';
+      var cond = (row.querySelector('.rec-rule-cond') || {}).value || '';
+      if (sid && cond.trim()) {
+        if (seen[sid]) { app.showToast && app.showToast(I18N.t('dashboard.recommend_rule_dup')||'同一场景不能有多条规则'); return; }
+        seen[sid] = true;
+        rules.push({scene_id: sid, condition: cond.trim()});
+      }
+    });
+    API.put('/repos/' + owner + '/' + name + '/scene-recommend-config', {fallback_scene: fallback, rules: rules})
+      .then(function() {
+        app.showToast && app.showToast(I18N.t('dashboard.recommend_saved')||'智能推荐规则已保存');
+        document.getElementById('sceneRecommendOverlay').remove();
+      })
+      .catch(function(e) { app.showToast && app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '保存失败'); });
+  };
 };
 

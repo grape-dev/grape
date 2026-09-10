@@ -106,13 +106,12 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
 def _read_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
     """读场景高级选项的 work_branch。
 
-    优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene →
-    devops_pipeline_scene.advanced_options。这样流水线跑到一半时仓库场景切换不影响已在跑的 Issue。
+    读 issue_state.scene_id（Issue 级快照）→ devops_pipeline_scene.advanced_options。
+    dev_scene 已退役，issue 无场景时返回空。
     """
     try:
         from src.session_manager import db, db_lock
         import json as _json
-        # 1. 优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene
         scene_id = ""
         if issue_id:
             try:
@@ -120,12 +119,6 @@ def _read_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
                 scene_id, _ = get_issue_scene(repo_key, issue_id)
             except Exception:
                 scene_id = ""
-        if not scene_id:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
-                row = c.fetchone()
-            scene_id = (row[0] if row else "") or ""
         if not scene_id:
             return ""
         with db_lock:

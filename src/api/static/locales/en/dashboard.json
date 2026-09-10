@@ -122,5 +122,16 @@
   "market_intro_title": "Explore Scene Center",
   "market_intro_desc": "The Scene Center offers official scene templates covering cloud-native, IaC, Agent development and more. Apply with one click.",
   "goto_market": "Go to Scene Center",
-  "stat_total": "Total"
+  "stat_total": "Total",
+  "scene_recommend_rules": "Smart Recommend Rules",
+  "recommend_fallback": "Fallback Scene",
+  "recommend_fallback_hint": "When no rule matches, use this scene",
+  "recommend_rules": "Scene Functions",
+  "recommend_add_rule": "Add Rule",
+  "recommend_scene_key": "Scene",
+  "recommend_condition_value": "Condition",
+  "recommend_rules_hint": "Select scene from current repo scenes, describe when to recommend it",
+  "recommend_saved": "Smart recommend rules saved",
+  "recommend_fallback_required": "Fallback scene is required",
+  "recommend_rule_dup": "Duplicate scene in rules"
 }
