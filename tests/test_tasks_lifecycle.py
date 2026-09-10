@@ -124,12 +124,13 @@ class TestConfirmDone:
         assert "尚未到待审核阶段" in r.json()["detail"]["message"]
 
     def test_confirm_done_from_sre_stage(self):
+        """Issue #85: sre 阶段不再允许直接确认，必须先进入 pending_review"""
         _clean()
         tid = _insert_task(status='processing', issue_number=104, stage='sre')
         r = client.post(f"/api/tasks/{tid}/confirm-done", headers=_headers,
                         json={"confirmation": "user_confirmed"})
-        assert r.status_code == 200
-        assert r.json()["status"] == "completed"
+        assert r.status_code == 400
+        assert "尚未到待审核阶段" in r.json()["detail"]["message"]
 
 
 class TestCancelTask:
