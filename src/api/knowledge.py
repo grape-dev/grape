@@ -198,6 +198,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
         return ""
     if scope == "project":
         issue_num = 0
+        agent_type = ""
     elif scope == "issue":
         agent_type = ""
     elif scope != "issue_agent":
@@ -335,7 +336,7 @@ def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str 
     """系统写入知识时按 scope 规则自动生成 scene_knowledge_ref 关联记录。"""
     ref_map = {
         "baseline":    {"scene_id": "", "agent_type": "",           "issue_num": 0},           # 全局（基线分析，所有 Agent 共享）
-        "project":     {"scene_id": "", "agent_type": agent_type,   "issue_num": 0},           # 项目级 Agent 知识——只注入给该 Agent
+        "project":     {"scene_id": "", "agent_type": "",           "issue_num": 0},           # 项目级——全局共享（所有 Agent 共写一个文件）
         "issue":       {"scene_id": "", "agent_type": "",           "issue_num": issue_num},   # Issue 级——只匹配该 Issue
         "issue_agent": {"scene_id": "", "agent_type": agent_type,   "issue_num": issue_num},   # Issue+Agent 级——只匹配该 Issue + 该 Agent
         # member 不自动关联——用户手动选择
