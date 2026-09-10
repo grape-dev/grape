@@ -101,11 +101,20 @@ JWT exp 按客户端本地时间算。若客户端时间不准，`remaining` 会
 upload 用 XMLHttpRequest，原先直接读 `localStorage.getItem('token')` 不走 `ensureTokenValid`。
 改为 `ensureTokenValid().then(token => ...)`——上传前确保 token 有效。
 
-### 10.2 多 Tab 定时器停摆
+### 10.2 多 Tab / 后台 Tab 定时器失效
 
-其他 Tab 刷新 token 后，当前 Tab 的旧定时器按旧 token 的 exp 算时间。旧定时器触发时发现新 token 还很充足（remaining > 阈值），`ensureTokenValid` 直接返回不刷新也不重设——定时器停摆，退化为纯 B 兜底。
+两种场景会导致定时器失效：
 
-修复：`storage` 事件里 `token` 有新值时调 `scheduleProactiveRefresh()`，按新 token 的 exp 重设定时器。`scheduleProactiveRefresh` 幂等——先 `clearTimeout` 再 `setTimeout`，不会多定时器并存。
+**多 Tab**：其他 Tab 刷新 token 后，当前 Tab 的旧定时器按旧 token 的 exp 算时间。旧定时器触发时发现新 token 还很充足，`ensureTokenValid` 直接返回不刷新也不重设——定时器停摆。
+
+**后台 Tab**：浏览器节流/暂停后台 Tab 的 setTimeout。Tab 切回前台时定时器可能已延迟很久没触发。
+
+修复（3 个触发点都调 `scheduleProactiveRefresh`）：
+- `storage` 事件：其他 Tab 更新 token 时重设
+- `visibilitychange` 事件：Tab 切回前台时重设
+- `ensureTokenValid` 成功后递归重设
+
+`scheduleProactiveRefresh` 幂等——先 `clearTimeout` 再 `setTimeout`，多次调用不会多定时器并存。
 
 ### 10.3 ensureTokenValid 的 async 语义
 
