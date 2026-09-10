@@ -741,7 +741,7 @@ function renderKnowledge() {
                     <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
                   <div class="scn-card-desc">{{ k.description || t('no_description') }}</div>
-                  <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:4px;margin-bottom:10px;flex-wrap:wrap;font-size:10px;color:var(--t3)">
+                  <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:4px;margin-top:auto;margin-bottom:10px;flex-wrap:wrap;font-size:10px;color:var(--t3)">
                     <span v-if="sceneRefCount(k) > 0" style="color:var(--t3)">{{ t('scenes_unit') }}</span>
                     <template v-if="sceneRefCount(k) > 0">
                       <span v-for="(s, i) in sceneNames(k)" :key="'s'+i" class="tg tg-d" style="margin-right:2px">{{ s }}</span>
