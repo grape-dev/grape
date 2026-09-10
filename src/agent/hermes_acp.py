@@ -466,7 +466,7 @@ class HermesACPBackend:
             if stop_reason == "end_turn" and not error_events:
                 exit_code = 0
             elif stop_reason == "timeout":
-                exit_code = -1
+                exit_code = 0 if collected_text else -1
             elif stop_reason == "error":
                 exit_code = -1
             elif error_events:

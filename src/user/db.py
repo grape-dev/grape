@@ -571,6 +571,16 @@ def _migrate_repo_key_tables():
         except Exception as e:
             log.warning(f"Add managed_repos.dev_scene failed: {e}")
 
+        # 幂等补充：managed_repos 加 scene_recommend_config 列（智能推荐配置）
+        try:
+            _mr_cols = [r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()]
+            if "scene_recommend_config" not in _mr_cols:
+                c.execute("ALTER TABLE managed_repos ADD COLUMN scene_recommend_config TEXT DEFAULT ''")
+                db.commit()
+                log.info("Migrate repo_key: added managed_repos.scene_recommend_config")
+        except Exception as e:
+            log.warning(f"Add managed_repos.scene_recommend_config failed: {e}")
+
 
 def init_db():
     """初始化用户相关表（幂等）"""
@@ -1055,6 +1065,70 @@ def get_repo_scene(repo_key: str) -> str:
     except Exception as e:
         log.warning(f"Get repo scene failed: {e}")
         return ""
+
+
+def get_scene_recommend_config(repo_key: str) -> dict:
+    """读取仓库智能推荐配置（managed_repos.scene_recommend_config）。
+    
+    返回 {"fallback_scene": "", "rules": [{"scene_id": "", "condition": ""}]}。
+    无记录或未设置返回默认值。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            _cols = [r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()]
+            if "scene_recommend_config" not in _cols:
+                return {"fallback_scene": "", "rules": []}
+            c.execute("SELECT scene_recommend_config FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            if row and row[0]:
+                import json
+                cfg = json.loads(row[0])
+                return {
+                    "fallback_scene": cfg.get("fallback_scene", "") or "",
+                    "rules": cfg.get("rules", []) or [],
+                }
+    except Exception as e:
+        log.warning(f"Get scene recommend config failed: {e}")
+    return {"fallback_scene": "", "rules": []}
+
+
+def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list):
+    """写入仓库智能推荐配置（managed_repos.scene_recommend_config），幂等。
+    
+    写入时自检：过滤 scene_id 不在当前场景列表中的规则。
+    fallback_scene 必填，空则报错。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    import json
+
+    # 自检：过滤无效 scene_id
+    try:
+        from src.api.pipeline_config import get_scenes
+        scenes = get_scenes(repo_key=repo_key)
+        valid_ids = {s["id"] for s in scenes}
+        if not valid_ids:
+            log.warning(f"Set scene recommend config: no scenes for {repo_key}")
+            return
+        rules = [r for r in (rules or []) if isinstance(r, dict) and r.get("scene_id") in valid_ids]
+        if fallback_scene and fallback_scene not in valid_ids:
+            fallback_scene = scenes[0]["id"] if scenes else ""
+            log.info(f"Set scene recommend config: fallback invalid, reset to {fallback_scene}")
+    except Exception as e:
+        log.warning(f"Set scene recommend config: sanitize failed: {e}")
+
+    cfg = json.dumps({"fallback_scene": fallback_scene or "", "rules": rules or []}, ensure_ascii=False)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE managed_repos SET scene_recommend_config=? WHERE repo_key=?", (cfg, repo_key))
+            db.commit()
+        log.info(f"Scene recommend config saved: repo={repo_key} fallback={fallback_scene} rules={len(rules)}")
+    except Exception as e:
+        log.warning(f"Set scene recommend config failed: {e}")
 
 
 def set_host_status(repo_key: str, status: str = ""):

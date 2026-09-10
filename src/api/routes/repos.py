@@ -830,3 +830,46 @@ def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_curren
     repo_key = to_repo_key(f"{owner}/{repo}")
     files, meta = load_project_info(repo_key)
     return {"repo_key": repo_key, "files": files, "meta": meta}
+
+
+class SceneRecommendConfigBody(BaseModel):
+    fallback_scene: str = ""
+    rules: list = []  # [{"scene_id": "", "condition": ""}]
+
+
+@router.get("/{owner}/{repo}/scene-recommend-config")
+def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
+    """读取仓库智能推荐配置（兜底场景 + 路由规则）。"""
+    from src.repo_key import to_repo_key
+    from src.user.db import get_scene_recommend_config
+    repo_key = to_repo_key(f"{owner}/{repo}")
+    return get_scene_recommend_config(repo_key)
+
+
+@router.put("/{owner}/{repo}/scene-recommend-config")
+def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfigBody,
+                                user: dict = Depends(get_current_user)):
+    """保存仓库智能推荐配置（兜底场景 + 路由规则）。
+
+    写入时自检：过滤 scene_id 不在当前场景列表中的规则。
+    fallback_scene 必填，空则报错。
+    """
+    from src.repo_key import to_repo_key
+    from src.user.db import set_scene_recommend_config
+    from src.api.pipeline_config import get_scenes
+    repo_key = to_repo_key(f"{owner}/{repo}")
+
+    # 校验 fallback_scene 非空
+    if not body.fallback_scene or not body.fallback_scene.strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "兜底场景不能为空"})
+
+    # 校验规则 key 不重复
+    seen = set()
+    for r in (body.rules or []):
+        sid = (r.get("scene_id") or "").strip() if isinstance(r, dict) else ""
+        if sid in seen:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"场景 '{sid}' 重复"})
+        seen.add(sid)
+
+    set_scene_recommend_config(repo_key, body.fallback_scene.strip(), body.rules or [])
+    return {"message": "智能推荐规则已保存"}

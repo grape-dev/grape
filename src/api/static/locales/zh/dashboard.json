@@ -122,5 +122,16 @@
   "market_intro_title": "探索场景中心",
   "market_intro_desc": "场景中心提供官方场景模板，涵盖云原生、IaC、Agent 开发等多种场景，一键应用到你的项目",
   "goto_market": "前往场景中心",
-  "stat_total": "总数"
+  "stat_total": "总数",
+  "scene_recommend_rules": "智能推荐规则",
+  "recommend_fallback": "兜底场景",
+  "recommend_fallback_hint": "当任务无法精确匹配任何规则时，走此场景",
+  "recommend_rules": "场景功能",
+  "recommend_add_rule": "添加规则",
+  "recommend_scene_key": "场景",
+  "recommend_condition_value": "推荐条件",
+  "recommend_rules_hint": "key 从当前仓库已应用场景中选择，value 描述什么情况下推荐使用该场景",
+  "recommend_saved": "智能推荐规则已保存",
+  "recommend_fallback_required": "兜底场景不能为空",
+  "recommend_rule_dup": "同一场景不能有多条规则"
 }
