@@ -34,8 +34,7 @@ UPDATE agent_shared_knowledge SET source = 'manual' WHERE scope = 'member' AND (
 |------|---------|--------|
 | `write_knowledge()` | `src/api/knowledge.py:184` | `source='agent'`（Agent 沉淀） |
 | `build_project_info()` | `src/project_info/builder.py:244` | `source='system'`（VOD 基线，写 DB 时设） |
-| `upload_knowledge()` | `src/api/routes/knowledge.py:472` | `source='manual'`（用户上传） |
-| `POST /api/knowledge/entry`（新增） | `src/api/routes/knowledge.py`（新增） | `source='manual'`（用户输入） |
+| `POST /api/knowledge/entry`（新增） | `src/api/routes/knowledge.py` | `source='manual'`（用户输入/文件导入） |
 
 ### 6.1.5 description 字段
 
@@ -511,7 +510,7 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 
 `GET /api/knowledge` 返回数据以 id 为主键，所有后续操作都以 id 为准。
 
-**权限校验**：`_check_repo_member(user, repo_key)` —— 只有当前仓库的成员（托管者或已加入）才能查看。新增知识和上传知识同样校验。
+**权限校验**：`_check_repo_member(user, repo_key)` —— 只有当前仓库的成员（托管者或已加入）才能查看。新增知识同样校验。
 
 **Tab 设计**：只有 3 个 tab（系统知识/Agent 知识/用户知识），无"全部"tab。每个 tab 按 source 筛选后端查询。
 
@@ -667,6 +666,9 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
   "entry_name": "知识名称",
   "entry_name_ph": "请输入知识名称（必填）",
   "name_required": "知识名称必填",
+  "import_file": "导入文件",
+  "file_too_large": "文件超过 10KB 限制",
+  "file_imported": "文件已导入",
   "knowledge_deleted": "知识已删除",
   "knowledge_updated": "知识已更新",
   "knowledge_created": "知识已创建",
@@ -675,7 +677,7 @@ def _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num):
 }
 ```
 
-> 当前实际 i18n 共 **114 keys**（zh/en 对称）。
+> 当前实际 i18n 共 **116 keys**（zh/en 对称）。
 
 ### 6.12 统计卡片数据接口
 
@@ -883,7 +885,7 @@ def _check_ref_permission(knowledge_id: int, user: dict):
 {WORKSPACE_DIR}/{owner}/{repo}/project-info/member/{username}/{timestamp}_{random}.md
 ```
 
-和上传文件一样落在 `project-info/member/{username}/` 目录下。区别是上传文件用原始文件名，手动创建用时间戳命名（因为没有文件名）：
+手动创建用时间戳命名（因为没有文件名）：
 
 ```python
 import time, uuid
@@ -893,6 +895,17 @@ file_path = os.path.join(member_dir, filename)
 ```
 
 OBS 模式下 obs_key 格式：`knowledge/{owner}/{repo}/member/{username}/{filename}`
+
+**文件导入**（前端 FileReader，不走后端接口）：
+
+新增/编辑页面支持通过文件导入内容：
+- 支持格式：`.md`、`.json`、`.txt`
+- 大小限制：10KB（`file.size > 10240` 拒绝）
+- 行为：FileReader 读取文件内容覆盖 textarea（用户可预览编辑后再提交）
+- 导入后自动填充 name（如果 name 为空，从文件名截取）
+- 纯前端操作，不调后端 upload 接口
+
+> 原 `POST /api/knowledge`（upload_knowledge）接口已删除——前端文件导入完全替代，不需要后端文件上传接口。
 
 ### 6.19 事件详情页知识引用链路
 
@@ -1251,13 +1264,9 @@ if status == "rejected":
 
 rejected 的使用场景：event-dialogue skill 里用户提了建议，Agent 判断"不值得沉淀"，用 rejected 登记留痕"考虑过但不采纳"。实际使用频率很低。
 
-#### 6.23.3 upload_knowledge 不存在重复记录问题
+#### 6.23.3 upload_knowledge 已删除
 
-`upload_knowledge`（`knowledge.py:472`）上传文件时已有重名检查（第 514-535 行）——同名文件自动加时间戳后缀（`design-1234567890.md`），每次上传文件名不同，DB 记录的 `file_path` 天然不同，不会产生重复记录。
-
-不需要改动 `upload_knowledge` 的 DB 写入逻辑。
-
-仅需要补充：上传时设置 `source='manual'`（6.1 已写）。
+原 `upload_knowledge` 接口（`POST /api/knowledge`）已删除。前端文件导入（FileReader）完全替代——用户在新增/编辑页面导入文件内容到 textarea，通过 `POST /api/knowledge/entry` 提交。不再需要后端文件上传接口。
 
 #### 6.23.4 建表 DDL 写进 db_setup.py
 
@@ -1645,10 +1654,11 @@ DELETE FROM agent_shared_knowledge WHERE id NOT IN (SELECT keep_id FROM _keep_id
 DROP TEMPORARY TABLE _keep_ids;
 ```
 
-#### 6.24.8 upload_knowledge 和 build_project_info 设置 source
+#### 6.24.8 build_project_info 和 entry 设置 source
 
-- `upload_knowledge`：INSERT 语句加 `source='manual'`
+- `POST /api/knowledge/entry`：INSERT 语句含 `source='manual'`（含文件导入场景）
 - `build_project_info`：写 baseline 到 DB 时加 `source='system'`
+- ~~`upload_knowledge`：已删除~~
 
 #### 6.24.9 事件详情页知识引用链路前端展示
 
