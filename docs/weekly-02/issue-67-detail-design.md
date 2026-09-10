@@ -1711,3 +1711,30 @@ pipeline_chain = pipeline_map.get(r[9], "")
 #### 6.25.5 详情页内容英文换行
 
 `.kb-detail-content` 加 `word-break:break-word` + `white-space:pre-wrap`——长英文单词正常换行。
+
+#### 6.25.6 知识注入逻辑——member_files 全量扫描移除
+
+**问题**：`_build_knowledge_section` 有两条注入路径：
+1. `scene_knowledge_ref` 表精确注入（Issue #67 新逻辑）
+2. `member_files` 全量扫描 `project-info/member/` 目录注入（旧逻辑遗留）
+
+同一条 manual 知识被注入两次——一次通过 ref 表 `[manual 级]`，一次通过 member_files `[member 级]`。
+
+**修复**：移除 `member_files` 全量扫描注入，完全走 `scene_knowledge_ref` 表。
+
+**新老逻辑比对**：
+
+| 知识来源 | scope | auto_ref 规则 | 老逻辑注入 | 新逻辑注入 | 影响 |
+|---------|-------|--------------|-----------|-----------|------|
+| system（基线） | baseline | scene_id='' + agent_type='' | `_build_project_info_section` 独立注入 | 不变（独立注入） | 无影响 |
+| system/agent（项目级） | project | scene_id='' + agent_type='' | scope 三级 + member_files | ref 表注入（自动有关联） | 无影响 |
+| system/agent（Issue 级） | issue | scene_id='' + agent_type='' | scope 三级 + member_files | ref 表注入（自动有关联） | 无影响 |
+| system/agent（Issue+Agent 级） | issue_agent | scene_id='' + agent_type=agent_type | scope 三级 + member_files | ref 表注入（自动有关联） | 无影响 |
+| manual（用户创建） | member | 不自动关联（用户手动） | member_files 全量注入 | ref 表注入（关联了才注入） | **有影响**：未关联的不再注入 |
+
+**结论**：
+- 系统/Agent 知识：**无影响**。`write_knowledge` 时自动生成 `scene_knowledge_ref` 关联记录（`_auto_generate_knowledge_ref`），注入时走 ref 表能查到。
+- 用户手动知识：**有影响**。从"全部注入"改为"关联了才注入"——符合 Issue #67 设计目标：用户通过知识库页面控制注入。
+- 向后兼容 fallback（`scene_knowledge_ref` 表不存在时回退 `read_knowledge` 三级 scope）：只对 system/agent 知识生效，不影响 manual 知识。
+
+**注意**：`member_files` 仍在 `_build_vod_scenes_section` 中用于加载 `pipelines-user.json`（自定义场景定义），与知识注入无关，保持不变。
