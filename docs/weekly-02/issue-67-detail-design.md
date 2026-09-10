@@ -1712,29 +1712,74 @@ pipeline_chain = pipeline_map.get(r[9], "")
 
 `.kb-detail-content` 加 `word-break:break-word` + `white-space:pre-wrap`——长英文单词正常换行。
 
-#### 6.25.6 知识注入逻辑——member_files 全量扫描移除
+#### 6.25.6 知识注入逻辑——member_files 全量扫描移除 + issue_num 精确匹配
 
-**问题**：`_build_knowledge_section` 有两条注入路径：
+**问题 1**：`_build_knowledge_section` 有两条注入路径：
 1. `scene_knowledge_ref` 表精确注入（Issue #67 新逻辑）
 2. `member_files` 全量扫描 `project-info/member/` 目录注入（旧逻辑遗留）
 
 同一条 manual 知识被注入两次——一次通过 ref 表 `[manual 级]`，一次通过 member_files `[member 级]`。
 
-**修复**：移除 `member_files` 全量扫描注入，完全走 `scene_knowledge_ref` 表。
+**修复 1**：移除 `member_files` 全量扫描注入，完全走 `scene_knowledge_ref` 表。
 
-**新老逻辑比对**：
+**问题 2**：`scene_knowledge_ref` 表没有 `issue_num` 字段——Issue #1 和 Issue #2 的知识会同时注入到任意 Issue。老逻辑用 `_query_knowledge_obs` 按 `WHERE issue_num=N` 精确查询，新逻辑丢失了这个维度。
 
-| 知识来源 | scope | auto_ref 规则 | 老逻辑注入 | 新逻辑注入 | 影响 |
-|---------|-------|--------------|-----------|-----------|------|
-| system（基线） | baseline | scene_id='' + agent_type='' | `_build_project_info_section` 独立注入 | 不变（独立注入） | 无影响 |
-| system/agent（项目级） | project | scene_id='' + agent_type='' | scope 三级 + member_files | ref 表注入（自动有关联） | 无影响 |
-| system/agent（Issue 级） | issue | scene_id='' + agent_type='' | scope 三级 + member_files | ref 表注入（自动有关联） | 无影响 |
-| system/agent（Issue+Agent 级） | issue_agent | scene_id='' + agent_type=agent_type | scope 三级 + member_files | ref 表注入（自动有关联） | 无影响 |
-| manual（用户创建） | member | 不自动关联（用户手动） | member_files 全量注入 | ref 表注入（关联了才注入） | **有影响**：未关联的不再注入 |
+**修复 2**：`scene_knowledge_ref` 表加 `issue_num` 字段（INTEGER NOT NULL DEFAULT 0）。
+
+**新老逻辑比对**（含文件路径）：
+
+写入路径（`write_knowledge` / `create_knowledge_entry`，Issue #67 未改写入逻辑）：
+
+| scope | 本地文件路径 | OBS key |
+|-------|------------|---------|
+| baseline | `{repo_base}/project-info/baseline.md` | `knowledge/{owner}/{repo}/baseline/baseline.md` |
+| project | `{repo_base}/project-info/knowledge.md` | `knowledge/{owner}/{repo}/project/knowledge.md` |
+| issue | `{repo_base}/issues/{N}/knowledge.md` | `knowledge/{owner}/{repo}/issues/{N}/knowledge.md` |
+| issue_agent | `{repo_base}/issues/{N}/{agent}/knowledge.md` | `knowledge/{owner}/{repo}/issues/{N}/{agent}/knowledge.md` |
+| member | `{repo_base}/project-info/member/{user}/entry_{ts}_{rand}.md` | `knowledge/{owner}/{repo}/member/{user}/entry_{ts}_{rand}.md` |
+
+auto_ref 规则（`_auto_generate_knowledge_ref`，写入后自动生成）：
+
+| scope | scene_id | agent_type | issue_num | 注入范围 |
+|-------|----------|------------|-----------|---------|
+| baseline | '' | '' | 0 | 全局（所有场景所有 Agent） |
+| project | '' | 写入Agent | 0 | 该 Agent 所有场景 |
+| issue | '' | '' | 实际Issue号 | 该 Issue 所有 Agent |
+| issue_agent | '' | 写入Agent | 实际Issue号 | 该 Issue 该 Agent |
+| member | 用户选择 | 用户选择 | 0 | 用户手动控制 |
+
+注入 SQL（`_build_knowledge_section`）：
+
+```sql
+SELECT DISTINCT k.id, k.scope, k.source, k.obs_key, k.file_path, k.content_hash
+FROM scene_knowledge_ref r
+JOIN agent_shared_knowledge k ON r.knowledge_id = k.id
+WHERE r.enabled = 1
+  AND (r.scene_id = ? OR r.scene_id = '')        -- 匹配当前场景 OR 全局
+  AND (r.agent_type = ? OR r.agent_type = '')     -- 匹配当前Agent OR 全局
+  AND (r.issue_num = ? OR r.issue_num = 0)        -- 匹配当前Issue OR 全局
+  AND k.repo_key=***
+  AND k.status = 'accepted'
+  AND k.archived = 0
+```
+
+读取路径（`_read_entry_content`）：
+
+| 模式 | 路径 |
+|------|------|
+| OBS（obs_key 非空 + content_hash 非空） | `read_with_cache(obs_key, content_hash)` — hash 缓存 LRU |
+| OBS（obs_key 非空 + content_hash 空） | `storage.read_bytes(obs_key)` — 直接读 OBS |
+| 非OBS / OBS miss | `_read_ws_file(repo_key, file_path)` → `open({repo_base}/{file_path})` |
 
 **结论**：
-- 系统/Agent 知识：**无影响**。`write_knowledge` 时自动生成 `scene_knowledge_ref` 关联记录（`_auto_generate_knowledge_ref`），注入时走 ref 表能查到。
-- 用户手动知识：**有影响**。从"全部注入"改为"关联了才注入"——符合 Issue #67 设计目标：用户通过知识库页面控制注入。
-- 向后兼容 fallback（`scene_knowledge_ref` 表不存在时回退 `read_knowledge` 三级 scope）：只对 system/agent 知识生效，不影响 manual 知识。
+- baseline：无影响（独立注入，不走 ref 表）
+- project：无影响（issue_num=0 全局，agent_type 精确匹配写入 Agent）
+- issue：**恢复精确匹配**——老逻辑按 `WHERE issue_num=N` 查，新逻辑 `(issue_num=N OR issue_num=0)` 精确匹配 OR 全局
+- issue_agent：**恢复精确匹配**——同 issue + agent_type 精确
+- manual：从"全部注入"改为"关联了才注入"，issue_num=0（用户不选 Issue）
+- 向后兼容 fallback（ref 表不存在时回退 `read_knowledge` 三级 scope）：只对 system/agent 知识生效
+- `member_files` 仍在 `_build_vod_scenes_section` 中用于加载 `pipelines-user.json`，与知识注入无关
 
-**注意**：`member_files` 仍在 `_build_vod_scenes_section` 中用于加载 `pipelines-user.json`（自定义场景定义），与知识注入无关，保持不变。
+**OBS hash 缓存**：`_read_entry_content` 优先走 `read_with_cache(obs_key, content_hash)`——和老逻辑一致，避免每次注入都读 OBS。`_build_knowledge_section` SQL 查询带 `content_hash` 字段。
+
+**空关联防护**：`POST /{id}/refs/batch` 接口跳过 `scene_id='' + agent_type=''` 的空关联（`continue`）——用户不选场景不选 Agent 是合法操作，但不生成全局注入记录。
