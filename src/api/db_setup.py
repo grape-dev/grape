@@ -1339,6 +1339,19 @@ def _migrate_knowledge_issue67():
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
 
+        # 3.1 MySQL: 修复 UNIQUE 索引——老索引缺 issue_num，删旧建新
+        if _is_mysql:
+            try:
+                c.execute("DROP INDEX knowledge_id ON scene_knowledge_ref")
+            except Exception:
+                pass  # 索引不存在则跳过
+            try:
+                c.execute(
+                    "CREATE UNIQUE INDEX uk_kid_scene_agent_issue "
+                    "ON scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num)")
+            except Exception:
+                pass  # 已存在则跳过
+
         # 4. scene_knowledge_ref 数据迁移——为现有知识生成关联记录
         # baseline → 全局关联（issue_num=0）
         c.execute(
@@ -1370,6 +1383,27 @@ def _migrate_knowledge_issue67():
             "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
             "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
+
+        # 4. content_hash 回填——OBS 模式下 obs_key 非空但 hash 为空的老数据
+        try:
+            from src.storage import get_storage
+            _storage = get_storage()
+            if _storage is not None:
+                import hashlib as _hashlib
+                _prefix = os.environ.get("OBS_PREFIX", "") or ""
+                _empty_hash_rows = c.execute(
+                    "SELECT id, obs_key FROM agent_shared_knowledge "
+                    "WHERE obs_key != '' AND (content_hash = '' OR content_hash IS NULL)"
+                ).fetchall()
+                for _kid, _obs_key in _empty_hash_rows:
+                    for _try_key in (_obs_key, f"{_prefix}/{_obs_key}"):
+                        _data = _storage.read_bytes(_try_key)
+                        if _data:
+                            _h = _hashlib.sha256(_data).hexdigest()
+                            c.execute("UPDATE agent_shared_knowledge SET content_hash=? WHERE id=?", (_h, _kid))
+                            break
+        except Exception as _e:
+            log.warning(f"[migrate] content_hash backfill failed: {_e}")
 
         db.commit()
 
