@@ -167,7 +167,7 @@ function loadTasks() {
 function _mapStatusL(t) {
   if (t.status === 'cancelled') return 'cancelled';
   if (t.status === 'completed' || t.stage === 'done') return 'done';
-  if (t.stage === 'pending_review') return 'pending_review';
+  if (t.status === 'pending_review' || t.stage === 'pending_review') return 'pending_review';
   if (t.status === 'awaiting_input') return 'awaiting_input';
   if (['vod','issue','coding','qa','sre'].includes(t.stage)) return 'in_progress';
   if (t.status === 'processing') return 'in_progress';
@@ -259,6 +259,37 @@ window._jumpToPipeline = function(nodeId) {
   }
 };
 
+// 点击流水线节点 → 跳转到该节点最新事件详情页
+window._jumpToNodeEvent = function(seq) {
+  if (!seq) { console.warn('jumpToNodeEvent: no seq'); return; }
+  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
+  const t = window._currentDetailTask;
+  if (t && t.repo_key) {
+    const repoKey = t.repo_key.replace('gitcode:', '');
+    const parts = repoKey.split('/');
+    if (parts.length >= 2) {
+      const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
+      localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+    }
+  }
+  // 直接修改 hash 跳转事件详情页（#event/seq），触发 hashchange → app.nav('event', seq)
+  window.location.hash = '#event/' + seq;
+};
+
+// 点击流水线卡片区域 → 跳转到流水线页面
+window._jumpToPipePage = function() {
+  const t = window._currentDetailTask;
+  if (!t || !t.repo_key) { console.warn('jumpToPipePage: no current detail task'); return; }
+  const repoKey = t.repo_key.replace('gitcode:', '');
+  const parts = repoKey.split('/');
+  if (parts.length < 2) return;
+  const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
+  localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+  if (typeof app !== 'undefined' && app.nav) {
+    app.nav('pipe');
+  }
+};
+
 function _renderPipelineSection(data) {
   const el = document.getElementById('_boardPipelineSection');
   if (!el) return;
@@ -280,9 +311,15 @@ function _renderPipelineSection(data) {
   }
   const _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px';
   const _cardTitle = 'font-size:12px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-family:-apple-system,BlinkMacSystemFont,sans-serif';
-  let html = `<div style="${_cardStyle}">`;
-  // 卡片标题：流水线 + 场景名
-  html += `<div style="${_cardTitle}">${I18N.t('tasks.pipeline_scene')||'流水线'} · ${data.scene_name || ''}</div>`;
+  let html = `<div style="${_cardStyle};cursor:pointer" onclick="_jumpToPipePage()">`;
+  // 卡片标题：流水线 + 场景名 + 当前状态
+  const _stageStatusMap = {vod:'VOD分析中',issue:'需求处理中',coding:'编码中',qa:'测试中',sre:'部署中',pending_review:'待审核',done:'已完成','':'待启动'};
+  const _stageStatusText = _stageStatusMap[data.current_stage] || data.current_stage || '待启动';
+  const _stageStatusColor = data.current_stage === 'done' ? '#34c759' : data.current_stage === 'pending_review' ? '#10b981' : ['#vod','#issue','#coding','#qa','#sre'].includes('#'+data.current_stage) ? '#3b82f6' : '#86868b';
+  html += `<div style="${_cardTitle};display:flex;align-items:center;justify-content:space-between">`;
+  html += `<span>${I18N.t('tasks.pipeline_scene')||'流水线'} · ${data.scene_name || ''}</span>`;
+  html += `<span style="font-size:10px;font-weight:600;color:${_stageStatusColor};background:${_stageStatusColor}15;border-radius:4px;padding:2px 8px;text-transform:none;letter-spacing:0">${_stageStatusText}</span>`;
+  html += `</div>`;
   // 流水线节点进度条
   if (nodes.length > 0) {
     html += '<div style="display:flex;align-items:center;gap:0;margin-bottom:16px;padding:10px;background:rgba(0,0,0,.02);border-radius:10px">';
@@ -291,12 +328,16 @@ function _renderPipelineSection(data) {
       var col = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : '#86868b';
       var bg = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : 'rgba(0,0,0,.06)';
       var isCurrent = ns === 'current';
-      var pulseStyle = isCurrent ? ';animation:grapePulse 1.2s ease-in-out infinite;cursor:pointer' : '';
+      var isCompleted = ns === 'completed';
+      var pulseStyle = isCurrent ? ';animation:grapePulse 1.2s ease-in-out infinite' : '';
       var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #3b82f6;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
       var innerStyle = isCurrent ? ';position:relative' : '';
-      var clickHandler = isCurrent ? ` onclick="_jumpToPipeline('${(n.id||'')}')"` : '';
-      html += `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0"${clickHandler}>`;
-      html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${ns==='completed'?'✓':i+1}</div>`;
+      // 节点点击：有事件 seq 则跳转事件详情，否则跳转流水线页面（阻止冒泡到卡片）
+      var nodeSeq = (n.latest_event && n.latest_event.seq) || '';
+      var nodeClick = (isCurrent || isCompleted) ? (nodeSeq ? ` onclick="event.stopPropagation();_jumpToNodeEvent(${nodeSeq})"` : ` onclick="event.stopPropagation();_jumpToPipePage()"`) : '';
+      var nodeCursor = (isCurrent || isCompleted) ? ';cursor:pointer' : '';
+      html += `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0${nodeCursor}"${nodeClick}>`;
+      html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${isCompleted?'✓':i+1}</div>`;
       html += `<span style="font-size:9px;color:${col};font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${n.name||n.id||''}</span>`;
       html += `</div>`;
       if (i < nodes.length - 1) {
@@ -359,11 +400,11 @@ function _renderBoard(filtered) {
     vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7',
     sre: '#f59e0b', pending_review: '#10b981', done: '#34c759', '': '#86868b'
   };
-  // task.status → 看板列映射
+  // task.status → 看板列映射（Issue #85: 增加 task.status=pending_review 支持）
   function _mapStatus(t) {
     if (t.status === 'cancelled') return 'cancelled';
     if (t.status === 'completed' || t.stage === 'done') return 'done';
-    if (t.stage === 'pending_review') return 'pending_review';
+    if (t.status === 'pending_review' || t.stage === 'pending_review') return 'pending_review';
     if (t.status === 'awaiting_input') return 'awaiting_input';
     const _activeStages = ['vod','issue','coding','qa','sre'];
     if (_activeStages.includes(t.stage)) return 'in_progress';
@@ -396,11 +437,18 @@ function _renderBoard(filtered) {
         const _stage = t.stage || '';
         const _stageLabel = stageLabels[_stage] || _stage || '—';
         const _stageColor = stageColors[_stage] || '#86868b';
+        const _isRunning = s === 'in_progress' && t.is_running && ['vod','issue','coding','qa','sre'].includes(_stage);
         const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
-        html += `<div onclick="_openBoardDetail(${t.id})" style="background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+        const _cardCls = _isRunning ? ' tsk-card-radar' : '';
+        html += `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03);overflow:hidden${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
+        if (_isRunning) {
+          html += `<div class="tsk-radar-sweep" style="background:conic-gradient(from 0deg,transparent 0deg,${_stageColor}14 40deg,transparent 90deg)"></div>`;
+        }
+        html += `<div style="position:relative;z-index:1">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
             <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#'+t.issue_number : ''}</span>
-            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px">
+            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px${_isRunning ? `;animation:radarPulse 1.2s ease-in-out infinite` : ''}">
+              ${_isRunning ? `<span style="width:5px;height:5px;border-radius:50%;background:${_stageColor};animation:radarPulse 1.2s ease-in-out infinite"></span>` : ''}
               ${_stageLabel}
             </span>
           </div>
@@ -410,6 +458,7 @@ function _renderBoard(filtered) {
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
           </div>
         </div>`;
+        html += `</div>`;
       });
     }
     html += `</div></div>`;
