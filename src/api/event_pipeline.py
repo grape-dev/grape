@@ -2096,6 +2096,16 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         pass
 
     if not has_output:
+        # agent 已通过 grape tasks complete 自报完成 → 跳过启发失败（防误判，issue-45-task-complete-endpoint-design.md）
+        if task_id:
+            try:
+                from src.runtime.service import get_task
+                _t = get_task(task_id) or {}
+                if _t.get("status") == "completed":
+                    log.info(f"Exec agent: task {task_id} self-reported completed, skip no-output fail")
+                    return
+            except Exception as _e:
+                log.warning(f"Exec agent: check self-complete failed for {task_id}: {_e}")
         # 无产出 → 标记 failed（保留 event，不删）
         log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, mark failed")
         if task_id:

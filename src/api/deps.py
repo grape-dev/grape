@@ -119,6 +119,18 @@ def get_current_user_or_api_key(request: Request) -> dict:
     return user
 
 
+def get_user_or_none(request: Request) -> dict | None:
+    """A2A 软认证依赖：JWT / 会话 token / API Key 任一通过返回 user，否则 None。
+
+    与 `get_current_user_or_api_key` 区别：不因 token 无效抛 401，而是返回 None，
+    供 A2A 端点先把用户级身份放行、再把 bot-token 等内部鉴权路径交给 `_authorize_a2a`。
+    """
+    try:
+        return get_current_user_or_api_key(request)
+    except HTTPException:
+        return None
+
+
 def get_user_token(username: str) -> str:
     """获取用户的个人 GitCode API Token（Chat Agent 使用）"""
     acc = user_db.get_user_account(username) or {}

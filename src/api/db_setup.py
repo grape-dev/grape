@@ -609,6 +609,37 @@ CREATE TABLE IF NOT EXISTS skill_likes (
 )
 """
 
+# ===== Issue-45: API Token 认证 =====
+# 会话级临时 token（方式 A）：存在即有效，删除即失效（无 revoked 标记位）。
+# session_key（task_id）仅作失效定位的管理键，不是授权身份（token 设计 §2.3）。
+_SESSION_API_TOKENS_DDL = """
+CREATE TABLE IF NOT EXISTS session_api_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key  TEXT NOT NULL,             -- 会话唯一键（task_id），失效时精确定位
+    repo_key     TEXT NOT NULL,             -- 仓库（主作用域）
+    agent_type   TEXT NOT NULL,             -- vod/issue/coding/qa/sre/chat
+    user_id      INTEGER DEFAULT 0,         -- 仅 chat agent（用户身份）绑定；devops 事件 agent 无此概念，0=仓库身份
+    token_sha256 TEXT UNIQUE NOT NULL,      -- SHA-256
+    expires_at   TEXT NOT NULL,             -- 签发时刻 + TTL（校验超时用）
+    created_at   TEXT DEFAULT (datetime('now'))
+)
+"""
+
+# 用户级长期 API Key（方式 B）：sha256 落库（不存明文），支持吊销。
+_API_TOKENS_DDL = """
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,                  -- 绑定单用户
+    token_sha256 TEXT UNIQUE NOT NULL,             -- SHA-256（不存明文）
+    name        TEXT DEFAULT '',                   -- token 名称（如 "ci-token-01"）
+    scopes      TEXT DEFAULT '["public"]',         -- 预留：未来 RBAC 扩展
+    created_at  TEXT DEFAULT (datetime('now')),
+    last_used_at TEXT DEFAULT NULL,
+    revoked     INTEGER DEFAULT 0,
+    UNIQUE (user_id, name)
+)
+"""
+
 _UPLOADED_FILES_DDL = """
 CREATE TABLE IF NOT EXISTS uploaded_files (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -682,6 +713,9 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("skill_likes", _SKILL_LIKES_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
     ("distributed_locks", _DISTRIBUTED_LOCKS_DDL),
+    # ===== Issue-45: API Token 认证 =====
+    ("session_api_tokens", _SESSION_API_TOKENS_DDL),
+    ("api_tokens", _API_TOKENS_DDL),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")

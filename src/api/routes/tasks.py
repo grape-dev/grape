@@ -1088,6 +1088,57 @@ def get_task_status(task_id: int, user: dict = Depends(get_current_user_or_api_k
     }
 
 
+class TaskSelfCompleteBody(BaseModel):
+    task_id: str = ""
+    result_text: str = ""
+    next_step: str = ""
+
+
+@router.post("/complete", operation_id="tasks_complete", summary="任务自报完成（grape CLI tasks complete）")
+def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_current_user_or_api_key)):
+    """Agent 动作收尾后显式自报完成（issue-45-task-complete-endpoint-design.md）。
+
+    - 会话 token（tk_）：任务 id 由 session_key 自动定位（M2 以 task_id 签发），校验 repo 作用域。
+    - JWT / API Key（用户级）：body.task_id 必填，校验任务 repo 在该用户托管仓库内。
+    - 终态幂等：completed/failed/cancelled 不再覆盖（返回现状）。
+    - 完成后任务 + 事件置为成功，不经过 evaluate_agent_output 启发。
+    """
+    from src.runtime.service import complete_task
+    from src.user import db as _user_db
+
+    if user.get("auth_type") == "session_token":
+        task_id = user.get("session_key") or ""
+    elif body.task_id:
+        task_id = str(body.task_id).strip()
+    else:
+        task_id = ""
+    if not task_id:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "缺少 task_id（会话 token 自动定位或 body.task_id 必填）"})
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, repo_key, status FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    _repo, _status = row[1], row[2]
+
+    if user.get("auth_type") == "session_token":
+        if user.get("session_key") != task_id or user.get("repo_key") != _repo:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权完成该任务（作用域不匹配）"})
+    else:
+        managed = {r.get("repo_key") for r in _user_db.get_managed_repos(user.get("id") or 0)}
+        if _repo not in managed:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权完成该任务（非本人托管仓库）"})
+
+    if _status in ("completed", "failed", "cancelled"):
+        return {"ok": True, "task_id": task_id, "status": _status, "already": True}
+
+    result_text = (body.result_text or "").strip() or f"任务自报完成{(' / ' + body.next_step) if body.next_step else ''}"
+    complete_task(task_id, result_text, 0)
+    return {"ok": True, "task_id": task_id, "status": "completed"}
+
+
 class TaskClarifyBody(BaseModel):
     message: str = ""
 
