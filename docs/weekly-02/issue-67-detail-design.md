@@ -1782,13 +1782,51 @@ WHERE r.enabled = 1
 
 **结论**：
 - baseline：无影响（独立注入，不走 ref 表）
-- project：无影响（issue_num=0 全局，agent_type 精确匹配写入 Agent）
+- project：无影响（issue_num=0 全局，agent_type='' 全局——所有 Agent 共写同一个文件 `project-info/knowledge.md`，不按 Agent 隔离）
 - issue：**恢复精确匹配**——老逻辑按 `WHERE issue_num=N` 查，新逻辑 `(issue_num=N OR issue_num=0)` 精确匹配 OR 全局
 - issue_agent：**恢复精确匹配**——同 issue + agent_type 精确
 - manual：从"全部注入"改为"关联了才注入"，issue_num=0（用户不选 Issue）
 - 向后兼容 fallback（ref 表不存在时回退 `read_knowledge` 三级 scope）：只对 system/agent 知识生效
 - `member_files` 仍在 `_build_vod_scenes_section` 中用于加载 `pipelines-user.json`，与知识注入无关
 
+**project scope 不按 agent_type 隔离的设计原因**：
+- project scope 的文件路径 `project-info/knowledge.md` 只有一个文件——所有 Agent 写入都追加到同一个文件
+- 如果按 agent_type 隔离，DB 会生成两条记录指向同一个文件（agent_type='' 和 agent_type='coding'），ref 表也会生成两条不同关联——但文件内容是所有 Agent 共同追加的，无法区分
+- 因此 project scope 保持 `agent_type=''`（全局注入），与老逻辑 `read_knowledge` scope=project 不带 agent_type 条件一致
+
+**对话场景与 issue_num**：
+三个对话入口的知识注入情况：
+
+| 对话入口 | 函数 | issue_num | `_build_knowledge_section` | `_build_project_info_section` |
+|---------|------|-----------|--------------------------|---------------------------|
+| Issue 对话 | `build_event_chat_prompt` | 有值（从 issue_id 解析） | ✅ 调用 | ✅ 调用 |
+| 飞书/IM 对话 | `build_general_chat_prompt` | 不传（无 Issue） | ❌ 不调用 | ✅ 调用 |
+| Web 通用对话 | `build_general_chat_prompt` | 不传（无 Issue） | ❌ 不调用 | ✅ 调用 |
+
+- Issue 对话是和当前执行任务的 Agent 对话（复用 Issue 级会话 `get_or_create_issue_session`），不是新启动 Agent
+- issue_num 从 issue_id 解析（`_issue_num_from("#5")` → 5），Issue 对话始终有 issue_num
+- 飞书/Web 通用对话不注入 `scene_knowledge_ref` 表知识——只注入项目基线，issue_num=0 的注入逻辑不影响这些场景
+- issue_num=0 只在异常情况（issue_id 解析失败）下触发，作为安全 fallback——只匹配全局，不注入 Issue 级知识，避免无关 Issue 知识干扰 Agent
+
 **OBS hash 缓存**：`_read_entry_content` 优先走 `read_with_cache(obs_key, content_hash)`——和老逻辑一致，避免每次注入都读 OBS。`_build_knowledge_section` SQL 查询带 `content_hash` 字段。
 
 **空关联防护**：`POST /{id}/refs/batch` 接口跳过 `scene_id='' + agent_type=''` 的空关联（`continue`）——用户不选场景不选 Agent 是合法操作，但不生成全局注入记录。
+
+**OBS 模式全流程验证**（hello-skill 项目，7 个场景全覆盖）：
+
+| 场景 | 注入 id | 说明 |
+|------|--------|------|
+| Coding Agent Issue#5 | 21,65,69,80,81 | manual+coding + baseline全局 + issue#5全局 + issue_agent#5+coding |
+| VOD Agent Issue#5 | 21,65,69,80 | 不含 issue_agent#5+coding（Agent 隔离） |
+| QA Agent Issue#5 | 21,28,65,69,80 | QA 的 manual ref 匹配 |
+| Coding Agent Issue#3 | 21,65,69 | 不含 issue#5 / issue_agent#5（Issue 隔离） |
+| Coding Agent 无Issue | 21,65,69 | 只注入全局，不注入 Issue 级 |
+| VOD Agent 无Issue | 21,65,69 | 同上 |
+| Chat Agent Issue#5 | 21,65,69,80 | 不含 issue_agent#5+coding |
+
+验证结论：
+- project scope 全局注入（所有 Agent 共享）✅
+- issue scope 按 issue_num 精确匹配（其他 Issue 不注入）✅
+- issue_agent scope 按 issue_num + agent_type 精确匹配 ✅
+- manual scope 按 ref 表关联精确注入 ✅
+- 无 Issue 场景只注入全局 ✅
