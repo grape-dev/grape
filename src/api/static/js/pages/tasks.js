@@ -396,7 +396,7 @@ function _renderBoard(filtered) {
         const _stage = t.stage || '';
         const _stageLabel = stageLabels[_stage] || _stage || '—';
         const _stageColor = stageColors[_stage] || '#86868b';
-        const _isRunning = s === 'in_progress' && ['vod','issue','coding','qa','sre'].includes(_stage);
+        const _isRunning = s === 'in_progress' && t.status === 'processing' && ['vod','issue','coding','qa','sre'].includes(_stage);
         const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
         const _cardCls = _isRunning ? ' tsk-card-radar' : '';
         html += `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03);overflow:hidden${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
