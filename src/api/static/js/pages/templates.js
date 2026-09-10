@@ -135,10 +135,7 @@ function _renderHorizontalCards(templates, cat, skipPager) {
 
   var cards = pageT.map(function(t) {
     var catName = _tmplCatName(t._cat_name || cat.name || '');
-    var tplUrl = t.html_url || (t.source_repo ? (t.source_platform === 'github' ? 'https://github.com/' + t.source_repo : 'https://gitcode.com/' + t.source_repo) : '');
-    var cardClick = tplUrl
-      ? "window.open('" + tplUrl + "','_blank')"
-      : "createFromTemplate('" + t.id + "','" + (t.default_repo_name || t.id) + "')";
+    var cardClick = "createFromTemplate('" + t.id + "','" + (t.default_repo_name || t.id) + "')";
     var isFav = _tmplState._favState[t.id] ? true : false;
     var favStar = isFav ? '★' : '☆';
     var favCls = isFav ? 'tmpl-fav-btn tmpl-fav-act' : 'tmpl-fav-btn';
@@ -280,6 +277,163 @@ var _PIPELINE_STAGES = {
   'harmony':       ['\u9700\u6c42\u5206\u6790','Issue\u8fd0\u8425','\u7f16\u7801\u5b9e\u73b0','PR\u5ba1\u67e5','\u4e91\u90e8\u7f72'],
 };
 
+var _TAG_HIGHLIGHTS = {
+  'python':     'Python \u7f16\u7a0b\u5b9e\u8df5',
+  'flask':      'Flask Web \u6846\u67b6',
+  'fastapi':    'FastAPI \u73b0\u4ee3 API',
+  'web':        'Web \u5e94\u7528\u5f00\u53d1',
+  'api':        'RESTful API \u8bbe\u8ba1',
+  'cli':        '\u547d\u4ee4\u884c\u5de5\u5177\u5f00\u53d1',
+  'game':       '\u6e38\u620f\u903b\u8f91\u4e0e\u6e32\u67d3',
+  'pygame':     'Pygame \u6e38\u620f\u5f15\u64ce',
+  'starter':    '\u9002\u5408\u65b0\u624b\u5feb\u901f\u5165\u95e8',
+  'test':       '\u5355\u5143\u6d4b\u8bd5\u5b9e\u8df5',
+  'html':       '\u524d\u7aef\u9875\u9762\u5f00\u53d1',
+  'css':        'CSS \u6837\u5f0f\u8bbe\u8ba1',
+  'js':         'JavaScript \u4ea4\u4e92',
+  'frontend':   '\u524d\u7aef\u4e09\u4ef6\u5957',
+  'blog':       '\u535a\u5ba2\u7cfb\u7edf\u642d\u5efa',
+  'docker':     '\u5bb9\u5668\u5316\u90e8\u7f72',
+  'k8s':        'Kubernetes \u7f16\u6392',
+  'terraform':  '\u57fa\u7840\u8bbe\u65bd\u5373\u4ee3\u7801',
+  'ai':         'AI \u80fd\u529b\u96c6\u6210',
+  'agent':      'Agent \u81ea\u52a8\u5316',
+  'automation': '\u81ea\u52a8\u5316\u5de5\u4f5c\u6d41',
+  'skill':      '\u534e\u4e3a\u4e91 Skill \u5f00\u53d1',
+  'harmonyos':  '\u9e3f\u8499\u5e94\u7528\u5f00\u53d1',
+  'arkts':      'ArkTS \u8bed\u8a00',
+  'ecommerce':  '\u7535\u5546\u5e94\u7528',
+  'mcp':        'MCP \u534f\u8bae\u96c6\u6210',
+  'vue':        'Vue.js \u6846\u67b6',
+  'golang':     'Go \u8bed\u8a00\u5f00\u53d1',
+  'gateway':    'API \u7f51\u5173',
+  'iac':        'IaC \u57fa\u7840\u8bbe\u65bd',
+  'spider':     '\u722c\u866b\u4e0e\u6570\u636e\u91c7\u96c6',
+  'crawler':    '\u6570\u636e\u6293\u53d6',
+  'markdown':   'Markdown \u5de5\u5177',
+  'tool':       '\u5b9e\u7528\u5de5\u5177',
+  'popular':    '\u793e\u533a\u70ed\u95e8\u9879\u76ee',
+  'content':    '\u5185\u5bb9\u521b\u4f5c',
+  'video':      '\u89c6\u9891\u751f\u6210',
+  'multi-agent':'\u591a Agent \u534f\u4f5c',
+  'mood-tracker':'\u5fc3\u60c5\u8ffd\u8e2a\u5668',
+  'snake':      '\u7ecf\u5178\u8d2a\u5403\u86c7',
+  'distributed':'\u5206\u5e03\u5f0f\u67b6\u6784',
+  'node':       'Node.js \u5f00\u53d1',
+  'fullstack':  '\u5168\u6808\u5f00\u53d1',
+  'platform':   '\u5e73\u53f0\u578b\u9879\u76ee',
+  'mobile':     '\u79fb\u52a8\u5e94\u7528',
+  'self-hosted':'\u81ea\u6258\u7ba1\u90e8\u7f72',
+  'monitoring': '\u76d1\u63a7\u4e0e\u544a\u8b66',
+  'security':   '\u5b89\u5168\u5408\u89c4',
+  'devops':     'DevOps \u5168\u6d41\u7a0b',
+  'helm':       'Helm \u5305\u7ba1\u7406',
+  'cncf':       'CNCF \u751f\u6001\u9879\u76ee',
+};
+
+var _LOCAL_PREVIEW = {
+  'hello-flask': '<div style="background:#f0f2f5;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
+    '<div style="text-align:center;font-size:11px;color:#888;margin-bottom:6px">Mood Tracker \u9884\u89c8</div>' +
+    '<div style="display:flex;justify-content:space-around;margin-bottom:6px">' +
+      '<span style="font-size:18px">\ud83d\ude00</span><span style="font-size:18px">\ud83d\ude0a</span><span style="font-size:18px">\ud83d\ude10</span><span style="font-size:18px">\ud83d\ude1f</span><span style="font-size:18px">\ud83d\ude22</span>' +
+    '</div>' +
+    '<div style="background:#fff;border-radius:6px;padding:6px 8px;margin-bottom:4px"><div style="font-size:9px;color:#4caf50;font-weight:600">\u5f00\u5fc3 \u00b7 \u4eca\u5929\u5b8c\u6210\u4e86\u4e00\u4e2a\u6709\u8da3\u7684\u529f\u80fd</div></div>' +
+    '<div style="display:flex;gap:6px;margin-top:4px"><div style="flex:1;background:#fff;border-radius:4px;padding:4px;text-align:center"><div style="font-size:14px;font-weight:700;color:#3168e0">3</div><div style="font-size:7px;color:#888">\u8bb0\u5f55</div></div><div style="flex:1;background:#fff;border-radius:4px;padding:4px;text-align:center"><div style="font-size:14px;font-weight:700;color:#3168e0">4.3</div><div style="font-size:7px;color:#888">\u5e73\u5747</div></div></div>' +
+  '</div>',
+  'hello-fastapi': '<div style="background:#0d1117;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px;font-family:monospace">' +
+    '<div style="font-size:9px;color:#58a6ff;margin-bottom:4px">GET /</div>' +
+    '<div style="font-size:9px;color:#7ee787;margin-bottom:6px">{ "message": "Hello, World!" }</div>' +
+    '<div style="font-size:9px;color:#58a6ff;margin-bottom:4px">GET /health</div>' +
+    '<div style="font-size:9px;color:#7ee787">{ "status": "ok", "service": "hello-fastapi" }</div>' +
+    '<div style="position:absolute;bottom:8px;right:10px;font-size:8px;color:#8b949e">\u26a1 FastAPI</div>' +
+  '</div>',
+  'hello-todo': '<div style="background:#fff;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px;font-family:monospace">' +
+    '<div style="font-size:10px;color:#333;font-weight:600;margin-bottom:6px">TODO CLI</div>' +
+    '<div style="font-size:9px;color:#888;margin-bottom:3px">> add \u5b66\u4e60 Flask</div>' +
+    '<div style="font-size:9px;color:#888;margin-bottom:3px">> add \u5199\u5355\u5143\u6d4b\u8bd5</div>' +
+    '<div style="font-size:9px;color:#4caf50;margin-bottom:3px">\u2713 \u5b66\u4e60 Flask</div>' +
+    '<div style="font-size:9px;color:#888;margin-bottom:3px">> list</div>' +
+    '<div style="font-size:9px;color:#888">1. [\u2713] \u5b66\u4e60 Flask</div>' +
+    '<div style="font-size:9px;color:#888">2. [ ] \u5199\u5355\u5143\u6d4b\u8bd5</div>' +
+  '</div>',
+  'hello-calculator': '<div style="background:#1a1a2e;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
+    '<div style="text-align:center;font-size:10px;color:#888;margin-bottom:6px">\u7b80\u5355\u8ba1\u7b97\u5668</div>' +
+    '<div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:6px;text-align:right"><span style="font-size:16px;color:#4caf50;font-family:monospace">3 + 4 = 7</span></div>' +
+    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px">' +
+      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">7</div>' +
+      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">8</div>' +
+      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">9</div>' +
+      '<div style="background:#4caf50;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#fff">\u00f7</div>' +
+      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">4</div>' +
+      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">5</div>' +
+      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">6</div>' +
+      '<div style="background:#4caf50;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#fff">\u00d7</div>' +
+    '</div>' +
+  '</div>',
+  'hello-html': '<div style="background:#fff;border-radius:8px;padding:0;overflow:hidden;position:relative;height:140px">' +
+    '<div style="background:#3168e0;padding:6px 10px"><span style="font-size:9px;color:#fff">Hello Static Site</span></div>' +
+    '<div style="padding:10px">' +
+      '<div style="font-size:14px;font-weight:700;color:#1a1a2e;margin-bottom:4px">Hello, World!</div>' +
+      '<div style="font-size:9px;color:#666;margin-bottom:6px">\u9759\u6001\u7f51\u9875\u6a21\u677f\uff0cHTML + CSS + JavaScript</div>' +
+      '<div style="display:inline-block;background:#3168e0;color:#fff;font-size:9px;padding:3px 10px;border-radius:4px;cursor:pointer">\u70b9\u51fb\u4ea4\u4e92</div>' +
+      '<div style="margin-top:6px;display:flex;gap:4px"><div style="width:24px;height:24px;background:#f0f4f8;border-radius:4px"></div><div style="width:24px;height:24px;background:#e8f5e9;border-radius:4px"></div><div style="width:24px;height:24px;background:#fff3e0;border-radius:4px"></div></div>' +
+    '</div>' +
+  '</div>',
+  'hello-blog': '<div style="background:#fff;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
+    '<div style="font-size:12px;font-weight:700;color:#333;margin-bottom:8px">\ud83d\udcd8 Hello Mini Blog</div>' +
+    '<div style="padding:4px 0;border-bottom:1px solid #eee"><div style="font-size:10px;color:#2563eb">\u6211\u7684\u7b2c\u4e00\u7bc7\u535a\u5ba2</div></div>' +
+    '<div style="padding:4px 0;border-bottom:1px solid #eee"><div style="font-size:10px;color:#2563eb">Hello World</div></div>' +
+    '<div style="padding:4px 0"><div style="font-size:9px;color:#888">\u6b22\u8fce\u6765\u5230\u6211\u7684\u8ff7\u4f60\u535a\u5ba2\uff01\u8fd9\u662f\u5b66\u4e60 Flask \u7684\u7b2c\u4e00\u7ad9\u3002</div></div>' +
+    '<div style="position:absolute;bottom:8px;right:10px;font-size:8px;color:#ccc">Flask</div>' +
+  '</div>',
+  'snake-game': '<div style="background:#16213e;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
+    '<div style="display:flex;gap:12px;margin-bottom:6px"><span style="font-size:10px;color:#4caf50">\u5f97\u5206: 30</span><span style="font-size:10px;color:#888">\u901f\u5ea6: 2</span></div>' +
+    '<div style="position:relative;width:100%;height:90px;background:#0d1117;border-radius:4px;overflow:hidden">' +
+      '<div style="position:absolute;top:20px;left:40px;width:14px;height:14px;background:#4caf50;border-radius:2px"></div>' +
+      '<div style="position:absolute;top:20px;left:26px;width:14px;height:14px;background:#388e3c;border-radius:2px"></div>' +
+      '<div style="position:absolute;top:20px;left:12px;width:14px;height:14px;background:#388e3c;border-radius:2px"></div>' +
+      '<div style="position:absolute;top:40px;left:120px;width:12px;height:12px;background:#f44336;border-radius:50%"></div>' +
+    '</div>' +
+    '<div style="position:absolute;bottom:8px;right:10px;font-size:8px;color:#4caf50">\u2191\u2193\u2190\u2192 \u63a7\u5236</div>' +
+  '</div>',
+  'alien-invasion': '<div style="background:#000;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px;font-family:monospace">' +
+    '<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:10px;color:#4caf50">SCORE: 1200</span><span style="font-size:10px;color:#f44336">LIVES: 3</span></div>' +
+    '<div style="position:relative;width:100%;height:90px;background:#111;border-radius:4px;overflow:hidden">' +
+      '<div style="position:absolute;bottom:6px;left:40px;font-size:16px">\ud83d\ude80</div>' +
+      '<div style="position:absolute;top:10px;left:30px;font-size:14px">\ud83d\udd25</div>' +
+      '<div style="position:absolute;top:10px;left:60px;font-size:14px">\ud83d\udd25</div>' +
+      '<div style="position:absolute;top:20px;right:30px;font-size:16px">\ud83d\udd25</div>' +
+      '<div style="position:absolute;top:20px;right:60px;font-size:16px">\ud83d\udd25</div>' +
+      '<div style="position:absolute;top:20px;right:90px;font-size:16px">\ud83d\udd25</div>' +
+    '</div>' +
+    '<div style="position:absolute;bottom:8px;left:12px;font-size:8px;color:#666">pygame \u00b7 \u65b9\u5411\u952e\u79fb\u52a8 \u00b7 \u7a7a\u683c\u5c04\u51fb</div>' +
+  '</div>',
+  'alien-game': '<div style="background:#0a0a23;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
+    '<div style="text-align:center;font-size:10px;color:#4caf50;margin-bottom:4px">ALIEN GAME</div>' +
+    '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:9px;color:#888">Score: 560</span><span style="font-size:9px;color:#888">High: 1200</span></div>' +
+    '<div style="position:relative;width:100%;height:80px;background:#111827;border-radius:4px;overflow:hidden">' +
+      '<div style="position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font-size:14px">\ud83d\udef3</div>' +
+      '<div style="position:absolute;top:8px;left:20%;font-size:12px">\ud83d\udc7d</div>' +
+      '<div style="position:absolute;top:8px;left:50%;font-size:12px">\ud83d\udc7d</div>' +
+      '<div style="position:absolute;top:8px;left:80%;font-size:12px">\ud83d\udc7d</div>' +
+      '<div style="position:absolute;top:24px;left:50%;width:2px;height:12px;background:#4caf50"></div>' +
+    '</div>' +
+    '<div style="position:absolute;bottom:8px;right:10px;font-size:8px;color:#555">pygame</div>' +
+  '</div>',
+  'hello-blog-sys': '<div style="background:#fff;border-radius:8px;padding:0;overflow:hidden;position:relative;height:140px">' +
+    '<div style="background:#2c3e50;padding:6px 10px;display:flex;justify-content:space-between"><span style="font-size:9px;color:#fff;font-weight:600">BLOG-SYS API</span><span style="font-size:8px;color:#95a5a6">v1.0</span></div>' +
+    '<div style="padding:8px;font-family:monospace">' +
+      '<div style="font-size:9px;color:#e74c3c;margin-bottom:3px">POST /api/posts</div>' +
+      '<div style="font-size:8px;color:#888;margin-bottom:4px">{ "title": "Hello", "content": "..." }</div>' +
+      '<div style="font-size:9px;color:#27ae60;margin-bottom:3px">GET /api/posts</div>' +
+      '<div style="font-size:8px;color:#888;margin-bottom:4px">[ { "id": 1, ... }, { "id": 2, ... } ]</div>' +
+      '<div style="font-size:9px;color:#f39c12;margin-bottom:3px">DELETE /api/posts/1</div>' +
+      '<div style="font-size:8px;color:#888">{ "status": "deleted" }</div>' +
+    '</div>' +
+    '<div style="position:absolute;bottom:6px;right:10px;font-size:8px;color:#ccc">Flask REST</div>' +
+  '</div>',
+};
+
 function createFromTemplate(templateId, defaultName) {
   var t = _findTemplateById(templateId) || {};
   var tplName = t.name || templateId;
@@ -291,7 +445,15 @@ function createFromTemplate(templateId, defaultName) {
   var tplSource = t.source || '';
   var tplStats = t.stats || {};
   var tplReason = t.recommend_reason || '';
+  var tplSourceRepo = t.source_repo || '';
   var tplUrl = t.html_url || '';
+  if (!tplUrl && tplSourceRepo) {
+    tplUrl = tplPlatform === 'github'
+      ? 'https://github.com/' + tplSourceRepo
+      : 'https://gitcode.com/' + tplSourceRepo;
+  } else if (!tplUrl && tplSource === 'local') {
+    tplUrl = 'https://gitcode.com/grape-dev/grape-template/tree/main/' + (t.id || '');
+  }
 
   var platformTag = tplPlatform === 'github' ? '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">GitHub</span>'
     : tplPlatform === 'gitcode' ? '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">GitCode</span>' : '';
@@ -322,6 +484,24 @@ function createFromTemplate(templateId, defaultName) {
     ? '<div style="margin-top:6px;font-size:11px;color:var(--a);background:#f0f4f8;padding:6px 10px;border-radius:6px">\ud83d\udca1 ' + tplReason + '</div>'
     : '';
 
+  var highlights = [];
+  tplTags.forEach(function(tg) {
+    var desc = _TAG_HIGHLIGHTS[tg.toLowerCase()];
+    if (desc && highlights.indexOf(desc) < 0) highlights.push(desc);
+  });
+  if (tplStats.language && !highlights.some(function(h) { return h.indexOf(tplStats.language) >= 0; })) {
+    var langDesc = _TAG_HIGHLIGHTS[(tplStats.language || '').toLowerCase()];
+    if (langDesc) highlights.push(langDesc);
+  }
+  var highlightsHtml = highlights.length
+    ? highlights.map(function(h) {
+        return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
+          '<span style="color:var(--a);font-size:10px;flex-shrink:0">\u25c6</span>' +
+          '<span style="font-size:11px;color:var(--t2);line-height:1.5">' + h + '</span>' +
+        '</div>';
+      }).join('')
+    : '';
+
   var stages = _PIPELINE_STAGES[tplScene] || _PIPELINE_STAGES['default'];
   var stagesHtml = stages.map(function(s, i) {
     var num = i + 1;
@@ -330,23 +510,11 @@ function createFromTemplate(templateId, defaultName) {
     return '<span style="display:inline-flex;align-items:center"><span style="width:16px;height:16px;border-radius:50%;background:var(--a);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0">' + num + '</span><span style="font-size:11px;color:var(--t2);margin-left:3px">' + s + '</span></span>' + arrow;
   }).join('');
 
-  var steps = [
-    '\u521b\u5efa GitCode \u4ed3\u5e93\uff08\u4f60\u7684\u4e2a\u4eba\u540d\u4e0b\uff09',
-    '\u63a8\u9001\u6a21\u677f\u4ee3\u7801\u5230\u4ed3\u5e93',
-    '\u914d\u7f6e\u4ed3\u5e93\u6258\u7ba1\u4e0e Webhook \u81ea\u52a8\u5316',
-    '\u5e94\u7528 ' + tplScene + ' \u5f00\u53d1\u573a\u666f\uff08' + stages.length + ' \u9636\u6bb5\u6d41\u6c34\u7ebf\uff09',
-    '\u521b\u5efa\u5f15\u5bfc Issue\uff0c\u81ea\u52a8\u89e6\u53d1\u6d41\u6c34\u7ebf',
-  ];
-  var stepsHtml = steps.map(function(s) {
-    return '<div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:5px">' +
-      '<span style="color:var(--g);font-size:11px;flex-shrink:0;margin-top:1px">\u2713</span>' +
-      '<span style="font-size:11px;color:var(--t2);line-height:1.5">' + s + '</span>' +
-    '</div>';
-  }).join('');
-
   var externalLink = tplUrl
     ? '<a href="' + tplUrl + '" target="_blank" style="font-size:10px;color:var(--a);text-decoration:none;margin-left:8px">\u67e5\u770b\u539f\u9879\u76ee \u2197</a>'
     : '';
+
+  var previewHtml = _LOCAL_PREVIEW[templateId] || '';
 
   var modal = document.createElement('div');
   modal.id = 'ptCreateModal';
@@ -368,18 +536,27 @@ function createFromTemplate(templateId, defaultName) {
             '</div>' +
           '</div>' +
           '<p style="font-size:12px;color:var(--t2);line-height:1.6;margin-top:8px">' + tplDesc + '</p>' +
-          tagsHtml +
-          reasonHtml +
+          (previewHtml ? '<div style="margin-top:10px">' + previewHtml + '</div>' : '') +
         '</div>' +
         '<span style="font-size:18px;color:var(--t3);cursor:pointer;flex-shrink:0;margin:-4px -4px 0 0;padding:4px" onclick="document.getElementById(\'ptCreateModal\').remove()">\u00d7</span>' +
       '</div>' +
 
       '<div style="height:1px;background:var(--b);margin:14px 0"></div>' +
 
-      '<div style="margin-bottom:14px">' +
-        '<div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:8px">\ud83d\ude80 \u521b\u5efa\u540e\u5c06\u81ea\u52a8\u5b8c\u6210</div>' +
-        stepsHtml +
-      '</div>' +
+      (highlightsHtml || tagsHtml || reasonHtml
+        ? '<div style="margin-bottom:14px">' +
+            (highlightsHtml
+              ? '<div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:8px">\u2728 \u6a21\u677f\u4eae\u70b9</div>' +
+                highlightsHtml
+              : '') +
+            (tagsHtml
+              ? '<div style="display:flex;gap:4px;flex-wrap:wrap;' + (highlightsHtml ? 'margin-top:8px' : '') + '">' + tplTags.map(function(tg) {
+                  return '<span class="tg tg-d" style="font-size:10px">#' + tg + '</span>';
+                }).join('') + '</div>'
+              : '') +
+            reasonHtml +
+          '</div>'
+        : '') +
 
       '<div style="margin-bottom:16px">' +
         '<div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:8px">\ud83d\udca1 \u6d41\u6c34\u7ebf\u9884\u89c8\uff08' + tplScene + '\uff09</div>' +
@@ -393,7 +570,8 @@ function createFromTemplate(templateId, defaultName) {
       '<label class="ts t2" style="display:block;margin-bottom:4px;font-size:12px">' + I18N.t('templates.repo_name') + '</label>' +
       '<input id="ptRepoName" value="' + defaultName + '" style="width:100%;padding:9px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:13px;outline:none;background:var(--c);box-sizing:border-box">' +
 
-      '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">' +
+      '<div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:18px">' +
+        (tplUrl ? '<button class="bt bt-o bt-s" onclick="window.open(\'' + tplUrl + '\',\'_blank\')">\u67e5\u770b\u6e90\u4ee3\u7801 \u2197</button>' : '') +
         '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">' + I18N.t('templates.cancel') + '</button>' +
         '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')" style="padding:6px 18px">' + I18N.t('templates.create_from_template_arrow') + '</button>' +
       '</div>' +

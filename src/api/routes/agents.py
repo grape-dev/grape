@@ -222,17 +222,8 @@ def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depends(get_
         from src.api.pipeline_config import get_scene_engine_ids
         from src.session_manager import db, db_lock
         # 查当前场景
-        _scene_id = "default"
+        _scene_id = ""
         _uid = user.get("id", 0) if isinstance(user, dict) else 0
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
-                _row = c.fetchone()
-                if _row and _row[0]:
-                    _scene_id = _row[0]
-        except Exception:
-            pass
         _eids = get_scene_engine_ids(_scene_id, name, repo_key=repo_key, user_id=_uid)
         if _eids:
             from src.runtime.engine_select import _engines_by_ids, load_engine_selection, _norm_repo

@@ -92,75 +92,6 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
     return "\n".join(lines)
 
 
-def _build_vod_scenes_section(agent_type: str, repo_key: str = "") -> str:
-    """VOD 专属：注入该仓库可用开发场景列表（issue-39 方案 B：场景只与仓库关联）。
-
-    独立于项目知识基线——即使项目知识加载异常，VOD 场景列表也不受影响。
-
-    - 场景候选 = get_scenes(repo_key)（scope 仅仓库级）
-    - 无「default」场景；仓库无任何场景时 VOD 需输出「未配置场景」终止信号。
-    """
-    if agent_type != "vod":
-        return ""
-    try:
-        from src.api.pipeline_config import get_scenes, get_pipeline_config
-        scenes = get_scenes(repo_key=repo_key)
-        lines = []
-        if not scenes:
-            lines.append("")
-            lines.append("> ⚠️ 该仓库**未配置任何开发场景**：请立即终止处理。")
-            lines.append('> 在最终 JSON 产出块中输出：`{"terminate": true, "reason": "未配置场景"}`。')
-            lines.append("> 不要继续分析需求、不要给出 recommended_scene（没有 default 场景）。")
-            return "\n".join(lines)
-        lines.append("\n## 可用开发场景（该仓库已配置，请根据需求特征从中选择）")
-        lines.append("| scene_id | 名称 | 技能链 | 来源 |")
-        lines.append("|----------|------|--------|------|")
-        for s in scenes:
-            cfg = get_pipeline_config(s["id"], repo_key=repo_key)
-            if cfg:
-                chain = " → ".join(n.get("skill", "") for n in cfg.get("nodes", []))
-                _disp = s.get("display_name") or s.get("name") or s["id"]
-                lines.append(f"| {s['id']} | {_disp} | {chain} | 内置 |")
-
-        # 加载成员上传的自定义场景（project-info/member/ 下的 pipelines-user.json）
-        if repo_key:
-            try:
-                from src.api.knowledge import member_files
-                _mf = member_files(repo_key)
-                for rel, content in _mf.items():
-                    if not rel.endswith("pipelines-user.json"):
-                        continue
-                    import json as _json
-                    try:
-                        _user_pipes = _json.loads(content)
-                    except Exception:
-                        continue
-                    _user_scenes = _user_pipes.get("scenes", {})
-                    for sid, scfg in _user_scenes.items():
-                        _name = scfg.get("name", sid)
-                        _nodes = scfg.get("nodes", [])
-                        _chain = " → ".join(n.get("skill", "") for n in _nodes) if _nodes else "—"
-                        lines.append(f"| {sid} | {_name} | {_chain} | 自定义 |")
-            except Exception:
-                pass
-
-        lines.append("")
-        lines.append("> 请根据项目知识基线 + 成员上传文档 + 需求特征，判定最匹配的 scene_id。")
-        lines.append("> 成员上传文档（project-info/member/）可能包含自定义场景定义（pipelines-user.json），")
-        lines.append("> 如有自定义场景且与需求匹配，优先推荐自定义场景。")
-        lines.append("⚠️ **必须**在最终 JSON 产出块中额外包含 `recommended_scene` 和 `scene_reason` 两个字段。")
-        lines.append("- `recommended_scene`：**只能填写上表中该仓库的场景 scene_id**，不允许使用其它值。")
-        lines.append("- `scene_reason`：一句话说明选择理由。")
-        lines.append("- **没有 `default` 场景**：禁止输出 `\"default\"`。")
-        lines.append("- 无法确定时 `recommended_scene` 填该仓库当前默认场景，不得省略。")
-        lines.append("- 注意：系统会根据用户设置决定是否采纳你的推荐，未采纳时保持仓库默认场景不变。")
-        return "\n".join(lines)
-    except Exception as _e:
-        from src.config import log as _log
-        _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")
-        return ""
-
-
 _advanced_options_cache: dict = {}  # (repo_key, issue_id) -> (options_str, timestamp)
 
 
@@ -575,11 +506,6 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     repo_key = evt.get("repo_key") or f"{evt['source']}:{evt['repository']}"
     account = evt.get("account") or evt.get("repository", "")
     parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else "")))
-
-    # VOD 场景列表（独立于项目知识基线，避免项目知识异常时场景列表消失）
-    _vod_scenes = _build_vod_scenes_section(agent_type, repo_key)
-    if _vod_scenes:
-        parts.append(_vod_scenes)
 
     # 场景高级选项注入（仅执行类 agent：coding/qa/sre）
     if agent_type in ("coding", "qa", "sre"):
@@ -1020,3 +946,161 @@ def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
 # Backward-compat aliases (see docs/new-version2/chat-prompt-overview.md for new names)
 build_chat_prompt = build_general_chat_prompt  # deprecated: use build_general_chat_prompt
 build_conversation_prompt = build_event_chat_prompt  # deprecated: use build_event_chat_prompt
+
+
+# ===== 智能推荐 Prompt 构建 =====
+
+def _load_scene_recommend_config(repo_key: str) -> dict:
+    """从 managed_repos.scene_recommend_config 读取用户经验规则（结构化数据）。
+
+    返回 {"fallback_scene": "", "rules": [{"scene_id": "", "condition": ""}]}。
+    读取时兜底过滤：规则中 scene_id 不在当前场景列表中的直接丢弃。
+    """
+    try:
+        from src.user.db import get_scene_recommend_config
+        config = get_scene_recommend_config(repo_key)
+        fallback = config.get("fallback_scene", "") or ""
+        rules = config.get("rules", []) or []
+        # 读取时兜底过滤
+        from src.api.pipeline_config import get_scenes
+        valid_ids = {s["id"] for s in get_scenes(repo_key=repo_key)}
+        rules = [r for r in rules if isinstance(r, dict) and r.get("scene_id") in valid_ids]
+        if fallback and fallback not in valid_ids:
+            fallback = ""
+        return {"fallback_scene": fallback, "rules": rules}
+    except Exception:
+        return {"fallback_scene": "", "rules": []}
+
+
+def _sanitize_recommend_config(repo_key: str) -> dict | None:
+    """自检并修复推荐配置：删除指向不存在场景的规则，重置失效的兜底场景。
+
+    在场景删除时主动调用。返回修复后的 config（已写回 DB），或 None（无需修复）。
+    """
+    from src.api.pipeline_config import get_scenes
+    from src.user.db import get_scene_recommend_config, set_scene_recommend_config
+
+    scenes = get_scenes(repo_key=repo_key)
+    valid_ids = {s["id"] for s in scenes}
+    if not valid_ids:
+        return None
+
+    config = get_scene_recommend_config(repo_key)
+    changed = False
+
+    old_rules = config.get("rules") or []
+    new_rules = [r for r in old_rules if isinstance(r, dict) and r.get("scene_id") in valid_ids]
+    if len(new_rules) != len(old_rules):
+        config["rules"] = new_rules
+        changed = True
+
+    fallback = config.get("fallback_scene") or ""
+    if fallback not in valid_ids:
+        config["fallback_scene"] = scenes[0]["id"] if scenes else ""
+        changed = True
+
+    if changed:
+        set_scene_recommend_config(repo_key, config["fallback_scene"], config["rules"])
+        from src.config import log
+        log.info(f"RecommendConfig: auto-sanitized for {repo_key}, "
+                 f"fallback={config['fallback_scene']}, rules={len(config['rules'])}")
+        return config
+    return None
+
+
+def build_scene_recommender_prompt(evt, repo_key: str) -> str:
+    """构建智能推荐专用 prompt（三层结构：系统数据 + 用户经验规则 + 固定指令）。
+
+    用户经验规则从 managed_repos.scene_recommend_config (JSON) 读取，结构化存储，
+    注入时转为自然语言。
+    """
+    payload = evt.get("payload", {})
+    issue_data = {}
+    if isinstance(payload.get("issue"), dict):
+        issue_data = payload["issue"]
+    elif isinstance(payload.get("object_attributes"), dict):
+        issue_data = payload["object_attributes"]
+    title = issue_data.get("title", "")
+    body = issue_data.get("body", issue_data.get("description", ""))[:1000]
+
+    parts = []
+
+    # === 第一层：系统数据（不可改）===
+    parts.append("## 任务信息")
+    parts.append(f"- 标题：{title}")
+    parts.append(f"- 描述：{body}")
+
+    from src.api.pipeline_config import get_scenes, get_pipeline_config
+    scenes = get_scenes(repo_key=repo_key)
+    if not scenes:
+        parts.append("\n## 可用开发场景\n> 该仓库未配置任何开发场景。")
+        parts.append('\n输出：{"scene_id": "", "reason": "未配置场景"}')
+        parts.append("\n## 硬约束\n1. 只输出 JSON，不得有任何前后文字。\n2. 任务立即结束。")
+        return "\n".join(parts)
+
+    parts.append("\n## 可用开发场景（该仓库已配置）")
+    parts.append("| scene_id | 名称 | 描述 | 技能链 |")
+    parts.append("|----------|------|------|--------|")
+    for s in scenes:
+        cfg = get_pipeline_config(s["id"], repo_key=repo_key)
+        chain = " → ".join(n.get("skill", "") for n in cfg.get("nodes", [])) if cfg else "—"
+        disp = s.get("display_name") or s.get("name") or s["id"]
+        desc = s.get("description") or ""
+        parts.append(f"| {s['id']} | {disp} | {desc} | {chain} |")
+
+    # === 第二层：用户经验规则（可改，从 DB 读取结构化数据，注入时转为自然语言）===
+    config = _load_scene_recommend_config(repo_key)
+    parts.append("\n## 用户经验规则")
+    if config.get("fallback_scene"):
+        parts.append(f"兜底场景：{config['fallback_scene']}")
+    else:
+        parts.append("兜底场景：未设置（由系统自动选择最通用的场景）")
+    rules = config.get("rules") or []
+    if rules:
+        parts.append("路由规则：")
+        for i, rule in enumerate(rules, 1):
+            sid = rule.get("scene_id", "")
+            cond = rule.get("condition", "")
+            parts.append(f"{i}. {cond} → 走 {sid} 场景")
+    else:
+        parts.append("路由规则：未设置（纯语义匹配模式）")
+
+    # === 第三层：固定指令（不可改，代码内置）===
+    parts.append("\n## 角色")
+    parts.append("你是智能推荐器。唯一职责：根据任务描述，从上方场景列表中匹配最优场景，返回 scene_id。")
+    parts.append("不执行任何其他操作。")
+
+    parts.append("\n## 匹配优先级（从高到低）")
+    parts.append("1. 用户路由规则：检查任务标题/描述是否命中上方「用户经验规则」中的条件，命中则直接走对应场景")
+    parts.append("2. 语义匹配：任务描述与场景名称/描述的语义相关性")
+    parts.append("3. 用户兜底场景：以上都未命中时，走用户设置的兜底场景")
+    parts.append("4. 系统兜底：用户未设兜底场景时，选择技能链最通用的场景")
+
+    parts.append("\n## 能力边界")
+    parts.append("- 创建/修改/总结 Issue → 禁止")
+    parts.append("- 发送 Issue 评论 → 禁止")
+    parts.append("- A2A 交办 → 禁止")
+    parts.append("- 多轮对话/需求澄清 → 禁止")
+    parts.append("- 读取项目知识基线 → 禁止")
+    parts.append("- 调用 GitCode API → 禁止")
+    parts.append("- 读写文件 → 禁止")
+    parts.append("- 输出 JSON 以外的内容 → 禁止")
+
+    parts.append("\n## 输出格式")
+    parts.append('只输出以下 JSON，不输出任何其他内容（无分析、无解释、无叙述）：')
+    parts.append('')
+    parts.append('{"scene_id": "场景列表中存在的 scene_id", "reason": "一句话选择理由（≤50字）"}')
+    parts.append('')
+    parts.append("边界情况：")
+    parts.append('- 仓库无场景 → {"scene_id": "", "reason": "未配置场景"}')
+    parts.append('- 无法精确匹配 → 走兜底场景，reason 注明"未精确匹配，使用兜底场景"')
+
+    parts.append("\n## 硬约束")
+    parts.append("1. 只输出 JSON：答复中只能有一个 JSON 块，不得有任何前后文字。")
+    parts.append("2. 不调用任何 API：不访问 GitCode、不调用 A2A、不发评论、不查 Issue。")
+    parts.append("3. 不读取任何文件：所有信息已在 prompt 中注入。")
+    parts.append("4. scene_id 必须来自列表：只能填写 prompt 注入的场景列表中存在的 scene_id。")
+    parts.append("5. 用户路由规则优先于你的语义判断：规则命中时必须遵从，不要用语义匹配覆盖。")
+    parts.append("6. 任务立即结束：输出 JSON 后结束，不继续思考、不等待输入。")
+
+    return "\n".join(parts)

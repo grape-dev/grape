@@ -49,12 +49,19 @@ def _iter_routes(route):
             yield from _iter_routes(r)
 
 
+# 视为「对外安全路由」的认证依赖名（契约收录范围）
+_PUBLIC_AUTH_DEPS = frozenset({
+    "get_current_user_or_api_key",
+    "get_user_or_none",  # a2a 软认证（JWT/session/api key 任一；None 交给内部 bot 鉴权）
+})
+
+
 def route_is_public(route) -> bool:
-    """路由是否对外：依赖链中含 `get_current_user_or_api_key` 即是对外安全路由。"""
+    """路由是否对外：依赖链中含对外认证依赖即收录进契约。"""
     if not isinstance(route, APIRoute):
         return False
     names = {getattr(d.call, "__name__", "") for d in _iter_deps(route.dependant)}
-    return "get_current_user_or_api_key" in names
+    return bool(names & _PUBLIC_AUTH_DEPS)
 
 
 def custom_openapi(app):

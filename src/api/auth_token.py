@@ -88,6 +88,20 @@ def verify_session_token(token: str) -> dict | None:
         return None
 
 
+def verify_session_token_for_repo(token: str, repo_key: str) -> dict | None:
+    """会话级临时 token 按仓库作用域校验（A2A / events 内部 agent 端点用）。
+
+    会话 token 绑定了 (repo_key, agent_type)，本次只校验仓库匹配——
+    即「该仓库执行期的 agent 凭据」才能调用该仓库的内部协议端点。
+    """
+    info = verify_session_token(token)
+    if not info or not repo_key:
+        return None
+    if info.get("repo_key") and info["repo_key"] == repo_key:
+        return info
+    return None
+
+
 def revoke_session_token(session_key: str) -> bool:
     """会话结束即失效：按 session_key 删除对应 token（不误删并发同类会话）。"""
     try:

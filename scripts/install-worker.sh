@@ -186,6 +186,26 @@ if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   fi
 fi
 
+# ===== 4.5 安装 grape CLI（独立项目 grape-cli；优先随包离线 wheel，失败回退在线）=====
+_install_grape_online() {
+  "$VENV/bin/pip" install -q --no-cache-dir \
+      git+https://gitcode.com/grape-dev/grape-cli.git 2>/dev/null \
+    && chmod +x "$VENV/bin/grape" 2>/dev/null || true \
+    && log "grape CLI 已装（在线）: $VENV/bin/grape" \
+    || log "警告: grape-cli 在线安装失败，agent 内暂无 \`grape\`；不影响 worker 运行"; return 0
+}
+if ls "$INSTALL_DIR/wheels"/grape-*.whl >/dev/null 2>&1; then
+  if "$VENV/bin/pip" install -q --no-index --find-links "$INSTALL_DIR/wheels" grape 2>/dev/null; then
+    chmod +x "$VENV/bin/grape" 2>/dev/null || true
+    log "grape CLI 已装（离线 wheel，随包）: $VENV/bin/grape"
+  else
+    log "警告: 离线 grape wheel 安装失败，回退在线..."
+    _install_grape_online
+  fi
+else
+  _install_grape_online
+fi
+
 # ===== 5. 写入接入配置（凭据 + 主系统地址，权限 600）=====
 # 保留已有 HERMES_CUSTOM_* 等 API key（重装不应覆盖本地配置）：
 # ① 备份旧文件中的 HERMES_CUSTOM 行 ② cat 覆盖 RUNTIME_*  ③ 追加回 HERMES_CUSTOM 行
@@ -293,6 +313,7 @@ ExecStart=$VENV/bin/python -m src.runtime.agent
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=PATH=$INSTALL_DIR/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$ENV_FILE
 
 [Install]
@@ -346,7 +367,7 @@ if [ "\$1" != "--no-daemon" ]; then
 fi
 
 cd "$INSTALL_DIR"
-export PATH="\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
+export PATH="$INSTALL_DIR/.venv/bin:\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
 set -a; . "$ENV_FILE"; set +a
 exec "$VENV/bin/python" -m src.runtime.agent
 EOF

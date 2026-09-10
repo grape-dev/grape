@@ -161,19 +161,11 @@ async def create_from_template(body: CreateTemplateRequest,
             host_warning = "托管配置失败"
         msg += f"。⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（{bot_username}）添加为维护者，然后手动托管仓库以完成自动化配置。"
 
-    # 4. 应用开发场景
-    #    apply_scene 同样是同步函数，用 to_thread 避免阻塞
-    scene_id = tpl.get("scene_id") or ctx.get("scene_id") or "default"
-    try:
-        from src.api.routes.scenes import ApplySceneRequest, apply_scene
-        await asyncio.to_thread(apply_scene, gitcode_login, repo_name, ApplySceneRequest(scene_id=scene_id), user)
-    except Exception as e:
-        log.warning(f"template apply scene failed: {e}")
-
-    # 5. 持久化开发场景 + 异步首次托管引导（仅模板创建触发）
+    # 4. 异步首次托管引导（仅模板创建触发）
+    #    dev_scene 已退役，不再写仓库级场景指针；场景数据由仓库托管时
+    #    apply_default_scene_to_repo 自动复刻，Issue 级场景由用户/智能推荐决定。
     try:
         from src.repo_key import to_repo_key
-        from src.user.db import set_repo_scene
         from src.api.onboarding import trigger_onboarding, cleanup_stale_repo_data
         repo_key = to_repo_key(full_name)
         owner = user.get("username", "") or gitcode_login
@@ -182,11 +174,10 @@ async def create_from_template(body: CreateTemplateRequest,
         #   events/issue_state/agent_tasks/sessions 等残留，导致新仓库前端界面混乱）
         if repo_created:
             cleanup_stale_repo_data(repo_key)
-        set_repo_scene(repo_key, scene_id)
         trigger_onboarding(repo_key, owner, template_id=body.template_id)
     except Exception as e:
         log.warning(f"template onboarding trigger failed: {e}")
 
-    return {"full_name": full_name, "webhook_id": webhook_id, "scene_id": scene_id,
+    return {"full_name": full_name, "webhook_id": webhook_id,
             "host_warning": host_warning,
             "message": msg}
