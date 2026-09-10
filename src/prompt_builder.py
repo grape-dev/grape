@@ -161,30 +161,41 @@ def _build_vod_scenes_section(agent_type: str, repo_key: str = "") -> str:
         return ""
 
 
-_advanced_options_cache: dict = {}  # repo_key -> (options_str, timestamp)
+_advanced_options_cache: dict = {}  # (repo_key, issue_id) -> (options_str, timestamp)
 
 
-def _build_scene_advanced_options(repo_key: str) -> str:
+def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
     """注入场景高级选项：工作分支 + 自定义配置（仅执行类 agent coding/qa/sre）。
 
-    读取 managed_repos.dev_scene → devops_pipeline_scene.advanced_options JSON，
-    拼装为 prompt 段落。无配置时返回空串。60s TTL 内存缓存减少 DB 查询。
+    优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene。
+    这样流水线跑到一半时，仓库场景被切换不会影响已在跑的 Issue。
+    读 devops_pipeline_scene.advanced_options JSON，拼装为 prompt 段落。无配置时返回空串。
+    60s TTL 内存缓存减少 DB 查询，缓存 key 为 (repo_key, issue_id)。
     """
     import time as _time
     now = _time.time()
-    cached = _advanced_options_cache.get(repo_key)
+    _cache_key = (repo_key, issue_id)
+    cached = _advanced_options_cache.get(_cache_key)
     if cached and now - cached[1] < 60:
         return cached[0]
     try:
         from src.session_manager import db, db_lock
-        # 1. 读 managed_repos.dev_scene 拿当前场景 scene_id
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
-            row = c.fetchone()
-        if not row or not row[0]:
+        # 1. 优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene
+        scene_id = ""
+        if issue_id:
+            try:
+                from src.api.session_store import get_issue_scene
+                scene_id, _ = get_issue_scene(repo_key, issue_id)
+            except Exception:
+                scene_id = ""
+        if not scene_id:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+                row = c.fetchone()
+            scene_id = (row[0] if row else "") or ""
+        if not scene_id:
             return ""
-        scene_id = row[0]
         # 2. 读 devops_pipeline_scene.advanced_options
         with db_lock:
             c = db.cursor()
@@ -212,7 +223,7 @@ def _build_scene_advanced_options(repo_key: str) -> str:
                 if _k:
                     lines.append(f"  - {_k}: {_v}")
         result = "\n".join(lines) if len(lines) > 1 else ""
-        _advanced_options_cache[repo_key] = (result, now)
+        _advanced_options_cache[_cache_key] = (result, now)
         return result
     except Exception as _e:
         from src.config import log as _log
@@ -572,7 +583,8 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
 
     # 场景高级选项注入（仅执行类 agent：coding/qa/sre）
     if agent_type in ("coding", "qa", "sre"):
-        _adv = _build_scene_advanced_options(repo_key)
+        _issue_id_for_scene = evt.get("issue_id", "") or ""
+        _adv = _build_scene_advanced_options(repo_key, _issue_id_for_scene)
         if _adv:
             parts.append(_adv)
 

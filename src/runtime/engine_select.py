@@ -365,12 +365,12 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
     """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。
     agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。
     username 非空时，user scope 只返回该用户的个人引擎。
-    repo scope 返回用户加入的所有仓库的仓库级引擎（不只当前仓库）。"""
+    repo scope 只返回当前仓库的仓库级引擎（按 repo_key 过滤 owner_id）。"""
     repo = _norm_repo(repo_key)
     db, lock = _db()
-    # 收集用户加入的仓库列表（用于 repo scope 过滤）
+    # 收集用户加入的仓库列表（用于 repo scope 无 repo_key 时的回退过滤）
     user_repos = set()
-    if username and scope == "repo":
+    if username and scope == "repo" and not repo:
         try:
             from src.session_manager import db as _udb, db_lock as _ulock
             from src.repo_key import from_repo_key
@@ -388,13 +388,25 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
         c = db.cursor()
         try:
             if scope == "repo":
-                c.execute(
-                    "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
-                    " COALESCE(r.alias,'')"
-                    "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
+                # 按当前仓库过滤：owner_id 可能带 gitcode: 前缀也可能不带，两种都匹配
+                if repo:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                        " COALESCE(r.alias,'')"
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' "
+                        "AND (rc.owner_id=? OR rc.owner_id=?) ORDER BY r.id",
+                        (repo, f"gitcode:{repo}"))
+                else:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                        " COALESCE(r.alias,'')"
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
                 # 本机引擎（credential_id=0）对所有人可见
                 c.execute(
@@ -436,8 +448,12 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
         if scope == "repo":
             from src.repo_key import from_repo_key
             _repo_owner = from_repo_key(r[9] or "")
-            # 只返回用户加入的仓库的仓库级引擎
-            if username and user_repos and _repo_owner not in user_repos:
+            if repo:
+                # 有 repo_key 时：只返回当前仓库的引擎
+                if _repo_owner != repo:
+                    continue
+            elif username and user_repos and _repo_owner not in user_repos:
+                # 无 repo_key 回退：只返回用户加入的仓库的引擎
                 continue
         # agent_type 标签过滤（r[10] = GROUP_CONCAT(tag) from engine_capabilities, e.g. "all" or "all,coding"）
         if agent_type:
