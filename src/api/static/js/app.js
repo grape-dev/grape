@@ -81,7 +81,13 @@ function loadAgentTypes() {
     } catch (e) { cachedRepos = null; }
 
     if (cachedRepos && !forceRefresh) {
-      renderReposFromData(cachedRepos);
+      // Issue #82: cachedRepos 路径也需 _currentView 守卫，与 API 回调路径一致——
+      // 用户已进入某页面时不应覆盖布局 DOM，只更新侧边栏下拉
+      if (window._currentView && window._currentView !== '') {
+        initSidebarRepos();
+      } else {
+        renderReposFromData(cachedRepos);
+      }
     }
 
     API.get('/repos/member').then(d => {
@@ -138,7 +144,9 @@ function loadAgentTypes() {
     $('mainView').style.zIndex = '';
     $('pageTitle').textContent = I18N.t('app.current_project');
 
-    if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
+    // Issue #82: 仅在完全无选中仓库时才默认选第一个；
+    // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
+    if (!current) {
       const r = managedRepos[0];
       if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
       else localStorage.removeItem('currentRepo');
