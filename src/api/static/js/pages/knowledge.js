@@ -865,7 +865,7 @@ function renderKnowledge() {
           <template v-if="detail.source === 'manual'">
             <!-- Agent 关联卡片（标签式，点击切换） -->
             <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
-              <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+              <div class="cd-h" style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
                 <h2 style="font-size:16px;font-weight:600">{{ t('ref_agent_title') }}</h2>
               </div>
               <div style="display:flex;flex-wrap:wrap;gap:8px">
@@ -881,7 +881,7 @@ function renderKnowledge() {
 
             <!-- 场景关联卡片 -->
             <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
-              <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+              <div class="cd-h" style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
                 <h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2>
                 <button class="kb-tag-add" style="font-size:10px" @click="openScenePopover($event)">+ {{ t('ref_add_scene') }}</button>
               </div>
@@ -1000,7 +1000,7 @@ function renderKnowledge() {
 
           <!-- 场景关联卡片（scn-card + 弹出层选择，同详情页面） -->
           <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
-            <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <div class="cd-h" style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
               <h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2>
               <button class="kb-tag-add" style="font-size:10px" @click="openCreateScenePopover($event)">+ {{ t('ref_add_scene') }}</button>
             </div>
