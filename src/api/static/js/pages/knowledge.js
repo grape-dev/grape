@@ -43,7 +43,6 @@ function renderKnowledge() {
         firstLoad: true,
         filter: { refStatus: '', query: '' },
         stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
-        showArchived: false,
         activeTab: 'system',
         page: 1,
         pageSize: 20,
@@ -67,9 +66,6 @@ function renderKnowledge() {
     computed: {
       filteredList() {
         let result = this.list;
-        if (!this.showArchived) {
-          result = result.filter(k => !k.archived);
-        }
         if (this.filter.refStatus === 'linked') {
           result = result.filter(k => k.refs && k.refs.length > 0);
         } else if (this.filter.refStatus === 'unlinked') {
@@ -717,9 +713,6 @@ function renderKnowledge() {
               </select>
               <input v-model="filter.query" :placeholder="t('search_placeholder')" class="kb-input" @keyup.enter="loadList">
               <button class="bt bt-o bt-s" @click="loadList">{{ t('search_btn') }}</button>
-              <label class="kb-checkbox-label">
-                <input type="checkbox" v-model="showArchived"> {{ t('show_archived') }}
-              </label>
               <div style="margin-left:auto;display:flex;gap:8px">
                 <button v-if="activeTab === 'user'" class="bt bt-o bt-s" style="color:var(--a);border-color:var(--a)" @click="openEntryModal">{{ t('entry_create') }}</button>
               </div>
@@ -737,7 +730,6 @@ function renderKnowledge() {
                   <div class="scn-card-head">
                     <div class="scn-ic" :class="sourceBarClass(k.source)">{{ sourceIcon(k.source) }}</div>
                     <div class="scn-card-title">{{ k.name || knowledgeTitle(k) }}</div>
-                    <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
                   <div class="scn-card-desc" :title="k.description || t('no_description')">{{ k.description || t('no_description') }}</div>
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;font-size:10px;min-height:17px">
@@ -753,8 +745,6 @@ function renderKnowledge() {
                     <div class="scn-card-btns">
                       <button class="bt bt-o bt-s" @click.stop="viewContent(k)">{{ t('view') }}</button>
                       <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click.stop="quickDelete(k)">{{ t('delete') }}</button>
-                      <button v-if="k.source !== 'manual' && !k.archived" class="bt bt-o bt-s" @click.stop="quickArchive(k)">{{ t('archive') }}</button>
-                      <button v-if="k.archived" class="bt bt-o bt-s" @click.stop="quickArchive(k)">{{ t('unarchive') }}</button>
                     </div>
                   </div>
                 </div>
@@ -787,7 +777,6 @@ function renderKnowledge() {
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
                   <span class="source-tag" :class="sourceClass(detail.source)" style="font-size:11px;padding:3px 12px">{{ sourceLabel(detail.source) }}</span>
                   <span v-if="detail.issue_tag" class="issue-tag">{{ detail.issue_tag }}</span>
-                  <span v-if="detail.archived" class="archived-tag">{{ t('archived') }}</span>
                 </div>
                 <h2 style="font-size:17px;font-weight:600;color:var(--t);margin-bottom:8px">{{ detail.name || knowledgeTitle(detail) }}</h2>
                 <div style="font-size:13px;color:var(--t2);line-height:1.5;margin-bottom:8px;font-weight:500;white-space:pre-line;word-break:break-word">
@@ -801,8 +790,6 @@ function renderKnowledge() {
             <div style="display:flex;align-items:center;gap:8px;padding-top:16px;border-top:1px solid var(--b);flex-wrap:wrap;justify-content:flex-end">
               <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" @click="editKnowledge">{{ t('edit_save') }}</button>
               <button v-if="detail.source === 'manual' && !detail.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click="deleteKnowledge">{{ t('delete') }}</button>
-              <button v-if="detail.source !== 'manual' && !detail.archived" class="bt bt-o bt-s" @click="toggleArchive">{{ t('archive') }}</button>
-              <button v-if="detail.archived" class="bt bt-o bt-s" @click="toggleArchive">{{ t('unarchive') }}</button>
             </div>
           </div>
 
