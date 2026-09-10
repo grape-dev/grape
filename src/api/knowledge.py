@@ -790,7 +790,7 @@ def _sync_baseline_files():
             if not os.path.isfile(fpath):
                 continue
 
-            file_path = os.path.relpath(fpath, WORKSPACE_DIR)
+            file_path = os.path.relpath(fpath, os.path.dirname(pi_dir))
 
             # 查 DB 是否已有 baseline 记录
             with db_lock:
