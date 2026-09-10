@@ -35,6 +35,7 @@ function renderKnowledge() {
         sceneScrollRight: false,
         createScenePopover: false,
         createSceneSearch: '',
+        createSceneTempSelected: [],
         list: [],
         loading: false,
         firstLoad: true,
@@ -566,7 +567,14 @@ function renderKnowledge() {
       openCreateScenePopover() {
         this.createScenePopover = true;
         this.createSceneSearch = '';
+        this.createSceneTempSelected = [...(this.createForm?.sceneSelected || [])];
         this.loadRepoScenes();
+      },
+      confirmCreateScenes() {
+        if (this.createForm) {
+          this.createForm.sceneSelected = [...this.createSceneTempSelected];
+        }
+        this.createScenePopover = false;
       },
       cancelCreate() {
         this.createForm = null;
@@ -578,9 +586,15 @@ function renderKnowledge() {
         else this.createForm.agentSelected.push(agentType);
       },
       toggleCreateScene(sceneId) {
+        // 场景列表里的 X 删除（直接删）
         const idx = this.createForm.sceneSelected.indexOf(sceneId);
         if (idx >= 0) this.createForm.sceneSelected.splice(idx, 1);
-        else this.createForm.sceneSelected.push(sceneId);
+      },
+      toggleCreateSceneTemp(sceneId) {
+        // 弹出层里切换临时选中
+        const idx = this.createSceneTempSelected.indexOf(sceneId);
+        if (idx >= 0) this.createSceneTempSelected.splice(idx, 1);
+        else this.createSceneTempSelected.push(sceneId);
       },
       async saveCreate() {
         if (!this.createForm.content.trim()) { app.showToast(this.t('entry_content')); return; }
@@ -945,10 +959,10 @@ function renderKnowledge() {
               <div v-if="availableCreateScenes.length === 0" class="ts t2" style="padding:24px;text-align:center">{{ t('ref_no_available') }}</div>
               <div v-else class="rgrid" style="gap:12px">
                 <div v-for="s in availableCreateScenes" :key="s.id" class="scn-card"
-                     :class="{ 'kb-pick-selected': createForm.sceneSelected.includes(s.id) }"
+                     :class="{ 'kb-pick-selected': createSceneTempSelected.includes(s.id) }"
                      style="cursor:pointer;position:relative"
-                     @click="toggleCreateScene(s.id)">
-                  <div v-if="createForm.sceneSelected.includes(s.id)" class="kb-pick-check">✓</div>
+                     @click="toggleCreateSceneTemp(s.id)">
+                  <div v-if="createSceneTempSelected.includes(s.id)" class="kb-pick-check">✓</div>
                   <div class="scn-card-bar bg-default"></div>
                   <div class="scn-card-body">
                     <div class="scn-card-head">
@@ -961,8 +975,11 @@ function renderKnowledge() {
               </div>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
-              <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: createForm.sceneSelected.length }) }}</span>
-              <button class="bt bt-o bt-s" @click="createScenePopover = false">{{ t('confirm') }}</button>
+              <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: createSceneTempSelected.length }) }}</span>
+              <div style="display:flex;gap:8px">
+                <button class="bt bt-o bt-s" @click="createScenePopover = false">{{ t('cancel') }}</button>
+                <button class="bt bt-p bt-s" @click="confirmCreateScenes">{{ t('confirm') }}</button>
+              </div>
             </div>
           </div>
         </div>
