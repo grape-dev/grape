@@ -742,10 +742,10 @@ function renderKnowledge() {
                   </div>
                   <div class="scn-card-desc" :title="k.description || t('no_description')">{{ k.description || t('no_description') }}</div>
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;font-size:10px;min-height:17px">
-                    <span v-if="sceneRefCount(k) > 0" class="kb-ref-pill" :data-names="sceneNames(k).join('、')" @click.stop="viewContent(k)">
+                    <span v-if="sceneRefCount(k) > 0" class="kb-ref-pill" :data-names="'场景：' + sceneNames(k).join('、')" @click.stop="viewContent(k)">
                       {{ t('scenes_unit') }}{{ sceneRefCount(k) }}
                     </span>
-                    <span v-if="agentRefCount(k) > 0" class="kb-ref-pill" :data-names="agentNames(k).join('、')" @click.stop="viewContent(k)">
+                    <span v-if="agentRefCount(k) > 0" class="kb-ref-pill" :data-names="'Agent：' + agentNames(k).join('、')" @click.stop="viewContent(k)">
                       Agent {{ agentRefCount(k) }}
                     </span>
                   </div>
