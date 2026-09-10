@@ -1830,3 +1830,29 @@ WHERE r.enabled = 1
 - issue_agent scope 按 issue_num + agent_type 精确匹配 ✅
 - manual scope 按 ref 表关联精确注入 ✅
 - 无 Issue 场景只注入全局 ✅
+
+### 6.26 前端防重复提交
+
+**问题**：用户快速连点写操作按钮（创建/保存/删除/确认）会产生重复请求和重复数据。
+
+**方案**：写操作按钮点击后 `disabled` + loading 状态，请求完成后恢复。不加 setTimeout 延时——用请求生命周期控制（async/await）。超时 10s 自动恢复 + 提示"请求超时请重试"。
+
+**适用按钮**（仅写操作，读操作不需要）：
+- 新增知识"创建"按钮
+- 编辑"保存"按钮
+- 场景选择弹出层"确认"按钮
+- 删除按钮
+- Agent 标签 toggle（关联/取消关联）
+
+**不适用**（读操作，重复点击无害）：
+- 查询、搜索、排序
+- tab 切换
+- 分页器
+- 卡片"查看"（进入详情）
+
+**实现**：
+- data 加 `submitting: false` 状态
+- 写操作方法开头 `if (this.submitting) return; this.submitting = true`
+- `try { await api() } finally { this.submitting = false }`
+- 按钮模板 `:disabled="submitting"` + loading 文案切换
+- 超时兜底：`setTimeout(() => this.submitting = false, 10000)`
