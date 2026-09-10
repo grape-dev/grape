@@ -88,13 +88,16 @@ token 的**授权身份** = **repo_key + agent_type** → 天然限制为"该仓
 ### 2.5.1 平台凭据解析（user / bot，服务端代调平台时）
 
 > 服务端在收到会话 token 后若要**代 agent 调外部平台**（如 git-repo 统一接口 / git-credential），
-> 解析平台凭据**依据会话 token 的 `agent_type`**，不能一概 bot 优先（评审修正）：
+> 解析平台凭据**依据会话 token 的 `agent_type`**，不能一概 bot 优先（评审修正）。
+>
+> ⚠️ **用户级 API Key（`grape_`）/ Web JWT 不适用于 git-repo 类接口**（评审）——该接口仅服务会话级临时 token（agent/worker 专用），授权不符时 **403**：
 
 | 调用身份（`auth_type`/`agent_type`） | 平台凭据 | 说明 |
 |--------------------------------------|----------|------|
 | 会话 token · **chat** | **用户 gitcode token** | chat 以用户身份执行（`USER_GITCODE_TOKEN` 同源语义） |
 | 会话 token · **devops**（vod/issue/coding/qa/sre） | **仓库 bot token** | devops 以仓库身份执行（`BOT_GITCODE_TOKEN` 同源语义） |
-| JWT / API Key（用户级） | 优先**用户 gitcode token**，缺失回退 bot | 用户级身份 |
+| 会话 token · 其中一类缺失 | 交叉回退另一类 | — |
+| **JWT / API Key（用户级）** | —（**403**） | 不适用于 git-repo；仅用于其他对外业务 API |
 | 全部缺失 | 502 | — |
 
 - 实现：`src/api/git_repo_api._repo_token(owner, repo, user)`（git-repo / git-credential 共用）。

@@ -24,7 +24,9 @@ BOT = "bot_tok_123"
 @pytest.fixture(autouse=True)
 def _client(monkeypatch):
     app.dependency_overrides[get_current_user_or_api_key] = \
-        lambda: {"id": UID, "username": "git_tester"}
+        lambda: {"id": UID, "username": "git_tester", "auth_type": "session_token",
+                 "agent_type": "vod", "user_id": 0, "session_key": "s1",
+                 "repo_key": f"gitcode:{OWNER}/{REPO}"}
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -200,13 +202,17 @@ def test_repo_token_devops_session_uses_bot_token(monkeypatch):
     assert calls["bot"] >= 1 and calls["user"] == 0
 
 
-def test_repo_token_api_key_prefers_user_token(monkeypatch):
+def test_repo_token_api_key_not_applicable():
+    """评审：用户级 API Key 不适用于 git-repo 接口 → 403。"""
     import src.api.git_repo_api as m
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
-    monkeypatch.setattr("src.api.deps.get_user_token_with_refresh",
-                        lambda *a, **k: "USRTOK")
-    user = {"auth_type": "api_key", "id": 9, "username": "someone"}
-    assert _repo_token_call(user) == "USRTOK"
+    import pytest as _p
+    from fastapi import HTTPException
+    with _p.raises(HTTPException) as ei:
+        m._repo_token(OWNER, REPO, {"auth_type": "api_key", "id": 9, "username": "someone"})
+    assert ei.value.status_code == 403
+    with _p.raises(HTTPException) as ei2:
+        m._repo_token(OWNER, REPO, {"auth_type": "jwt", "id": 9, "username": "someone"})
+    assert ei2.value.status_code == 403
 
 
 def test_repo_token_all_missing_502(monkeypatch):
