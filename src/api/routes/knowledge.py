@@ -109,8 +109,9 @@ def _read_ws_file(repo_key: str, ws_rel: str) -> str:
         log.warning(f"OBS read failed for {repo_key}/{rel}: {e} — fallback to local")
 
     # 本地模式（OBS 未启用 / OBS miss）
-    full = os.path.normpath(os.path.join(WORKSPACE_DIR, rel))
-    if full != WORKSPACE_DIR and not full.startswith(WORKSPACE_DIR + os.sep):
+    base = _repo_base(repo_key)
+    full = os.path.normpath(os.path.join(base, rel))
+    if full != base and not full.startswith(base + os.sep):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
     ext = os.path.splitext(rel)[1].lower()
     if ext not in ALLOWED_EXTS:
