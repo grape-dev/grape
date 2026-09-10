@@ -110,5 +110,8 @@
   "ref_system_auto": "System knowledge loads automatically, no configuration needed",
   "no_description": "No description provided",
   "search_btn": "Search",
-  "entry_description": "Description (brief summary of this knowledge)"
+  "entry_description": "Description (brief summary of this knowledge)",
+  "entry_name": "Knowledge Name",
+  "entry_name_ph": "Enter a name (required)",
+  "name_required": "Knowledge name is required"
 }

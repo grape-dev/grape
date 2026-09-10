@@ -184,7 +184,7 @@ def read_knowledge(repo_key: str, agent_type: str = "", issue_num: int = 0) -> d
 def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "accepted",
                     agent_type: str = "", issue_num: int = 0,
                     source_seq: int = 0, created_by: str = "",
-                    source: str = "", description: str = "") -> str:
+                    source: str = "", description: str = "", name: str = "") -> str:
     """写入知识正文文件 + 登记索引行。返回文件绝对路径。
 
     Issue #67 改动：
@@ -279,6 +279,21 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
         elif scope == "member":
             description = ""  # 用户手动填写
 
+    # 自动生成 name（system/agent；manual 由调用方传入）
+    if not name and source != "manual":
+        _agent_name = {
+            "vod": "VOD", "issue": "Issue", "coding": "Coding",
+            "qa": "QA", "sre": "SRE", "chat": "Chat",
+        }
+        if scope == "baseline":
+            name = "项目基线分析"
+        elif scope == "project":
+            name = f"项目知识 - {_agent_name.get(agent_type, agent_type or 'Agent')}"
+        elif scope == "issue":
+            name = f"Issue #{issue_num} 知识"
+        elif scope == "issue_agent":
+            name = f"Issue #{issue_num} - {_agent_name.get(agent_type, agent_type or 'Agent')} 知识"
+
     knowledge_id = None
     with db_lock:
         c = db.cursor()
@@ -292,18 +307,18 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             # 有记录 → UPDATE（不插入新记录）
             c.execute(
                 "UPDATE agent_shared_knowledge "
-                "SET content_hash=?, obs_key=?, source_seq=?, description=?, updated_at=datetime('now') "
+                "SET content_hash=?, obs_key=?, source_seq=?, description=?, name=?, updated_at=datetime('now') "
                 "WHERE id=?",
-                (content_hash, obs_key, source_seq, description, existing[0])
+                (content_hash, obs_key, source_seq, description, name, existing[0])
             )
             knowledge_id = existing[0]
         else:
             # 无记录 → INSERT
             c.execute(
                 "INSERT INTO agent_shared_knowledge "
-                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (scope, repo_key, agent_type, issue_num, rel_path, obs_key, content_hash, status, source_seq, created_by, source, description)
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description, name) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (scope, repo_key, agent_type, issue_num, rel_path, obs_key, content_hash, status, source_seq, created_by, source, description, name)
             )
             knowledge_id = c.lastrowid
         db.commit()

@@ -395,7 +395,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
         offset = (page - 1) * page_size
         rows = c.execute(
             f"SELECT id, scope, repo_key, agent_type, issue_num, file_path, status, "
-            f"source_seq, created_by, created_at, obs_key, content_hash, updated_at, source, archived, description "
+            f"source_seq, created_by, created_at, obs_key, content_hash, updated_at, source, archived, description, name "
             f"FROM agent_shared_knowledge {where} "
             f"ORDER BY id DESC LIMIT ? OFFSET ?",
             params + [page_size, offset]
@@ -419,6 +419,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
             "source": r[13] or "",
             "archived": r[14] or 0,
             "description": r[15] or "",
+            "name": r[16] or "",
             "issue_tag": f"Issue #{r[4]}" if r[4] and r[1] in ("issue", "issue_agent") else "",
         })
 
@@ -766,10 +767,12 @@ class KnowledgeEntryBody(BaseModel):
     content: str = ""
     agent_type: str = ""
     description: str = ""
+    name: str = ""
 
 class KnowledgeUpdateBody(BaseModel):
     content: str = ""
     description: str = ""
+    name: str = ""
 
 class KnowledgeRefBody(BaseModel):
     scene_id: str = ""
@@ -813,7 +816,7 @@ def _get_knowledge_by_id(knowledge_id: int):
         row = db.cursor().execute(
             "SELECT id, scope, repo_key, agent_type, issue_num, file_path, "
             "status, source_seq, created_by, created_at, obs_key, content_hash, "
-            "updated_at, source, archived, description "
+            "updated_at, source, archived, description, name "
             "FROM agent_shared_knowledge WHERE id = ?",
             (knowledge_id,)
         ).fetchone()
@@ -828,6 +831,7 @@ def _get_knowledge_by_id(knowledge_id: int):
         "content_hash": row[11] or "", "updated_at": row[12] or "",
         "source": row[13] or "", "archived": row[14] or 0,
         "description": row[15] or "",
+        "name": row[16] or "",
     }
 
 
@@ -930,6 +934,8 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_cu
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     if not body.repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
+    if not (body.name or "").strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "name 必填"})
 
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(body.repo)
@@ -963,9 +969,9 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_cu
         c = db.cursor()
         c.execute(
             "INSERT INTO agent_shared_knowledge "
-            "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("member", repo_key, body.agent_type or "", 0, rel, obs_key, content_hash, "accepted", 0, username, "manual", body.description or "")
+            "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description, name) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("member", repo_key, body.agent_type or "", 0, rel, obs_key, content_hash, "accepted", 0, username, "manual", body.description or "", body.name.strip())
         )
         kid = c.lastrowid
         db.commit()
@@ -1027,6 +1033,7 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
         "obs_key": row["obs_key"], "content": content,
         "archived": row["archived"], "created_by": row["created_by"],
         "created_at": row["created_at"], "description": row.get("description", ""),
+        "name": row.get("name", ""),
         "refs": ref_list,
     }
 
@@ -1045,15 +1052,25 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
 
     _update_knowledge_content(knowledge_id, row, body.content)
 
-    # 更新描述
-    if body.description is not None:
+    # 更新描述 + 名称
+    if body.description is not None or body.name is not None:
         from src.session_manager import db, db_lock
         with db_lock:
-            db.cursor().execute(
-                "UPDATE agent_shared_knowledge SET description=? WHERE id=?",
-                (body.description, knowledge_id)
-            )
-            db.commit()
+            sets = []
+            vals = []
+            if body.description is not None:
+                sets.append("description=?")
+                vals.append(body.description)
+            if body.name is not None and body.name.strip():
+                sets.append("name=?")
+                vals.append(body.name.strip())
+            if sets:
+                vals.append(knowledge_id)
+                db.cursor().execute(
+                    f"UPDATE agent_shared_knowledge SET {', '.join(sets)} WHERE id=?",
+                    vals
+                )
+                db.commit()
 
     return {"ok": True, "message": "知识已更新"}
 

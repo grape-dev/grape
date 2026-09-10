@@ -30,6 +30,7 @@ function renderKnowledge() {
       return {
         view: 'list',
         editMode: false,
+        editForm: null,
         createForm: null,
         sceneScrollLeft: false,
         sceneScrollRight: false,
@@ -461,6 +462,11 @@ function renderKnowledge() {
 
       // 编辑
       editKnowledge() {
+        this.editForm = {
+          name: this.detail.name || '',
+          content: this.detail.content || '',
+          description: this.detail.description || ''
+        };
         this.editMode = true;
       },
       cancelEdit() {
@@ -478,10 +484,12 @@ function renderKnowledge() {
       },
       async saveEdit() {
         if (!this.detail) return;
+        if (!this.editForm.name.trim()) { app.showToast(this.t('name_required')); return; }
         try {
           await API.put('/knowledge/' + this.detail.id, {
-            content: this.detail.content || '',
-            description: this.detail.description || ''
+            content: this.editForm.content || '',
+            description: this.editForm.description || '',
+            name: this.editForm.name.trim()
           });
           app.showToast(this.t('knowledge_updated'));
           this.editMode = false;
@@ -550,6 +558,7 @@ function renderKnowledge() {
       // 新增知识
       openEntryModal() {
         this.createForm = {
+          name: '',
           title: '',
           description: '',
           content: '',
@@ -597,13 +606,15 @@ function renderKnowledge() {
         else this.createSceneTempSelected.push(sceneId);
       },
       async saveCreate() {
+        if (!this.createForm.name.trim()) { app.showToast(this.t('name_required')); return; }
         if (!this.createForm.content.trim()) { app.showToast(this.t('entry_content')); return; }
         try {
           const d = await API.post('/knowledge/entry', {
             repo: this.currentRepo(),
             content: this.createForm.content,
             agent_type: '',
-            description: this.createForm.description || ''
+            description: this.createForm.description || '',
+            name: this.createForm.name.trim()
           });
           const kid = d.id || d.knowledge_id;
           // 批量关联 Agent + 场景
@@ -696,7 +707,7 @@ function renderKnowledge() {
                 <div class="scn-card-body">
                   <div class="scn-card-head">
                     <div class="scn-ic" :class="sourceBarClass(k.source)">{{ sourceIcon(k.source) }}</div>
-                    <div class="scn-card-title">{{ knowledgeTitle(k) }}</div>
+                    <div class="scn-card-title">{{ k.name || knowledgeTitle(k) }}</div>
                     <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
                   <div class="scn-card-desc">{{ k.description || t('no_description') }}</div>
@@ -742,7 +753,7 @@ function renderKnowledge() {
                   <span v-if="detail.issue_tag" class="issue-tag">{{ detail.issue_tag }}</span>
                   <span v-if="detail.archived" class="archived-tag">{{ t('archived') }}</span>
                 </div>
-                <h2 style="font-size:17px;font-weight:600;color:var(--t);margin-bottom:8px">{{ knowledgeTitle(detail) }}</h2>
+                <h2 style="font-size:17px;font-weight:600;color:var(--t);margin-bottom:8px">{{ detail.name || knowledgeTitle(detail) }}</h2>
                 <div style="font-size:13px;color:var(--t2);line-height:1.5;margin-bottom:8px;font-weight:500">
                   {{ detail.description || t('no_description') }}
                 </div>
@@ -878,8 +889,15 @@ function renderKnowledge() {
             <div class="cd-h" style="margin-bottom:16px">
               <h2 style="font-size:16px;font-weight:600">{{ t('edit_title') }}</h2>
             </div>
-            <input v-model="detail.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%;margin-bottom:12px">
-            <textarea v-model="detail.content" rows="20" class="kb-textarea"></textarea>
+            <div style="margin-bottom:12px">
+              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_name') }} *</label>
+              <input v-model="editForm.name" :placeholder="t('entry_name_ph')" class="kb-input" style="width:100%" maxlength="256">
+            </div>
+            <div style="margin-bottom:12px">
+              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_description') }}</label>
+              <input v-model="editForm.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%">
+            </div>
+            <textarea v-model="editForm.content" rows="20" class="kb-textarea"></textarea>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--b)">
               <button class="bt bt-o bt-s" @click="cancelEdit">{{ t('cancel') }}</button>
               <button class="bt bt-p bt-s" @click="saveEdit">{{ t('confirm') }}</button>
@@ -895,6 +913,10 @@ function renderKnowledge() {
           <div class="cd" style="padding:28px 32px;margin-bottom:20px;border-radius:20px">
             <div class="cd-h" style="margin-bottom:16px">
               <h2 style="font-size:16px;font-weight:600">{{ t('entry_title') }}</h2>
+            </div>
+            <div style="margin-bottom:12px">
+              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_name') }} *</label>
+              <input v-model="createForm.name" :placeholder="t('entry_name_ph')" class="kb-input" style="width:100%" maxlength="256">
             </div>
             <div style="margin-bottom:12px">
               <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_description') }}</label>
