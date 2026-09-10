@@ -272,9 +272,8 @@ window._jumpToNodeEvent = function(seq) {
       localStorage.setItem('currentRepo', JSON.stringify(repoObj));
     }
   }
-  if (typeof app !== 'undefined' && app.nav) {
-    app.nav('event', seq);
-  }
+  // 直接修改 hash 跳转事件详情页（#event/seq），触发 hashchange → app.nav('event', seq)
+  window.location.hash = '#event/' + seq;
 };
 
 // 点击流水线卡片区域 → 跳转到流水线页面
