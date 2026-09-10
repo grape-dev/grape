@@ -261,7 +261,8 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          page: int = Query(1, description="页码，从1开始"),
                          page_size: int = Query(50, description="每页条数，默认50"),
                          show_archived: bool = Query(False, description="是否包含归档知识"),
-                         sort: str = Query("", description="排序：latest=按更新时间倒序")):
+                         sort: str = Query("", description="排序：latest=按更新时间倒序"),
+                         q: str = Query("", description="搜索关键词（匹配 name/description）")):
     """统一知识列表——只查 DB 返回分页列表（不含统计，统计走独立接口）。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
@@ -279,6 +280,9 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
     if source:
         where += " AND source=?"
         params.append(source)
+    if q:
+        where += " AND (name LIKE ? OR description LIKE ?)"
+        params.extend([f"%{q}%", f"%{q}%"])
 
     with db_lock:
         c = db.cursor()
