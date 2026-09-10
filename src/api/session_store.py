@@ -107,21 +107,18 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
 
 
 def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
-    """读取 Issue 级开发场景。空则回退到仓库默认场景（managed_repos.dev_scene）。
+    """读取 Issue 级开发场景。issue_state.scene_id 为空时返回 ("", 0)。
 
-    方案 B：无「default」场景，仓库无场景时返回 ("", 0)。
+    不再回退到仓库级 dev_scene——新架构下每个 Issue 独立选场景（用户手选 / 智能推荐），
+    仓库级默认场景已退役。
     返回 (scene_id, scene_user_id)：
     - issue_state.scene_id 非空 → 用该值 + scene_user_id
-    - 否则回退 managed_repos.dev_scene（scene_user_id=0）
+    - 否则返回 ("", 0)，由调用方决定走智能推荐
     """
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
-    try:
-        from src.user.db import get_repo_scene
-        return get_repo_scene(repo_key) or "", 0
-    except Exception:
-        return "", 0
+    return "", 0
 
 
 def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int = 0):

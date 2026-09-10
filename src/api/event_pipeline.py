@@ -47,12 +47,6 @@ def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = 
     try:
         from src.api.pipeline_config import get_node_by_tag
         if not scene_id:
-            try:
-                from src.user.db import get_repo_scene
-                scene_id = get_repo_scene(repo_key) or ""
-            except Exception:
-                scene_id = ""
-        if not scene_id:
             return ""
         node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
         if node:

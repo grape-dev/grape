@@ -235,26 +235,6 @@ function renderDashboard(data) {
 
     el.innerHTML = html;
 
-    // 场景应用（从卡片快捷应用）
-    window._applySceneFromCard = function(sceneId, e) {
-      if (e) e.stopPropagation();
-      API.post('/scenes/apply/' + owner + '/' + name, {scene_id: sceneId}).then(r => {
-        app.showToast(r.message || I18N.t('dashboard.scene_applied'));
-        // 局部更新详情页按钮状态（不跳回列表）
-        const btn = document.getElementById('sceneApplyBtn');
-        if (btn) {
-          const badge = document.createElement('span');
-          badge.className = 'scn-applied-badge';
-          badge.id = 'sceneApplyBadge';
-          badge.style.cssText = 'margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500';
-          badge.textContent = '✓ ' + (I18N.t('dashboard.current_default')||'当前默认');
-          btn.replaceWith(badge);
-        } else {
-          // 卡片列表里点的，刷新列表
-          API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
-        }
-      }).catch(err => app.showToast(I18N.t('dashboard.apply_failed', {msg: (err.detail?.message || err.message)})));
-    };
   }
 
   // 删除模式切换
@@ -362,10 +342,7 @@ function _renderLocalSceneCard(s, isApplied, idx) {
     <div class="scn-row-chain">${chain}</div>
     <div class="scn-row-right">
       <span class="scn-branch-tag">🌿 ${workBranch}</span>
-      ${isApplied
-        ? `<span class="scn-applied-badge">✓ ${I18N.t('dashboard.current_default')||'当前默认'}</span>`
-        : `<button class="ap-btn" onclick="_applySceneFromCard('${s.id}',event)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`
-      }
+      ${isApplied ? '' : ''}
     </div>
   </div>`;
 }
@@ -590,7 +567,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
         <div id="sceneNameDisplay" style="font-size:20px;font-weight:700;cursor:text;padding:2px 6px;margin:-2px -6px 4px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneName')">${sceneName}</div>
         <div id="sceneDescDisplay" style="font-size:13px;color:#86868b;cursor:text;padding:2px 6px;margin:-2px -6px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneDesc')">${sceneDesc || '<span style="color:#c7c7cc;font-style:italic">' + (I18N.t('dashboard.desc_optional')||'描述（可选）') + '</span>'}</div>
       </div>
-      ${isApplied ? '<span class="scn-applied-badge" id="sceneApplyBadge" style="margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500">✓ ' + (I18N.t('dashboard.current_default')||'当前默认') + '</span>' : `<button class="ap-btn" id="sceneApplyBtn" style="margin-top:4px" onclick="_applySceneFromCard('${scene.id}',null)">${I18N.t('dashboard.set_default')||'设为默认'}</button>`}
+
       ${isCustomScene ? `<button class="ap-btn ap-btn-d" style="margin-top:4px" onclick="_confirmDeleteScene('${scene.id}','${(scene.display_name||scene.name||'').replace(/'/g,'\\\'')}',null)">${I18N.t('common.delete')||'删除'}</button>` : ''}
     </div>
   </div>`;
@@ -777,23 +754,6 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   };
 
   // 详情页操作函数
-  window._applySceneFromCard = function(sceneId, e) {
-    if (e) e.stopPropagation();
-    API.post('/scenes/apply/' + owner + '/' + name, {scene_id: sceneId}).then(r => {
-      app.showToast(r.message || I18N.t('dashboard.scene_applied'));
-      // 原地将设为默认按钮变为当前默认标记，不刷新整个页面
-      const btn = document.getElementById('sceneApplyBtn');
-      if (btn) {
-        const badge = document.createElement('span');
-        badge.className = 'scn-applied-badge';
-        badge.id = 'sceneApplyBadge';
-        badge.style.cssText = 'margin-top:4px;padding:6px 14px;font-size:12px;font-weight:500';
-        badge.textContent = '✓ ' + (I18N.t('dashboard.current_default')||'当前默认');
-        btn.replaceWith(badge);
-      }
-    }).catch(err => app.showToast(I18N.t('dashboard.apply_failed', {msg: (err.detail?.message || err.message)})));
-  };
-
   window._deleteSceneFromDetail = function(sceneId) {
     const sn = scene.display_name || scene.name;
     const overlay = document.createElement('div');

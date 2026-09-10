@@ -445,12 +445,6 @@ def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
             description=official.get("description", "") or "",
             repo_key=repo_key, nodes=official.get("nodes") or [],
             onboarding=official.get("onboarding", "repo-onboarding"))
-        # 同步写 managed_repos.dev_scene
-        try:
-            from src.user.db import set_repo_scene
-            set_repo_scene(repo_key, default_name)
-        except Exception as _e:
-            log.warning(f"apply_default_scene_to_repo: set dev_scene failed: {_e}")
         log.info(f"Applied default scene '{default_name}' to {repo_key}")
         return True
     except Exception as e:
