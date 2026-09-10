@@ -967,18 +967,8 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
         except Exception:
             pass
 
-    # 2. 成员上传文档摘要（保持现有逻辑）
-    try:
-        from src.api.knowledge import member_files
-        mf = member_files(repo_key)
-        if mf:
-            found = True
-            lines.append("[member 级] 项目成员上传文档：")
-            for rel in sorted(mf):
-                body = mf[rel].strip()
-                lines.append(f"- {rel.split('/')[-1]}: {body[:200]}{'…' if len(body) > 200 else ''}")
-    except Exception:
-        pass
+    # 2. member_files 全量扫描已移除——Issue #67 改用 scene_knowledge_ref 表精确注入
+    # 未关联场景/Agent 的知识不会被注入（符合预期：用户没关联 = 不需要注入）
 
     if not found:
         return "", []
