@@ -1317,24 +1317,22 @@ def _migrate_knowledge_issue67():
             "UPDATE agent_shared_knowledge SET source = 'manual' "
             "WHERE scope = 'member' AND (source IS NULL OR source = '')")
 
-        # 2. 重复记录去重——每个 scope + repo_key + agent_type + issue_num 只保留最新一条
+        # 2. 重复记录去重——每个 scope + repo_key + agent_type + issue_num + file_path 只保留最新一条
         if _is_mysql:
-            # MySQL 不允许子查询引用要删除的表，用临时表
             c.execute(
                 "CREATE TEMPORARY TABLE IF NOT EXISTS _keep_ids AS "
                 "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-                "GROUP BY repo_key, scope, agent_type, issue_num")
+                "GROUP BY repo_key, scope, agent_type, issue_num, file_path")
             c.execute(
                 "DELETE FROM agent_shared_knowledge "
                 "WHERE id NOT IN (SELECT keep_id FROM _keep_ids)")
             c.execute("DROP TEMPORARY TABLE IF EXISTS _keep_ids")
         else:
-            # SQLite 支持子查询引用要删除的表
             c.execute(
                 "DELETE FROM agent_shared_knowledge "
                 "WHERE id NOT IN ("
                 "  SELECT MAX(id) FROM agent_shared_knowledge "
-                "  GROUP BY repo_key, scope, agent_type, issue_num)")
+                "  GROUP BY repo_key, scope, agent_type, issue_num, file_path)")
 
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
