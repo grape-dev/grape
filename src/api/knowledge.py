@@ -209,9 +209,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
         source = "system" if scope == "baseline" else "agent"
 
     file_path = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-    _owner, _rname = _owner_repo(repo_key)
-    _base = os.path.join(WORKSPACE_DIR, _owner, _rname)
-    rel_path = os.path.relpath(file_path, _base)
+    rel_path = os.path.relpath(file_path, WORKSPACE_DIR)
 
     # rejected 只登记索引，不落文件——有已存在记录则跳过
     if status == "rejected":
@@ -447,15 +445,10 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
                 (scene_id, agent_type, issue_num, repo_key)
             ).fetchall()
 
-        _owner, _rname = _owner_repo(repo_key)
-        _base = os.path.join(WORKSPACE_DIR, _owner, _rname)
         for kid, obs_key, file_path in rows:
             content = _read_entry_content(repo_key, obs_key or "", file_path or "")
             if content:
-                # rel 相对 WORKSPACE_DIR（worker 物化用）
-                full = os.path.join(_base, file_path or "")
-                rel = os.path.relpath(full, WORKSPACE_DIR) if os.path.isabs(full) else file_path
-                files[rel] = content
+                files[file_path or ""] = content
     except Exception:
         # 向后兼容：ref 表不存在时回退到 read_knowledge 三级 scope
         for scope, content in read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num).items():
@@ -813,7 +806,7 @@ def _sync_baseline_files():
             if not os.path.isfile(fpath):
                 continue
 
-            file_path = os.path.relpath(fpath, os.path.dirname(pi_dir))
+            file_path = os.path.relpath(fpath, WORKSPACE_DIR)
 
             # 查 DB 是否已有 baseline 记录
             with db_lock:

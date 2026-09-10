@@ -327,7 +327,7 @@ class TestAgentScopedUpload:
         assert r.status_code == 200, r.text
         fp = r.json()["file_path"]
         assert "project-info/member/" in fp
-        assert os.path.isfile(os.path.join(WORKSPACE_DIR, "org", "test", fp.replace("/", os.sep)))
+        assert os.path.isfile(os.path.join(WORKSPACE_DIR, fp.replace("/", os.sep)))
 
     def test_enqueue_only_packs_own_agent_dir(self):
         from src.config import WORKSPACE_DIR
