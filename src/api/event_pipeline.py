@@ -821,26 +821,26 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if event_type == "issue_opened":
         agent_type = "vod"
         log.info(f"Pipeline: issue_opened -> VOD (stage init)")
-        # 智能推荐触发判断：allow_scene_override=True 时走推荐流程
-        # Task Center 创建 Issue 后 GitCode webhook 可能比 set_scene_override_flag 先到达，
-        # 所以最多重试 3 次、每次间隔 0.5s，等 issue_state 写入标记
+        # 判断是否需要推荐：issue_state 有 scene_id → 用户已选场景，跳过推荐
+        # GitCode 直接创建的 Issue 无 scene_id → 走智能推荐
+        # Task Center 创建 Issue 后 GitCode webhook 可能比 set_issue_scene 先到达，
+        # 最多重试 3 次、每次间隔 0.5s，等 scene_id 写入
         _rid_early = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
-        log.info(f"Pipeline: issue_opened recommend check, rid={_rid_early}, repo_key={repo_key}")
+        _is_scene_recommend = True  # 默认走推荐
         if _rid_early:
             import time as _time
             for _attempt in range(3):
                 try:
-                    from src.api.session_store import get_scene_override_flag
-                    _flag = get_scene_override_flag(repo_key, _rid_early)
-                    log.info(f"Pipeline: issue_opened recommend check, attempt={_attempt+1}, allow_scene_override={_flag}")
-                    if _flag:
-                        _is_scene_recommend = True
-                        log.info(f"Pipeline: issue_opened -> 智能推荐模式 for {_rid_early}")
+                    from src.api.session_store import get_issue_scene
+                    _existing_scene, _ = get_issue_scene(repo_key, _rid_early)
+                    if _existing_scene:
+                        _is_scene_recommend = False
+                        log.info(f"Pipeline: issue_opened 已有场景 {_existing_scene}（attempt={_attempt+1}），跳过推荐")
                         break
                     if _attempt < 2:
                         _time.sleep(0.5)
                 except Exception as _re:
-                    log.warning(f"Pipeline: issue_opened recommend check failed: {_re}")
+                    log.warning(f"Pipeline: issue_opened scene check failed: {_re}")
                     break
         # project-info 后台刷新（服务端 codegraph 生成基线，不阻塞 webhook；见 codegraph-builder-plan.md）
         try:

@@ -65,9 +65,8 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
 
     原实现 INSERT OR REPLACE ... VALUES ((SELECT id FROM issue_state ...)) 在
     MySQL 下报 1093（自引用子查询），改为先查后改/插。
-    新建记录时从 managed_repos.dev_scene 带入 scene_id（确保场景引擎配置生效）。
+    scene_id 初始为空，由 Task Center set_issue_scene 或智能推荐写入。
     """
-    _init_scene = ""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
@@ -78,20 +77,14 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                 (stage, owner_agent, assignee, a2a_seq, row[0]),
             )
         else:
-            # 新建：从 managed_repos.dev_scene 带入 scene_id
-            try:
-                from src.user.db import get_repo_scene
-                _init_scene = get_repo_scene(repo_key) or ""
-            except Exception:
-                pass
             c.execute(
                 "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, scene_id, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-                (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, _init_scene),
+                "VALUES (?, ?, ?, ?, ?, ?, '', datetime('now'))",
+                (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq),
             )
         db.commit()
     from src.config import log
-    _scene_log = _init_scene if not row else '(existing)'
+    _scene_log = '(existing)' if row else '(empty)'
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee} scene={_scene_log}")
 
 
@@ -149,38 +142,6 @@ def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: 
         db.commit()
     from src.config import log
     log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
-
-
-def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
-    """设置 Issue 是否允许 VOD 覆盖场景（allow_scene_override），幂等 upsert。"""
-    val = 1 if allowed else 0
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
-        row = c.fetchone()
-        if row:
-            c.execute("UPDATE issue_state SET allow_scene_override=? WHERE id=?", (val, row[0]))
-        else:
-            c.execute(
-                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, allow_scene_override, updated_at) "
-                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
-                (repo_key, issue_id, val))
-        db.commit()
-    log.info(f"SceneOverride: repo={repo_key} issue={issue_id} allowed={val}")
-
-
-def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
-    """读取 Issue 是否允许 VOD 覆盖场景。默认 False。"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?",
-                (repo_key, issue_id))
-            row = c.fetchone()
-            return bool(row[0]) if row and row[0] else False
-    except Exception:
-        return False
 
 
 def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):

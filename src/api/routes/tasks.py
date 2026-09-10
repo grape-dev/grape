@@ -983,25 +983,17 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                                          "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
         issue_num = int(n)
         created = True
-    # 2) 场景选择 + 智能推荐开关 — 必须在 ensure_issue_task 之前写入 issue_state，
-    #    否则 GitCode webhook 触发的 run_pipeline 推荐判断读不到 allow_scene_override（竞态）
-    #    - 选具体场景 → 关闭开关，写入用户选择的 scene_id
-    #    - 选智能推荐（vod-auto）→ 打开开关，用 dev_scene 初始值，触发智能推荐流程
+    # 2) 场景选择：用户选了具体场景 → 写入 scene_id（issue_opened 读到有值则跳过推荐）
+    #    选智能推荐（vod-auto）或留空 → 不写 scene_id → issue_opened 走智能推荐
     try:
-        from src.api.session_store import set_scene_override_flag
         if body.scene_id and body.scene_id != "vod-auto":
-            # 用户指定场景：关闭开关，写入 scene_id
-            set_scene_override_flag(repo_key, f"#{issue_num}", False)
             from src.api.session_store import set_issue_scene
             from src.runtime.engine_select import _repo_user_id
             scene_uid = _repo_user_id(repo_key) or 0
             set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
-        else:
-            # 选智能推荐（vod-auto）：打开开关，用 dev_scene 初始值，触发智能推荐流程
-            set_scene_override_flag(repo_key, f"#{issue_num}", True)
     except Exception as _e:
         from src.config import log
-        log.warning(f"create_task: scene override/scene_id failed: {_e}")
+        log.warning(f"create_task: set_issue_scene failed: {_e}")
     # 3) 自动检测多任务模式：根据场景的 issue skill 是否为 issue-multitask
     _auto_subtask_mode = 0
     if body.scene_id and body.scene_id != "vod-auto":
