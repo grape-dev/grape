@@ -113,5 +113,8 @@
   "entry_description": "知识描述（简述这条知识的用途）",
   "entry_name": "知识名称",
   "entry_name_ph": "请输入知识名称（必填）",
-  "name_required": "知识名称必填"
+  "name_required": "知识名称必填",
+  "import_file": "导入文件",
+  "file_too_large": "文件超过 10KB 限制",
+  "file_imported": "文件已导入"
 }

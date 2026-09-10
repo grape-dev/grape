@@ -693,7 +693,7 @@ async def knowledge_sync_loop():
                         continue
                     try:
                         # 兼容 file_path 格式：write_knowledge/builder 用 WORKSPACE_DIR 相对（owner/repo/...），
-                        # upload_knowledge 用 repo_base 相对（project-info/...）
+                        # member 文档：用 file_path 生成
                         owner, rname = _owner_repo(repo_key)
                         if file_path.startswith(f"{owner}/{rname}/"):
                             full_path = os.path.join(WORKSPACE_DIR, file_path)
@@ -709,7 +709,7 @@ async def knowledge_sync_loop():
                         if content:
                             # 按 scope 生成 storage_key——member/baseline 不走 knowledge_storage_key
                             if scope == "member":
-                                # member 文档：用 file_path 生成（和 upload_knowledge 一致）
+                                # member 文档：用 file_path 生成 storage_key
                                 storage_key = f"knowledge/{owner}/{rname}/{file_path.replace('project-info/', '', 1)}"
                             elif scope == "baseline":
                                 # 基线文件：用 file_path 生成（和 builder.py 一致）

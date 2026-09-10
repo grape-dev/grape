@@ -472,6 +472,30 @@ function renderKnowledge() {
       cancelEdit() {
         this.editMode = false;
       },
+      importFile(event, target) {
+        const file = event.target.files[0];
+        if (!file) return;
+        if (file.size > 10240) {
+          app.showToast(this.t('file_too_large'));
+          event.target.value = '';
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const text = e.target.result || '';
+          if (target === 'create') {
+            this.createForm.content = text;
+            if (!this.createForm.name) {
+              this.createForm.name = file.name.replace(/\.\w+$/, '').replace(/[-_]/g, ' ');
+            }
+          } else {
+            this.editForm.content = text;
+          }
+          app.showToast(this.t('file_imported'));
+        };
+        reader.readAsText(file);
+        event.target.value = '';
+      },
       scrollSceneTrack(delta) {
         const el = this.$refs.sceneTrack;
         if (el) el.scrollBy({ left: delta, behavior: 'smooth' });
@@ -896,7 +920,17 @@ function renderKnowledge() {
               <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_description') }}</label>
               <input v-model="editForm.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%">
             </div>
-            <textarea v-model="editForm.content" rows="20" class="kb-textarea"></textarea>
+            <div style="margin-bottom:12px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+                <label style="font-size:11px;color:var(--t3)">{{ t('entry_content') }}</label>
+                <label class="bt bt-o bt-s" style="cursor:pointer;font-size:11px">
+                  {{ t('import_file') }}
+                  <input type="file" accept=".md,.json,.txt" style="display:none" @change="e => importFile(e, 'edit')">
+                </label>
+              </div>
+              <textarea v-model="editForm.content" rows="20" class="kb-textarea"></textarea>
+              <div v-if="editForm.content" style="font-size:10px;color:var(--t3);margin-top:4px">{{ editForm.content.length }} chars</div>
+            </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--b)">
               <button class="bt bt-o bt-s" @click="cancelEdit">{{ t('cancel') }}</button>
               <button class="bt bt-p bt-s" @click="saveEdit">{{ t('confirm') }}</button>
@@ -922,8 +956,15 @@ function renderKnowledge() {
               <input v-model="createForm.description" :placeholder="t('entry_description')" class="kb-input" style="width:100%">
             </div>
             <div style="margin-bottom:16px">
-              <label style="font-size:11px;color:var(--t3);display:block;margin-bottom:4px">{{ t('entry_content') }}</label>
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+                <label style="font-size:11px;color:var(--t3)">{{ t('entry_content') }}</label>
+                <label class="bt bt-o bt-s" style="cursor:pointer;font-size:11px">
+                  {{ t('import_file') }}
+                  <input type="file" accept=".md,.json,.txt" style="display:none" @change="e => importFile(e, 'create')">
+                </label>
+              </div>
               <textarea v-model="createForm.content" rows="20" class="kb-textarea"></textarea>
+              <div v-if="createForm.content" style="font-size:10px;color:var(--t3);margin-top:4px">{{ createForm.content.length }} chars</div>
             </div>
           </div>
 

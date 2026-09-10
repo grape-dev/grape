@@ -113,5 +113,8 @@
   "entry_description": "Description (brief summary of this knowledge)",
   "entry_name": "Knowledge Name",
   "entry_name_ph": "Enter a name (required)",
-  "name_required": "Knowledge name is required"
+  "name_required": "Knowledge name is required",
+  "import_file": "Import File",
+  "file_too_large": "File exceeds 10KB limit",
+  "file_imported": "File imported"
 }
