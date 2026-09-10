@@ -1372,6 +1372,16 @@ async def get_task_pipeline(task_id: int, user: dict = Depends(get_current_user)
     if issue_id:
         events = get_events(repo_key, issue_id=issue_id, limit=30)
 
+    # 为每个节点关联最新事件（含 seq，供前端点击跳转事件详情）
+    _events_by_agent = {}
+    for e in events:
+        _at = e.get("agent_type", "")
+        if _at and _at not in _events_by_agent:
+            _events_by_agent[_at] = e
+    for n in nodes:
+        _nid = n.get("id", "")
+        n["latest_event"] = _events_by_agent.get(_nid, None)
+
     return {
         "scene_id": _scene_id,
         "scene_name": (pipe_cfg or {}).get("name", _scene_id),
