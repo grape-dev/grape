@@ -650,12 +650,16 @@
 .kb-pick-selected .scn-card-title{color:var(--a)}
 .kb-pick-check{position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:50%;background:var(--a);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;z-index:5;font-weight:700}
 .kb-tag-selected{background:rgba(0,113,227,0.1);border-color:var(--a);color:var(--a)}
-.kb-agent-tag{padding:12px 16px;border-radius:16px;border:1px solid var(--b);background:var(--c);cursor:pointer;transition:all .25s cubic-bezier(.25,.1,.25,1);min-width:150px}
+.kb-agent-tag{padding:12px 16px;border-radius:16px;border:1px solid var(--b);background:var(--c);cursor:pointer;transition:all .25s cubic-bezier(.25,.1,.25,1);min-width:150px;position:relative}
 .kb-agent-tag:hover{border-color:var(--a);background:rgba(0,113,227,0.03);transform:translateY(-1px)}
 .kb-agent-selected{border-color:var(--a);background:rgba(0,113,227,0.06);box-shadow:0 0 0 3px rgba(0,113,227,0.1)}
 .kb-agent-selected .kb-agent-name{color:var(--a)}
-.kb-agent-name{font-size:13px;font-weight:600;color:var(--t);margin-bottom:3px}
+.kb-agent-name{font-size:13px;font-weight:600;color:var(--t);margin-bottom:3px;padding-right:24px}
 .kb-agent-desc{font-size:10px;color:var(--t3);line-height:1.4}
+.kb-agent-check{position:absolute;top:12px;right:12px;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--b);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--t3);transition:all .2s}
+.kb-agent-selected .kb-agent-check{background:var(--a);border-color:var(--a);color:#fff}
+.kb-agent-selected:hover .kb-agent-check::before{content:'\\2715'}
+.kb-agent-selected:hover .kb-agent-check span{display:none}
 .kb-ref-pill{display:inline-flex;align-items:center;gap:3px;padding:3px 10px;border-radius:980px;font-size:10px;font-weight:500;color:var(--a);background:rgba(0,113,227,0.08);cursor:pointer;transition:all .15s;position:relative}
 .kb-ref-pill:hover{background:rgba(0,113,227,0.15)}
 .kb-ref-pill:hover::after{content:attr(data-names);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:8px 12px;border-radius:8px;font-size:10px;font-weight:400;white-space:normal;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.15);max-width:280px;line-height:1.5}

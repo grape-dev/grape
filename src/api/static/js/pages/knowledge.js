@@ -830,6 +830,7 @@ function renderKnowledge() {
                 <div v-for="at in agentTypes.filter(a => a.value)" :key="at.value"
                   class="kb-agent-tag" :class="{ 'kb-agent-selected': isAgentSelected(at.value) }"
                   @click="toggleAgentRef(at.value)">
+                  <div class="kb-agent-check"><span>✓</span></div>
                   <div class="kb-agent-name">{{ at.label }}</div>
                   <div v-if="at.desc" class="kb-agent-desc">{{ at.desc }}</div>
                 </div>
@@ -986,6 +987,7 @@ function renderKnowledge() {
               <div v-for="at in agentTypes.filter(a => a.value)" :key="at.value"
                 class="kb-agent-tag" :class="{ 'kb-agent-selected': createForm.agentSelected.includes(at.value) }"
                 @click="toggleCreateAgent(at.value)">
+                <div class="kb-agent-check"><span>✓</span></div>
                 <div class="kb-agent-name">{{ at.label }}</div>
                 <div v-if="at.desc" class="kb-agent-desc">{{ at.desc }}</div>
               </div>
