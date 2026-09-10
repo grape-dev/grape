@@ -136,12 +136,14 @@ def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
 def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       description: str = "", assignee: str = "",
                       event_type: str = "",
-                      subtask_mode: int = -1) -> int | None:
+                      subtask_mode: int = -1,
+                      created_by: str = "") -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
     - assignee 优先 → 对应平台 user_id；assignee 为空 → 仓库 owner
     - assignee/owner 未注册平台（无 unified_user_mapping）→ user_id=0 落库；
       任务中心 mine 查询 `user_id=? OR user_id=0` 展示（P2 拍板修订：展示，不隐藏）
+    - created_by: Issue 创建者的 GitCode 用户名（用于「我创建的任务」过滤）；空则不写入
     - 幂等：同一 issue 已存在 active/processing 任务则复用（2026-09-03 修复#15：不再按 assignee 区分，
       防止 webhook 回声导致同一 issue 产生两个不同 assignee 的任务）
     """
@@ -171,6 +173,16 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 c.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
             if subtask_mode >= 0:
                 c.execute("UPDATE tasks SET is_subtask_mode=? WHERE id=?", (subtask_mode, task_id))
+            # 更新 created_by（仅当传入且与现有不同时更新）
+            if created_by:
+                try:
+                    c.execute("SELECT created_by FROM tasks WHERE id=?", (task_id,))
+                    _r_cb = c.fetchone()
+                    _existing_cb = _r_cb[0] if _r_cb else ""
+                    if _existing_cb != created_by:
+                        c.execute("UPDATE tasks SET created_by=? WHERE id=?", (created_by, task_id))
+                except Exception:
+                    pass
             # 如果传入的 assignee 与现有不同，更新 assignee 并关闭旧 assignee 的任务
             # （#15 修复：复用已有任务时同步 assignee，防止 assignee 与新建 Issue 不匹配）
             _existing_assignee = ""
@@ -196,10 +208,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
             c.execute(
-                "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number) "
-                "VALUES (?,?,?,?,?,?,'active',?,?)",
+                "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, created_by) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
-                 _subtask_val, _parent_val)
+                 _subtask_val, _parent_val, created_by)
             )
             db.commit()
             task_id = c.lastrowid
@@ -1002,7 +1014,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
 
     # 3) 按既有流程幂等建档（同 issue 任务 id 复用）
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee,
-                                subtask_mode=_auto_subtask_mode)
+                                subtask_mode=_auto_subtask_mode, created_by=user["username"])
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
     # 4) 场景选择 + VOD 覆盖开关
@@ -1016,7 +1028,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             from src.api.session_store import set_issue_scene
             # 方案 B：场景只与仓库关联，uid 用仓库归属用户
             from src.runtime.engine_select import _repo_user_id
-            scene_uid = _repo_user_id(repo_key) or 0
+            scene_uid = _repo_user_id(repo_key, issue_creator=user["username"]) or 0
             set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
         else:
             # 不选场景（含 vod-auto）：打开开关，用 dev_scene 默认，VOD 可覆盖
@@ -1304,11 +1316,13 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                    repo_key: str = Query("", description="按仓库过滤"),
                    sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                    mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
+                   created_by_me: bool = Query(False, description="仅显示我创建的任务"),
                    user: dict = Depends(get_current_user_or_api_key)):
     """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤 / 按时间排序）。
 
     sort_order: desc（默认，最新在前）/ asc（最早在前）
     mode: default（状态优先 active→processing→completed，组内按时间）/ time（纯时间序）
+    created_by_me: True 时仅返回 created_by 匹配当前用户 GitCode 用户名的任务
     """
     from src.repo_key import to_repo_key, from_repo_key
     if repo_key:
@@ -1321,6 +1335,10 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
     if repo_key:
         clauses.append("repo_key=?")
         params.append(repo_key)
+    if created_by_me:
+        # 「我创建的任务」：created_by 匹配当前用户的 GitCode 用户名
+        clauses.append("created_by=?")
+        params.append(user["username"])
     where = " AND ".join(clauses)
     # 排序：白名单已由 FastAPI pattern 约束（desc/asc/default/time），此处直接拼（防注入）
     _order_dir = "DESC" if sort_order == "desc" else "ASC"
@@ -1333,7 +1351,7 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
         try:
             c.execute(
                 f"SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
-                f"status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number "
+                f"status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, created_by "
                 f"FROM tasks WHERE {where} "
                 f"ORDER BY {_order_by}",
                 params
@@ -1374,6 +1392,7 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
             "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
             "is_subtask_mode": r[11] or 0,
             "parent_issue_number": r[12] or 0,
+            "created_by": r[13] or "",
             "scene_id": _scene_id,
             "scene_name": _scene_name,
             "scene_source": _scene_source,

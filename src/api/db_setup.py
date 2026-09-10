@@ -264,6 +264,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     conversation_id  TEXT DEFAULT '',
     status           TEXT DEFAULT 'active',
     completed_reason TEXT DEFAULT '',
+    created_by       TEXT DEFAULT '',
     created_at       TEXT DEFAULT (datetime('now')),
     completed_at     TEXT DEFAULT NULL
 )
@@ -2350,6 +2351,15 @@ def _migrate_tables():
         log.info("Added content_hash column to skill")
     except Exception as e:
         log.warning(f"Add skill.content_hash column failed: {e}")
+    # ===== Issue-76: tasks.created_by（记录任务来源 Issue 的创建者 GitCode 用户名，用于「我创建的任务」过滤）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "tasks", "created_by", "TEXT DEFAULT ''")
+            db.commit()
+        log.info("Added created_by column to tasks")
+    except Exception as e:
+        log.warning(f"Add tasks.created_by column failed: {e}")
     # ===== Scene scope downgrade 已在 _migrate_scene_table_to_repo_model 中处理（Issue-39 方案 B）=====
 
 

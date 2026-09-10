@@ -665,7 +665,7 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
             ), name=f"sub-{agent_type}-{seq}")
         else:
             from src.runtime.engine_select import _repo_user_id
-            _sub_uid = _repo_user_id(repo_key)
+            _sub_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
                                    skill_id, skill_path, engine_id, issue_id, user_id=_sub_uid)
         log.info(f"Pipeline subscription: dispatched seq={seq} agent={agent_type} mode={kind}")
@@ -914,7 +914,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _t3 = str(_o3.get("title", "") or "") if isinstance(_o3, dict) else ""
                     if not _t3:
                         _t3 = evt.get("title", "") or ""
-                    ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3, event_type=event_type)
+                    # Issue #76: 提取 Issue 创建者 GitCode 用户名，写入 tasks.created_by
+                    _creator3 = ""
+                    try:
+                        _issue_obj3 = _p3.get("issue", {}) or {}
+                        if isinstance(_issue_obj3, dict):
+                            _author3 = _issue_obj3.get("author", {}) or {}
+                            if isinstance(_author3, dict):
+                                _creator3 = _author3.get("username", _author3.get("login", "")) or ""
+                    except Exception:
+                        pass
+                    ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3, event_type=event_type, created_by=_creator3)
                     log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or '(owner)'}")
     except Exception as _e:
         log.warning(f"Pipeline: task-center sync failed: {_e}")
@@ -977,7 +987,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if not _issue_scene_uid:
         try:
             from src.runtime.engine_select import _repo_user_id
-            _issue_scene_uid = _repo_user_id(repo_key)
+            _issue_scene_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
         except Exception:
             pass
     log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
@@ -1978,7 +1988,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             if _scene_out.get("terminate") or _scene_out.get("reason") == "未配置场景":
                                 from src.api.session_store import set_issue_scene
                                 from src.runtime.engine_select import _repo_user_id
-                                _vod_uid = _repo_user_id(repo_key)
+                                _vod_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
                                 set_issue_scene(repo_key, issue_id, "", scene_user_id=_vod_uid)
                                 log.info(f"VOD done: terminate (未配置场景) for {issue_id}, scene cleared (no pipeline)")
                                 _rec_scene = None   # 不进入正常场景覆写
@@ -1990,7 +2000,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             elif _rec_scene:
                                 from src.api.session_store import set_issue_scene
                                 from src.runtime.engine_select import _repo_user_id
-                                _vod_uid = _repo_user_id(repo_key)
+                                _vod_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
                                 set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
                                 log.info(f"VOD done: recommended_scene={_rec_scene} uid={_vod_uid} set for {issue_id} (override enabled)")
                             else:

@@ -10,6 +10,7 @@ const _TASKS_PER_PAGE = 15;   // 每页任务数
 let _taskPollTimer = null;    // 场景识别轮询定时器
 let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
 let _tasksMode = 'default';   // default=状态优先 / time=纯时间序（Issue #42）
+let _tasksCreatedByMe = false; // 「我创建的任务」过滤（Issue #76）
 
 function _tasksSortPrefKey(repoKey) {
   return 'task_sort_' + (repoKey || 'all');
@@ -38,6 +39,11 @@ function toggleTasksMode() {
   _tasksMode = (_tasksMode === 'default') ? 'time' : 'default';
   const repo = app.currentRepo();
   _saveTasksSortPref(repo ? repo.fullName : '');
+  _taskPage = 1;
+  loadTasks();
+}
+function toggleCreatedByMe() {
+  _tasksCreatedByMe = !_tasksCreatedByMe;
   _taskPage = 1;
   loadTasks();
 }
@@ -128,7 +134,8 @@ function loadTasks() {
   _loadTasksSortPref(repoKey);
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
   API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
-          '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode).then(d => {
+          '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
+          (_tasksCreatedByMe ? '&created_by_me=true' : '')).then(d => {
     if (window._currentView !== 'tasks') return;  // stale guard
     _tasksAll = d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
@@ -528,6 +535,9 @@ function _render() {
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:8px">${I18N.t('tasks.create.btn_new')}</button>
         ${_filterPanel}
+        <button class="tsk-tab" onclick="toggleCreatedByMe()" style="border:1px solid var(--b);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;background:${_tasksCreatedByMe ? 'var(--a,#34c759)' : 'var(--bg)'};color:${_tasksCreatedByMe ? '#fff' : 'inherit'};display:inline-flex;align-items:center;gap:4px;flex-shrink:0" title="${I18N.t('tasks.filter.created_by_me')}">
+          <span style="font-size:12px">👤</span> ${I18N.t('tasks.filter.created_by_me')}
+        </button>
         <div style="flex:1"></div>
         <div style="position:relative;display:inline-flex;align-items:center;flex-shrink:0">
           <button class="tsk-tab" onclick="document.getElementById('taskViewPopover').style.display=document.getElementById('taskViewPopover').style.display==='block'?'none':'block'" style="border:1px solid var(--b);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;background:var(--bg);display:inline-flex;align-items:center;gap:4px">

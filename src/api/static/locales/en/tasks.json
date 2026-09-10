@@ -113,5 +113,8 @@
   "single_task_badge": "Single Task",
   "parent_task": "Parent",
   "pipeline_scene": "Pipeline Scene",
-  "task_mode": "Task Mode"
+  "task_mode": "Task Mode",
+  "filter": {
+    "created_by_me": "My Tasks"
+  }
 }
