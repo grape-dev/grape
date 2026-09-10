@@ -201,7 +201,7 @@ function renderKnowledge() {
         this.refTooltip = { show: true, text, x: r.left + r.width / 2, y: r.bottom + 8 };
       },
       hideRefTooltip() {
-        this.refTooltip.show = false;
+        this.refTooltip = { show: false, text: '', x: 0, y: 0 };
       },
       agentRefCount(k) {
         if (!k.refs) return 0;
