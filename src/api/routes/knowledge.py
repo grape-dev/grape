@@ -125,10 +125,17 @@ def _read_ws_file(repo_key: str, ws_rel: str) -> str:
         raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
 
 
-def _read_entry_content(repo_key: str, obs_key: str, file_path: str) -> str:
-    """读取知识条目正文：obs_key 非空走 OBS，否则走本地文件。失败返回空串（不影响列表聚合）。"""
+def _read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash: str = "") -> str:
+    """读取知识条目正文：obs_key 非空走 OBS（优先 hash 缓存），否则走本地文件。失败返回空串。"""
     if obs_key:
         try:
+            from src.api.knowledge import read_with_cache
+            # 有 content_hash → 走 hash 缓存（和老逻辑一致）
+            if content_hash:
+                content = read_with_cache(obs_key, content_hash)
+                if content is not None:
+                    return content
+            # 无 content_hash 或缓存 miss → 直接读 OBS
             from src.storage import get_storage
             storage = get_storage()
             if storage is not None:
@@ -772,7 +779,7 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
 
-    content = _read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""))
+    content = _read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""), row.get("content_hash", ""))
 
     from src.session_manager import db, db_lock
     from src.api.pipeline_config import get_pipeline_config

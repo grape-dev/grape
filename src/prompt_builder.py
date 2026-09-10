@@ -935,7 +935,7 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
         from src.session_manager import db, db_lock
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT DISTINCT k.id, k.scope, k.source, k.obs_key, k.file_path "
+                "SELECT DISTINCT k.id, k.scope, k.source, k.obs_key, k.file_path, k.content_hash "
                 "FROM scene_knowledge_ref r "
                 "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
                 "WHERE r.enabled = 1 "
@@ -948,8 +948,8 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
             ).fetchall()
 
         from src.api.routes.knowledge import _read_entry_content
-        for kid, scope, source, obs_key, file_path in rows:
-            content = _read_entry_content(repo_key, obs_key or "", file_path or "")
+        for kid, scope, source, obs_key, file_path, content_hash in rows:
+            content = _read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
             if content:
                 found = True
                 injected_ids.append(kid)
