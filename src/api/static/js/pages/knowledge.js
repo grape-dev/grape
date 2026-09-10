@@ -929,7 +929,7 @@ function renderKnowledge() {
                 </label>
               </div>
               <textarea v-model="editForm.content" rows="20" class="kb-textarea"></textarea>
-              <div v-if="editForm.content" style="font-size:10px;color:var(--t3);margin-top:4px">{{ editForm.content.length }} chars</div>
+              <div v-if="editForm.content" style="font-size:10px;color:var(--t3);text-align:right;margin-top:4px">{{ editForm.content.length }} / 10240</div>
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--b)">
               <button class="bt bt-o bt-s" @click="cancelEdit">{{ t('cancel') }}</button>
@@ -964,7 +964,7 @@ function renderKnowledge() {
                 </label>
               </div>
               <textarea v-model="createForm.content" rows="20" class="kb-textarea"></textarea>
-              <div v-if="createForm.content" style="font-size:10px;color:var(--t3);margin-top:4px">{{ createForm.content.length }} chars</div>
+              <div v-if="createForm.content" style="font-size:10px;color:var(--t3);text-align:right;margin-top:4px">{{ createForm.content.length }} / 10240</div>
             </div>
           </div>
 
