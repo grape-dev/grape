@@ -509,13 +509,14 @@
 .scn-card-head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
 .scn-card-title{font-size:17px;font-weight:600;letter-spacing:-.01em;color:var(--t);flex:1}
 .scn-star{font-size:14px}
+.scn-card-desc{font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:14px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
 .knowledge-page .scn-card-head{display:flex;align-items:center;gap:12px;margin-bottom:12px;min-height:32px}
 .knowledge-page .scn-card-title{font-size:17px;font-weight:600;letter-spacing:-.01em;color:var(--t);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.knowledge-page .scn-card-desc{font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:14px;white-space:pre-line;word-break:break-word;overflow:hidden;min-height:38px;max-height:38px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.knowledge-page .scn-card-desc{white-space:pre-line;word-break:break-word;min-height:38px;max-height:38px}
 .scn-chain{display:flex;align-items:center;gap:3px;flex-wrap:wrap;margin-bottom:16px}
 .scn-tag{font-size:10px;padding:3px 8px;border-radius:6px;background:var(--bg);color:var(--t2);font-weight:500}
 .scn-arr{font-size:9px;color:var(--t3)}
-.scn-card-foot{display:flex;align-items:center;gap:8px;padding-top:14px;border-top:1px solid var(--b)}
+.scn-card-foot{display:flex;align-items:center;gap:8px;padding-top:14px;border-top:1px solid var(--b);margin-top:auto}
 .scn-meta{font-size:10px;color:var(--t3)}
 .scn-card-btns{display:flex;gap:6px;margin-left:auto}
 .scn-scroll-wrap{position:relative}
@@ -597,7 +598,7 @@
 .knowledge-page .skill-card{background:var(--c);border:1px solid var(--b);border-radius:18px;overflow:hidden;cursor:pointer;transition:all .3s cubic-bezier(.25,.1,.25,1);box-shadow:var(--sh);display:flex;flex-direction:column}
 .knowledge-page .skill-card:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08);border-color:rgba(0,113,227,.15)}
 .knowledge-page .scn-card-body{padding:20px 20px 0}
-.knowledge-page .scn-card-foot{padding-bottom:20px}
+.knowledge-page .scn-card-foot{padding-bottom:20px;margin-top:0}
 .knowledge-page .card-header{flex-shrink:0;display:flex;align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap}
 .knowledge-page .card-content{flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px}
 .knowledge-page .card-footer{flex-shrink:0;font-size:10px;color:var(--t3);margin-bottom:10px}
