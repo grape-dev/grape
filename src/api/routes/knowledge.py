@@ -11,6 +11,7 @@ import os, re, time, uuid, hashlib
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.knowledge import read_entry_content
 from src.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
 
@@ -123,34 +124,6 @@ def _read_ws_file(repo_key: str, ws_rel: str) -> str:
             return f.read()
     except Exception as e:
         raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
-
-
-def _read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash: str = "") -> str:
-    """读取知识条目正文：obs_key 非空走 OBS（优先 hash 缓存），否则走本地文件。失败返回空串。"""
-    if obs_key:
-        try:
-            from src.api.knowledge import read_with_cache
-            # 有 content_hash → 走 hash 缓存（和老逻辑一致）
-            if content_hash:
-                content = read_with_cache(obs_key, content_hash)
-                if content is not None:
-                    return content
-            # 无 content_hash 或缓存 miss → 直接读 OBS
-            from src.storage import get_storage
-            storage = get_storage()
-            if storage is not None:
-                data = storage.read_bytes(obs_key)
-                if data is not None:
-                    return data.decode("utf-8", errors="replace")
-        except Exception as e:
-            log.warning(f"OBS read failed for entry {repo_key}/{obs_key}: {e} — fallback to local")
-    # 本地模式（storage 为 None / obs_key 为空 / OBS miss）
-    if file_path:
-        try:
-            return _read_ws_file(repo_key, file_path)
-        except HTTPException:
-            return ""
-    return ""
 
 
 def _member_docs(repo_key: str) -> list[dict]:
@@ -779,7 +752,7 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
 
-    content = _read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""), row.get("content_hash", ""))
+    content = read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""), row.get("content_hash", ""))
 
     from src.session_manager import db, db_lock
     from src.api.pipeline_config import get_pipeline_config
@@ -1037,6 +1010,15 @@ def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
                          user: dict = Depends(get_current_user)):
     """修改关联的 enabled 开关。"""
     from src.session_manager import db, db_lock
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT k.repo_key FROM scene_knowledge_ref r "
+            "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+            "WHERE r.id = ?", (ref_id,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "关联记录不存在"})
+    _check_repo_member(user, row["repo_key"] if isinstance(row, dict) else row[0])
     username = str(user.get("username") or "")
     with db_lock:
         db.cursor().execute(
@@ -1051,6 +1033,15 @@ def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
 def delete_knowledge_ref(ref_id: int, user: dict = Depends(get_current_user)):
     """删除知识的某条关联。"""
     from src.session_manager import db, db_lock
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT k.repo_key FROM scene_knowledge_ref r "
+            "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+            "WHERE r.id = ?", (ref_id,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "关联记录不存在"})
+    _check_repo_member(user, row["repo_key"] if isinstance(row, dict) else row[0])
     with db_lock:
         db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE id = ?", (ref_id,))
         db.commit()

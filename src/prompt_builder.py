@@ -875,9 +875,9 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
                 (scene_id, agent_type, issue_num, repo_key)
             ).fetchall()
 
-        from src.api.routes.knowledge import _read_entry_content
+        from src.api.knowledge import read_entry_content
         for kid, scope, source, obs_key, file_path, content_hash in rows:
-            content = _read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
+            content = read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
             if content:
                 found = True
                 injected_ids.append(kid)

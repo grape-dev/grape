@@ -63,6 +63,41 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
     return content
 
 
+def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash: str = "") -> str:
+    """读取知识条目正文（业务层）。
+
+    obs_key 非空走 OBS（优先 hash 缓存），否则走本地文件。失败返回空串。
+    routes 层和 prompt_builder 都应调用此函数，不应跨层依赖 routes。
+    """
+    if obs_key:
+        try:
+            if content_hash:
+                content = read_with_cache(obs_key, content_hash)
+                if content is not None:
+                    return content
+            from src.storage import get_storage
+            storage = get_storage()
+            if storage is not None:
+                data = storage.read_bytes(obs_key)
+                if data is not None:
+                    return data.decode("utf-8", errors="replace")
+        except Exception as e:
+            log.warning(f"OBS read failed for entry {repo_key}/{obs_key}: {e} — fallback to local")
+    # 本地模式：直接读文件（路径校验由 API 层入口负责，内部调用不重复）
+    if file_path:
+        try:
+            full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
+            # 安全：确保路径不逃逸 WORKSPACE_DIR
+            if full != WORKSPACE_DIR and not full.startswith(WORKSPACE_DIR + os.sep):
+                return ""
+            if os.path.isfile(full):
+                with open(full, "r", encoding="utf-8") as f:
+                    return f.read()
+        except Exception as e:
+            log.warning(f"Local read failed for {repo_key}/{file_path}: {e}")
+    return ""
+
+
 def _issue_num_from(issue_id) -> int:
     """'#5' / '5' / 5 → 5；无法解析返回 0。"""
     import re
@@ -424,7 +459,6 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
     未关联的知识不打包给 worker（和 prompt 注入逻辑一致）。
     """
     from src.session_manager import db, db_lock
-    from src.api.routes.knowledge import _read_entry_content
     from src.storage import get_storage
     _storage = get_storage()
 
@@ -446,7 +480,7 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
             ).fetchall()
 
         for kid, obs_key, file_path, content_hash in rows:
-            content = _read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
+            content = read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
             if content:
                 files[file_path or ""] = content
     except Exception:

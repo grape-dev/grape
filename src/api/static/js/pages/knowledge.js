@@ -669,7 +669,13 @@ function renderKnowledge() {
       },
       renderMarkdown(content) {
         if (typeof marked !== 'undefined' && marked.parse) {
-          return marked.parse(content);
+          // 安全模式：marked 默认不转义 HTML，需手动转义防止 XSS
+          // 转义后 marked 仍可解析 Markdown 语法（#/-/* 等不依赖 <>）
+          const escaped = (content || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+          return marked.parse(escaped);
         }
         return '<pre>' + (content || '').replace(/</g, '&lt;') + '</pre>';
       },
