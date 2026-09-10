@@ -247,6 +247,10 @@ function loadAgentTypes() {
     }
   });
   function nav(view, param) {
+    // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
+    if (view === 'knowledge' && window._currentView === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
+      return;
+    }
     const repo = currentRepo();
     if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local') { loadRepos(); return; }
 
@@ -287,7 +291,17 @@ function loadAgentTypes() {
     const title = $('pageTitle');
     const repoTitle = $('repoTitle');
     const pc = $('pageContent');
-    pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
+
+    // Issue #67: 离开 knowledge 页面时先卸载 Vue 应用（必须在 innerHTML 替换之前）
+    if (view !== 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
+      try { _knowledgeVueApp.unmount(); } catch(e) {}
+      _knowledgeVueApp = null;
+    }
+
+    // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不覆盖 DOM（避免 Vue 虚拟 DOM 不一致）
+    if (!(view === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp)) {
+      pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
+    }
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     // Issue #63: 切 tab 时主动取消旧请求 + 设全局 signal + 停定时轮询
@@ -368,7 +382,9 @@ function loadAgentTypes() {
       renderSkills();
     } else if (view === 'knowledge') {
       title.textContent = I18N.t('app.current_project');
-      renderKnowledge();
+      if (typeof _knowledgeVueApp === 'undefined' || !_knowledgeVueApp) {
+        renderKnowledge();
+      }
     } else if (view === 'runtimes') {
       title.textContent = I18N.t('app.current_project');
       if (typeof renderRuntimes !== 'function') {
@@ -613,3 +629,20 @@ function loadAgentTypes() {
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });
+
+// Issue #67: 全局苹果风格确认 modal（knowledge.js / skills.js 共用）
+function _showAppleConfirm(message, onConfirm, onCancel) {
+  var modal = document.createElement('div');
+  modal.id = 'appleConfirmModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = '<div class="cd" style="width:360px;padding:24px;border-radius:14px;text-align:center">' +
+    '<p style="font-size:14px;color:var(--t);margin-bottom:20px;line-height:1.5">' + message + '</p>' +
+    '<div style="display:flex;gap:10px">' +
+    '<button id="appleConfirmCancel" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">' + (I18N.t('common.cancel') || '取消') + '</button>' +
+    '<button id="appleConfirmOk" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#ff3b30;color:#fff;cursor:pointer">' + (I18N.t('common.confirm') || '确认') + '</button>' +
+    '</div></div>';
+  document.body.appendChild(modal);
+  modal.onclick = function(e) { if (e.target === modal) { modal.remove(); if (onCancel) onCancel(); } };
+  document.getElementById('appleConfirmOk').onclick = function() { modal.remove(); if (onConfirm) onConfirm(); };
+  document.getElementById('appleConfirmCancel').onclick = function() { modal.remove(); if (onCancel) onCancel(); };
+}
