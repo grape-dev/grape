@@ -408,10 +408,10 @@
       ]
     },
     {
-      "id": "iac",
-      "name": "基础设施项目模板",
+      "id": "cloud-native",
+      "name": "云原生项目模板",
       "icon": "☁",
-      "description": "云原生、K8s、Docker、Terraform 等基础设施开发模板",
+      "description": "Kubernetes、Docker、微服务等云原生开发模板",
       "scene_id": "cloud-native",
       "templates": [
         {
@@ -494,20 +494,6 @@
           ],
           "scene_id": "cloud-native",
           "video_url": ""
-        },
-        {
-          "id": "tf-infra",
-          "name": "Terraform Infra",
-          "description": "Terraform 基础设施管理骨架",
-          "icon": "🏗️",
-          "source": "git",
-          "source_repo": "devops-bot/terraform-infra",
-          "default_repo_name": "tf-infra",
-          "tags": [
-            "terraform",
-            "iac"
-          ],
-          "scene_id": "iac"
         },
         {
           "id": "gitcode-boostkit-cloud-native",
@@ -1581,29 +1567,6 @@
           }
         },
         {
-          "id": "gitcode-gh_mirrors-k8s-k8s.io",
-          "name": "k8s.io",
-          "description": "Code and configuration to manage Kubernetes project infrastructure, including various *.k8s.io sites",
-          "recommend_reason": "HCL · K8s 编排 · Code and configuration to manage Kubernetes project infrastr",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/k8s/k8s.io",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/k8s/k8s.io.git",
-          "html_url": "https://gitcode.com/gh_mirrors/k8s/k8s.io",
-          "default_repo_name": "k8s.io",
-          "tags": [
-            "HCL"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "HCL",
-            "platform": "gitcode"
-          }
-        },
-        {
           "id": "gitcode-gh_mirrors-k8s-k8Studio",
           "name": "k8Studio",
           "description": "K8Studio: A Kubernetes IDE",
@@ -1736,466 +1699,6 @@
             "show": true,
             "stars": 0,
             "language": "Makefile",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-GitHub_Trending-te-terraform",
-          "name": "terraform",
-          "description": "Terraform enables you to safely and predictably create, change, and improve infrastructure. It is a source-available too",
-          "recommend_reason": "值得关注（10 ⭐） · Go 语言 · 基础设施即代码",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "GitHub_Trending/te/terraform",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/GitHub_Trending/te/terraform.git",
-          "html_url": "https://gitcode.com/GitHub_Trending/te/terraform",
-          "default_repo_name": "terraform",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 10,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-GitHub_Trending-te-terraform-provider-aws",
-          "name": "terraform-provider-aws",
-          "description": "The AWS Provider enables Terraform to manage AWS resources.",
-          "recommend_reason": "值得关注（3 ⭐） · Go 语言 · 基础设施即代码",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "GitHub_Trending/te/terraform-provider-aws",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-aws.git",
-          "html_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-aws",
-          "default_repo_name": "terraform-provider-aws",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 3,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-GitHub_Trending-te-terraform-aws-eks",
-          "name": "terraform-aws-eks",
-          "description": "Terraform module to create Amazon Elastic Kubernetes (EKS) resources 🇺🇦",
-          "recommend_reason": "值得关注（1 ⭐） · HCL · 基础设施即代码",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "GitHub_Trending/te/terraform-aws-eks",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/GitHub_Trending/te/terraform-aws-eks.git",
-          "html_url": "https://gitcode.com/GitHub_Trending/te/terraform-aws-eks",
-          "default_repo_name": "terraform-aws-eks",
-          "tags": [
-            "HCL"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 1,
-            "language": "HCL",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-terrafor-terraform",
-          "name": "terraform",
-          "description": "Source code for the Azure Marketplace Terraform development VM package.",
-          "recommend_reason": "Markdown · 基础设施即代码 · Source code for the Azure Marketplace Terraform development ",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/terrafor/terraform",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/terrafor/terraform.git",
-          "html_url": "https://gitcode.com/gh_mirrors/terrafor/terraform",
-          "default_repo_name": "terraform",
-          "tags": [
-            "Markdown"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Markdown",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-docs",
-          "name": "terraform-docs",
-          "description": "Generate documentation from Terraform modules in various output formats",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · Generate documentation from Terraform modules in various out",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-docs",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-docs.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-docs",
-          "default_repo_name": "terraform-docs",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-ter-terraformer",
-          "name": "terraformer",
-          "description": "CLI tool to generate terraform files from existing infrastructure (reverse Terraform). Infrastructure to Code",
-          "recommend_reason": "值得关注（1 ⭐） · Go 语言 · 基础设施即代码",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/ter/terraformer",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/ter/terraformer.git",
-          "html_url": "https://gitcode.com/gh_mirrors/ter/terraformer",
-          "default_repo_name": "terraformer",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 1,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-aws-rds",
-          "name": "terraform-aws-rds",
-          "description": "Terraform module to create AWS RDS resources 🇺🇦",
-          "recommend_reason": "HCL · 基础设施即代码 · Terraform module to create AWS RDS resources 🇺🇦",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-aws-rds",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-rds.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-rds",
-          "default_repo_name": "terraform-aws-rds",
-          "tags": [
-            "HCL"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "HCL",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-provider-kubernetes",
-          "name": "terraform-provider-kubernetes",
-          "description": "Terraform Kubernetes provider",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform Kubernetes provider",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-provider-kubernetes",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-kubernetes.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-kubernetes",
-          "default_repo_name": "terraform-provider-kubernetes",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-aws-github-runner",
-          "name": "terraform-aws-github-runner",
-          "description": "Terraform module for scalable GitHub action runners on AWS",
-          "recommend_reason": "HCL · 基础设施即代码 · Terraform module for scalable GitHub action runners on AWS",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-aws-github-runner",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-github-runner.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-github-runner",
-          "default_repo_name": "terraform-aws-github-runner",
-          "tags": [
-            "HCL"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "HCL",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-ter-terraform-provider-proxmox",
-          "name": "terraform-provider-proxmox",
-          "description": "Terraform / OpenTofu Provider for Proxmox VE",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform / OpenTofu Provider for Proxmox VE",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/ter/terraform-provider-proxmox",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/ter/terraform-provider-proxmox.git",
-          "html_url": "https://gitcode.com/gh_mirrors/ter/terraform-provider-proxmox",
-          "default_repo_name": "terraform-provider-proxmox",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-guides",
-          "name": "terraform-guides",
-          "description": "Example usage of HashiCorp Terraform",
-          "recommend_reason": "HCL · 基础设施即代码 · Example usage of HashiCorp Terraform",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-guides",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-guides.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-guides",
-          "default_repo_name": "terraform-guides",
-          "tags": [
-            "HCL"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "HCL",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-visual",
-          "name": "terraform-visual",
-          "description": "Terraform Visual is an interactive way of visualizing your Terraform plan",
-          "recommend_reason": "TypeScript · 基础设施即代码 · Terraform Visual is an interactive way of visualizing your T",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-visual",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-visual.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-visual",
-          "default_repo_name": "terraform-visual",
-          "tags": [
-            "TypeScript"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "TypeScript",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-aws-lambda",
-          "name": "terraform-aws-lambda",
-          "description": "Terraform module, which takes care of a lot of AWS Lambda/serverless tasks (build dependencies, packages, updates, deplo",
-          "recommend_reason": "HCL · 基础设施即代码 · Terraform module, which takes care of a lot of AWS Lambda/se",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-aws-lambda",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-lambda.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-lambda",
-          "default_repo_name": "terraform-aws-lambda",
-          "tags": [
-            "HCL"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "HCL",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-provider-helm",
-          "name": "terraform-provider-helm",
-          "description": "Terraform Helm provider",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform Helm provider",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-provider-helm",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-helm.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-helm",
-          "default_repo_name": "terraform-provider-helm",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-provider-dominos",
-          "name": "terraform-provider-dominos",
-          "description": "The Terraform plugin for the Dominos Pizza provider.",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · The Terraform plugin for the Dominos Pizza provider.",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-provider-dominos",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-dominos.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-dominos",
-          "default_repo_name": "terraform-provider-dominos",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-aws-vpc",
-          "name": "terraform-aws-vpc",
-          "description": "Terraform module to create AWS VPC resources 🇺🇦",
-          "recommend_reason": "HCL · 基础设施即代码 · Terraform module to create AWS VPC resources 🇺🇦",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-aws-vpc",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-vpc.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-vpc",
-          "default_repo_name": "terraform-aws-vpc",
-          "tags": [
-            "HCL"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "HCL",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-GitHub_Trending-te-terraform-provider-azurerm",
-          "name": "terraform-provider-azurerm",
-          "description": "Terraform provider for Azure Resource Manager",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform provider for Azure Resource Manager",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "GitHub_Trending/te/terraform-provider-azurerm",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-azurerm.git",
-          "html_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-azurerm",
-          "default_repo_name": "terraform-provider-azurerm",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-inventory",
-          "name": "terraform-inventory",
-          "description": "Terraform State → Ansible Dynamic Inventory",
-          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform State → Ansible Dynamic Inventory",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-inventory",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-inventory.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-inventory",
-          "default_repo_name": "terraform-inventory",
-          "tags": [
-            "Go"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Go",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-tui",
-          "name": "terraform-tui",
-          "description": "Terraform textual UI",
-          "recommend_reason": "Python · 基础设施即代码",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-tui",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-tui.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-tui",
-          "default_repo_name": "terraform-tui",
-          "tags": [
-            "Python"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "Python",
-            "platform": "gitcode"
-          }
-        },
-        {
-          "id": "gitcode-gh_mirrors-te-terraform-cdk",
-          "name": "terraform-cdk",
-          "description": "Define infrastructure resources using programming constructs and provision them using HashiCorp Terraform",
-          "recommend_reason": "TypeScript · 基础设施即代码 · Define infrastructure resources using programming constructs",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "gh_mirrors/te/terraform-cdk",
-          "source_platform": "gitcode",
-          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-cdk.git",
-          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-cdk",
-          "default_repo_name": "terraform-cdk",
-          "tags": [
-            "TypeScript"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 0,
-            "language": "TypeScript",
             "platform": "gitcode"
           }
         },
@@ -2695,33 +2198,6 @@
           }
         },
         {
-          "id": "github-bregman-arie-devops-exercises",
-          "name": "devops-exercises",
-          "description": "Linux, Jenkins, AWS, SRE, Prometheus, Docker, Python, Ansible, Git, Kubernetes, Terraform, OpenStack, SQL, NoSQL, Azure,",
-          "recommend_reason": "热门项目（84,401 ⭐） · Python · Kubernetes 生态 / 容器化 / 监控告警",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "bregman-arie/devops-exercises",
-          "source_platform": "github",
-          "clone_url": "https://github.com/bregman-arie/devops-exercises.git",
-          "html_url": "https://github.com/bregman-arie/devops-exercises",
-          "default_repo_name": "devops-exercises",
-          "tags": [
-            "ansible",
-            "aws",
-            "azure",
-            "coding",
-            "containers"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 84401,
-            "language": "Python",
-            "platform": "github"
-          }
-        },
-        {
           "id": "github-moby-moby",
           "name": "moby",
           "description": "The Moby Project - a collaborative project for the container ecosystem to assemble container-based systems",
@@ -2825,29 +2301,6 @@
             "show": true,
             "stars": 52247,
             "language": "Go",
-            "platform": "github"
-          }
-        },
-        {
-          "id": "github-opentofu-manifesto",
-          "name": "manifesto",
-          "description": "The OpenTF Manifesto expresses concern over HashiCorp's switch of the Terraform license from open-source to the Business",
-          "recommend_reason": "高星项目（35,655 ⭐） · 前端 · 基础设施即代码",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "opentofu/manifesto",
-          "source_platform": "github",
-          "clone_url": "https://github.com/opentofu/manifesto.git",
-          "html_url": "https://github.com/opentofu/manifesto",
-          "default_repo_name": "manifesto",
-          "tags": [
-            "HTML"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 35655,
-            "language": "HTML",
             "platform": "github"
           }
         },
@@ -2980,33 +2433,6 @@
             "show": true,
             "stars": 30227,
             "language": "Go",
-            "platform": "github"
-          }
-        },
-        {
-          "id": "github-MichaelCade-90DaysOfDevOps",
-          "name": "90DaysOfDevOps",
-          "description": "This repository started out as a learning in public project for myself and has now become a structured learning map for ",
-          "recommend_reason": "高星项目（29,718 ⭐） · Shell 脚本 · 基础设施即代码 / Kubernetes 生态",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "MichaelCade/90DaysOfDevOps",
-          "source_platform": "github",
-          "clone_url": "https://github.com/MichaelCade/90DaysOfDevOps.git",
-          "html_url": "https://github.com/MichaelCade/90DaysOfDevOps",
-          "default_repo_name": "90daysofdevops",
-          "tags": [
-            "ansible",
-            "backup",
-            "containers",
-            "devops",
-            "iac"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 29718,
-            "language": "Shell",
             "platform": "github"
           }
         },
@@ -3305,33 +2731,6 @@
           }
         },
         {
-          "id": "github-mikefarah-yq",
-          "name": "yq",
-          "description": "yq is a portable command-line YAML, JSON, XML, CSV, TOML, HCL  and properties processor",
-          "recommend_reason": "高星项目（15,935 ⭐） · Go 语言 · 基础设施即代码",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "mikefarah/yq",
-          "source_platform": "github",
-          "clone_url": "https://github.com/mikefarah/yq.git",
-          "html_url": "https://github.com/mikefarah/yq",
-          "default_repo_name": "yq",
-          "tags": [
-            "bash",
-            "cli",
-            "csv",
-            "devops-tools",
-            "golang"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 15935,
-            "language": "Go",
-            "platform": "github"
-          }
-        },
-        {
           "id": "github-helm-charts",
           "name": "charts",
           "description": "⚠️(OBSOLETE) Curated applications for Kubernetes",
@@ -3352,60 +2751,6 @@
           "stats": {
             "show": true,
             "stars": 15402,
-            "language": "Go",
-            "platform": "github"
-          }
-        },
-        {
-          "id": "github-xpipe-io-xpipe",
-          "name": "xpipe",
-          "description": "Access your entire server infrastructure from your local desktop",
-          "recommend_reason": "高星项目（14,511 ⭐） · Java · K8s 编排 / 容器化 / Kubernetes 生态",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "xpipe-io/xpipe",
-          "source_platform": "github",
-          "clone_url": "https://github.com/xpipe-io/xpipe.git",
-          "html_url": "https://github.com/xpipe-io/xpipe",
-          "default_repo_name": "xpipe",
-          "tags": [
-            "bash",
-            "docker",
-            "filemanager",
-            "files",
-            "incus"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 14511,
-            "language": "Java",
-            "platform": "github"
-          }
-        },
-        {
-          "id": "github-semaphoreui-semaphore",
-          "name": "semaphore",
-          "description": "Modern UI and powerful API for Ansible, Terraform/OpenTofu/Terragrunt, PowerShell and other DevOps tools.",
-          "recommend_reason": "高星项目（14,115 ⭐） · Go 语言 · 基础设施即代码 / 容器化",
-          "icon": "📦",
-          "source": "git",
-          "source_repo": "semaphoreui/semaphore",
-          "source_platform": "github",
-          "clone_url": "https://github.com/semaphoreui/semaphore.git",
-          "html_url": "https://github.com/semaphoreui/semaphore",
-          "default_repo_name": "semaphore",
-          "tags": [
-            "ansible",
-            "awx",
-            "ci",
-            "cicd",
-            "devops"
-          ],
-          "scene_id": "default",
-          "stats": {
-            "show": true,
-            "stars": 14115,
             "language": "Go",
             "platform": "github"
           }
@@ -3515,6 +2860,670 @@
             "show": true,
             "stars": 9589,
             "language": "Python",
+            "platform": "github"
+          }
+        }
+      ]
+    },
+    {
+      "id": "iac",
+      "name": "IaC项目模板",
+      "icon": "🏗",
+      "description": "Terraform、OpenTofu 等基础设施即代码模板",
+      "scene_id": "iac",
+      "templates": [
+        {
+          "id": "tf-infra",
+          "name": "Terraform Infra",
+          "description": "Terraform 基础设施管理骨架",
+          "icon": "🏗️",
+          "source": "git",
+          "source_repo": "devops-bot/terraform-infra",
+          "default_repo_name": "tf-infra",
+          "tags": [
+            "terraform",
+            "iac"
+          ],
+          "scene_id": "iac"
+        },
+        {
+          "id": "gitcode-gh_mirrors-k8s-k8s.io",
+          "name": "k8s.io",
+          "description": "Code and configuration to manage Kubernetes project infrastructure, including various *.k8s.io sites",
+          "recommend_reason": "HCL · K8s 编排 · Code and configuration to manage Kubernetes project infrastr",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/k8s/k8s.io",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/k8s/k8s.io.git",
+          "html_url": "https://gitcode.com/gh_mirrors/k8s/k8s.io",
+          "default_repo_name": "k8s.io",
+          "tags": [
+            "HCL"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "HCL",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-GitHub_Trending-te-terraform",
+          "name": "terraform",
+          "description": "Terraform enables you to safely and predictably create, change, and improve infrastructure. It is a source-available too",
+          "recommend_reason": "值得关注（10 ⭐） · Go 语言 · 基础设施即代码",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "GitHub_Trending/te/terraform",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/GitHub_Trending/te/terraform.git",
+          "html_url": "https://gitcode.com/GitHub_Trending/te/terraform",
+          "default_repo_name": "terraform",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 10,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-GitHub_Trending-te-terraform-provider-aws",
+          "name": "terraform-provider-aws",
+          "description": "The AWS Provider enables Terraform to manage AWS resources.",
+          "recommend_reason": "值得关注（3 ⭐） · Go 语言 · 基础设施即代码",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "GitHub_Trending/te/terraform-provider-aws",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-aws.git",
+          "html_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-aws",
+          "default_repo_name": "terraform-provider-aws",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 3,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-GitHub_Trending-te-terraform-aws-eks",
+          "name": "terraform-aws-eks",
+          "description": "Terraform module to create Amazon Elastic Kubernetes (EKS) resources 🇺🇦",
+          "recommend_reason": "值得关注（1 ⭐） · HCL · 基础设施即代码",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "GitHub_Trending/te/terraform-aws-eks",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/GitHub_Trending/te/terraform-aws-eks.git",
+          "html_url": "https://gitcode.com/GitHub_Trending/te/terraform-aws-eks",
+          "default_repo_name": "terraform-aws-eks",
+          "tags": [
+            "HCL"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 1,
+            "language": "HCL",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-terrafor-terraform",
+          "name": "terraform",
+          "description": "Source code for the Azure Marketplace Terraform development VM package.",
+          "recommend_reason": "Markdown · 基础设施即代码 · Source code for the Azure Marketplace Terraform development ",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/terrafor/terraform",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/terrafor/terraform.git",
+          "html_url": "https://gitcode.com/gh_mirrors/terrafor/terraform",
+          "default_repo_name": "terraform",
+          "tags": [
+            "Markdown"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Markdown",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-docs",
+          "name": "terraform-docs",
+          "description": "Generate documentation from Terraform modules in various output formats",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · Generate documentation from Terraform modules in various out",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-docs",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-docs.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-docs",
+          "default_repo_name": "terraform-docs",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-ter-terraformer",
+          "name": "terraformer",
+          "description": "CLI tool to generate terraform files from existing infrastructure (reverse Terraform). Infrastructure to Code",
+          "recommend_reason": "值得关注（1 ⭐） · Go 语言 · 基础设施即代码",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/ter/terraformer",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/ter/terraformer.git",
+          "html_url": "https://gitcode.com/gh_mirrors/ter/terraformer",
+          "default_repo_name": "terraformer",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 1,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-aws-rds",
+          "name": "terraform-aws-rds",
+          "description": "Terraform module to create AWS RDS resources 🇺🇦",
+          "recommend_reason": "HCL · 基础设施即代码 · Terraform module to create AWS RDS resources 🇺🇦",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-aws-rds",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-rds.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-rds",
+          "default_repo_name": "terraform-aws-rds",
+          "tags": [
+            "HCL"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "HCL",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-provider-kubernetes",
+          "name": "terraform-provider-kubernetes",
+          "description": "Terraform Kubernetes provider",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform Kubernetes provider",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-provider-kubernetes",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-kubernetes.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-kubernetes",
+          "default_repo_name": "terraform-provider-kubernetes",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-aws-github-runner",
+          "name": "terraform-aws-github-runner",
+          "description": "Terraform module for scalable GitHub action runners on AWS",
+          "recommend_reason": "HCL · 基础设施即代码 · Terraform module for scalable GitHub action runners on AWS",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-aws-github-runner",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-github-runner.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-github-runner",
+          "default_repo_name": "terraform-aws-github-runner",
+          "tags": [
+            "HCL"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "HCL",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-ter-terraform-provider-proxmox",
+          "name": "terraform-provider-proxmox",
+          "description": "Terraform / OpenTofu Provider for Proxmox VE",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform / OpenTofu Provider for Proxmox VE",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/ter/terraform-provider-proxmox",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/ter/terraform-provider-proxmox.git",
+          "html_url": "https://gitcode.com/gh_mirrors/ter/terraform-provider-proxmox",
+          "default_repo_name": "terraform-provider-proxmox",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-guides",
+          "name": "terraform-guides",
+          "description": "Example usage of HashiCorp Terraform",
+          "recommend_reason": "HCL · 基础设施即代码 · Example usage of HashiCorp Terraform",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-guides",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-guides.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-guides",
+          "default_repo_name": "terraform-guides",
+          "tags": [
+            "HCL"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "HCL",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-visual",
+          "name": "terraform-visual",
+          "description": "Terraform Visual is an interactive way of visualizing your Terraform plan",
+          "recommend_reason": "TypeScript · 基础设施即代码 · Terraform Visual is an interactive way of visualizing your T",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-visual",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-visual.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-visual",
+          "default_repo_name": "terraform-visual",
+          "tags": [
+            "TypeScript"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "TypeScript",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-aws-lambda",
+          "name": "terraform-aws-lambda",
+          "description": "Terraform module, which takes care of a lot of AWS Lambda/serverless tasks (build dependencies, packages, updates, deplo",
+          "recommend_reason": "HCL · 基础设施即代码 · Terraform module, which takes care of a lot of AWS Lambda/se",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-aws-lambda",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-lambda.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-lambda",
+          "default_repo_name": "terraform-aws-lambda",
+          "tags": [
+            "HCL"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "HCL",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-provider-helm",
+          "name": "terraform-provider-helm",
+          "description": "Terraform Helm provider",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform Helm provider",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-provider-helm",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-helm.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-helm",
+          "default_repo_name": "terraform-provider-helm",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-provider-dominos",
+          "name": "terraform-provider-dominos",
+          "description": "The Terraform plugin for the Dominos Pizza provider.",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · The Terraform plugin for the Dominos Pizza provider.",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-provider-dominos",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-dominos.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-provider-dominos",
+          "default_repo_name": "terraform-provider-dominos",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-aws-vpc",
+          "name": "terraform-aws-vpc",
+          "description": "Terraform module to create AWS VPC resources 🇺🇦",
+          "recommend_reason": "HCL · 基础设施即代码 · Terraform module to create AWS VPC resources 🇺🇦",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-aws-vpc",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-vpc.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-aws-vpc",
+          "default_repo_name": "terraform-aws-vpc",
+          "tags": [
+            "HCL"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "HCL",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-GitHub_Trending-te-terraform-provider-azurerm",
+          "name": "terraform-provider-azurerm",
+          "description": "Terraform provider for Azure Resource Manager",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform provider for Azure Resource Manager",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "GitHub_Trending/te/terraform-provider-azurerm",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-azurerm.git",
+          "html_url": "https://gitcode.com/GitHub_Trending/te/terraform-provider-azurerm",
+          "default_repo_name": "terraform-provider-azurerm",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-inventory",
+          "name": "terraform-inventory",
+          "description": "Terraform State → Ansible Dynamic Inventory",
+          "recommend_reason": "Go 语言 · 基础设施即代码 · Terraform State → Ansible Dynamic Inventory",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-inventory",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-inventory.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-inventory",
+          "default_repo_name": "terraform-inventory",
+          "tags": [
+            "Go"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Go",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-tui",
+          "name": "terraform-tui",
+          "description": "Terraform textual UI",
+          "recommend_reason": "Python · 基础设施即代码",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-tui",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-tui.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-tui",
+          "default_repo_name": "terraform-tui",
+          "tags": [
+            "Python"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "Python",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "gitcode-gh_mirrors-te-terraform-cdk",
+          "name": "terraform-cdk",
+          "description": "Define infrastructure resources using programming constructs and provision them using HashiCorp Terraform",
+          "recommend_reason": "TypeScript · 基础设施即代码 · Define infrastructure resources using programming constructs",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "gh_mirrors/te/terraform-cdk",
+          "source_platform": "gitcode",
+          "clone_url": "https://gitcode.com/gh_mirrors/te/terraform-cdk.git",
+          "html_url": "https://gitcode.com/gh_mirrors/te/terraform-cdk",
+          "default_repo_name": "terraform-cdk",
+          "tags": [
+            "TypeScript"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 0,
+            "language": "TypeScript",
+            "platform": "gitcode"
+          }
+        },
+        {
+          "id": "github-bregman-arie-devops-exercises",
+          "name": "devops-exercises",
+          "description": "Linux, Jenkins, AWS, SRE, Prometheus, Docker, Python, Ansible, Git, Kubernetes, Terraform, OpenStack, SQL, NoSQL, Azure,",
+          "recommend_reason": "热门项目（84,401 ⭐） · Python · Kubernetes 生态 / 容器化 / 监控告警",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "bregman-arie/devops-exercises",
+          "source_platform": "github",
+          "clone_url": "https://github.com/bregman-arie/devops-exercises.git",
+          "html_url": "https://github.com/bregman-arie/devops-exercises",
+          "default_repo_name": "devops-exercises",
+          "tags": [
+            "ansible",
+            "aws",
+            "azure",
+            "coding",
+            "containers"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 84401,
+            "language": "Python",
+            "platform": "github"
+          }
+        },
+        {
+          "id": "github-opentofu-manifesto",
+          "name": "manifesto",
+          "description": "The OpenTF Manifesto expresses concern over HashiCorp's switch of the Terraform license from open-source to the Business",
+          "recommend_reason": "高星项目（35,655 ⭐） · 前端 · 基础设施即代码",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "opentofu/manifesto",
+          "source_platform": "github",
+          "clone_url": "https://github.com/opentofu/manifesto.git",
+          "html_url": "https://github.com/opentofu/manifesto",
+          "default_repo_name": "manifesto",
+          "tags": [
+            "HTML"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 35655,
+            "language": "HTML",
+            "platform": "github"
+          }
+        },
+        {
+          "id": "github-MichaelCade-90DaysOfDevOps",
+          "name": "90DaysOfDevOps",
+          "description": "This repository started out as a learning in public project for myself and has now become a structured learning map for ",
+          "recommend_reason": "高星项目（29,718 ⭐） · Shell 脚本 · 基础设施即代码 / Kubernetes 生态",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "MichaelCade/90DaysOfDevOps",
+          "source_platform": "github",
+          "clone_url": "https://github.com/MichaelCade/90DaysOfDevOps.git",
+          "html_url": "https://github.com/MichaelCade/90DaysOfDevOps",
+          "default_repo_name": "90daysofdevops",
+          "tags": [
+            "ansible",
+            "backup",
+            "containers",
+            "devops",
+            "iac"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 29718,
+            "language": "Shell",
+            "platform": "github"
+          }
+        },
+        {
+          "id": "github-mikefarah-yq",
+          "name": "yq",
+          "description": "yq is a portable command-line YAML, JSON, XML, CSV, TOML, HCL  and properties processor",
+          "recommend_reason": "高星项目（15,935 ⭐） · Go 语言 · 基础设施即代码",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "mikefarah/yq",
+          "source_platform": "github",
+          "clone_url": "https://github.com/mikefarah/yq.git",
+          "html_url": "https://github.com/mikefarah/yq",
+          "default_repo_name": "yq",
+          "tags": [
+            "bash",
+            "cli",
+            "csv",
+            "devops-tools",
+            "golang"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 15935,
+            "language": "Go",
+            "platform": "github"
+          }
+        },
+        {
+          "id": "github-xpipe-io-xpipe",
+          "name": "xpipe",
+          "description": "Access your entire server infrastructure from your local desktop",
+          "recommend_reason": "高星项目（14,511 ⭐） · Java · K8s 编排 / 容器化 / Kubernetes 生态",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "xpipe-io/xpipe",
+          "source_platform": "github",
+          "clone_url": "https://github.com/xpipe-io/xpipe.git",
+          "html_url": "https://github.com/xpipe-io/xpipe",
+          "default_repo_name": "xpipe",
+          "tags": [
+            "bash",
+            "docker",
+            "filemanager",
+            "files",
+            "incus"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 14511,
+            "language": "Java",
+            "platform": "github"
+          }
+        },
+        {
+          "id": "github-semaphoreui-semaphore",
+          "name": "semaphore",
+          "description": "Modern UI and powerful API for Ansible, Terraform/OpenTofu/Terragrunt, PowerShell and other DevOps tools.",
+          "recommend_reason": "高星项目（14,115 ⭐） · Go 语言 · 基础设施即代码 / 容器化",
+          "icon": "📦",
+          "source": "git",
+          "source_repo": "semaphoreui/semaphore",
+          "source_platform": "github",
+          "clone_url": "https://github.com/semaphoreui/semaphore.git",
+          "html_url": "https://github.com/semaphoreui/semaphore",
+          "default_repo_name": "semaphore",
+          "tags": [
+            "ansible",
+            "awx",
+            "ci",
+            "cicd",
+            "devops"
+          ],
+          "scene_id": "default",
+          "stats": {
+            "show": true,
+            "stars": 14115,
+            "language": "Go",
             "platform": "github"
           }
         }
