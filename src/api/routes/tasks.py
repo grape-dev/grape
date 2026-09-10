@@ -249,20 +249,27 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
             (repo_key, _issue_id))
         _has_running = c.fetchone() is not None
 
-        if _stage in ("done", "pending_review"):
-            # 已经在待审核或已完成阶段 → 直接关闭
+        if _stage == "done":
+            # stage=done 表示开发者已确认 → 直接 completed
             c.execute(
                 "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
-                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
                 (repo_key, issue_number)
             )
-            if _stage != "done" and not _has_running:
-                set_issue_stage(repo_key, _issue_id, "done", "issue_closed")
+        elif _stage == "pending_review":
+            # Issue #85: stage=pending_review → 保持 pending_review，不自动 completed
+            # 只将 active 任务推进到 pending_review（processing/awaiting_input 保持原状）
+            c.execute(
+                "UPDATE tasks SET status='pending_review' "
+                "WHERE repo_key=? AND issue_number=? AND status='active'",
+                (repo_key, issue_number)
+            )
         elif not _has_running:
             # 还在 pipeline 流转中且无 agent 运行 → 设为 pending_review 等待开发者确认
+            # Issue #85: 无 issue_state 记录（stage 为空）时也走此路径
             c.execute(
-                "UPDATE tasks SET status='processing', completed_reason=NULL "
-                "WHERE repo_key=? AND issue_number=? AND status='active'",
+                "UPDATE tasks SET status='pending_review', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                 (repo_key, issue_number)
             )
             set_issue_stage(repo_key, _issue_id, "pending_review", "issue_closed")
@@ -304,18 +311,23 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
             (repo_key, _issue_id))
         _has_running = c.fetchone() is not None
 
-        if _stage in ("done", "pending_review"):
+        if _stage == "done":
+            # stage=done → 直接 completed
             c.execute(
                 "UPDATE tasks SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
-                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
                 (repo_key, issue_number))
-            if _stage != "done" and not _has_running:
-                set_issue_stage(repo_key, _issue_id, "done", "bot_takeover")
-        elif not _has_running:
-            # 没有 agent 在运行 → 设为 pending_review
+        elif _stage == "pending_review":
+            # Issue #85: stage=pending_review → 保持，不自动 completed
             c.execute(
-                "UPDATE tasks SET status='processing', completed_reason=NULL "
+                "UPDATE tasks SET status='pending_review' "
                 "WHERE repo_key=? AND issue_number=? AND status='active'",
+                (repo_key, issue_number))
+        elif not _has_running:
+            # 没有 agent 在运行 → 设为 pending_review（Issue #85: 同步 processing 任务）
+            c.execute(
+                "UPDATE tasks SET status='pending_review', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                 (repo_key, issue_number))
             set_issue_stage(repo_key, _issue_id, "pending_review", "bot_takeover")
         # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
@@ -572,10 +584,12 @@ class TaskStatusBody(BaseModel):
     status: str = ""
 
 
-# 任务状态迁移规则（任务中心新建任务支持的状态流）
+# 任务状态迁移规则（Issue #85: 增加 awaiting_input + pending_review）
 _TASK_STATUS_FLOWS = {
-    "active": ("processing", "cancelled"),
-    "processing": ("completed", "cancelled", "active"),
+    "active": ("processing", "awaiting_input", "cancelled"),
+    "processing": ("awaiting_input", "pending_review", "completed", "cancelled", "active"),
+    "awaiting_input": ("processing", "cancelled"),
+    "pending_review": ("completed", "cancelled"),
     "completed": (),
     "cancelled": ("active",),
 }
@@ -593,6 +607,7 @@ async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = De
     将 task status → done，issue_state stage → done，
     completed_reason → 'user_confirmed' / 'issue_comment' / 'chat_agent'。
     仅 pending_review 阶段可确认；已 done 幂等跳过。
+    Issue #85: 收紧校验——只允许 pending_review 和 done 阶段确认，不再允许 sre 阶段绕过。
     """
     from src.api.session_store import set_issue_stage, get_issue_stage
     with db_lock:
@@ -610,9 +625,9 @@ async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = De
         if _issue_num:
             _st = get_issue_stage(_repo_key, f"#{_issue_num}")
         _stage = (_st.get("stage") if _st else "") or ""
-        # 允许 pending_review 和 sre/sre_completed 阶段确认
-        if _stage not in ("pending_review", "sre_completed", "sre", "done"):
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "任务尚未到待审核阶段"})
+        # Issue #85: 只允许 pending_review 和 done 阶段确认
+        if _stage not in ("pending_review", "done"):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"任务尚未到待审核阶段，当前阶段：{_stage}"})
         c.execute(
             "UPDATE tasks SET status='completed', completed_reason=?, completed_at=datetime('now') WHERE id=?",
             (body.confirmation, task_id))
@@ -1050,7 +1065,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
 
 @router.put("/{task_id}/status", operation_id="tasks_status", summary="更新任务状态")
 async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user_or_api_key)):
-    """任务状态迁移（active → processing → completed / cancelled；cancelled → active 可恢复）。
+    """任务状态迁移（Issue #85: active → processing → awaiting_input → pending_review → completed / cancelled）。
 
     终端状态 completed 不可改；同一任务只能单向流转（按 _TASK_STATUS_FLOWS 校验）。
     """
@@ -1284,6 +1299,20 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
         except Exception as e:
             log.warning(f"Task clarify: write conversation message failed: {e}")
 
+    # Issue #85: 开发者回复澄清后 → task.status 从 awaiting_input 恢复为 processing
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE tasks SET status='processing' "
+                "WHERE repo_key=? AND issue_number=? AND status='awaiting_input'",
+                (repo_key, issue_number))
+            db.commit()
+            if c.rowcount > 0:
+                log.info(f"Task clarify: awaiting_input → processing for {repo_key}/#{issue_number}")
+    except Exception as e:
+        log.warning(f"Task clarify: restore processing failed: {e}")
+
     return {"ok": True, "message": "澄清已发送到 Issue 并同步到任务会话"}
 
 
@@ -1343,6 +1372,16 @@ async def get_task_pipeline(task_id: int, user: dict = Depends(get_current_user)
     if issue_id:
         events = get_events(repo_key, issue_id=issue_id, limit=30)
 
+    # 为每个节点关联最新事件（含 seq，供前端点击跳转事件详情）
+    _events_by_agent = {}
+    for e in events:
+        _at = e.get("agent_type", "")
+        if _at and _at not in _events_by_agent:
+            _events_by_agent[_at] = e
+    for n in nodes:
+        _nid = n.get("id", "")
+        n["latest_event"] = _events_by_agent.get(_nid, None)
+
     return {
         "scene_id": _scene_id,
         "scene_name": (pipe_cfg or {}).get("name", _scene_id),
@@ -1353,7 +1392,7 @@ async def get_task_pipeline(task_id: int, user: dict = Depends(get_current_user)
 
 
 @router.get("/mine", operation_id="tasks_mine", summary="我的任务列表")
-async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
+async def my_tasks(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|)?$"),
                    repo_key: str = Query("", description="按仓库过滤"),
                    sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                    mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
@@ -1437,6 +1476,18 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                 _scene_name = _cfg.get("name", _scene_id)
         except Exception:
             pass
+        # 检查是否有正在运行的 agent_task（Issue #85: 雷达动画依据）
+        _has_running_agent = False
+        if r[3] and _stage in ("vod", "issue", "coding", "qa", "sre"):
+            try:
+                with db_lock:
+                    _rc = db.cursor()
+                    _rc.execute(
+                        "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running') LIMIT 1",
+                        (_rk, _issue_id))
+                    _has_running_agent = _rc.fetchone() is not None
+            except Exception:
+                pass
         tasks_out.append({
             "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
             "title": r[4] or "", "task_description": r[5] or "",
@@ -1448,5 +1499,6 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
             "scene_name": _scene_name,
             "scene_source": _scene_source,
             "stage": _stage,
+            "is_running": _has_running_agent,
         })
     return {"tasks": tasks_out, "sort_order": sort_order, "mode": mode}

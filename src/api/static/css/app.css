@@ -456,6 +456,9 @@
 .nd-heartbeat>*{position:relative;z-index:1}
 .d-heartbeat{animation:radarPulse 1.2s ease-in-out infinite}
 
+/* ===== 看板卡片雷达扫描（流水线执行中任务）===== */
+.tsk-radar-sweep{position:absolute;top:0;left:0;width:100%;height:100%;animation:radarSweep 3s linear infinite;pointer-events:none;z-index:0}
+
 /* ===== Chat 查询中三点动画（学习 Admin AI loading-dots query-bounce）===== */
 .chat-typing{display:inline-block;font-size:12px;color:var(--t2)}
 .chat-dots{display:inline-flex;gap:6px;padding:8px 4px;align-items:center}
