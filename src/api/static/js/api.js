@@ -58,16 +58,13 @@ const API = (() => {
         if (!e.newValue) {
           localStorage.removeItem('user');
           if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+        } else {
+          // Issue #86: 其他 Tab 刷新了 token——当前 Tab 按新 token 的 exp 重设定时器
+          // 否则旧定时器触发时发现新 token 还很充足，不刷新也不重设，定时器停摆
+          scheduleProactiveRefresh();
         }
       }
     });
-  }
-
-  function headers() {
-    const h = {'Content-Type': 'application/json'};
-    const token = localStorage.getItem('token');
-    if (token) h['Authorization'] = 'Bearer ' + token;
-    return h;
   }
 
   // 用 refresh_token 换新的 access_token（滚动续期）
@@ -308,7 +305,7 @@ const API = (() => {
     del: _del,
     scheduleProactiveRefresh: scheduleProactiveRefresh,  // Issue #86: app.js 登录成功后调用
     upload: (path, formData, onUploadProgress) => {
-      const token = localStorage.getItem('token');
+      return ensureTokenValid().then(token => {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', BASE + path);
@@ -338,6 +335,7 @@ const API = (() => {
         };
         xhr.onerror = () => reject(new Error(I18N.t('common.network_upload_error')));
         xhr.send(formData);
+      });
       });
     },
   };
