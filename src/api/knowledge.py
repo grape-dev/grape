@@ -826,13 +826,18 @@ def _sync_baseline_files():
                         "project-capabilities.md": "VOD 基线分析：项目能力清单（功能特性/支持能力）",
                         ".metadata.json": "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）",
                     }.get(fname, "VOD 基线分析自动生成")
+                    _baseline_name = {
+                        "project-graph.md": "项目结构图谱",
+                        "project-capabilities.md": "项目能力清单",
+                        ".metadata.json": "项目元数据",
+                    }.get(fname, "项目基线分析")
                     with db_lock:
                         c = db.cursor()
                         c.execute(
                             "INSERT INTO agent_shared_knowledge "
-                            "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, description) "
-                            "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync', 'system', ?)",
-                            (repo_key, file_path, storage_key, content_hash, _baseline_desc)
+                            "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, description, name) "
+                            "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync', 'system', ?, ?)",
+                            (repo_key, file_path, storage_key, content_hash, _baseline_desc, _baseline_name)
                         )
                         db.commit()
                 log.info(f"[knowledge] sync baseline {repo_key}/{fname} → OBS")
