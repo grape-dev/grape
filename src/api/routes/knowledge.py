@@ -43,20 +43,6 @@ def _safe_rel(rel: str) -> str:
     return rel
 
 
-def _repo_root_rel(ws_rel: str, repo_key: str) -> str:
-    """WORKSPACE_DIR 相对路径 → 仓库根相对路径（剥掉 {owner}/{repo}/ 前缀）。
-
-    agent_shared_knowledge.file_path 存 WORKSPACE 相对（如 owner/repo/project-info/knowledge.md），
-    看板统一用「相对仓库根」语义（与 content 接口 / 成员文档 path 一致）。
-    """
-    rel = (ws_rel or "").replace("\\", "/").lstrip("/")
-    owner, rname = _owner_repo(repo_key)
-    prefix = f"{owner}/{rname}/"
-    if owner and rname and rel.startswith(prefix):
-        rel = rel[len(prefix):]
-    return rel
-
-
 def _read_file(repo_key: str, rel: str) -> str:
     rel = _safe_rel(rel)
     ext = os.path.splitext(rel)[1].lower()
@@ -581,9 +567,6 @@ def _build_ref_summary(refs: list) -> str:
     enabled_refs = [r for r in refs if r.get("enabled")]
     if not enabled_refs:
         return "未关联"
-    has_global = any(r.get("scene_id") == "" and r.get("agent_type") == "" for r in enabled_refs)
-    if has_global:
-        return "全局"
     scene_count = sum(1 for r in enabled_refs if r.get("scene_id"))
     agent_types = [r.get("agent_type") for r in enabled_refs if r.get("agent_type")]
     parts = []
