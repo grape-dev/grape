@@ -955,7 +955,7 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
             if content:
                 found = True
                 injected_ids.append(kid)
-                lines.append(f"[{source} 级] {content[:500]}")
+                lines.append(f"[{source} 级] {content}")
     except Exception:
         # 向后兼容：scene_knowledge_ref 表不存在时回退到 scope 三级注入
         try:
