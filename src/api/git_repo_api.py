@@ -71,23 +71,61 @@ def _provider(header: str = Header("", alias="X-Git-Provider"),
 
 
 def _repo_token(owner: str, repo: str, user: dict) -> str:
-    """解析仓库平台 token：优先仓库 bot token，回退调用者 gitcode token。"""
-    try:
-        from src.repo_key import to_repo_key
-        from src.user.db import get_gitcode_token
-        rk = to_repo_key(f"{owner}/{repo}")
-        tok = get_gitcode_token(repo_key=rk) or ""
+    """解析仓库平台 token，按调用凭据身份决定（user/bot 三态，见 issue-45-api-token-design §2.5 增补）：
+
+    - 会话级临时 token（tk_，auth_type=session_token）→ 按其 agent_type：
+        · chat agent → **用户 gitcode token**（用户身份）
+        · devops 事件 agent（vod/issue/coding/qa/sre）→ **仓库 bot token**（仓库身份）
+    - JWT / 用户级 API Key（auth_type=jwt/api_key）→ 调用者用户 gitcode token，缺失回退 bot。
+    - 均缺失 → 502。
+    """
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(f"{owner}/{repo}")
+
+    def _bot() -> str:
+        try:
+            from src.user.db import get_gitcode_token
+            return get_gitcode_token(repo_key=rk) or ""
+        except Exception:
+            return ""
+
+    def _user() -> str:
+        try:
+            from src.api.deps import get_user_token_with_refresh
+            uid = user.get("id") or 0
+            username = user.get("username") or ""
+            if not username and uid > 0:
+                from src.user.db import get_user
+                username = (get_user(uid) or {}).get("username", "")
+            return get_user_token_with_refresh(username, user_id=uid)
+        except Exception:
+            return ""
+
+    if user.get("auth_type") == "session_token":
+        # 会话 token 绑定 agent_type：chat → 用户；devops → bot（评审：不能一概 bot 优先）
+        if user.get("agent_type") == "chat":
+            tok = _user()
+            if tok:
+                return tok
+            # 用户 token 缺失兜底 bot（仓库 bot 可用时）
+            tok = _bot()
+            if tok:
+                return tok
+        else:
+            tok = _bot()
+            if tok:
+                return tok
+            tok = _user()
+            if tok:
+                return tok
+    else:
+        # JWT / API Key：用户级身份 → 优先用户 gitcode token
+        tok = _user()
         if tok:
             return tok
-    except Exception:
-        pass
-    try:
-        from src.api.deps import get_user_token_with_refresh
-        tok = get_user_token_with_refresh(user.get("username", ""), user_id=user.get("id") or 0)
+        tok = _bot()
         if tok:
             return tok
-    except Exception:
-        pass
     raise HTTPException(status_code=502, detail={"code": 502, "message": "Git 仓库 token 解析失败"})
 
 

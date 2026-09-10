@@ -167,6 +167,59 @@ def test_no_token_502(monkeypatch, _client):
     assert r.status_code == 502
 
 
+# ===================== _repo_token 按会话身份取平台 token =====================
+
+def _repo_token_call(user):
+    import src.api.git_repo_api as m
+    return m._repo_token(OWNER, REPO, user)
+
+
+def test_repo_token_chat_session_uses_user_token(monkeypatch):
+    import src.api.git_repo_api as m
+    calls = {"user": 0, "bot": 0}
+    monkeypatch.setattr("src.user.db.get_gitcode_token",
+                        lambda *a, **k: calls.__setitem__("bot", calls["bot"] + 1) or BOT)
+    monkeypatch.setattr("src.api.deps.get_user_token_with_refresh",
+                        lambda *a, **k: calls.__setitem__("user", calls["user"] + 1) or "USRTOK")
+    user = {"auth_type": "session_token", "agent_type": "chat", "user_id": 7, "id": 7,
+            "session_key": "t_x", "repo_key": f"gitcode:{OWNER}/{REPO}"}
+    tok = _repo_token_call(user)
+    assert tok == "USRTOK"
+    assert calls["user"] >= 1 and calls["bot"] == 0
+
+
+def test_repo_token_devops_session_uses_bot_token(monkeypatch):
+    calls = {"user": 0, "bot": 0}
+    monkeypatch.setattr("src.user.db.get_gitcode_token",
+                        lambda *a, **k: calls.__setitem__("bot", calls["bot"] + 1) or BOT)
+    monkeypatch.setattr("src.api.deps.get_user_token_with_refresh",
+                        lambda *a, **k: calls.__setitem__("user", calls["user"] + 1) or "USRTOK")
+    user = {"auth_type": "session_token", "agent_type": "vod", "user_id": 0,
+            "session_key": "t_y", "repo_key": f"gitcode:{OWNER}/{REPO}"}
+    assert _repo_token_call(user) == BOT
+    assert calls["bot"] >= 1 and calls["user"] == 0
+
+
+def test_repo_token_api_key_prefers_user_token(monkeypatch):
+    import src.api.git_repo_api as m
+    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.api.deps.get_user_token_with_refresh",
+                        lambda *a, **k: "USRTOK")
+    user = {"auth_type": "api_key", "id": 9, "username": "someone"}
+    assert _repo_token_call(user) == "USRTOK"
+
+
+def test_repo_token_all_missing_502(monkeypatch):
+    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "")
+    monkeypatch.setattr("src.api.deps.get_user_token_with_refresh", lambda *a, **k: "")
+    import src.api.git_repo_api as m
+    import pytest as _p
+    from fastapi import HTTPException
+    with _p.raises(HTTPException) as ei:
+        m._repo_token(OWNER, REPO, {"auth_type": "session_token", "agent_type": "vod", "user_id": 0})
+    assert ei.value.status_code == 502
+
+
 def test_unauthenticated_401():
     app.dependency_overrides.clear()
     client = TestClient(app)
