@@ -750,7 +750,7 @@ function renderKnowledge() {
                     </span>
                   </div>
                   <div class="scn-card-foot">
-                    <span class="scn-meta">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
+                    <span class="scn-meta" :title="k.created_by + ' · ' + (k.created_at || '').substring(0, 16)">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
                     <div class="scn-card-btns">
                       <button class="bt bt-p bt-s" @click.stop="viewContent(k)">{{ t('view') }}</button>
                       <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click.stop="quickDelete(k)">{{ t('delete') }}</button>
