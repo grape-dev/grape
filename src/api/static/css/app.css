@@ -602,6 +602,7 @@
 .kb-input{padding:7px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:12px;outline:none;background:var(--c);width:200px}
 .kb-checkbox-label{font-size:11px;color:var(--t3);display:flex;align-items:center;gap:4px;cursor:pointer}
 .kb-textarea{width:100%;min-height:200px;padding:12px;border:1px solid var(--b);border-radius:8px;font-size:13px;font-family:monospace;resize:vertical}
+.kb-required{color:var(--r);margin-left:2px}
 .kb-detail-content { font-size: 13px; line-height: 1.6; overflow-x: auto; }
 .kb-detail-scroll { max-height: 400px; overflow-y: auto; padding-right: 8px; }
 .kb-detail-scroll::-webkit-scrollbar { width: 6px; }
