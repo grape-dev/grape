@@ -262,6 +262,16 @@ window._jumpToPipeline = function(nodeId) {
 // 点击流水线节点 → 跳转到该节点最新事件详情页
 window._jumpToNodeEvent = function(seq) {
   if (!seq) { console.warn('jumpToNodeEvent: no seq'); return; }
+  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
+  const t = window._currentDetailTask;
+  if (t && t.repo_key) {
+    const repoKey = t.repo_key.replace('gitcode:', '');
+    const parts = repoKey.split('/');
+    if (parts.length >= 2) {
+      const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
+      localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+    }
+  }
   if (typeof app !== 'undefined' && app.nav) {
     app.nav('event', seq);
   }
@@ -323,9 +333,9 @@ function _renderPipelineSection(data) {
       var pulseStyle = isCurrent ? ';animation:grapePulse 1.2s ease-in-out infinite' : '';
       var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #3b82f6;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
       var innerStyle = isCurrent ? ';position:relative' : '';
-      // 节点点击：有事件 seq 则跳转事件详情，否则跳转流水线页面
+      // 节点点击：有事件 seq 则跳转事件详情，否则跳转流水线页面（阻止冒泡到卡片）
       var nodeSeq = (n.latest_event && n.latest_event.seq) || '';
-      var nodeClick = (isCurrent || isCompleted) ? (nodeSeq ? ` onclick="_jumpToNodeEvent(${nodeSeq})"` : ` onclick="_jumpToPipePage()"`) : '';
+      var nodeClick = (isCurrent || isCompleted) ? (nodeSeq ? ` onclick="event.stopPropagation();_jumpToNodeEvent(${nodeSeq})"` : ` onclick="event.stopPropagation();_jumpToPipePage()"`) : '';
       var nodeCursor = (isCurrent || isCompleted) ? ';cursor:pointer' : '';
       html += `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0${nodeCursor}"${nodeClick}>`;
       html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${isCompleted?'✓':i+1}</div>`;
