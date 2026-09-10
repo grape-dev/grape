@@ -71,14 +71,6 @@ function renderKnowledge() {
         } else if (this.filter.refStatus === 'unlinked') {
           result = result.filter(k => !k.refs || k.refs.length === 0);
         }
-        if (this.filter.query) {
-          const q = this.filter.query.toLowerCase();
-          result = result.filter(k =>
-            (k.content || '').toLowerCase().includes(q) ||
-            (k.file_path || '').toLowerCase().includes(q) ||
-            (k.created_by || '').toLowerCase().includes(q)
-          );
-        }
         return result;
       },
       detailAgentRefs() {
