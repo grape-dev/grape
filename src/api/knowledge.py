@@ -198,7 +198,6 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
         return ""
     if scope == "project":
         issue_num = 0
-        agent_type = ""
     elif scope == "issue":
         agent_type = ""
     elif scope != "issue_agent":
