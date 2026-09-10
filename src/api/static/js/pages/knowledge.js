@@ -682,21 +682,21 @@ function renderKnowledge() {
           <template v-if="!firstLoad">
             <!-- 统计卡片（点击切换 tab，在 apple-card 外面） -->
             <div class="stats-bar">
-              <div class="stat-card" :class="{ active: activeTab === 'system' }" @click="switchTab('system')">
+              <div class="stat-card">
                 <div class="stat-info">
                   <span class="stat-num">{{ statSystem() }}</span>
                   <span class="stat-label">{{ t('stats_system') }}</span>
                 </div>
                 <div class="stat-icon" style="background:rgba(0,113,227,0.1);color:#0071e3">⚙</div>
               </div>
-              <div class="stat-card" :class="{ active: activeTab === 'agent' }" @click="switchTab('agent')">
+              <div class="stat-card">
                 <div class="stat-info">
                   <span class="stat-num">{{ statAgent() }}</span>
                   <span class="stat-label">{{ t('stats_agent') }}</span>
                 </div>
                 <div class="stat-icon" style="background:rgba(255,149,0,0.1);color:#ff9500">🤖</div>
               </div>
-              <div class="stat-card" :class="{ active: activeTab === 'user' }" @click="switchTab('user')">
+              <div class="stat-card">
                 <div class="stat-info">
                   <span class="stat-num">{{ statUser() }}</span>
                   <span class="stat-label">{{ t('stats_user') }}</span>

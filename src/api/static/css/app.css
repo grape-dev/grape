@@ -590,10 +590,7 @@
 
 /* ===== Issue #67: 知识库页面 Vue 组件样式 ===== */
 .knowledge-page .stats-bar{display:flex;gap:12px;margin-bottom:16px}
-.knowledge-page .stat-card{flex:1;padding:16px 20px;border-radius:14px;background:var(--c);border:1px solid var(--b);cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:space-between;box-shadow:none}
-.knowledge-page .stat-card:hover{border-color:var(--a);background:rgba(0,113,227,0.02)}
-.knowledge-page .stat-card.active{border-color:var(--a);background:rgba(0,113,227,0.04)}
-.knowledge-page .stat-card.active .stat-num{color:var(--a)}
+.knowledge-page .stat-card{flex:1;padding:16px 20px;border-radius:14px;background:var(--c);border:1px solid var(--b);display:flex;align-items:center;justify-content:space-between;box-shadow:none}
 .knowledge-page .stat-info{display:flex;flex-direction:column}
 .knowledge-page .stat-num{font-size:24px;font-weight:700;color:var(--t);letter-spacing:-.02em}
 .knowledge-page .stat-label{font-size:11px;color:var(--t3);margin-top:2px;font-weight:500}
