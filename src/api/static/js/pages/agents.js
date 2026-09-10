@@ -234,8 +234,11 @@ function renderAgent(name, data) {
   const et = m.total_events || 0;
 
   const engineText = data.backend || (data.backends && data.backends.length ? data.backends.join(', ') : '');
+  const _ENGINE_TYPE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
+  const _engineTypeOf = n => { const l = (n || '').toLowerCase(); if (l.includes('hermes')) return 'hermes'; if (l.includes('opencode')) return 'opencode'; if (l.includes('codearts')) return 'codearts'; if (l.includes('codex')) return 'codex'; return ''; };
+  const _engineDot = _ENGINE_TYPE_DOT[_engineTypeOf(engineText)] || '';
   const engineBadge = engineText
-    ? `<span class="ts t3" style="font-weight:600">${I18N.t('agents.engine.label', {text: engineText})}</span>`
+    ? `<span class="ts t3" style="font-weight:600;display:inline-flex;align-items:center;gap:5px">${_engineDot ? `<span style="width:7px;height:7px;border-radius:50%;background:${_engineDot};flex-shrink:0"></span>` : ''}${I18N.t('agents.engine.label', {text: engineText})}</span>`
     : `<span class="ts t3" style="color:var(--r);font-weight:700">${I18N.t('agents.engine.no_engine')}</span>`;
 
   let html = `
