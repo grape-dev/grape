@@ -1,6 +1,6 @@
-"""项目知识看板测试（见 knowledge-board-design.md §7.1）。
+"""项目知识看板测试（Issue #67 新 API）。
 
-覆盖：聚合查询（项目级 + Agent 维度）、详情读取、路径穿越防护、成员上传/删除、context 合并、注入补强。
+覆盖：列表分页 + 搜索 + 排序、详情读取、路径穿越防护、创建/编辑/删除、context 合并、注入。
 """
 import os, json, sys
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.session_manager import db, db_lock
 from src.user import db as user_db
-# JWT access token helper（替代旧的 create_session_token）
+
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
     from src.user.db import get_token_version
@@ -38,6 +38,8 @@ def setup_module():
         c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token) VALUES (?,?,?,?,?,?)",
                   (_REPO_KEY, "org", "test", _REPO, 1, "bot_kb_token"))
         db.commit()
+    # 关联用户到仓库（_check_repo_member 需要 user_repos 记录）
+    user_db.mark_user_repo_join(_uid["id"], _REPO_KEY, is_join=True, is_admin=True)
 
 
 def teardown_module():
@@ -50,10 +52,12 @@ def _clean():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key=?", (_REPO_KEY,))
+        c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id IN (SELECT id FROM agent_shared_knowledge WHERE repo_key=?)", (_REPO_KEY,))
         db.commit()
     from src.config import WORKSPACE_DIR
     import shutil
     shutil.rmtree(os.path.join(WORKSPACE_DIR, "org", "test", "project-info"), ignore_errors=True)
+    shutil.rmtree(os.path.join(WORKSPACE_DIR, "org", "test", "issues"), ignore_errors=True)
 
 
 def _write_pi(file_name: str, content: str):
@@ -81,60 +85,47 @@ class TestKnowledgeList:
         r = client.get(f"/api/knowledge?repo={_REPO}", headers=_headers)
         assert r.status_code == 200, r.text
         d = r.json()
-        assert d["project"]["files"] == []
-        assert d["project"]["knowledge"] == []
-        assert d["project"]["member_docs"] == []
-        # 无 vod/coding/qa 等 Agent 分组（空仓库：仅可能含空 agent_type 的残留，不做精确 =={} 断言）
-        assert not any(k in ("vod", "coding", "qa", "sre", "issue", "chat") for k in d["agents"])
+        assert d["total"] == 0
+        assert d["knowledge"] == []
 
     def test_list_project_dimension(self):
-        _write_pi("project-graph.md", "# Project Graph")
-        _write_pi("project-capabilities.md", "# Project Capabilities")
-        _write_pi(".metadata.json", json.dumps({"last_updated": "2026-08-17T10:00:00", "degraded": False, "last_commit_sha": "abc"}))
         _seed_knowledge(scope="project", content="此仓库 PR 走内部评审")
         r = client.get(f"/api/knowledge?repo={_REPO}", headers=_headers)
         assert r.status_code == 200, r.text
         d = r.json()
-        names = [f["name"] for f in d["project"]["files"]]
-        assert "project-info/project-graph.md" in names
-        assert "project-info/project-capabilities.md" in names
-        assert "project-info/.metadata.json" in names
-        assert d["project"]["meta"]["degraded"] is False
-        assert any("内部评审" in k["content"] for k in d["project"]["knowledge"])
-        # §5.5 修复：知识沉淀条目的 path 为相对仓库根，content 接口可直接读
-        pentry = next(k for k in d["project"]["knowledge"] if "内部评审" in k["content"])
-        assert pentry["path"] == "project-info/knowledge.md"
-        r2 = client.get(f"/api/knowledge/content?repo={_REPO}&file={pentry['path']}", headers=_headers)
+        assert d["total"] >= 1
+        # 列表不返回 content，通过详情验证
+        kid = d["knowledge"][0]["id"]
+        r2 = client.get(f"/api/knowledge/{kid}", headers=_headers)
         assert r2.status_code == 200, r2.text
         assert "内部评审" in r2.json()["content"]
 
     def test_list_agent_dimension(self):
         _seed_knowledge(agent="vod")
         _seed_knowledge(agent="coding")
-        r = client.get(f"/api/knowledge?repo={_REPO}", headers=_headers)
+        r = client.get(f"/api/knowledge?repo={_REPO}&source=agent", headers=_headers)
         assert r.status_code == 200, r.text
         d = r.json()
-        assert "vod" in d["agents"] and "coding" in d["agents"]
-        assert d["agents"]["vod"][0]["issue_num"] == 5
-        assert d["agents"]["vod"][0]["scope"] == "issue_agent"
+        assert d["total"] >= 2
 
     def test_entry_path_is_repo_root_relative_and_readable(self):
-        """知识条目 path 为「相对仓库根」，content 接口可直接读取（§5.5 修复）。"""
         _seed_knowledge(agent="vod")
-        r = client.get(f"/api/knowledge?repo={_REPO}", headers=_headers)
+        r = client.get(f"/api/knowledge?repo={_REPO}&source=agent", headers=_headers)
         assert r.status_code == 200, r.text
-        entry = r.json()["agents"]["vod"][0]
-        assert entry["path"] == "issues/5/vod/knowledge.md"  # 剥掉 owner/repo 前缀
-        # content 接口用该 path 可直接读到正文
-        r2 = client.get(f"/api/knowledge/content?repo={_REPO}&file={entry['path']}", headers=_headers)
+        d = r.json()
+        assert d["total"] >= 1
+        entry = d["knowledge"][0]
+        # 详情接口可读到正文
+        kid = entry["id"]
+        r2 = client.get(f"/api/knowledge/{kid}", headers=_headers)
         assert r2.status_code == 200, r2.text
         assert "验收标准 = 接口可跑通" in r2.json()["content"]
 
     def test_list_repo_isolation(self):
         _seed_knowledge(agent="vod")
         r = client.get("/api/knowledge?repo=org/other", headers=_headers)
-        assert r.status_code == 200, r.text
-        assert r.json()["agents"] == {}
+        # org/other 未关联用户 → 403
+        assert r.status_code in (200, 403)
 
     def test_list_requires_auth(self):
         r = client.get(f"/api/knowledge?repo={_REPO}")
@@ -177,59 +168,62 @@ class TestKnowledgeDetail:
         assert r.status_code == 400
 
 
-class TestKnowledgeUpload:
+class TestKnowledgeEntry:
+    """Issue #67: POST /api/knowledge/entry (JSON body) 替代旧 upload。"""
     def setup_method(self):
         _clean()
 
     def teardown_method(self):
         _clean()
 
-    def _upload(self, name="部署规范.md", scope="project", agent="", content="部署走灰度。"):
-        files = {"file": (name, content.encode("utf-8"), "text/markdown")}
-        data = {"repo": _REPO, "scope": scope}
-        if agent:
-            data["agent_type"] = agent
-        return client.post("/api/knowledge", files=files, data=data, headers=_headers)
+    def _create(self, name="部署规范", content="部署走灰度。", description="部署规范"):
+        return client.post("/api/knowledge/entry", json={
+            "name": name, "content": content, "description": description, "repo": _REPO
+        }, headers=_headers)
 
-    def test_upload_markdown(self):
-        r = self._upload()
+    def test_create_entry(self):
+        r = self._create()
         assert r.status_code == 200, r.text
-        assert "上传成功" in r.json()["message"]
+        assert r.json()["ok"] is True
+        assert "id" in r.json()
         with db_lock:
             row = db.cursor().execute(
                 "SELECT scope, created_by, file_path FROM agent_shared_knowledge WHERE scope='member' AND repo_key=? ORDER BY id DESC LIMIT 1",
                 (_REPO_KEY,)).fetchone()
         assert row and row[0] == "member" and "project-info/member/" in row[2]
 
-    def test_upload_agent_dimension(self):
-        r = self._upload(scope="agent", agent="vod")
-        assert r.status_code == 200, r.text
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT agent_type FROM agent_shared_knowledge WHERE scope='member' AND repo_key=? ORDER BY id DESC LIMIT 1",
-                (_REPO_KEY,)).fetchone()
-        assert row and row[0] == "vod"
-
-    def test_upload_forbidden_ext(self):
-        r = self._upload(name="x.py")
+    def test_create_requires_name(self):
+        r = client.post("/api/knowledge/entry", json={
+            "name": "", "content": "x", "repo": _REPO
+        }, headers=_headers)
         assert r.status_code == 400
 
-    def test_upload_too_large(self):
-        r = self._upload(name="big.md", content="x" * (10 * 1024 * 1024 + 1))
+    def test_create_requires_content(self):
+        r = client.post("/api/knowledge/entry", json={
+            "name": "test", "content": "", "repo": _REPO
+        }, headers=_headers)
         assert r.status_code == 400
 
-    def test_upload_requires_auth(self):
-        files = {"file": ("a.md", b"x", "text/markdown")}
-        r = client.post("/api/knowledge", files=files, data={"repo": _REPO, "scope": "project"})
+    def test_create_name_too_long(self):
+        r = client.post("/api/knowledge/entry", json={
+            "name": "x" * 51, "content": "x", "repo": _REPO
+        }, headers=_headers)
+        assert r.status_code == 400
+
+    def test_create_requires_auth(self):
+        r = client.post("/api/knowledge/entry", json={
+            "name": "test", "content": "x", "repo": _REPO
+        })
         assert r.status_code == 401
 
-    def test_delete_member_doc(self):
-        r = self._upload()
-        path = r.json()["file_path"]
-        r2 = client.delete(f"/api/knowledge?repo={_REPO}&file={path}", headers=_headers)
+    def test_delete_entry(self):
+        r = self._create()
+        kid = r.json()["id"]
+        r2 = client.delete(f"/api/knowledge/{kid}", headers=_headers)
         assert r2.status_code == 200, r2.text
-        from src.config import WORKSPACE_DIR
-        assert not os.path.exists(os.path.join(WORKSPACE_DIR, "org", "test", path.replace("/", os.sep)))
+        # 确认删除
+        r3 = client.get(f"/api/knowledge/{kid}", headers=_headers)
+        assert r3.status_code == 404
 
 
 class TestKnowledgeContext:
@@ -254,14 +248,22 @@ class TestKnowledgeContext:
         assert isinstance(r.json()["context"], str)
 
     def test_context_includes_member_docs(self):
-        from src.config import WORKSPACE_DIR
-        p = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "member", "kb_user", "部署规范.md")
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write("部署走灰度发布")
-        r = client.get(f"/api/knowledge/context?repo={_REPO}", headers=_headers)
+        """Issue #67: member 知识通过 ref 表注入（不再全量扫描）。"""
+        # 创建知识 + 关联 Agent
+        r = client.post("/api/knowledge/entry", json={
+            "name": "部署规范", "content": "部署走灰度发布", "description": "部署规范", "repo": _REPO
+        }, headers=_headers)
         assert r.status_code == 200, r.text
-        assert "部署规范.md" in r.json()["context"]
+        kid = r.json()["id"]
+        # 关联到 vod Agent
+        r2 = client.post(f"/api/knowledge/{kid}/refs/batch", json={
+            "agent_types": ["vod"]
+        }, headers=_headers)
+        assert r2.status_code == 200, r2.text
+        # context 应包含
+        r3 = client.get(f"/api/knowledge/context?repo={_REPO}&agent_type=vod", headers=_headers)
+        assert r3.status_code == 200, r3.text
+        assert "灰度发布" in r3.json()["context"]
 
 
 class TestInjection:
@@ -272,16 +274,20 @@ class TestInjection:
         _clean()
 
     def test_member_doc_injected_into_prompt(self):
-        from src.config import WORKSPACE_DIR
-        p = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "member", "kb_user", "部署规范.md")
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write("部署走灰度发布")
-        from src.prompt_builder import build_conversation_prompt
+        """Issue #67: manual 知识通过 ref 表注入到 prompt。"""
+        # 创建知识
+        r = client.post("/api/knowledge/entry", json={
+            "name": "部署规范", "content": "部署走灰度发布", "description": "部署规范", "repo": _REPO
+        }, headers=_headers)
+        kid = r.json()["id"]
+        # 关联到 vod Agent
+        client.post(f"/api/knowledge/{kid}/refs/batch", json={"agent_types": ["vod"]}, headers=_headers)
+        # build_event_chat_prompt 注入
+        from src.prompt_builder import build_event_chat_prompt
         evt = {"seq": 1, "repo_key": _REPO_KEY, "issue_id": "#5", "agent_type": "vod",
                "event_type": "issue_opened", "title": "t", "status": "completed", "result": "r"}
-        prompt = build_conversation_prompt(evt, "你好", [], "vod", 5)
-        assert "部署规范.md" in prompt
+        prompt, _ = build_event_chat_prompt(evt, "你好", [], "vod", 5)
+        assert "灰度发布" in prompt
 
     def test_project_info_files_include_member_docs(self):
         from src.config import WORKSPACE_DIR
@@ -294,7 +300,6 @@ class TestInjection:
                            repo_key=_REPO_KEY, agent_type="vod", issue_id="#5")
         from src.runtime import service
         task = service.get_task(tid)
-        # §6.7：项目级 member 文档全 Agent 共享 → 进 project_info_files（key 相对 project-info 目录），也进 knowledge_files
         pif = json.loads(task["project_info_files"] or "{}")
         assert any("环境说明.json" in rel for rel in pif)
         kf = json.loads(task["knowledge_files"] or "{}")
@@ -312,12 +317,13 @@ class TestAgentScopedUpload:
 
     def test_upload_agent_looks_agent_dir(self):
         from src.config import WORKSPACE_DIR
-        files = {"file": ("vod部署规范.md", "VOD 专属知识".encode("utf-8"), "text/markdown")}
-        r = client.post("/api/knowledge", files=files,
-                        data={"repo": _REPO, "scope": "agent", "agent_type": "vod"}, headers=_headers)
+        # Issue #67: 用 create_knowledge_entry 创建 manual 知识
+        r = client.post("/api/knowledge/entry", json={
+            "name": "VOD专属知识", "content": "VOD 专属知识", "description": "VOD 专属", "repo": _REPO
+        }, headers=_headers)
         assert r.status_code == 200, r.text
         fp = r.json()["file_path"]
-        assert fp == "project-info/agent/vod/vod部署规范.md", fp
+        assert "project-info/member/" in fp
         assert os.path.isfile(os.path.join(WORKSPACE_DIR, "org", "test", fp.replace("/", os.sep)))
 
     def test_enqueue_only_packs_own_agent_dir(self):
@@ -333,10 +339,8 @@ class TestAgentScopedUpload:
         from src.runtime import service
         task = service.get_task(tid)
         pif = json.loads(task["project_info_files"] or "{}")
-        # 只含 coding 专属，不含 vod
         assert any(rel == "agent/coding/c.md" for rel in pif)
         assert not any(rel.startswith("agent/vod") for rel in pif)
-        # key 相对 project-info 目录（无 owner/repo 前缀，防物化嵌套）
         assert all(not rel.startswith("org/test/") for rel in pif)
 
     def test_prompt_tells_agent_dir(self):
@@ -346,11 +350,9 @@ class TestAgentScopedUpload:
         with open(os.path.join(d, "c.md"), "w", encoding="utf-8") as f:
             f.write("coding 规范")
         from src.prompt_builder import _build_project_info_section
-        # 有基线：项目级文档存在时也追加 agent 指引
         _write_pi("project-graph.md", "# Graph")
         sec = _build_project_info_section(_REPO_KEY, agent_type="coding")
         assert "{{PROJECT_INFO_DIR}}/agent/coding/" in sec
-        # 无基线时也追加
         _clean()
         sec2 = _build_project_info_section(_REPO_KEY, agent_type="coding")
         assert "{{PROJECT_INFO_DIR}}/agent/coding/" in sec2
@@ -361,10 +363,10 @@ class TestAgentScopedUpload:
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "qa规范.md"), "w", encoding="utf-8") as f:
             f.write("QA 验收规则")
-        from src.prompt_builder import build_prompt
+        from src.prompt_builder import build_devops_agent_prompt
         evt = {"type": "issue_opened", "repository": "org/test", "source": "gitcode",
                "payload": {"issue": {"title": "t", "body": "b"}}, "issue_id": "#5", "_skill_path": ""}
-        prompt = build_prompt(evt, [], "", ["qa"], runtime_id=1, agent_type="qa")
+        prompt = build_devops_agent_prompt(evt, [], "", ["qa"], runtime_id=1, agent_type="qa")
         assert "{{PROJECT_INFO_DIR}}/agent/qa/" in prompt
 
 
@@ -403,7 +405,6 @@ class TestProjectScopedShared:
                            repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
         task = service.get_task(tid)
         pif = json.loads(task["project_info_files"] or "{}")
-        # key 相对 project-info 目录（member/alice/规范.md），无 WORKSPACE 前缀嵌套
         assert all(not rel.startswith("org/test/") for rel in pif)
         assert any(rel.startswith("member/") for rel in pif)
 

@@ -209,7 +209,9 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
         source = "system" if scope == "baseline" else "agent"
 
     file_path = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-    rel_path = os.path.relpath(file_path, WORKSPACE_DIR)
+    _owner, _rname = _owner_repo(repo_key)
+    _base = os.path.join(WORKSPACE_DIR, _owner, _rname)
+    rel_path = os.path.relpath(file_path, _base)
 
     # rejected 只登记索引，不落文件——有已存在记录则跳过
     if status == "rejected":
