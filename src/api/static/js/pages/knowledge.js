@@ -866,42 +866,27 @@ function renderKnowledge() {
             </div>
 
             <!-- 场景选择弹出层 -->
-            <div v-if="addScenePopover" class="modal-overlay" @click.self="addScenePopover = false">
-              <div class="modal cd" style="width:720px;max-width:92vw">
-                <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
-
-                <!-- 搜索 -->
-                <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
-
-                <!-- 场景列表（固定高度滚动） -->
-                <div class="kb-scene-pick-scroll" style="max-height:400px;overflow-y:auto;padding-right:4px">
-                  <div v-if="availableScenes.length === 0" class="ts t2" style="padding:24px;text-align:center">{{ t('ref_no_available') }}</div>
-                  <div v-else class="rgrid" style="gap:12px">
-                    <div v-for="s in availableScenes" :key="s.id" class="scn-card"
-                         :class="{ 'kb-pick-selected': sceneSelected.includes(s.id) }"
-                         style="cursor:pointer;position:relative"
-                         @click="toggleSceneSelect(s.id)">
-                      <div v-if="sceneSelected.includes(s.id)" class="kb-pick-check">✓</div>
-                      <div class="scn-card-bar bg-default"></div>
-                      <div class="scn-card-body">
-                        <div class="scn-card-head">
-                          <div class="scn-ic bg-default">📦</div>
-                          <div class="scn-card-title">{{ s.name }}</div>
-                        </div>
-                        <div v-if="s.desc" class="scn-card-desc">{{ s.desc }}</div>
-                      </div>
-                    </div>
+            <!-- 场景选择下拉面板 -->
+            <div v-if="addScenePopover" class="kb-scene-popover">
+              <div class="kb-scene-popover-header">
+                <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="flex:1;width:auto">
+                <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
+              </div>
+              <div class="kb-scene-popover-list">
+                <div v-if="availableScenes.length === 0" class="ts t2" style="padding:20px;text-align:center">{{ t('ref_no_available') }}</div>
+                <div v-for="s in availableScenes" :key="s.id" class="kb-scene-row"
+                     :class="{ 'kb-scene-row-selected': sceneSelected.includes(s.id) }"
+                     @click="toggleSceneSelect(s.id)">
+                  <div class="kb-scene-row-info">
+                    <div class="kb-scene-row-name">{{ s.name }}</div>
+                    <div v-if="s.desc" class="kb-scene-row-desc">{{ s.desc }}</div>
                   </div>
+                  <div class="kb-scene-row-check"><span class="kb-check-yes">✓</span></div>
                 </div>
-
-                <!-- 底部：已选数量 + 操作 -->
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
-                  <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
-                  <div style="display:flex;gap:8px">
-                    <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
-                    <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
-                  </div>
-                </div>
+              </div>
+              <div class="kb-scene-popover-footer">
+                <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
+                <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
               </div>
             </div>
           </template>
@@ -1019,37 +1004,27 @@ function renderKnowledge() {
           </div>
         </template>
 
-        <!-- 新增页面场景选择弹出层 -->
-        <div v-if="createScenePopover" class="modal-overlay" @click.self="createScenePopover = false">
-          <div class="modal cd" style="width:720px;max-width:92vw">
-            <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">{{ t('ref_select_scenes') }}</h3>
-            <input v-model="createSceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="width:100%;margin-bottom:12px">
-            <div style="max-height:400px;overflow-y:auto;padding-right:4px">
-              <div v-if="availableCreateScenes.length === 0" class="ts t2" style="padding:24px;text-align:center">{{ t('ref_no_available') }}</div>
-              <div v-else class="rgrid" style="gap:12px">
-                <div v-for="s in availableCreateScenes" :key="s.id" class="scn-card"
-                     :class="{ 'kb-pick-selected': createSceneTempSelected.includes(s.id) }"
-                     style="cursor:pointer;position:relative"
-                     @click="toggleCreateSceneTemp(s.id)">
-                  <div v-if="createSceneTempSelected.includes(s.id)" class="kb-pick-check">✓</div>
-                  <div class="scn-card-bar bg-default"></div>
-                  <div class="scn-card-body">
-                    <div class="scn-card-head">
-                      <div class="scn-ic bg-default">📦</div>
-                      <div class="scn-card-title">{{ s.name }}</div>
-                    </div>
-                    <div v-if="s.desc" class="scn-card-desc">{{ s.desc }}</div>
-                  </div>
-                </div>
+        <!-- 新增页面场景选择下拉面板 -->
+        <div v-if="createScenePopover" class="kb-scene-popover">
+          <div class="kb-scene-popover-header">
+            <input v-model="createSceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="flex:1;width:auto">
+            <button class="bt bt-o bt-s" @click="createScenePopover = false">{{ t('cancel') }}</button>
+          </div>
+          <div class="kb-scene-popover-list">
+            <div v-if="availableCreateScenes.length === 0" class="ts t2" style="padding:20px;text-align:center">{{ t('ref_no_available') }}</div>
+            <div v-for="s in availableCreateScenes" :key="s.id" class="kb-scene-row"
+                 :class="{ 'kb-scene-row-selected': createSceneTempSelected.includes(s.id) }"
+                 @click="toggleCreateSceneTemp(s.id)">
+              <div class="kb-scene-row-info">
+                <div class="kb-scene-row-name">{{ s.name }}</div>
+                <div v-if="s.desc" class="kb-scene-row-desc">{{ s.desc }}</div>
               </div>
+              <div class="kb-scene-row-check"><span class="kb-check-yes">✓</span></div>
             </div>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--b)">
-              <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: createSceneTempSelected.length }) }}</span>
-              <div style="display:flex;gap:8px">
-                <button class="bt bt-o bt-s" @click="createScenePopover = false">{{ t('cancel') }}</button>
-                <button class="bt bt-p bt-s" @click="confirmCreateScenes">{{ t('confirm') }}</button>
-              </div>
-            </div>
+          </div>
+          <div class="kb-scene-popover-footer">
+            <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: createSceneTempSelected.length }) }}</span>
+            <button class="bt bt-p bt-s" @click="confirmCreateScenes">{{ t('confirm') }}</button>
           </div>
         </div>
       </div>
