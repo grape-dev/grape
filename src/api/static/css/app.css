@@ -658,11 +658,8 @@
 .kb-agent-desc{font-size:10px;color:var(--t3);line-height:1.4}
 .kb-agent-check{position:absolute;top:12px;right:12px;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--b);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--t3);transition:all .2s}
 .kb-agent-selected .kb-agent-check{background:var(--a);border-color:var(--a);color:#fff}
-.kb-agent-check .kb-check-yes,.kb-agent-check .kb-check-no{display:none}
+.kb-agent-check .kb-check-yes{display:none}
 .kb-agent-selected .kb-agent-check .kb-check-yes{display:inline}
-.kb-agent-selected .kb-agent-check .kb-check-no{display:none}
-.kb-agent-selected:hover .kb-agent-check .kb-check-yes{display:none}
-.kb-agent-selected:hover .kb-agent-check .kb-check-no{display:inline}
 .kb-ref-pill{display:inline-flex;align-items:center;gap:3px;padding:3px 10px;border-radius:980px;font-size:10px;font-weight:500;color:var(--a);background:rgba(0,113,227,0.08);cursor:pointer;transition:all .15s;position:relative}
 .kb-ref-pill:hover{background:rgba(0,113,227,0.15)}
 .kb-ref-pill:hover::after{content:attr(data-names);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:8px 12px;border-radius:8px;font-size:10px;font-weight:400;white-space:normal;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.15);max-width:280px;line-height:1.5}
