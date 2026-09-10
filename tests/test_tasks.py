@@ -298,6 +298,7 @@ class TestNotify:
 
 class TestClose:
     def test_close_marks_completed(self):
+        """Issue #85: Issue closed → 任务进入 pending_review（不再自动 completed）"""
         _clean_tasks()
         with db_lock:
             c = db.cursor()
@@ -311,8 +312,7 @@ class TestClose:
         with db_lock:
             c = db.cursor()
             row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (tid,)).fetchone()
-        assert row and row[0] == "completed"
-        assert row and row[1] == "issue_closed"
+        assert row and row[0] == "pending_review"
 
     def test_close_missing_fields(self):
         r = client.post("/api/tasks/close", headers=_bot_headers(), json={})
@@ -573,7 +573,7 @@ class TestTaskLifecycle:
         assert row and row[0] == "processing"
 
     def test_close_marks_processing_completed(self):
-        """Issue 关闭应关闭 processing 任务（不只 active）"""
+        """Issue #85: Issue closed → processing 任务进入 pending_review（不再自动 completed）"""
         self._clean()
         with db_lock:
             c = db.cursor()
@@ -586,8 +586,7 @@ class TestTaskLifecycle:
         with db_lock:
             c = db.cursor()
             row = c.execute("SELECT status, completed_reason FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number=55").fetchone()
-        assert row and row[0] == "completed"
-        assert row and row[1] == "issue_closed"
+        assert row and row[0] == "pending_review"
 
     def test_reassign_closes_processing_old_assignee(self):
         """换人时原 assignee 的 processing 任务置 completed（reassigned）"""

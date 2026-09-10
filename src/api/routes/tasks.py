@@ -266,9 +266,10 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
             )
         elif not _has_running:
             # 还在 pipeline 流转中且无 agent 运行 → 设为 pending_review 等待开发者确认
+            # Issue #85: 无 issue_state 记录（stage 为空）时也走此路径
             c.execute(
-                "UPDATE tasks SET status='processing', completed_reason=NULL "
-                "WHERE repo_key=? AND issue_number=? AND status='active'",
+                "UPDATE tasks SET status='pending_review', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                 (repo_key, issue_number)
             )
             set_issue_stage(repo_key, _issue_id, "pending_review", "issue_closed")
@@ -323,10 +324,10 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
                 "WHERE repo_key=? AND issue_number=? AND status='active'",
                 (repo_key, issue_number))
         elif not _has_running:
-            # 没有 agent 在运行 → 设为 pending_review
+            # 没有 agent 在运行 → 设为 pending_review（Issue #85: 同步 processing 任务）
             c.execute(
-                "UPDATE tasks SET status='processing', completed_reason=NULL "
-                "WHERE repo_key=? AND issue_number=? AND status='active'",
+                "UPDATE tasks SET status='pending_review', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                 (repo_key, issue_number))
             set_issue_stage(repo_key, _issue_id, "pending_review", "bot_takeover")
         # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
