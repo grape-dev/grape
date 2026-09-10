@@ -432,7 +432,7 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
     try:
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT DISTINCT k.id, k.obs_key, k.file_path "
+                "SELECT DISTINCT k.id, k.obs_key, k.file_path, k.content_hash "
                 "FROM scene_knowledge_ref r "
                 "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
                 "WHERE r.enabled = 1 "
@@ -445,8 +445,8 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
                 (scene_id, agent_type, issue_num, repo_key)
             ).fetchall()
 
-        for kid, obs_key, file_path in rows:
-            content = _read_entry_content(repo_key, obs_key or "", file_path or "")
+        for kid, obs_key, file_path, content_hash in rows:
+            content = _read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
             if content:
                 files[file_path or ""] = content
     except Exception:
