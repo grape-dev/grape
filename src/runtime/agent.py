@@ -47,6 +47,7 @@ _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
+    "codex": ["codex", "exec", "--json", "--sandbox", "workspace-write", "hello"],
     "cursor": ["cursor", "run", "hello"],
 }
 _PROBE_TIMEOUT = 30
@@ -382,12 +383,14 @@ def _remap_cwd(path: str) -> str:
 
 
 def _backend_for_engine(engine_name: str | None = "") -> str:
-    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；其余默认 opencode）。"""
+    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；codex-xxx → codex；其余默认 opencode）。"""
     name = (engine_name or "").lower()
     if name.startswith("hermes"):
         return "hermes"
     if name.startswith("codearts"):
         return "codearts"
+    if name.startswith("codex"):
+        return "codex"
     return "opencode"
 
 
@@ -592,6 +595,7 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
     patterns = {
         "hermes": ["hermes acp", "hermes chat", "hermes -z"],
         "codearts": ["codearts run"],
+        "codex": ["codex exec"],
     }.get(backend, ["opencode run"])
     killed_any = False
     for pattern in patterns:

@@ -790,7 +790,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
     const skIcon = meta.icon || '◈';
     const skLabel = meta.label || tag;
     const agent = agents.find(a => a.agent_type === tag) || {};
-    const skillName = agent.skill_display_name || agent.skill || node.skill || '';
+    const skillName = node.skill ? (agent.skill_display_name || node.skill) : (agent.skill_display_name || agent.skill || '');
     const engineIds = node.engine_runtime_ids || agent.engine_runtime_ids || [];
     const modeIcon = {emit:'→',waterfall:'◇',serial:'↻',parallel:'⇄'}[node.mode] || '→';
     const en = editNodes.find(n => n.id === tag);
@@ -847,7 +847,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     if (node) {
       return {
         id: at, tag: at,
-        skill: ag.skill || ag.skill_display_name || node.skill || '',
+        skill: node.skill || ag.skill || ag.skill_display_name || '',
         mode: node.mode || 'emit',
         next: node.next || 'done',
         handoff: node.handoff || 'a2a',
@@ -919,6 +919,20 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
       API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name)).then(d => {
         const sc = (d.scenes || []).find(s => s.id === sceneId);
         const newNodes = (sc && sc.pipeline && sc.pipeline.nodes) || [];
+        // 从编辑模式的 select options 构建 skill_name → display_name 映射
+        const skillDisplayMap = {};
+        document.querySelectorAll('.ap-skill-select option, select[onchange*="selectAgentSkill"] option').forEach(opt => {
+          if (opt.value) skillDisplayMap[opt.value] = opt.textContent;
+        });
+        // 用 newNodes 的 skill + 映射构建临时 agents（保留引擎等其余字段）
+        const refreshAgents = agents.map(a => {
+          const node = newNodes.find(n => (n.tag || n.id) === a.agent_type);
+          const sk = node ? node.skill : a.skill;
+          return Object.assign({}, a, {
+            skill: sk || a.skill,
+            skill_display_name: (sk && skillDisplayMap[sk]) || (sk === a.skill ? a.skill_display_name : '') || sk || a.skill_display_name || a.skill
+          });
+        });
         // 恢复标题行
         if (headerDiv) {
           headerDiv.innerHTML = `<h2 style="font-size:15px;font-weight:600">${I18N.t('skills.execution_flow')||'执行流程'}</h2>
@@ -932,7 +946,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
           const _agentLabels = _agentOrder.map(t => (_DASH_AGENT_META[t]||{}).label || t);
           const _colors = {vod:'#ff2d92',issue:'#ff3b30',coding:'#0071e3',qa:'#af52de',sre:'#ff9f0a'};
           const _descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
-          cardsContainer.innerHTML = _renderFlowCards(newNodes, agents, agentEngines, _agentOrder, _agentLabels, _colors, _descs, false, []);
+          cardsContainer.innerHTML = _renderFlowCards(newNodes, refreshAgents, agentEngines, _agentOrder, _agentLabels, _colors, _descs, false, []);
         }
       }).catch(() => {});
     }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
@@ -1093,7 +1107,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   }
 
   window._engCurIds = currentIds.slice();
-  const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; return ''; }).filter(Boolean))];
+  const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; if (n.includes('codex')) return 'codex'; return ''; }).filter(Boolean))];
   const _availScopes = [...new Set(sorted.map(e => e.scope || 'global'))];
   const _SCOPE_LABELS_ALL = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
   const _SCOPE_ORDER_ALL = ['local','user','repo','global'];
