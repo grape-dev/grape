@@ -922,7 +922,7 @@ function renderKnowledge() {
             </div>
             <div style="margin-bottom:12px">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-                <label style="font-size:11px;color:var(--t3)">{{ t('entry_content') }}</label>
+                <label style="font-size:11px;color:var(--t3)">{{ t('entry_content') }} *</label>
                 <label class="bt bt-o bt-s" style="cursor:pointer;font-size:11px">
                   {{ t('import_file') }}
                   <input type="file" accept=".md,.json,.txt" style="display:none" @change="e => importFile(e, 'edit')">
@@ -956,7 +956,7 @@ function renderKnowledge() {
             </div>
             <div style="margin-bottom:16px">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-                <label style="font-size:11px;color:var(--t3)">{{ t('entry_content') }}</label>
+                <label style="font-size:11px;color:var(--t3)">{{ t('entry_content') }} *</label>
                 <label class="bt bt-o bt-s" style="cursor:pointer;font-size:11px">
                   {{ t('import_file') }}
                   <input type="file" accept=".md,.json,.txt" style="display:none" @change="e => importFile(e, 'create')">
