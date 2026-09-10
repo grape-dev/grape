@@ -485,6 +485,7 @@ function loadAgentTypes() {
       localStorage.setItem('token', d.token);
       // refresh_token 在 HttpOnly cookie 里——不需要存 localStorage
       localStorage.setItem('user', JSON.stringify(d.user));
+      API.scheduleProactiveRefresh();  // Issue #86: 启动主动刷新定时器
       showApp();
     }).catch(e => showToast(I18N.t('app.login.failed') + ': ' + e.message));
   }
@@ -494,6 +495,7 @@ function loadAgentTypes() {
     // 保留 currentRepo（记录上次选择的仓库），下次登录恢复；只清登录态
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
     // refresh_token cookie 由服务端 logout 清除
     showLogin();
   }
@@ -551,6 +553,7 @@ function loadAgentTypes() {
         $('pageTitle').textContent = I18N.t('app.current_project');
       }
       showApp();
+      API.scheduleProactiveRefresh();  // Issue #86: OAuth 登录后启动定时器
       // Remove token from URL without reload (preserve language prefix)
       if (window.history.replaceState) {
         const lang = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
@@ -575,6 +578,7 @@ function loadAgentTypes() {
     const token = localStorage.getItem('token');
     if (token) {
       showApp();
+      API.scheduleProactiveRefresh();  // Issue #86: 页面恢复时启动定时器
       // Handle hash-based navigation (e.g., #runtimes, #settings) on page load
       const hash = window.location.hash;
       if (hash && hash.length > 1) {
