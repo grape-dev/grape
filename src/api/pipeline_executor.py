@@ -245,17 +245,19 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
             if not _scene_uid:
                 try:
                     from src.runtime.engine_select import _repo_user_id
-                    _scene_uid = _repo_user_id(repo_key)
+                    _scene_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
                 except Exception:
                     pass
             _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0,
-                                  scene_id=_scene_id, user_id=_scene_uid)
+                                  scene_id=_scene_id, user_id=_scene_uid,
+                                  issue_creator=evt.get("actor", ""))
             if _picked is None:
                 return {"error": "no engine available"}
             runtime_id = _picked
             # 场景 engine 限定广播范围
             from src.runtime.engine_select import get_scene_pool_engine_ids
-            _pool_eids = get_scene_pool_engine_ids(_scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid)
+            _pool_eids = get_scene_pool_engine_ids(_scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid,
+                                                   issue_creator=evt.get("actor", ""))
         elif not runtime_id:
             _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
             if _picked is None:
