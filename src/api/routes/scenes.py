@@ -1167,7 +1167,7 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user
     where = ["agent_type=?", "is_active=1"]
     params: list = [agent_type]
 
-    # skill 可见范围：official + 当前仓库的 repo skill
+    # skill 可见范围：official + 个人 user skill + 当前仓库的 repo skill
     repo_key = ""
     if repo:
         from src.repo_key import to_repo_key
@@ -1180,8 +1180,9 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user
                 repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
-    where.append("(scope='official' OR (scope='repo' AND owner_id=?))")
-    params.append(repo_key)
+    user_id = str(user.get("id", ""))
+    where.append("(scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))")
+    params.extend([user_id, repo_key])
 
     if q:
         where.append("(skill_name LIKE ? OR display_name LIKE ?)")
