@@ -248,6 +248,7 @@ const API = (() => {
   // Issue #63: 合并全局 nav/tab signal，切 tab/页面时主动取消请求；区分超时 abort 和外部 abort
   const _DEFAULT_TIMEOUT = 30000;
   function _fetchWithTimeout(url, opts, timeout, _retried, _skipNavSignal) {
+    const _t0 = performance.now();
     const controller = new AbortController();
     const timer = setTimeout(() => { controller._timedOut = true; controller.abort(); }, timeout || _DEFAULT_TIMEOUT);
     // 合并全局 nav signal + tab signal（读操作合并，写操作跳过）
@@ -264,7 +265,11 @@ const API = (() => {
       }
     }
     opts = Object.assign({}, opts, { signal: controller.signal });
-    return fetch(url, opts).finally(() => clearTimeout(timer)).catch(e => {
+    return fetch(url, opts).finally(() => clearTimeout(timer)).then(r => {
+      _reportLatency(url, opts.method || 'GET', r.status, Math.round(performance.now() - _t0));
+      return r;
+    }).catch(e => {
+      _reportLatency(url, opts.method || 'GET', 0, Math.round(performance.now() - _t0));
       if (e.name === 'AbortError') {
         if (controller._timedOut) throw e;  // 超时 abort，正常显示错误
         e.silent = true; throw e;            // 外部取消（nav/tab/浏览器），静默
@@ -296,6 +301,51 @@ const API = (() => {
   }
   function _del(path, timeout) {
     return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'DELETE', headers: h}, timeout, false, true).then(r => handleResp(r, () => _del(path, timeout))));
+  }
+
+  // ===== 方案B：前端 API 时延埋点 + 批量上报 =====
+  // Worker 轮询路径不上报（高频内部请求，非用户页面加载）
+  var _LATENCY_SKIP_PREFIXES = ['/runtime/runtimes/', '/runtime/heartbeat', '/runtime/tasks/', '/latency/report'];
+  var _latencyBuffer = [];
+  var _latencyTimer = null;
+  var _LATENCY_BATCH_SIZE = 10;
+  var _LATENCY_FLUSH_INTERVAL = 30000;
+  var _LATENCY_THRESHOLD_MS = 200;  // 只上报耗时 ≥ 200ms 的请求，避免数据量爆炸
+
+  function _reportLatency(url, method, status, durationMs) {
+    try {
+      if (durationMs < _LATENCY_THRESHOLD_MS) return;  // 快请求不上报
+      var path = url.replace(BASE, '');
+      // 跳过 Worker 轮询和上报自身
+      for (var i = 0; i < _LATENCY_SKIP_PREFIXES.length; i++) {
+        if (path.startsWith(_LATENCY_SKIP_PREFIXES[i])) return;
+      }
+      _latencyBuffer.push({ url: path, method: method, status: status, durationMs: durationMs, ts: Date.now() });
+      if (_latencyBuffer.length >= _LATENCY_BATCH_SIZE) {
+        _flushLatency();
+      } else if (!_latencyTimer) {
+        _latencyTimer = setTimeout(_flushLatency, _LATENCY_FLUSH_INTERVAL);
+      }
+    } catch(e) { /* 埋点失败不影响业务 */ }
+  }
+
+  function _flushLatency() {
+    if (!_latencyBuffer.length) return;
+    var batch = _latencyBuffer.splice(0);
+    _latencyTimer = null;
+    try {
+      // sendBeacon：异步不阻塞页面，即使页面关闭也能发出
+      var blob = new Blob([JSON.stringify({ entries: batch })], { type: 'application/json' });
+      navigator.sendBeacon(BASE + '/latency/report', blob);
+    } catch(e) { /* ignore */ }
+  }
+
+  // 页面卸载/隐藏时冲刷剩余数据
+  if (typeof window !== 'undefined') {
+    window.addEventListener('visibilitychange', function() {
+      if (document.visibilityState === 'hidden') _flushLatency();
+    });
+    window.addEventListener('beforeunload', _flushLatency);
   }
 
   return {

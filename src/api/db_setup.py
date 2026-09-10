@@ -569,6 +569,21 @@ CREATE TABLE IF NOT EXISTS login_whitelist (
 )
 """
 
+_API_LATENCY_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS api_latency_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id VARCHAR(32) DEFAULT '',
+    method VARCHAR(8) DEFAULT '',
+    path VARCHAR(256) DEFAULT '',
+    status INTEGER DEFAULT 0,
+    duration_ms INTEGER DEFAULT 0,
+    repo_key VARCHAR(128) DEFAULT '',
+    user_id VARCHAR(32) DEFAULT '',
+    source VARCHAR(16) DEFAULT 'backend',
+    created_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
 # ===== Issue-11: DevOps 市场（场景市场 + 技能市场）======
 # 技术方案：docs/new-version3/issue-11-scene-skill-market-tech-design.md 第二章
 
@@ -757,6 +772,7 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("skill_likes", _SKILL_LIKES_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
     ("distributed_locks", _DISTRIBUTED_LOCKS_DDL),
+    ("api_latency_log", _API_LATENCY_LOG_DDL),
     # ===== Issue-45: API Token 认证 =====
     ("session_api_tokens", _SESSION_API_TOKENS_DDL),
     ("api_tokens", _API_TOKENS_DDL),
@@ -872,6 +888,11 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_scene_skill_ref_skill_name ON scene_skill_ref(skill_name)",
         "CREATE INDEX IF NOT EXISTS idx_skill_is_featured ON skill(is_featured)",
         "CREATE INDEX IF NOT EXISTS idx_market_scene_id ON devops_pipeline_scene(market_scene_id)",
+        # ===== API 慢请求监控索引 =====
+        "CREATE INDEX IF NOT EXISTS idx_latency_log_created ON api_latency_log(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_latency_log_path ON api_latency_log(path)",
+        "CREATE INDEX IF NOT EXISTS idx_latency_log_duration ON api_latency_log(duration_ms)",
+        "CREATE INDEX IF NOT EXISTS idx_latency_log_source ON api_latency_log(source)",
     ]
     for idx in indexes:
         try:
@@ -1286,6 +1307,7 @@ def init_database():
                 _cleanup_stale_meta()
                 _cleanup_chat_shared_worker_runtime()
                 _migrate_whitelist_from_file()
+                _cleanup_old_latency_logs()
                 # ===== Issue-11: DevOps 市场数据初始化 =====
                 _init_scene_category_data()
                 _init_scene_market_data()
@@ -1315,6 +1337,7 @@ def init_database():
         _cleanup_stale_meta()
         _cleanup_chat_shared_worker_runtime()
         _migrate_whitelist_from_file()
+        _cleanup_old_latency_logs()
         # ===== Issue-11: DevOps 市场数据初始化 =====
         _init_scene_category_data()
         _init_scene_market_data()
@@ -1542,6 +1565,20 @@ def _cleanup_stale_meta():
         log.info("Cleaned stale meta key: ws_feishu_app_id")
     except Exception as e:
         log.warning(f"Cleanup stale meta ws_feishu_app_id failed: {e}")
+
+
+def _cleanup_old_latency_logs():
+    """清理 7 天前的 API 慢请求日志"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM api_latency_log WHERE created_at < datetime('now', '-7 days')")
+            deleted = c.rowcount
+            db.commit()
+        if deleted:
+            log.info(f"Cleaned {deleted} old latency logs")
+    except Exception as e:
+        log.warning(f"Latency log cleanup failed: {e}")
 
 
 def _cleanup_chat_shared_worker_runtime():

@@ -259,6 +259,10 @@ def get_domain_agent(evt_type: str, repo_key: str = "", user_id: int = 0) -> str
 
 LOGIN_WHITELIST_PATH = os.path.join(CONFIG_DIR, "login-whitelist.json")
 
+# ====== API 慢请求监控 ======
+
+SLOW_REQUEST_THRESHOLD_MS = int(os.environ.get("SLOW_REQUEST_THRESHOLD_MS", "500"))
+
 # server-config.json（gitignored）：server_base_url / webhook_url 显式配置，见 DEPLOYMENT-REMOTE.md §4
 SERVER_CONFIG_PATH = os.path.join(CONFIG_DIR, "server-config.json")
 
