@@ -58,16 +58,13 @@ const API = (() => {
         if (!e.newValue) {
           localStorage.removeItem('user');
           if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+        } else {
+          // Issue #86: 其他 Tab 刷新了 token——当前 Tab 按新 token 的 exp 重设定时器
+          // 否则旧定时器触发时发现新 token 还很充足，不刷新也不重设，定时器停摆
+          scheduleProactiveRefresh();
         }
       }
     });
-  }
-
-  function headers() {
-    const h = {'Content-Type': 'application/json'};
-    const token = localStorage.getItem('token');
-    if (token) h['Authorization'] = 'Bearer ' + token;
-    return h;
   }
 
   // 用 refresh_token 换新的 access_token（滚动续期）
@@ -108,6 +105,64 @@ const API = (() => {
       _refreshPromise = null;
     });
     return _refreshPromise;
+  }
+
+  // Issue #86: 主动刷新——解析 JWT exp，过期前 2 分钟主动刷新
+  const _REFRESH_THRESHOLD_MS = 2 * 60 * 1000;  // 过期前 2 分钟
+  let _proactiveTimer = null;
+
+  function _parseTokenExp(token) {
+    if (!token) return 0;
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      return (payload.exp || 0) * 1000;
+    } catch (e) { return 0; }
+  }
+
+  function _getRemainingMs(token) {
+    const exp = _parseTokenExp(token);
+    if (!exp) return Infinity;  // 无法解析——不主动刷新，交给 401 兜底
+    return exp - Date.now();
+  }
+
+  // 统一入口：检查 token 剩余有效期，不足阈值则刷新。返回可用的 token。
+  // 定时器(A)和请求前(B)都调此函数，内部复用 _refreshPromise 单例，不会重复刷新。
+  // 注意：JWT exp 按客户端本地时间算，时钟偏差可能导致 remaining 不准——401 被动刷新兜底。
+  async function ensureTokenValid() {
+    const token = localStorage.getItem('token');
+    const remaining = _getRemainingMs(token);
+    if (remaining > _REFRESH_THRESHOLD_MS) return token;
+    // 剩余不足阈值——刷新（doRefresh 内部有 _refreshPromise 单例）
+    try {
+      return await doRefresh();
+    } catch (e) {
+      // 重试 1 次（500ms 后）——_refreshPromise 在 finally 里已清空，重试会发起新请求
+      await new Promise(r => setTimeout(r, 500));
+      try {
+        return await doRefresh();
+      } catch (e2) {
+        return token;  // 重试仍失败——返回原 token，交给 401 兜底
+      }
+    }
+  }
+
+  // 定时器：到点调 ensureTokenValid，刷新成功后重新设定时器
+  function scheduleProactiveRefresh() {
+    if (_proactiveTimer) { clearTimeout(_proactiveTimer); _proactiveTimer = null; }
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    const remaining = _getRemainingMs(token);
+    if (remaining <= 0) return;  // 已过期——等 401 被动刷新
+    // 过期前 2 分钟触发（最少 30 秒后）
+    const delay = Math.max(remaining - _REFRESH_THRESHOLD_MS, 30000);
+    _proactiveTimer = setTimeout(async () => {
+      try {
+        const newToken = await ensureTokenValid();
+        if (newToken) scheduleProactiveRefresh();  // 刷新成功——重设定时器
+      } catch (e) {
+        // 静默——401 被动刷新兜底
+      }
+    }, delay);
   }
 
   // 401 时尝试 refresh，成功后重发原请求
@@ -222,17 +277,25 @@ const API = (() => {
     });
   }
 
+  // Issue #86: headers 改为 async——请求前先确保 token 有效（B 模式兜底）
+  async function _makeHeaders() {
+    const token = await ensureTokenValid();
+    const h = {'Content-Type': 'application/json'};
+    if (token) h['Authorization'] = 'Bearer ' + token;
+    return h;
+  }
+
   function _get(path, timeout) {
-    return _fetchWithTimeout(BASE + path, {headers: headers()}, timeout, false, false).then(r => handleResp(r, () => _get(path, timeout)));
+    return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {headers: h}, timeout, false, false).then(r => handleResp(r, () => _get(path, timeout))));
   }
   function _post(path, body, timeout) {
-    return _fetchWithTimeout(BASE + path, {method: 'POST', headers: headers(), body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _post(path, body, timeout)));
+    return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'POST', headers: h, body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _post(path, body, timeout))));
   }
   function _put(path, body, timeout) {
-    return _fetchWithTimeout(BASE + path, {method: 'PUT', headers: headers(), body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _put(path, body, timeout)));
+    return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'PUT', headers: h, body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _put(path, body, timeout))));
   }
   function _del(path, timeout) {
-    return _fetchWithTimeout(BASE + path, {method: 'DELETE', headers: headers()}, timeout, false, true).then(r => handleResp(r, () => _del(path, timeout)));
+    return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'DELETE', headers: h}, timeout, false, true).then(r => handleResp(r, () => _del(path, timeout))));
   }
 
   return {
@@ -240,8 +303,9 @@ const API = (() => {
     post: _post,
     put: _put,
     del: _del,
+    scheduleProactiveRefresh: scheduleProactiveRefresh,  // Issue #86: app.js 登录成功后调用
     upload: (path, formData, onUploadProgress) => {
-      const token = localStorage.getItem('token');
+      return ensureTokenValid().then(token => {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', BASE + path);
@@ -271,6 +335,7 @@ const API = (() => {
         };
         xhr.onerror = () => reject(new Error(I18N.t('common.network_upload_error')));
         xhr.send(formData);
+      });
       });
     },
   };
