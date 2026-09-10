@@ -33,6 +33,7 @@ function renderKnowledge() {
         editForm: null,
         editFormSnapshot: null,
         refTooltip: { show: false, text: '', x: 0, y: 0 },
+        popoverPos: { left: 0, top: 0 },
         createForm: null,
         sceneScrollLeft: false,
         sceneScrollRight: false,
@@ -131,6 +132,10 @@ function renderKnowledge() {
     async mounted() {
       await this.loadStats();
       await this.loadList();
+      window.addEventListener('resize', this.onResize);
+    },
+    beforeUnmount() {
+      window.removeEventListener('resize', this.onResize);
     },
     methods: {
       t(key, params) {
@@ -202,6 +207,37 @@ function renderKnowledge() {
       },
       hideRefTooltip() {
         this.refTooltip = { show: false, text: '', x: 0, y: 0 };
+      },
+      positionPopover(e) {
+        const btn = e.target;
+        const r = btn.getBoundingClientRect();
+        const popW = Math.min(500, window.innerWidth - 20);
+        const maxH = Math.min(434, window.innerHeight - 40);
+        // 右边缘和按钮右边缘对齐，向左展开
+        let left = r.right - popW;
+        // 左溢出时右移
+        if (left < 10) left = 10;
+        let top = r.bottom + 4;
+        // 下方空间不够时向上弹
+        if (top + maxH > window.innerHeight) {
+          top = Math.max(10, r.top - maxH - 4);
+        }
+        this.popoverPos = { left: Math.max(10, left), top, width: popW };
+      },
+      onResize() {
+        if (this.addScenePopover || this.createScenePopover) {
+          const btn = document.querySelector('.kb-tag-add');
+          if (btn) {
+            const r = btn.getBoundingClientRect();
+            const popW = Math.min(500, window.innerWidth - 20);
+            const maxH = Math.min(434, window.innerHeight - 40);
+            let left = r.right - popW;
+            if (left < 10) left = 10;
+            let top = r.bottom + 4;
+            if (top + maxH > window.innerHeight) top = Math.max(10, r.top - maxH - 4);
+            this.popoverPos = { left: Math.max(10, left), top, width: popW };
+          }
+        }
       },
       agentRefCount(k) {
         if (!k.refs) return 0;
@@ -353,11 +389,12 @@ function renderKnowledge() {
           app.showToast(e.message || I18N.t('common.load_failed'));
         }
       },
-      openScenePopover() {
+      openScenePopover(e) {
         this.addScenePopover = true;
         this.sceneSearch = '';
         this.sceneSelected = [];
         this.loadRepoScenes();
+        this.$nextTick(() => this.positionPopover(e));
       },
       switchSceneTab(tab) {
         this.sceneTab = tab;
@@ -603,11 +640,12 @@ function renderKnowledge() {
         const s = (this.repoScenes || []).find(x => x.id === sid);
         return s ? s.name : String(sid || '').substring(0, 12);
       },
-      openCreateScenePopover() {
+      openCreateScenePopover(e) {
         this.createScenePopover = true;
         this.createSceneSearch = '';
         this.createSceneTempSelected = [...(this.createForm?.sceneSelected || [])];
         this.loadRepoScenes();
+        this.$nextTick(() => this.positionPopover(e));
       },
       confirmCreateScenes() {
         if (this.createForm) {
@@ -845,7 +883,7 @@ function renderKnowledge() {
             <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
               <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
                 <h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2>
-                <button class="kb-tag-add" style="font-size:10px" @click="openScenePopover">+ {{ t('ref_add_scene') }}</button>
+                <button class="kb-tag-add" style="font-size:10px" @click="openScenePopover($event)">+ {{ t('ref_add_scene') }}</button>
               </div>
               <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
               <div v-else class="scn-scroll-wrap">
@@ -875,7 +913,9 @@ function renderKnowledge() {
 
             <!-- 场景选择弹出层 -->
             <!-- 场景选择下拉面板 -->
-            <div v-if="addScenePopover" class="kb-scene-popover">
+            <teleport to="body">
+              <div v-if="addScenePopover" class="kb-popover-mask" @click="addScenePopover = false"></div>
+              <div v-if="addScenePopover" class="kb-scene-popover" :style="{ left: popoverPos.left + 'px', top: popoverPos.top + 'px', width: (popoverPos.width || 500) + 'px' }">
               <div class="kb-scene-popover-header">
                 <input v-model="sceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="flex:1;width:auto">
                 <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
@@ -896,7 +936,8 @@ function renderKnowledge() {
                 <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
                 <button class="bt bt-p bt-s" :disabled="sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
               </div>
-            </div>
+              </div>
+            </teleport>
           </template>
           </div>
         </template>
@@ -987,7 +1028,7 @@ function renderKnowledge() {
           <div class="cd kb-detail-card" style="padding:24px;margin-bottom:20px;border-radius:18px">
             <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
               <h2 style="font-size:16px;font-weight:600">{{ t('ref_scene_title') }}</h2>
-              <button class="kb-tag-add" style="font-size:10px" @click="openCreateScenePopover">+ {{ t('ref_add_scene') }}</button>
+              <button class="kb-tag-add" style="font-size:10px" @click="openCreateScenePopover($event)">+ {{ t('ref_add_scene') }}</button>
             </div>
             <div v-if="createForm.sceneSelected.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
             <div v-else class="scn-scroll-wrap">
@@ -1013,28 +1054,31 @@ function renderKnowledge() {
         </template>
 
         <!-- 新增页面场景选择下拉面板 -->
-        <div v-if="createScenePopover" class="kb-scene-popover">
-          <div class="kb-scene-popover-header">
-            <input v-model="createSceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="flex:1;width:auto">
-            <button class="bt bt-o bt-s" @click="createScenePopover = false">{{ t('cancel') }}</button>
-          </div>
-          <div class="kb-scene-popover-list">
-            <div v-if="availableCreateScenes.length === 0" class="ts t2" style="padding:20px;text-align:center">{{ t('ref_no_available') }}</div>
-            <div v-for="s in availableCreateScenes" :key="s.id" class="kb-scene-row"
-                 :class="{ 'kb-scene-row-selected': createSceneTempSelected.includes(s.id) }"
-                 @click="toggleCreateSceneTemp(s.id)">
-              <div class="kb-scene-row-info">
-                <div class="kb-scene-row-name">{{ s.name }}</div>
-                <div v-if="s.desc" class="kb-scene-row-desc">{{ s.desc }}</div>
+        <teleport to="body">
+          <div v-if="createScenePopover" class="kb-popover-mask" @click="createScenePopover = false"></div>
+          <div v-if="createScenePopover" class="kb-scene-popover" :style="{ left: popoverPos.left + 'px', top: popoverPos.top + 'px' }">
+            <div class="kb-scene-popover-header">
+              <input v-model="createSceneSearch" :placeholder="t('ref_search_scenes')" class="kb-input" style="flex:1;width:auto">
+              <button class="bt bt-o bt-s" @click="createScenePopover = false">{{ t('cancel') }}</button>
+            </div>
+            <div class="kb-scene-popover-list">
+              <div v-if="availableCreateScenes.length === 0" class="ts t2" style="padding:20px;text-align:center">{{ t('ref_no_available') }}</div>
+              <div v-for="s in availableCreateScenes" :key="s.id" class="kb-scene-row"
+                   :class="{ 'kb-scene-row-selected': createSceneTempSelected.includes(s.id) }"
+                   @click="toggleCreateSceneTemp(s.id)">
+                <div class="kb-scene-row-info">
+                  <div class="kb-scene-row-name">{{ s.name }}</div>
+                  <div v-if="s.desc" class="kb-scene-row-desc">{{ s.desc }}</div>
+                </div>
+                <div class="kb-scene-row-check"><span class="kb-check-yes">✓</span></div>
               </div>
-              <div class="kb-scene-row-check"><span class="kb-check-yes">✓</span></div>
+            </div>
+            <div class="kb-scene-popover-footer">
+              <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: createSceneTempSelected.length }) }}</span>
+              <button class="bt bt-p bt-s" @click="confirmCreateScenes">{{ t('confirm') }}</button>
             </div>
           </div>
-          <div class="kb-scene-popover-footer">
-            <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: createSceneTempSelected.length }) }}</span>
-            <button class="bt bt-p bt-s" @click="confirmCreateScenes">{{ t('confirm') }}</button>
-          </div>
-        </div>
+        </teleport>
       </div>
       <teleport to="body">
         <div v-if="refTooltip.show" class="kb-ref-tooltip" :style="{ left: refTooltip.x + 'px', top: refTooltip.y + 'px', transform: 'translateX(-50%)' }">{{ refTooltip.text }}</div>
