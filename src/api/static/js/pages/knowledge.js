@@ -741,19 +741,19 @@ function renderKnowledge() {
                     <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
                   <div class="scn-card-desc">{{ k.description || t('no_description') }}</div>
-                  <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:4px;margin-top:auto;margin-bottom:10px;flex-wrap:wrap;font-size:10px;color:var(--t3)">
-                    <span v-if="sceneRefCount(k) > 0" style="color:var(--t3)">{{ t('scenes_unit') }}</span>
-                    <template v-if="sceneRefCount(k) > 0">
-                      <span v-for="(s, i) in sceneNames(k)" :key="'s'+i" class="tg tg-d" style="margin-right:2px">{{ s }}</span>
-                      <span v-if="sceneRefCount(k) > sceneNames(k).length" style="color:var(--t3)">+{{ sceneRefCount(k) - sceneNames(k).length }}</span>
-                    </template>
-                    <span v-if="agentRefCount(k) > 0" style="color:var(--t3);margin-left:4px">Agent</span>
-                    <template v-if="agentRefCount(k) > 0">
-                      <span v-for="(a, i) in agentNames(k)" :key="'a'+i" class="tg tg-d" style="margin-right:2px">{{ a }}</span>
-                    </template>
-                  </div>
                   <div class="scn-card-foot">
-                    <span class="scn-meta">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
+                    <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;font-size:10px;line-height:1.4">
+                      <span v-if="sceneRefCount(k) > 0" style="color:var(--t3)">{{ t('scenes_unit') }}</span>
+                      <template v-if="sceneRefCount(k) > 0">
+                        <span v-for="(s, i) in sceneNames(k)" :key="'s'+i" class="tg tg-d" style="margin-right:2px">{{ s }}</span>
+                        <span v-if="sceneRefCount(k) > sceneNames(k).length" style="color:var(--t3)">+{{ sceneRefCount(k) - sceneNames(k).length }}</span>
+                      </template>
+                      <span v-if="agentRefCount(k) > 0" style="color:var(--t3);margin-left:4px">Agent</span>
+                      <template v-if="agentRefCount(k) > 0">
+                        <span v-for="(a, i) in agentNames(k)" :key="'a'+i" class="tg tg-d" style="margin-right:2px">{{ a }}</span>
+                      </template>
+                    </div>
+                    <span class="scn-meta" style="margin-left:auto">{{ k.created_by || '' }} · {{ (k.created_at || '').substring(0, 16) }}</span>
                     <div class="scn-card-btns">
                       <button class="bt bt-o bt-s" @click.stop="viewContent(k)">{{ t('view') }}</button>
                       <button v-if="k.source === 'manual' && !k.archived" class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" @click.stop="quickDelete(k)">{{ t('delete') }}</button>
