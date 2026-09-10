@@ -186,14 +186,24 @@ if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   fi
 fi
 
-# ===== 4.5 安装 grape CLI（独立项目 grape-cli，2026-09-08 起不再随包内置）=====
-log "安装 grape CLI（gitcode.com/grape-dev/grape-cli）..."
-if "$VENV/bin/pip" install -q --no-cache-dir \
-    git+https://gitcode.com/grape-dev/grape-cli.git 2>/dev/null; then
-  chmod +x "$VENV/bin/grape" 2>/dev/null || true
-  log "grape CLI 已装: $VENV/bin/grape（agent 内直接使用 \`grape ...\`）"
+# ===== 4.5 安装 grape CLI（独立项目 grape-cli；优先随包离线 wheel，失败回退在线）=====
+_install_grape_online() {
+  "$VENV/bin/pip" install -q --no-cache-dir \
+      git+https://gitcode.com/grape-dev/grape-cli.git 2>/dev/null \
+    && chmod +x "$VENV/bin/grape" 2>/dev/null || true \
+    && log "grape CLI 已装（在线）: $VENV/bin/grape" \
+    || log "警告: grape-cli 在线安装失败，agent 内暂无 \`grape\`；不影响 worker 运行"; return 0
+}
+if ls "$INSTALL_DIR/wheels"/grape-*.whl >/dev/null 2>&1; then
+  if "$VENV/bin/pip" install -q --no-index --find-links "$INSTALL_DIR/wheels" grape 2>/dev/null; then
+    chmod +x "$VENV/bin/grape" 2>/dev/null || true
+    log "grape CLI 已装（离线 wheel，随包）: $VENV/bin/grape"
+  else
+    log "警告: 离线 grape wheel 安装失败，回退在线..."
+    _install_grape_online
+  fi
 else
-  log "警告: grape-cli 安装失败（网络/凭据），agent 内暂无 \`grape\` 命令；不影响 worker 运行"
+  _install_grape_online
 fi
 
 # ===== 5. 写入接入配置（凭据 + 主系统地址，权限 600）=====

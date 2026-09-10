@@ -90,6 +90,38 @@ class TestWorkerPackage:
             assert os.path.exists(path), f"manifest 项缺失: {item}"
 
 
+class TestGrapeCliWheel:
+    def test_skip_when_wheel_present(self, monkeypatch, tmp_path):
+        """wheels/ 已含 grape-*.whl → 不触发网络/clone/pip wheel（离线安全）。"""
+        import src.worker_package as wp
+        (tmp_path / "grape-0.1.0-py3-none-any.whl").write_text("dummy", encoding="utf-8")
+        called = []
+        monkeypatch.setattr(wp, "_git", lambda *a, **k: called.append("git"))
+        monkeypatch.setattr(wp.subprocess, "run", lambda *a, **k: called.append("pip"))
+        wp._ensure_grape_cli_wheel(str(tmp_path))
+        assert called == []  # 已有 wheel：什么都不做
+
+    def test_builds_wheel_when_missing(self, monkeypatch, tmp_path):
+        """wheel 缺失 → 触发 clone + pip wheel 写入同一目录。"""
+        import src.worker_package as wp
+        from types import SimpleNamespace
+        events = []
+
+        def _fake_git(args):
+            events.append("git:" + args[3])  # src 目录
+
+        def _fake_run(cmd, **kw):
+            if cmd[:3] == [sys.executable, "-m", "pip"] and "wheel" in cmd:
+                (tmp_path / "grape-1.0.0-py3-none-any.whl").write_text("x", encoding="utf-8")
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(wp, "CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(wp, "_git", _fake_git)
+        monkeypatch.setattr(wp.subprocess, "run", _fake_run)
+        wp._ensure_grape_cli_wheel(str(tmp_path))
+        assert events and (tmp_path / "grape-1.0.0-py3-none-any.whl").exists()
+
+
 class TestInstallEndpoints:
     def _auth_client(self):
         import hashlib as _h

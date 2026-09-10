@@ -15,6 +15,8 @@ VERSION_PATH = os.path.join(CACHE_DIR, "VERSION")
 WHEELS_DIR = os.path.join(CACHE_DIR, "wheels")
 REQUIREMENTS_PATH = os.path.join(ROOT, "requirements-worker.txt")
 PIP_INDEX = os.environ.get("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple")
+# grape CLI 独立项目：打包成 wheel 随 workers 离线安装（issue-45-worker-offline-grape-cli-design.md）
+GRAPE_CLI_REPO = os.environ.get("GRAPE_CLI_REPO", "https://gitcode.com/grape-dev/grape-cli.git")
 # 打包进安装包的 Python 解释器来源：uv 的 standalone 构建（python-build-standalone，
 # 免编译、自包含）。worker 端 install-worker.sh 在系统无 Python>=3.10 时用包内解释器建 venv。
 UV_PYTHON_DIR = os.path.expanduser(os.environ.get("UV_PYTHON_DIR", "~/.local/share/uv/python"))
@@ -54,6 +56,45 @@ def _tar_filter(ti: tarfile.TarInfo):
     if "__pycache__" in ti.name or ti.name.endswith(".pyc"):
         return None
     return ti
+
+
+def _git(args: list[str]) -> None:
+    """执行 git（强制 Jason7602 身份替代：grape-cli 为私有仓库，该身份可读）"""
+    subprocess.run(
+        ["git", "-c", "url.https://Jason7602@gitcode.com/.insteadOf=https://gitcode.com/"] + args,
+        check=True, capture_output=True, text=True, timeout=300,
+    )
+
+
+def _ensure_grape_cli_wheel(whl_dir: str) -> str:
+    """把 grape-cli 构建成 wheel 放入 wheels/（离线随包安装）。
+
+    - wheels/ 已含 `grape-*.whl` → 跳过；
+    - 否则懒拉 grape-cli 源码（浅克隆到 CACHE_DIR），`pip wheel` 产出到 wheels/；
+    - 失败仅告警：安装侧回退在线（现状兜底，不影响包构建）。
+    """
+    if any(f.startswith("grape-") and f.endswith(".whl") for f in os.listdir(whl_dir)):
+        return whl_dir
+    src = os.path.join(CACHE_DIR, "grape-cli-src")
+    try:
+        if not os.path.isdir(os.path.join(src, ".git")):
+            os.makedirs(os.path.dirname(src), exist_ok=True)
+            _git(["clone", "--depth", "1", GRAPE_CLI_REPO, src])
+            log.info(f"worker_package: cloned grape-cli -> {src}")
+        else:
+            try:
+                _git(["-C", src, "pull", "--ff-only"])
+            except Exception:
+                pass  # 更新失败用已有缓存
+        subprocess.run(
+            [sys.executable, "-m", "pip", "wheel", "--no-cache-dir", src,
+             "--no-deps", "-w", whl_dir],
+            check=True, capture_output=True, text=True, timeout=600,
+        )
+        log.info(f"worker_package: grape-cli wheel built into {whl_dir}")
+    except Exception as e:
+        log.warning(f"worker_package: grape-cli wheel build failed (fallback online install): {e}")
+    return whl_dir
 
 
 def _manifest_version() -> str:
@@ -352,6 +393,7 @@ def build_package() -> str:
             if _m:
                 py_ver = _m.group(1)
         whl_dir = _ensure_wheels(py_ver)
+        _ensure_grape_cli_wheel(whl_dir)  # grape-cli 轮子随包（离线安装，issue-45）
         if py_root:
             log.info(f"worker_package: bundling python {os.path.basename(py_root)}")
         else:
