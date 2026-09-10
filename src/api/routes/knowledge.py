@@ -648,9 +648,9 @@ def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
     """更新知识内容：写文件 + OBS + DB content_hash + updated_at。"""
     repo_key = row["repo_key"]
     file_path = row["file_path"]
-    base = _repo_base(repo_key)
-    full = os.path.normpath(os.path.join(base, file_path))
-    if full != base and not full.startswith(base + os.sep):
+    from src.config import WORKSPACE_DIR
+    full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
+    if full != WORKSPACE_DIR and not full.startswith(WORKSPACE_DIR + os.sep):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w", encoding="utf-8") as f:
@@ -695,8 +695,8 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
 
     file_path = row.get("file_path", "")
     if file_path:
-        base = _repo_base(row["repo_key"])
-        full = os.path.normpath(os.path.join(base, file_path))
+        from src.config import WORKSPACE_DIR
+        full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
         if os.path.isfile(full):
             try:
                 os.remove(full)
