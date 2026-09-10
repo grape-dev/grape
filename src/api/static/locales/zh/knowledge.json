@@ -120,5 +120,6 @@
   "content_too_large": "内容不能超过 10KB",
   "import_file": "导入文件",
   "file_too_large": "文件超过 10KB 限制",
-  "file_imported": "文件已导入"
+  "file_imported": "文件已导入",
+  "reset": "还原"
 }

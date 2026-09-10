@@ -31,6 +31,7 @@ function renderKnowledge() {
         view: 'list',
         editMode: false,
         editForm: null,
+        editFormSnapshot: null,
         createForm: null,
         sceneScrollLeft: false,
         sceneScrollRight: false,
@@ -462,12 +463,19 @@ function renderKnowledge() {
 
       // 编辑
       editKnowledge() {
-        this.editForm = {
+        const snapshot = {
           name: this.detail.name || '',
           content: this.detail.content || '',
           description: this.detail.description || ''
         };
+        this.editForm = { ...snapshot };
+        this.editFormSnapshot = snapshot;
         this.editMode = true;
+      },
+      resetEdit() {
+        if (this.editFormSnapshot) {
+          this.editForm = { ...this.editFormSnapshot };
+        }
       },
       cancelEdit() {
         this.editMode = false;
@@ -938,6 +946,7 @@ function renderKnowledge() {
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--b)">
               <button class="bt bt-o bt-s" @click="cancelEdit">{{ t('cancel') }}</button>
+              <button class="bt bt-o bt-s" @click="resetEdit">{{ t('reset') }}</button>
               <button class="bt bt-p bt-s" @click="saveEdit">{{ t('confirm') }}</button>
             </div>
           </div>

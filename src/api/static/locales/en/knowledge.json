@@ -120,5 +120,6 @@
   "content_too_large": "Content cannot exceed 10KB",
   "import_file": "Import File",
   "file_too_large": "File exceeds 10KB limit",
-  "file_imported": "File imported"
+  "file_imported": "File imported",
+  "reset": "Reset"
 }
