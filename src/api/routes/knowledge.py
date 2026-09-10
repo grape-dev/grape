@@ -728,7 +728,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_cu
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(body.content.strip())
 
-    rel = os.path.relpath(file_path, WORKSPACE_DIR)
+    rel = os.path.relpath(file_path, base)
     content_hash = hashlib.sha256(body.content.encode("utf-8")).hexdigest()
 
     obs_key = ""
