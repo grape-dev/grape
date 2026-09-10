@@ -1358,7 +1358,7 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                    sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                    mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
                    created_by_me: str = Query("", description="仅我创建的任务"),
-                   assignee: str = Query("", description="按创建人筛选"),
+                   assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
                    user: dict = Depends(get_current_user_or_api_key)):
     """任务中心：当前登录用户的待处理/已完成任务（可按 repo / 创建人过滤 / 按时间排序）。
 
@@ -1383,9 +1383,14 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
     if repo_key:
         clauses.append("repo_key=?")
         params.append(repo_key)
-    if assignee:
-        clauses.append("assignee=?")
-        params.append(assignee)
+    if assignees:
+        _assignee_list = [a.strip() for a in assignees.split(",") if a.strip()]
+        if len(_assignee_list) == 1:
+            clauses.append("assignee=?")
+            params.append(_assignee_list[0])
+        elif len(_assignee_list) > 1:
+            clauses.append(f"assignee IN ({','.join('?' * len(_assignee_list))})")
+            params.extend(_assignee_list)
     where = " AND ".join(clauses)
     # 排序：白名单已由 FastAPI pattern 约束（desc/asc/default/time），此处直接拼（防注入）
     _order_dir = "DESC" if sort_order == "desc" else "ASC"
