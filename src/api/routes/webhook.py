@@ -154,7 +154,7 @@ class A2AHandoffBody(BaseModel):
 
 
 @router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Agent 交办（A2A，grape a2a handoff）")
-async def a2a_endpoint(body: A2AHandoffBody, request: Request, user: dict | None = Depends(get_user_or_none)):
+async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
     """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
     agent_name = body.agent or ""
     payload = body.payload or {}
