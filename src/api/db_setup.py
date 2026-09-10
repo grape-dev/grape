@@ -433,7 +433,8 @@ CREATE TABLE IF NOT EXISTS agent_shared_knowledge (
     updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,  -- 最近内容更新时间（OBS 同步审计）
     source       TEXT NOT NULL DEFAULT '',   -- 知识来源：system / agent / manual
     archived     INTEGER NOT NULL DEFAULT 0,  -- 0正常 1归档（归档后不注入）
-    description  TEXT DEFAULT ''              -- 知识描述：system/agent 自动生成，manual 用户填写
+    description  TEXT DEFAULT '',             -- 知识描述：system/agent 自动生成，manual 用户填写
+    name         VARCHAR(256) DEFAULT ''      -- 知识名称：system/agent 自动生成，manual 用户必填
 )
 """
 
@@ -1784,6 +1785,7 @@ def _migrate_tables():
         "ALTER TABLE agent_shared_knowledge ADD COLUMN source TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN description TEXT DEFAULT ''",
+        "ALTER TABLE agent_shared_knowledge ADD COLUMN name VARCHAR(256) DEFAULT ''",
         # ===== knowledge-obs-design：agent_tasks 知识/project-info OBS 临时 URL =====
         "ALTER TABLE agent_tasks ADD COLUMN project_info_file_urls TEXT DEFAULT ''",
         "ALTER TABLE agent_tasks ADD COLUMN knowledge_file_urls TEXT DEFAULT ''",
