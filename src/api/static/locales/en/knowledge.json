@@ -116,5 +116,6 @@
   "content_too_large": "Content cannot exceed 10KB",
   "import_file": "Import File",
   "file_imported": "File imported",
-  "reset": "Reset"
+  "reset": "Revert",
+  "reset_tip": "Discard all changes, restore to original content"
 }

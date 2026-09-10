@@ -905,7 +905,7 @@ function renderKnowledge() {
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
                 <label style="font-size:11px;color:var(--t3)">{{ t('entry_content') }}<span class="kb-required">*</span></label>
                 <div style="display:flex;gap:6px">
-                  <button class="bt bt-o bt-s" style="cursor:pointer;font-size:11px" @click="resetEdit">{{ t('reset') }}</button>
+                  <button v-if="editForm.content !== editFormSnapshot?.content" class="bt bt-o bt-s" style="cursor:pointer;font-size:11px" :title="t('reset_tip')" @click="resetEdit">{{ t('reset') }}</button>
                   <label class="bt bt-o bt-s" style="cursor:pointer;font-size:11px">
                     {{ t('import_file') }}
                     <input type="file" accept=".md,.json,.txt" style="display:none" @change="e => importFile(e, 'edit')">
