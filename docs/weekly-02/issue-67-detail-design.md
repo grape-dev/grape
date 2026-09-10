@@ -1763,6 +1763,15 @@ WHERE r.enabled = 1
   AND k.archived = 0
 ```
 
+**issue_num 条件安全性分析**：
+
+- `issue_num=0` 语义：全局（不限 Issue），与 `scene_id=''`、`agent_type=''` 一致
+- 正常场景：Coding Agent 处理 Issue #5（issue_num=5）→ 匹配 issue_num=5（当前 Issue）OR issue_num=0（全局），不匹配 issue_num=3（其他 Issue）
+- issue_num 传 None：SQL `r.issue_num = NULL`（FALSE）+ `r.issue_num = 0`（匹配全局）→ Issue 级知识不注入，全局知识注入（安全 fallback）
+- issue_num 传 0（对话场景无 Issue）：只匹配全局，Issue 级知识不注入（正确）
+- DB 字段 `INTEGER NOT NULL DEFAULT 0`：不可能为 NULL，迁移已有数据填充 0
+- MySQL/SQLite 兼容：INTEGER 类型参数绑定无问题
+
 读取路径（`_read_entry_content`）：
 
 | 模式 | 路径 |
