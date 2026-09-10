@@ -739,7 +739,7 @@ function renderKnowledge() {
                     <div class="scn-card-title">{{ k.name || knowledgeTitle(k) }}</div>
                     <span v-if="k.archived" class="archived-tag">{{ t('archived') }}</span>
                   </div>
-                  <div class="scn-card-desc">{{ k.description || t('no_description') }}</div>
+                  <div class="scn-card-desc" :title="k.description || t('no_description')">{{ k.description || t('no_description') }}</div>
                   <div v-if="k.refs && k.refs.length > 0" style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;font-size:10px">
                     <span v-if="sceneRefCount(k) > 0" class="kb-ref-pill" :data-names="sceneNames(k).join('、')" @click.stop="viewContent(k)">
                       {{ t('scenes_unit') }}{{ sceneRefCount(k) }}
