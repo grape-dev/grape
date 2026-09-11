@@ -1,9 +1,9 @@
 """Project Templates 路由：模板列表获取与一键创建"""
-import json, os, re, asyncio
+import json, os, re, asyncio, base64
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.api.deps import get_current_user, get_user_token
-from src.config import log, CONFIG_DIR
+from src.config import log, CONFIG_DIR, EXAMPLE_DIR
 from src.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
 
 router = APIRouter(prefix="/api/project-templates", tags=["project-templates"])
@@ -59,6 +59,85 @@ def list_templates(user: dict = Depends(get_current_user)):
     """返回配置化的模板分类与模板列表"""
     data = _load_templates()
     return {"categories": data.get("categories", [])}
+
+
+@router.get("/{template_id}/readme")
+def get_template_readme(template_id: str, user: dict = Depends(get_current_user)):
+    """获取模板 README 内容（本地优先，git 来源从 GitCode/GitHub API 拉取）"""
+    ctx = _find_template(template_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"模板 '{template_id}' 不存在"})
+    tpl = ctx["template"]
+
+    # 1. 本地模板：直接读 examples/{id}/README.md
+    if tpl.get("source") == "local":
+        readme_path = os.path.join(EXAMPLE_DIR, template_id, "README.md")
+        if os.path.exists(readme_path):
+            try:
+                with open(readme_path, "r", encoding="utf-8") as f:
+                    return {"content": f.read(), "source": "local"}
+            except Exception as e:
+                log.warning(f"read local readme failed: {e}")
+        return {"content": "", "source": "local"}
+
+    # 2. git 来源：从 GitCode/GitHub API 拉取
+    source_repo = tpl.get("source_repo", "")
+    source_platform = tpl.get("source_platform", "gitcode")
+    if not source_repo:
+        return {"content": "", "source": "git"}
+
+    try:
+        import requests
+        if source_platform == "github":
+            url = f"https://api.github.com/repos/{source_repo}/readme"
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            github_token = os.environ.get("GITHUB_TOKEN", "")
+            if github_token:
+                headers["Authorization"] = f"token {github_token}"
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
+                return {"content": content, "source": "github"}
+        else:
+            url = f"https://api.gitcode.com/api/v5/repos/{source_repo}/contents/README.md"
+            gitcode_pat = os.environ.get("GITCODE_PAT", "")
+            headers = {}
+            if gitcode_pat:
+                headers["PRIVATE-TOKEN"] = gitcode_pat
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
+                return {"content": content, "source": "gitcode"}
+            # 尝试小写 readme.md
+            url2 = f"https://api.gitcode.com/api/v5/repos/{source_repo}/contents/readme.md"
+            r2 = requests.get(url2, headers=headers, timeout=10)
+            if r2.status_code == 200:
+                content = base64.b64decode(r2.json().get("content", "")).decode("utf-8")
+                return {"content": content, "source": "gitcode"}
+    except Exception as e:
+        log.warning(f"fetch readme for {template_id} failed: {e}")
+
+    return {"content": "", "source": "git"}
+
+
+@router.get("/{template_id}/preview")
+def get_template_preview(template_id: str, user: dict = Depends(get_current_user)):
+    """获取模板预览图 HTML（本地模板读取 examples/{id}/preview.html）"""
+    ctx = _find_template(template_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"模板 '{template_id}' 不存在"})
+    tpl = ctx["template"]
+
+    if tpl.get("source") == "local":
+        preview_path = os.path.join(EXAMPLE_DIR, template_id, "preview.html")
+        if os.path.exists(preview_path):
+            try:
+                with open(preview_path, "r", encoding="utf-8") as f:
+                    return {"content": f.read(), "source": "local"}
+            except Exception as e:
+                log.warning(f"read local preview failed: {e}")
+
+    return {"content": "", "source": "none"}
 
 
 class CreateTemplateRequest(BaseModel):

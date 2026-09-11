@@ -827,7 +827,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
         oc_session_id = row[0] or "" if row else ""
 
     from src.prompt_builder import build_conversation_prompt
-    prompt = build_conversation_prompt(evt, user_message, _list_thread(anchor_seq), agent_type, issue_num)
+    prompt, _inj_ids = build_conversation_prompt(evt, user_message, _list_thread(anchor_seq), agent_type, issue_num)
 
     from src.user.db import get_gitcode_token
     bot_token = get_gitcode_token(repo_key=repo_key) or ""
@@ -1069,6 +1069,7 @@ def _execute_conv_task(task_id: str, loop):
     """后台执行对话任务（线程池中运行，call_soon_threadsafe 投递事件到 event loop）。"""
     import json as _json
     _worker_final_text = ""
+    injected_ids = []
     with _conv_tasks_lock:
         task = _conv_tasks.get(task_id)
         if not task:
@@ -1115,7 +1116,7 @@ def _execute_conv_task(task_id: str, loop):
         ws = get_agent_workdir(repo_key, agent_type, issue_id)
         import os
         os.makedirs(ws, exist_ok=True)
-        prompt = build_conversation_prompt(evt, message, _list_thread(anchor_seq), agent_type, issue_num)
+        prompt, injected_ids = build_conversation_prompt(evt, message, _list_thread(anchor_seq), agent_type, issue_num)
         bot_token = get_gitcode_token(repo_key=repo_key) or ""
         repository = from_repo_key(repo_key)
         # 用 hermes 引擎（对齐 Chat Agent）
@@ -1150,6 +1151,11 @@ def _execute_conv_task(task_id: str, loop):
         _add_thread_message(seq, repo_key, issue_id, agent_type, "agent", "（无返回内容）", agent_type,
                             task_id=task_id, generate_status=3)
         _worker_final_text = "（无返回内容）"
+
+    # Issue #67: 记录注入的知识 ID 到事件线程
+    if injected_ids:
+        _add_thread_message(seq, repo_key, issue_id, agent_type, "system",
+                            f"📌 本次注入知识：{', '.join(str(i) for i in injected_ids)}")
 
     with _conv_tasks_lock:
         t = _conv_tasks.get(task_id)

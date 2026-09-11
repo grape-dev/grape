@@ -248,6 +248,8 @@ function loadAgentTypes() {
     if (document.visibilityState === 'hidden') {
       _hiddenSince = Date.now();
     } else if (document.visibilityState === 'visible' && window._currentView && _hiddenSince) {
+      // Issue #86: Tab 切回前台——重设定时器（后台 setTimeout 被浏览器节流可能没触发）
+      API.scheduleProactiveRefresh();
       if (Date.now() - _hiddenSince > 60000) {
         setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(window._currentView, window._currentParam); }, 300);
       }
@@ -288,6 +290,10 @@ function loadAgentTypes() {
   }
 
   function nav(view, param) {
+    // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
+    if (view === 'knowledge' && window._currentView === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
+      return;
+    }
     const repo = currentRepo();
     if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local') { loadRepos(); return; }
 
@@ -339,7 +345,17 @@ function loadAgentTypes() {
     const title = $('pageTitle');
     const repoTitle = $('repoTitle');
     const pc = $('pageContent');
-    pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
+
+    // Issue #67: 离开 knowledge 页面时先卸载 Vue 应用（必须在 innerHTML 替换之前）
+    if (view !== 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
+      try { _knowledgeVueApp.unmount(); } catch(e) {}
+      _knowledgeVueApp = null;
+    }
+
+    // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不覆盖 DOM（避免 Vue 虚拟 DOM 不一致）
+    if (!(view === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp)) {
+      pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
+    }
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     // Issue #63: 切 tab 时主动取消旧请求 + 设全局 signal + 停定时轮询
@@ -420,7 +436,9 @@ function loadAgentTypes() {
       renderSkills();
     } else if (view === 'knowledge') {
       title.textContent = I18N.t('app.current_project');
-      renderKnowledge();
+      if (typeof _knowledgeVueApp === 'undefined' || !_knowledgeVueApp) {
+        renderKnowledge();
+      }
     } else if (view === 'runtimes') {
       title.textContent = I18N.t('app.current_project');
       if (typeof renderRuntimes !== 'function') {
@@ -521,6 +539,7 @@ function loadAgentTypes() {
       localStorage.setItem('token', d.token);
       // refresh_token 在 HttpOnly cookie 里——不需要存 localStorage
       localStorage.setItem('user', JSON.stringify(d.user));
+      API.scheduleProactiveRefresh();  // Issue #86: 启动主动刷新定时器
       showApp();
     }).catch(e => showToast(I18N.t('app.login.failed') + ': ' + e.message));
   }
@@ -530,6 +549,7 @@ function loadAgentTypes() {
     // 保留 currentRepo（记录上次选择的仓库），下次登录恢复；只清登录态
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
     // refresh_token cookie 由服务端 logout 清除
     showLogin();
   }
@@ -589,6 +609,7 @@ function loadAgentTypes() {
         $('pageTitle').textContent = I18N.t('app.current_project');
       }
       showApp();
+      API.scheduleProactiveRefresh();  // Issue #86: OAuth 登录后启动定时器
       // Remove token from URL without reload (preserve language prefix)
       if (window.history.replaceState) {
         const lang = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
@@ -613,6 +634,7 @@ function loadAgentTypes() {
     const token = localStorage.getItem('token');
     if (token) {
       showApp();
+      API.scheduleProactiveRefresh();  // Issue #86: 页面恢复时启动定时器
       // Handle hash-based navigation (e.g., #runtimes, #settings) on page load
       const hash = window.location.hash;
       if (hash && hash.length > 1) {
@@ -667,3 +689,20 @@ function loadAgentTypes() {
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });
+
+// Issue #67: 全局苹果风格确认 modal（knowledge.js / skills.js 共用）
+function _showAppleConfirm(message, onConfirm, onCancel) {
+  var modal = document.createElement('div');
+  modal.id = 'appleConfirmModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = '<div class="cd" style="width:360px;padding:24px;border-radius:14px;text-align:center">' +
+    '<p style="font-size:14px;color:var(--t);margin-bottom:20px;line-height:1.5">' + message + '</p>' +
+    '<div style="display:flex;gap:10px">' +
+    '<button id="appleConfirmCancel" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">' + (I18N.t('common.cancel') || '取消') + '</button>' +
+    '<button id="appleConfirmOk" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#ff3b30;color:#fff;cursor:pointer">' + (I18N.t('common.confirm') || '确认') + '</button>' +
+    '</div></div>';
+  document.body.appendChild(modal);
+  modal.onclick = function(e) { if (e.target === modal) { modal.remove(); if (onCancel) onCancel(); } };
+  document.getElementById('appleConfirmOk').onclick = function() { modal.remove(); if (onConfirm) onConfirm(); };
+  document.getElementById('appleConfirmCancel').onclick = function() { modal.remove(); if (onCancel) onCancel(); };
+}
