@@ -140,8 +140,16 @@ def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
 
 # ===== 引擎档位 / 优先级（供 pick_engine 多引擎选择）=====
 
-def _repo_user_id(repo_key: str) -> int:
-    """从 user_repos 表反查 repo_key 对应的 user_id（取第一个 join 的用户）。"""
+def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
+    """从 user_repos 表反查 repo_key 对应的 user_id。
+
+    优先按 issue_creator（GitCode 用户名）查 unified_user_mapping 获取 user_id；
+    issue_creator 为空或查不到时，回退到原逻辑（取第一个 join 的用户）。
+
+    Issue #76 修复：原逻辑按 user_id ASC 取第一条 is_join=1 的记录，
+    对于多用户仓库会返回"最早加入的用户"而非 Issue 创建者，
+    导致 scope=user 引擎无法通过 claim_by_tag 认领任务。
+    """
     if not repo_key:
         return 0
     repo = _norm_repo(repo_key)
@@ -149,7 +157,16 @@ def _repo_user_id(repo_key: str) -> int:
     with lock:
         try:
             c = db.cursor()
-            # repo_key 在 user_repos 里可能带 gitcode: 前缀，用 LIKE 匹配
+            # 优先按 Issue 创建者查 unified_user_mapping（Issue #76 修复）
+            if issue_creator:
+                c.execute(
+                    "SELECT user_id FROM unified_user_mapping "
+                    "WHERE gitcode_user=? AND user_id>0 LIMIT 1",
+                    (issue_creator,))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+            # 回退：repo_key 在 user_repos 里可能带 gitcode: 前缀，用 LIKE 匹配
             c.execute(
                 "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 ORDER BY user_id LIMIT 1",
                 (repo, f"gitcode:{repo}"))
@@ -242,7 +259,8 @@ def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
 
 
 def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
-                scene_id: str = "", user_id: int = 0) -> int | None:
+                scene_id: str = "", user_id: int = 0,
+                issue_creator: str = "") -> int | None:
     """从场景 node 的 engine_runtime_ids 选引擎；为空回退会话主引擎（legacy）。
 
     返回 None = engine_unavailable（调用方跳过执行）。
@@ -264,7 +282,7 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     # Legacy 模式：从场景 node 读 engine_runtime_ids
     repo = _norm_repo(repo_key)
     if not user_id:
-        user_id = _repo_user_id(repo_key)
+        user_id = _repo_user_id(repo_key, issue_creator=issue_creator)
     if scene_id:
         try:
             from src.api.pipeline_config import get_scene_engine_ids
@@ -292,7 +310,8 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     return None
 
 
-def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0) -> str:
+def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0,
+                              issue_creator: str = "") -> str:
     """获取限定广播引擎列表，返回 JSON 字符串供 agent_tasks.pool_engine_ids 使用。
 
     只从场景 node 的 engine_runtime_ids 读取。
@@ -300,7 +319,7 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     """
     import json
     if not user_id:
-        user_id = _repo_user_id(repo_key)
+        user_id = _repo_user_id(repo_key, issue_creator=issue_creator)
     if scene_id:
         try:
             from src.api.pipeline_config import get_scene_engine_ids

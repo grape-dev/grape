@@ -411,6 +411,16 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
     return ""
 
 
+# Issue #85: agent 输出澄清意图检测
+_AWAITING_INPUT_MARKERS = ["澄清", "需要确认", "请问", "请提供", "需要补充", "请回复", "请说明", "需要以下信息"]
+
+def _detect_awaiting_input(result_text: str) -> bool:
+    """检测 agent 输出是否包含澄清意图（仅 vod/issue agent 调用）。"""
+    if not result_text:
+        return False
+    return any(marker in result_text for marker in _AWAITING_INPUT_MARKERS)
+
+
 # L2 阶段分派映射表（Issue #49 §5.3）：stage × 事件类型 → Agent
 # - 对应列 stage 命中 → 目标 Agent；"—" 表示该阶段下该事件不分发（返回空）
 # - 特例：PR updated + stage=coding + QA 有历史 → qa（复审）
@@ -786,7 +796,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # close 副作用-only（执行关闭后短路不进入 agent）。
     try:
         from src.api.event_rule import evaluate_event_action
-        _d = evaluate_event_action(event_type, evt.get("payload", {}) or {})
+        _vcs_source = evt.get("source", "") or ""
+        _d = evaluate_event_action(event_type, evt.get("payload", {}) or {}, vcs_source=_vcs_source)
         if _d["decision"] == "skip":
             log.info(f"Pipeline skip: {_d['reason']} (event_action_filter, actor={_d['actor_type']})")
             from src.api.event_store import append_skipped_event
@@ -880,6 +891,11 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         _rid = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
         if _rid:
             _asg = _fetch_issue_assignee(repo_key, _rid)
+            # Issue #49: assignee 为空时 fallback 到 issue 创建者（actor），而非仓库 owner
+            if not _asg:
+                _asg = actor or ""
+                if _asg:
+                    log.info(f"Pipeline: issue_assignee API empty, fallback to actor={_asg} for {_rid}")
             set_issue_stage(repo_key, _rid, "vod", "vod", assignee=_asg)
             log.info(f"Pipeline: issue_state init vod for {_rid} assignee={_asg or 'none'}")
             # 子任务识别：Issue body 含 "## 父任务" + Issue 链接 → 标记 parent_issue_id
@@ -914,6 +930,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 if _closed:
                     _n3 = close_issue_tasks(repo_key, int(_num3))
                     log.info(f"Pipeline: issue closed -> complete tasks #{_num3} ({_n3} rows)")
+                    # Issue #67: 归档该 Issue 的知识
+                    try:
+                        from src.api.knowledge import _archive_issue_knowledge
+                        _archive_issue_knowledge(repo_key, int(_num3))
+                        log.info(f"Pipeline: issue closed -> archived knowledge #{_num3}")
+                    except Exception as _e:
+                        log.warning(f"Pipeline: archive issue knowledge failed: {_e}")
                 elif event_type in ISSUE_EVENT_TYPES:
                     _asg3 = ""
                     try:
@@ -2136,7 +2159,24 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)
-    log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}")
+    log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}\n")
+
+    # Issue #85: agent 完成后检测澄清意图 → 设 task.status=awaiting_input
+    if new_status == "completed" and result_text and issue_id and agent_type in ("vod", "issue"):
+        try:
+            _issue_num = _issue_num_from(issue_id)
+            if _issue_num and _detect_awaiting_input(result_text):
+                with db_lock:
+                    _c = db.cursor()
+                    _c.execute(
+                        "UPDATE tasks SET status='awaiting_input' "
+                        "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+                        (repo_key, int(_issue_num)))
+                    db.commit()
+                    if _c.rowcount > 0:
+                        log.info(f"Issue #85: agent clarification detected → task awaiting_input for {repo_key}/#{_issue_num}")
+        except Exception as _e:
+            log.warning(f"Issue #85: awaiting_input detection failed: {_e}")
 
     # 多任务模式：父任务 Issue Agent 完成后 → stage=done（不 A2A coding，子任务由 webhook 自动触发）
     if new_status == "completed" and agent_type == "issue" and issue_id:

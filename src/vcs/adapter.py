@@ -1,16 +1,19 @@
 """VCS 事件归一化适配器：按 webhook 路径自动分发。"""
 from .gitcode import GitCodeBackend
 from .github import GitHubBackend
+from .gitlab import GitLabBackend
 
 
 _BACKENDS = {
     "gitcode": GitCodeBackend(),
     "github": GitHubBackend(),
+    "gitlab": GitLabBackend(),
 }
 
 _WEBHOOK_PATH_MAP = {
     "/webhook/gitcode": "gitcode",
     "/webhook/github": "github",
+    "/webhook/gitlab": "gitlab",
 }
 
 
