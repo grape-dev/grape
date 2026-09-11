@@ -299,7 +299,7 @@ function renderOutcome(knowledge, messages) {
   var kCards = Object.keys(knowledge || {}).map(function(scope) {
     if (!knowledge[scope]) return '';
     var content = knowledge[scope];
-    var summary = content.substring(0, 30).replace(/\n/g, ' ').replace(/- \[seq[^\]]*\] /g, '');
+    var summary = content.substring(0, 30).replace(/\n/g, ' ').replace(/- \[seq[^\]]*\] /g, '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     var len = content.length;
     return '<div class="k-card" onclick="showKnowledgeDetail(\'' + scope + '\')">'
       + '<span class="k-card-label">' + scopeIcons[scope] + ' ' + scopeLabels[scope] + '</span>'
