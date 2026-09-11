@@ -259,6 +259,10 @@ def get_domain_agent(evt_type: str, repo_key: str = "", user_id: int = 0) -> str
 
 LOGIN_WHITELIST_PATH = os.path.join(CONFIG_DIR, "login-whitelist.json")
 
+# ====== API 慢请求监控 ======
+
+SLOW_REQUEST_THRESHOLD_MS = int(os.environ.get("SLOW_REQUEST_THRESHOLD_MS", "500"))
+
 # server-config.json（gitignored）：server_base_url / webhook_url 显式配置，见 DEPLOYMENT-REMOTE.md §4
 SERVER_CONFIG_PATH = os.path.join(CONFIG_DIR, "server-config.json")
 
@@ -403,12 +407,13 @@ BWRAP_RO_ENGINE = {
 }
 
 # bwrap 白名单（读写）——引擎缓存；hermes overlay 由 sandbox 模块按 md5(cwd) 动态计算绑定。
-# 注意：hermes 的 ~/.hermes 必须 rw —— hermes_acp._build_overlay_home 把 ~/.hermes 的
-# logs/skills/plugins/cache 等子目录 symlink 进 overlay，hermes 运行时读写全落到 ~/.hermes 真身；
+# 注意：hermes 的 HERMES_HOME 必须 rw —— hermes_acp._build_overlay_home 把 HERMES_HOME 的
+# logs/skills/plugins/cache 等子目录 symlink 进 overlay，hermes 运行时读写全落到 HERMES_HOME 真身；
 # ro 会导致写 logs 报 [Errno 30] Read-only file system（2026-09-03 实测踩坑）。
 # codearts 底层同 opencode 用 bun，需 /var/cache/bun-compile 写权限（JIT .so 缓存）。
+_hermes_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
 BWRAP_RW_ENGINE = {
     "opencode": ("/var/cache/bun-compile",),
     "codearts": ("~/.codeartsdoer", "~/.cache/codearts-tasks", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
-    "hermes": ("~/.hermes",),
+    "hermes": (_hermes_home,),
 }
