@@ -513,6 +513,8 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             try:
                 from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
                 _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+            except HTTPException:
+                raise
             except Exception as e:
                 log.warning(f"host_repo: auto-fork scenes failed: {e}")
             _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
@@ -621,6 +623,8 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             try:
                 from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
                 _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+            except HTTPException:
+                raise
             except Exception as e:
                 log.warning(f"host_repo: auto-fork scenes failed: {e}")
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
@@ -637,6 +641,8 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         try:
             from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
             _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+        except HTTPException:
+            raise
         except Exception as e:
             log.warning(f"host_repo: auto-fork scenes failed: {e}")
         return {"message": "仓库托管成功", "webhook_id": hook_id}
