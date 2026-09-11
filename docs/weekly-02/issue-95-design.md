@@ -157,17 +157,18 @@ _CREDENTIAL_SUBSTRINGS = (
 **目标**：`knowledge/{owner}/{repo}/project-info/{filename}`
 
 改动点：
-- `knowledge.py` 第 769 行 sync_loop — `storage_key = f"knowledge/{owner}/{rname}/project-info/{_fname}"`
-- `knowledge.py` 第 861 行 _sync_baseline_files — 同上
-- `obs.py` generate_file_urls — baseline URL 生成用新 key
+- `src/project_info/builder.py` 第 132 行 `_write_baseline_record` — baseline 生成的源头，改为新格式
+- `src/api/knowledge.py` 第 769 行 sync_loop — 同步时用新格式
+- `src/api/knowledge.py` 第 861 行 _sync_baseline_files — 补扫时用新格式
+- `src/storage/obs.py` generate_file_urls — baseline URL 生成用新 key
 
 **老数据不需要手动迁移**：
 
 1. 老数据 DB 里 obs_key 是旧格式 `project-info/{repo_key}/{filename}`，OBS 对象也在旧 key 下。`storage.read_bytes(旧key)` 通过 `_full()` 自动拼前缀能正常读取——功能不受影响。
 
-2. 新代码用新格式 `knowledge/{owner}/{repo}/project-info/{filename}` 写入 OBS + 更新 DB obs_key。
+2. baseline 重新生成时（codegraph 分析 / 仓库代码变更），`builder.py` 的 `_write_baseline_record` 用 `INSERT OR REPLACE` 重写 DB 记录 + obs_key——自动用新格式写入 OBS + 更新 DB。
 
-3. `_sync_baseline_files` 启动时扫描本地 baseline 文件，发现 DB 有记录但 obs_key 是旧格式——会用新格式重新写 OBS + 更新 DB obs_key。老数据在下次服务启动同步时自动迁移到新格式。
+3. `_sync_baseline_files` 只处理 obs_key 为空的记录（第 854 行 `if row and row[1]: continue`），不会重写已有 obs_key 的老数据。但 baseline 重新生成会走 `builder.py` 重写——这是自动迁移的触发点。
 
 4. 两种格式并存期间不影响读取——`read_entry_content` 用 DB 里的 obs_key 直接读 OBS，不管 key 格式是什么。
 
@@ -176,6 +177,7 @@ _CREDENTIAL_SUBSTRINGS = (
 | 文件 | 改动 |
 |------|------|
 | `src/api/knowledge.py` | 新增 query_knowledge_refs()；knowledge_files 加 credential 过滤；member_files_pi/agent_files 接 ref 表；baseline OBS key 统一；_is_credential_file 加 "repo-cr" |
+| `src/project_info/builder.py` | _write_baseline_record baseline OBS key 改为新格式 |
 | `src/storage/obs.py` | generate_file_urls 接 ref 表 + credential 过滤 |
 | `src/im/vod_handler_async.py` | _build_vod_prompt 改调 _build_project_info_section |
 | `src/runtime/service.py` | member_files_pi/agent_files/generate_file_urls 调用方加参数 |
