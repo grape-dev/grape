@@ -135,21 +135,20 @@ parts.append(_build_project_info_section(repo_key, agent_type="vod"))
 
 删除 vod_handler_async 里第 205-250 行的独立 baseline 查询逻辑。
 
-### 3.8 _is_credential_file 关键词加 "cr"（问题 7）
+### 3.8 _is_credential_file 改为配置文件加载（问题 7）
 
-```python
-_CREDENTIAL_SUBSTRINGS = (
-    "credential", "token", "secret", "password", "passwd",
-    "apikey", "api_key", "api-key",
-    "private_key", "private-key",
-    "access_key", "access-key",
-    "cr",  # ← 新增：覆盖 repo-cr.json 等变体
-)
+**配置文件**：`configs/credential-filter.json`
+
+```json
+{
+  "substrings": ["credential", "token", "secret", ..., "repo-cr"],
+  "extensions": [".pem", ".key", ".env", ".p12", ".pfx"]
+}
 ```
 
-**注意**："cr" 是短词，可能误匹配文件名含 "cr" 的普通文件（如 "crawler.md"）。需要确认——是匹配 basename 子串还是精确匹配文件名前缀？
+**代码改动**：`_CREDENTIAL_SUBSTRINGS` 和 `_CREDENTIAL_EXTENSIONS` 从配置文件加载，配置文件不存在或解析失败用默认值（`_DEFAULT_CREDENTIAL_SUBSTRINGS` / `_DEFAULT_CREDENTIAL_EXTENSIONS`）。
 
-建议改为 `"repo-cr"` 而非 `"cr"`——精确匹配 `repo-cr.json` 这类凭证文件，不误匹配。
+**新增关键词**："repo-cr"——精确匹配 `repo-cr.json`，不误匹配 `crawler.md`。
 
 ### 3.9 baseline OBS key 统一格式（问题 8）
 
@@ -176,8 +175,9 @@ _CREDENTIAL_SUBSTRINGS = (
 
 | 文件 | 改动 |
 |------|------|
-| `src/api/knowledge.py` | 新增 query_knowledge_refs()；knowledge_files 加 credential 过滤；member_files_pi/agent_files 接 ref 表；baseline OBS key 统一；_is_credential_file 加 "repo-cr" |
+| `src/api/knowledge.py` | 新增 query_knowledge_refs()；knowledge_files 加 credential 过滤；member_files_pi/agent_files 接 ref 表；baseline OBS key 统一；_is_credential_file 改配置文件加载 |
 | `src/project_info/builder.py` | _write_baseline_record baseline OBS key 改为新格式 |
+| `configs/credential-filter.json` | 新增——凭证过滤配置文件（substrings + extensions） |
 | `src/storage/obs.py` | generate_file_urls 接 ref 表 + credential 过滤 |
 | `src/im/vod_handler_async.py` | _build_vod_prompt 改调 _build_project_info_section |
 | `src/runtime/service.py` | member_files_pi/agent_files/generate_file_urls 调用方加参数 |
@@ -209,6 +209,6 @@ _CREDENTIAL_SUBSTRINGS = (
 - [ ] generate_file_urls() 接 ref 表，只给关联知识生成 URL
 - [x] ~~build_devops_agent_prompt 注入 ref 表知识~~ — 不改，devops 靠 worker 物化
 - [ ] vod_handler_async 用统一注入逻辑
-- [ ] _is_credential_file 包含 "repo-cr"
+- [ ] _is_credential_file 配置文件加载，包含 "repo-cr"
 - [ ] baseline OBS key 统一为 knowledge/{owner}/{repo}/project-info/{filename}
 - [ ] 现有测试通过，新增 credential 过滤测试

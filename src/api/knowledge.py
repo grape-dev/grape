@@ -14,6 +14,7 @@ OBS 改造（feat/knowledge-obs）：
 - storage_key 生成不依赖 rel_path，只依赖 repo_key + scope + filename
 """
 import hashlib
+import json
 import os
 import threading
 from src.config import log, WORKSPACE_DIR
@@ -493,13 +494,29 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
     return files
 
 
-_CREDENTIAL_SUBSTRINGS = (
+# 默认值——配置文件 configs/credential-filter.json 不存在时使用
+_DEFAULT_CREDENTIAL_SUBSTRINGS = (
     "credential", "token", "secret", "password", "passwd",
     "apikey", "api_key", "api-key",
     "private_key", "private-key",
     "access_key", "access-key",
+    "repo-cr",
 )
-_CREDENTIAL_EXTENSIONS = (".pem", ".key", ".env", ".p12", ".pfx")
+_DEFAULT_CREDENTIAL_EXTENSIONS = (".pem", ".key", ".env", ".p12", ".pfx")
+
+def _load_credential_filter():
+    """从 configs/credential-filter.json 加载凭证过滤配置，失败用默认值。"""
+    try:
+        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "configs", "credential-filter.json")
+        with open(config_path, encoding="utf-8") as f:
+            cfg = json.loads(f.read())
+        substrings = tuple(cfg.get("substrings") or _DEFAULT_CREDENTIAL_SUBSTRINGS)
+        extensions = tuple(cfg.get("extensions") or _DEFAULT_CREDENTIAL_EXTENSIONS)
+        return substrings, extensions
+    except Exception:
+        return _DEFAULT_CREDENTIAL_SUBSTRINGS, _DEFAULT_CREDENTIAL_EXTENSIONS
+
+_CREDENTIAL_SUBSTRINGS, _CREDENTIAL_EXTENSIONS = _load_credential_filter()
 
 
 def _is_credential_file(rel_path: str) -> bool:
