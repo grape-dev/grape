@@ -1653,30 +1653,38 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
 
     _issue = issue_id or evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or ""
 
-    # 1) project-info 物化（复用 enqueue_task 打包逻辑）
+    # 1) project-info + knowledge 物化（Issue #95：统一调 collect_knowledge_files）
     proj_dir = os.path.join(ws, ".project-info")
+    know_dir = os.path.join(ws, ".knowledge")
     try:
-        from src.runtime.service import load_project_info
-        _pif, _pim = load_project_info(repo_key)
-        try:
-            from src.api.knowledge import member_files_pi, agent_files
-            for rel, content in (member_files_pi(repo_key) or {}).items():
-                _pif.setdefault(rel, content)
-            for rel, content in (agent_files(repo_key, agent_type) or {}).items():
-                _pif.setdefault(rel, content)
-        except Exception:
-            pass
-        for rel, content in (_pif or {}).items():
+        from src.runtime.service import collect_knowledge_files
+        _collected = collect_knowledge_files(repo_key, agent_type=agent_type, issue_id=_issue)
+        # project-info 物化（baseline + member）
+        for rel, meta in (_collected.get("project_info") or {}).items():
+            if rel == ".metadata.json":
+                continue
             _dest = os.path.join(proj_dir, rel)
             try:
                 os.makedirs(os.path.dirname(_dest), exist_ok=True)
+                _content = meta.get("content", "") if isinstance(meta, dict) else str(meta)
                 with open(_dest, "w", encoding="utf-8") as f:
-                    f.write(content if isinstance(content, str) else str(content))
+                    f.write(_content)
             except Exception:
                 pass
         prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
+        # knowledge 物化（agent 沉淀知识）
+        for rel, meta in (_collected.get("knowledge") or {}).items():
+            _dest = os.path.join(know_dir, rel)
+            try:
+                os.makedirs(os.path.dirname(_dest), exist_ok=True)
+                _content = meta.get("content", "") if isinstance(meta, dict) else str(meta)
+                with open(_dest, "w", encoding="utf-8") as f:
+                    f.write(_content)
+            except Exception:
+                pass
+        prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
     except Exception as e:
-        log.warning(f"direct project-info materialize failed for {repo_key}: {e}")
+        log.warning(f"direct knowledge materialize failed for {repo_key}: {e}")
 
     # 2) skill 物化（OBS zip 解压 / 本地技能 copytree 到 ws/.skills/{skill_name}/）
     skill_dir = os.path.join(ws, ".skills")
@@ -1722,25 +1730,6 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
         prompt = prompt.replace("{{SKILL_DIR}}", skill_dir)
     except Exception as e:
         log.warning(f"direct skill materialize failed for {skill_name}: {e}")
-
-    # 3) knowledge 物化（对齐 worker 端 .knowledge，direct 补齐）
-    know_dir = os.path.join(ws, ".knowledge")
-    try:
-        from src.api.knowledge import knowledge_files as _know_files
-        from src.runtime.service import _issue_num as _svc_issue_num
-        _num = _svc_issue_num(_issue)
-        _know = _know_files(repo_key, agent_type=agent_type, issue_num=_num)
-        for rel, content in (_know or {}).items():
-            _dest = os.path.join(know_dir, rel)
-            try:
-                os.makedirs(os.path.dirname(_dest), exist_ok=True)
-                with open(_dest, "w", encoding="utf-8") as f:
-                    f.write(content if isinstance(content, str) else str(content))
-            except Exception:
-                pass
-        prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
-    except Exception as e:
-        log.warning(f"direct knowledge materialize failed for {repo_key}: {e}")
 
     return prompt
 
