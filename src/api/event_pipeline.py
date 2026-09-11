@@ -180,6 +180,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     try:
         from src.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
+        evt["issue_id"] = issue_id
         evt["_skill_path"] = skill_path
         evt["_skill_id"] = skill_id
         prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
@@ -1444,6 +1445,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 4) 构建 prompt（含技能占位符化，见 skill-delivery-remote.md）
     try:
         evt["repo_key"] = repo_key
+        evt["issue_id"] = issue_id
         evt["_skill_path"] = skill_path
         if is_scene_recommend:
             from src.prompt_builder import build_scene_recommender_prompt
@@ -1866,6 +1868,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     try:
         from src.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
+        evt["issue_id"] = issue_id
         prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
         # 直接模式（direct）：组件4 统一物化 project-info / skill / knowledge 到 ws 内

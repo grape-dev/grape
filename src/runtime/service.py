@@ -1436,41 +1436,6 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
         except Exception as e:
             log.warning(f"complete_task update issue session failed: {e}")
     log.info(f"Task completed: {task_id} exit={exit_code}")
-    # 智能推荐完成处理（远程 worker 模式）：检测推荐任务完成 → 解析 scene_id → 持久化 → 重派 VOD
-    if exit_code == 0 and task and task.get("agent_type") == "vod" and task.get("issue_id"):
-        _task_prompt = task.get("prompt") or ""
-        if "智能推荐器" in _task_prompt and "{{SKILL_DIR}}" not in _task_prompt:
-            try:
-                import re as _re
-                _rec_scene = ""
-                _final_text = result_text or ""
-                try:
-                    from src.api.event_store import parse_agent_output_json
-                    _scene_out = parse_agent_output_json(_final_text) or {}
-                    _rec_scene = _scene_out.get("scene_id", "") or ""
-                except Exception:
-                    pass
-                if not _rec_scene:
-                    _m = _re.search(r'"scene_id"\s*:\s*"([^"]*)"', _final_text)
-                    _rec_scene = _m.group(1) if _m else ""
-                if _rec_scene:
-                    from src.api.session_store import set_issue_scene
-                    from src.runtime.engine_select import _repo_user_id
-                    _repo_key = task["repo_key"]
-                    _issue_id = task["issue_id"]
-                    _vod_uid = _repo_user_id(_repo_key)
-                    set_issue_scene(_repo_key, _issue_id, _rec_scene, scene_user_id=_vod_uid)
-                    log.info(f"智能推荐完成(remote): scene_id={_rec_scene} set for {_issue_id}")
-                    # 重派 VOD
-                    from src.api.event_pipeline import _redispatch_vod_after_recommend
-                    _runtime_id = task.get("runtime_id") or 0
-                    _token = task.get("repo_gitcode_token") or ""
-                    _evt = {"repository": task.get("account") or "", "payload": {}}
-                    _redispatch_vod_after_recommend(_repo_key, _issue_id, _rec_scene, _evt, _runtime_id, _token)
-                else:
-                    log.info(f"智能推荐完成(remote): no scene_id for {task.get('issue_id')}, pipeline terminated")
-            except Exception as _se:
-                log.warning(f"智能推荐完成处理(remote)失败: {_se}")
     # remote worker 模式下 _execute_agent 不执行，系统回帖 + 会话同步在此补触发
     if exit_code == 0 and task and task.get("issue_id"):
         try:
