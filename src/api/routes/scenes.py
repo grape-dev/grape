@@ -342,7 +342,7 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(get_current_
 
 @router.post("/market/{market_id}/apply")
 def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
-                       owner: str = "", repo: str = ""):
+                       owner: str = "", repo: str = "", repo_key: str = ""):
     """应用场景：从市场复制配置到仓库级 devops_pipeline_scene。
 
     - scope='repo'（方案 B：场景只与仓库关联，无 user 级）
@@ -363,7 +363,9 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
     if not scene:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
 
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    # repo_key：优先用传入的（保留 provider 前缀），否则默认 gitcode:
+    if not repo_key:
+        repo_key = to_repo_key(f"{owner}/{repo}")
     nodes_json = scene["nodes_json"]
     try:
         nodes = json.loads(nodes_json) if nodes_json else []

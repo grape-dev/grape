@@ -372,59 +372,14 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
         pass
     log.info(f"GitHub OAuth: user={local_user['username']} github_id={github_id} token={access_token[:10]}...{access_token[-5:]} saved+checkpointed")
 
-    # 签发 JWT（installation 检查可能需要提前 return，所以先创建）
+    # 签发 JWT
     from src.api.jwt_utils import create_access_token, create_refresh_token
     token_version = user_db.get_token_version(local_user["id"])
     jwt_access_token = create_access_token(local_user["id"], local_user["username"], token_version)
     jwt_refresh_token = create_refresh_token(local_user["id"], local_user["username"], token_version)
 
-    # 校验 GitHub App installation 状态（未安装时自动跳转安装页）
+    # OAuth App 不需要 installation 检查（scope 在授权 URL 里已指定）
     _gh_perm_warning = ""
-    try:
-        import urllib.request as _url_req
-        _gh_headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json", "User-Agent": "Grape-DevOps"}
-
-        # 检测是否为 GitHub App token（X-OAuth-Scopes 为空且 X-OAuth-Client-Id 存在）
-        _perm_req = _url_req.Request("https://api.github.com/user/repos?per_page=1", headers=_gh_headers, method="GET")
-        with _url_req.urlopen(_perm_req, timeout=10) as _perm_resp:
-            _perm_resp.read()
-            _scopes = _perm_resp.headers.get("X-OAuth-Scopes", "")
-            _client_id = _perm_resp.headers.get("X-OAuth-Client-Id", "")
-
-        if _client_id and not _scopes.strip():
-            # GitHub App token：检查 installation 是否存在
-            _inst_req = _url_req.Request("https://api.github.com/user/installations?per_page=1", headers=_gh_headers, method="GET")
-            with _url_req.urlopen(_inst_req, timeout=10) as _inst_resp:
-                _inst_data = json.loads(_inst_resp.read().decode())
-            _inst_count = _inst_data.get("total_count", 0)
-            if _inst_count == 0:
-                # 未安装 → 自动重定向到 GitHub App 安装页
-                _app_slug = os.environ.get("GITHUB_APP_SLUG", "grape-mlc")
-                _install_url = f"https://github.com/apps/{_app_slug}/installations/new"
-                log.info(f"GitHub OAuth: user={github_login} has no App installation, redirecting to {_install_url}")
-                _lang = request.cookies.get("grapeLang", "zh")
-                _prefix = f"/{_lang}" if _lang != "zh" else ""
-                _login_redirect = urllib.parse.quote(f"{_prefix}/?tab=github")
-                resp = RedirectResponse(
-                    url=f"{_install_url}?state={urllib.parse.quote(state)}&redirect_uri={_login_redirect}",
-                    status_code=302
-                )
-                _set_refresh_cookie(resp, jwt_refresh_token)
-                return resp
-            else:
-                # 已安装但权限可能不足（如缺 issues:write）
-                _inst_perms = _inst_data.get("installations", [{}])[0].get("permissions", {})
-                _missing = []
-                if _inst_perms.get("issues") != "write":
-                    _missing.append("issues:write")
-                if _inst_perms.get("administration") != "write":
-                    _missing.append("administration:write")
-                if _missing:
-                    _gh_perm_warning = f"GitHub App 已安装但缺少权限: {', '.join(_missing)}。请在 App 设置页调整 Repository permissions 后卸载重装"
-                else:
-                    _gh_perm_warning = ""
-    except Exception as e:
-        log.warning(f"GitHub OAuth: token permission check failed: {e}")
 
     try:
         from src.session_manager import update_unified_user_info
