@@ -618,7 +618,12 @@ function doSkillUpload() {
     renderSkills();
   }).catch(e => {
     _setSkillUploadProgress(0, true);
-    if (app && app.showToast) app.showToast(I18N.t('skills.toast.upload_failed',{msg:e.message})||'上传失败');
+    // 优先展示后端返回的具体校验错误（errors 数组）
+    let msg = e.message || (I18N.t('skills.toast.upload_failed')||'上传失败');
+    if (e.errors && Array.isArray(e.errors) && e.errors.length > 0) {
+      msg = e.errors.join('；');
+    }
+    if (app && app.showToast) app.showToast(msg);
   });
 }
 
@@ -767,7 +772,7 @@ function loadSubSkillDetail(pkgId, subName) {
   if (!el) return;
   el.innerHTML = '<div class="loading">'+(I18N.t('skills.loading')||'加载中...')+'</div>';
   API.get('/skills/package-sub/'+pkgId+'/'+subName).then(function(data) {
-    if (window._currentView !== 'skills') return;  // stale guard
+    if (window._currentView !== 'skill' && window._currentView !== 'skills') return;  // stale guard
     var safeContent = (data.content||'').replace(/`/g,'\\`').replace(/\${/g,'\\${');
     el.innerHTML = `
       <button class="bt bt-o bt-s" onclick="_backFromSubSkill(${pkgId})" style="margin-bottom:12px">← ${I18N.t('skills.huawei.back')||'返回'}</button>
