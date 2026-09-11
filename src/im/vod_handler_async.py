@@ -234,6 +234,9 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     parts.append("## 角色定义")
     parts.append(_VOD_ROLE_DEFINITION)
 
+    # Issue #95：agent 沉淀知识引导（和 build_devops_agent_prompt 一致）
+    parts.append("\n## 共享知识\n> 前序 Agent 沉淀的经验已落地：{{KNOWLEDGE_DIR}}/，存在则用 read tool 读取并遵循。")
+
     try:
         agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
         if os.path.isfile(agents_file):

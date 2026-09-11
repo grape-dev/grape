@@ -1442,11 +1442,13 @@ def _migrate_knowledge_issue67():
         #     "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
         #     "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
 
-        # Issue #95：清理已生成的错误 member ref（幂等）
+        # Issue #95：清理 migration 自动创建的错误 member ref（幂等）
+        # 只删 created_by='system' 的——用户手动创建的（created_by=username）不删
         try:
             c.execute(
                 "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN "
-                "(SELECT id FROM agent_shared_knowledge WHERE scope = 'member')")
+                "(SELECT id FROM agent_shared_knowledge WHERE scope = 'member') "
+                "AND created_by = 'system'")
         except Exception:
             pass
 

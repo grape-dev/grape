@@ -419,7 +419,8 @@ def knowledge_context(repo: str = Query(""),
     lines = []
     try:
         from src.prompt_builder import _build_project_info_section, _build_agent_knowledge_section
-        pi = _build_project_info_section(repo_key)
+        pi = _build_project_info_section(repo_key, agent_type=agent_type,
+                                         issue_num=issue_num, scene_id=scene_id)
         if pi:
             lines.append(pi)
         k, _ = _build_agent_knowledge_section(repo_key, agent_type=agent_type, issue_num=issue_num, scene_id=scene_id)

@@ -266,7 +266,7 @@ def _collect_server_env(user_id, account):
     return env
 
 
-_PROJECT_INFO_FILES = ("project-graph.md", "project-capabilities.md")
+_PROJECT_INFO_FILES = ("project-graph.md", "project-capabilities.md", ".metadata.json")
 
 
 def load_project_info(repo_key: str) -> tuple[dict, dict]:
@@ -546,6 +546,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                 project_info_meta = {}
             if knowledge_files is None:
                 knowledge_files = {}
+            _collected = {"project_info": {}, "knowledge": {}}
     # 生成 file_urls（基于已过滤结果，不查 DB；storage 为 None 时 file_urls 为空 dict，worker 用 content 兜底）
     try:
         from src.storage import get_storage
@@ -553,6 +554,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     except Exception:
         _storage = None
     if _storage:
+        # 复用 _collected（只在上面已调用过时复用；调用方传了内容时重新调一次取 obs_key）
         if _collected is None:
             try:
                 _collected = collect_knowledge_files(repo_key, agent_type=agent_type, issue_id=issue_id)
