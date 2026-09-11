@@ -290,7 +290,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     if _pipe_skill:
                         skill_name = _pipe_skill
                         from src.user.db import resolve_skill_id, get_skill_by_id
-                        _new_sid = resolve_skill_id(_pipe_skill)
+                        _new_sid = resolve_skill_id(_pipe_skill, repo_key=repo_key, user_id=_a2a_issue_uid)
                         if _new_sid:
                             skill_id = _new_sid
                             _sk = get_skill_by_id(_new_sid)

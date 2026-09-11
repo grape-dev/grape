@@ -991,6 +991,16 @@ def _seed_event_action_filter():
         ("pull_request_opened", "merge",  1, "any", "", "", ""),
         # pull_request_merged
         ("pull_request_merged", "merge",  1, "any", "", "", ""),
+        # pull_request_updated（Issue #49 补充：normalize 细分后，update/审查类事件走这里；
+        # 无新 commit 的 update（审查/reopen/元数据）由 event_rule 的 no_commit 门控过滤）
+        ("pull_request_updated", "open",   1, "any", "", "", ""),
+        ("pull_request_updated", "update", 1, "user", "", "", ""),
+        ("pull_request_updated", "close",  0, "any", "", "", ""),
+        ("pull_request_updated", "reopen", 0, "any", "", "", ""),
+        # pull_request_review / pull_request_closed（multi-vcs 细分后独立事件，默认不触发执行 agent）
+        ("pull_request_review", "review",  0, "any", "", "", ""),
+        ("pull_request_review", "approve", 0, "any", "", "", ""),
+        ("pull_request_closed", "close",   0, "any", "", "", ""),
     ]
     with db_lock:
         c = db.cursor()
@@ -1898,6 +1908,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN scene_tags TEXT DEFAULT '[\"default\"]'",
         # ===== 引擎别名：用户自定义别名，不受心跳覆盖 =====
         "ALTER TABLE agent_runtimes ADD COLUMN alias TEXT DEFAULT ''",
+        # ===== 标签用户标记：用户手动设过标签后置1，心跳注册不再自动补 'all' =====
+        "ALTER TABLE agent_runtimes ADD COLUMN tags_user_set INTEGER DEFAULT 0",
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
