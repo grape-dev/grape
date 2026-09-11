@@ -98,7 +98,7 @@ Issue 确认 → 认领 → 拉当期 weekly → 建特性分支 → 开发+提�
 4. **推送并提 MR**，目标分支选 **当期 `weekly-0X`**，用 [§6] 模板写清楚：
    - 改动是什么、为什么、怎么测的、关联 Issue 号。
 5. **等审查**：
-   - 项目负责人（`CODEOWNERS` 中的 owner，当前为 `@Jason7602`）或维护者 approve；
+   - 项目负责人（`MAINTAINER` 中的 owner，当前为 `@Jason7602`）或维护者 approve；
    - Grape 自身的 **QA Agent 会辅助审查**（自动跑测试、静态检查）——它是辅助，无法替代人工把关；
    - 有修改意见 → 在**同一分支**继续提交；**合入后不要再改原 MR**。
 6. **CI 全绿 + 审查通过** → 由维护者 squash/merge 进 `weekly-0X`。
@@ -227,13 +227,13 @@ main ──────────────────── ...
 
 | 负责人 | 职责 |
 |--------|------|
-| 维护者（owner，见 CODEOWNERS） | 审核/合并 MR、weekly 合并回、打 tag、发布、分支保护管理 |
+| 维护者（owner，见 MAINTAINER） | 审核/合并 MR、weekly 合并回、打 tag、发布、分支保护管理 |
 | 贡献者 | 特性/修复开发，测试环境自测 |
 | QA Agent（Grape） | 每个 MR 自动辅助审查：测试、静态检查、安全扫描 |
 
 ### 11.2 权限与保护
 
-- `main`、`weekly-0X`：**禁止直推**；要求审查（≥1 人 approve、CODEOWNERS 对应模块 owner 可收尾）、CI 全绿后由维护者合并。
+- `main`、`weekly-0X`：**禁止直推**；要求审查（≥1 人 approve、MAINTAINER 对应模块 owner 可收尾）、CI 全绿后由维护者合并。
 - `feat/*` `fix/*` 等：贡献者自建自治，合入必须走 MR。
 - 平台级禁用强推（`force-push`）与分支删除 `main`/`weekly`。
 
@@ -255,7 +255,7 @@ main ──────────────────── ...
 
 **安全漏洞不要提公开 Issue**（会让所有人一起处于风险）：
 
-- 通过 GitCode **站内私信**联系维护者（`CODEOWNERS` 中的 owner），或按 `SECURITY.md` 指引提交。
+- 通过 GitCode **站内私信**联系维护者（`MAINTAINER` 中的 owner），或按 `SECURITY.md` 指引提交。
 - 说明：影响面、触发条件、复现、建议修复；**不公开 PoC**。
 - 维护者会在不泄露信息的前提下评估、修复（随下一个 hotfix / weekly 发布），并在版本说明中致谢。
 
