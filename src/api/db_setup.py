@@ -1367,9 +1367,24 @@ def init_database():
     # MySQL with session_manager
 
 def _migrate_knowledge_issue67():
-    """Issue #67 知识库优化迁移：source 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。"""
+    """Issue #67 知识库优化迁移 + Issue #95 修复：source 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。
+
+    Issue #95：加幂等标记——#95 修复（member ref 清理 + rejected 修复）跑一次后跳过。
+    #67 基础迁移仍每次执行（幂等，开销微量）。
+    """
     from src.mysql_compat import get_db_backend
     _is_mysql = get_db_backend() == "mysql"
+
+    # Issue #95：检查 #95 修复是否已执行过
+    _issue95_done = False
+    with db_lock:
+        try:
+            row = db.cursor().execute(
+                "SELECT value FROM meta WHERE key='issue95_migrate_done'"
+            ).fetchone()
+            _issue95_done = bool(row and row[0] == '1')
+        except Exception:
+            pass
 
     with db_lock:
         c = db.cursor()
@@ -1440,15 +1455,47 @@ def _migrate_knowledge_issue67():
             "SELECT id, '', agent_type, issue_num, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'issue_agent' AND source = 'agent' AND agent_type != ''")
         # member（agent_type 非空）→ 指定 Agent 关联（issue_num=0）
-        c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'member' AND source = 'manual' AND agent_type != ''")
+        # Issue #95：删除——member 不自动关联，用户手动绑定才注入
+        # c.execute(
+        #     "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+        #     "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
+        #     "WHERE scope = 'member' AND source = 'manual' AND agent_type != ''")
         # member（agent_type 空）→ 全局关联（issue_num=0）
-        c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
+        # Issue #95：删除——违反"member 不自动关联"设计
+        # c.execute(
+        #     "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+        #     "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
+        #     "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
+
+        # Issue #95：清理 migration 自动创建的错误 member ref（幂等）
+        # 只删 created_by='system' 的——用户手动创建的（created_by=username）不删
+        # 加幂等标记：首次执行后设 meta 标记，后续跳过
+        if not _issue95_done:
+            try:
+                c.execute(
+                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN "
+                    "(SELECT id FROM agent_shared_knowledge WHERE scope = 'member') "
+                    "AND created_by = 'system'")
+            except Exception:
+                pass
+
+            # Issue #95：修复 rejected→accepted 老数据（幂等）
+            # 老代码 UPDATE 不改 status，导致先 rejected 再 accepted 的记录仍为 rejected
+            # 有文件内容（obs_key 非空 + content_hash 非空）说明 accepted 写过文件，应为 accepted
+            try:
+                c.execute(
+                    "UPDATE agent_shared_knowledge SET status='accepted' "
+                    "WHERE status='rejected' AND obs_key != '' AND content_hash != '' "
+                    "AND obs_key IS NOT NULL AND content_hash IS NOT NULL")
+            except Exception:
+                pass
+
+            # Issue #95：标记已完成
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('issue95_migrate_done', '1')")
+            except Exception:
+                pass
 
         # 4. content_hash 回填——OBS 模式下 obs_key 非空但 hash 为空的老数据
         try:

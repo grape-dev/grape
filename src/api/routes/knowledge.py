@@ -418,11 +418,12 @@ def knowledge_context(repo: str = Query(""),
 
     lines = []
     try:
-        from src.prompt_builder import _build_project_info_section, _build_knowledge_section
-        pi = _build_project_info_section(repo_key)
+        from src.prompt_builder import _build_project_info_section, _build_agent_knowledge_section
+        pi = _build_project_info_section(repo_key, agent_type=agent_type,
+                                         issue_num=issue_num, scene_id=scene_id)
         if pi:
             lines.append(pi)
-        k, _ = _build_knowledge_section(repo_key, agent_type=agent_type, issue_num=issue_num, scene_id=scene_id)
+        k, _ = _build_agent_knowledge_section(repo_key, agent_type=agent_type, issue_num=issue_num, scene_id=scene_id)
         if k:
             lines.append(k)
     except Exception:
@@ -923,6 +924,10 @@ def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
     from src.session_manager import db, db_lock
     scene_id = body.scene_id or ""
     agent_type = body.agent_type or ""
+    # Issue #95：禁止空关联——scene_id 和 agent_type 不能同时为空（否则全局注入）
+    if not scene_id and not agent_type:
+        raise HTTPException(status_code=400,
+            detail={"code": 400, "message": "scene_id 和 agent_type 不能同时为空，必须绑定到场景或 Agent"})
     with db_lock:
         count = db.cursor().execute(
             "SELECT COUNT(*) FROM scene_knowledge_ref "
