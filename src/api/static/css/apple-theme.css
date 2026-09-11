@@ -1148,19 +1148,6 @@
 [data-theme="apple"] .sb-nav .grp-tog .grp-arrow {
   font-size: 10px !important;
 }
-/* 折叠子项隐藏 + 箭头旋转（Issue #66 修复：默认主题缺 .grp-items.hid） */
-[data-theme="apple"] .sb-nav .grp-items.hid,
-.sb-nav .grp-items.hid {
-  display: none !important;
-}
-[data-theme="apple"] .grp-tog.collapsed .grp-arrow,
-.grp-tog.collapsed .grp-arrow {
-  transform: rotate(90deg);
-}
-[data-theme="apple"] .grp-tog:not(.collapsed) .grp-arrow,
-.grp-tog:not(.collapsed) .grp-arrow {
-  transform: rotate(180deg);
-}
 
 /* Sidebar select: match nav padding */
 [data-theme="apple"] .sb-sel select {
