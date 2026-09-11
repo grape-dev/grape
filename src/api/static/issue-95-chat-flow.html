@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Issue #95 - chat 路径 Agent 注入流程</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #f8f9fa; font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif; padding: 20px; color: #1e1e1e; }
+.container { max-width: 1000px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 40px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+h1 { font-size: 26px; margin-bottom: 8px; text-align: center; }
+h2 { font-size: 18px; margin: 28px 0 14px; padding-left: 12px; border-left: 4px solid #845ef7; }
+h2.green { border-left-color: #40c057; }
+h2.red { border-left-color: #fa5252; }
+h2.blue { border-left-color: #339af0; }
+.subtitle { text-align: center; color: #6c757d; font-size: 14px; margin-bottom: 28px; }
+.flow { background: #f8f9fa; border-radius: 10px; padding: 24px; margin: 16px 0; }
+.step { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px; }
+.step-num { flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%; background: #845ef7; color: #fff; font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.step-num.green { background: #40c057; }
+.step-num.red { background: #fa5252; }
+.step-num.yellow { background: #fcc419; color: #1e1e1e; }
+.step-content { flex: 1; }
+.step-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.step-desc { font-size: 13px; color: #343a40; line-height: 1.7; }
+.step-mono { font-family: "SF Mono", "Fira Code", Consolas, monospace; font-size: 12px; color: #343a40; line-height: 1.6; background: #e9ecef; padding: 8px 12px; border-radius: 6px; margin-top: 6px; }
+.step-warn { color: #c92a2a; font-size: 12px; margin-top: 4px; }
+.step-ok { color: #2b8a3e; font-size: 12px; margin-top: 4px; }
+table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
+th, td { border: 1px solid #dee2e6; padding: 8px 12px; text-align: left; }
+th { background: #e9ecef; font-weight: 700; }
+tr:nth-child(even) { background: #f8f9fa; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.badge-red { background: #ffc9c9; color: #c92a2a; }
+.badge-green { background: #b2f2bb; color: #2b8a3e; }
+.badge-yellow { background: #fff3bf; color: #e67700; }
+.note { background: #fff3bf; border-left: 4px solid #fcc419; padding: 10px 14px; border-radius: 6px; font-size: 13px; line-height: 1.7; margin: 10px 0; }
+.divider { border: none; border-top: 2px dashed #dee2e6; margin: 28px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Issue #95: chat 路径 Agent 注入流程</h1>
+<p class="subtitle">触发：用户在 Issue 对话窗口发消息 | 执行：build_event_chat_prompt</p>
+
+<h2 class="red">改前流程（问题标注）</h2>
+<div class="flow">
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <div class="step-title">事件上下文</div>
+      <div class="step-desc">Seq / 事件类型 / 标题 / 状态 / Agent 结论</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <div class="step-title">Skill 指令</div>
+      <div class="step-desc">"用 read tool 读取 event-dialogue/SKILL.md 并严格执行"<br>"只做对话 / 沉淀共享知识 / 流程控制"</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <div class="step-title">对话历史</div>
+      <div class="step-desc">最近 20 条消息</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num red">4</div>
+    <div class="step-content">
+      <div class="step-title">_build_knowledge_section()</div>
+      <div class="step-mono">查 ref 表不过滤 source<br>→ 返回 system + agent + manual 全部<br>→ 内联到 prompt: "[source 级] {content}"</div>
+      <div class="step-warn">⚠ 问题：三源交叉<br>⚠ baseline 全文内联（#67 之前没有，#67 引入）<br>⚠ member 用户上传知识全文内联（不该内联）</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">5</div>
+    <div class="step-content">
+      <div class="step-title">用户消息</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">6</div>
+    <div class="step-content">
+      <div class="step-title">回复提示</div>
+      <div class="step-desc">"调 POST /events/{seq}/knowledge 沉淀知识"</div>
+    </div>
+  </div>
+</div>
+
+<h2 class="green">改后流程</h2>
+<div class="flow">
+  <div class="step">
+    <div class="step-num green">1</div>
+    <div class="step-content">
+      <div class="step-title">事件上下文</div>
+      <div class="step-desc">Seq / 事件类型 / 标题 / 状态 / Agent 结论</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num green">2</div>
+    <div class="step-content">
+      <div class="step-title">Skill 指令</div>
+      <div class="step-desc">"用 read tool 读取 event-dialogue/SKILL.md 并严格执行"<br>"只做对话 / 沉淀共享知识 / 流程控制"</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num green">3</div>
+    <div class="step-content">
+      <div class="step-title">对话历史</div>
+      <div class="step-desc">最近 20 条消息</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num green">4</div>
+    <div class="step-content">
+      <div class="step-title">_build_agent_knowledge_section()</div>
+      <div class="step-mono">查 ref 表 source='agent'<br>三维匹配: scene_id + agent_type + issue_num<br>+ credential 过滤<br>read_entry_content 读内容<br>内联到 prompt: "[agent 级] {content}"</div>
+      <div class="step-ok">✓ 恢复 #67 之前的原始语义<br>✓ 只内联 agent 沉淀知识<br>✓ baseline 不内联（#67 之前就没有）<br>✓ member 不内联（#67 之前就没有）<br>✓ credential 过滤</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num green">5</div>
+    <div class="step-content">
+      <div class="step-title">用户消息</div>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num green">6</div>
+    <div class="step-content">
+      <div class="step-title">回复提示</div>
+      <div class="step-desc">"调 POST /events/{seq}/knowledge 沉淀知识"</div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<h2 class="blue">chat 路径不调 _build_project_info_section</h2>
+<div class="note">
+  chat 路径从最初设计（e22dbce7）就不调 _build_project_info_section：<br>
+  - 没有 baseline 摘要内联<br>
+  - 没有 member 引导文字<br>
+  - 只有 _build_agent_knowledge_section 内联 agent 知识<br><br>
+  设计如此——chat 是对话场景，agent 做对话/沉淀/流程控制，不需要 baseline 项目背景。
+</div>
+
+<h2 class="blue">chat vs devops 对比</h2>
+<table>
+  <thead><tr><th>项</th><th>chat 路径</th><th>devops 流水线</th></tr></thead>
+  <tbody>
+    <tr><td>触发</td><td>Issue 对话窗口发消息</td><td>issue_opened / a2a_event</td></tr>
+    <tr><td>执行</td><td>build_event_chat_prompt</td><td>build_devops_agent_prompt</td></tr>
+    <tr><td>worker 物化</td><td><span class="badge badge-red">不走</span></td><td><span class="badge badge-green">走 enqueue_task</span></td></tr>
+    <tr><td>.project-info/</td><td>无</td><td>有（baseline + member 物化）</td></tr>
+    <tr><td>.knowledge/</td><td>无</td><td>有（agent 知识物化）</td></tr>
+    <tr><td>baseline</td><td><span class="badge badge-red">不注入</span></td><td>_build_project_info_section 内联摘要</td></tr>
+    <tr><td>agent 知识</td><td>_build_agent_knowledge_section 内联全文</td><td>agent_knowledge_files() 物化到 .knowledge/</td></tr>
+    <tr><td>member</td><td><span class="badge badge-red">不注入</span></td><td>member_files_pi() 物化到 .project-info/member/</td></tr>
+    <tr><td>credential 过滤</td><td><span class="badge badge-green">有</span></td><td><span class="badge badge-green">有</span></td></tr>
+  </tbody>
+</table>
+
+<h2 class="blue">改前改后对比</h2>
+<table>
+  <thead><tr><th>项</th><th>改前</th><th>改后</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>函数名</td><td>_build_knowledge_section</td><td>_build_agent_knowledge_section</td><td>语义明确</td></tr>
+    <tr><td>source 过滤</td><td><span class="badge badge-red">无</span></td><td><span class="badge badge-green">source='agent'</span></td><td>恢复 #67 之前语义</td></tr>
+    <tr><td>baseline 内联</td><td><span class="badge badge-yellow">有（#67 引入）</span></td><td><span class="badge badge-red">无</span></td><td>#67 之前就没有，恢复原状</td></tr>
+    <tr><td>member 内联</td><td><span class="badge badge-yellow">有（#67 引入）</span></td><td><span class="badge badge-red">无</span></td><td>#67 之前就没有，恢复原状</td></tr>
+    <tr><td>agent 知识内联</td><td>有</td><td>有</td><td>不变</td></tr>
+    <tr><td>credential 过滤</td><td><span class="badge badge-red">无</span></td><td><span class="badge badge-green">有</span></td><td>新增</td></tr>
+  </tbody>
+</table>
+
+</div>
+</body>
+</html>

@@ -352,6 +352,126 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
         return {}, {}
 
 
+def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
+    """Issue #95：和 load_project_info 同逻辑，但 files 值改为 {content, obs_key}。
+
+    供 collect_knowledge_files → generate_file_urls 用，不暴露给前端。
+    load_project_info 本身不变（repos.py / prompt_builder.py 不受影响）。
+    """
+    if not repo_key:
+        return {}, {}
+    try:
+        from src.config import WORKSPACE_DIR
+        from src.repo_key import split_owner_repo
+        owner, rname = split_owner_repo(repo_key)
+
+        try:
+            from src.storage import get_storage
+            _storage = get_storage()
+        except Exception:
+            _storage = None
+        if _storage is not None:
+            files = {}
+            from src.session_manager import db, db_lock
+            with db_lock:
+                rows = db.cursor().execute(
+                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+                    "ORDER BY id DESC",
+                    (repo_key,)
+                ).fetchall()
+            for fp, ok in rows:
+                if fp and ok:
+                    fname = os.path.basename(fp)
+                    if fname in _PROJECT_INFO_FILES or fname == ".metadata.json":
+                        try:
+                            data = _storage.read_bytes(ok)
+                            if data:
+                                files[fname] = {"content": data.decode("utf-8", errors="replace"), "obs_key": ok}
+                        except Exception:
+                            continue
+            if files:
+                meta = {}
+                if ".metadata.json" in files:
+                    try:
+                        meta = json.loads(files[".metadata.json"]["content"])
+                    except Exception:
+                        meta = {}
+                files[".metadata.json"] = {"content": json.dumps(meta, ensure_ascii=False), "obs_key": ""}
+                return files, meta
+
+        # 本地模式
+        pi = os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
+        if not os.path.isdir(pi):
+            return {}, {}
+        files = {}
+        for rel in _PROJECT_INFO_FILES:
+            p = os.path.join(pi, rel)
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        files[rel] = {"content": f.read(), "obs_key": ""}
+                except Exception:
+                    pass
+        meta = {}
+        mp = os.path.join(pi, ".metadata.json")
+        if os.path.isfile(mp):
+            try:
+                with open(mp, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                meta = {}
+        if files:
+            files[".metadata.json"] = {"content": json.dumps(meta, ensure_ascii=False), "obs_key": ""}
+        return files, meta
+    except Exception as e:
+        log.warning(f"load_project_info_with_obs failed for {repo_key}: {e}")
+        return {}, {}
+
+
+def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str = "",
+                            scene_id: str = "") -> dict:
+    """Issue #95：统一过滤知识文件，返回三批 {rel: {content, obs_key}}。
+
+    三源不交叉：
+    - load_project_info_with_obs → baseline (source='system')
+    - member_files_pi → member (source='manual')
+    - agent_knowledge_files → agent (source='agent')
+
+    enqueue_task 和 direct 物化都调此函数，过滤逻辑只写一遍。
+    返回 {"project_info": {rel: {content, obs_key}}, "meta": dict, "knowledge": {rel: {content, obs_key}}}
+    """
+    from src.api.session_store import get_issue_scene
+    from src.api.knowledge import member_files_pi, agent_knowledge_files
+
+    _scene_id = scene_id
+    if not _scene_id and issue_id:
+        try:
+            _scene_id, _ = get_issue_scene(repo_key, issue_id)
+        except Exception:
+            _scene_id = ""
+    _inum = _issue_num(issue_id)
+
+    # 1. baseline
+    _pif, _pim = load_project_info_with_obs(repo_key)
+
+    # 2. member（并入 baseline）
+    try:
+        for rel, meta in member_files_pi(repo_key, agent_type, _inum, _scene_id or "").items():
+            _pif.setdefault(rel, meta)
+    except Exception:
+        pass
+
+    # 3. agent 知识（独立）
+    _know = {}
+    try:
+        _know = agent_knowledge_files(repo_key, agent_type=agent_type, issue_num=_inum, scene_id=_scene_id or "")
+    except Exception:
+        pass
+
+    return {"project_info": _pif, "meta": _pim, "knowledge": _know}
+
+
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", user_gitcode_token="", env_extra=None,
@@ -409,52 +529,46 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                     skill_files = _skill_files_from_zip(_zip, skill)
         except Exception as e:
             log.warning(f"enqueue: skill pack failed for {skill}: {e}")
-    # project-info 随任务（服务端权威，多 VM 共享，见 multi-issue-isolation-design.md §2.4）
-    if project_info_files is None:
-        _pif, _pim = load_project_info(repo_key)
-        # 项目级成员上传文档（全 Agent 共享，key 相对 project-info 目录，物化到 .project-info/member/，
-        # 见 knowledge-board-design.md §6.7 方案 A）
+    # Issue #95：统一调 collect_knowledge_files 过滤知识文件（三源不交叉，过滤只做一次）
+    _collected = None
+    if project_info_files is None or knowledge_files is None:
         try:
-            from src.api.knowledge import member_files_pi
-            for rel, content in member_files_pi(repo_key).items():
-                _pif.setdefault(rel, content)
-        except Exception:
-            pass
-        # Agent 专属成员上传文档定向并入（仅当前任务 agent_type，key 相对 project-info 目录，
-        # 物化到 .project-info/agent/{agent_type}/，见 knowledge-board-design.md §六）
-        try:
-            from src.api.knowledge import agent_files
-            for rel, content in agent_files(repo_key, agent_type).items():
-                _pif.setdefault(rel, content)
-        except Exception:
-            pass
-        project_info_files = _pif
-        project_info_meta = _pim
-    # 共享知识快照（仅任务作用域：issue/issue_agent/project 三级，随任务交付远端 worker）
-    if knowledge_files is None:
-        try:
-            from src.api.knowledge import knowledge_files as _know_files
-            from src.api.session_store import get_issue_scene
-            _scene_id = ""
-            try:
-                _scene_id, _ = get_issue_scene(repo_key, issue_id)
-            except Exception:
-                pass
-            knowledge_files = _know_files(repo_key, agent_type=agent_type, issue_num=_issue_num(issue_id), scene_id=_scene_id or "")
+            _collected = collect_knowledge_files(repo_key, agent_type=agent_type, issue_id=issue_id)
+            if project_info_files is None:
+                project_info_files = {rel: v["content"] for rel, v in _collected["project_info"].items()}
+                project_info_meta = _collected["meta"]
+            if knowledge_files is None:
+                knowledge_files = {rel: v["content"] for rel, v in _collected["knowledge"].items()}
         except Exception as e:
-            log.warning(f"enqueue: knowledge pack failed for {repo_key}: {e}")
-            knowledge_files = {}
-    # 生成 file_urls（url + storage_key，见 knowledge-obs-design §八：字段分开存 + 三级降级）
-    # storage 为 None（本地模式）时 file_urls 为空 dict，worker 用 content 兜底
+            log.warning(f"enqueue: collect_knowledge_files failed for {repo_key}: {e}")
+            if project_info_files is None:
+                project_info_files = {}
+                project_info_meta = {}
+            if knowledge_files is None:
+                knowledge_files = {}
+    # 生成 file_urls（基于已过滤结果，不查 DB；storage 为 None 时 file_urls 为空 dict，worker 用 content 兜底）
     try:
         from src.storage import get_storage
         _storage = get_storage()
     except Exception:
         _storage = None
-    _inum = _issue_num(issue_id)
-    _file_urls = _storage.generate_file_urls(repo_key, agent_type, _inum) if _storage else {}
-    project_info_file_urls = _file_urls
-    knowledge_file_urls = _file_urls
+    if _storage:
+        if _collected is None:
+            try:
+                _collected = collect_knowledge_files(repo_key, agent_type=agent_type, issue_id=issue_id)
+            except Exception:
+                _collected = {"project_info": {}, "knowledge": {}}
+        _all_filtered = {}
+        _all_filtered.update(_collected.get("project_info") or {})
+        _all_filtered.update(_collected.get("knowledge") or {})
+        _file_urls = _storage.generate_file_urls(_all_filtered) if _all_filtered else {}
+    else:
+        _file_urls = {}
+    # 分离 URL：project_info_file_urls = baseline + member，knowledge_file_urls = agent
+    project_info_file_urls = {k: v for k, v in _file_urls.items()
+                              if k.startswith("member/") or k in _PROJECT_INFO_FILES}
+    knowledge_file_urls = {k: v for k, v in _file_urls.items()
+                           if not k.startswith("member/") and k not in _PROJECT_INFO_FILES}
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
