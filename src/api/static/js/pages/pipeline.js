@@ -211,6 +211,17 @@ function renderPipeline(data) {
   // 拼接：流程卡片 + 分页（右对齐） + 表格卡片
   html += `${flowHtml}`;
   if (pagerHtml) html += pagerHtml;
+
+  // Issue #89: 部分任务尚未生成流水线事件提示
+  if (data.has_tasks_without_events) {
+    const _twe = data.tasks_without_events || [];
+    const _hintItems = _twe.slice(0, 5).map(function(t) {
+      return `<span class="tg tg-i" style="font-size:10px;margin:2px">${t.issue_id} ${t.title ? '· ' + t.title.substring(0, 30) : ''}</span>`;
+    }).join('');
+    const _more = _twe.length > 5 ? `<span class="ts t3" style="font-size:10px;margin-left:4px">+${_twe.length - 5}</span>` : '';
+    html += `<div style="background:#fff8e8;border:1px solid #ff9f0a;border-radius:12px;padding:10px 16px;margin:0 0 8px;display:flex;align-items:center;gap:8px;flex-shrink:0"><span style="font-size:14px">⚠️</span><span style="font-size:12px;color:#86868b">${I18N.t('pipeline.tasks_without_events_hint')}</span><div style="margin-left:auto;display:flex;align-items:center;gap:2px;flex-wrap:wrap">${_hintItems}${_more}</div></div>`;
+  }
+
   html += `<div class="pl-table-card"><div class="pl-table-wrap"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')}</th><th>${I18N.t('pipeline.th_title')}</th><th>${I18N.t('pipeline.th_parent_issue')}</th><th>${I18N.t('pipeline.th_duration')}</th><th>${I18N.t('pipeline.th_agents')}</th><th>${I18N.t('pipeline.th_stage')}</th><th>${I18N.t('pipeline.th_scene')}</th><th>${I18N.t('pipeline.th_owner')}</th></tr>`;
   pagePipes.forEach((p, i) => {
     const realIdx = pipeStart + i;

@@ -301,24 +301,24 @@ class TestPromptBuilder:
     """prompt_builder 注入逻辑测试"""
 
     def test_inject_by_ref(self, test_knowledge):
-        from src.prompt_builder import _build_knowledge_section
-        text, ids = _build_knowledge_section(
+        from src.prompt_builder import _build_agent_knowledge_section
+        text, ids = _build_agent_knowledge_section(
             test_knowledge["repo_key"], agent_type="", issue_num=0, scene_id=""
         )
         assert isinstance(text, str)
         assert isinstance(ids, list)
 
     def test_inject_empty_repo(self):
-        from src.prompt_builder import _build_knowledge_section
-        text, ids = _build_knowledge_section(
+        from src.prompt_builder import _build_agent_knowledge_section
+        text, ids = _build_agent_knowledge_section(
             "gitcode:empty/empty", agent_type="", issue_num=0, scene_id=""
         )
         assert isinstance(text, str)
         assert isinstance(ids, list)
 
     def test_return_type(self, test_knowledge):
-        from src.prompt_builder import _build_knowledge_section
-        result = _build_knowledge_section(
+        from src.prompt_builder import _build_agent_knowledge_section
+        result = _build_agent_knowledge_section(
             test_knowledge["repo_key"], agent_type="", issue_num=0, scene_id=""
         )
         assert isinstance(result, tuple)

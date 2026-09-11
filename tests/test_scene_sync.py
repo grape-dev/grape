@@ -64,7 +64,7 @@ class TestLoadConfig:
             os.environ.pop(k, None)
         url, branch, interval = _load_config()
         assert "gitcode.com" in url
-        assert branch == "dev"
+        assert branch == "main"
         assert interval == 1800.0
 
     def test_env_overrides(self):

@@ -805,7 +805,7 @@ def set_chat_config(user_id: int, **kwargs):
     # skill name → skill_id（若未显式传 skill_id）
     if data.get("skill") and not data.get("skill_id"):
         from src.user.db import resolve_skill_id
-        data["skill_id"] = resolve_skill_id(data["skill"])
+        data["skill_id"] = resolve_skill_id(data["skill"], user_id=user_id)
     _write_chat_config_row(user_id, runtime_id=runtime_id, skill=data["skill"],
                            skill_id=data.get("skill_id", 0), im_app_id=data["im_app_id"],
                            im_app_secret=data["im_app_secret"], im_provider=data["im_provider"])

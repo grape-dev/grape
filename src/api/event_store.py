@@ -96,15 +96,19 @@ def append_event(repo_key: str, event_type: str, title: str = "",
     return _seq
 
 
-def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: str = ""):
-    """写入被跳过/无产出的事件审计记录到 event_skipped 表"""
+def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: str = "",
+                         issue_id: str = ""):
+    """写入被跳过/无产出的事件审计记录到 event_skipped 表
+
+    issue_id（Issue #89）：关联 Issue 编号，便于流水线页面展示「部分任务尚未生成流水线事件」。
+    """
     with db_lock:
         try:
             c = db.cursor()
-            c.execute("INSERT INTO event_skipped (repo_key, event_type, reason, detail) VALUES (?,?,?,?)",
-                      (repo_key, event_type, reason, detail))
+            c.execute("INSERT INTO event_skipped (repo_key, issue_id, event_type, reason, detail) VALUES (?,?,?,?,?)",
+                      (repo_key, issue_id or "", event_type, reason, detail))
             db.commit()
-            log.info(f"Event skipped: repo={repo_key}, type={event_type}, reason={reason}, detail={detail[:80]}")
+            log.info(f"Event skipped: repo={repo_key}, issue={issue_id or ''}, type={event_type}, reason={reason}, detail={detail[:80]}")
         except Exception as e:
             log.warning(f"Event skipped FAILED: {e}")
 
