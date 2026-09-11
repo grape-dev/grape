@@ -48,6 +48,7 @@ _PROBE_COMMANDS = {
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
     "cursor": ["cursor", "run", "hello"],
+    "codex": ["codex", "exec", "--json", "hello"],
 }
 _PROBE_TIMEOUT = 30
 _PROBE_INTERVAL = 600  # 10 分钟
@@ -382,12 +383,14 @@ def _remap_cwd(path: str) -> str:
 
 
 def _backend_for_engine(engine_name: str | None = "") -> str:
-    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；其余默认 opencode）。"""
+    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；codex-xxx → codex；其余默认 opencode）。"""
     name = (engine_name or "").lower()
     if name.startswith("hermes"):
         return "hermes"
     if name.startswith("codearts"):
         return "codearts"
+    if name.startswith("codex"):
+        return "codex"
     return "opencode"
 
 

@@ -14,6 +14,31 @@ def _local_port() -> str:
     return os.environ.get("GRAPE_MAIN_PORT", "3000")
 
 
+def _is_github_repo(repo_key: str) -> bool:
+    """判断 repo_key 是否为 GitHub 仓库。"""
+    return bool(repo_key and repo_key.startswith("github:"))
+
+
+def _vcs_api_base(repo_key: str) -> str:
+    """返回 VCS API 基础 URL。"""
+    return "https://api.github.com" if _is_github_repo(repo_key) else "https://gitcode.com/api/v5"
+
+
+def _vcs_token_env(repo_key: str) -> str:
+    """返回 VCS token 环境变量名。"""
+    return "USER_GITHUB_TOKEN" if _is_github_repo(repo_key) else "USER_GITCODE_TOKEN"
+
+
+def _vcs_bot_token_env(repo_key: str) -> str:
+    """返回 VCS bot token 环境变量名。"""
+    return "BOT_GITHUB_TOKEN" if _is_github_repo(repo_key) else "BOT_GITCODE_TOKEN"
+
+
+def _vcs_name(repo_key: str) -> str:
+    """返回 VCS 平台名称。"""
+    return "GitHub" if _is_github_repo(repo_key) else "GitCode"
+
+
 def _resolve_server_url(runtime_id: int = 0) -> str:
     """返回服务端可达地址（A2A/tasks 等对外调用用）。
 
@@ -68,7 +93,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
         files, meta = {}, {}
     lines = ["\n## 项目知识基线（repo 全局）"]
     if not files:
-        lines.append("[无项目知识基线] 允许降级分析：可基于 README 与 GitCode API 获取基础信息，相关结论标注 [degraded]。")
+        lines.append(f"[无项目知识基线] 允许降级分析：可基于 README 与 {_vcs_name(repo_key)} API 获取基础信息，相关结论标注 [degraded]。")
         # Issue #95：条件输出 member 引导（不固定输出）
         if _has_manual_ref(repo_key, agent_type, issue_num, scene_id):
             lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
@@ -190,7 +215,10 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
         return ""
 
 
-def build_role_definition(skills=None, agent_type="") -> str:
+def build_role_definition(skills=None, agent_type="", repo_key="") -> str:
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    _bot_token_env = _vcs_bot_token_env(repo_key)
     rules = [
         "You are a DevOps operations assistant. Your domain:",
         "- Code review, build diagnosis, deployment guard, incident triage",
@@ -198,9 +226,9 @@ def build_role_definition(skills=None, agent_type="") -> str:
         "- Repository (GitCode/GitHub) API operations",
         "",
         "SECURITY (MUST FOLLOW):",
-        "1. Use ONLY the GitCode token provided in this prompt (BOT_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.",
+        f"1. Use ONLY the {_vcs} token provided in this prompt ({_bot_token_env}). NEVER read, guess, or use any other token from the database, config files, logs, or history.",
         "2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data."
-        "3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs admin/maintainer permission (configure it manually in GitCode). NEVER try other tokens or workarounds.",
+        f"3. If the {_vcs} API returns 403 (no permission): STOP that operation and tell the user the action needs admin/maintainer permission (configure it manually in {_vcs}). NEVER try other tokens or workarounds.",
         "4. NEVER write any token into files, logs, or comments.",
     ]
     if agent_type == "coding":
@@ -303,8 +331,10 @@ Use Python to save discovered mappings in the bot's sessions.db:
     return "\n".join(lines)
 
 
-def build_chat_role_definition() -> str:
-    return """You are a DevOps operations assistant. Your domain:
+def build_chat_role_definition(repo_key="") -> str:
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    return f"""You are a DevOps operations assistant. Your domain:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
 - Repository (GitCode/GitHub) API operations
@@ -319,9 +349,9 @@ Reply rules:
 5. MEDIA EXCEPTION (overrides rule 2): When prompt contains "## 用户上传的图片分析" or "## 用户上传的视频分析" section, the image/video has already been analyzed by the system. You MUST answer the user's question based on that analysis. This includes ANY question about the image/video — UI/UX, design, layout, content, code shown in screenshot, architecture, video content, etc. These are NOT "non-DevOps topics". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the analysis provided.
 
 SECURITY (MUST FOLLOW):
-1. Use ONLY the GitCode token provided in this prompt (USER_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.
+1. Use ONLY the {_vcs} token provided in this prompt ({_token_env}). NEVER read, guess, or use any other token from the database, config files, logs, or history.
 2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.
-3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in GitCode). NEVER try other tokens or workarounds.
+3. If the {_vcs} API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in {_vcs}). NEVER try other tokens or workarounds.
 4. NEVER write any token into files, logs, or comments."""
 
 
@@ -346,9 +376,9 @@ You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, 
 3. 不实施 / 不部署 / 不写代码、不执行 git 命令——实现由 pipeline（coding/sre）在回帖后执行。
 
 SECURITY (MUST FOLLOW):
-1. 只使用本 prompt 提供的 GitCode token（USER_GITCODE_TOKEN）。
+1. 只使用本 prompt 提供的 {_vcs} token（{_token_env}）。
 2. 绝不访问 bot 内部 data/、configs/、sessions.db、user_accounts。
-3. GitCode API 403：停止并用政策性话术告知用户需要权限。
+3. {_vcs} API 403：停止并用政策性话术告知用户需要权限。
 4. 绝不把 token 写入文件、日志、评论。
 
 图片分析规则：
@@ -461,6 +491,11 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     number = extract_event_number(evt['payload'])
     repo = evt['repository']
     payload = evt['payload']
+    _rk = evt.get("repo_key", "")
+    _vcs = _vcs_name(_rk)
+    _token_env = _vcs_token_env(_rk)
+    _bot_token_env = _vcs_bot_token_env(_rk)
+    _api_base = _vcs_api_base(_rk)
     issue_data = {}
     if isinstance(payload.get("issue"), dict):
         issue_data = payload["issue"]
@@ -497,7 +532,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             if any(f"@{u}" in note for u in __import__("src.user.db", fromlist=["get_all_bot_usernames"]).get_all_bot_usernames()):
                 parts.append("(User @mentioned the bot)")
         if number is None:
-            parts.append("\n⚠️ 本评论事件未携带 Issue 编号。你必须先通过 GitCode API 定位该评论落在哪个 Issue：")
+            parts.append(f"\n⚠️ 本评论事件未携带 Issue 编号。你必须先通过 {_vcs} API 定位该评论落在哪个 Issue：")
             parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /repos/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
             parts.append("  用评论内容匹配确认 Issue 编号，然后对用户评论进行回复。")
             parts.append("  注意：即使缺少编号，也必须对用户评论作出回复，不得静默跳过。")
@@ -600,7 +635,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         repo_key = f"{evt['source']}:{evt['repository']}"
         parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 
-    parts.append(build_role_definition(skills, agent_type=agent_type))
+    parts.append(build_role_definition(skills, agent_type=agent_type, repo_key=_rk))
 
     # A2A protocol instructions + available agents（mtime 缓存，避免每次构建 prompt 读文件）
     agent_registry = _load_agent_registry()
@@ -616,16 +651,16 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
 然后调用 A2A API：
 
-  curl -X POST {{SERVER_URL}}/api/a2a \\
-    -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \\
+  curl -X POST {SERVER_URL}/api/a2a \\
+    -H "Authorization: Bearer $""" + _bot_token_env + """\" \\
     -H "Content-Type: application/json" \\
     -d '{
       "agent": "coding",
       "payload": {
-        "repository": "'"$REPO_FULL_NAME"'",
-        "account": "'"$ACCOUNT"'",
-        "issue_number": "'"$ISSUE_NUMBER"'",
-        "pr_number": "'"$PR_NUMBER"'",
+        "repository": '"$REPO_FULL_NAME"',
+        "account": '"$ACCOUNT"',
+        "issue_number": '"$ISSUE_NUMBER"',
+        "pr_number": '"$PR_NUMBER"',
         "context": "当前处理摘要"
       }
     }'
@@ -677,6 +712,16 @@ context 是传给下一个 Agent 的接力说明，应包含：
     _role_rule = _a2a_role_rules.get(agent_type, "")
     if _role_rule:
         parts.append(_role_rule)
+
+    # VCS API 访问说明（告诉 agent 用哪个 API URL 和 token 环境变量）
+    parts.append(f"""
+## {_vcs} API Access
+Your token is available as the {_bot_token_env} environment variable.
+API base URL: {_api_base}
+  curl -s -H "Authorization: Bearer ${_bot_token_env}" \
+    {_api_base}/repos/$REPO_FULL_NAME/issues
+Never print or reveal the token value.
+""")
 
     parts.append(_build_output_contract())
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
@@ -781,12 +826,15 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
                 f"Skill 文件：{{{{SKILL_DIR}}}}/{_sn}/SKILL.md\n"
                 f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令去完成任务（不得跳过读取或凭空猜测）。"
             )
-    # GitCode API 访问说明
-    parts.append("""
-## GitCode API Access
-Your token is available as the USER_GITCODE_TOKEN environment variable.
-  curl -s -H "Authorization: Bearer $USER_GITCODE_TOKEN" \\
-    https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues
+    # VCS API 访问说明
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    _api_base = _vcs_api_base(repo_key)
+    parts.append(f"""
+## {_vcs} API Access
+Your token is available as the {_token_env} environment variable.
+  curl -s -H "Authorization: Bearer ${_token_env}" \\
+    {_api_base}/repos/{{owner}}/{{repo}}/issues
 Never print or reveal the token value.
 """)
     repo_note = f" (in {repo_key})" if repo_key else ""

@@ -209,10 +209,8 @@ function renderAgent(name, data) {
       <tbody>
         ${events.map(ev => {
           const _issNum = String(ev.issue_id || '').replace(/^#/, '');
-          const _repoKey = (ev.repo_key || '').replace(/^gitcode:/, '');
-          const _repoParts = _repoKey.split('/');
-          const _issLink = (_issNum && _repoParts.length === 2)
-            ? `<a href="https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issNum}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">${ev.issue_id}</a>`
+          const _issLink = (_issNum && ev.repo_key)
+            ? `<a href="${_vcsUrl(ev.repo_key, '/issues/' + _issNum)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">${ev.issue_id}</a>`
             : ev.issue_id || '—';
           return `<tr class="pipe-row" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
           <td style="padding:8px 10px;font-size:11px;font-weight:600;color:var(--t2)">#${ev.seq || '?'}</td>
@@ -221,7 +219,7 @@ function renderAgent(name, data) {
           <td style="padding:8px 10px;font-size:11px">${_issLink}</td>
           <td style="padding:8px 10px;font-size:10px;color:var(--t2)">${ev.actor ? '@'+ev.actor : '—'}</td>
           <td style="padding:8px 10px;text-align:center;font-size:10px;color:var(--t3)">${ev.duration ? ev.duration + 's' : '—'}</td>
-          <td style="padding:8px 10px;font-size:10px;color:var(--t3);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-clamp:2;word-break:break-all">${ev.backend || '—'}</td>
+          <td style="padding:8px 10px;font-size:10px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${ev.backend || '—'}</td>
           <td style="padding:8px 10px;text-align:right"><span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}" style="font-size:10px;font-weight:600">${I18N.t('common.status.' + ev.status) !== ('common.status.' + ev.status) ? I18N.t('common.status.' + ev.status) : ev.status}</span></td>
         </tr>`;
         }).join('')}

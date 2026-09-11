@@ -36,11 +36,10 @@ function renderEventDetail(data) {
   _convSeq = data.seq;
   _convAgent = agent;
 
-  // Issue 编号 → GitCode 超链接（repo_key 已去前缀为 owner/repo，issue_id 为 #N）
+  // Issue 编号 → VCS 超链接
   const _issNum = String(data.issue_id || '').replace(/^#/, '');
-  const _repoParts = (data.repo_key || '').replace(/^gitcode:/, '').split('/');
-  const _issueLink = (_issNum && _repoParts.length === 2)
-    ? `<a href="https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issNum}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${data.issue_id}</a>`
+  const _issueLink = (_issNum && data.repo_key)
+    ? `<a href="${_vcsUrl(data.repo_key, '/issues/' + _issNum)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${data.issue_id}</a>`
     : `Issue ${data.issue_id || '—'}`;
 
   // 重新派发按钮显示条件（event-redispatch-design.md §3.1）：

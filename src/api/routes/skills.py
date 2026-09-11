@@ -13,6 +13,25 @@ router = APIRouter(prefix="/api/skills", tags=["skills"])
 MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
 
 
+def _resolve_repo_key(repo: str) -> str:
+    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(repo)
+    if ":" in repo:
+        return rk
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            c = _db.cursor()
+            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+                            (f"gitcode:{repo}", f"github:{repo}")).fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return rk
+
+
 def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
     """规范化重打包技能 zip：根 = {skill_name}/，逐文件保留权限位（external_attr），
     丢弃系统目录。返回 zip 字节（OBS 存储正体，见 obs-skill-storage-design.md §2.2）。"""
@@ -48,7 +67,7 @@ def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "
                              batch_skill_scenes)
 
     # repo 参数可能是 fullName（xiaowu2119/hello-skill），转成 repo_key（gitcode:xiaowu2119/hello-skill）
-    repo_key = to_repo_key(repo) if repo else ""
+    repo_key = _resolve_repo_key(repo) if repo else ""
 
     # 构建查询条件
     conditions = ["is_active=1"]
@@ -326,7 +345,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_current_use
     """
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key, from_repo_key
-    repo_key = to_repo_key(repo) if repo else ""
+    repo_key = _resolve_repo_key(repo) if repo else ""
     with db_lock:
         c = db.cursor()
         if repo_key:
@@ -558,7 +577,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
             from src.user.db import upsert_skill_obs
             from src.repo_key import to_repo_key
-            owner = to_repo_key(repo) if scope == "repo" else str(user["id"])
+            owner = _resolve_repo_key(repo) if scope == "repo" else str(user["id"])
             db_scope = "repo" if scope == "repo" else "user"
             try:
                 # 固定 key（v2.4 去版本化）：putObject 同 key 原子覆盖（最后写者胜）；
@@ -582,7 +601,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         # ===== local 分支 =====
         if scope == "repo":
             from src.repo_key import to_repo_key, from_repo_key
-            repo_key = to_repo_key(repo)
+            repo_key = _resolve_repo_key(repo)
             target_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", from_repo_key(repo_key), skill_name)
             os.makedirs(os.path.dirname(target_dir), exist_ok=True)
             if os.path.exists(target_dir):
@@ -711,8 +730,8 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_current_us
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "目标仓库不能为空"})
 
-    from src.repo_key import to_repo_key, from_repo_key
-    repo_key = to_repo_key(repo)
+    from src.repo_key import from_repo_key
+    repo_key = _resolve_repo_key(repo)
 
     # 1. 查原个人技能（须属于当前用户）
     skill_rec = next((s for s in user_db.list_skills(user["id"]) if s["skill_name"] == skill_name), None)

@@ -20,6 +20,7 @@ _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
+    "codex": ["codex", "exec", "--json", "hello"],
 }
 
 _PROBE_TIMEOUT = 30  # 秒

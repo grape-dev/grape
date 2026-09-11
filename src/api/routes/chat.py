@@ -1122,14 +1122,18 @@ def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
     chat_skills = []
     from src.repo_key import to_repo_key
-    repo_key = to_repo_key(repo) if repo else ""
+    # 跨平台：查 DB 确定 repo_key 实际前缀
+    _rk_candidates = []
+    if repo:
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        _rk_candidates = [f"gitcode:{_base}", f"github:{_base}"]
     with db_lock:
         c = db.cursor()
         try:
-            if repo_key:
+            if _rk_candidates:
                 c.execute(
-                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) ORDER BY scope, skill_name",
-                    (str(user["id"]), repo_key)
+                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id IN ({}))) ORDER BY scope, skill_name".format(",".join("?" * len(_rk_candidates))),
+                    [str(user["id"])] + _rk_candidates
                 )
             else:
                 c.execute(
