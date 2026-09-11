@@ -160,7 +160,16 @@ _CREDENTIAL_SUBSTRINGS = (
 - `knowledge.py` 第 769 行 sync_loop — `storage_key = f"knowledge/{owner}/{rname}/project-info/{_fname}"`
 - `knowledge.py` 第 861 行 _sync_baseline_files — 同上
 - `obs.py` generate_file_urls — baseline URL 生成用新 key
-- 老数据迁移：OBS 对象从旧 key 复制到新 key + DB obs_key 更新
+
+**老数据不需要手动迁移**：
+
+1. 老数据 DB 里 obs_key 是旧格式 `project-info/{repo_key}/{filename}`，OBS 对象也在旧 key 下。`storage.read_bytes(旧key)` 通过 `_full()` 自动拼前缀能正常读取——功能不受影响。
+
+2. 新代码用新格式 `knowledge/{owner}/{repo}/project-info/{filename}` 写入 OBS + 更新 DB obs_key。
+
+3. `_sync_baseline_files` 启动时扫描本地 baseline 文件，发现 DB 有记录但 obs_key 是旧格式——会用新格式重新写 OBS + 更新 DB obs_key。老数据在下次服务启动同步时自动迁移到新格式。
+
+4. 两种格式并存期间不影响读取——`read_entry_content` 用 DB 里的 obs_key 直接读 OBS，不管 key 格式是什么。
 
 ## 4. 改动文件
 
@@ -186,8 +195,8 @@ _CREDENTIAL_SUBSTRINGS = (
 
 - **member_files_pi/agent_files 签名变化**——加了 3 个参数，所有调用方都要改
 - **generate_file_urls 签名变化**——加了 scene_id 参数
-- **build_devops_agent_prompt 加知识注入**——prompt 变长，可能影响 Agent 上下文窗口
-- **baseline OBS key 迁移**——老数据需要迁移，否则读不到
+- **build_devops_agent_prompt**——不改，无 prompt 变长风险
+- **baseline OBS key**——老数据不需要手动迁移，`_sync_baseline_files` 自动逐步迁移
 - **"repo-cr" 关键词**——需要确认不会误匹配正常文件
 
 ## 7. 验收标准
