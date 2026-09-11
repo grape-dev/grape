@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     password_hash TEXT NOT NULL DEFAULT '',
     gitcode_id TEXT DEFAULT '',
     gitcode_api_token TEXT DEFAULT '',
+    github_id TEXT DEFAULT '',
+    github_api_token TEXT DEFAULT '',
+    github_login TEXT DEFAULT '',
     nickname TEXT DEFAULT '',
     feishu_app_id TEXT DEFAULT '',
     feishu_app_secret TEXT DEFAULT '',
@@ -274,6 +277,37 @@ def link_gitcode_user(user_id: int, gitcode_id: str, access_token: str, refresh_
         return False
 
 
+def get_user_by_github_id(github_id: str) -> dict | None:
+    """通过 GitHub 用户 ID 查找本地用户"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE github_id=?", (github_id,))
+        row = c.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
+
+
+def link_github_user(user_id: int, github_id: str, access_token: str, refresh_token: str = "") -> bool:
+    """绑定本地用户与 GitHub 用户，存储 access_token 到 user_credentials"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE user_accounts SET github_id=? WHERE id=?", (github_id, user_id))
+            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
+                      (user_id, "github_oauth", json.dumps({
+                          "github_id": github_id,
+                          "access_token": access_token,
+                          "refresh_token": refresh_token,
+                          "fetched_at": int(time.time())
+                      })))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"Link GitHub user failed: {e}")
+        return False
+
+
 # ====== 凭据表 ======
 _CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS user_credentials (
@@ -313,6 +347,8 @@ def get_credentials(user_id: int) -> list[dict]:
     result = []
     if d.get("gitcode_api_token"):
         result.append({"provider": "gitcode", "config": {"token": d["gitcode_api_token"]}})
+    if d.get("github_api_token"):
+        result.append({"provider": "github", "config": {"token": d["github_api_token"]}})
     if d.get("feishu_app_id") or d.get("feishu_app_secret"):
         cfg = {}
         if d.get("feishu_app_id"): cfg["app_id"] = d["feishu_app_id"]
@@ -587,6 +623,12 @@ def init_db():
             db.execute("ALTER TABLE user_accounts ADD COLUMN last_active_at TEXT DEFAULT NULL")
         except Exception:
             pass
+        # 兼容旧列迁移（幂等）：github_id / github_api_token（GitHub OAuth 登录）
+        for col in ["github_id", "github_api_token"]:
+            try:
+                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
+            except Exception:
+                pass
         # 兼容旧列迁移（幂等）：华为云 IAM 列（存量库升级；CREATE TABLE 只影响新库）
         for col in ["hw_iam_domain", "hw_iam_user", "hw_iam_password", "hw_iam_account_type"]:
             try:
@@ -596,6 +638,17 @@ def init_db():
         db.execute(_CREDENTIALS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
+        # 兼容旧列迁移（幂等）：managed_repos 新增 github 列
+        for col in ["bot_github_token", "github_webhook_token"]:
+            try:
+                db.execute(f"ALTER TABLE managed_repos ADD COLUMN {col} TEXT DEFAULT ''")
+            except Exception:
+                pass
+        # 兼容旧列迁移（幂等）：login_whitelist 新增 github_username 列
+        try:
+            db.execute("ALTER TABLE login_whitelist ADD COLUMN github_username TEXT DEFAULT ''")
+        except Exception:
+            pass
         # repo_key 统一整改迁移（managed_repos 去 user_id + user_repos 加前缀/is_join）
         _migrate_repo_key_tables()
         # 从旧表迁移数据（幂等）
@@ -1023,7 +1076,8 @@ def get_skill_md(user_id: int, skill_name: str) -> str | None:
 
 def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id: int = 0,
                      bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
-                     bot_username: str = "", dev_scene: str = "") -> bool:
+                     bot_username: str = "", dev_scene: str = "",
+                     github_webhook_token: str = "", bot_github_token: str = "") -> bool:
     """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。"""
     from src.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
@@ -1031,9 +1085,21 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
-                (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username))
+            # 先尝试含 bot_github_token 的完整插入
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token))
+            except Exception:
+                # 列不存在时降级（兼容未迁移的库）
+                try:
+                    c.execute(
+                        "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token))
+                except Exception:
+                    c.execute(
+                        "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username))
             db.commit()
             return True
     except Exception as e:
@@ -1293,6 +1359,55 @@ def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
     return ""
 
 
+def get_github_token(repo_key: str = "") -> str:
+    """统一获取 GitHub API Token（对应 get_gitcode_token 的 GitHub 版）。
+
+    - repo_key 非空 → bot token：managed_repos.bot_github_token → 仓库 owner 的 user_accounts.github_api_token → 全局
+    - 无 repo_key → 空（用户级 token 走 get_user_github_token）
+    """
+    from src.repo_key import to_repo_key, parse_repo_key
+    repo_key = to_repo_key(repo_key, provider="github")
+    if not repo_key:
+        return ""
+    # 仅处理 GitHub 仓库
+    provider, _, _ = parse_repo_key(repo_key)
+    if provider != "github":
+        return ""
+    # 1. managed_repos.bot_github_token（仓库级配置）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT bot_github_token FROM managed_repos WHERE repo_key=? AND bot_github_token!='' LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if row and row[0]:
+                return row[0]
+    except Exception as e:
+        log.warning(f"get_github_token: query managed_repos failed: {e}")
+    # 2. 仓库 owner 的 user_accounts.github_api_token（OAuth 登录时自动获取）
+    try:
+        from src.repo_key import parse_repo_key
+        _prov, owner, _name = parse_repo_key(repo_key)
+        if owner:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT github_api_token FROM user_accounts WHERE username=? AND github_api_token!='' LIMIT 1", (owner,))
+                row = c.fetchone()
+                if row and row[0]:
+                    return row[0]
+    except Exception as e:
+        log.warning(f"get_github_token: query user_accounts failed: {e}")
+    # 3. 全局 github_api_token（configs/global-bot-token.json）
+    try:
+        import json, os
+        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "global-bot-token.json")
+        if os.path.exists(_gbt_path):
+            with open(_gbt_path, "r", encoding="utf-8") as f:
+                return json.load(f).get("github_bot_token", "") or ""
+    except Exception as e:
+        log.warning(f"get_github_token: load global token failed: {e}")
+    return ""
+
+
 def get_agent_bot_token(repo_key: str) -> str:
     """获取 Agent 执行的 GitCode Bot Token（兼容包装，统一走 get_gitcode_token）"""
     return get_gitcode_token(repo_key=repo_key)
@@ -1309,6 +1424,20 @@ def get_user_gitcode_token(user_id: int) -> str:
                 return c.get("config", {}).get("token", "") or ""
     except Exception as e:
         log.warning(f"get_user_gitcode_token failed for user={user_id}: {e}")
+    return ""
+
+
+def get_user_github_token(user_id: int) -> str:
+    """获取用户的 GitHub API token（user_accounts.github_api_token）"""
+    if not user_id or user_id <= 0:
+        return ""
+    try:
+        creds = get_credentials(user_id)
+        for c in creds:
+            if c.get("provider") == "github":
+                return c.get("config", {}).get("token", "") or ""
+    except Exception as e:
+        log.warning(f"get_user_github_token failed for user={user_id}: {e}")
     return ""
 
 
@@ -1393,13 +1522,22 @@ def refresh_gitcode_oauth_token(user_id: int) -> str | None:
 
 
 def get_webhook_token_by_repo(full_name: str) -> str:
-    """根据 full_name（owner/repo）查找 repo 的预期 webhook token"""
+    """根据 full_name（owner/repo）查找 repo 的预期 webhook token（按 provider 分流）。"""
     from src.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT gitcode_webhook_token FROM managed_repos WHERE repo_key=? LIMIT 1", (to_repo_key(full_name),))
+        # 同时查 gitcode: 和 github: 前缀
+        gc_key = to_repo_key(full_name)  # 默认 gitcode:
+        gh_key = to_repo_key(full_name, provider="github")
+        c.execute(
+            "SELECT gitcode_webhook_token, github_webhook_token FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+            (gc_key, gh_key)
+        )
         row = c.fetchone()
-        return row[0] if row else ""
+        if not row:
+            return ""
+        # 优先返回非空的 token（GitHub 仓库有 github_webhook_token，GitCode 有 gitcode_webhook_token）
+        return row[1] or row[0] or ""
 
 
 def remove_managed_repo(repo_key: str) -> dict | None:
@@ -1436,6 +1574,7 @@ def get_all_managed_repos() -> list[dict]:
 USER_ACCOUNT_FIELDS = [
     "id", "username", "password_hash", "gitcode_id",
     "gitcode_api_token",
+    "github_id", "github_api_token", "github_login",
     "nickname",
     "feishu_app_id", "feishu_app_secret",
     "huawei_cloud_ak", "huawei_cloud_sk",
@@ -1619,6 +1758,9 @@ def migrate_accounts_from_json():
             ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
             ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
             ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
+            ("github_oauth_client_id", "oauth_github_client_id"),
+            ("github_oauth_client_secret", "oauth_github_client_secret"),
+            ("github_oauth_redirect_uri", "oauth_github_redirect_uri"),
         ]
         loaded = []
         with db_lock:
@@ -1684,7 +1826,8 @@ def save_user_repos(user_id: int, repos: list[dict]):
         c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
         for r in repos:
             full_name = r.get("full_name", "") or r.get("repo_key", "")
-            repo_key = to_repo_key(full_name)
+            # 优先使用 repos 中已有的 repo_key（含 provider 前缀），否则用 full_name 生成
+            repo_key = r.get("repo_key", "") or to_repo_key(full_name)
             is_join = 1 if repo_key in joined_keys else 0
             c.execute(
                 "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -1784,16 +1927,23 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                 _ls_json = json.dumps(a.get("local_skills", []), ensure_ascii=False)
                 _detail = a.get("local_skills_detail")
                 _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
-                # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
-                c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 AND host_name=?", (name, scope, owner_id, host_name))
+                # 匹配已有本机直连行：优先 host_name 精确匹配，其次 host_name 为空/NULL 的遗留孤儿行（claim 它）
+                # 防止 host_name 字段引入后旧行（host_name=''）匹配不上 → 新建重复行 → 前端显示两个 opencode-cred0
+                c.execute(
+                    "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 "
+                    "AND (host_name=? OR host_name='' OR host_name IS NULL) "
+                    "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
+                    (name, scope, owner_id, host_name, host_name))
                 row = c.fetchone()
                 if row:
                     c.execute(
-                        "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
+                        "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, "
+                        "pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), "
+                        "local_skills=?, skill_scan_result=?, host_name=? WHERE id=?",
                         (a.get("display_name", name),
                          1 if a.get("installed") else 0, a.get("cli_path", ""),
                          a.get("version", ""), 1 if a.get("healthy") else 0,
-                         a.get("pip_package", ""), _ls_json, _detail_json, row[0])
+                         a.get("pip_package", ""), _ls_json, _detail_json, host_name, row[0])
                     )
                 else:
                     # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
@@ -1817,6 +1967,13 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             if current_names:
                 placeholders = ",".join("?" for _ in current_names)
                 c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
+            # 去重：同 name+scope+owner_id+cred=0 的重复行只保留 id 最小的一条
+            # （upsert 已 claim 旧行并写入 host_name，此处清理未被 claim 的重复行）
+            c.execute(
+                "DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
+                "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
+                "GROUP BY lower(name), scope, owner_id)"
+            )
             db.commit()
         except Exception as e:
             log.warning(f"save_agent_runtimes failed (lock timeout or error): {e}")

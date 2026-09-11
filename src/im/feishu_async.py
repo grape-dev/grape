@@ -163,7 +163,7 @@ def _fetch_gitcode_collaborators(owner: str, repo: str, api_token: str) -> list:
     page = 1
     while True:
         req = urllib.request.Request(
-            f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators?per_page=100&page={page}",
+            f"https://gitcode.com/api/v5/repos/{owner}/{repo}/collaborators?per_page=100&page={page}",
             headers={"Authorization": f"Bearer {api_token}"},
         )
         data = json.loads(urllib.request.urlopen(req, timeout=10).read())
