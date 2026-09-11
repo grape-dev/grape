@@ -767,7 +767,7 @@ function loadSubSkillDetail(pkgId, subName) {
   if (!el) return;
   el.innerHTML = '<div class="loading">'+(I18N.t('skills.loading')||'加载中...')+'</div>';
   API.get('/skills/package-sub/'+pkgId+'/'+subName).then(function(data) {
-    if (window._currentView !== 'skills') return;  // stale guard
+    if (window._currentView !== 'skill' && window._currentView !== 'skills') return;  // stale guard
     var safeContent = (data.content||'').replace(/`/g,'\\`').replace(/\${/g,'\\${');
     el.innerHTML = `
       <button class="bt bt-o bt-s" onclick="_backFromSubSkill(${pkgId})" style="margin-bottom:12px">← ${I18N.t('skills.huawei.back')||'返回'}</button>
