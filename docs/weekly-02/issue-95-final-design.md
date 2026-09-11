@@ -236,7 +236,7 @@ scope=project, source='agent'
 
 ---
 
-## 3. 改动清单（18 项，8 组）
+## 3. 改动清单（26 项，10 组）
 
 ### A. credential 安全过滤
 
@@ -315,6 +315,23 @@ collect_knowledge_files 内部调用：
 | 17 | src/api/knowledge.py:348 (write_knowledge UPDATE) | UPDATE 补 source + status | 修复 rejected→accepted 不更新 status 的 bug（status 直接更新）；source 用 COALESCE(NULLIF(source, ''), ?) 补空值不覆盖已有值 |
 | 18 | src/api/knowledge.py:672+770 (sync_loop + _sync_baseline_files) | OBS key 格式统一 + UPDATE 补 source/name | sync_loop baseline OBS key 从 `project-info/{repo_key}/{fname}` 改为 `knowledge/{owner}/{repo}/project-info/{fname}`；sync_loop UPDATE 补 source（COALESCE 按 scope 推导默认值）；_sync_baseline_files OBS key 同步改；_sync_baseline_files UPDATE 补 source + name（COALESCE 空值不覆盖） |
 
+### I. 审查修复（code review 发现）
+
+| # | 文件 | 改动 | 说明 |
+|---|------|------|------|
+| 20 | src/api/db_setup.py:1449 | migration DELETE 加 created_by='system' 过滤 | [严重] 原 DELETE 无条件删所有 member ref，每次重启删用户手动创建的绑定。改为只删 migration 自动创建的（created_by='system'），用户手动创建的（created_by=username）不删 |
+| 21 | src/im/vod_handler_async.py:237 | VOD prompt 加 {{KNOWLEDGE_DIR}} 引导 | VOD 走 enqueue_task，worker 物化 .knowledge/ 目录，但 prompt 没引导 agent 去读。和 build_devops_agent_prompt 保持一致 |
+| 22 | src/api/knowledge.py:509 | _is_credential_file 加精确匹配列表 | 新增 _DEFAULT_CREDENTIAL_EXACT_NAMES = {cr.json, cr.yaml, cr.yml, cr.txt, cr.env}。解决 "cr" 子串误伤 cr-notes.md vs cr.json 漏过的矛盾。子串匹配保留 "repo-cr" |
+| 23 | src/runtime/service.py:549 | collect_knowledge_files 异常时设 _collected 兜底值 | 避免 _collected is None 时 URL 生成阶段重复调用 |
+| 24 | src/runtime/service.py:269 | _PROJECT_INFO_FILES 加 .metadata.json | URL 分类正确归属 project_info_file_urls |
+| 25 | src/api/routes/knowledge.py:422 | knowledge context API 传 issue_num + scene_id | _build_project_info_section 条件输出 member 引导正确 |
+
+### J. 深度检查修复（direct 模式占位符残留）
+
+| # | 文件 | 改动 | 说明 |
+|---|------|------|------|
+| 26 | src/im/vod_handler_async.py:329 | VOD direct 模式手动替换占位符 | [严重-#95 新引入] VOD direct 走 consume_stream_async 不物化文件。#95 改动让 _build_vod_prompt 调 _build_project_info_section → 生成 {{PROJECT_INFO_DIR}} + {{KNOWLEDGE_DIR}}。direct 模式不替换 → 残留。修复：consume_stream_async 前手动 replace 为 ws 路径 |
+
 ---
 
 ## 4. 不做
@@ -322,9 +339,10 @@ collect_knowledge_files 内部调用：
 | 项 | 理由 |
 |----|------|
 | build_devops_agent_prompt 接入 _build_agent_knowledge_section | devops 走 worker 物化路径，prompt 内联冗余 |
-| _is_credential_file 改 "cr" 关键词 | 用 "repo-cr" 更精准，避免误匹配 crawler.md。已完成 |
 | scope=project 物化路径调整 | 文件源在 project-info/ 但物化到 .knowledge/ 是原始设计(e22dbce7)，不在 #95 范围 |
 | _member_docs file_path 解析 | DB file_path 带 owner/repo 前缀，解析走 else 分支用 created_by 而非路径里的 username。既有问题，不影响注入逻辑，不在 #95 范围 |
+| chat direct 模式 {{PROJECT_INFO_DIR}} 残留 | handler_async.py / events.py 的 chat direct 模式不物化文件不替换占位符。既有问题，不是 #95 引入（#95 只给 devops/VOD 新增 {{KNOWLEDGE_DIR}}） |
+| OBS 旧格式对象清理 | 旧 OBS key (project-info/{repo_key}/{name}) 能读到，不影响功能。新写入用新格式。清理是运维任务 |
 
 ---
 
@@ -650,6 +668,13 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
 | 14 | write_knowledge UPDATE | 不更新 source + status | 补 source（COALESCE）+ status | 修复 |
 | 15 | sync_loop OBS key + UPDATE | OBS key 格式不统一 + UPDATE 不补 source | 统一 + 补 source | 修复 |
 | 16 | _sync_baseline_files OBS key + UPDATE | OBS key 格式不统一 + UPDATE 不补 source/name | 统一 + 补 source/name | 修复 |
+| 17 | migration DELETE member ref | 无条件删所有 member ref（含用户手动创建） | 只删 created_by='system' | 修复 |
+| 18 | _is_credential_file | "repo-cr" 子串，cr.json 漏过 | + 精确匹配 _DEFAULT_CREDENTIAL_EXACT_NAMES | 修复 |
+| 19 | VOD prompt | 无 {{KNOWLEDGE_DIR}} 引导 | 加引导（和 devops 一致） | 修复 |
+| 20 | VOD direct 模式 | #95 引入 {{PROJECT_INFO_DIR}}/{{KNOWLEDGE_DIR}} 但 direct 不替换 | consume_stream_async 前手动 replace | 修复 |
+| 21 | collect_knowledge_files | 异常时 _collected=None → URL 阶段重复调用 | 异常时设兜底值 | 修复 |
+| 22 | _PROJECT_INFO_FILES | 不含 .metadata.json → URL 分类错误 | 加 .metadata.json | 修复 |
+| 23 | knowledge context API | 不传 issue_num/scene_id → member 引导不输出 | 传参 | 修复 |
 
 ---
 
@@ -683,7 +708,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
 - [ ] member_files()（不带_pi）废弃
 - [ ] enqueue_task 内部 if knowledge_files is None 改为调 collect_knowledge_files
 - [ ] test_knowledge_ref.py 更新 _build_knowledge_section → _build_agent_knowledge_section
-- [ ] _is_credential_file 关键词包含 "repo-cr"
+- [ ] _is_credential_file 关键词包含 "repo-cr" + 精确匹配 cr.json/cr.yaml/cr.yml/cr.txt/cr.env
 - [ ] storage/__init__.py LocalStorage generate_file_urls 同步改签名
 - [ ] builder.py _write_to_obs: source='system' + name + description + created_by='system'
 - [ ] builder.py _write_to_obs: OBS key 格式 knowledge/{owner}/{repo}/project-info/{name}
@@ -697,6 +722,12 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
 - [ ] 所有 INSERT agent_shared_knowledge 含 source/name/description（rejected 缺 name/description 可接受）
 - [ ] 所有需要补 source 的 UPDATE 已用 COALESCE 补空值
 - [ ] build_devops_agent_prompt 生成 {{KNOWLEDGE_DIR}} 引导文字（修复死占位符）
+- [ ] VOD prompt 生成 {{KNOWLEDGE_DIR}} 引导
+- [ ] migration DELETE 只删 created_by='system' 的 member ref（不删用户手动创建的）
+- [ ] collect_knowledge_files 异常时设 _collected 兜底值（避免重复调用）
+- [ ] _PROJECT_INFO_FILES 含 .metadata.json
+- [ ] knowledge context API 传 issue_num + scene_id
+- [ ] VOD direct 模式 consume_stream_async 前替换 {{PROJECT_INFO_DIR}} 和 {{KNOWLEDGE_DIR}}
 - [ ] 所有 OBS key 格式统一为 knowledge/{owner}/{repo}/... 前缀
 - [ ] 现有测试通过，新增测试覆盖上述逻辑
 
@@ -706,15 +737,15 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
 
 | 文件 | 改动项 |
 |------|--------|
-| src/api/knowledge.py | #1 credential 过滤；#3 member_files_pi 接 ref 表 + 返回值加 obs_key + key 归一化；#4 agent_files 废弃；#5 knowledge_files 改名 agent_knowledge_files + source='agent' + 返回值加 obs_key；#15 fallback 保持只查 agent；member_files（不带_pi）废弃；#17 write_knowledge UPDATE 补 source+status；#18 sync_loop+_sync_baseline_files OBS key 统一 + UPDATE 补 source/name |
-| src/runtime/service.py | #7 URL 字段分离；新增 load_project_info_with_obs；新增 collect_knowledge_files 公共函数；enqueue_task 改调 collect_knowledge_files |
+| src/api/knowledge.py | #1 credential 过滤 + #22 精确匹配列表；#3 member_files_pi 接 ref 表 + 返回值加 obs_key + key 归一化；#4 agent_files 废弃；#5 knowledge_files 改名 agent_knowledge_files + source='agent' + 返回值加 obs_key；#15 fallback 保持只查 agent；member_files（不带_pi）废弃；#17 write_knowledge UPDATE 补 source+status；#18 sync_loop+_sync_baseline_files OBS key 统一 + UPDATE 补 source/name |
+| src/runtime/service.py | #7 URL 字段分离；新增 load_project_info_with_obs；新增 collect_knowledge_files 公共函数；enqueue_task 改调 collect_knowledge_files；#23 异常兜底值；#24 _PROJECT_INFO_FILES 加 .metadata.json |
 | src/storage/obs.py | #6 generate_file_urls 改为接收已过滤结果生成 URL |
 | src/storage/__init__.py | #6 LocalStorage generate_file_urls 同步改签名 |
 | src/api/event_pipeline.py | direct 物化改调 collect_knowledge_files |
 | src/prompt_builder.py | #8 _build_project_info_section 条件输出 + 去掉 agent 引导 + 3 调用点 scene_id 处理 + _has_manual_ref；#9 _build_agent_knowledge_section 改名 + source='agent'；#15 fallback 保持只查 agent；#19 生成 {{KNOWLEDGE_DIR}} 引导文字 |
-| src/im/vod_handler_async.py | #10 baseline 注入统一 + 保留 codegraph 提示 |
-| src/api/db_setup.py | #12 删除 member ref 迁移；#13 清理错误 ref |
-| src/api/routes/knowledge.py | #14 单条 API 空关联校验；knowledge_context 函数名更新 |
+| src/im/vod_handler_async.py | #10 baseline 注入统一 + 保留 codegraph 提示；#21 VOD prompt 加 {{KNOWLEDGE_DIR}} 引导；#26 VOD direct 模式手动替换占位符 |
+| src/api/db_setup.py | #12 删除 member ref 迁移；#13 清理错误 ref（只删 created_by='system'）+ 修复 rejected→accepted 老数据 |
+| src/api/routes/knowledge.py | #14 单条 API 空关联校验；knowledge_context 函数名更新 + #25 传 issue_num/scene_id |
 | src/project_info/builder.py | #16 _write_to_obs 修复: source='system' + name + description + created_by + OBS key 格式 + 自动 ref + 先查再 INSERT/UPDATE |
 | tests/ | test_knowledge_board + test_knowledge_ref 更新 |
 
