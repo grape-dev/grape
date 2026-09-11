@@ -3,26 +3,36 @@ import json, urllib.request, urllib.error, urllib.parse, os, shutil, tempfile
 import requests as _requests
 from src.config import log
 
-API_BASE = "https://api.gitcode.com/api/v5"
+# GitCode API 端点迁移：api.gitcode.com 上 /user/repos 和 /repos/... 已全部 404，
+# 仓库相关 API 改走 gitcode.com（证书正常，不需要 verify=False）。
+# /api/v5/user 仍在 api.gitcode.com 上可用（auth.py 单独使用）。
+API_BASE = "https://gitcode.com/api/v5"
 
 
 def _req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode()
-            if raw.strip():
-                return json.loads(raw)
-            return {}
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")[:500]
-        raise RuntimeError(f"GitCode API {method} {url} failed ({e.code}): {body}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+        if method == "GET":
+            resp = _requests.get(url, headers=headers, timeout=30)
+        elif method == "POST":
+            resp = _requests.post(url, json=body, headers=headers, timeout=30)
+        elif method == "DELETE":
+            resp = _requests.delete(url, headers=headers, timeout=30)
+        elif method == "PUT":
+            resp = _requests.put(url, json=body, headers=headers, timeout=30)
+        elif method == "PATCH":
+            resp = _requests.patch(url, json=body, headers=headers, timeout=30)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+        if resp.status_code >= 400:
+            raise RuntimeError(f"GitCode API {method} {url} failed ({resp.status_code}): {resp.text[:500]}")
+        if resp.text.strip():
+            return resp.json()
+        return {}
+    except _requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Cannot reach GitCode API: {e}")
 
 
 def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: str) -> bool:
@@ -385,24 +395,24 @@ def _download_gitcode_tarball(source_repo, workdir, tmp, token):
     _run_git(["init"], workdir)
 
 
-def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
-                          user_token: str, bot_token: str = "") -> bool:
+def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
+                          user_token: str, bot_token: str = "", provider: str = "gitcode") -> bool:
     """将模板内容推送到新仓库。
 
     template: 配置中的模板对象（含 source / source_repo / id）
     target_repo: 目标仓库名（不含 owner）
+    provider: "gitcode" 或 "github"，决定 push 目标 URL
     来源:
       - source="local" → 复制 examples/{template_id}/（或旧路径 configs/project-templates/{id} 兜底）到临时目录
       - source="git"   → git clone source_repo（用 bot_token 拉取）
-    目标: 设置 remote 为个人新仓库（https://{user_token}@gitcode.com/{login}/{repo}.git）
-          并 git push -u origin HEAD:main。成功返回 True。
+    目标: 设置 remote 为个人新仓库并 git push -u origin HEAD:main。成功返回 True。
     """
     import os
     import shutil
     import tempfile
     from src.config import EXAMPLE_DIR, CONFIG_DIR
 
-    if not user_token or not gitcode_login or not target_repo:
+    if not user_token or not owner_login or not target_repo:
         raise RuntimeError("缺少用户 token 或目标仓库信息")
     if not template:
         raise RuntimeError("模板配置缺失")
@@ -446,7 +456,15 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
                 # GitCode 模板：用 source_repo + token，tarball 下载
                 _download_gitcode_tarball(source_repo, workdir, tmp, bot_token or user_token)
 
-        target_url = f"https://oauth2:{user_token}@gitcode.com/{gitcode_login}/{target_repo}.git"
+        if provider == "github":
+            target_url = f"https://{user_token}@github.com/{owner_login}/{target_repo}.git"
+            # GitHub App token 无 workflows 权限，push 含 .github/workflows 的仓库会被拒绝
+            _wf_dir = os.path.join(workdir, ".github", "workflows")
+            if os.path.isdir(_wf_dir):
+                shutil.rmtree(_wf_dir, ignore_errors=True)
+                log.info(f"Removed .github/workflows from template (GitHub App token lacks workflow permission)")
+        else:
+            target_url = f"https://oauth2:{user_token}@gitcode.com/{owner_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):
             _run_git(["remote", "remove", "origin"], workdir)
         _run_git(["remote", "add", "origin", target_url], workdir)
@@ -574,3 +592,289 @@ def remove_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> bo
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
     _req("DELETE", url, api_token)
     return True
+
+
+# ====== GitHub 仓库管理 ======
+
+_GITHUB_API_BASE = "https://api.github.com"
+
+
+def remove_github_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> bool:
+    """删除 GitHub 仓库上的 webhook。"""
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
+    _github_req("DELETE", url, api_token)
+    return True
+
+
+def remove_github_collaborator(api_token: str, owner: str, repo: str, username: str) -> bool:
+    """移除 GitHub 仓库协作者（DELETE /repos/{owner}/{repo}/collaborators/{username}）。"""
+    if not username or not api_token:
+        return False
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}"
+    try:
+        _github_req("DELETE", url, api_token)
+        return True
+    except RuntimeError as e:
+        log.warning(f"remove_github_collaborator failed: {e}")
+        return False
+
+
+def _github_check_installation(api_token: str) -> str:
+    """检测 GitHub App installation 状态，返回用户可操作的错误提示。"""
+    try:
+        inst_data = _github_req("GET", f"{_GITHUB_API_BASE}/user/installations?per_page=1", api_token)
+        inst_count = inst_data.get("total_count", 0) if isinstance(inst_data, dict) else 0
+    except Exception:
+        inst_count = -1
+
+    if inst_count == 0:
+        return (
+            "GitHub App 未安装到您的账户，无法创建仓库。"
+            "请前往 https://github.com/settings/apps → 点击您的 App → Install App → 安装到个人账户，"
+            "然后重新登录。"
+        )
+    return (
+        "GitHub App 已安装但 Administration 权限不足。"
+        "请在 GitHub App 设置页 Repository permissions → Administration 设为 Read and write，"
+        "然后撤销授权（https://github.com/settings/applications）并重新登录。"
+    )
+
+
+def _github_req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "Grape-DevOps",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            if raw.strip():
+                return json.loads(raw)
+            return {}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")[:500]
+        raise RuntimeError(f"GitHub API {method} {url} failed ({e.code}): {body}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Cannot reach GitHub API: {e.reason}")
+
+
+def fetch_github_repos_with_role(api_token: str) -> list[dict]:
+    """获取用户的 GitHub 仓库列表。
+    返回：[{"full_name": "owner/repo", "owner": "owner", "name": "repo", "is_admin": bool}, ...]
+    """
+    if not api_token:
+        raise RuntimeError("GitHub API Token 未配置")
+    repos = []
+    page = 1
+    while True:
+        url = f"{_GITHUB_API_BASE}/user/repos?per_page=100&page={page}&sort=full_name"
+        data = _github_req("GET", url, api_token)
+        items = data if isinstance(data, list) else []
+        if not items:
+            break
+        for r in items:
+            full_name = r.get("full_name", "")
+            if not full_name or "/" not in full_name:
+                continue
+            perm = r.get("permissions") or {}
+            is_admin = bool(perm.get("admin")) if isinstance(perm, dict) else False
+            repos.append({
+                "full_name": full_name,
+                "owner": full_name.split("/", 1)[0],
+                "name": full_name.split("/", 1)[1],
+                "is_admin": is_admin,
+                "created_at": r.get("created_at", "") or "",
+            })
+        if len(items) < 100:
+            break
+        page += 1
+    return repos
+
+
+def find_existing_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int | None:
+    """检查 GitHub 仓库是否已有指向 webhook_url 的 webhook。"""
+    if not webhook_url:
+        return None
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
+    try:
+        hooks = _github_req("GET", url, api_token)
+        if isinstance(hooks, list):
+            for h in hooks:
+                if h.get("config", {}).get("url") == webhook_url:
+                    return h.get("id")
+    except RuntimeError:
+        pass
+    return None
+
+
+def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_secret: str = "") -> int:
+    """在 GitHub 仓库上创建 webhook，返回 webhook_id。"""
+    if not webhook_secret:
+        webhook_secret = api_token
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
+    body = {
+        "name": "web",
+        "active": True,
+        "events": ["push", "issues", "pull_request", "issue_comment", "create", "release"],
+        "config": {
+            "url": webhook_url,
+            "content_type": "json",
+            "secret": webhook_secret,
+            "insecure_ssl": "0",
+        },
+    }
+    result = _github_req("POST", url, api_token, body)
+    hook_id = result.get("id", 0)
+    if not hook_id:
+        raise RuntimeError(f"Created GitHub webhook but got no id: {json.dumps(result, ensure_ascii=False)[:200]}")
+    return hook_id
+
+
+def get_user_github_login(api_token: str) -> str:
+    """获取当前 token 的 GitHub 登录用户名。"""
+    if not api_token:
+        return ""
+    try:
+        data = _github_req("GET", f"{_GITHUB_API_BASE}/user", api_token)
+        return data.get("login", "") or ""
+    except RuntimeError as e:
+        log.warning(f"get_user_github_login failed: {e}")
+        return ""
+
+
+def get_github_repo_permissions(api_token: str, owner: str, repo: str) -> dict | None:
+    """获取 token 持有者对指定仓库的权限（GET /repos/{owner}/{repo}）。
+
+    返回 permissions dict：{admin, maintain, push, triage, pull}。
+    只需 pull 权限即可调用——bot 用自己的 token 查自己对该仓库的权限。
+    失败返回 None。
+    """
+    if not api_token:
+        return None
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}"
+    try:
+        data = _github_req("GET", url, api_token)
+        return data.get("permissions") or {}
+    except RuntimeError as e:
+        log.warning(f"get_github_repo_permissions failed: {e}")
+        return None
+
+
+def add_github_collaborator(api_token: str, owner: str, repo: str, username: str, permission: str = "push") -> bool:
+    """将用户添加为 GitHub 仓库协作者（PUT /repos/{owner}/{repo}/collaborators/{username}）。
+    
+    GitHub 会自动发送邀请，被邀请方需 accept 才生效。
+    permission: pull / push / admin（OAuth App token 不支持 maintain/triage）
+    默认 push（可读写代码），admin 仓库 owner 可用 maintain/admin。
+    已是成员时返回 True（幂等）。
+    """
+    if not username or not api_token:
+        return False
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}"
+    try:
+        _github_req("PUT", url, api_token, {"permission": permission})
+        return True
+    except RuntimeError as e:
+        # 403 = 已是 collaborator（GitHub 返回 403 而非 200）
+        if "403" in str(e):
+            return True
+        log.warning(f"add_github_collaborator failed: {e}")
+        return False
+
+
+def accept_github_invite(api_token: str, owner: str, repo: str) -> bool:
+    """接受 GitHub 仓库邀请（PATCH /user/repository_invitations）。
+    
+    GitHub 的邀请 accept 需要用被邀请方的 token。
+    先列出邀请找到 invitation_id，再 accept。
+    """
+    if not api_token:
+        return False
+    try:
+        invites = _github_req("GET", f"{_GITHUB_API_BASE}/user/repository_invitations?per_page=50", api_token)
+        if not isinstance(invites, list):
+            return False
+        target = f"{owner}/{repo}".lower()
+        for inv in invites:
+            inv_repo = (inv.get("repository") or {}).get("full_name", "").lower()
+            if inv_repo == target:
+                inv_id = inv.get("id")
+                if inv_id:
+                    _github_req("PATCH", f"{_GITHUB_API_BASE}/user/repository_invitations/{inv_id}", api_token, {})
+                    log.info(f"accept_github_invite: accepted {target} (id={inv_id})")
+                    return True
+        log.info(f"accept_github_invite: no matching invite for {target} (total={len(invites)})")
+        return False
+    except RuntimeError as e:
+        log.warning(f"accept_github_invite failed: {e}")
+        return False
+
+
+def get_github_collaborator_permission(api_token: str, owner: str, repo: str, username: str) -> str:
+    """查看 GitHub 仓库成员权限（GET /repos/{owner}/{repo}/collaborators/{username}/permission）。
+    
+    返回 permission role_name（如 admin/maintain/push），失败返回空字符串。
+    注意：需要 admin 权限的 token（通常用仓库 owner 的 token，不是 bot 自己的 token）。
+    """
+    if not username or not api_token:
+        return ""
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}/permission"
+    try:
+        data = _github_req("GET", url, api_token)
+        perm = data.get("permission") or ""
+        role = data.get("role_name") or ""
+        return role or perm or ""
+    except RuntimeError as e:
+        log.warning(f"get_github_collaborator_permission failed: {e}")
+        return ""
+
+
+def check_github_is_collaborator(api_token: str, owner: str, repo: str, username: str) -> bool:
+    """检查用户是否已是仓库 collaborator（GET /repos/{owner}/{repo}/collaborators/{username}）。
+    
+    204 = 是 collaborator，404 = 不是。
+    需要 push 权限的 token（仓库 owner 的 token 即可）。
+    """
+    if not username or not api_token:
+        return False
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}"
+    try:
+        _github_req("GET", url, api_token)
+        return True  # 200 = 是 collaborator
+    except RuntimeError as e:
+        if "404" in str(e):
+            return False  # 不是 collaborator
+        # 204 也可能被 _github_req 当作异常（空 body）
+        if "204" in str(e) or "No Content" in str(e):
+            return True
+        log.warning(f"check_github_is_collaborator failed: {e}")
+        return False
+
+
+def create_github_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
+    """在 token 用户个人名下创建一个空仓库。"""
+    if not api_token:
+        raise RuntimeError("GitHub API Token 未配置")
+    body = {
+        "name": name,
+        "description": description,
+        "private": bool(private),
+        "auto_init": False,
+    }
+    try:
+        result = _github_req("POST", f"{_GITHUB_API_BASE}/user/repos", api_token, body)
+    except RuntimeError as e:
+        if "403" in str(e) and "Resource not accessible by integration" in str(e):
+            # 检测 installation 状态，区分"未安装"和"权限不足"
+            _hint = _github_check_installation(api_token)
+            raise RuntimeError(_hint) from e
+        raise
+    full_name = result.get("full_name", "")
+    if not full_name:
+        raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
+    return result

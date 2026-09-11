@@ -51,6 +51,12 @@ def setup_module():
             db.execute("INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope) VALUES (?,?,?,?,?,'official')",
                        (skill, dn, f"{dn} description", parent, skill))
         db.commit()
+        # 确保 test_api 用户有权访问 org/test 仓库（check_repo_access 需要 managed_repos + user_repos 关联）
+        db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
+                   ("gitcode:org/test", "org", "test", "org/test"))
+        db.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, is_join, is_admin) VALUES (?,?,1,1)",
+                   (_uid["id"], "gitcode:org/test"))
+        db.commit()
 
 def teardown_module():
     if _uid:
@@ -331,6 +337,14 @@ class TestRepos:
 # ===================== 4. Dashboard =====================
 class TestDashboard:
     def test_dashboard_success(self):
+        # 确保测试用户有权访问 org/test（前面的测试可能清了 managed_repos）
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
+                       ("gitcode:org/test", "org", "test", "org/test"))
+            db.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, is_join, is_admin) VALUES (?,?,1,1)",
+                       (_uid["id"], "gitcode:org/test"))
+            db.commit()
         r = client.get("/api/dashboard/org/test", headers=_headers)
         assert r.status_code == 200
         d = r.json()
@@ -358,6 +372,10 @@ class TestPipeline:
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM events WHERE repo_key=?", (repo_key,))
+            c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
+                      (repo_key, "pipeline", "repo-prefix", "pipeline/repo-prefix"))
+            c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, is_join, is_admin) VALUES (?,?,1,1)",
+                      (_uid["id"], repo_key))
             c.execute("INSERT INTO events (repo_key, event_type, agent_type, issue_id, title, summary, status, payload) VALUES (?,?,?,?,?,?,?,?)",
                       (repo_key, "issue_opened", "issue", "#1", "pipeline-test", "s", "completed", '{}'))
             db.commit()

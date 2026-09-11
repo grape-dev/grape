@@ -243,15 +243,19 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
     }
 
 
-def _running_issue_ids(repo_key: str) -> set[str]:
+def _running_issue_ids(repo_keys) -> set[str]:
     """按 repo 查 agent_tasks 中 queued/dispatched/running 的 issue_id 集合（前端 B 执行态派生）。"""
+    if isinstance(repo_keys, str):
+        repo_keys = [repo_keys]
     from src.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT DISTINCT issue_id FROM agent_tasks WHERE repo_key=? AND status IN ('queued','dispatched','running') AND issue_id!=''",
-                (repo_key,)
+                "SELECT DISTINCT issue_id FROM agent_tasks WHERE repo_key IN ({}) AND status IN ('queued','dispatched','running') AND issue_id!=''".format(
+                    ",".join("?" * len(repo_keys))
+                ),
+                repo_keys
             )
             return {r[0] for r in c.fetchall()}
     except Exception:
@@ -261,15 +265,29 @@ def _running_issue_ids(repo_key: str) -> set[str]:
 @router.get("/{owner}/{repo}")
 def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    _owner_repo = f"{owner}/{repo}"
+    repo_key = to_repo_key(_owner_repo)
+
+    # 权限校验：用户必须有权访问该仓库
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+
+    # 同时查 gitcode: 和 github: 前缀的事件（用户可能切换了 provider）
+    _repo_keys = [repo_key]
+    if repo_key.startswith("gitcode:"):
+        _repo_keys.append(f"github:{_owner_repo}")
+    elif repo_key.startswith("github:"):
+        _repo_keys.append(f"gitcode:{_owner_repo}")
 
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at, actor, payload, duration FROM events WHERE repo_key=? AND issue_id != '' ORDER BY seq ASC",
-                (repo_key,)
+                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at, actor, payload, duration, repo_key FROM events WHERE repo_key IN ({}) AND issue_id != '' ORDER BY seq ASC".format(
+                    ",".join("?" * len(_repo_keys))
+                ),
+                _repo_keys
             )
             rows = c.fetchall()
         except Exception:
@@ -278,7 +296,7 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
     events = [
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
          "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": r[9] or "",
-         "duration": r[10]}
+         "duration": r[10], "repo_key": r[11] if len(r) > 11 else repo_key}
         for r in rows
     ]
 
@@ -314,7 +332,7 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
 
     # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，
     # 不维护 issue_agent_session.status 双份记账，避免状态漂移
-    running_issues = _running_issue_ids(repo_key)
+    running_issues = _running_issue_ids(_repo_keys)
     for p in pipelines:
         p["executing"] = p["issue_id"] in running_issues
 
@@ -326,8 +344,16 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
     scene_id = ""
     pipeline_config = get_pipeline_config(scene_id) if scene_id else None
 
+    # 返回实际有事件的 repo_key（带 provider 前缀），供前端生成 VCS 链接
+    _actual_repo_key = repo_key
+    if events:
+        _actual_repo_key = events[0].get("repo_key", repo_key) or repo_key
+
+    # 返回 repo（不带 provider 前缀，前端用 _vcsUrl() 按 repo_key 判断 provider 拼链接）
+    from src.repo_key import from_repo_key
     return {
-        "repo": f"{owner}/{repo}",
+        "repo": from_repo_key(_actual_repo_key),
+        "repo_key": _actual_repo_key,
         "active": active,
         "history": history,
         "active_count": 1 if active and active["result"] in ("Processing", "Pending") else 0,

@@ -532,13 +532,7 @@ if os.path.isdir(STATIC_DIR):
             raise HTTPException(status_code=404)
         return _spa_response()
 
-    # SPA catch-all：非 API/static 的路径（如 /login）回退到 index.html
-    @app.get("/{path:path}")
-    async def spa_catch_all(path: str):
-        if path.startswith("api/") or path.startswith("static/"):
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404)
-        return _spa_response()
+    # 注意：SPA catch-all (/{path:path}) 延迟到文件末尾注册，避免拦截 /health /healthz 等系统端点
 
 from src.api.db_setup import init_database
 init_database()

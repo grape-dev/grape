@@ -20,7 +20,7 @@
     "event_detail": "事件详情",
     "skill_detail": "技能详情",
     "sub_skill_detail": "子技能详情",
-    "gitcode_repo": "GitCode 仓库",
+    "gitcode_repo": "仓库设置",
     "scene_center": "项目场景",
     "scene_skill_market": "场景·技能",
     "scene_market": "场景市场",
@@ -37,6 +37,7 @@
   },
   "login": {
     "gitcode_login": "使用 GitCode 登录",
+    "github_login": "使用 GitHub 登录",
     "pwd_login": "← 用户名密码登录",
     "username": "用户名",
     "password": "密码",

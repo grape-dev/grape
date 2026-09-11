@@ -1,5 +1,23 @@
 """Bot 配置：全局常量、事件路由、多账户配置"""
 import os, json, logging, logging.handlers, urllib.request, socket
+import ssl
+
+# api.gitcode.com 被 GFW SNI 拦截（返回自签名证书），全局禁用 urllib SSL 验证。
+# 影响所有用 urllib.request.urlopen 调 api.gitcode.com 的模块（event_pipeline / auth / repo_manager 等）。
+# requests 库的调用在各调用点单独 verify=False。
+_ssl_ctx = ssl.create_default_context()
+_ssl_ctx.check_hostname = False
+_ssl_ctx.verify_mode = ssl.CERT_NONE
+_https_handler = urllib.request.HTTPSHandler(context=_ssl_ctx)
+_opener = urllib.request.build_opener(_https_handler)
+urllib.request.install_opener(_opener)
+
+# 抑制 requests 库的 InsecureRequestWarning
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
 
 # ====== 日志 ======
 # 结构化 JSON 日志（参考 multica logger/logger.go）：
@@ -314,6 +332,40 @@ def is_gitcode_user_allowed(gitcode_login: str) -> bool:
         if not wl:
             return True
         return gitcode_login in wl
+    except Exception:
+        return True
+
+
+def is_github_user_allowed(github_login: str) -> bool:
+    """白名单判定（GitHub 用户名）。
+
+    优先查 DB（login_whitelist 表 github_username 列），降级读 login-whitelist.json 文件。
+    - DB 表存在且有数据 → github_login 必须在 github_username 列中
+    - DB 不可用 → 降级文件逻辑
+    - 文件缺失 / whitelist 为空 → 全部放行（默认开放）
+    - 读取异常 → 保守放行（避免误锁所有用户）
+    """
+    if not github_login:
+        return False
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
+            if count > 0:
+                row = c.execute("SELECT 1 FROM login_whitelist WHERE github_username=?", (github_login,)).fetchone()
+                return row is not None
+    except Exception:
+        pass
+    try:
+        if not os.path.exists(LOGIN_WHITELIST_PATH):
+            return True
+        with open(LOGIN_WHITELIST_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        wl = data.get("whitelist") if isinstance(data, dict) else None
+        if not wl:
+            return True
+        return github_login in wl
     except Exception:
         return True
 

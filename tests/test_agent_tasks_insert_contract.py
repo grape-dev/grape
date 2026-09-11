@@ -116,7 +116,7 @@ def test_create_direct_task_no_bindings_error_in_db():
         "agent_type": "vod", "skill": "vod", "skill_id": 0,
         "prompt": "", "cwd": "", "runtime_session_id": "", "event_type": "issue_opened",
         "account": "owner/test-agenttasks-insert", "user_id": 0,
-        "repo_gitcode_token": "", "env_extra": "{}", "skill_files": "{}",
+        "repo_gitcode_token": "", "user_gitcode_token": "", "env_extra": "{}", "skill_files": "{}",
         "server_url": "", "issue_session_id": "", "project_info_files": "{}",
         "project_info_meta": "{}", "knowledge_files": "{}",
         "project_info_file_urls": "{}", "knowledge_file_urls": "{}", "attempts": 0,
