@@ -997,6 +997,10 @@ def _seed_event_action_filter():
         ("pull_request_updated", "update", 1, "user", "", "", ""),
         ("pull_request_updated", "close",  0, "any", "", "", ""),
         ("pull_request_updated", "reopen", 0, "any", "", "", ""),
+        # pull_request_review / pull_request_closed（multi-vcs 细分后独立事件，默认不触发执行 agent）
+        ("pull_request_review", "review",  0, "any", "", "", ""),
+        ("pull_request_review", "approve", 0, "any", "", "", ""),
+        ("pull_request_closed", "close",   0, "any", "", "", ""),
     ]
     with db_lock:
         c = db.cursor()

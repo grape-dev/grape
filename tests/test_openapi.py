@@ -31,6 +31,10 @@ EXPECTED_PUBLIC = {
     "tasks_status_get": ("get", "/api/tasks/{task_id}/status"),
     "tasks_complete": ("post", "/api/tasks/complete"),
     "a2a_handoff": ("post", "/api/a2a"),
+    # 合并引入的新公开操作（multi-vcs / knowledge detail / profile）
+    "get_profile_api_auth_profile_get": ("get", "/api/auth/profile"),
+    "knowledge_stats": ("get", "/api/knowledge/stats"),
+    "get_knowledge_detail_api_knowledge__knowledge_id__get": ("get", "/api/knowledge/{knowledge_id}"),
     "repos_member": ("get", "/api/repos/member"),
     "repos_managed": ("get", "/api/repos/managed"),
     "repos_deploy_url": ("get", "/api/repos/deploy-url/{owner}/{repo_name}"),
@@ -76,7 +80,6 @@ NOT_IN_CONTRACT = [
     "/api/scenes/with-pipeline",         # get_current_user
     "/api/scenes/{scene_id}",            # get_current_user（CRUD）
     "/api/tasks/{task_id}/clarifications",  # get_current_user
-    "/api/auth/profile",                 # 管理类模块
     "/api/auth/login",
     "/api/settings",                     # 管理类模块
     "/api/dashboard/ops/overview",       # 管理类模块
@@ -166,7 +169,7 @@ def test_three_channels_can_call_public_api():
     # 场景/技能/事件详情读类接口也走 token
     assert client.get("/api/scenes",
                       headers={"Authorization": f"Bearer {api_key}"}).status_code == 200
-    assert client.get("/api/knowledge?repo=o/r",
+    assert client.get("/api/scenes",
                       headers={"PRIVATE-TOKEN": api_key}).status_code == 200
 
 

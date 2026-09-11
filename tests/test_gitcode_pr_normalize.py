@@ -9,22 +9,16 @@ BACKEND = GitCodeBackend()
 # 注入规则（不依赖 event_action_filter seed，避免环境旧库复用导致 no_rule）
 def _inject_rules(monkeypatch):
     import src.api.event_rule as er
+    _base = {
+        "open": {"allow": 1, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
+        "update": {"allow": 1, "actor": "user", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
+        "close": {"allow": 0, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
+        "reopen": {"allow": 0, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
+    }
     rules = {
-        "pull_request_opened": {
-            "open": {"allow": 1, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
-            "update": {"allow": 1, "actor": "user", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
-            "close": {"allow": 0, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
-            "reopen": {"allow": 0, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
-        },
-        "pull_request_updated": {
-            "open": {"allow": 1, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
-            "update": {"allow": 1, "actor": "user", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
-            "close": {"allow": 0, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
-            "reopen": {"allow": 0, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
-        },
-        "pull_request_merged": {
-            "merge": {"allow": 1, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""},
-        },
+        ("", "pull_request_opened"): dict(_base),
+        ("", "pull_request_updated"): dict(_base),
+        ("", "pull_request_merged"): {"merge": {"allow": 1, "actor": "any", "require_changes": [], "block_changes": [], "handle_side_effect": ""}},
     }
     monkeypatch.setattr(er, "load_event_action_rule", lambda force=False: rules)
 
@@ -50,31 +44,30 @@ def test_open_create_to_pull_request_opened():
     for a in ("open", "create"):
         evt = _merge_request_hook(_payload(a))
         assert evt["type"] == "pull_request_opened"
-        assert evt["pr_action"] == a
+        assert evt["payload"]["_raw_action"] == a
 
 
 def test_merge_to_pull_request_merged():
     evt = _merge_request_hook(_payload("merge"))
     assert evt["type"] == "pull_request_merged"
-    assert evt["pr_action"] == "merge"
 
 
 def test_update_to_pull_request_updated_with_signal():
     evt = _merge_request_hook(_payload("update", with_commits=True))
     assert evt["type"] == "pull_request_updated"
-    assert evt["pr_action"] == "update"
-    assert evt["has_commits"] is True
+    assert "commits" in evt["payload"]
+    assert evt["payload"]["_raw_action"] == "update"
     evt0 = _merge_request_hook(_payload("update", with_commits=False))
     assert evt0["type"] == "pull_request_updated"
-    assert evt0["has_commits"] is False
+    assert "commits" not in evt0["payload"]
 
 
-def test_reopen_close_review_to_pull_request_updated():
-    # 通过审查/审查类（approve）与 reopen/close 均不再并成 opened，归入 updated 由 L1 处理
-    for a in ("reopen", "close", "approve"):
-        evt = _merge_request_hook(_payload(a))
-        assert evt["type"] == "pull_request_updated", a
-        assert evt["pr_action"] == a
+def test_close_review_reopen_taxonomy():
+    # 通过审查/审查类 → 独立 PR_REVIEW（不再并成 opened）；close → PR_CLOSED；reopen → opened
+    assert _merge_request_hook(_payload("approve"))["type"] == "pull_request_review"
+    assert _merge_request_hook(_payload("review"))["type"] == "pull_request_review"
+    assert _merge_request_hook(_payload("close"))["type"] == "pull_request_closed"
+    assert _merge_request_hook(_payload("reopen"))["type"] == "pull_request_opened"
 
 
 def test_pr_update_commit_gate(monkeypatch):
