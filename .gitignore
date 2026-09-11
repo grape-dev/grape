@@ -73,6 +73,7 @@ query_*.py
 monitor_*.py
 monitor_*.sh
 sre_monitor_loop.sh
+merge-remote-branch.sh
 skills.bak.*/
 *.bak.2026082*
 *.bak2
@@ -100,6 +101,9 @@ skills/
 trace_*.py
 configs/scene-sync.json
 .coverage
+
+# help.html 为生成物（由 src/help_page_gen.py 依据 help/ 渲染，启动时生成）
+src/api/static/help.html
 
 # grape-cli 已拆为独立仓库管理（D:/Developer/grape-dev/grape/cli）
 cli/

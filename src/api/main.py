@@ -49,6 +49,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Templates: startup check failed: {e}")
 
+        # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新（改 md 后重启生效）
+        try:
+            from src.help_page_gen import generate as _generate_help_page
+            _n_help = _generate_help_page()
+            log.info(f"Help: help.html regenerated ({_n_help} sources)")
+        except Exception as e:
+            log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
+
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
         lease_store = None
