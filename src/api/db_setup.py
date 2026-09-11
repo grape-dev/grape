@@ -2472,8 +2472,9 @@ def _migrate_tables():
             c = db.cursor()
             _ensure_column(c, "user_accounts", "gitcode_publish_repo", "TEXT DEFAULT ''")
             _ensure_column(c, "user_accounts", "github_publish_repo", "TEXT DEFAULT ''")
+            _ensure_column(c, "user_accounts", "github_login", "TEXT DEFAULT ''")
             db.commit()
-            log.info("Added gitcode_publish_repo / github_publish_repo columns to user_accounts")
+        log.info("Added gitcode_publish_repo / github_publish_repo / github_login columns to user_accounts")
     except Exception as e:
         log.warning(f"Add user_accounts publish repo columns failed: {e}")
     # ===== managed_repos 部署URL列（weekly-01 合并） =====
