@@ -452,7 +452,7 @@ def ensure_default_agent_sessions(repo_key: str):
         for _at, _sk in _mapping.items():
             try:
                 from src.user.db import resolve_skill_id
-                _skill_id = resolve_skill_id(_sk)
+                _skill_id = resolve_skill_id(_sk, repo_key=repo_key)
                 # 默认引擎：按 专属→全局→本机 选择，写入 session 主引擎；
                 # 无候选则 runtime_id=0（agent 标识"无 engine，不可用"）
                 _rid = resolve_default_engine(repo_key, _at) or 0

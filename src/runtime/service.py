@@ -390,12 +390,12 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                     _okey = _sk.get("file_path") or ""
                 else:
                     # ② skill_id 失效（skill 被删除/停用）→ 回退按名字解析
-                    _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
+                    _sid = resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or resolve_skill_id(skill)
                     _path = get_skill_path(_sid) if _sid else (skill_path or "")
                     _okey = get_skill_object_key(_sid) if _sid else ""
             else:
                 # ③ 无 skill_id → 走老逻辑（向后兼容）
-                _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
+                _sid = resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or resolve_skill_id(skill)
                 _path = get_skill_path(_sid) if _sid else (skill_path or "")
                 _okey = get_skill_object_key(_sid) if _sid else ""
             # 本地目录存在 → 打包（official 技能 + 少数有磁盘目录的 user/repo 技能）

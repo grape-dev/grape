@@ -817,10 +817,20 @@ def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str =
         return False
 
 
-def resolve_skill_id(skill_name: str, owner_id: str = "") -> int:
-    """按 skill_name 匹配 skill 表拿主键 id（official 优先，其次 user/repo 匹配 owner）"""
+def resolve_skill_id(skill_name: str, owner_id: str = "",
+                     repo_key: str = "", user_id: str | int = "") -> int:
+    """按 skill_name 匹配 skill 表拿主键 id。
+
+    查询顺序：official → repo scope（按 repo_key）→ user scope（按 user_id）。
+    owner_id 参数兼容旧调用（非空时等价于 repo_key=owner_id）。
+    """
     if not skill_name:
         return 0
+    # 兼容旧调用：owner_id 非空时作为 repo_key 回退
+    if owner_id and not repo_key:
+        repo_key = owner_id
+    if user_id:
+        user_id = str(user_id)
     try:
         with db_lock:
             c = db.cursor()
@@ -828,8 +838,13 @@ def resolve_skill_id(skill_name: str, owner_id: str = "") -> int:
             row = c.fetchone()
             if row:
                 return row[0]
-            if owner_id:
-                c.execute("SELECT id FROM skill WHERE skill_name=? AND (scope='user' OR scope='repo') AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, owner_id))
+            if repo_key:
+                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, repo_key))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+            if user_id:
+                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, user_id))
                 row = c.fetchone()
                 if row:
                     return row[0]

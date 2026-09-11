@@ -1450,7 +1450,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
             try:
                 from src.user.db import resolve_skill_id
                 from src.api.session_store import get_agent_type_enable
-                skill_id = resolve_skill_id(skill)
+                skill_id = resolve_skill_id(skill, repo_key=repo_key, user_id=user.get("id", ""))
 
                 runtime_id = 0
                 try:
