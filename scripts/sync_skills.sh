@@ -14,7 +14,9 @@
 # =====================================================================
 set -euo pipefail
 
-SKILLS_REPO="${SKILLS_REPO:-https://Jason7602:shhnrXxGm1E1SJ-FxKxQ9M2Q@gitcode.com/grape-dev/grape-skills.git}"
+# 不再内联凭据（避免进 git）；用 `~/.git-credentials`（store）+ 显式 Jason7602 身份替代
+# （grape-skills 为私有仓库，主仓库原用的 Jason7602 凭据可读）
+SKILLS_REPO="${SKILLS_REPO:-https://gitcode.com/grape-dev/grape-skills.git}"
 SKILLS_REF="${SKILLS_REF:-main}"
 
 # 官方技能 agent_type 目录（+ _template），按部署结构铺入
@@ -25,7 +27,9 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "[sync-skills] fetch ${SKILLS_REPO}@${SKILLS_REF}"
-git clone --depth 1 --branch "$SKILLS_REF" "$SKILLS_REPO" "$STAGE/skills-repo" >/dev/null 2>&1
+# 强制 Jason7602 身份（~/.git-credentials 中该条可读 grape-skills；不把密码写死在脚本里）
+git -c 'url.https://Jason7602@gitcode.com/.insteadOf=https://gitcode.com/' \
+  clone --depth 1 --branch "$SKILLS_REF" "$SKILLS_REPO" "$STAGE/skills-repo" >/dev/null 2>&1
 
 # 1) 官方技能 → 部署根 skills/<agent>/（只清官方技能，保留 custom/ repo/ 运行时目录）
 for d in "${SKILL_AGENT_DIRS[@]}"; do

@@ -76,6 +76,71 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(get_current
     return {"message": "凭据已更新"}
 
 
+# ====== API Keys (Issue #69: grape_ 前缀用户级 key 管理) ======
+
+class CreateApiKeyBody(BaseModel):
+    name: str = ""
+
+
+@router.post("/api-keys")
+def create_api_key(body: CreateApiKeyBody, user: dict = Depends(get_current_user)):
+    """生成 grape_ 前缀 API key——明文仅返回一次，DB 存 SHA-256 hash。
+
+    复用 auth_token.generate_api_token（Issue-45 方式 B 已有后端），
+    补齐 Web UI 管理入口（Issue #69 验收标准）。
+    """
+    from src.api.auth_token import generate_api_token
+
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "Key 名称不能为空"})
+    if len(name) > 64:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "Key 名称不能超过 64 字符"})
+
+    result = generate_api_token(user["id"], name)
+    if not result:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "生成 API Key 失败（同名 key 可能已存在）"})
+
+    log.info(f"API key created: user={user['username']} id={result['id']} name={name}")
+    return {
+        "id": result["id"],
+        "key": result["token"],       # 明文——仅此一次返回
+        "name": name,
+        "message": "API Key 已生成，明文仅展示此次，请立即保存",
+    }
+
+
+@router.get("/api-keys")
+def list_api_keys(user: dict = Depends(get_current_user)):
+    """列出当前用户的所有 API key（不含明文，仅展示名称+状态+时间）。"""
+    from src.api.auth_token import list_api_tokens, API_KEY_PREFIX
+
+    tokens = list_api_tokens(user["id"])
+    return {"keys": [
+        {
+            "id": t["id"],
+            "name": t["name"],
+            "prefix": API_KEY_PREFIX + "••••",
+            "created_at": normalize_event_time(t.get("created_at")),
+            "last_used_at": normalize_event_time(t.get("last_used_at")) if t.get("last_used_at") else None,
+        }
+        for t in tokens
+    ]}
+
+
+@router.delete("/api-keys/{key_id}")
+def revoke_api_key(key_id: int, user: dict = Depends(get_current_user)):
+    """吊销 API key——软删除（revoked=1），立即失效，保审计。"""
+    from src.api.auth_token import revoke_api_token
+
+    ok = revoke_api_token(user["id"], key_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "API Key 不存在或已吊销"})
+
+    log.info(f"API key revoked: user={user['username']} id={key_id}")
+    return {"message": "API Key 已吊销，立即失效"}
+
+
 # ====== Notifications ======
 
 @router.get("/notifications")

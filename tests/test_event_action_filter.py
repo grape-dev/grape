@@ -130,15 +130,19 @@ class TestEvaluateEventAction:
 
     def test_pr_update_actor_split(self, monkeypatch):
         from src.api.event_rule import evaluate_event_action
-        # user → allow
+        # Issue #49 补充：PR update 需带新 commit 才放行
+        payload = {"object_attributes": {"action": "update"}, "commits": [{"id": "x"}]}
         _monkey_actor(monkeypatch, "user")
-        d1 = evaluate_event_action("pull_request_opened", {"object_attributes": {"action": "update"}})
+        d1 = evaluate_event_action("pull_request_opened", payload)
         assert d1["decision"] == "allow"
-        # bot → skip（actor mismatch）
         _monkey_actor(monkeypatch, "bot")
-        d2 = evaluate_event_action("pull_request_opened", {"object_attributes": {"action": "update"}})
+        d2 = evaluate_event_action("pull_request_opened", payload)
         assert d2["decision"] == "skip"
         assert "actor" in d2["reason"]
+        # 无 commit（审查/元数据）→ 无论 user/bot 均 skip
+        _monkey_actor(monkeypatch, "user")
+        d3 = evaluate_event_action("pull_request_opened", {"object_attributes": {"action": "update"}})
+        assert d3["decision"] == "skip" and "commit" in d3["reason"]
 
     def test_no_rule_allows(self, monkeypatch):
         from src.api.event_rule import evaluate_event_action

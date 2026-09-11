@@ -81,7 +81,13 @@ function loadAgentTypes() {
     } catch (e) { cachedRepos = null; }
 
     if (cachedRepos && !forceRefresh) {
-      renderReposFromData(cachedRepos);
+      // Issue #82: cachedRepos 路径也需 _currentView 守卫，与 API 回调路径一致——
+      // 用户已进入某页面时不应覆盖布局 DOM，只更新侧边栏下拉
+      if (window._currentView && window._currentView !== '') {
+        initSidebarRepos();
+      } else {
+        renderReposFromData(cachedRepos);
+      }
     }
 
     API.get('/repos/member').then(d => {
@@ -138,7 +144,9 @@ function loadAgentTypes() {
     $('mainView').style.zIndex = '';
     $('pageTitle').textContent = I18N.t('app.current_project');
 
-    if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
+    // Issue #82: 仅在完全无选中仓库时才默认选第一个；
+    // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
+    if (!current) {
       const r = managedRepos[0];
       if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
       else localStorage.removeItem('currentRepo');
@@ -248,6 +256,39 @@ function loadAgentTypes() {
       _hiddenSince = 0;
     }
   });
+  // ── Sidebar 分组折叠（Issue #66）──
+  // 可折叠分组标题带 class="grp-tog" + data-key（localStorage 键）。
+  // 默认收起（HTML 中预置 collapsed）；initGroupCollapse() 读取 localStorage
+  // 同步真实状态；toggleGroup() 点击切换并写回。收起时 .grp-items 子项隐藏。
+  function _readCollapsed(key) {
+    // 默认 true（收起）；localStorage 存 '0'/'1'
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? true : v === '1';
+    } catch (e) { return true; }
+  }
+  function initGroupCollapse() {
+    document.querySelectorAll('.grp-tog[data-key]').forEach(tog => {
+      const key = tog.getAttribute('data-key');
+      const collapsed = _readCollapsed(key);
+      tog.classList.toggle('collapsed', collapsed);
+      const items = tog.nextElementSibling;
+      if (items && items.classList.contains('grp-items')) {
+        items.classList.toggle('hid', collapsed);
+      }
+    });
+  }
+  function toggleGroup(tog) {
+    const key = tog.getAttribute('data-key');
+    const collapsed = !tog.classList.contains('collapsed');
+    tog.classList.toggle('collapsed', collapsed);
+    const items = tog.nextElementSibling;
+    if (items && items.classList.contains('grp-items')) {
+      items.classList.toggle('hid', collapsed);
+    }
+    try { localStorage.setItem(key, collapsed ? '1' : '0'); } catch (e) {}
+  }
+
   function nav(view, param) {
     // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
     if (view === 'knowledge' && window._currentView === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
@@ -289,6 +330,17 @@ function loadAgentTypes() {
       if (param && o.includes("'" + param + "'")) a.classList.add('act');
       else if (!param && o === "nav('" + view + "')") a.classList.add('act');
     });
+    // 导航到折叠分组内的项时自动展开该分组（Issue #66）
+    const _actNav = document.querySelector('.sb-nav a.act');
+    if (_actNav) {
+      const _items = _actNav.closest('.grp-items');
+      if (_items && _items.classList.contains('hid')) {
+        const _tog = _items.previousElementSibling;
+        if (_tog && _tog.classList.contains('grp-tog') && _tog.classList.contains('collapsed')) {
+          toggleGroup(_tog);
+        }
+      }
+    }
 
     const title = $('pageTitle');
     const repoTitle = $('repoTitle');
@@ -537,6 +589,8 @@ function loadAgentTypes() {
       currentRepo: localStorage.getItem('currentRepo'),
       url: window.location.href
     }));
+    // 同步可折叠分组的持久化状态（Issue #66）
+    initGroupCollapse();
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
     const urlToken = p.get('token');
@@ -631,7 +685,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
+  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup};
 })();
 document.addEventListener('DOMContentLoaded', () => app.init());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });
