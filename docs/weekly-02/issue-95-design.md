@@ -12,7 +12,7 @@ Issue #67 只把 `knowledge_files()` 和 `_build_knowledge_section()` 两条路�
 | 2 | member_files_pi() 没接 ref 表 | 全量查 scope=member，3 处调用 | 未关联知识全量注入 project_info_files |
 | 3 | agent_files() 没接 ref 表 | 全量查 scope=member+agent_type，2 处调用 | 未关联知识全量注入 project_info_files |
 | 4 | generate_file_urls() 没接 ref 表 | 全量查 member 生成 OBS URL | 未关联知识 URL 暴露给 worker |
-| 5 | _build_knowledge_section 只在 chat 路径调用 | build_devops_agent_prompt 不调它 | ref 表对流水线 prompt 不生效 |
+| 5 | ~~_build_knowledge_section 只在 chat 路径调用~~ | build_devops_agent_prompt 不调它 | **不改**——devops 路径靠 worker 物化 knowledge_files 交付知识，不需要 prompt 内联 |
 | 6 | vod_handler_async 独立注入 baseline | 直接查 scope=baseline，第三套注入逻辑 | 三套注入逻辑不统一 |
 | 7 | _is_credential_file 缺 "cr" 关键词 | _CREDENTIAL_SUBSTRINGS 无 "cr" | repo-cr.json 未被过滤 |
 | 8 | baseline OBS key 格式不统一 | project-info/{repo_key}/{filename} | 和其他 scope key 前缀不一致 |
@@ -117,19 +117,11 @@ def generate_file_urls(self, repo_key, agent_type="", issue_num=0, scene_id="") 
 **调用方改签名**：
 - `service.py:455` — `_storage.generate_file_urls(repo_key, agent_type, _inum, scene_id)`
 
-### 3.6 build_devops_agent_prompt 接入 _build_knowledge_section（问题 5）
+### 3.6 ~~build_devops_agent_prompt 接入 _build_knowledge_section~~（问题 5 — 不改）
 
-在 `build_devops_agent_prompt` 里加 `_build_knowledge_section` 调用：
+devops 路径（build_devops_agent_prompt）走 worker 队列模式，知识通过 `knowledge_files` 物化到 `.knowledge/` 目录，Agent 用 read tool 读取。不需要 prompt 内联——`_build_knowledge_section` 内联是 chat 路径专用（chat 没有 worker 物化）。
 
-```python
-# 现有：parts.append(_build_project_info_section(repo_key, agent_type))
-# 新增：
-_knowledge, _ = _build_knowledge_section(repo_key, agent_type=agent_type, issue_num=issue_num, scene_id=scene_id)
-if _knowledge:
-    parts.append(_knowledge)
-```
-
-**注意**：`_build_project_info_section` 注入的是 baseline 基线（project-graph.md / project-capabilities.md），`_build_knowledge_section` 注入的是 ref 表关联知识。两者不冲突——baseline 是全局的，ref 表是精确匹配的。但 baseline 也走 ref 表了（issue_num=0, agent_type='', scene_id=''），所以 `_build_knowledge_section` 已经包含 baseline。`_build_project_info_section` 的 baseline 内联摘要可以保留（它是截断的摘要 + 文件路径指引），不重复。
+只要 `knowledge_files` 走 ref 表 + credential 过滤（问题 1），devops 路径就正常。
 
 ### 3.7 vod_handler_async 统一注入（问题 6）
 
@@ -176,7 +168,6 @@ _CREDENTIAL_SUBSTRINGS = (
 |------|------|
 | `src/api/knowledge.py` | 新增 query_knowledge_refs()；knowledge_files 加 credential 过滤；member_files_pi/agent_files 接 ref 表；baseline OBS key 统一；_is_credential_file 加 "repo-cr" |
 | `src/storage/obs.py` | generate_file_urls 接 ref 表 + credential 过滤 |
-| `src/prompt_builder.py` | build_devops_agent_prompt 加 _build_knowledge_section 调用 |
 | `src/im/vod_handler_async.py` | _build_vod_prompt 改调 _build_project_info_section |
 | `src/runtime/service.py` | member_files_pi/agent_files/generate_file_urls 调用方加参数 |
 | `src/api/event_pipeline.py` | member_files_pi/agent_files 调用方加参数 |
@@ -205,7 +196,7 @@ _CREDENTIAL_SUBSTRINGS = (
 - [ ] member_files_pi() 接 ref 表，只返回关联知识
 - [ ] agent_files() 接 ref 表，只返回关联知识
 - [ ] generate_file_urls() 接 ref 表，只给关联知识生成 URL
-- [ ] build_devops_agent_prompt 注入 ref 表知识
+- [x] ~~build_devops_agent_prompt 注入 ref 表知识~~ — 不改，devops 靠 worker 物化
 - [ ] vod_handler_async 用统一注入逻辑
 - [ ] _is_credential_file 包含 "repo-cr"
 - [ ] baseline OBS key 统一为 knowledge/{owner}/{repo}/project-info/{filename}
