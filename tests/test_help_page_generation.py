@@ -75,6 +75,11 @@ class TestShell:
     def test_section_scoping_labels(self, page_text):
         assert "使用指南" in page_text and "API 参考" in page_text
 
+    def test_openapi_download_link_fixed(self, page_text):
+        """契约下载 URL 固定为 /static/openapi.json（生成物，启动期落盘）。"""
+        assert "下载 openapi.json" in page_text
+        assert "/static/openapi.json" in page_text
+
     def test_data_parses_with_correct_counts(self, data):
         assert len(data["usage"]) == 9, f"expected 9 usage docs, got {len(data['usage'])}"
         assert len(data["api"]) == 13, f"expected 13 api docs, got {len(data['api'])}"

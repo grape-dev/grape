@@ -57,6 +57,16 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
 
+        # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json（固定下载 URL）
+        try:
+            from src.api.openapi import custom_openapi
+            from src.help_page_gen import write_openapi_contract
+            _schema = custom_openapi(app)
+            _n_paths = write_openapi_contract(_schema)
+            log.info(f"OpenAPI: contract dumped ({_n_paths} paths) -> /static/openapi.json")
+        except Exception as e:
+            log.warning(f"OpenAPI: contract dump failed: {e}")
+
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
         lease_store = None

@@ -106,6 +106,9 @@ configs/scene-sync.json
 
 # help.html 为生成物（由 src/help_page_gen.py 依据 help/ 渲染，启动时生成）
 src/api/static/help.html
+# OpenAPI 契约生成物（启动期由 custom_openapi(app) 落盘；固定 URL=/static/openapi.json）
+help/api/openapi.json
+src/api/static/openapi.json
 
 # grape-cli 已拆为独立仓库管理（D:/Developer/grape-dev/grape/cli）
 cli/

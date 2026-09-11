@@ -117,8 +117,9 @@ class TestApiFiles:
             assert name in files, f"Missing {name} in help/api/"
 
     def test_file_count(self):
-        files = [f for f in API_DIR.iterdir() if f.is_file()]
-        assert len(files) == 13, f"Expected 13 files, got {len(files)}"
+        # 仅统计 markdown 文档（help/api/openapi.json 为启动期生成的契约生成物，不计入）
+        files = [f for f in API_DIR.iterdir() if f.is_file() and f.suffix == ".md"]
+        assert len(files) == 13, f"Expected 13 md files, got {len(files)}"
 
     @pytest.mark.parametrize("filename", EXPECTED_API_FILES)
     def test_api_matches_openapi_source(self, filename):

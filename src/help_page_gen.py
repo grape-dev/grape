@@ -37,6 +37,11 @@ USAGE_ORDER = [
 ]
 _MD_EXTENSIONS = ["fenced_code", "tables", "toc", "sane_lists", "nl2br"]
 
+# OpenAPI 契约下载：固定 URL（内容随 API 版本刷新，路径不变）
+OPENAPI_STATIC_URL = "/static/openapi.json"
+OPENAPI_STATIC_PATH = _REPO_ROOT / "src" / "api" / "static" / "openapi.json"
+OPENAPI_HELP_PATH = HELP_DIR / "api" / "openapi.json"
+
 _CSS = """\
 :root{--bg:#fff;--c:#f7f8fa;--b:#e2e8f0;--t1:#1a202c;--t2:#4a5568;--t3:#a0aec0;--a:#3b82f6;--g:#22c55e;--y:#eab308;--r:#ef4444;--pk:#ec4899;--pu:#8b5cf6;--or:#f97316}
 html[data-mode="dark"]{--bg:#0f1117;--c:#1a1d28;--b:#2d3142;--t1:#f1f5f9;--t2:#94a3b8;--t3:#64748b}
@@ -87,6 +92,12 @@ th{background:var(--c);font-weight:600}
 .ds:hover{color:var(--a)}
 .ds.active{background:var(--c);color:var(--a);font-weight:600}
 .content{flex:1;min-width:0;max-width:940px;padding:26px 32px 90px}
+.contract{display:flex;align-items:center;gap:14px;background:var(--c);border:1px solid var(--b);border-radius:10px;padding:14px 18px;margin-bottom:24px}
+.contract .ct-info{flex:1;font-size:13px}
+.contract .ct-info b{font-size:14px}
+.contract .ct-info small{display:block;color:var(--t3);margin-top:2px}
+.contract .dl{background:var(--a);color:#fff;text-decoration:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;white-space:nowrap}
+.contract .dl:hover{opacity:.9}
 .back-top{position:fixed;bottom:26px;right:26px;background:var(--a);color:#fff;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;border:none;font-size:18px;box-shadow:0 4px 12px rgba(0,0,0,.15)}
 @media(max-width:900px){
   .burger{display:inline-block}
@@ -106,6 +117,7 @@ _MIGRATION_COMMENT = """<!--
 _JS_APP = r"""
 (function () {
   'use strict';
+  var OPENAPI_URL = '__OPENAPI_URL__';
   var DATA = (function () { var el = document.getElementById('help-data'); try { return el ? JSON.parse(el.textContent) : {}; } catch (e) { return {}; } })();
   var app = document.getElementById('app');
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -188,9 +200,14 @@ _JS_APP = r"""
       }
     });
   }
+  function contractBar() {
+    return '<div class="contract"><div class="ct-info"><b>OpenAPI 契约</b><small>OpenAPI 3.1 \u00b7 对外安全接口 \u00b7 Bearer / PRIVATE-TOKEN / access_token 三通道认证</small></div><a class="dl" href="' + OPENAPI_URL + '" download>⬇ 下载 openapi.json</a></div>';
+  }
   function renderSection(sec, cur) {
+    var body = cur ? cur.html : '';
+    if (sec === 'api') { body = contractBar() + body; }
     app.innerHTML = topbar(sec) + '<div class="body"><aside class="side" id="side">' + sideList(sec, cur) + '</aside><main class="content" id="content"></main></div>';
-    document.getElementById('content').innerHTML = cur ? cur.html : '';
+    document.getElementById('content').innerHTML = body;
     window.scrollTo(0, 0);
     var sideEl = document.getElementById('side');
     if (sideEl) { sideEl.classList.remove('open'); }
@@ -326,7 +343,7 @@ def build_help_html(data: dict | None = None) -> str:
         "</head>\n<body>\n"
         '<div id="app"></div>\n'
         f'<script type="application/json" id="help-data">{data_tag}</script>\n'
-        f"<script>{_JS_APP}</script>\n"
+        f"<script>{_JS_APP.replace('__OPENAPI_URL__', OPENAPI_STATIC_URL)}</script>\n"
         "</body>\n</html>"
     )
 
@@ -337,6 +354,21 @@ def generate() -> int:
     data = build_data()
     OUT_PATH.write_text(build_help_html(data), encoding="utf-8")
     return len(data["usage"]) + len(data["api"])
+
+
+def write_openapi_contract(schema: dict, help_path: Path | None = None, static_path: Path | None = None) -> int:
+    """把 OpenAPI 契约 schema 落盘（固定下载 URL=/static/openapi.json）。
+
+    规范副本写 help/api/openapi.json（需求要求），提供副本写 static 目录供下载。
+    返回架构 paths 数。
+    """
+    import json as _json
+
+    text = _json.dumps(schema, ensure_ascii=False, indent=2)
+    for p in (help_path or OPENAPI_HELP_PATH, static_path or OPENAPI_STATIC_PATH):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    return len(schema.get("paths", {}))
 
 
 if __name__ == "__main__":
