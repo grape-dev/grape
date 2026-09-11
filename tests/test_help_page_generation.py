@@ -130,6 +130,22 @@ class TestRenderedStructure:
         html_all = "".join(d["html"] for sec in data.values() for d in sec)
         assert "<table>" in html_all
 
+    def test_md_links_rewritten_to_spa_routes(self, data):
+        """README 的相对 .md 链接须改写为 SPA 路由（否则点成 /static/xx.md 404）。"""
+        readme = next(d for d in data["api"] if d["id"] == "README")
+        assert 'href="#/api/00-auth"' in readme["html"], "00-auth link not rewritten"
+        assert 'href="#/api/12-a2a"' in readme["html"], "12-a2a link not rewritten"
+        assert re.search(r'href="(?!https?://|/|#)[^"]*\.md', readme["html"]) is None, \
+            "remaining non-rewritten relative .md links in README"
+
+    def test_external_links_untouched(self, data):
+        """外部 http/https 链接保持原样。"""
+        readme = next(d for d in data["api"] if d["id"] == "README")
+        html = readme["html"]
+        for h in re.findall(r'href="([^"]+)"', html):
+            if h.startswith("http"):
+                assert not h.startswith("#/"), f"external link mangled: {h}"
+
 
 class TestGenerate:
     def test_source_count(self):

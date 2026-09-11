@@ -302,6 +302,30 @@ def _adorn_blockquotes(body: str) -> str:
     return re.sub(r"(<blockquote>)(.*?)(</blockquote>)", _repl, body, flags=re.DOTALL)
 
 
+def _rewrite_md_hrefs(body: str, section: str) -> str:
+    """把文档内相对 .md 链接改写为 SPA 路由（#/{section}/{stem}）。
+
+    - 只改 <a href> 中相对路径且以 .md 结尾（含 .md#anchor）的链接
+    - 换行里生成 #/api/00-auth 等路由，点击即切换到对应文档（不再拼成 /static/xx.md 404）
+    - 外部（http/https）链接 / 绝对路径（/ 开头）/ 纯锚点（# 开头）保持原样
+    - md 源文件不动（GitHub/仓库预览仍是 .md 相对链接）
+    """
+
+    def _repl(m):
+        prefix, href = m.group(1), m.group(2)
+        if href.startswith(("#", "/", "http://", "https://", "mailto:")) or "://" in href:
+            return m.group(0)
+        path, _, frag = href.partition("#")
+        if not path.endswith(".md"):
+            return m.group(0)
+        route = f"#/{section}/{path[:-3]}"
+        if frag:
+            route += f"#{frag}"
+        return f'{prefix} href="{route}"'
+
+    return re.sub(r'(<a\b[^>]*?)\shref="([^"]*)"', _repl, body)
+
+
 def _docs(usage: bool) -> list[tuple[Path, str]]:
     if usage:
         return [(USAGE_DIR / f, f) for f in USAGE_ORDER]
@@ -312,6 +336,7 @@ def _docs(usage: bool) -> list[tuple[Path, str]]:
 
 
 def _section_data(usage: bool) -> list[dict]:
+    section = "usage" if usage else "api"
     items = []
     for path, fname in _docs(usage):
         if not path.is_file():
@@ -320,6 +345,7 @@ def _section_data(usage: bool) -> list[dict]:
         prefix = re.sub(r"[^0-9a-zA-Z]", "-", path.stem).strip("-") + "-"
         body = _prefix_heading_ids(body, tokens, prefix)
         body = _adorn_blockquotes(body)
+        body = _rewrite_md_hrefs(body, section)
         title = next((t.get("name", "") for t in tokens if t.get("level") == 1), path.stem)
         items.append({"id": path.stem, "title": title, "html": body, "toc": _collect_toc(tokens, prefix)})
     return items
