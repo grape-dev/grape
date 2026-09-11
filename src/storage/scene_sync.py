@@ -53,7 +53,7 @@ def _load_config():
     if not repo_url:
         repo_url = "https://gitcode.com/grape-dev/grape-skills"
     if not repo_branch:
-        repo_branch = "dev"
+        repo_branch = "main"
 
     return repo_url, repo_branch, float(sync_interval) if sync_interval else 1800.0
 

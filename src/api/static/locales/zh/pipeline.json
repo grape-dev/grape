@@ -44,5 +44,6 @@
   "th_parent": "父任务",
   "stat_active": "活跃",
   "stat_today": "今日",
-  "stat_failed": "失败"
+  "stat_failed": "失败",
+  "tasks_without_events_hint": "部分任务尚未生成流水线事件"
 }

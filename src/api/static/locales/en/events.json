@@ -77,5 +77,16 @@
   "no_inline_log": "(No execution logs — agent did not actually run)",
   "load_log_failed": "Failed to load logs: {{msg}}",
   "no_reply": "(No reply)",
-  "error_reply": "(Error)"
+  "error_reply": "(Error)",
+  "clear_conv_btn": "Clear Chat",
+  "clear_conv_title": "Clear conversation messages for this event",
+  "clear_conv_confirm": "Clear all conversation messages for this event? This cannot be undone.",
+  "clear_conv_done": "Conversation cleared",
+  "clear_conv_failed": "Clear failed: {{msg}}",
+  "delete_knowledge_btn": "Delete",
+  "knowledge_deleted": "Knowledge deleted",
+  "knowledge_delete_failed": "Delete failed: {{msg}}",
+  "knowledge_delete_confirm_project": "This knowledge is shared by all Agents. Confirm deletion?",
+  "knowledge_modal_close": "Close",
+  "scope_agent_solo": "Agent Only"
 }
