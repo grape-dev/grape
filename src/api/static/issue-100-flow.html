@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Issue #100 - 事件完整流程图</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:#f5f5f7; color:#1d1d1f; padding:20px; }
+.container { max-width:1100px; margin:0 auto; }
+h1 { font-size:22px; font-weight:700; margin-bottom:6px; }
+.subtitle { font-size:13px; color:#86868b; margin-bottom:20px; }
+.flow { display:flex; flex-direction:column; gap:12px; }
+.row { display:flex; gap:12px; align-items:stretch; }
+.row-label { width:140px; font-size:11px; font-weight:600; color:#86868b; display:flex; align-items:center; justify-content:flex-end; text-align:right; flex-shrink:0; }
+.box { flex:1; border-radius:10px; padding:12px 16px; font-size:12px; line-height:1.6; }
+.box-blue { background:#d0e4ff; border:1px solid #8ec4ff; }
+.box-purple { background:#e8dcff; border:1px solid #c4a8ff; }
+.box-green { background:#d4f4dd; border:1px solid #8ed4a8; }
+.box-yellow { background:#fff3bf; border:1px solid #ffd43b; }
+.box-orange { background:#ffe8cc; border:1px solid #ffa94d; }
+.box-red { background:#ffd6d6; border:1px solid #ff8787; }
+.box-gray { background:#e9ecef; border:1px solid #ced4da; }
+.box-pink { background:#fcc2d7; border:1px solid #e64980; }
+.title { font-weight:700; font-size:13px; margin-bottom:4px; }
+.code { font-family:monospace; font-size:11px; background:rgba(0,0,0,.06); padding:1px 4px; border-radius:3px; }
+.arrow { text-align:center; font-size:18px; color:#86868b; margin:-4px 0; }
+table { width:100%; border-collapse:collapse; margin-top:16px; font-size:12px; }
+th,td { border:1px solid #dee2e6; padding:8px 12px; text-align:left; }
+th { background:#f1f3f5; font-weight:600; }
+.section-title { font-size:15px; font-weight:700; margin:20px 0 8px; padding-bottom:4px; border-bottom:2px solid #8ec4ff; }
+.note { background:#fff3bf; border:1px solid #ffd43b; border-radius:8px; padding:10px 14px; font-size:12px; margin:8px 0; }
+.tag { display:inline-block; font-size:10px; padding:1px 6px; border-radius:4px; font-weight:600; margin-right:4px; }
+.tag-new { background:#e64980; color:#fff; }
+.tag-existing { background:#86868b; color:#fff; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Issue #100 - 事件完整流程图（现状）</h1>
+<p class="subtitle">从事件触发到对话产出，完整链路 + Issue #100 清理位置</p>
+
+<!-- ===== 第一阶段：事件触发 ===== -->
+<div class="section-title">第一阶段：事件触发</div>
+<div class="flow">
+  <div class="row">
+    <div class="row-label">触发源</div>
+    <div class="box box-blue">
+      <div class="title">3 大入口</div>
+      <span class="code">GitCode Webhook</span> → webhook.py:117 → run_pipeline(body)<br>
+      <span class="code">飞书 IM</span> → handler_async.py → run_pipeline(body)<br>
+      <span class="code">WebUI</span> → events.py:245 redispatch_event → run_pipeline(body)<br>
+      <span class="code">A2A 交办</span> → event_pipeline.py:2539 → _enqueue_pipeline_task
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">事件路由</div>
+    <div class="box box-purple">
+      <div class="title">run_pipeline (event_pipeline.py)</div>
+      1. 事件过滤（event_action_filter）<br>
+      2. 路由判定（event_route_config）→ 确定 agent_type + skill<br>
+      3. 引擎选择（engine_select v2）→ 确定 runtime_id<br>
+      4. <span class="code">append_event()</span> → 写入 events 表，返回 seq
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">events 表</div>
+    <div class="box box-gray">
+      <div class="title">events 表 (event_store.py:71)</div>
+      <span class="code">seq | repo_key | issue_id | agent_type | event_type | title | actor | payload | status | result</span><br>
+      status: running → completed/failed<br>
+      result: agent 答复结论（纯文本）
+    </div>
+  </div>
+</div>
+
+<!-- ===== 第二阶段：任务入队 ===== -->
+<div class="section-title">第二阶段：任务入队 + Prompt 构建</div>
+<div class="flow">
+  <div class="row">
+    <div class="row-label">入队</div>
+    <div class="box box-purple">
+      <div class="title">_enqueue_pipeline_task (event_pipeline.py:1396)</div>
+      1. init_event_json → 事件骨架<br>
+      2. get_agent_workdir → ws 目录<br>
+      3. get_or_create_agent_session → 会话<br>
+      4. get_or_create_issue_session → Issue 级会话<br>
+      5. <span class="code">build_devops_agent_prompt</span> → 构建 prompt<br>
+      6. <span class="code">enqueue_task()</span> → 写入 agent_tasks 表
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">Prompt 构建</div>
+    <div class="box box-green">
+      <div class="title">build_devops_agent_prompt (prompt_builder.py)</div>
+      1. 事件上下文（title/body/payload）<br>
+      2. <span class="code">_build_project_info_section</span> → baseline 摘要 + member 引导<br>
+      3. <span class="code">{{KNOWLEDGE_DIR}}</span> → agent 知识引导<br>
+      4. Skill 占位符 → <span class="code">{{SKILL_DIR}}/skill/SKILL.md</span><br>
+      5. 场景高级选项<br>
+      6. <span class="code">{{SERVER_URL}}</span> 替换<br>
+      <b>Issue #95 改动</b>：collect_knowledge_files 统一过滤 + {{KNOWLEDGE_DIR}} 引导
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">知识注入</div>
+    <div class="box box-green">
+      <div class="title">enqueue_task → collect_knowledge_files (service.py)</div>
+      <span class="code">load_project_info_with_obs</span> → baseline (source='system')<br>
+      <span class="code">member_files_pi</span> → member (source='manual', ref 表)<br>
+      <span class="code">agent_knowledge_files</span> → agent (source='agent', ref 表)<br>
+      → project_info_files (baseline+member content)<br>
+      → knowledge_files (agent content)<br>
+      → project_info_file_urls / knowledge_file_urls (分离)
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">agent_tasks 表</div>
+    <div class="box box-gray">
+      <div class="title">agent_tasks 表</div>
+      <span class="code">id | prompt | cwd | project_info_files | knowledge_files | project_info_file_urls | knowledge_file_urls | ...</span>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 第三阶段：Worker 执行 ===== -->
+<div class="section-title">第三阶段：Worker 执行</div>
+<div class="flow">
+  <div class="row">
+    <div class="row-label">执行模式</div>
+    <div class="box box-orange">
+      <div class="title">两种执行模式</div>
+      <b>队列模式</b>（kind != DIRECT）：worker claim task → 执行<br>
+      <b>Direct 模式</b>（kind == DIRECT）：consume_stream_async → 直接执行
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">物化文件</div>
+    <div class="box box-orange">
+      <div class="title">文件物化 (agent.py / event_pipeline.py)</div>
+      .project-info/ → baseline + member 文件<br>
+      .knowledge/ → agent 知识文件<br>
+      .skills/ → 技能文件<br>
+      占位符替换：{{PROJECT_INFO_DIR}} {{KNOWLEDGE_DIR}} {{SKILL_DIR}}
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">Agent 执行</div>
+    <div class="box box-orange">
+      <div class="title">Agent 执行（CLI: opencode / codex / hermes）</div>
+      读 SKILL.md → 按 skill 指令执行<br>
+      读 .project-info/ → 项目背景<br>
+      读 .knowledge/ → 前序 agent 经验<br>
+      执行完毕 → 返回 result_text
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">结果回写</div>
+    <div class="box box-yellow">
+      <div class="title">结果回写</div>
+      <span class="code">update_event_status(seq, "completed")</span><br>
+      <span class="code">update_event_result(seq, result_text)</span><br>
+      → events 表 status=completed, result=结论
+    </div>
+  </div>
+</div>
+
+<!-- ===== 第四阶段：知识沉淀 ===== -->
+<div class="section-title">第四阶段：知识沉淀（Agent 产出）</div>
+<div class="flow">
+  <div class="row">
+    <div class="row-label">知识沉淀</div>
+    <div class="box box-pink">
+      <div class="title">POST /api/events/{seq}/knowledge (events.py:1283)</div>
+      Agent 调用（bot token 鉴权）：<br>
+      <span class="code">write_knowledge()</span> → 写工作区文件 + DB 索引<br>
+      <span class="code">_add_thread_message(seq, "system", "📌 已沉淀...")</span> → event_thread 留痕<br>
+      <b>数据存储</b>：<br>
+      - 文件：project-info/knowledge.md / issues/{n}/knowledge.md<br>
+      - DB：agent_shared_knowledge + scene_knowledge_ref（ref 表自动关联）
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">流程操作</div>
+    <div class="box box-pink">
+      <div class="title">POST /api/events/{seq}/flow/reset (events.py:1303)</div>
+      Agent 调用（bot token 鉴权）：<br>
+      <span class="code">set_issue_stage()</span> → 回退阶段<br>
+      <span class="code">_cancel_issue_tasks()</span> → 取消任务<br>
+      <span class="code">_add_thread_message(seq, "system", "🔄 流程干预...")</span> → event_thread 留痕
+    </div>
+  </div>
+</div>
+
+<!-- ===== 第五阶段：事件详情页 ===== -->
+<div class="section-title">第五阶段：事件详情页（用户查看）</div>
+<div class="flow">
+  <div class="row">
+    <div class="row-label">页面加载</div>
+    <div class="box box-blue">
+      <div class="title">GET /api/events/detail/{seq} (events.py:13)</div>
+      返回事件详情：seq / repo_key / issue_id / agent_type / payload / result / status<br>
+      前端 events.js 渲染：事件上下文 + 处理记录 + 结论
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">对话面板</div>
+    <div class="box box-blue">
+      <div class="title">GET /api/events/{seq}/thread (events.py:957)</div>
+      返回：<br>
+      - <span class="code">messages</span> → event_thread 记录（user/agent/system 消息）<br>
+      - <span class="code">knowledge</span> → read_knowledge()（工作区文件内容）<br>
+      - <span class="code">gate</span> → 对话门禁状态<br>
+      前端渲染：对话气泡 + 对话产出面板（#convOutcome）
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">对话产出</div>
+    <div class="box box-blue">
+      <div class="title">renderOutcome() (events.js:288)</div>
+      <b>#convOutcome 面板</b>：<br>
+      - 📌 知识沉淀 ← messages 里 role='system' 且 content 以 📌 开头<br>
+      - 🔄 流程操作 ← messages 里 role='system' 且 content 以 🔄 开头<br>
+      <b>知识内容</b> ← knowledge 对象（独立于 messages，从工作区文件读）
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label">用户对话</div>
+    <div class="box box-blue">
+      <div class="title">POST /api/events/{seq}/chat/submit (events.py:1032)</div>
+      用户发消息 → _add_thread_message(anchor_seq, "user", message)<br>
+      → build_conversation_prompt（含 _list_thread 历史）<br>
+      → enqueue_task / consume_stream_async 执行<br>
+      → _add_thread_message(anchor_seq, "agent", reply)<br>
+      → SSE 流式返回（conv_task_stream）
+    </div>
+  </div>
+</div>
+
+<!-- ===== Issue #100 清理位置 ===== -->
+<div class="section-title">Issue #100：清理位置</div>
+<div class="flow">
+  <div class="row">
+    <div class="row-label"><span class="tag tag-new">新增</span></div>
+    <div class="box box-red">
+      <div class="title">DELETE /api/events/{seq}/chat（新增）</div>
+      <b>清理范围</b>：<br>
+      - event_thread 表 WHERE anchor_seq=seq → 删除所有对话消息（user/agent/system）<br>
+      - 包括 📌 知识沉淀留痕 和 🔄 流程操作留痕（都是 system 消息）<br>
+      <b>不删</b>：<br>
+      - 知识文件（knowledge.md / issues/{n}/knowledge.md）→ 独立沉淀，有独立删除入口<br>
+      - agent_shared_knowledge / scene_knowledge_ref 记录 → 知识库管理<br>
+      - events 表记录 → 事件本身不删<br>
+      <b>清理后</b>：loadConversation() 刷新 → messages 为空 → 对话面板显示提示，对话产出面板流程操作为空
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row">
+    <div class="row-label"><span class="tag tag-new">新增</span></div>
+    <div class="box box-red">
+      <div class="title">前端清理入口（新增）</div>
+      对话面板标题栏（convPanel h3）加"清理"按钮<br>
+      点击 → 确认气泡（复用 Chat Agent 的 chat-del-overlay 样式）<br>
+      确认 → DELETE 请求 → loadConversation() 刷新
+    </div>
+  </div>
+</div>
+
+<!-- ===== 数据表关系 ===== -->
+<div class="section-title">数据表关系</div>
+<table>
+<tr><th>表</th><th>用途</th><th>Issue #100 清理</th></tr>
+<tr><td>events</td><td>事件记录（seq/repo/agent/result/status）</td><td>不删</td></tr>
+<tr><td>event_thread</td><td>对话消息（anchor_seq 关联事件）</td><td><b>删除 WHERE anchor_seq=seq</b></td></tr>
+<tr><td>agent_shared_knowledge</td><td>知识索引（文件路径/obs_key/source）</td><td>不删（独立沉淀）</td></tr>
+<tr><td>scene_knowledge_ref</td><td>知识关联（scene/agent/issue）</td><td>不删</td></tr>
+<tr><td>工作区文件</td><td>knowledge.md / issues/{n}/knowledge.md</td><td>不删</td></tr>
+</table>
+
+<div class="note">
+<b>关键区分</b>：event_thread 里的 📌/🔄 system 消息只是<b>留痕</b>（通知用户 agent 做了什么操作），
+真正的知识数据存在工作区文件 + agent_shared_knowledge 表。
+清理对话只删留痕，不删知识本身。
+清理后对话产出面板的"知识沉淀"区域仍有内容（从 knowledge 对象读，独立于 messages）。
+</div>
+
+</div>
+</body>
+</html>
