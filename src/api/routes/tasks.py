@@ -1058,6 +1058,32 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         except Exception as _e:
             from src.config import log
             log.warning(f"create_task: patch issue body for multi-task-mode failed: {_e}")
+
+    # Issue #89: 同步触发 pipeline 事件，不依赖 webhook（webhook 异步可能丢事件）
+    # 新建 Issue 时直接创建 issue_opened 事件 → VOD Agent 处理
+    # 复用已有 Issue 时创建 a2a_event 事件 → issue Agent 处理
+    if created:
+        try:
+            from src.config import log as _log
+            from src.api.event_store import append_event
+            append_event(
+                repo_key=repo_key, event_type="issue_opened",
+                title=body.title.strip(), issue_id=f"#{issue_num}",
+                source="task_center", agent_type="vod",
+                actor=assignee or user["username"],
+                summary=f"新 Issue #{issue_num}: {body.title.strip()}",
+                payload={"issue_number": issue_num, "repository": f"{owner}/{rname}",
+                         "created_via": "task_center"},
+                status="running",
+            )
+            # 初始化 issue_state（vod 阶段）
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(repo_key, f"#{issue_num}", "vod", "vod", assignee=assignee or "")
+            _log.info(f"create_task: triggered issue_opened event for #{issue_num}")
+        except Exception as _e:
+            from src.config import log as _log
+            _log.warning(f"create_task: sync pipeline trigger failed: {_e}")
+
     return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
             "assignee": assignee, "is_subtask_mode": _auto_subtask_mode,
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}

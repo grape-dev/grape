@@ -970,6 +970,75 @@ def get_event_thread(seq: int, user: dict = Depends(get_current_user)):
     }
 
 
+@router.delete("/{seq}/chat")
+def delete_event_thread(seq: int, user: dict = Depends(get_current_user)):
+    """Issue #100: 清理事件关联的对话消息（event_thread 记录）。"""
+    evt = _load_event(seq)
+    from src.api.routes.knowledge import _check_repo_member
+    _check_repo_member(user, evt["repo_key"])
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM event_thread WHERE anchor_seq=?", (seq,))
+        db.commit()
+    return {"ok": True, "message": "对话已清理"}
+
+
+@router.delete("/{seq}/knowledge/{scope}")
+def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(get_current_user)):
+    """Issue #100: 删除事件关联的 agent 沉淀知识（文件 + DB + ref）。"""
+    evt = _load_event(seq)
+    if scope not in ("project", "issue", "issue_agent"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 project/issue/issue_agent"})
+    from src.api.routes.knowledge import _check_repo_member
+    _check_repo_member(user, evt["repo_key"])
+
+    from src.api.knowledge import knowledge_path, knowledge_storage_key, _issue_num_from
+    from src.session_manager import db, db_lock
+    import os
+
+    issue_num = _issue_num_from(evt["issue_id"])
+    agent_type = evt["agent_type"]
+    _ag = agent_type if scope == "issue_agent" else ""
+    _in = issue_num if scope != "project" else 0
+
+    # Issue #100: issue/issue_agent 级必须有 issue_id
+    if scope != "project" and _in == 0:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "该事件无关联 Issue，无法删除 issue/issue_agent 级知识"})
+
+    # 1. 删工作区文件
+    file_path = knowledge_path(evt["repo_key"], scope, agent_type=_ag, issue_num=_in)
+    if os.path.isfile(file_path):
+        os.remove(file_path)
+
+    # 2. 删 OBS 对象（如有）
+    try:
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None:
+            obs_key = knowledge_storage_key(evt["repo_key"], scope, agent_type=_ag, issue_num=_in)
+            storage.delete_object(obs_key)
+    except Exception:
+        pass
+
+    # 3. 删 DB 记录（agent_shared_knowledge + scene_knowledge_ref）
+    with db_lock:
+        c = db.cursor()
+        rows = c.execute(
+            "SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            (evt["repo_key"], scope, _ag, _in)
+        ).fetchall()
+        for (kid,) in rows:
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
+        c.execute(
+            "DELETE FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            (evt["repo_key"], scope, _ag, _in)
+        )
+        db.commit()
+
+    return {"ok": True, "scope": scope, "message": "知识已删除"}
+
+
 @router.post("/{seq}/chat")
 async def send_conversation(seq: int, body: ConversationMessage, user: dict = Depends(get_current_user)):
     evt = _load_event(seq)

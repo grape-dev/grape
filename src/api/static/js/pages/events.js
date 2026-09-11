@@ -146,7 +146,13 @@ function renderEventDetail(data) {
     </div>
     <!-- 右栏：对话面板（有对话/门禁开放才显示，见 loadConversation 条件渲染 Issue #35） -->
     <div id="convPanel" class="cd" style="padding:14px;display:none;flex-direction:column;gap:8px;height:100%;overflow:hidden">
-      <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">${I18N.t('events.section_conversation', {name: agentName})} <button onclick="toggleConvFullscreen()" title="${I18N.t('events.fullscreen_title')}" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">${I18N.t('events.fullscreen_btn')}</button></h3>
+      <div style="flex-shrink:0;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <h3 style="font-size:12px;font-weight:600;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${I18N.t('events.section_conversation', {name: agentName})}</h3>
+        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0">
+          <button onclick="clearConversation(event, ${_convSeq})" title="${I18N.t('events.clear_conv_title')}" style="border:1px solid var(--b);background:transparent;color:#ff3b30;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap">${I18N.t('events.clear_conv_btn')}</button>
+          <button onclick="toggleConvFullscreen()" title="${I18N.t('events.fullscreen_title')}" style="border:1px solid var(--b);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap">${I18N.t('events.fullscreen_btn')}</button>
+        </div>
+      </div>
       <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
       <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
         <input id="convInput" placeholder="${I18N.t('events.conv_input_placeholder')}" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
@@ -287,16 +293,201 @@ function loadConversation() {
 function renderOutcome(knowledge, messages) {
   const el = document.getElementById('convOutcome');
   if (!el) return;
-  const kRows = Object.keys(knowledge || {}).map(scope =>
-    `<div style="padding:3px 0;border-bottom:1px dashed var(--b)"><b>${scope === 'project' ? I18N.t('events.scope_project') : scope === 'issue' ? I18N.t('events.scope_issue') : I18N.t('events.scope_agent')}</b> · ${knowledge[scope]}</div>`
-  ).join('');
+  _convKnowledge = knowledge || {};
+  var scopeLabels = {project: I18N.t('events.scope_project'), issue: I18N.t('events.scope_issue'), issue_agent: I18N.t('events.scope_agent_solo')};
+  var scopeIcons = {project: '📦', issue: '📋', issue_agent: '🤖'};
+  var kCards = Object.keys(knowledge || {}).map(function(scope) {
+    if (!knowledge[scope]) return '';
+    var content = knowledge[scope];
+    var summary = content.substring(0, 30).replace(/\n/g, ' ').replace(/- \[seq[^\]]*\] /g, '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    var len = content.length;
+    return '<div class="k-card" onclick="showKnowledgeDetail(\'' + scope + '\')">'
+      + '<span class="k-card-label">' + scopeIcons[scope] + ' ' + scopeLabels[scope] + '</span>'
+      + '<span class="k-card-summary">' + summary + '… (' + len + '字)</span>'
+      + '<button class="k-card-x" onclick="event.stopPropagation();quickDeleteKnowledge(\'' + scope + '\')">&times;</button>'
+      + '</div>';
+  }).join('');
   const flowRows = (messages || []).filter(m => m.role === 'system' && (m.content || '').indexOf('🔄') === 0)
     .map(m => `<div style="padding:3px 0;border-bottom:1px dashed var(--b)">${m.content}</div>`).join('');
-  if (!kRows && !flowRows) { el.style.display = 'none'; return; }
+  if (!kCards && !flowRows) { el.style.display = 'none'; return; }
   el.style.display = 'block';
   el.innerHTML = `<h3 style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--a)">${I18N.t('events.outcome_title')}</h3>`
-    + (kRows ? `<div style="margin-top:2px"><b>${I18N.t('events.outcome_knowledge')}</b>${kRows}</div>` : '')
+    + (kCards ? `<div style="margin-top:2px"><b>${I18N.t('events.outcome_knowledge')}</b><div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">${kCards}</div></div>` : '')
     + (flowRows ? `<div style="margin-top:4px"><b>${I18N.t('events.outcome_flow')}</b>${flowRows}</div>` : '');
+}
+
+// Issue #100: 知识缓存
+var _convKnowledge = {};
+
+// Issue #100: 知识详情弹窗
+function showKnowledgeDetail(scope) {
+  var content = (_convKnowledge || {})[scope] || '';
+  var scopeLabels = {project: I18N.t('events.scope_project'), issue: I18N.t('events.scope_issue'), issue_agent: I18N.t('events.scope_agent_solo')};
+  _closeKnowledgeModal();
+  var overlay = document.createElement('div');
+  overlay.className = 'km-overlay show';
+  overlay.id = 'kmOverlay';
+  overlay.onclick = function(e) { if (e.target === overlay) _closeKnowledgeModal(); };
+  var modal = document.createElement('div');
+  modal.className = 'km-modal';
+  var hdr = document.createElement('div');
+  hdr.className = 'km-hdr';
+  hdr.textContent = scopeLabels[scope] + I18N.t('events.outcome_knowledge');
+  modal.appendChild(hdr);
+  var body = document.createElement('div');
+  body.className = 'km-body';
+  body.innerHTML = renderMarkdown(content);
+  modal.appendChild(body);
+  var footer = document.createElement('div');
+  footer.className = 'km-footer';
+  var closeBtn = document.createElement('button');
+  closeBtn.className = 'km-close';
+  closeBtn.textContent = I18N.t('events.knowledge_modal_close');
+  closeBtn.onclick = _closeKnowledgeModal;
+  footer.appendChild(closeBtn);
+  var delBtn = document.createElement('button');
+  delBtn.className = 'km-del';
+  delBtn.textContent = I18N.t('events.delete_knowledge_btn');
+  delBtn.onclick = function() { _closeKnowledgeModal(); _deleteKnowledge(scope); };
+  footer.appendChild(delBtn);
+  modal.appendChild(footer);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
+function _closeKnowledgeModal() {
+  var el = document.getElementById('kmOverlay');
+  if (el) el.remove();
+}
+
+// Issue #100: 快速删除知识（卡片 X 按钮）
+function quickDeleteKnowledge(scope) {
+  if (scope === 'project') {
+    _showProjectDeleteConfirm(scope);
+  } else {
+    _deleteKnowledge(scope);
+  }
+}
+
+// Issue #100: project 级二次确认
+function _showProjectDeleteConfirm(scope) {
+  _closeClearConvPopover();
+  var overlay = document.createElement('div');
+  overlay.className = 'chat-del-overlay';
+  overlay.id = 'kmConfirmOverlay';
+  overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+  var pop = document.createElement('div');
+  pop.className = 'chat-del-pop';
+  pop.style.left = (window.innerWidth / 2 - 110) + 'px';
+  pop.style.top = (window.innerHeight / 2 - 70) + 'px';
+  var title = document.createElement('div');
+  title.className = 'chat-del-title';
+  title.style.color = '#ff3b30';
+  title.innerHTML = I18N.t('events.knowledge_delete_confirm_project');
+  pop.appendChild(title);
+  var btns = document.createElement('div');
+  btns.className = 'chat-del-btns';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'chat-del-cancel';
+  cancelBtn.textContent = I18N.t('common.cancel');
+  cancelBtn.onclick = function() { overlay.remove(); };
+  btns.appendChild(cancelBtn);
+  var okBtn = document.createElement('button');
+  okBtn.className = 'chat-del-ok';
+  okBtn.textContent = I18N.t('common.confirm');
+  okBtn.onclick = function() { overlay.remove(); _deleteKnowledge(scope); };
+  btns.appendChild(okBtn);
+  pop.appendChild(btns);
+  overlay.appendChild(pop);
+  document.body.appendChild(overlay);
+  requestAnimationFrame(function() { pop.classList.add('show'); });
+}
+
+// Issue #100: 删除知识（防重复点击）
+var _delKnowBusy = false;
+function _deleteKnowledge(scope) {
+  if (_delKnowBusy) return;
+  _delKnowBusy = true;
+  fetch('/api/events/' + _convSeq + '/knowledge/' + scope, {
+    method: 'DELETE',
+    headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')}
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    _delKnowBusy = false;
+    if (d.ok) {
+      app.showToast(I18N.t('events.knowledge_deleted'));
+      loadConversation();
+    } else {
+      app.showToast(I18N.t('events.knowledge_delete_failed', {msg: (d.detail || {}).message || ''}));
+    }
+  }).catch(function(e) {
+    _delKnowBusy = false;
+    app.showToast(I18N.t('events.knowledge_delete_failed', {msg: e.message}));
+  });
+}
+
+// Issue #100: 清理对话
+function clearConversation(ev, seq) {
+  _showClearConvPopover(ev, seq);
+}
+
+function _showClearConvPopover(ev, seq) {
+  _closeClearConvPopover();
+  var overlay = document.createElement('div');
+  overlay.className = 'chat-del-overlay';
+  overlay.id = 'clearConvOverlay';
+  overlay.onclick = function(e) { if (e.target === overlay) _closeClearConvPopover(); };
+  var pop = document.createElement('div');
+  pop.className = 'chat-del-pop';
+  pop.style.left = Math.min(ev.clientX, window.innerWidth - 240) + 'px';
+  pop.style.top = Math.min(ev.clientY + 10, window.innerHeight - 140) + 'px';
+  var title = document.createElement('div');
+  title.className = 'chat-del-title';
+  title.textContent = I18N.t('events.clear_conv_confirm');
+  pop.appendChild(title);
+  var btns = document.createElement('div');
+  btns.className = 'chat-del-btns';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'chat-del-cancel';
+  cancelBtn.textContent = I18N.t('common.cancel');
+  cancelBtn.onclick = _closeClearConvPopover;
+  btns.appendChild(cancelBtn);
+  var okBtn = document.createElement('button');
+  okBtn.className = 'chat-del-ok';
+  okBtn.textContent = I18N.t('common.confirm');
+  okBtn.onclick = function() { _closeClearConvPopover(); _doClearConv(seq); };
+  btns.appendChild(okBtn);
+  pop.appendChild(btns);
+  overlay.appendChild(pop);
+  document.body.appendChild(overlay);
+  requestAnimationFrame(function() { pop.classList.add('show'); });
+}
+
+function _closeClearConvPopover() {
+  var el = document.getElementById('clearConvOverlay');
+  if (el) el.remove();
+}
+
+// Issue #100: 防重复点击
+var _clearBusy = false;
+
+function _doClearConv(seq) {
+  if (_clearBusy) return;
+  _clearBusy = true;
+  fetch('/api/events/' + seq + '/chat', {
+    method: 'DELETE',
+    headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')}
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    _clearBusy = false;
+    if (d.ok) {
+      app.showToast(I18N.t('events.clear_conv_done'));
+      loadConversation();
+    } else {
+      app.showToast(I18N.t('events.clear_conv_failed', {msg: (d.detail || {}).message || ''}));
+    }
+  }).catch(function(e) {
+    _clearBusy = false;
+    app.showToast(I18N.t('events.clear_conv_failed', {msg: e.message}));
+  });
 }
 
 // ===== 事件对话持久化查询（对齐 Chat Agent v31）=====
@@ -462,7 +653,17 @@ function toggleConvFullscreen() {
     btn.style.cssText = 'border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer';
     btn.onclick = toggleConvFullscreen;
     bar.appendChild(title);
-    bar.appendChild(btn);
+    // Issue #100: 全屏时也显示清理对话按钮
+    var btnsDiv = document.createElement('div');
+    btnsDiv.style.cssText = 'display:flex;gap:6px;align-items:center';
+    var clearBtn = document.createElement('button');
+    clearBtn.textContent = I18N.t('events.clear_conv_btn');
+    clearBtn.title = I18N.t('events.clear_conv_title');
+    clearBtn.style.cssText = 'border:1px solid var(--b);background:transparent;color:#ff3b30;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap';
+    clearBtn.onclick = function(ev) { clearConversation(ev, _convSeq); };
+    btnsDiv.appendChild(clearBtn);
+    btnsDiv.appendChild(btn);
+    bar.appendChild(btnsDiv);
     fs.appendChild(bar);
     fs.appendChild(messages);
     fs.appendChild(inputRow);

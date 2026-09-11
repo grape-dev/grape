@@ -1126,7 +1126,7 @@ scene-template.zip
 
 **触发方式**：服务启动后 asyncio 定时任务，启动即执行一次，之后每 30 分钟同步一次。和 skill_sync_scheduler 模式完全对齐。
 
-**同步源**：grape-skills 仓库（https://gitcode.com/grape-dev/grape-skills）dev 分支的 scenes/ 目录。
+**同步源**：grape-skills 仓库（https://gitcode.com/grape-dev/grape-skills）main 分支的 scenes/ 目录。
 
 **拉取方式**：GitCode API v5 逐文件下载（`/api/v5/repos/{owner}/{repo}/contents/{path}?ref={branch}`）。用 bot token 认证，列 scenes/ 下子目录，每个子目录再列文件，下载 scene.json + README.md + icon 文件到临时目录。
 

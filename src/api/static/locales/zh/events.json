@@ -77,5 +77,16 @@
   "no_inline_log": "(无执行日志 — agent 未实际运行)",
   "load_log_failed": "加载日志失败: {{msg}}",
   "no_reply": "（无回复）",
-  "error_reply": "（错误）"
+  "error_reply": "（错误）",
+  "clear_conv_btn": "清理对话",
+  "clear_conv_title": "清除当前事件的对话消息",
+  "clear_conv_confirm": "确认清理该事件的所有对话消息？此操作不可撤销。",
+  "clear_conv_done": "对话已清理",
+  "clear_conv_failed": "清理失败: {{msg}}",
+  "delete_knowledge_btn": "删除知识",
+  "knowledge_deleted": "知识已删除",
+  "knowledge_delete_failed": "删除失败: {{msg}}",
+  "knowledge_delete_confirm_project": "此知识为所有 Agent 共享，删除后其他 Agent 也会受影响。确认删除？",
+  "knowledge_modal_close": "关闭",
+  "scope_agent_solo": "Agent 独享"
 }
