@@ -326,6 +326,13 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             final_text = ""
             exit_code = -1
     else:
+        # Issue #95：direct 模式不走 worker 物化，手动替换占位符为实际路径
+        # _build_project_info_section 生成 {{PROJECT_INFO_DIR}}，新增 {{KNOWLEDGE_DIR}} 引导
+        # direct 模式不物化文件，替换为 ws 下的路径（agent 可读到本地原始文件）
+        _ws_proj = os.path.join(wsd, ".project-info")
+        _ws_know = os.path.join(wsd, ".knowledge")
+        prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _ws_proj)
+        prompt = prompt.replace("{{KNOWLEDGE_DIR}}", _ws_know)
         async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
                                                             backend_name=_be, account=repo_key,
                                                            bot_token=repo_token, agent_name="VOD Agent",
