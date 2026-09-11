@@ -96,11 +96,12 @@ _advanced_options_cache: dict = {}  # (repo_key, issue_id) -> (options_str, time
 
 
 def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
-    """注入场景高级选项：工作分支 + 自定义配置（仅执行类 agent coding/qa/sre）。
+    """注入场景高级选项指引（仅执行类 agent coding/qa/sre）。
+
+    值不暴露在 prompt 文本里——通过环境变量注入（GRAPE_WORK_BRANCH / GRAPE_CF_N / GRAPE_CF_MAP），
+    prompt 只输出固定指引文本，agent 自行 printenv 读取。
 
     优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene。
-    这样流水线跑到一半时，仓库场景被切换不会影响已在跑的 Issue。
-    读 devops_pipeline_scene.advanced_options JSON，拼装为 prompt 段落。无配置时返回空串。
     60s TTL 内存缓存减少 DB 查询，缓存 key 为 (repo_key, issue_id)。
     """
     import time as _time
@@ -141,19 +142,21 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
         opts = _json.loads(row[0]) if row[0] else {}
         if not opts:
             return ""
-        lines = ["\n## 场景高级选项"]
+        # 3. 判断有哪些配置项（决定是否输出指引）
         wb = opts.get("work_branch", "")
+        fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("key")]
+        has_any = bool(wb) or bool(fields)
+        if not has_any:
+            return ""
+        # 4. 输出固定指引文本（不暴露任何值）
+        lines = ["\n## 场景自定义配置"]
+        lines.append("场景高级选项已注入环境变量。执行前必须读取以下环境变量：")
         if wb:
-            lines.append(f"- 工作基线分支：{wb}（Issue 分支从该分支切出，PR/MR 目标分支必须为 {wb}）")
-        fields = opts.get("custom_fields", [])
+            lines.append("- GRAPE_WORK_BRANCH：工作基线分支（printenv GRAPE_WORK_BRANCH）")
         if fields:
-            lines.append("- 项目自定义配置：")
-            for f in fields:
-                _k = f.get("key", "")
-                _v = f.get("value", "")
-                if _k:
-                    lines.append(f"  - {_k}: {_v}")
-        result = "\n".join(lines) if len(lines) > 1 else ""
+            lines.append("- GRAPE_CF_MAP：自定义配置键名映射（printenv GRAPE_CF_MAP），按映射中的变量名读取对应环境变量获取值")
+        lines.append("必须先读取所有配置项再开始工作。")
+        result = "\n".join(lines)
         _advanced_options_cache[_cache_key] = (result, now)
         return result
     except Exception as _e:

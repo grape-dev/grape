@@ -49,12 +49,14 @@
 <a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span><span data-i18n="app.nav.scene_center">项目场景</span></a>
 <a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span><span data-i18n="app.nav.pipeline">流水线</span></a>
 
-<div class="grp" data-i18n="app.sidebar.devops_agents">DevOps Agents</div>
+<div class="grp-tog collapsed" id="grp-devops" data-key="sidebar.devops_agents_collapsed" onclick="app.toggleGroup(this)"><span data-i18n="app.sidebar.devops_agents">DevOps Agents</span><i class="grp-arrow">▸</i></div>
+<div class="grp-items" id="grp-devops-items">
 <a id="nav-vod" onclick="app.nav('vod')"><span class="ic" style="color:var(--pk)">●</span><span data-i18n="app.nav.vod">VOD Agent</span></a>
 <a id="nav-issue" onclick="app.nav('issue')"><span class="ic" style="color:var(--r)">●</span><span data-i18n="app.nav.issue">Issue Agent</span></a>
 <a id="nav-coding" onclick="app.nav('coding')"><span class="ic" style="color:var(--a)">●</span><span data-i18n="app.nav.coding">Coding Agent</span></a>
 <a id="nav-qa" onclick="app.nav('qa')"><span class="ic" style="color:var(--pu)">●</span><span data-i18n="app.nav.qa">QA Agent</span></a>
 <a id="nav-sre" onclick="app.nav('sre')"><span class="ic" style="color:var(--or)">●</span><span data-i18n="app.nav.sre">SRE Agent</span></a>
+</div>
 
 <div class="grp" data-i18n="app.sidebar.devops_market">场景中心</div>
 <a id="nav-scene-market" class="act" onclick="app.nav('scene-market')"><span class="ic">◈</span><span data-i18n="app.nav.scene_skill_market">场景·技能</span></a>
@@ -105,7 +107,7 @@
 <script src="/static/js/pages/dashboard.js?v=64"></script>
 <script src="/static/js/pages/pipeline.js?v=35"></script>
 <script src="/static/js/pages/agents.js?v=21"></script>
-<script src="/static/js/pages/events.js?v=40"></script>
+<script src="/static/js/pages/events.js?v=41"></script>
 <script src="/static/js/pages/chat.js?v=32"></script>
 <script src="/static/js/pages/repos.js?v=34"></script>
 <script src="/static/js/pages/templates.js?v=34"></script>

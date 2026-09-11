@@ -180,6 +180,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     try:
         from src.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
+        evt["issue_id"] = issue_id
         evt["_skill_path"] = skill_path
         evt["_skill_id"] = skill_id
         prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
@@ -1033,7 +1034,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             skill_name = _pipe_skill
             # 同步更新 skill_id 和 skill_path，否则执行时仍用旧 skill_id 查到旧 skill
             from src.user.db import resolve_skill_id, get_skill_by_id, get_skill_path
-            _new_sid = resolve_skill_id(_pipe_skill)
+            _new_sid = resolve_skill_id(_pipe_skill, repo_key=repo_key, user_id=_issue_scene_uid)
             if _new_sid:
                 skill_id = _new_sid
                 _sk = get_skill_by_id(_new_sid)
@@ -1467,6 +1468,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 4) 构建 prompt（含技能占位符化，见 skill-delivery-remote.md）
     try:
         evt["repo_key"] = repo_key
+        evt["issue_id"] = issue_id
         evt["_skill_path"] = skill_path
         if is_scene_recommend:
             from src.prompt_builder import build_scene_recommender_prompt
@@ -1487,7 +1489,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     _inject_cloud_credentials(env_extra, repo_key)
-    # 注入场景 work_branch（worker 端 repogit 优先读环境变量，不依赖本地 DB）
+    # 注入场景 work_branch + custom_fields 环境变量（值不暴露在 prompt 文本里）
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -1495,6 +1497,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
+    _inject_custom_fields_env(env_extra, repo_key, issue_id)
     # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
@@ -1567,6 +1570,57 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         return
     _mode_tag = "plugin" if is_plugin_mode() else "legacy"
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
+
+
+def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = "") -> None:
+    """读场景高级选项的 custom_fields，按序号注入环境变量。
+
+    每个自定义字段对应 GRAPE_CF_1、GRAPE_CF_2...
+    GRAPE_CF_MAP = {"GRAPE_CF_1":"key名","GRAPE_CF_2":"key名"} 供 agent 查映射。
+    值不暴露在 prompt 文本里，agent 通过 printenv 自行读取。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        import json as _json
+        # 1. 优先读 issue_state.scene_id，空则回退 managed_repos.dev_scene
+        scene_id = ""
+        if issue_id:
+            try:
+                from src.api.session_store import get_issue_scene
+                scene_id, _ = get_issue_scene(repo_key, issue_id)
+            except Exception:
+                scene_id = ""
+        if not scene_id:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+                row = c.fetchone()
+            scene_id = (row[0] if row else "") or ""
+        if not scene_id:
+            return
+        # 2. 读 advanced_options
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return
+        opts = _json.loads(row[0]) if row[0] else {}
+        fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("key")]
+        if not fields:
+            return
+        # 3. 按序号注入
+        cf_map = {}
+        for i, f in enumerate(fields, 1):
+            var_name = f"GRAPE_CF_{i}"
+            env_extra[var_name] = str(f.get("value", ""))
+            cf_map[var_name] = f.get("key", "")
+        env_extra["GRAPE_CF_MAP"] = _json.dumps(cf_map, ensure_ascii=False)
+    except Exception as _e:
+        log.warning(f"inject custom_fields env failed: {_e}")
 
 
 def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:
@@ -1889,6 +1943,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     try:
         from src.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
+        evt["issue_id"] = issue_id
         prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                               skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
         # 直接模式（direct）：组件4 统一物化 project-info / skill / knowledge 到 ws 内
@@ -1934,7 +1989,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         "ACCOUNT": exec_account,
     }
     _inject_cloud_credentials(env_extra, repo_key)
-    # 注入场景 work_branch（direct 模式同样注入，保持与 worker 模式一致）
+    # 注入场景 work_branch + custom_fields 环境变量（direct 模式同样注入，保持与 worker 模式一致）
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -1942,6 +1997,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
+    _inject_custom_fields_env(env_extra, repo_key, issue_id)
     # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
     # （direct 模式同样需要——A2A 交办 sre 走本路径，见 _enqueue_pipeline_task 同款逻辑）
     if agent_type == "sre":
@@ -2517,7 +2573,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     # skill 解析
     from src.user.db import resolve_skill_id, get_skill_by_id, get_skill_path
     skill_name = vod_skill
-    skill_id = resolve_skill_id(vod_skill) or 0
+    skill_id = resolve_skill_id(vod_skill, repo_key=repo_key, user_id=_scene_uid) or 0
     skill_path = vod_skill
     if skill_id:
         _sk = get_skill_by_id(skill_id)

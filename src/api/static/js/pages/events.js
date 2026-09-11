@@ -51,25 +51,29 @@ function renderEventDetail(data) {
     (data.status === 'running' && _ts && (Date.now() - _ts) > 10 * 60 * 1000) ||
     (data.task && data.task.task_status === 'dispatched');
 
-  // M4：结构化产出（event.json archive 对应段，见 §11.4）
-  // "Agent 处理记录" 作为方框外部左上角标题，与下方"Agent 答复结论"上下对齐
-  let structuredHtml = '';
-  const arch = data.archive || null;
-  if (arch && arch.output) {
-    const o = arch.output;
+  // M4：结构化产出（唯一结论）：优先 event.json archive.output，其次 events.result 自身的结构化 JSON。
+  // "Agent 处理记录" 作为方框外部左上角标题，与下方结构化结论分离（不再重复展示 result 原文）。
+  const _buildStructuredHtml = (o) => {
+    if (!o) return '';
     const actions = Array.isArray(o.actions) ? o.actions.map(a => `<div>• ${a}</div>`).join('') : '';
     const arts = Array.isArray(o.artifacts) ? o.artifacts.map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('') : '';
-    const _lblConclusion = I18N.t('events.label_conclusion');
-    const _lblActions = I18N.t('events.label_actions');
-    const _lblArtifacts = I18N.t('events.label_artifacts');
-    const _lblNextStep = I18N.t('events.label_next_step');
-    const _lblIssueSummary = I18N.t('events.label_issue_summary');
-    structuredHtml = `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblConclusion}</b> ${o.conclusion}</div>` : ''}
-      ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblActions}</b> ${actions}</div>` : ''}
-      ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblArtifacts}</b> ${arts}</div>` : ''}
-      ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblNextStep}</b> ${o.next_step}</div>` : ''}
-      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>${_lblIssueSummary}</b> ${o.issue_summary}</div>` : ''}`;
-  }
+    return `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_conclusion')}</b> ${o.conclusion}</div>` : ''}
+      ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_actions')}</b> ${actions}</div>` : ''}
+      ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_artifacts')}</b> ${arts}</div>` : ''}
+      ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_next_step')}</b> ${o.next_step}</div>` : ''}
+      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>${I18N.t('events.label_issue_summary')}</b> ${o.issue_summary}</div>` : ''}`;
+  };
+  const _tryStructuredResult = (r) => {
+    if (!r) return null;
+    const s = String(r).trim();
+    if (!(s.startsWith('{') && s.endsWith('}'))) return null;
+    try {
+      const o = JSON.parse(s);
+      return (o && (o.conclusion || o.actions || o.artifacts || o.issue_summary)) ? o : null;
+    } catch (e) { return null; }
+  };
+  const arch = data.archive || null;
+  let structuredHtml = _buildStructuredHtml((arch && arch.output) || _tryStructuredResult(result));
 
   // 上下文折叠区块摘要（折叠时显示）
   const _ctxSummary = `${data.event_type || '—'} · ${data.actor || '—'}`;
@@ -135,8 +139,8 @@ function renderEventDetail(data) {
       <!-- 区块3：Agent 处理记录与答复结论（统一标题，内置框+结论，整体滑动） -->
       <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">${I18N.t('events.section_processing')}</h3>
       <div style="flex:1;overflow-y:auto;background:var(--bg);color:var(--t);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
-        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
-        ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">' + I18N.t('events.no_conclusion') + '</div>'}
+        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>`
+          : `${result ? renderMarkdown(result) : '<div style="color:var(--t3)">' + I18N.t('events.no_conclusion') + '</div>'}`}
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>

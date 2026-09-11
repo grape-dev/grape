@@ -790,7 +790,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
     const skIcon = meta.icon || '◈';
     const skLabel = meta.label || tag;
     const agent = agents.find(a => a.agent_type === tag) || {};
-    const skillName = node.skill ? (agent.skill_display_name || node.skill) : (agent.skill_display_name || agent.skill || '');
+    const skillName = node.skill_display_name || node.skill || agent.skill_display_name || agent.skill || '';
     const engineIds = node.engine_runtime_ids || agent.engine_runtime_ids || [];
     const modeIcon = {emit:'→',waterfall:'◇',serial:'↻',parallel:'⇄'}[node.mode] || '→';
     const en = editNodes.find(n => n.id === tag);
@@ -986,7 +986,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes) {
     const skIcon = meta.icon || '◈';
     const skLabel = meta.label || tag;
     const ag = agents.find(a => a.agent_type === tag) || {};
-    const skillDisplay = ag.skill_display_name || ag.skill || node.skill || '';
+    const skillDisplay = node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '';
     const engineIds = node.engine_runtime_ids || [];
     const enabled = node.enabled !== false;
 
@@ -1438,7 +1438,7 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     const node = isEditing ? editNodes.find(n => n.id === at) : null;
     const enabled = node ? node.enabled : (ag.enabled_in_scene !== false);
     const skill = node ? (node.skill || '') : (ag.skill || '');
-    const skillDisplay = node ? (ag.skill_display_name || ag.skill || node.skill || '') : (ag.skill_display_name || ag.skill || '');
+    const skillDisplay = node ? (node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '') : (ag.skill_display_name || ag.skill || '');
     const engineIds = node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []);
     const accentColor = meta.color || colors[at] || '#86868b';
     // 语言包优先于后端 description（后端返回中文时英文模式用前端翻译）

@@ -4,7 +4,7 @@ from .base import VcsBackend
 from .event_types import (
     ISSUE_OPENED, ISSUE_UPDATED, ISSUE_CLOSED, ISSUE_REOPENED,
     ISSUE_ASSIGNED, ISSUE_LABELED, ISSUE_COMMENT,
-    PR_OPENED, PR_UPDATED, PR_CLOSED, PR_MERGED, PR_COMMENT,
+    PR_OPENED, PR_UPDATED, PR_CLOSED, PR_MERGED, PR_REVIEW, PR_COMMENT,
     PUSH, TAG_CREATED, RELEASE_CREATED, BUILD_START,
     normalize_changes,
 )
@@ -66,6 +66,9 @@ class GitCodeBackend(VcsBackend):
                 evt_type = PR_CLOSED
             elif action == "reopen":
                 evt_type = PR_OPENED
+            elif action in ("review", "approve"):
+                # 审查/通过审查：独立事件，避免被归入 PR_OPENED 误触发执行 agent
+                evt_type = PR_REVIEW
             else:
                 evt_type = PR_OPENED
 

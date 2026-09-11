@@ -1134,6 +1134,20 @@
   font-size: 11px !important;
   padding: 16px 12px 6px !important;
 }
+/* 可折叠分组标题（Issue #66）：沿用 .grp 视觉，增加点击反馈与箭头 */
+[data-theme="apple"] .sb-nav .grp-tog {
+  font-size: 11px !important;
+  padding: 16px 12px 6px !important;
+  border-radius: 8px;
+  transition: background 0.2s, color 0.2s;
+}
+[data-theme="apple"] .sb-nav .grp-tog:hover {
+  color: var(--t2);
+  background: rgba(0,0,0,0.04);
+}
+[data-theme="apple"] .sb-nav .grp-tog .grp-arrow {
+  font-size: 10px !important;
+}
 
 /* Sidebar select: match nav padding */
 [data-theme="apple"] .sb-sel select {
