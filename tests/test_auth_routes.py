@@ -29,6 +29,18 @@ class _FakeUrlResp:
         return json.dumps(self._payload).encode()
 
 
+class _FakeReqResp:
+    """模拟 requests.get 的返回值（auth.py 用 requests.get 获取用户信息）。"""
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+    def raise_for_status(self):
+        pass
+
+
 def _cleanup(username: str, gitcode_id: str):
     with db_lock:
         c = db.cursor()
@@ -112,8 +124,8 @@ class TestOAuthCallback:
     def test_user_info_exception_502(self):
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen", side_effect=[_FakeUrlResp({"access_token": "at"}),
-                                                          OSError("user api down")]):
+             patch("urllib.request.urlopen", side_effect=[_FakeUrlResp({"access_token": "at"})]), \
+             patch("requests.get", side_effect=OSError("user api down")):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 502
 
@@ -121,9 +133,9 @@ class TestOAuthCallback:
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at", "refresh_token": "rt"}),
-                                _FakeUrlResp({"id": 777777, "login": "whitelist_denied_user",
-                                              "nickname": "拒绝"})]), \
+                   side_effect=[_FakeUrlResp({"access_token": "at", "refresh_token": "rt"})]), \
+             patch("requests.get", return_value=_FakeReqResp({"id": 777777, "login": "whitelist_denied_user",
+                                              "nickname": "拒绝"})), \
              patch("src.config.is_gitcode_user_allowed", return_value=False):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 403
@@ -135,8 +147,8 @@ class TestOAuthCallback:
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at", "refresh_token": "rt"}),
-                                _FakeUrlResp({"id": gid, "login": uname, "nickname": "新用户"})]), \
+                   side_effect=[_FakeUrlResp({"access_token": "at", "refresh_token": "rt"})]), \
+             patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "新用户"})), \
              patch("src.config.is_gitcode_user_allowed", return_value=True):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
@@ -166,8 +178,8 @@ class TestOAuthCallback:
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at2", "refresh_token": "rt"}),
-                                _FakeUrlResp({"id": gid, "login": uname, "name": "旧名"})]):
+                   side_effect=[_FakeUrlResp({"access_token": "at2", "refresh_token": "rt"})]), \
+             patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "旧名"})):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
         assert "first_login=0" in r.headers["location"]
@@ -181,8 +193,8 @@ class TestOAuthCallback:
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at"}),
-                                _FakeUrlResp({"login": "no_id_user"})]):
+                   side_effect=[_FakeUrlResp({"access_token": "at"})]), \
+             patch("requests.get", return_value=_FakeReqResp({"login": "no_id_user"})):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
         assert r.status_code == 502
@@ -194,8 +206,8 @@ class TestOAuthCallback:
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at"}),
-                                _FakeUrlResp({"id": gid, "login": uname, "nickname": "x"})]), \
+                   side_effect=[_FakeUrlResp({"access_token": "at"})]), \
+             patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
              patch("src.config.is_gitcode_user_allowed", return_value=True), \
              patch("src.user.db.create_user", return_value=None):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
@@ -209,8 +221,8 @@ class TestOAuthCallback:
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at"}),
-                                _FakeUrlResp({"id": gid, "login": uname, "nickname": "x"})]), \
+                   side_effect=[_FakeUrlResp({"access_token": "at"})]), \
+             patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
              patch("src.config.is_gitcode_user_allowed", return_value=True), \
              patch("src.session_manager.set_feishu_open_id", side_effect=RuntimeError("boom")):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},

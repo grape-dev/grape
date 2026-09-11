@@ -28,9 +28,9 @@ function renderSettings(tab) {
       const _akVal = d.huawei_cloud && d.huawei_cloud.ak_exists ? '********' : '';
       const _skVal = d.huawei_cloud && d.huawei_cloud.sk_exists ? '********' : '';
       _sc.innerHTML = `
-        <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.gitcode_api_title')}</h3>
-          <div class="srow"><label>${I18N.t('settings.credentials.api_token')}</label><input type="password" value="${d.gitcode && d.gitcode.api_token_exists ? '********' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? '' : `placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"`} style="${d.gitcode && d.gitcode.api_token_exists ? 'background:#f1f5f9' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? 'disabled' : ''}></div>
-          <div class="srow"><label>${I18N.t('settings.credentials.account')}</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + I18N.t('settings.credentials.gitcode_account_suffix') : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
+        <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.vcs_api_title')}</h3>
+          <div class="srow"><label>${I18N.t('settings.credentials.api_token')}</label><input type="password" id="githubToken" value="${d.github && d.github.token_exists ? '********' : ''}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"></div>
+          <div class="srow"><label>${I18N.t('settings.credentials.account')}</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account : (d.github && d.github.login ? d.github.login : '—')}" disabled style="background:#f1f5f9;font-size:10px"></div>
         </div>
         <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.huawei_cloud_title')}</h3>
           <div class="srow"><label>${I18N.t('settings.credentials.access_key')}</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.access_key')}"></div>
@@ -220,6 +220,11 @@ function saveCredentials() {
   if (akVal && !_isCredPlaceholder(akVal)) body.huawei_cloud_ak = akVal;
   if (skVal && !_isCredPlaceholder(skVal)) body.huawei_cloud_sk = skVal;
 
+  // GitHub Token
+  const ghEl = document.getElementById('githubToken');
+  const ghVal = ghEl && ghEl.value ? ghEl.value.trim() : '';
+  if (ghVal && !_isCredPlaceholder(ghVal) && ghVal !== '********') body.github_token = ghVal;
+
   // v4.3：发布令牌按仓库（项目维度）——带当前仓库
   const cur = app.currentRepo();
   if (cur && cur.fullName) {
@@ -267,11 +272,11 @@ function unhostFromSettings(fullName) {
     }
     app.initSidebarRepos();
     API.get('/repos/managed').then(md => {
-      if (window._currentView !== 'settings') return;  // Issue #63: 用户已切走，丢弃回调
       const remaining = md.repos || [];
       if (wasCurrent || remaining.length === 0) {
+        // 当前仓库被解除或已无托管仓库 → 回到仓库选择页
         API.get('/repos/member').then(d => {
-          if (window._currentView !== 'settings') return;  // Issue #63: 用户已切走，丢弃回调
+          const repos = d.repos || [];
           document.getElementById('sidebar').style.display = 'none';
           document.getElementById('tb').style.display = 'none';
           const mv = document.getElementById('mainView');
@@ -283,6 +288,7 @@ function unhostFromSettings(fullName) {
           renderRepoSelection(repos);
         });
       } else {
+        // 还有其他托管仓库 → 回到 Dashboard
         app.nav('dash');
       }
     });

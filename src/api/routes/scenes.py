@@ -744,7 +744,7 @@ def list_repo_branches(owner: str, repo: str, user: dict = Depends(get_current_u
     try:
         page = 1
         while page <= 5:
-            url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/branches?per_page=100&page={page}"
+            url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/branches?per_page=100&page={page}"
             data = _req("GET", url, token)
             if not isinstance(data, list) or not data:
                 break
@@ -789,7 +789,7 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         raise HTTPException(status_code=400, detail={"code": 400, "message": "分支名不能为空"})
 
     try:
-        url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/branches"
+        url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/branches"
         result = _req("POST", url, token, {
             "branch_name": body.branch_name.strip(),
             "refs": body.refs or "main",

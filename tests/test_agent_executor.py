@@ -51,7 +51,8 @@ class TestCodeArtsRuntime:
         assert "--format" in args
         assert "json" in args
         assert "--auto" in args               # E2: opencode --auto 批准 write/edit
-        assert "--attach" in args              # E2: attach 到 codearts serve
+        # E2 重构后 --attach 移除（serve 改为 per-task 内部启动）
+        assert "--attach" not in args
         assert "--dangerously-skip-permissions" not in args
         assert "hello world" in args  # prompt passed as positional arg
         # --model 仅在 CODEARTS_MODEL 环境变量设置时才传，默认不传
@@ -60,11 +61,10 @@ class TestCodeArtsRuntime:
             assert "--model" not in args
 
     def test_build_args_with_session(self):
-        """E2: codearts 通过 opencode --session 传递 session_id"""
+        """E2: codearts session_id 当前不通过命令行传递（per-task KERNEL_DATA_DIR 隔离）"""
         args = self.backend.build_args("test prompt", "sess_abc")
-        assert "--session" in args
-        idx = args.index("--session")
-        assert args[idx + 1] == "sess_abc"
+        # session_id 参数被接受但不作为 --session 传递
+        assert "--session" not in args
         assert "test prompt" in args
 
     def test_build_args_no_dangerous_flag(self):
@@ -558,7 +558,8 @@ class TestExecutorPipeInvocation:
             return FakeProc(cmd, *a, **k)
 
         with patch("src.agent.executor.subprocess.Popen", side_effect=fake_popen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"), \
+             patch("src.agent.sandbox.build_bwrap_cmd", return_value=None):
             list(stream_runtime("p", os.getcwd(), "", "issue"))
 
         assert captured["cmd"][0] == "/usr/bin/opencode", "命令应为直接 agent CLI，不得是 script 包装"

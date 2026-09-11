@@ -669,37 +669,6 @@ CREATE TABLE IF NOT EXISTS skill_likes (
 )
 """
 
-# ===== Issue-45: API Token 认证 =====
-# 会话级临时 token（方式 A）：存在即有效，删除即失效（无 revoked 标记位）。
-# session_key（task_id）仅作失效定位的管理键，不是授权身份（token 设计 §2.3）。
-_SESSION_API_TOKENS_DDL = """
-CREATE TABLE IF NOT EXISTS session_api_tokens (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_key  TEXT NOT NULL,             -- 会话唯一键（task_id），失效时精确定位
-    repo_key     TEXT NOT NULL,             -- 仓库（主作用域）
-    agent_type   TEXT NOT NULL,             -- vod/issue/coding/qa/sre/chat
-    user_id      INTEGER DEFAULT 0,         -- 仅 chat agent（用户身份）绑定；devops 事件 agent 无此概念，0=仓库身份
-    token_sha256 TEXT UNIQUE NOT NULL,      -- SHA-256
-    expires_at   TEXT NOT NULL,             -- 签发时刻 + TTL（校验超时用）
-    created_at   TEXT DEFAULT (datetime('now'))
-)
-"""
-
-# 用户级长期 API Key（方式 B）：sha256 落库（不存明文），支持吊销。
-_API_TOKENS_DDL = """
-CREATE TABLE IF NOT EXISTS api_tokens (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL,                  -- 绑定单用户
-    token_sha256 TEXT UNIQUE NOT NULL,             -- SHA-256（不存明文）
-    name        TEXT DEFAULT '',                   -- token 名称（如 "ci-token-01"）
-    scopes      TEXT DEFAULT '["public"]',         -- 预留：未来 RBAC 扩展
-    created_at  TEXT DEFAULT (datetime('now')),
-    last_used_at TEXT DEFAULT NULL,
-    revoked     INTEGER DEFAULT 0,
-    UNIQUE (user_id, name)
-)
-"""
-
 _UPLOADED_FILES_DDL = """
 CREATE TABLE IF NOT EXISTS uploaded_files (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -775,9 +744,30 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("uploaded_files", _UPLOADED_FILES_DDL),
     ("distributed_locks", _DISTRIBUTED_LOCKS_DDL),
     ("api_latency_log", _API_LATENCY_LOG_DDL),
-    # ===== Issue-45: API Token 认证 =====
-    ("session_api_tokens", _SESSION_API_TOKENS_DDL),
-    ("api_tokens", _API_TOKENS_DDL),
+    # ===== Issue-45: API Token 认证表 =====
+    ("session_api_tokens", """
+CREATE TABLE IF NOT EXISTS session_api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key TEXT NOT NULL,
+    repo_key TEXT NOT NULL DEFAULT '',
+    agent_type TEXT NOT NULL DEFAULT '',
+    user_id INTEGER NOT NULL DEFAULT 0,
+    token_sha256 TEXT NOT NULL,
+    expires_at INTEGER NOT NULL DEFAULT 0
+)"""),
+    ("api_tokens", """
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_sha256 TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    scopes TEXT NOT NULL DEFAULT '["public"]',
+    revoked INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_used_at TEXT DEFAULT ''
+)"""),
+    # ===== legacy: backend_agents（_migrate_tables rebuild 依赖其存在）=====
+    ("backend_agents", _BACKEND_AGENTS_DDL),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -2187,6 +2177,9 @@ def _migrate_tables():
             ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
             ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
             ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
+            ("github_oauth_client_id", "oauth_github_client_id"),
+            ("github_oauth_client_secret", "oauth_github_client_secret"),
+            ("github_oauth_redirect_uri", "oauth_github_redirect_uri"),
         ]
         with db_lock:
             c = db.cursor()
@@ -2501,15 +2494,6 @@ def _migrate_tables():
             log.info("Added managed_repos.host_status column")
     except Exception as e:
         log.warning(f"Add managed_repos.host_status column failed: {e}")
-    # ===== managed_repos 智能推荐配置列 =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "managed_repos", "scene_recommend_config", "TEXT DEFAULT ''")
-            db.commit()
-            log.info("Added managed_repos.scene_recommend_config column")
-    except Exception as e:
-        log.warning(f"Add managed_repos.scene_recommend_config column failed: {e}")
     # ===== devops_pipeline_scene 高级选项列（场景级工作分支 + 自定义 key:value）=====
     try:
         with db_lock:
