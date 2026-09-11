@@ -1861,6 +1861,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN scene_tags TEXT DEFAULT '[\"default\"]'",
         # ===== 引擎别名：用户自定义别名，不受心跳覆盖 =====
         "ALTER TABLE agent_runtimes ADD COLUMN alias TEXT DEFAULT ''",
+        # ===== 标签用户标记：用户手动设过标签后置1，心跳注册不再自动补 'all' =====
+        "ALTER TABLE agent_runtimes ADD COLUMN tags_user_set INTEGER DEFAULT 0",
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
