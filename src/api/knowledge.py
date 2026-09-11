@@ -766,8 +766,14 @@ def _sync_baseline_files():
                     (repo_key, file_path)
                 ).fetchone()
 
-            if row and row[1]:  # DB 有记录且 obs_key 非空 → 跳过
-                continue
+            if row and row[1]:  # DB 有记录且 obs_key 非空
+                # Issue #95：检测旧格式 obs_key（project-info/ 前缀但不含 knowledge/）→ 强制更新
+                _old_obs = row[1] or ""
+                if _old_obs.startswith("project-info/") and not _old_obs.startswith("knowledge/"):
+                    # 旧格式 → 重新写 OBS + UPDATE
+                    pass  # 不 continue，走下面的写入逻辑
+                else:
+                    continue  # 新格式或本地模式 → 跳过
 
             # 写 OBS + DB
             try:
