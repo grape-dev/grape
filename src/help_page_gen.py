@@ -1,10 +1,16 @@
-"""帮助文档静态页生成器：将 help/usage + help/api 的 markdown 渲染为 src/api/static/help.html。
+"""帮助文档静态页生成器（v2）：将 help/usage + help/api 的 markdown 渲染为 src/api/static/help.html。
 
-- 单一事实源 = 仓库根目录 help/（usage 9 章 + api 13 章，Issue #97 拆分）
-- 服务启动时（src/api/main.py lifespan）调用 generate() 覆写 help.html
-- help.html 为生成物（已在 .gitignore），不做手工编辑；改 help/*.md 后重启即刷新
+v2 设计（见 docs/weekly-02/help-page-prototype.md）：
+- help.html 为轻量 SPA 壳：入口页(帮助中心)→ 使用文档 / API 文档 两个独立区块
+- 目录按区块隔离：使用页=仅使用指南；API 页=仅 API；同一级小节同缩进（不互为父子）
+- 点击目录子项左目录常驻，仅右侧内容区替换渲染对应 markdown
+- 右侧单文档渲染，H2/H3 轻量标题，仅提示/代码块带框；当前章节/小节高亮 + scrollspy
+- 主题切换(🌓 localStorage) + 移动端抽屉目录 + 侧栏搜索
+
+数据流：help/*.md → 启动期生成 → /static/help.html（生成物，.gitignore）
 """
 import html as _html
+import json
 import os
 import re
 from pathlib import Path
@@ -33,63 +39,211 @@ _MD_EXTENSIONS = ["fenced_code", "tables", "toc", "sane_lists", "nl2br"]
 
 _CSS = """\
 :root{--bg:#fff;--c:#f7f8fa;--b:#e2e8f0;--t1:#1a202c;--t2:#4a5568;--t3:#a0aec0;--a:#3b82f6;--g:#22c55e;--y:#eab308;--r:#ef4444;--pk:#ec4899;--pu:#8b5cf6;--or:#f97316}
-[data-theme="apple"][data-theme-mode="dark"]{--bg:#0f1117;--c:#1a1d28;--b:#2d3142;--t1:#f1f5f9;--t2:#94a3b8;--t3:#64748b}
+html[data-mode="dark"]{--bg:#0f1117;--c:#1a1d28;--b:#2d3142;--t1:#f1f5f9;--t2:#94a3b8;--t3:#64748b}
+*{box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--t1);margin:0;line-height:1.7;font-size:15px}
-.wrap{max-width:1080px;margin:0 auto;padding:40px 24px}
-h1{font-size:26px;border-bottom:3px solid var(--a);padding-bottom:10px;margin-top:40px}
-h1:first-of-type{margin-top:0}
-h2{font-size:20px;margin-top:32px;padding-left:12px;border-left:4px solid var(--a)}
-h3{font-size:17px;margin-top:24px;color:var(--t2)}
+h1{font-size:25px;border-bottom:1px solid var(--b);padding-bottom:8px;margin-top:8px}
+h2{font-size:20px;margin-top:28px;padding-left:10px;border-left:3px solid var(--a)}
+h3{font-size:16px;margin-top:22px;color:var(--t2)}
 p{margin:8px 0}
 ul,ol{padding-left:24px}
 li{margin:4px 0}
 code{background:var(--c);padding:2px 6px;border-radius:4px;font-size:13px;font-family:"SF Mono",Monaco,monospace;color:var(--pk)}
-pre{background:var(--c);padding:16px;border-radius:8px;overflow-x:auto;border:1px solid var(--b)}
+pre{background:var(--c);padding:14px 16px;border-radius:8px;overflow-x:auto;border:1px solid var(--b)}
 pre code{background:none;padding:0;color:var(--t1)}
 blockquote{margin:12px 0;padding:12px 16px;background:var(--c);border:1px solid var(--b);border-left:4px solid var(--a);border-radius:8px}
-.blockquote.tip,blockquote.card.tip{border-left-color:var(--g);background:rgba(34,197,94,.08)}
-.blockquote.warn,blockquote.card.warn{border-left-color:var(--y);background:rgba(234,179,8,.08)}
-.card{background:var(--c);border:1px solid var(--b);border-radius:10px;padding:16px 20px;margin:12px 0}
-.card-title{font-weight:700;font-size:16px;margin-bottom:8px}
-.tip{border-left:4px solid var(--g);background:rgba(34,197,94,.08)}
-.warn{border-left:4px solid var(--y);background:rgba(234,179,8,.08)}
-.danger{border-left:4px solid var(--r);background:rgba(239,68,68,.08)}
-.toc{position:sticky;top:20px;background:var(--c);border:1px solid var(--b);border-radius:10px;padding:16px 20px;font-size:13px}
-.toc a{color:var(--t2);text-decoration:none;display:block;padding:3px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.toc a:hover{color:var(--a)}
-.toc-group{margin-top:16px;padding-top:12px;border-top:1px solid var(--b);font-weight:700;color:var(--t1);font-size:13px}
-.grid{display:grid;grid-template-columns:260px 1fr;gap:24px}
+blockquote.card.tip{border-left-color:var(--g);background:rgba(34,197,94,.08)}
+blockquote.card.warn{border-left-color:var(--y);background:rgba(234,179,8,.08)}
 table{width:100%;border-collapse:collapse;margin:12px 0}
 th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--b)}
 th{background:var(--c);font-weight:600}
-.back-top{position:fixed;bottom:30px;right:30px;background:var(--a);color:#fff;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;border:none;font-size:18px;box-shadow:0 4px 12px rgba(0,0,0,.15)}
-@media(max-width:768px){.grid{grid-template-columns:1fr}.toc{display:none}}
+/* ── 壳 ── */
+.topnav{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:6px;padding:10px 18px;background:var(--bg);border-bottom:1px solid var(--b)}
+.brand{font-weight:700;font-size:15px;color:var(--t1);text-decoration:none;margin-right:10px}
+.link{color:var(--t2);text-decoration:none;font-size:13px;padding:4px 12px;border-radius:6px}
+.link:hover{color:var(--a)}
+.link.active{background:var(--c);color:var(--a);font-weight:600}
+.spacer{flex:1}
+.btn{border:1px solid var(--b);background:var(--c);color:var(--t1);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px}
+.burger{display:none}
+/* 入口 */
+.home{max-width:860px;margin:44px auto;padding:0 20px}
+.home h1{font-size:28px;border-bottom:3px solid var(--a)}
+.cards{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:30px}
+.card{display:block;background:var(--c);border:1px solid var(--b);border-radius:12px;padding:26px;text-decoration:none;color:var(--t1)}
+.card:hover{border-color:var(--a);box-shadow:0 6px 20px rgba(0,0,0,.08)}
+.card .big{font-size:22px;font-weight:700;margin-bottom:8px}
+.card .go{margin-top:16px;color:var(--a);font-weight:600}
+/* 骨架 */
+.body{display:flex;max-width:1320px;margin:0 auto;padding:0 10px}
+.side{width:272px;flex:0 0 272px;position:sticky;top:52px;height:calc(100vh - 52px);overflow-y:auto;padding:16px 8px 60px;border-right:1px solid var(--b)}
+.side-group{font-weight:700;font-size:12px;color:var(--t3);letter-spacing:.5px;padding:6px 10px 4px}
+.side .search{margin:6px 10px 10px}
+.side .search input{width:100%;background:var(--c);border:1px solid var(--b);border-radius:6px;padding:6px 10px;color:var(--t1);font-size:12px}
+.dn{display:block;padding:6px 10px;border-radius:6px;color:var(--t1);text-decoration:none;font-size:13px}
+.dn:hover{background:var(--c)}
+.dn.active{background:rgba(59,130,246,.12);color:var(--a);font-weight:600}
+.ds{display:block;padding:4px 10px;border-radius:6px;color:var(--t2);text-decoration:none;font-size:12px;cursor:pointer}
+.ds:hover{color:var(--a)}
+.ds.active{background:var(--c);color:var(--a);font-weight:600}
+.content{flex:1;min-width:0;max-width:940px;padding:26px 32px 90px}
+.back-top{position:fixed;bottom:26px;right:26px;background:var(--a);color:#fff;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;border:none;font-size:18px;box-shadow:0 4px 12px rgba(0,0,0,.15)}
+@media(max-width:900px){
+  .burger{display:inline-block}
+  .cards{grid-template-columns:1fr}
+  .body{display:block}
+  .side{position:fixed;left:0;top:52px;bottom:0;width:280px;z-index:30;background:var(--bg);display:none;border-right:1px solid var(--b)}
+  .side.open{display:block}
+  .content{padding:20px 18px 90px}
+}
 """
 
 _MIGRATION_COMMENT = """<!--
-  ⚠️ 本文件为生成产物（migration note）：由 src/help_page_gen.py 依据 help/usage + help/api 渲染生成。
-  如需更新内容，请编辑 help/ 目录下对应 markdown 文件后重启服务（help.html 会自动重新生成）。
+  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/help_page_gen.py 依据 help/usage + help/api 渲染。
+  如需更新任何内容，请编辑 help/ 目录下对应 markdown 文件后重启服务（help.html 自动重新生成）。
 -->"""
 
-_API_SEP = '<hr style="margin:40px 0;border:none;border-top:1px solid var(--b)" />'
+_JS_APP = r"""
+(function () {
+  'use strict';
+  var DATA = (function () { var el = document.getElementById('help-data'); try { return el ? JSON.parse(el.textContent) : {}; } catch (e) { return {}; } })();
+  var app = document.getElementById('app');
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function setMode(m) { document.documentElement.setAttribute('data-mode', m); try { localStorage.setItem('help_theme', m); } catch (e) {} }
+  function initMode() { var m = 'light'; try { m = localStorage.getItem('help_theme') || 'light'; } catch (e) {} setMode(m); }
+  function docs(s) { return DATA[s] || []; }
+  function docOf(s, id) { var d = docs(s); for (var i = 0; i < d.length; i++) { if (d[i].id === id) return d[i]; } return d[0] || null; }
+  function subLinks(cur) {
+    if (!cur) return '';
+    var out = '', t = cur.toc || [], i, r;
+    for (i = 0; i < t.length; i++) { r = t[i]; out += '<a class="ds" data-id="' + r.id + '" style="padding-left:' + (8 + 12 * (r.level - 1)) + 'px">' + esc(r.name) + '</a>'; }
+    return out;
+  }
+  function sideList(sec, cur) {
+    var out = '<div class="side-group">' + esc(sec === 'usage' ? '使用指南' : 'API 参考') + '</div>';
+    out += '<div class="search"><input id="sbox" type="text" placeholder="搜索' + esc(sec === 'usage' ? '使用指南' : 'API 文档') + '..."></div>';
+    var h1id = (cur && (cur.html.match(/<h1\b[^>]*id="([^"]+)"/) || [])[1]) || '';
+    var d, i;
+    for (i = 0; i < docs(sec).length; i++) {
+      d = docs(sec)[i];
+      out += '<a class="dn' + (d.id === cur.id ? ' active' : '') + '" href="#/' + sec + '/' + d.id + '" data-id="' + d.id + '"' + (d.id === cur.id && h1id ? ' data-h1="' + h1id + '"' : '') + '>' + esc(d.title) + '</a>';
+      if (d.id === cur.id) { out += subLinks(cur); }
+    }
+    return out;
+  }
+  function topbar(sec) {
+    return '<div class="topnav"><a class="brand" href="#/">Grape 帮助中心</a>'
+      + '<a class="link' + (sec === 'usage' ? ' active' : '') + '" href="#/usage">使用文档</a>'
+      + '<a class="link' + (sec === 'api' ? ' active' : '') + '" href="#/api">API 文档</a>'
+      + '<span class="spacer"></span>'
+      + '<button class="btn theme-toggle" type="button" title="切换主题">\u2600\ufe0f/\ud83c\udf19</button>'
+      + '<button class="btn burger" type="button" title="目录">\u2630</button></div>';
+  }
+  function renderHome() {
+    app.innerHTML = topbar(null)
+      + '<div class="home"><h1>Grape 帮助中心</h1>'
+      + '<p>帮助文档与 API 参考，按需进入。</p>'
+      + '<div class="cards">'
+      + '<a class="card" href="#/usage"><div class="big">\ud83d\udcd6 使用文档</div><div>快速上手 · Agent 详解 · 流水线 · 技能 · FAQ</div><div class="go">进入使用文档 \u2192</div></a>'
+      + '<a class="card" href="#/api"><div class="big">\u26ed API 文档</div><div>认证与通用约定 · 任务/仓库/技能 等接口参考</div><div class="go">进入 API 文档 \u2192</div></a>'
+      + '</div></div>';
+  }
+  function initSpy(cur) {
+    if (!cur) return;
+    var map = {};
+    var subs = Array.prototype.slice.call(document.querySelectorAll('.side .ds'));
+    for (var i = 0; i < subs.length; i++) { map[subs[i].getAttribute('data-id')] = subs[i]; }
+    var main = document.querySelector('.side .dn.active');
+    var h1 = document.getElementById('content') ? document.querySelector('#content h1[id]') : null;
+    if (h1 && main) { map[h1.id] = main; }
+    var links = Array.prototype.slice.call(document.querySelectorAll('.side .dn,.side .ds'));
+    function onScroll() {
+      var els = Array.prototype.slice.call(document.querySelectorAll('#content h1[id],#content h2[id],#content h3[id]'));
+      var mark = 106, curId = null;
+      for (var k = 0; k < els.length; k++) { if (els[k].getBoundingClientRect().top <= mark) { curId = els[k].id; } }
+      for (var j = 0; j < links.length; j++) { links[j].classList.remove('active'); }
+      var target = map[curId];
+      if (target) { target.classList.add('active'); }
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  }
+  function bindSearch() {
+    var box = document.getElementById('sbox');
+    if (!box) return;
+    box.addEventListener('input', function () {
+      var q = (box.value || '').toLowerCase();
+      var items = Array.prototype.slice.call(document.querySelectorAll('.side .dn'));
+      for (var i = 0; i < items.length; i++) {
+        items[i].style.display = (!q || items[i].textContent.toLowerCase().indexOf(q) >= 0) ? '' : 'none';
+      }
+    });
+    box.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        var q = (box.value || '').toLowerCase();
+        var items = Array.prototype.slice.call(document.querySelectorAll('.side .dn'));
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].style.display !== 'none' && items[i].textContent.toLowerCase().indexOf(q) >= 0) { location.hash = items[i].getAttribute('href'); return; }
+        }
+      }
+    });
+  }
+  function renderSection(sec, cur) {
+    app.innerHTML = topbar(sec) + '<div class="body"><aside class="side" id="side">' + sideList(sec, cur) + '</aside><main class="content" id="content"></main></div>';
+    document.getElementById('content').innerHTML = cur ? cur.html : '';
+    window.scrollTo(0, 0);
+    var sideEl = document.getElementById('side');
+    if (sideEl) { sideEl.classList.remove('open'); }
+    initSpy(cur);
+    bindSearch();
+  }
+  function route() {
+    var raw = (location.hash || '').replace(/^#/, '');
+    var parts = raw.split('/').filter(Boolean);
+    var sec = parts[0];
+    if (sec !== 'usage' && sec !== 'api') { renderHome(); return; }
+    renderSection(sec, docOf(sec, parts[1]));
+  }
+  app.addEventListener('click', function (e) {
+    var sub = e.target.closest ? e.target.closest('a.ds') : null;
+    if (sub) {
+      e.preventDefault();
+      var el = document.getElementById(sub.getAttribute('data-id'));
+      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      var links = Array.prototype.slice.call(document.querySelectorAll('.side .ds'));
+      for (var i = 0; i < links.length; i++) { links[i].classList.toggle('active', links[i] === sub); }
+      return;
+    }
+    if (e.target.closest('.theme-toggle')) {
+      var curMode = document.documentElement.getAttribute('data-mode') || 'light';
+      setMode(curMode === 'light' ? 'dark' : 'light');
+      return;
+    }
+    if (e.target.closest('.burger')) {
+      var side = document.getElementById('side');
+      if (side) { side.classList.toggle('open'); }
+    }
+  });
+  window.addEventListener('hashchange', route);
+  initMode();
+  route();
+})();
+"""
 
 
 def render_markdown(text: str) -> str:
-    """渲染单个 markdown 文档为 HTML（返回纯正文，不含页面壳）。"""
+    """渲染单个 markdown 文档为 HTML 片段（不含页面壳）。"""
     md = markdown.Markdown(extensions=_MD_EXTENSIONS)
-    body = md.convert(text)
-    return body
+    return md.convert(text)
 
 
 def _render_file(path: Path) -> tuple[str, list]:
     md = markdown.Markdown(extensions=_MD_EXTENSIONS)
     body = md.convert(path.read_text(encoding="utf-8"))
-    tokens = md.toc_tokens or []
-    return body, tokens
+    return body, (md.toc_tokens or [])
 
 
 def _prefix_heading_ids(body: str, tokens: list, prefix: str) -> str:
-    """给当前文档的标题 id 加前缀，保证跨文档锚点唯一（各文档独立 Markdown 实例，slug 可能撞车）。"""
     for token in tokens:
         oid = token.get("id")
         if oid:
@@ -103,34 +257,25 @@ def _prefix_heading_ids(body: str, tokens: list, prefix: str) -> str:
     return body
 
 
-def _collect_links(tokens: list, prefix: str) -> list[str]:
-    """把文档标题树拍平为侧边目录链接（含级联缩进，还原原 help.html 的层级目录观感）。"""
-    links: list[str] = []
+def _collect_toc(tokens: list, prefix: str) -> list[dict]:
+    """收集 level>=2 的标题（level1 即文档标题，单独存 title）。"""
+    rows: list[dict] = []
 
     def walk(nodes: list):
         for t in nodes:
             level = t.get("level", 1)
-            name = _html.escape(t.get("name", ""))
-            anchor = t["id"]
-            if level == 1:
-                links.append(f'<a href="#{prefix}{anchor}">{name}</a>')
-            else:
-                indent = min(12 * (level - 1) + 8, 28)
-                links.append(
-                    f'<a href="#{prefix}{anchor}" style="padding-left:{indent}px;font-size:12px;color:var(--t3)">{name}</a>'
-                )
+            if level > 1:
+                rows.append({"level": level, "id": prefix + t["id"], "name": t.get("name", "")})
             walk(t.get("children", []))
 
     walk(tokens)
-    return links
+    return rows
 
 
 def _adorn_blockquotes(body: str) -> str:
-    """把以 💡/⚠️ 开头的引用块还原成原 help.html 的提示卡片样式（增强，非阻塞）。"""
-
     def _repl(m):
         open_tag, inner = m.group(1), m.group(2)
-        head = inner.lstrip()[:24]
+        head = (inner or "").lstrip()[:24]
         if "💡" in head or "TIP" in head.upper():
             return open_tag.replace("<blockquote>", '<blockquote class="card tip">')
         if any(k in head for k in ("⚠️", "⚠", "❌", "🚫", "注意", "安全")):
@@ -140,8 +285,7 @@ def _adorn_blockquotes(body: str) -> str:
     return re.sub(r"(<blockquote>)(.*?)(</blockquote>)", _repl, body, flags=re.DOTALL)
 
 
-def _docs(usage=True) -> list[tuple[Path, str]]:
-    """返回 (path, 文件名) 有序列表。"""
+def _docs(usage: bool) -> list[tuple[Path, str]]:
     if usage:
         return [(USAGE_DIR / f, f) for f in USAGE_ORDER]
     return sorted(
@@ -150,82 +294,51 @@ def _docs(usage=True) -> list[tuple[Path, str]]:
     )
 
 
-def build_help_html() -> str:
-    """读 help/ 下全部 markdown，渲染为完整 help.html 字符串（UTF-8 无 BOM）。"""
-    usage_links: list[str] = []
-    usage_parts: list[str] = []
-    api_links: list[str] = []
-    api_parts: list[str] = []
-
-    for path, fname in _docs(usage=True):
+def _section_data(usage: bool) -> list[dict]:
+    items = []
+    for path, fname in _docs(usage):
         if not path.is_file():
             continue
         body, tokens = _render_file(path)
         prefix = re.sub(r"[^0-9a-zA-Z]", "-", path.stem).strip("-") + "-"
         body = _prefix_heading_ids(body, tokens, prefix)
         body = _adorn_blockquotes(body)
-        usage_links.extend(_collect_links(tokens, prefix))
-        usage_parts.append(body)
+        title = next((t.get("name", "") for t in tokens if t.get("level") == 1), path.stem)
+        items.append({"id": path.stem, "title": title, "html": body, "toc": _collect_toc(tokens, prefix)})
+    return items
 
-    for path, fname in _docs(usage=False):
-        if not path.is_file():
-            continue
-        body, tokens = _render_file(path)
-        prefix = re.sub(r"[^0-9a-zA-Z]", "-", path.stem).strip("-") + "-"
-        body = _prefix_heading_ids(body, tokens, prefix)
-        body = _adorn_blockquotes(body)
-        api_links.extend(_collect_links(tokens, prefix))
-        api_parts.append(body)
 
-    toc = _html.escape("目录")
-    toc_html = (
-        f'<div class="toc"><h3 style="margin-top:0">{toc}</h3>'
-        f'<div class="toc-group">使用指南</div>'
-        + ("".join(usage_links) if usage_links else '<a href="#">（无）</a>')
-        + f'<div class="toc-group">API 参考</div>'
-        + ("".join(api_links) if api_links else '<a href="#">（无）</a>')
-        + "</div>"
-    )
-    content = (
-        "".join(usage_parts)
-        + _API_SEP
-        + "".join(api_parts)
-        if usage_parts and api_parts
-        else "".join(usage_parts + api_parts)
-    )
+def build_data() -> dict:
+    return {"usage": _section_data(True), "api": _section_data(False)}
 
+
+def build_help_html(data: dict | None = None) -> str:
+    data = data or build_data()
+    data_tag = json.dumps(data, ensure_ascii=False).replace("</", "<\\u002f")
     return (
         "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n"
         '<meta charset="UTF-8">\n'
         '<meta name="viewport" content="width=device-width,initial-scale=1.0">\n'
-        '<title>Grape 使用指导 &amp; FAQ</title>\n'
+        '<title>Grape 帮助中心</title>\n'
         '<link rel="icon" type="image/png" href="/static/logo-64.png">\n'
         f"{_MIGRATION_COMMENT}\n"
-        "<style>"
-        f"{_CSS}"
-        "</style>\n</head>\n<body>\n"
-        '<div class="wrap"><div class="grid"><div>'
-        f"{toc_html}"
-        "</div><div>"
-        f"{content}"
-        "</div></div></div>\n"
-        '<button class="back-top" onclick="window.scrollTo({top:0,behavior:\'smooth\'})" title="回到顶部">\u2191</button>\n'
+        f"<style>{_CSS}</style>\n"
+        "</head>\n<body>\n"
+        '<div id="app"></div>\n'
+        f'<script type="application/json" id="help-data">{data_tag}</script>\n'
+        f"<script>{_JS_APP}</script>\n"
         "</body>\n</html>"
     )
 
 
 def generate() -> int:
     """生成并覆写 src/api/static/help.html；返回渲染的 markdown 文件数。"""
-    out_dir = OUT_PATH.parent
-    out_dir.mkdir(parents=True, exist_ok=True)
-    html = build_help_html()
-    OUT_PATH.write_text(html, encoding="utf-8")
-    count = len([p for p, _ in _docs(usage=True) if p.is_file()]) + len(
-        [p for p, _ in _docs(usage=False) if p.is_file()]
-    )
-    return count
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = build_data()
+    OUT_PATH.write_text(build_help_html(data), encoding="utf-8")
+    return len(data["usage"]) + len(data["api"])
 
 
 if __name__ == "__main__":
     n = generate()
-    print(f"help.html regenerated from {n} markdown sources -> {OUT_PATH}")
+    print(f"help.html regenerated (v2 SPA) from {n} markdown sources -> {OUT_PATH}")
