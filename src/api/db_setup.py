@@ -1867,6 +1867,10 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
+        # GitHub OAuth 集成——user_accounts 新增 github 字段
+        "ALTER TABLE user_accounts ADD COLUMN github_id TEXT DEFAULT ''",
+        "ALTER TABLE user_accounts ADD COLUMN github_api_token TEXT DEFAULT ''",
+        "ALTER TABLE user_accounts ADD COLUMN github_login TEXT DEFAULT ''",
         # 飞书 Bot Lease——集群部署保证同一 bot 同一时刻只有一个实例连 WebSocket
         "ALTER TABLE global_im_bot_config ADD COLUMN bot_name VARCHAR(128) DEFAULT ''",
         "ALTER TABLE global_im_bot_config ADD COLUMN lease_token VARCHAR(128) DEFAULT NULL",
