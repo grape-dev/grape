@@ -220,8 +220,16 @@ def list_commits(owner: str, repo: str, per_page: int = Query(20, ge=1, le=100),
                     _repo_token(owner, repo, user, p))
 
 
-@router.get("/{owner}/{repo}/contents/{path:path}", operation_id="gitrepo_contents", summary="文件内容（base64）")
-def get_file_content(owner: str, repo: str, path: str, ref: str = Query("", description="分支/引用"),
+@router.get("/{owner}/{repo}/contents", operation_id="gitrepo_contents_root", summary="仓库内容：根目录列表")
+def list_root_contents(owner: str, repo: str, ref: str = Query("", description="分支/引用"),
+                       user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    """取仓库根目录条目列表（空 path → GitCode contents 返回根目录数组）。"""
+    return _gitcode(p, "GET", _vcs_url(owner, repo, "/contents/", {"ref": ref}, p),
+                    _repo_token(owner, repo, user, p))
+
+
+@router.get("/{owner}/{repo}/contents/{path:path}", operation_id="gitrepo_contents", summary="仓库内容：目录列表（path 空/目录）或文件内容（base64）")
+def get_file_content(owner: str, repo: str, path: str = "", ref: str = Query("", description="分支/引用"),
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     return _gitcode(p, "GET", _vcs_url(owner, repo, "/contents/" + path, {"ref": ref}, p),
                     _repo_token(owner, repo, user, p))

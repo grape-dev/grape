@@ -157,6 +157,17 @@ def test_contents_branches_milestones_labels(gitcode_calls, _client):
     client = _client
     base = f"/api/repos/{OWNER}/{REPO}"
 
+    # 根路径（path 空）→ 请求 /contents/（目录列表语义，GitCode 返回数组）
+    assert _get(client, f"{base}/contents?ref=main").status_code == 200
+    last = gitcode_calls[-1]
+    assert "/contents/" in last["url"] and "ref=main" in last["url"]
+
+    # 目录路径 → /contents/configs（目录列表）
+    assert _get(client, f"{base}/contents/configs?ref=main").status_code == 200
+    last = gitcode_calls[-1]
+    assert "/contents/configs" in last["url"] and "ref=main" in last["url"]
+
+    # 文件路径 → /contents/CODEOWNERS（base64 单文件，不回归）
     assert _get(client, f"{base}/contents/CODEOWNERS?ref=codeowner").status_code == 200
     last = gitcode_calls[-1]
     assert "/contents/CODEOWNERS" in last["url"] and "ref=codeowner" in last["url"]
