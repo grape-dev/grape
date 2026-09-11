@@ -981,6 +981,16 @@ def _seed_event_action_filter():
         ("pull_request_opened", "merge",  1, "any", "", "", ""),
         # pull_request_merged
         ("pull_request_merged", "merge",  1, "any", "", "", ""),
+        # pull_request_updated（Issue #49 补充：normalize 细分后，update/审查类事件走这里；
+        # 无新 commit 的 update（审查/reopen/元数据）由 event_rule 的 no_commit 门控过滤）
+        ("pull_request_updated", "open",   1, "any", "", "", ""),
+        ("pull_request_updated", "update", 1, "user", "", "", ""),
+        ("pull_request_updated", "close",  0, "any", "", "", ""),
+        ("pull_request_updated", "reopen", 0, "any", "", "", ""),
+        # pull_request_review / pull_request_closed（multi-vcs 细分后独立事件，默认不触发执行 agent）
+        ("pull_request_review", "review",  0, "any", "", "", ""),
+        ("pull_request_review", "approve", 0, "any", "", "", ""),
+        ("pull_request_closed", "close",   0, "any", "", "", ""),
     ]
     with db_lock:
         c = db.cursor()

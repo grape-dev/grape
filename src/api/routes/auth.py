@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.config import log, COOKIE_SECURE
 import hashlib, os, time
 
@@ -442,7 +442,8 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
 
 
 @router.get("/profile")
-def get_profile(user: dict = Depends(get_current_user)):
+def get_profile(user: dict = Depends(get_current_user_or_api_key)):
+    """用户信息——支持 JWT 会话 / grape_ API Key / tk_ 会话 token（Issue #69）。"""
     acc = user_db.get_user_account(user["username"]) or {}
     managed_repos_raw = user_db.get_managed_repos(user["id"])
     managed = [{"key": r["full_name"], "full_name": r["full_name"], "is_admin": r["is_admin"]}

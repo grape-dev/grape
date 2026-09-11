@@ -2,6 +2,7 @@
 import threading
 from fastapi import Header, HTTPException, Request, Depends
 from src.user import db as user_db
+from src.config import log
 
 TOKEN_TYPE_DEVOPS = "devops_bot"
 TOKEN_TYPE_USER = "user"

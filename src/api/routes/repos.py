@@ -436,10 +436,11 @@ def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: 
                 if perms_final and (perms_final.get("admin") or perms_final.get("maintain") or perms_final.get("push")):
                     log.info(f"GitHub bot {bot_username} permissions after accept: {perms_final}")
                     return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
-            # accept 失败（fine-grained PAT 不支持 accept invitation）
-            # 但 invitation 已发送 → 不阻断托管，bot 可在 GitHub 手动 accept
-            log.info(f"GitHub bot {bot_username} invite sent (accept pending, PAT cannot auto-accept)")
-            return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
+            # accept 失败或权限未生效 → 提示用户手动操作
+            log.info(f"GitHub bot {bot_username} invite sent but accept/perm not effective (accepted={accepted})")
+            return {"bot_collaborator_needed": True, "bot_username": bot_username,
+                    "bot_status": "invite_pending",
+                    "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
         else:
             return {"bot_collaborator_needed": True, "bot_username": bot_username,
                     "bot_status": "add_failed",

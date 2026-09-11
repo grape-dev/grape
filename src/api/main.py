@@ -722,7 +722,7 @@ def _check_and_sync_templates() -> bool:
         _result = _sp.run(
             ["bash", _sync_script],
             capture_output=True, text=True, timeout=60,
-            env={**_os.environ, "TEMPLATES_REPO": "https://mm6667:shhnrXxGm1E1SJ-FxKxQ9M2Q@gitcode.com/grape-dev/grape-template.git"}
+            env={**_os.environ, "TEMPLATES_REPO": "https://gitcode.com/grape-dev/grape-template.git"}
         )
         if _result.returncode == 0:
             log.info(f"Templates: auto-sync OK\n{_result.stdout}")

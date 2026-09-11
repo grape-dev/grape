@@ -668,9 +668,11 @@ def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
         clauses.append("status=?")
         params.append(status)
     if repo:
-        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
-        clauses.append("repo_key=?")
-        params.append(repo_key)
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        repo_key = f"gitcode:{_base}"
+        _rk_list = [f"gitcode:{_base}", f"github:{_base}"]
+        clauses.append(f"repo_key IN ({','.join('?' * len(_rk_list))})")
+        params.extend(_rk_list)
     with db_lock:
         c = db.cursor()
         c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at, issue_id, event_seq FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
@@ -699,9 +701,10 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user
     repo_clause = ""
     params: list = []
     if repo:
-        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
-        repo_clause = " AND repo_key=?"
-        params.append(repo_key)
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        _rk_list = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_clause = f" AND repo_key IN ({','.join('?' * len(_rk_list))})"
+        params.extend(_rk_list)
 
     with db_lock:
         c = db.cursor()
@@ -755,7 +758,7 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user
             sessions.append({
                 "id": sid,
                 "agent_type": agent_type,
-                "repo_key": repo_key_raw.replace("gitcode:", ""),
+                "repo_key": repo_key_raw.split(":", 1)[1] if ":" in repo_key_raw else repo_key_raw,
                 "status": "running" if current else "idle",
                 "skill": r[4] or "",
                 "created_at": normalize_event_time(r[5]),

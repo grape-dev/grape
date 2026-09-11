@@ -81,7 +81,13 @@ function loadAgentTypes() {
     } catch (e) { cachedRepos = null; }
 
     if (cachedRepos && !forceRefresh) {
-      renderReposFromData(cachedRepos);
+      // Issue #82: cachedRepos 路径也需 _currentView 守卫，与 API 回调路径一致——
+      // 用户已进入某页面时不应覆盖布局 DOM，只更新侧边栏下拉
+      if (window._currentView && window._currentView !== '') {
+        initSidebarRepos();
+      } else {
+        renderReposFromData(cachedRepos);
+      }
     }
 
     API.get('/repos/member').then(d => {
@@ -138,7 +144,9 @@ function loadAgentTypes() {
     $('mainView').style.zIndex = '';
     $('pageTitle').textContent = I18N.t('app.current_project');
 
-    if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
+    // Issue #82: 仅在完全无选中仓库时才默认选第一个；
+    // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
+    if (!current) {
       const r = managedRepos[0];
       if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
       else localStorage.removeItem('currentRepo');
@@ -251,6 +259,39 @@ function loadAgentTypes() {
       _hiddenSince = 0;
     }
   });
+  // ── Sidebar 分组折叠（Issue #66）──
+  // 可折叠分组标题带 class="grp-tog" + data-key（localStorage 键）。
+  // 默认收起（HTML 中预置 collapsed）；initGroupCollapse() 读取 localStorage
+  // 同步真实状态；toggleGroup() 点击切换并写回。收起时 .grp-items 子项隐藏。
+  function _readCollapsed(key) {
+    // 默认 true（收起）；localStorage 存 '0'/'1'
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? true : v === '1';
+    } catch (e) { return true; }
+  }
+  function initGroupCollapse() {
+    document.querySelectorAll('.grp-tog[data-key]').forEach(tog => {
+      const key = tog.getAttribute('data-key');
+      const collapsed = _readCollapsed(key);
+      tog.classList.toggle('collapsed', collapsed);
+      const items = tog.nextElementSibling;
+      if (items && items.classList.contains('grp-items')) {
+        items.classList.toggle('hid', collapsed);
+      }
+    });
+  }
+  function toggleGroup(tog) {
+    const key = tog.getAttribute('data-key');
+    const collapsed = !tog.classList.contains('collapsed');
+    tog.classList.toggle('collapsed', collapsed);
+    const items = tog.nextElementSibling;
+    if (items && items.classList.contains('grp-items')) {
+      items.classList.toggle('hid', collapsed);
+    }
+    try { localStorage.setItem(key, collapsed ? '1' : '0'); } catch (e) {}
+  }
+
   function nav(view, param) {
     // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
     if (view === 'knowledge' && window._currentView === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
@@ -292,6 +333,17 @@ function loadAgentTypes() {
       if (param && o.includes("'" + param + "'")) a.classList.add('act');
       else if (!param && o === "nav('" + view + "')") a.classList.add('act');
     });
+    // 导航到折叠分组内的项时自动展开该分组（Issue #66）
+    const _actNav = document.querySelector('.sb-nav a.act');
+    if (_actNav) {
+      const _items = _actNav.closest('.grp-items');
+      if (_items && _items.classList.contains('hid')) {
+        const _tog = _items.previousElementSibling;
+        if (_tog && _tog.classList.contains('grp-tog') && _tog.classList.contains('collapsed')) {
+          toggleGroup(_tog);
+        }
+      }
+    }
 
     const title = $('pageTitle');
     const repoTitle = $('repoTitle');
@@ -333,8 +385,12 @@ function loadAgentTypes() {
     if (repo) {
       var _rk = repo.repoKey || repo.repo_key || '';
       var _fn = repo.fullName || (repo.owner + '/' + repo.name);
-      var _repoLink = _rk.indexOf('github:') === 0 ? 'https://github.com/' + _fn : 'https://gitcode.com/' + _fn;
-      repoTitle.innerHTML = `<a href="${_repoLink}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="打开 ${_fn}">${repo.fullName} ↗</a>`;
+      var _isGithub = _rk.indexOf('github:') === 0;
+      var _repoLink = _isGithub ? 'https://github.com/' + _fn : 'https://gitcode.com/' + _fn;
+      var _logo = _isGithub
+        ? '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>'
+        : '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+      repoTitle.innerHTML = `${_logo}<a href="${_repoLink}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="打开 ${_fn}">${repo.fullName} ↗</a>`;
     } else {
       repoTitle.textContent = '';
     }
@@ -506,6 +562,8 @@ function loadAgentTypes() {
     // 清除所有用户相关缓存——防止切换账号后看到上一个用户的仓库/事件
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    localStorage.removeItem('currentRepo');
+    localStorage.removeItem(REPO_CACHE_KEY);
     API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
     // refresh_token cookie 由服务端 logout 清除
     showLogin();
@@ -546,6 +604,8 @@ function loadAgentTypes() {
       currentRepo: localStorage.getItem('currentRepo'),
       url: window.location.href
     }));
+    // 同步可折叠分组的持久化状态（Issue #66）
+    initGroupCollapse();
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
     // Check for OAuth error in URL (e.g. github.com timeout)
@@ -561,9 +621,10 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '10');
-      // 每次 OAuth 登录都清除上一个用户的仓库缓存——防止切换账号后看到旧数据
+      localStorage.setItem('app_cache_ver', '15');
+      // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
+      localStorage.removeItem('currentRepo');
       if (p.get('first_login') === '1') {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -587,13 +648,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '10') {
+    if (localStorage.getItem('app_cache_ver') !== '15') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '10');
+      localStorage.setItem('app_cache_ver', '15');
     }
 
     const token = localStorage.getItem('token');
@@ -650,7 +711,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
+  return {nav, search, oauthLogin, oauthLoginGithub, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

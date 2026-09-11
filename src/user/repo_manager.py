@@ -395,24 +395,24 @@ def _download_gitcode_tarball(source_repo, workdir, tmp, token):
     _run_git(["init"], workdir)
 
 
-def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
-                          user_token: str, bot_token: str = "") -> bool:
+def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
+                          user_token: str, bot_token: str = "", provider: str = "gitcode") -> bool:
     """将模板内容推送到新仓库。
 
     template: 配置中的模板对象（含 source / source_repo / id）
     target_repo: 目标仓库名（不含 owner）
+    provider: "gitcode" 或 "github"，决定 push 目标 URL
     来源:
       - source="local" → 复制 examples/{template_id}/（或旧路径 configs/project-templates/{id} 兜底）到临时目录
       - source="git"   → git clone source_repo（用 bot_token 拉取）
-    目标: 设置 remote 为个人新仓库（https://{user_token}@gitcode.com/{login}/{repo}.git）
-          并 git push -u origin HEAD:main。成功返回 True。
+    目标: 设置 remote 为个人新仓库并 git push -u origin HEAD:main。成功返回 True。
     """
     import os
     import shutil
     import tempfile
     from src.config import EXAMPLE_DIR, CONFIG_DIR
 
-    if not user_token or not gitcode_login or not target_repo:
+    if not user_token or not owner_login or not target_repo:
         raise RuntimeError("缺少用户 token 或目标仓库信息")
     if not template:
         raise RuntimeError("模板配置缺失")
@@ -441,10 +441,13 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
             workdir = os.path.join(tmp, "repo")
             if clone_url and source_platform == "github":
                 # GitHub 优选模板：下载 tarball（比 clone 快 10 倍），解压后 init 新仓库
+                gh_headers = {}
+                gh_token = os.environ.get("GITHUB_TOKEN", "")
+                if gh_token:
+                    gh_headers["Authorization"] = f"token {gh_token}"
                 _download_and_extract_tarball(
                     f"https://api.github.com/repos/{source_repo}/tarball",
-                    workdir, tmp,
-                    headers={"Authorization": f"token {os.environ.get('GITHUB_TOKEN', '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')}"},
+                    workdir, tmp, headers=gh_headers,
                 )
             elif clone_url and source_platform == "gitcode" and not source_repo:
                 # GitCode 优选模板（有 clone_url 但无 source_repo）：tarball 下载
@@ -453,7 +456,15 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
                 # GitCode 模板：用 source_repo + token，tarball 下载
                 _download_gitcode_tarball(source_repo, workdir, tmp, bot_token or user_token)
 
-        target_url = f"https://oauth2:{user_token}@gitcode.com/{gitcode_login}/{target_repo}.git"
+        if provider == "github":
+            target_url = f"https://{user_token}@github.com/{owner_login}/{target_repo}.git"
+            # GitHub App token 无 workflows 权限，push 含 .github/workflows 的仓库会被拒绝
+            _wf_dir = os.path.join(workdir, ".github", "workflows")
+            if os.path.isdir(_wf_dir):
+                shutil.rmtree(_wf_dir, ignore_errors=True)
+                log.info(f"Removed .github/workflows from template (GitHub App token lacks workflow permission)")
+        else:
+            target_url = f"https://oauth2:{user_token}@gitcode.com/{owner_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):
             _run_git(["remote", "remove", "origin"], workdir)
         _run_git(["remote", "add", "origin", target_url], workdir)

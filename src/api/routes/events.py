@@ -1391,8 +1391,13 @@ def list_events(owner: str, repo: str,
 
     from src.session_manager import db, db_lock
 
-    where_clauses = ["repo_key=?"]
-    params = [repo_key]
+    # 跨平台 repo_key 候选（用户可能通过 GitHub OAuth 登录）
+    _owner_repo = f"{owner}/{repo}"
+    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
+    _rk_placeholders = ",".join("?" * len(_repo_keys))
+
+    where_clauses = [f"repo_key IN ({_rk_placeholders})"]
+    params = _repo_keys
     if status:
         where_clauses.append("status=?")
         params.append(status)
