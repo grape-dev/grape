@@ -324,6 +324,7 @@ grapecli git diff --repo Jason7602/hello
 | `assignee_ids` | array | 责任人 id 数组（implementation 风格） |
 | `milestone_id` | int | 里程碑 id |
 | `state` | string | `"close"`（**注意**：GitCode 关闭用 "close" 非 "closed"） |
+| `body` | string | Issue 正文（同 POST create / PR update 的 body；空值忽略，不影响其他字段） |
 
 **返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
 
