@@ -185,91 +185,21 @@ class ObsStorage(StorageBackend):
             log.warning(f"list_objects_with_meta {prefix} failed: {e}")
         return items, next_cursor
 
-    def generate_file_urls(self, repo_key: str, agent_type: str = "", issue_num: int = 0) -> dict:
-        """按 scope 生成 {rel_path: {url, storage_key}}——和 knowledge_files() 同样的逻辑。
+    def generate_file_urls(self, filtered_files: dict) -> dict:
+        """基于已过滤结果生成 OBS 预签名 URL（Issue #95：不再独立查 DB）。
 
-        通过 _query_knowledge_obs 按 scope 查 DB obs_key（不查 DB file_path）。
-        通过 knowledge_path() 算 rel_path（和 knowledge_files 同函数）。
-        obs_key 非空 → 生成 url；obs_key 为空 → url 和 storage_key 留空。
+        filtered_files: {rel: {content, obs_key}}（来自 collect_knowledge_files）
+        返回: {rel: {url, storage_key}}
+        obs_key 非空 → 生成预签名 URL；空 → url 和 storage_key 留空。
         """
-        import os as _os
-        from src.config import WORKSPACE_DIR
-        from src.api.knowledge import knowledge_path, _query_knowledge_obs, _owner_repo
-        from src.session_manager import db, db_lock
-        out: dict[str, dict] = {}
+        out: dict = {}
         try:
-            # 共享知识：project / issue / issue_agent 三级（和 read_knowledge 同样的 scope 循环）
-            for scope in ("project", "issue", "issue_agent"):
-                _agent = agent_type if scope == "issue_agent" else ""
-                _issue = issue_num if scope != "project" else 0
-                obs_key, _ = _query_knowledge_obs(repo_key, scope, _agent, _issue)
-                rel_path = _os.path.relpath(knowledge_path(repo_key, scope, agent_type=_agent, issue_num=_issue), WORKSPACE_DIR)
+            for rel, meta in (filtered_files or {}).items():
+                obs_key = meta.get("obs_key", "") if isinstance(meta, dict) else ""
                 if obs_key:
-                    out[rel_path] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
+                    out[rel] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
                 else:
-                    out[rel_path] = {"url": "", "storage_key": ""}
-
-            # 成员上传文档：按 scope='member' 查 DB obs_key（不调 member_files，直接用 DB 结果）
-            owner, rname = _owner_repo(repo_key)
-            with db_lock:
-                rows = db.cursor().execute(
-                    "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
-                    "WHERE repo_key=? AND scope='member' AND (agent_type='' OR agent_type IS NULL) "
-                    "AND obs_key!='' AND obs_key IS NOT NULL "
-                    "ORDER BY id DESC",
-                    (repo_key,)
-                ).fetchall()
-            # 直接用 DB file_path 生成两种格式的 rel_path（Python 侧去重，只保留最新 id）
-            seen = set()
-            for rid, fp, ok in rows:
-                if fp and ok and fp not in seen:
-                    seen.add(fp)
-                    # WORKSPACE_DIR 相对格式（owner/repo/project-info/member/...）
-                    ws_rel = _os.path.join(owner, rname, fp).replace("\\", "/")
-                    out[ws_rel] = {"url": self.temporary_url(ok, expires=3600), "storage_key": ok}
-                    # project-info 相对格式（member/user1/design.md）
-                    pi_rel = fp.replace("project-info/", "", 1).replace("\\", "/")
-                    out[pi_rel] = {"url": self.temporary_url(ok, expires=3600), "storage_key": ok}
-
-            # Agent 专属文档：按 scope='member' AND agent_type 查 DB obs_key（不调 agent_files）
-            with db_lock:
-                if agent_type:
-                    rows = db.cursor().execute(
-                        "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
-                        "WHERE repo_key=? AND scope='member' AND agent_type=? AND obs_key!='' AND obs_key IS NOT NULL "
-                        "ORDER BY id DESC",
-                        (repo_key, agent_type)
-                    ).fetchall()
-                else:
-                    rows = []
-            seen = set()
-            for rid, fp, ok in rows:
-                if fp and ok and fp not in seen:
-                    seen.add(fp)
-                    pi_rel = fp.replace("project-info/", "", 1).replace("\\", "/")
-                    out[pi_rel] = {"url": self.temporary_url(ok, expires=3600), "storage_key": ok}
-
-            # 基线文件：按 scope='baseline' 查 DB obs_key
-            with db_lock:
-                rows = db.cursor().execute(
-                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
-                    "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
-                    "ORDER BY id DESC",
-                    (repo_key,)
-                ).fetchall()
-            # load_project_info 返回的 rel_path 只有文件名（project-graph.md 等）
-            # DB file_path 是 WORKSPACE_DIR 相对（owner/repo/project-info/{filename}）——用 basename 匹配
-            baseline_basename_map = {}
-            for fp, ok in rows:
-                if fp and ok:
-                    baseline_basename_map[_os.path.basename(fp)] = ok
-            # 基线文件固定 2 个：project-graph.md / project-capabilities.md
-            for _fname in ("project-graph.md", "project-capabilities.md"):
-                obs_key = baseline_basename_map.get(_fname, "")
-                if obs_key:
-                    out[_fname] = {"url": self.temporary_url(obs_key, expires=3600), "storage_key": obs_key}
-                else:
-                    out[_fname] = {"url": "", "storage_key": ""}
+                    out[rel] = {"url": "", "storage_key": ""}
         except Exception as e:
             log.warning(f"generate_file_urls failed: {e}")
         return out

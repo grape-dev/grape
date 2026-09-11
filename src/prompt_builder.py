@@ -52,11 +52,13 @@ _PROJECT_INFO_MAX_CHARS = 2500
 _CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
 
 
-def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
+def _build_project_info_section(repo_key: str, agent_type: str = "",
+                                issue_num: int = 0, scene_id: str = "") -> str:
     """注入 repo 全局项目知识基线（服务端权威、多 VM 共享，见 multi-issue-isolation-design.md §2.4/§4.2）。
 
     - 内联摘要（截断）+ {{PROJECT_INFO_DIR}} 占位符（worker/本地落地后可用 read tool 读全文）
-    - agent_type 非空 → 追加「本 Agent 专属知识」路径指引（knowledge-board-design.md §六）
+    - Issue #95：member 引导改条件输出（查 ref 表有 source='manual' 关联才输出）
+    - Issue #95：去掉 agent/{type}/ 引导（agent_files 废弃后不再物化到 agent/ 目录）
     - 无基线 → 明确允许降级分析
     """
     try:
@@ -67,9 +69,9 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
     lines = ["\n## 项目知识基线（repo 全局）"]
     if not files:
         lines.append("[无项目知识基线] 允许降级分析：可基于 README 与 GitCode API 获取基础信息，相关结论标注 [degraded]。")
-        if agent_type:
+        # Issue #95：条件输出 member 引导（不固定输出）
+        if _has_manual_ref(repo_key, agent_type, issue_num, scene_id):
             lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
-            lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
         return "\n".join(lines)
     _meta = meta or {}
     if _meta.get("degraded"):
@@ -86,10 +88,33 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
         body = content[:_PROJECT_INFO_MAX_CHARS] + ("\n...(已截断)" if truncated else "")
         lines.append(f"### {label}\n{body}")
     lines.append("> 全文副本已落地：{{PROJECT_INFO_DIR}}/project-graph.md 与 {{PROJECT_INFO_DIR}}/project-capabilities.md，可用 read tool 读取全文。")
-    if agent_type:
+    # Issue #95：条件输出 member 引导（不固定输出，去掉 agent/{type}/ 引导）
+    if _has_manual_ref(repo_key, agent_type, issue_num, scene_id):
         lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
-        lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
     return "\n".join(lines)
+
+
+def _has_manual_ref(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> bool:
+    """查 ref 表是否有 source='manual' 的关联记录（Issue #95 条件引导用）。"""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT COUNT(*) FROM scene_knowledge_ref r "
+                "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+                "WHERE r.enabled = 1 "
+                "AND (r.scene_id = ? OR r.scene_id = '') "
+                "AND (r.agent_type = ? OR r.agent_type = '') "
+                "AND (r.issue_num = ? OR r.issue_num = 0) "
+                "AND k.repo_key = ? "
+                "AND k.source = 'manual' "
+                "AND k.status = 'accepted' "
+                "AND k.archived = 0",
+                (scene_id, agent_type, issue_num, repo_key)
+            ).fetchone()
+        return bool(row and row[0] > 0)
+    except Exception:
+        return False
 
 
 _advanced_options_cache: dict = {}  # (repo_key, issue_id) -> (options_str, timestamp)
@@ -508,7 +533,26 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     # 优先用 evt 里已有的 repo_key（A2A 事件 source='a2a' 会导致拼接错误）
     repo_key = evt.get("repo_key") or f"{evt['source']}:{evt['repository']}"
     account = evt.get("account") or evt.get("repository", "")
-    parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else "")))
+    # Issue #95：传 issue_num + scene_id 给 _build_project_info_section（条件输出 member 引导用）
+    _devops_issue_id = evt.get("issue_id", "") or ""
+    _devops_issue_num = 0
+    _devops_scene_id = ""
+    if _devops_issue_id:
+        import re as _re
+        _m = _re.search(r"(\d+)", str(_devops_issue_id))
+        if _m:
+            _devops_issue_num = int(_m.group(1))
+        try:
+            from src.api.session_store import get_issue_scene
+            _devops_scene_id, _ = get_issue_scene(repo_key, _devops_issue_id)
+        except Exception:
+            pass
+    parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else ""),
+                                             issue_num=_devops_issue_num, scene_id=_devops_scene_id or ""))
+
+    # Issue #95：agent 沉淀知识引导——告知 agent 去 .knowledge/ 目录读取
+    # {{KNOWLEDGE_DIR}} 由 worker 物化后替换为真实路径（agent.py:1079 / event_pipeline.py:1685）
+    parts.append("\n## 共享知识\n> 前序 Agent 沉淀的经验已落地：{{KNOWLEDGE_DIR}}/，存在则用 read tool 读取并遵循。")
 
     # 场景高级选项注入（仅执行类 agent：coding/qa/sre）
     if agent_type in ("coding", "qa", "sre"):
@@ -845,22 +889,22 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
 
 # ====== Event 对话（event-conversation-design.md）======
 
-def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0,
+def _build_agent_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0,
                              scene_id: str = "") -> tuple:
-    """共享知识段落：查 scene_knowledge_ref 表注入关联知识 + 基线文件。
+    """agent 沉淀知识段落：查 ref 表注入 source='agent' 关联知识。
 
-    Issue #67 改动：
-    - 新增 scene_id + issue_num 参数
-    - 注入逻辑改为查 scene_knowledge_ref 表（DISTINCT knowledge_id 去重）
-    - issue_num 精确匹配：issue/issue_agent 知识只注入到对应 Issue
-    - 向后兼容：表不存在或无关联记录时回退到 scope 三级注入
+    Issue #95 改动：
+    - 改名 _build_knowledge_section → _build_agent_knowledge_section（语义明确）
+    - SQL 加 source='agent' 过滤——只内联 agent 沉淀知识
+    - 恢复 #67 之前的原始语义（#67 之前调 read_knowledge 只查 project/issue/issue_agent）
+    - 不内联 baseline（load_project_info 已处理）和 member（member_files_pi 已处理）
     - 返回 (知识段落文本, 注入的知识 ID 列表)
     """
     lines = ["### 用户反馈沉淀的共享知识（仅 enabled）"]
     found = False
     injected_ids = []
 
-    # 1. 查 scene_knowledge_ref 表注入关联知识
+    # 1. 查 scene_knowledge_ref 表注入关联知识（source='agent'）
     try:
         from src.session_manager import db, db_lock
         with db_lock:
@@ -873,6 +917,7 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
                 "AND (r.agent_type = ? OR r.agent_type = '') "
                 "AND (r.issue_num = ? OR r.issue_num = 0) "
                 "AND k.repo_key = ? "
+                "AND k.source = 'agent' "
                 "AND k.status = 'accepted' "
                 "AND k.archived = 0",
                 (scene_id, agent_type, issue_num, repo_key)
@@ -884,9 +929,9 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
             if content:
                 found = True
                 injected_ids.append(kid)
-                lines.append(f"[{source} 级] {content}")
+                lines.append(f"[{scope} 级] {content}")
     except Exception:
-        # 向后兼容：scene_knowledge_ref 表不存在时回退到 scope 三级注入
+        # 向后兼容：scene_knowledge_ref 表不存在时回退到 scope 三级注入（只查 agent 知识）
         try:
             from src.api.knowledge import read_knowledge
             k = read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num)
@@ -897,9 +942,6 @@ def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int
                     lines.append(f"[{scope} 级] {content}")
         except Exception:
             pass
-
-    # 2. member_files 全量扫描已移除——Issue #67 改用 scene_knowledge_ref 表精确注入
-    # 未关联场景/Agent 的知识不会被注入（符合预期：用户没关联 = 不需要注入）
 
     if not found:
         return "", []
@@ -937,7 +979,7 @@ def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
         hist = "\n".join(f"[{m.get('role')}] {m.get('content', '')}" for m in thread[-20:])
         parts.append(f"## 对话历史\n{hist}")
 
-    knowledge, _injected_ids = _build_knowledge_section(evt.get("repo_key", ""), agent_type=agent_type, issue_num=issue_num)
+    knowledge, _injected_ids = _build_agent_knowledge_section(evt.get("repo_key", ""), agent_type=agent_type, issue_num=issue_num)
     if knowledge:
         parts.append(f"## 共享知识\n{knowledge}")
 

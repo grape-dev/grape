@@ -1440,15 +1440,36 @@ def _migrate_knowledge_issue67():
             "SELECT id, '', agent_type, issue_num, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'issue_agent' AND source = 'agent' AND agent_type != ''")
         # member（agent_type 非空）→ 指定 Agent 关联（issue_num=0）
-        c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'member' AND source = 'manual' AND agent_type != ''")
+        # Issue #95：删除——member 不自动关联，用户手动绑定才注入
+        # c.execute(
+        #     "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+        #     "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
+        #     "WHERE scope = 'member' AND source = 'manual' AND agent_type != ''")
         # member（agent_type 空）→ 全局关联（issue_num=0）
-        c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
+        # Issue #95：删除——违反"member 不自动关联"设计
+        # c.execute(
+        #     "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+        #     "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
+        #     "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
+
+        # Issue #95：清理已生成的错误 member ref（幂等）
+        try:
+            c.execute(
+                "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN "
+                "(SELECT id FROM agent_shared_knowledge WHERE scope = 'member')")
+        except Exception:
+            pass
+
+        # Issue #95：修复 rejected→accepted 老数据（幂等）
+        # 老代码 UPDATE 不改 status，导致先 rejected 再 accepted 的记录仍为 rejected
+        # 有文件内容（obs_key 非空 + content_hash 非空）说明 accepted 写过文件，应为 accepted
+        try:
+            c.execute(
+                "UPDATE agent_shared_knowledge SET status='accepted' "
+                "WHERE status='rejected' AND obs_key != '' AND content_hash != '' "
+                "AND obs_key IS NOT NULL AND content_hash IS NOT NULL")
+        except Exception:
+            pass
 
         # 4. content_hash 回填——OBS 模式下 obs_key 非空但 hash 为空的老数据
         try:
