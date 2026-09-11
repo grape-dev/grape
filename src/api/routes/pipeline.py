@@ -290,6 +290,24 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
     pipelines = [_get_issue_pipeline(repo_key, iid, _events_by_issue.get(iid, [])) for iid in issue_ids]
     pipelines = [p for p in pipelines if p is not None]
 
+    # Issue #89: 检测 tasks 有记录但 events 无记录的 Issue（数据一致性差异）
+    # 这些 Issue 在任务中心有任务，但流水线未生成事件 → 前端展示提示
+    tasks_without_events = []
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT DISTINCT issue_number, title FROM tasks "
+                "WHERE repo_key=? AND status IN ('active','processing') AND issue_number > 0",
+                (repo_key,)
+            )
+            for r in c.fetchall():
+                _iid = f"#{r[0]}"
+                if _iid not in issue_ids:
+                    tasks_without_events.append({"issue_id": _iid, "title": r[1] or ""})
+    except Exception:
+        pass
+
     # 按 Issue 最新活动倒序：用预建索引中的最大 seq 排序（O(N)，避免反复遍历全量 events）
     _max_seq_cache = {iid: max((e["seq"] for e in evts), default=0) for iid, evts in _events_by_issue.items()}
     pipelines.sort(key=lambda p: _max_seq_cache.get(p["issue_id"], 0), reverse=True)
@@ -321,4 +339,6 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
         "today_count": len(pipelines),
         "scene_id": scene_id,
         "pipeline_config": pipeline_config,
+        "tasks_without_events": tasks_without_events,
+        "has_tasks_without_events": len(tasks_without_events) > 0,
     }
