@@ -2,7 +2,7 @@
 
 > 需求关联：`docs/grape-server-requirement-gitrepo-tree-list.md`（与选项 A「contents 目录列表」并列的独立方案）
 > 目标仓库：grape 主仓库（`src/api/git_repo_api.py` / OpenAPI 契约）
-> 状态：**方案输出，暂不实施**
+> 状态：**✅ 已实施**（`gitrepo_tree` 单层透传 + GitCode recursive 明确拒绝 + GitHub 递归支持；见 `src/api/git_repo_api.py`）
 > 日期：2026-09-11
 
 ---

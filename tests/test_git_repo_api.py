@@ -252,3 +252,33 @@ def test_unauthenticated_401():
     app.dependency_overrides.clear()
     client = TestClient(app)
     assert client.get(f"/api/repos/{OWNER}/{REPO}/branches").status_code == 401
+
+
+def test_tree_single_level(gitcode_calls, _client):
+    """选项 B：单层树透传 git/trees/{ref}。"""
+    client = _client
+    base = f"/api/repos/{OWNER}/{REPO}"
+    r = client.get(f"{base}/tree?ref=main")
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert "/git/trees/main" in last["url"] and last["method"] == "GET"
+
+
+def test_tree_ref_empty_resolves_default(gitcode_calls, _client):
+    """选项 B：ref 空时解析默认分支（branches[0]）再取树。"""
+    client = _client
+    base = f"/api/repos/{OWNER}/{REPO}"
+    # gitcode_calls 的 mock _req 对 branches 返回 {"ok": True}（非 list）→ _default_ref 落到 "main" 兜底
+    r = client.get(f"{base}/tree")
+    assert r.status_code == 200
+    reqs = [c["url"] for c in gitcode_calls]
+    assert any("/branches" in u for u in reqs) or any("/git/trees/main" in u for u in reqs)
+
+
+def test_tree_recursive_gitcode_rejected(_client):
+    """选项 B：GitCode 平台 recursive → 明确 400 拒绝，不产出破碎树。"""
+    client = _client
+    base = f"/api/repos/{OWNER}/{REPO}"
+    r = client.get(f"{base}/tree?ref=main&depth=recursive")
+    assert r.status_code == 400
+    assert "暂不支持递归" in r.json()["detail"]["message"]

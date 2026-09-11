@@ -220,6 +220,76 @@ def list_commits(owner: str, repo: str, per_page: int = Query(20, ge=1, le=100),
                     _repo_token(owner, repo, user, p))
 
 
+@router.get("/{owner}/{repo}/tree", operation_id="gitrepo_tree", summary="仓库目录树（单层；GitHub 支持递归）")
+def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分支/引用，空=默认分支"),
+                  depth: str = Query("single", description="single(单层，默认)/recursive(递归，仅 GitHub)"),
+                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    """取仓库目录树。
+
+    - 单层（default）：透传 `git/trees/{ref}`，返回该层 tree+blob 条目（type/name/path/mode/sha）。
+    - 递归（depth=recursive）：仅 GitHub 支持（`git/trees/{sha}?recursive=1`）；
+      GitCode 平台 recursive 返回破碎树（丢失 blob），故明确拒绝，避免产出残缺数据。
+    - ref 空 → 自动解析默认分支。
+    """
+    depth = (depth or "single").strip().lower()
+    ref = (ref or "").strip()
+
+    # 单层
+    if depth != "recursive":
+        if not ref:
+            ref = _default_ref(p, owner, repo, user)
+        return _gitcode(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
+                        _repo_token(owner, repo, user, p))
+    # 递归
+    if p != "github":
+        raise HTTPException(status_code=400, detail={"code": 400,
+            "message": "该平台（GitCode）暂不支持递归树：recursive 返回破碎树（丢失 blob），请用单层或 Git 仓库等效接口"})
+    if not ref:
+        ref = _default_ref(p, owner, repo, user)
+    # GitHub：git/trees/{sha} 需要 tree sha → 先取默认分支最新 commit 的 tree sha
+    _tree_sha = _github_tree_sha(owner, repo, ref, user)
+    return _gitcode(p, "GET", _vcs_url(owner, repo, f"/git/trees/{_tree_sha}", {"recursive": "1"}, p),
+                    _repo_token(owner, repo, user, p))
+
+
+def _default_ref(p: str, owner: str, repo: str, user: dict) -> str:
+    """解析默认分支（ref 空时）：GitCode 用 branches[0]，GitHub 用 default_branch 或 branches[0]。"""
+    try:
+        if p == "github":
+            data = _gitcode(p, "GET", _vcs_url(owner, repo, "", None), _repo_token(owner, repo, user, p))
+            if isinstance(data, dict) and data.get("default_branch"):
+                return data["default_branch"]
+        else:
+            data = _gitcode(p, "GET", _vcs_url(owner, repo, "/branches", {"per_page": 1}, p),
+                            _repo_token(owner, repo, user, p))
+            if isinstance(data, list) and data and data[0].get("name"):
+                return data[0]["name"]
+    except Exception as e:
+        log.warning(f"gitrepo_tree: resolve default ref failed: {e}")
+    return "main"
+
+
+def _github_tree_sha(owner: str, repo: str, ref: str, user: dict) -> str:
+    """GitHub：从 ref 解析 tree sha（GET commit 的 commit.tree.sha）。"""
+    try:
+        data = _gitcode("github", "GET", _vcs_url(owner, repo, f"/commits/{ref}", {"per_page": 1}, "github"),
+                        _repo_token(owner, repo, user, "github"))
+        if isinstance(data, list) and data:
+            _c = data[0]
+        elif isinstance(data, dict):
+            _c = data
+        else:
+            raise ValueError("unexpected commits response")
+        # commit.tree.sha 或携带为 dict
+        _tree = _c.get("commit", {}).get("tree", {}) or _c.get("tree", {})
+        if isinstance(_tree, dict) and _tree.get("sha"):
+            return _tree["sha"]
+    except Exception as e:
+        log.warning(f"gitrepo_tree: resolve github tree sha failed: {e}")
+    # 兜底：tree sha 直接用 ref（GitHub /git/trees/{ref} 分支名也可，但 sha 更稳）
+    return ref
+
+
 @router.get("/{owner}/{repo}/contents", operation_id="gitrepo_contents_root", summary="仓库内容：根目录列表")
 def list_root_contents(owner: str, repo: str, ref: str = Query("", description="分支/引用"),
                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):

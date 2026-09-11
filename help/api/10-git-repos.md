@@ -219,6 +219,30 @@ grapecli git diff --repo Jason7602/hello
 
 ## 3. 文件内容
 
+### GET /api/repos/{owner}/{repo}/tree?ref={branch}&depth={single|recursive}
+
+**入参**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `ref` | string(Query) | 分支/引用；空 → 自动解析默认分支 |
+| `depth` | string(Query) | `single`（单层，默认） / `recursive`（递归，**仅 GitHub**） |
+
+**返回（200）**：底层 `git/trees/{ref}` 结构
+```json
+{"tree": [
+  {"type": "tree", "name": "configs", "path": "configs", "mode": "040000", "sha": "..."},
+  {"type": "blob", "name": "README.md", "path": "README.md", "mode": "100644", "sha": "..."}
+]}
+```
+
+> **平台差异**：GitCode 单层可用（tree+blob）；`depth=recursive` 在 **GitCode 明确不支持**（返回破碎树，
+> 丢失 blob），会返回 **400 提示**；GitHub 原生支持递归（`git/trees/{sha}?recursive=1`）。
+
+**错误**：401 / 403 / 400（GitCode 递归）/ 404。
+
+---
+
 ### GET /api/repos/{owner}/{repo}/contents/{path}?ref={branch}
 
 **入参**
