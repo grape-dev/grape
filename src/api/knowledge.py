@@ -506,6 +506,13 @@ _DEFAULT_CREDENTIAL_SUBSTRINGS = (
     "access_key", "access-key",
     "repo-cr",
 )
+# Issue #95：精确匹配的凭证文件名（basename 完全匹配）
+# "cr" 单独作为子串会误伤 cr-notes.md / scrum-cr.md
+# 但 cr.json / cr.yaml 是凭证文件——用精确匹配避免误伤
+_DEFAULT_CREDENTIAL_EXACT_NAMES = frozenset({
+    "cr.json", "cr.yaml", "cr.yml", "cr.txt",
+    "cr.env",
+})
 _DEFAULT_CREDENTIAL_EXTENSIONS = (".pem", ".key", ".env", ".p12", ".pfx")
 
 def _load_credential_filter():
@@ -526,11 +533,14 @@ _CREDENTIAL_SUBSTRINGS, _CREDENTIAL_EXTENSIONS = _load_credential_filter()
 def _is_credential_file(rel_path: str) -> bool:
     """按文件名判断是否凭证类文件（token/密钥/password 等），用于知识库物化前过滤。
 
-    仅匹配文件名（basename），布尔子串 + 敏感扩展名；不拦普通文档与 pipelines-user.json。
+    仅匹配文件名（basename），布尔子串 + 敏感扩展名 + 精确匹配；不拦普通文档与 pipelines-user.json。
+    Issue #95：cr.json/cr.yaml 用精确匹配，避免 "cr" 子串误伤 cr-notes.md。
     """
     if not rel_path:
         return False
     name = os.path.basename(rel_path).lower()
+    if name in _DEFAULT_CREDENTIAL_EXACT_NAMES:
+        return True
     if name.endswith(_CREDENTIAL_EXTENSIONS):
         return True
     return any(sub in name for sub in _CREDENTIAL_SUBSTRINGS)
@@ -756,8 +766,14 @@ def _sync_baseline_files():
                     (repo_key, file_path)
                 ).fetchone()
 
-            if row and row[1]:  # DB 有记录且 obs_key 非空 → 跳过
-                continue
+            if row and row[1]:  # DB 有记录且 obs_key 非空
+                # Issue #95：检测旧格式 obs_key（project-info/ 前缀但不含 knowledge/）→ 强制更新
+                _old_obs = row[1] or ""
+                if _old_obs.startswith("project-info/") and not _old_obs.startswith("knowledge/"):
+                    # 旧格式 → 重新写 OBS + UPDATE
+                    pass  # 不 continue，走下面的写入逻辑
+                else:
+                    continue  # 新格式或本地模式 → 跳过
 
             # 写 OBS + DB
             try:
