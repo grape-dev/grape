@@ -1178,6 +1178,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
                     "AND status IN ('running','dispatched') "
                     "AND event_type != 'a2a_event' "
+                    "AND source != 'task_center' "
                     "ORDER BY seq DESC LIMIT 1",
                     (repo_key, issue_id, agent_type))
                 _existing_evt = _dc.fetchone()

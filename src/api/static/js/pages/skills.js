@@ -618,7 +618,12 @@ function doSkillUpload() {
     renderSkills();
   }).catch(e => {
     _setSkillUploadProgress(0, true);
-    if (app && app.showToast) app.showToast(I18N.t('skills.toast.upload_failed',{msg:e.message})||'上传失败');
+    // 优先展示后端返回的具体校验错误（errors 数组）
+    let msg = e.message || (I18N.t('skills.toast.upload_failed')||'上传失败');
+    if (e.errors && Array.isArray(e.errors) && e.errors.length > 0) {
+      msg = e.errors.join('；');
+    }
+    if (app && app.showToast) app.showToast(msg);
   });
 }
 
