@@ -898,6 +898,10 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 
+    # 权限校验：用户必须有权访问该仓库
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()

@@ -259,7 +259,7 @@ def build_project_info(repo_key: str, token: str = "") -> dict:
         tok = token or get_gitcode_token(repo_key=repo_key) or ""
         if tok:
             req = urllib.request.Request(
-                f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
                 headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
             import json as _json
             commits = _json.load(urllib.request.urlopen(req, timeout=20))
@@ -322,7 +322,7 @@ def should_refresh(repo_key: str) -> bool:
             if tok:
                 owner, rname = split_owner_repo(repo_key)
                 req = urllib.request.Request(
-                    f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                    f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
                     headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
                 commits = _json.load(urllib.request.urlopen(req, timeout=20))
                 if commits and commits[0].get("sha", "") != last_sha:

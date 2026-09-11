@@ -140,4 +140,4 @@ class GitCodeBackend(VcsBackend):
         return ""
 
     def get_collaborators_url(self, owner: str, repo: str) -> str:
-        return f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators"
+        return f"https://gitcode.com/api/v5/repos/{owner}/{repo}/collaborators"

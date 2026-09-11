@@ -140,7 +140,7 @@ function loadAgentTypes() {
 
     if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
       const r = managedRepos[0];
-      if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
+      if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
       else localStorage.removeItem('currentRepo');
     }
     nav('dash');
@@ -150,6 +150,8 @@ function loadAgentTypes() {
     // Lightweight version for after repo selection - just populate sidebar dropdown
     API.get('/repos/managed').then(d => {
       const repos = d.repos || [];
+      window._managedRepoMap = {};
+      repos.forEach(r => { window._managedRepoMap[r.full_name] = r.repo_key || ''; });
       const sel = $('repoSelect');
       const current = currentRepo();
       sel.innerHTML = repos.map(r =>
@@ -178,7 +180,8 @@ function loadAgentTypes() {
       return;
     }
     const parts = val.split('/');
-    localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1]}));
+    const _rk = (window._managedRepoMap && window._managedRepoMap[val]) || '';
+    localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
     // 同步侧边栏下拉选中项
     const sel = $('repoSelect');
     if (sel) sel.value = val;
@@ -328,7 +331,10 @@ function loadAgentTypes() {
     window._dashboardEditing = false;
 
     if (repo) {
-      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.fullName || (repo.owner + '/' + repo.name)}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
+      var _rk = repo.repoKey || repo.repo_key || '';
+      var _fn = repo.fullName || (repo.owner + '/' + repo.name);
+      var _repoLink = _rk.indexOf('github:') === 0 ? 'https://github.com/' + _fn : 'https://gitcode.com/' + _fn;
+      repoTitle.innerHTML = `<a href="${_repoLink}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="打开 ${_fn}">${repo.fullName} ↗</a>`;
     } else {
       repoTitle.textContent = '';
     }
@@ -470,6 +476,9 @@ function loadAgentTypes() {
   function oauthLogin() {
     API.get('/auth/login/gitcode').then(d => { if (d.redirect_url) window.location.href = d.redirect_url; }).catch(e => showToast(I18N.t('app.login.oauth_not_configured')));
   }
+  function oauthLoginGithub() {
+    API.get('/auth/login/github').then(d => { if (d.redirect_url) window.location.href = d.redirect_url; }).catch(e => showToast(I18N.t('app.login.oauth_not_configured')));
+  }
 
   let pwdVisible = false;
   function togglePwdLogin() {
@@ -494,7 +503,7 @@ function loadAgentTypes() {
 
   function logout() {
     API.post('/auth/logout', {}).catch(() => {});
-    // 保留 currentRepo（记录上次选择的仓库），下次登录恢复；只清登录态
+    // 清除所有用户相关缓存——防止切换账号后看到上一个用户的仓库/事件
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
@@ -539,10 +548,22 @@ function loadAgentTypes() {
     }));
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
+    // Check for OAuth error in URL (e.g. github.com timeout)
+    const oauthError = p.get('oauth_error');
+    if (oauthError) {
+      showToast(decodeURIComponent(oauthError), 6000);
+      if (window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+    }
+
+    // Check for OAuth token in URL first
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '9');
+      localStorage.setItem('app_cache_ver', '10');
+      // 每次 OAuth 登录都清除上一个用户的仓库缓存——防止切换账号后看到旧数据
+      localStorage.removeItem(REPO_CACHE_KEY);
       if (p.get('first_login') === '1') {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -566,15 +587,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '9') {
-      const oldRepo = localStorage.getItem('currentRepo');
+    if (localStorage.getItem('app_cache_ver') !== '10') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      if (oldRepo) localStorage.setItem('currentRepo', oldRepo);
-      localStorage.setItem('app_cache_ver', '9');
+      localStorage.setItem('app_cache_ver', '10');
     }
 
     const token = localStorage.getItem('token');
@@ -631,8 +650,17 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
+  return {nav, search, oauthLogin, oauthLoginGithub, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
 })();
+
+/** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
+function _vcsUrl(repoKey, path) {
+  var rk = repoKey || '';
+  var host = rk.indexOf('github:') === 0 ? 'https://github.com' : 'https://gitcode.com';
+  var parts = rk.split(':');
+  var repoPath = parts.length > 1 ? parts[1] : rk;
+  return host + '/' + repoPath + (path || '');
+}
 document.addEventListener('DOMContentLoaded', () => app.init());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });
 

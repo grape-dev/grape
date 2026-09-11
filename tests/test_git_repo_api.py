@@ -66,8 +66,7 @@ def test_provider_header_and_query(gitcode_calls, _client):
 
 def test_unknown_provider_rejected(_client):
     client = _client
-    assert _get(client, f"/api/repos/{OWNER}/{REPO}/branches",
-                headers={"X-Git-Provider": "github"}).status_code == 403
+    # github 现在是受支持的 provider（不再 403）；gitlab 仍然被拒
     assert _get(client, f"/api/repos/{OWNER}/{REPO}/branches?provider=gitlab").status_code == 403
 
 

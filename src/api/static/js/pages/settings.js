@@ -261,11 +261,11 @@ function unhostFromSettings(fullName) {
     }
     app.initSidebarRepos();
     API.get('/repos/managed').then(md => {
-      if (window._currentView !== 'settings') return;  // Issue #63: 用户已切走，丢弃回调
       const remaining = md.repos || [];
       if (wasCurrent || remaining.length === 0) {
+        // 当前仓库被解除或已无托管仓库 → 回到仓库选择页
         API.get('/repos/member').then(d => {
-          if (window._currentView !== 'settings') return;  // Issue #63: 用户已切走，丢弃回调
+          const repos = d.repos || [];
           document.getElementById('sidebar').style.display = 'none';
           document.getElementById('tb').style.display = 'none';
           const mv = document.getElementById('mainView');
@@ -277,6 +277,7 @@ function unhostFromSettings(fullName) {
           renderRepoSelection(repos);
         });
       } else {
+        // 还有其他托管仓库 → 回到 Dashboard
         app.nav('dash');
       }
     });

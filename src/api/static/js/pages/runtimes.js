@@ -124,6 +124,9 @@ function _engineWatermark(name) {
   if (n.includes('codearts')) {
     return `<img src="/static/img/engines/codearts.jpg" style="position:absolute;right:12px;bottom:8px;width:50px;height:50px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
   }
+  if (n.includes('codex')) {
+    return `<img src="/static/img/engines/codex.png" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
+  }
   return '';
 }
 
@@ -189,6 +192,7 @@ function renderRuntimes(data) {
     if (n.includes('hermes')) return 'hermes';
     if (n.includes('opencode')) return 'opencode';
     if (n.includes('codearts')) return 'codearts';
+    if (n.includes('codex')) return 'codex';
     return '';
   }).filter(Boolean))];
   const _allScopes = ['local','user','repo','global'];
@@ -197,7 +201,7 @@ function renderRuntimes(data) {
     const list = _runtimeTab === 'engines' ? (data.runtimes||[]) : devices;
     return list.some(e => (e.scope || (e.is_local ? 'local' : 'global')) === sc || (sc === 'local' && e.is_local));
   };
-  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b' };
+  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
   // 收集可用场景和标签（从引擎数据提取）
   const _allRuntimes = (data.runtimes || []);
   const _availScenes = [...new Set(_allRuntimes.flatMap(rt => rt.scene_tags || []))].filter(Boolean);

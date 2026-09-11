@@ -137,6 +137,12 @@ def get_user_token(username: str) -> str:
     return acc.get("gitcode_api_token", "")
 
 
+def get_user_github_token(username: str) -> str:
+    """获取用户的个人 GitHub API Token"""
+    acc = user_db.get_user_account(username) or {}
+    return acc.get("github_api_token", "")
+
+
 def _get_user_refresh_lock(user_id: int) -> threading.Lock:
     """获取用户级别的 GitCode OAuth 刷新锁（懒创建，Issue #52）。"""
     with _gitcode_refresh_locks_guard:
@@ -192,7 +198,7 @@ def get_bot_token(repo_owner: str = "", repo_name: str = "") -> str:
     return ""
 
 
-def require_devops_token(user: dict = Depends(get_current_user)):
+def require_devops_token(user: dict = Depends(get_current_user)) -> dict:
     """确保该端点只能由拥有 Bot Token 配置的管理员访问"""
     # 检查用户是否有任一托管仓库配置了 Bot Token
     repos = user_db.get_managed_repos(user["id"])
@@ -200,3 +206,29 @@ def require_devops_token(user: dict = Depends(get_current_user)):
     if not has_bot:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "DevOps Bot Token 未配置，请在 GitCode Repo 页面中配置"})
     return user
+
+
+def check_repo_access(user: dict, repo_key: str) -> None:
+    """校验当前用户是否有权访问指定仓库（managed_repos 中存在该仓库）。
+    
+    用于 dashboard/events/pipeline/agents 等按 repo_key 查询的接口，防止用户访问他人仓库的数据。
+    session_token / api_key 认证方式跳过校验（已由 token 作用域限定）。
+    同时检查 gitcode: 和 github: 前缀——前端 URL 不含平台前缀，to_repo_key 默认加 gitcode:，
+    但用户可能通过 GitHub OAuth 登录，仓库实际是 github: 前缀。
+    """
+    auth_type = user.get("auth_type", "jwt")
+    if auth_type in ("session_token", "api_key"):
+        return  # 作用域已限定
+    uid = user.get("id", 0)
+    if not uid or not repo_key:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库"})
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(repo_key)
+    # 构建候选 repo_key 列表：原始 + 跨平台前缀（gitcode:↔github:）
+    base = rk.split(":", 1)[1] if ":" in rk else rk
+    candidates = {f"gitcode:{base}", f"github:{base}"}
+    repos = user_db.get_managed_repos(uid)
+    for r in repos:
+        if r["repo_key"] in candidates:
+            return  # 用户有权访问
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库"})

@@ -872,11 +872,10 @@ function renderTimelineList(container, issues, repoKey) {
     return _ip ? engine + ' (' + _ip + ')' : engine;
   }
   // 构建 GitCode issue URL：优先用 issue 自身 repoKey，回退全局 repoKey
-  const _globalRepoPath = (repoKey || '').replace(/^gitcode:/, '');
   function _issueUrl(issueId, issueRepoKey) {
     const num = (issueId || '').replace(/^#/, '');
-    const repoPath = (issueRepoKey || '').replace(/^gitcode:/, '') || _globalRepoPath;
-    return repoPath && num ? 'https://gitcode.com/' + repoPath + '/issues/' + num : '';
+    const rk = issueRepoKey || repoKey || '';
+    return rk && num ? _vcsUrl(rk, '/issues/' + num) : '';
   }
   let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
   html += '<div style="display:flex;flex-direction:column;gap:0">';

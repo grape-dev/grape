@@ -45,8 +45,7 @@ function selPipe(idx) {
   // 重建流程图 HTML
   const iss = displayPipe.issue_id || '#?';
   const num = String(iss).replace(/^#/, '');
-  const repoParts = (data.repo || '').replace(/^gitcode:/, '').split('/');
-  const issueUrl = repoParts.length === 2 ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${num}` : '';
+  const issueUrl = (data.repo_key || '') ? _vcsUrl(data.repo_key, '/issues/' + num) : '';
   const issHtml = issueUrl ? `<a href="${issueUrl}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${I18N.t('pipeline.issue_prefix')} ${iss}</a>` : `${I18N.t('pipeline.issue_prefix')} ${iss}`;
   const stages = displayPipe.stages || [];
   const statuses = displayPipe.statuses || [];
@@ -143,10 +142,7 @@ function renderPipeline(data) {
   if (displayPipe) {
     const iss = displayPipe.issue_id || '#?';
     const num = String(iss).replace(/^#/, '');
-    const repoParts = (data.repo || '').replace(/^gitcode:/, '').split('/');
-    const issueUrl = repoParts.length === 2
-      ? `https://gitcode.com/${repoParts[0]}/${repoParts[1]}/issues/${num}`
-      : '';
+    const issueUrl = (data.repo_key || '') ? _vcsUrl(data.repo_key, '/issues/' + num) : '';
     const issHtml = issueUrl
       ? `<a href="${issueUrl}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${I18N.t('pipeline.issue_prefix')} ${iss}</a>`
       : `${I18N.t('pipeline.issue_prefix')} ${iss}`;
@@ -158,7 +154,7 @@ function renderPipeline(data) {
       : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
     // 触发 SRE 部署按钮：stage 非 done 时显示
     const _issueNum = String(iss).replace(/^#/, '');
-    const _repoFullName = (data.repo || '').replace(/^gitcode:/, '');
+    const _repoFullName = (data.repo_key || '').replace(/^(gitcode|github):/, '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
     flowHtml = `<div class="pl-flow-card" id="pipeFlow"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div></div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
@@ -238,10 +234,9 @@ function renderPipeline(data) {
     const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || p.scene_name || _sceneId) : '—';
     const sceneBadge = _sceneId ? `<span class="tg tg-i" style="font-size:10px">${sceneLabel}</span>` : '<span class="ts t3">—</span>';
     const _issueNum = String(p.issue_id || '').replace(/^#/, '');
-    const _repoParts2 = (data.repo || '').replace(/^gitcode:/, '').split('/');
-    const _issueUrl = (_issueNum && _repoParts2.length === 2) ? `https://gitcode.com/${_repoParts2[0]}/${_repoParts2[1]}/issues/${_issueNum}` : '';
+    const _issueUrl = _issueNum ? _vcsUrl(data.repo_key || '', '/issues/' + _issueNum) : '';
     const _parentIssueId = String(p.parent_issue_id || '').replace(/^#/, '');
-    const _parentIssueUrl = (_parentIssueId && _repoParts2.length === 2) ? `https://gitcode.com/${_repoParts2[0]}/${_repoParts2[1]}/issues/${_parentIssueId}` : '';
+    const _parentIssueUrl = _parentIssueId ? _vcsUrl(data.repo_key || '', '/issues/' + _parentIssueId) : '';
     const _parentIssueHtml = _parentIssueId ? `<a href="${_parentIssueUrl}" target="_blank" rel="noopener" style="color:var(--pu);text-decoration:underline;font-size:11px">#${_parentIssueId}</a>` : '<span class="ts t3">—</span>';
     const _esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const execBadge = p.executing

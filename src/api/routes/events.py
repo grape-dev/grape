@@ -27,6 +27,10 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
 
+    # 权限校验：用户必须有权访问该事件所属仓库
+    from src.api.deps import check_repo_access
+    check_repo_access(user, row[1] or "")
+
     import json
     from src.repo_key import from_repo_key
     payload = {}
@@ -43,7 +47,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
 
     result = {
         "seq": row[0],
-        "repo_key": from_repo_key(row[1] or ""),
+        "repo_key": row[1] or "",
         "issue_id": row[2],
         "event_type": row[3],
         "source": row[4],
@@ -562,7 +566,55 @@ def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
             else:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
         else:
-            # 无关联任务（引擎不可用时未创建 task 快照的历史事件）→ 从 events 表恢复参数重走 run_pipeline
+            # 无关联任务（引擎不可用时未创建 task 快照的历史事件）
+            _event_type = evt.get("event_type", "unknown")
+
+            # A2A 事件不能走 run_pipeline（payload 格式不同，且无 webhook header 映射）
+            # → 直接重新触发 A2A 交办
+            if _event_type == "a2a_event":
+                try:
+                    _payload = evt.get("payload") or evt.get("payload_raw") or "{}"
+                    if isinstance(_payload, str):
+                        _payload = _json.loads(_payload)
+                    _repo_key = evt.get("repo_key", "") or ""
+                    _bot_token = ""
+                    try:
+                        from src.user.db import get_repo_bot_token_no_global
+                        _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
+                    except Exception:
+                        pass
+                    import urllib.request as _url_req
+                    _a2a_body = _json.dumps({"agent": evt.get("agent_type", ""), "payload": _payload}).encode()
+                    _a2a_req = _url_req.Request(
+                        f"http://localhost:3000/api/a2a",
+                        data=_a2a_body,
+                        headers={"Content-Type": "application/json", "X-Bot-Token": _bot_token},
+                        method="POST"
+                    )
+                    with _url_req.urlopen(_a2a_req, timeout=30) as _a2a_resp:
+                        _a2a_result = _json.loads(_a2a_resp.read().decode())
+                    if _a2a_result.get("status") == "ok":
+                        _new_seq = _a2a_result.get("seq", 0)
+                        log.info(f"[redispatch] seq={seq} a2a re-dispatch ok, new seq={_new_seq}")
+                        update_event_status(seq, "failed")
+                        try:
+                            from src.user.db import set_meta_value as _smv
+                            import time as _tm
+                            _smv(f"redispatch:{seq}", str(_tm.time()))
+                        except Exception:
+                            pass
+                        return {"status": "redispatched", "task_id": "(new)", "event_seq": _new_seq,
+                                "original_seq": seq}
+                    else:
+                        raise HTTPException(status_code=409, detail={"code": 409,
+                            "message": f"重派失败：A2A 重新交办未成功（{_a2a_result.get('status', 'unknown')}）"})
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    log.warning(f"[redispatch] seq={seq} a2a re-dispatch failed: {e}")
+                    raise HTTPException(status_code=500, detail={"code": 500, "message": f"重派异常: {str(e)[:100]}"})
+
+            # 非 A2A 事件：从 events 表恢复参数重走 run_pipeline
             # 构建最小 webhook evt，复用 run_pipeline 路由+引擎选择+入队/执行
             try:
                 from src.api.event_pipeline import run_pipeline as _rp
@@ -1332,6 +1384,11 @@ def list_events(owner: str, repo: str,
                       user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
+
+    # 权限校验：用户必须有权访问该仓库
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+
     from src.session_manager import db, db_lock
 
     where_clauses = ["repo_key=?"]

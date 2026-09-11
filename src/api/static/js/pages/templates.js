@@ -586,7 +586,8 @@ function doCreateFromTemplate(templateId) {
           app.showToast(I18N.t('templates.create_success', {msg: r.message || I18N.t('templates.create_success_default')}));
         }
         var parts = (r.full_name || '').split('/');
-        setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1]); }, 900);
+        var _rk = r.repo_key || (r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name;
+        setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1], _rk); }, 900);
       }).catch(function(e) {
         clearInterval(_timer);
         btn.disabled = false;

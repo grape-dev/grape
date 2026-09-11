@@ -12,6 +12,17 @@ from pydantic import BaseModel
 from src.api.deps import get_current_user, get_current_user_or_api_key, get_user_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
+
+
+def _vcs_url_static(repo_key: str, path: str = "") -> str:
+    """根据 repo_key 的 provider 前缀生成 VCS 平台 URL。"""
+    rk = repo_key or ""
+    host = "https://github.com" if rk.startswith("github:") else "https://gitcode.com"
+    parts = rk.split(":", 1)
+    repo_path = parts[1] if len(parts) > 1 else rk
+    return f"{host}/{repo_path}{path}"
+
+
 from src.session_manager import (
     db, db_lock, get_chat_config, create_conversation, add_message,
 )
@@ -191,7 +202,9 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                     _existing_assignee = _r2[0] or ""
             except Exception:
                 pass
-            if target and _existing_assignee and target != _existing_assignee:
+            # 仅当显式传了 assignee（非 owner 回退）时才覆盖已有 assignee
+            # 防止 pipeline 回声调用 assignee='' → owner 回退 → 覆盖正确的 assignee
+            if assignee and _existing_assignee and assignee != _existing_assignee:
                 c.execute("UPDATE tasks SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
                 try:
                     _close_other_assignee_tasks(repo_key, issue_number, keep_assignee=target)
@@ -746,24 +759,29 @@ async def resume_task_api(task_id: int, user: dict = Depends(get_current_user)):
             set_issue_stage(repo_key, _issue_id, _resume_stage, "resume")
             # 通过 A2A 重新派发
             try:
-                import urllib.request, json as _json
-                from src.prompt_builder import _resolve_server_url
-                _a2a_url = _resolve_server_url() + "/api/a2a"
-                _a2a_payload = _json.dumps({
-                    "agent": _resume_stage,
-                    "payload": {
-                        "repository": repo_key.replace("gitcode:", ""),
-                        "issue_number": issue_number,
-                        "context": f"resume from cancelled, last_completed={_last_completed_agent}, next={_resume_stage}",
+                from src.repo_key import from_repo_key
+                _repo_path = from_repo_key(repo_key)
+                from src.api.event_pipeline import run_pipeline as _rp
+                import json as _json
+                _fake_payload = {
+                    "object_attributes": {"action": "open", "title": "", "description": "",
+                                          "iid": issue_number, "number": issue_number},
+                    "project": {"path_with_namespace": _repo_path},
+                    "repository": {"full_name": _repo_path},
+                    "user": {"username": user.get("username", "")},
+                }
+                if repo_key.startswith("github:"):
+                    _fake_payload = {
+                        "action": "opened",
+                        "issue": {"number": issue_number, "title": "", "body": "",
+                                  "user": {"login": user.get("username", "")}},
+                        "repository": {"full_name": _repo_path, "name": _repo_path.split("/")[-1]},
+                        "sender": {"login": user.get("username", "")},
                     }
-                }).encode()
-                _req = urllib.request.Request(
-                    _a2a_url,
-                    data=_a2a_payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST")
-                urllib.request.urlopen(_req, timeout=5)
-                log.info(f"Task #{task_id} resumed → re-dispatched to stage={_resume_stage} (last_completed={_last_completed_agent})")
+                _fake_raw = _json.dumps(_fake_payload).encode()
+                _header = {"X-GitHub-Event": "issues"} if repo_key.startswith("github:") else {"X-GitCode-Event": "Issue Hook"}
+                _rp_result = _rp(_fake_raw, _header, account=_repo_path, repo_key_override=repo_key)
+                log.info(f"Task #{task_id} resumed → re-dispatched to stage={_resume_stage} (last_completed={_last_completed_agent}), seq={_rp_result.get('seq')}")
             except Exception as _e:
                 log.warning(f"Task #{task_id} resume re-dispatch failed: {_e}")
     log.info(f"Task #{task_id} resumed by user")
@@ -814,12 +832,27 @@ def resume_issue_task(repo_key: str, issue_number: int):
     return affected
 
 
-def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str) -> int | None:
+def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str, provider: str = "gitcode") -> int | None:
     """幂等查找：同仓库已存在同名 open Issue → 返回其 number（避免重复建 issue）。"""
+    if provider == "github":
+        from src.user.repo_manager import _github_req
+        try:
+            data = _github_req("GET", f"https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=50", api_token)
+        except Exception:
+            return None
+        items = data if isinstance(data, list) else []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if str(it.get("title") or "").strip() == title.strip():
+                n = it.get("number")
+                if n:
+                    return int(n)
+        return None
     from src.user.repo_manager import _req
     try:
         data = _req("GET",
-                    f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=all&per_page=50&page=1",
+                    f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=all&per_page=50&page=1",
                     api_token)
     except Exception:
         return None
@@ -857,7 +890,7 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
         params["body"] = body_text
     if assignee:
         params["assignee"] = assignee
-    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?access_token={api_token}"
+    url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?access_token={api_token}"
     req = _ur.Request(url, data=_up.urlencode(params).encode(),
                       headers={"Content-Type": "application/x-www-form-urlencoded",
                                "Accept": "application/json"}, method="POST")
@@ -869,6 +902,19 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
         raise RuntimeError(f"GitCode API POST issues failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
     except _uerr.URLError as e:
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+
+
+def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
+                       body_text: str = "", assignee: str = "") -> dict:
+    """创建 GitHub Issue。"""
+    from src.user.repo_manager import _github_req
+    body = {"title": title}
+    if body_text:
+        body["body"] = body_text
+    if assignee:
+        body["assignees"] = [assignee]
+    result = _github_req("POST", f"https://api.github.com/repos/{owner}/{repo}/issues", api_token, body)
+    return result
 
 
 def _is_gitcode_401(err: Exception) -> bool:
@@ -912,7 +958,7 @@ def _gitcode_api_with_refresh(user: dict, api_call_fn, *args, **kwargs):
 def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（追加多任务模式标记）。"""
     import urllib.request as _ur, urllib.error as _uerr, json as _json
-    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
+    url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
     data = _json.dumps({"body": body_text}).encode()
     req = _ur.Request(url, data=data, headers={"Content-Type": "application/json", "Accept": "application/json"}, method="PATCH")
     try:
@@ -981,31 +1027,49 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         raise HTTPException(status_code=400, detail={"code": 400, "message": "任务描述必填"})
     repo_key = to_repo_key(body.repo_key)
     owner, rname = split_owner_repo(repo_key)
-    # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
-    from src.api.deps import get_user_token_with_refresh
-    api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    # 根据 repo_key 前缀判断 provider，选择对应 token 和 API
+    _provider = "gitcode"
+    if repo_key.startswith("github:"):
+        _provider = "github"
+    elif not ":" in repo_key:
+        # 兜底：repo_key 无前缀时，检查用户是否有 github token
+        from src.api.deps import get_user_github_token
+        if get_user_github_token(user["username"]):
+            _provider = "github"
+            repo_key = f"github:{repo_key}"
+            owner, rname = split_owner_repo(repo_key)
+
+    if _provider == "github":
+        from src.api.deps import get_user_github_token
+        api_token = get_user_github_token(user["username"])
+    else:
+        from src.api.deps import get_user_token_with_refresh
+        api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
     if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
-    assignee = (body.assignee or "").strip() or user["username"]  # General Settings Account：登录用户 gitcode 账号
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
+    assignee = (body.assignee or "").strip() or user["username"]
     # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
-    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip())
+    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(), provider=_provider)
     created = False
     if issue_num is not None:
         raise HTTPException(status_code=409, detail={"code": 409,
                                                      "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
                                                      "issue_number": issue_num})
     if issue_num is None:
-        # Issue #52: 401 时自动刷新 OAuth token 并重试
-        resp = _gitcode_api_with_refresh(
-            user, _post_gitcode_issue, owner, rname, body.title.strip(),
-            (body.description or "").strip(), assignee=assignee
-        )
+        if _provider == "github":
+            resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
+                                      (body.description or "").strip(), assignee=assignee)
+        else:
+            resp = _gitcode_api_with_refresh(
+                user, _post_gitcode_issue, owner, rname, body.title.strip(),
+                (body.description or "").strip(), assignee=assignee
+            )
         n = None
         if isinstance(resp, dict):
             n = resp.get("number") or resp.get("iid") or resp.get("id")
         if not n:
             raise HTTPException(status_code=502, detail={"code": 502,
-                                                         "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
+                                                         "message": f"创建 Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
         issue_num = int(n)
         created = True
     # 2) 场景选择：用户选了具体场景 → 写入 scene_id（issue_opened 读到有值则跳过推荐）
@@ -1058,6 +1122,40 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         except Exception as _e:
             from src.config import log
             log.warning(f"create_task: patch issue body for multi-task-mode failed: {_e}")
+
+    # 6) 触发流水线（模拟 issue_opened webhook 事件）
+    if created:
+        try:
+            from src.api.event_pipeline import run_pipeline as _rp
+            import json as _json
+            if _provider == "github":
+                _fake_payload = {
+                    "action": "opened",
+                    "issue": {"number": issue_num, "title": body.title.strip(), "body": (body.description or "").strip(),
+                              "user": {"login": user["username"]}},
+                    "repository": {"full_name": f"{owner}/{rname}", "name": rname},
+                    "sender": {"login": user["username"]},
+                }
+                _fake_raw = _json.dumps(_fake_payload).encode()
+                _rp_result = _rp(_fake_raw, {"X-GitHub-Event": "issues"},
+                                 account=f"{owner}/{rname}", repo_key_override=repo_key)
+            else:
+                _fake_payload = {
+                    "object_attributes": {"action": "open", "title": body.title.strip(),
+                                          "description": (body.description or "").strip(), "iid": issue_num, "number": issue_num},
+                    "project": {"path_with_namespace": f"{owner}/{rname}"},
+                    "repository": {"full_name": f"{owner}/{rname}"},
+                    "user": {"username": user["username"]},
+                }
+                _fake_raw = _json.dumps(_fake_payload).encode()
+                _rp_result = _rp(_fake_raw, {"X-GitCode-Event": "Issue Hook"},
+                                 account=f"{owner}/{rname}", repo_key_override=repo_key)
+            from src.config import log
+            log.info(f"create_task: triggered pipeline, result={_rp_result.get('ok')}, seq={_rp_result.get('seq')}")
+        except Exception as _e:
+            from src.config import log
+            log.warning(f"create_task: trigger pipeline failed: {_e}")
+
     return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
             "assignee": assignee, "is_subtask_mode": _auto_subtask_mode,
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
@@ -1232,7 +1330,7 @@ async def get_task_clarifications(task_id: int, user: dict = Depends(get_current
         from src.session_manager import get_messages
         conv_messages = get_messages(conv_id, limit=30)
     return {"messages": messages, "conversation_id": conv_id,
-            "issue_url": f"https://gitcode.com/{repo_key}/issues/{issue_number}"}
+            "issue_url": _vcs_url_static(repo_key, '/issues/' + str(issue_number))}
 
 
 @router.post("/{task_id}/clarify")
@@ -1250,46 +1348,63 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
     if not info:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
     repo_key, issue_number, conv_id = info
-    # Issue #52: 用带预刷新的 token 获取
-    from src.api.deps import get_user_token_with_refresh
-    api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    # 根据 repo_key 前缀判断 provider
+    _provider = "gitcode"
+    if repo_key.startswith("github:"):
+        _provider = "github"
+        from src.api.deps import get_user_github_token
+        api_token = get_user_github_token(user["username"])
+    else:
+        from src.api.deps import get_user_token_with_refresh
+        api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
     if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
-    # 1) 发 GitCode Issue 评论（form + access_token，同 _post_gitcode_issue 的实测结论）
+    # 1) 发 Issue 评论
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
     comment_body = f"💬 **开发者澄清**\n\n{msg}"
 
-    def _post_comment(token: str, _owner=owner, _rname=rname, _issue_num=issue_number, _body=comment_body):
-        import urllib.parse as _up
-        import urllib.request as _ur
-        import urllib.error as _uerr
-        url = f"https://api.gitcode.com/api/v5/repos/{_owner}/{_rname}/issues/{_issue_num}/comments?access_token={token}"
-        req = _ur.Request(url, data=_up.urlencode({"body": _body}).encode(),
-                          headers={"Content-Type": "application/x-www-form-urlencoded",
-                                   "Accept": "application/json"}, method="POST")
+    if _provider == "github":
+        # GitHub Issue 评论
+        from src.user.repo_manager import _github_req
         try:
-            with _ur.urlopen(req, timeout=30) as resp:
-                resp.read()
-        except _uerr.HTTPError as e:
-            raise RuntimeError(f"GitCode comment failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
-        except _uerr.URLError as e:
-            raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+            _github_req("POST", f"https://api.github.com/repos/{owner}/{rname}/issues/{issue_number}/comments",
+                        api_token, {"body": comment_body})
+            log.info(f"Task clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"GitHub 评论失败: {e}"})
+    else:
+        # GitCode Issue 评论（form + access_token）
+        def _post_comment(token: str, _owner=owner, _rname=rname, _issue_num=issue_number, _body=comment_body):
+            import urllib.parse as _up
+            import urllib.request as _ur
+            import urllib.error as _uerr
+            url = f"https://gitcode.com/api/v5/repos/{_owner}/{_rname}/issues/{_issue_num}/comments?access_token={token}"
+            req = _ur.Request(url, data=_up.urlencode({"body": _body}).encode(),
+                              headers={"Content-Type": "application/x-www-form-urlencoded",
+                                       "Accept": "application/json"}, method="POST")
+            try:
+                with _ur.urlopen(req, timeout=30) as resp:
+                    resp.read()
+            except _uerr.HTTPError as e:
+                raise RuntimeError(f"GitCode comment failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
+            except _uerr.URLError as e:
+                raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
-    try:
-        _gitcode_api_with_refresh(user, _post_comment)
-        log.info(f"Task clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        if _is_gitcode_401(e):
-            raise HTTPException(status_code=401, detail={
-                "code": 401, "message": "GitCode 授权已过期，请重新登录授权",
-                "action": "reauth_required"
-            })
-        raise HTTPException(status_code=502, detail={"code": 502,
-                                                     "message": f"GitCode 评论失败: {str(e)[:200]}"})
+        try:
+            _gitcode_api_with_refresh(user, _post_comment)
+            log.info(f"Task clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            if _is_gitcode_401(e):
+                raise HTTPException(status_code=401, detail={
+                    "code": 401, "message": "GitCode 授权已过期，请重新登录授权",
+                    "action": "reauth_required"
+                })
+            raise HTTPException(status_code=502, detail={"code": 502,
+                                                         "message": f"GitCode 评论失败: {str(e)[:200]}"})
 
     # 2) 写入任务会话（如有 conv_id）
     if conv_id:
@@ -1407,6 +1522,23 @@ async def my_tasks(status: str = Query("", pattern="^(active|processing|awaiting
     assignee: 按创建人筛选（assignee 字段精确匹配）
     """
     from src.repo_key import to_repo_key, from_repo_key
+    # 任务中心显示当前用户管理的仓库的任务（不按 user_id 过滤，而是按仓库归属）
+    # 管理员可能同时绑定了 GitCode 和 GitHub 账号，两个账号的仓库都应显示
+    from src.user.db import get_managed_repos
+    _user_repos = get_managed_repos(user["id"])
+    _user_repo_keys = [r["repo_key"] for r in _user_repos] if _user_repos else []
+    # 如果用户没有通过 user_repos JOIN 到任何托管仓库（如新用户/跨平台），
+    # 回退到显示所有托管仓库（managed_repos 是全局的，管理员应该看到全部）
+    if not _user_repo_keys:
+        from src.session_manager import db as _mdb, db_lock as _mdl
+        with _mdl:
+            _mc = _mdb.cursor()
+            _mc.execute("SELECT repo_key FROM managed_repos")
+            _user_repo_keys = [r[0] for r in _mc.fetchall()]
+    if not _user_repo_keys:
+        _user_repo_keys = ["__none__"]  # 占位，确保不返回全部
+
+    _repo_keys = []
     if repo_key:
         repo_key = to_repo_key(repo_key)
     if created_by_me and created_by_me.lower() == "true":
@@ -1456,7 +1588,7 @@ async def my_tasks(status: str = Query("", pattern="^(active|processing|awaiting
     from src.api.session_store import get_issue_stage
     tasks_out = []
     for r in rows:
-        _rk = to_repo_key(from_repo_key(r[2]))
+        _rk = r[2]  # tasks.repo_key 已是规范化 repo_key（含 provider 前缀），无需 to_repo_key(from_repo_key()) 转换
         _issue_id = f"#{r[3]}"
         # 区分场景来源：issue_state.scene_id（VOD 识别）vs 仓库默认场景
         _st = get_issue_stage(_rk, _issue_id)
@@ -1489,7 +1621,7 @@ async def my_tasks(status: str = Query("", pattern="^(active|processing|awaiting
             except Exception:
                 pass
         tasks_out.append({
-            "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
+            "id": r[0], "assignee": r[1], "repo_key": r[2], "repo_name": from_repo_key(r[2]), "issue_number": r[3],
             "title": r[4] or "", "task_description": r[5] or "",
             "conversation_id": r[6] or "", "status": r[7],
             "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),

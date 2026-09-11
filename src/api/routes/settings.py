@@ -21,6 +21,10 @@ def get_credentials(user: dict = Depends(get_current_user), repo_key: str = ""):
             "account": user["username"],
             "auto_filled": True,
         },
+        "github": {
+            "token_exists": bool(acc.get("github_api_token")),
+            "login": acc.get("github_login", ""),
+        },
         "huawei_cloud": {
             "ak_exists": bool(acc.get("huawei_cloud_ak")),
             "sk_exists": bool(acc.get("huawei_cloud_sk")),
@@ -39,6 +43,7 @@ class UpdateCredentials(BaseModel):
     huawei_cloud_sk: str = ""
     codearts_ak: str = ""
     codearts_sk: str = ""
+    github_token: str = ""
     repo_key: str = ""
 
 
@@ -72,6 +77,25 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(get_current
         acc["CODEARTS_CLI_AK"] = body.codearts_ak.strip()
     if body.codearts_sk and not _is_placeholder(body.codearts_sk):
         acc["CODEARTS_CLI_SK"] = body.codearts_sk.strip()
+    if body.github_token and not _is_placeholder(body.github_token):
+        _gh_tok = body.github_token.strip()
+        acc["github_api_token"] = _gh_tok
+        # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
+        try:
+            import requests as _req
+            _resp = _req.get("https://api.github.com/user",
+                             headers={"Authorization": f"Bearer {_gh_tok}", "Accept": "application/vnd.github+json"},
+                             timeout=10)
+            if _resp.status_code == 200:
+                _gh_user = _resp.json()
+                acc["github_login"] = _gh_user.get("login", "")
+                # 关联到用户表
+                user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
+                log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
+            else:
+                log.warning(f"GitHub token validation failed: {_resp.status_code}")
+        except Exception as _e:
+            log.warning(f"GitHub token validation error: {_e}")
     user_db.save_user_account(user["username"], acc)
     return {"message": "凭据已更新"}
 
@@ -192,6 +216,33 @@ def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_current_user
     if body.gitcode_oauth_redirect_uri:
         set_meta_value("oauth_gitcode_redirect_uri", body.gitcode_oauth_redirect_uri)
     return {"message": "OAuth 配置已更新"}
+
+
+class GitHubOAuthConfig(BaseModel):
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    github_oauth_redirect_uri: str = ""
+
+
+@router.get("/oauth-github")
+def get_github_oauth_config(user: dict = Depends(get_current_user)):
+    from src.user.db import get_meta_value
+    return {
+        "github_oauth_client_id": bool(get_meta_value("oauth_github_client_id")),
+        "github_oauth_redirect_uri": get_meta_value("oauth_github_redirect_uri"),
+    }
+
+
+@router.put("/oauth-github")
+def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(get_current_user)):
+    from src.user.db import set_meta_value
+    if body.github_oauth_client_id:
+        set_meta_value("oauth_github_client_id", body.github_oauth_client_id)
+    if body.github_oauth_client_secret:
+        set_meta_value("oauth_github_client_secret", body.github_oauth_client_secret)
+    if body.github_oauth_redirect_uri:
+        set_meta_value("oauth_github_redirect_uri", body.github_oauth_redirect_uri)
+    return {"message": "GitHub OAuth 配置已更新"}
 
 
 # ====== Agent Runtimes ======
