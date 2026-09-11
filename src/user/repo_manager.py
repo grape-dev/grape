@@ -431,10 +431,13 @@ def push_template_to_repo(template: dict, gitcode_login: str, target_repo: str,
             workdir = os.path.join(tmp, "repo")
             if clone_url and source_platform == "github":
                 # GitHub 优选模板：下载 tarball（比 clone 快 10 倍），解压后 init 新仓库
+                gh_headers = {}
+                gh_token = os.environ.get("GITHUB_TOKEN", "")
+                if gh_token:
+                    gh_headers["Authorization"] = f"token {gh_token}"
                 _download_and_extract_tarball(
                     f"https://api.github.com/repos/{source_repo}/tarball",
-                    workdir, tmp,
-                    headers={"Authorization": f"token {os.environ.get('GITHUB_TOKEN', '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')}"},
+                    workdir, tmp, headers=gh_headers,
                 )
             elif clone_url and source_platform == "gitcode" and not source_repo:
                 # GitCode 优选模板（有 clone_url 但无 source_repo）：tarball 下载

@@ -20,8 +20,8 @@ CN_KEYWORDS = [
     "containerd", "grafana",
 ]
 
-GITCODE_PAT = os.environ.get("GITCODE_PAT", "yXgZq-rf19PW2cmMoyXF_xbK")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
+GITCODE_PAT = os.environ.get("GITCODE_PAT", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")  # 可选，无则用匿名
 
 
 def _build_reason(item, search_kw):
