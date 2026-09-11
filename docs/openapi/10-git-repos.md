@@ -225,16 +225,27 @@ grapecli git diff --repo Jason7602/hello
 
 | 位置 | 参数 | 类型 | 说明 |
 |------|------|------|------|
-| Path | `owner`/`repo`/`path` | string | 文件路径（技能多用 `CODEOWNERS`） |
+| Path | `owner`/`repo`/`path` | string | 路径。**空/省略 → 根目录列表**；目录 → 该目录条目列表；文件 → 单文件 base64 内容（技能多用 `CODEOWNERS`） |
 | Query | `ref` | string | 分支/引用（技能用 `ref=codeowner`） |
 
-**返回（200）**：文件对象（base64 content）
-```json
-{"name": "CODEOWNERS", "path": "CODEOWNERS", "size": 123,
- "sha": "sha", "content": "<base64>", "encoding": "base64",
- "type": "file", "download_url": "..."}
-```
-**错误**：401 / 403 / 404（文件不存在）。
+**返回（200）**：
+- **目录/根** → 条目数组（一接口枚举仓库结构，QA/开发 agent 一步拿目录树）：
+  ```json
+  [{"type":"dir","name":"configs","path":"configs","sha":"..."},
+   {"type":"file","name":"README.md","path":"README.md","sha":"..."}]
+  ```
+- **文件** → 文件对象（base64 content）：
+  ```json
+  {"name": "CODEOWNERS", "path": "CODEOWNERS", "size": 123,
+   "sha": "sha", "content": "<base64>", "encoding": "base64",
+   "type": "file", "download_url": "..."}
+  ```
+
+> **根目录列表**：`GET /api/repos/{owner}/{repo}/contents`（无尾斜杠的根路由
+> `gitrepo_contents_root`）或 `/contents?ref=` 请求根目录，平台返回条目数组。
+
+**错误**：401 / 403 / 404（路径不存在）。
+> 提示：路径不存在时（尤其根/目录探测），可先取根目录列表确认仓库结构，避免盲目探测吃 404。
 
 ---
 
@@ -324,6 +335,7 @@ grapecli git diff --repo Jason7602/hello
 | `assignee_ids` | array | 责任人 id 数组（implementation 风格） |
 | `milestone_id` | int | 里程碑 id |
 | `state` | string | `"close"`（**注意**：GitCode 关闭用 "close" 非 "closed"） |
+| `body` | string | Issue 正文（同 POST create / PR update 的 body；空值忽略，不影响其他字段） |
 
 **返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
 
