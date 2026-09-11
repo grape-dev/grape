@@ -316,8 +316,24 @@ def get_agent_display_name(agent_type: str) -> str:
 
 
 def _is_pr_payload(payload: dict) -> bool:
-    """判断是否为 PR 事件 payload（PR webhook 带 issues 关联列表 / pull_request 键）。"""
-    return ("issues" in payload) or bool(payload.get("pull_request")) or bool(payload.get("merge_request"))
+    """判断是否为 PR 事件 payload（PR webhook 带 pull_request/merge_request 键）。
+
+    Issue #89 修复：旧逻辑 `"issues" in payload` 会误判 Issue Hook（GitCode Issue Hook
+    payload 可能含 issues 交叉引用键）为 PR 事件，导致 resolve_issue_id 跳过
+    object_attributes 解析 → 子任务 issue_id=#0。
+    改为：仅当有 pull_request/merge_request 键，或 object_attributes 含 PR 特有字段
+    （source_branch/target_branch）时才判定为 PR。
+    """
+    if bool(payload.get("pull_request")) or bool(payload.get("merge_request")):
+        return True
+    obj = payload.get("object_attributes", {})
+    if isinstance(obj, dict):
+        if obj.get("source_branch") or obj.get("target_branch"):
+            return True
+        # noteable_type 明确为 Issue → 非 PR
+        if obj.get("noteable_type") == "Issue":
+            return False
+    return False
 
 
 def resolve_issue_id(payload: dict) -> str:
@@ -325,6 +341,10 @@ def resolve_issue_id(payload: dict) -> str:
 
     注意：PR 事件不返回 PR 号（其 object_attributes.iid 是 PR 号，会误当 issue_id）；
     PR 事件的真实关联 Issue 用 resolve_pr_issue_id（title/分支/issues 列表）。
+
+    Issue #89 修复：Issue Hook payload 可能含 issues 交叉引用键（父任务），
+    旧逻辑先查 issues 列表 → 返回父任务编号而非当前 Issue。
+    修正：非 PR 事件优先查 object_attributes，issues 列表仅作 PR 事件兜底。
     """
     if not isinstance(payload, dict):
         return ""
@@ -338,6 +358,15 @@ def resolve_issue_id(payload: dict) -> str:
         num = obj.get("number", obj.get("iid", ""))
         if num:
             return f"#{num}"
+    # Issue #89: 非 PR 事件优先查 object_attributes（当前 Issue 编号）
+    # 旧逻辑先查 issues 列表 → 对含交叉引用的 Issue Hook 返回父任务编号
+    _is_pr = _is_pr_payload(payload)
+    if not _is_pr:
+        obj = payload.get("object_attributes", {})
+        if isinstance(obj, dict):
+            num = obj.get("number", obj.get("iid", obj.get("noteable_iid", "")))
+            if num:
+                return f"#{num}"
     # PR payload 中显式关联的 issues 列表（GitCode pull_request_*）
     issues = payload.get("issues")
     if isinstance(issues, list):
@@ -346,12 +375,7 @@ def resolve_issue_id(payload: dict) -> str:
                 num = it.get("number", it.get("iid", ""))
                 if num:
                     return f"#{num}"
-    # Issue 类 webhook 的 object_attributes.iid（PR 事件的该字段是 PR 号，跳过）
-    obj = payload.get("object_attributes", {})
-    if isinstance(obj, dict) and not _is_pr_payload(payload):
-        num = obj.get("number", obj.get("iid", obj.get("noteable_iid", "")))
-        if num:
-            return f"#{num}"
+    # PR 事件的 object_attributes 不查（其 iid 是 PR 号，会误当 issue_id）
     return ""
 
 
@@ -620,11 +644,19 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                 skill_name = _mapping.get(agent_type, "")
             if not skill_name:
                 log.warning(f"Pipeline subscription: no skill for agent={agent_type}, skip extra dispatch")
+                from src.api.event_store import append_skipped_event
+                _sub_skip_iid = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
+                append_skipped_event(repo_key, evt.get("type", ""), "subscription_no_skill", agent_type,
+                                     issue_id=_sub_skip_iid)
                 return
         # Agent 启用检查
         from src.api.session_store import is_agent_enabled
         if not is_agent_enabled(repo_key, agent_type):
             log.info(f"Pipeline subscription: agent={agent_type} disabled, skip extra dispatch")
+            from src.api.event_store import append_skipped_event
+            _sub_skip_iid2 = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
+            append_skipped_event(repo_key, evt.get("type", ""), "subscription_agent_disabled", agent_type,
+                                 issue_id=_sub_skip_iid2)
             return
         # 创建事件
         from src.api.event_store import append_event
@@ -698,8 +730,18 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     log.info(f"Pipeline: start, raw_type={event_header}, source={source}, repo={evt['repository']}")
 
+    # Issue #89: 提前解析 issue_id 供 skipped 事件审计（所有提前 return 路径共用）
+    _pre_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+    if not _pre_issue_id and event_type in PR_EVENT_TYPES:
+        try:
+            _pre_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}) or ""
+        except Exception:
+            pass
+
     if not evt["repository"] or event_type == "unknown":
         log.info(f"Pipeline skipped: repository='{evt['repository']}' or event_type='{event_type}' not recognized")
+        from src.api.event_store import append_skipped_event
+        append_skipped_event(repo_key, event_type, "unrecognized_event", issue_id=_pre_issue_id)
         return result
 
     # 2. 自循环检测：actor 是任一 bot 用户名 → 跳过（评论/评论PR/打标签等 bot 自身动作的回声）
@@ -728,6 +770,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.info(f"Pipeline: bot={actor} created onboarding/subtask issue, allow through")
             else:
                 log.info(f"Pipeline skip: self-comment from bot={actor}")
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "self_loop", actor, issue_id=_pre_issue_id)
                 return result
         log.info(f"Pipeline: comment from {actor}, not a bot ({bot_usernames})")
 
@@ -740,7 +784,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             if "<!-- grape-auto-comment -->" in _note:
                 log.info(f"Pipeline skip: system auto-comment marker detected, event={event_type}")
                 from src.api.event_store import append_skipped_event
-                append_skipped_event(repo_key, event_type, "system_auto_comment")
+                append_skipped_event(repo_key, event_type, "system_auto_comment", issue_id=_pre_issue_id)
                 return result
 
             # Issue #51: 开发者指令检测（/done /cancel /resume）
@@ -786,7 +830,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             if _label_changed and not _content_keys:
                 log.info(f"Pipeline skip: issue_updated with only label change (likely bot label echo)")
                 from src.api.event_store import append_skipped_event
-                append_skipped_event(repo_key, event_type, "label_only_change")
+                append_skipped_event(repo_key, event_type, "label_only_change", issue_id=_pre_issue_id)
                 return result
         except Exception as e:
             log.warning(f"Pipeline: issue_updated label-only check failed: {e}")
@@ -801,7 +845,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         if _d["decision"] == "skip":
             log.info(f"Pipeline skip: {_d['reason']} (event_action_filter, actor={_d['actor_type']})")
             from src.api.event_store import append_skipped_event
-            append_skipped_event(repo_key, event_type, _d["reason"])
+            append_skipped_event(repo_key, event_type, _d["reason"], issue_id=_pre_issue_id)
             return result
         if _d["decision"] == "side_effect":
             # 执行副作用后短路：close → close_issue_tasks
@@ -817,6 +861,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     log.warning(f"Pipeline L1 side_effect close_issue_tasks failed: {_ce}")
             else:
                 log.info(f"Pipeline side_effect: {_d['side_effect'] or 'n/a'} (event_action_filter)")
+            from src.api.event_store import append_skipped_event
+            append_skipped_event(repo_key, event_type, f"side_effect:{_d.get('side_effect', '')}",
+                                 issue_id=_pre_issue_id)
             return result
     except Exception as e:
         log.warning(f"Pipeline: event_action_filter check failed: {e}")
@@ -882,7 +929,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         _reason = "issue_done" if (event_type in ISSUE_EVENT_TYPES or event_type in PR_EVENT_TYPES) else "no_route"
         log.info(f"Pipeline: no route for type={event_type} ({_reason}), skip")
         from src.api.event_store import append_skipped_event
-        append_skipped_event(repo_key, event_type, _reason)
+        append_skipped_event(repo_key, event_type, _reason, issue_id=_pre_issue_id)
         return result
 
     # 3.1 Issue 生命周期阶段初始化（D8/D9）：issue_opened 建 vod 阶段；其余命中 vod 且无记录时补建
@@ -963,7 +1010,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if not is_agent_enabled(repo_key, agent_type):
         log.info(f"Pipeline: agent '{agent_type}' disabled for repo={repo_key}, skip")
         from src.api.event_store import append_skipped_event
-        append_skipped_event(repo_key, event_type, "agent_disabled", agent_type)
+        append_skipped_event(repo_key, event_type, "agent_disabled", agent_type, issue_id=_pre_issue_id)
         return result
 
     # 4. 查找 Agent 配置（backend + skill），找不到则不处理
@@ -1070,12 +1117,18 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                         log.info(f"Pipeline: using default skill for {agent_type}={_default_skill} (scene={_issue_scene})")
                     else:
                         log.info(f"Pipeline: no agent session and no default skill for {agent_type}, skip")
+                        from src.api.event_store import append_skipped_event
+                        append_skipped_event(repo_key, event_type, "no_skill_config", agent_type, issue_id=_pre_issue_id)
                         return result
                 else:
                     log.info(f"Pipeline: no agent session for repo={repo_name}, agent={agent_type}, skip")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, "no_agent_session", agent_type, issue_id=_pre_issue_id)
                     return result
             except Exception as e:
                 log.warning(f"Pipeline: failed to load default skill config: {e}")
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "skill_config_error", str(e)[:200], issue_id=_pre_issue_id)
                 return result
 
     # 4. 查找 Agent 配置（backend + skill），找不到则不处理
@@ -1121,7 +1174,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     log.info(f"Pipeline: dedup skip — issue={issue_id} agent={agent_type} "
                              f"already has running event seq={_existing_evt[0]}")
                     from src.api.event_store import append_skipped_event
-                    append_skipped_event(repo_key, event_type, f"dedup:active_{agent_type}_for_{issue_id}")
+                    append_skipped_event(repo_key, event_type, f"dedup:active_{agent_type}_for_{issue_id}",
+                                         issue_id=issue_id)
                     result["skipped"] = "duplicate_active_task"
                     return result
         except Exception as _de:
@@ -1912,7 +1966,11 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 log.warning(f"Exec agent: prompt writeback failed for task={task_id}: {_pe}")
     except Exception as e:
         log.warning(f"Exec agent: prompt build failed: {e}")
-        append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e))
+        _prompt_skip_iid = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
+        if _prompt_skip_iid and not str(_prompt_skip_iid).startswith("#"):
+            _prompt_skip_iid = f"#{_prompt_skip_iid}"
+        append_skipped_event(repo_key, evt.get("type", ""), "prompt_build_failed", str(e),
+                             issue_id=_prompt_skip_iid)
         _fail_event(seq, f"执行失败：prompt 构建异常 {str(e)[:150]}")
         return
 

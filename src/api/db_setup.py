@@ -34,6 +34,7 @@ _EVENT_SKIPPED_DDL = """
 CREATE TABLE IF NOT EXISTS event_skipped (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_key TEXT DEFAULT '',
+    issue_id TEXT DEFAULT '',
     event_type TEXT DEFAULT '',
     reason TEXT DEFAULT '',
     detail TEXT DEFAULT '',
@@ -1875,9 +1876,8 @@ def _migrate_tables():
         "ALTER TABLE scene_market ADD COLUMN obs_icon_key VARCHAR(256) DEFAULT ''",
         # ===== Issue-11: scene_category 加 slug（场景包 category 用 slug 引用） =====
         "ALTER TABLE scene_category ADD COLUMN slug VARCHAR(64) DEFAULT ''",
-        # ===== Issue-54: scene_market 加 scope + repo_key 列 =====
-        "ALTER TABLE scene_market ADD COLUMN scope VARCHAR(32) DEFAULT 'official'",
-        "ALTER TABLE scene_market ADD COLUMN repo_key VARCHAR(191) DEFAULT ''",
+        # ===== Issue-89: event_skipped 加 issue_id 列（skipped 事件审计需关联 Issue） =====
+        "ALTER TABLE event_skipped ADD COLUMN issue_id TEXT DEFAULT ''",
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
