@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency
+from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues
 
 
 bot_manager = None
@@ -484,6 +484,7 @@ app.include_router(webhook.router)
 app.include_router(scenes.router)
 app.include_router(templates.router)
 app.include_router(tasks.router)
+app.include_router(issues.router)
 app.include_router(runtime.router)
 app.include_router(feishu_onboard.router)
 app.include_router(feishu_card.router)
