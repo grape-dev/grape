@@ -15,7 +15,10 @@ Task 对象字段：`id / user_id / assignee / repo_key / issue_number / title /
 
 ---
 
-## POST /api/tasks/create — 创建任务（同时建 GitCode Issue）
+## POST /api/tasks/create — 创建 Issue（兼容保留；语义归位 /api/issues）
+
+> ⚠️ **归属澄清**：本端点实际是**创建 GitCode Issue**（body 含 repo_key/title/description，调 GitCode 建 Issue + 建档 `tasks` 触发 pipeline）。
+> **建议改用 `POST /api/issues/{owner}/{repo}`**（对外统一入口）。本端点**保留为兼容别名**，行为不变。
 
 请求头：`Content-Type: application/json`
 
