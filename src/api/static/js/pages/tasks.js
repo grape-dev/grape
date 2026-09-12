@@ -1,6 +1,5 @@
 // ====== 任务中心（Account ▸ 任务中心）======
 // 方案 B：列表工作流风（左列表 + 右详情面板）
-let _tasksTab = 'all';        // all / active / completed
 let _tasksAll = [];           // 全部任务缓存
 let _taskSel = null;          // 选中的任务
 let _taskQuery = '';          // 搜索关键字
@@ -12,6 +11,10 @@ let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #4
 let _tasksMode = 'time';     // time=纯时间序（唯一模式）
 let _taskFilterStatuses = []; // 按状态多选筛选（空=全部）
 let _taskFilterAssignees = []; // 按创建人多选筛选（空=全部）
+let _tasksViewMode = 'mine';  // 'mine' | 'repo_all'（Issue #72: 仓库全部视图）
+let _taskFilterPopoverOpen = false;  // 筛选 popover 展开状态（跨 _render 保持）
+let _filterStatusExpanded = false;   // 状态筛选区展开状态
+let _filterCreatorExpanded = false;  // 创建人筛选区展开状态
 
 function _tasksSortPrefKey(repoKey) {
   return 'task_sort_' + (repoKey || 'all');
@@ -62,15 +65,53 @@ function toggleCreatedByMe() {
   const me = (window.app && app._user && app._user.username) || '';
   if (me) _toggleFilterAssignee(me);
 }
+function _toggleFilterPopover() {
+  _taskFilterPopoverOpen = !_taskFilterPopoverOpen;
+  var el = document.getElementById('taskFilterPopover');
+  if (el) el.style.display = _taskFilterPopoverOpen ? 'block' : 'none';
+}
+function _closeFilterPopover() {
+  _taskFilterPopoverOpen = false;
+  var el = document.getElementById('taskFilterPopover');
+  if (el) el.style.display = 'none';
+}
+function _toggleFilterSection(sec) {
+  if (sec === 'status') _filterStatusExpanded = !_filterStatusExpanded;
+  else _filterCreatorExpanded = !_filterCreatorExpanded;
+  _applyFilterPopoverState();
+}
+function _applyFilterPopoverState() {
+  var pop = document.getElementById('taskFilterPopover');
+  if (pop) pop.style.display = _taskFilterPopoverOpen ? 'block' : 'none';
+  var sb = document.getElementById('_filterStatusBody');
+  if (sb) sb.style.display = _filterStatusExpanded ? 'block' : 'none';
+  var cb = document.getElementById('_filterCreatorBody');
+  if (cb) cb.style.display = _filterCreatorExpanded ? 'block' : 'none';
+  var sa = document.getElementById('_filterStatusArrow');
+  if (sa) sa.textContent = _filterStatusExpanded ? '▾' : '▸';
+  var ca = document.getElementById('_filterCreatorArrow');
+  if (ca) ca.textContent = _filterCreatorExpanded ? '▾' : '▸';
+}
 
 function renderTasks() {
   const el = document.getElementById('pageContent');
   if (!el) return;
   _taskSel = null;   // 进入页面重置选中（避免切换 repo 后详情残留旧仓库任务）
+  _taskFilterPopoverOpen = false;
   el.innerHTML = '<div class="loading">' + I18N.t('tasks.loading') + '</div>';
   loadTasks();
   _startScenePoll();
 }
+
+window._switchTasksViewMode = function(mode) {
+  if (_tasksViewMode === mode) return;
+  _tasksViewMode = mode;
+  _taskSel = null;
+  _taskPage = 1;
+  _taskFilterStatuses = [];
+  _taskFilterAssignees = [];
+  loadTasks();
+};
 
 // 场景识别轮询：有待处理任务且场景未识别时，定期刷新
 function _startScenePoll() {
@@ -148,9 +189,20 @@ function loadTasks() {
   const repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
   _loadTasksSortPref(repoKey);
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
-  API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
-          '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
-          (_taskFilterAssignees.length ? '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '')).then(d => {
+  // Issue #72: 「仓库全部」视图调用 /tasks/repo/{owner}/{repo}（不限 user_id）
+  let apiUrl;
+  if (_tasksViewMode === 'repo_all' && repo) {
+    apiUrl = '/tasks/repo/' + repo.owner + '/' + repo.name +
+             '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode;
+    if (_taskFilterAssignees.length) {
+      apiUrl += '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(','));
+    }
+  } else {
+    apiUrl = '/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
+             '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
+             (_taskFilterAssignees.length ? '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '');
+  }
+  API.get(apiUrl).then(d => {
     if (window._currentView !== 'tasks') return;  // stale guard
     _tasksAll = d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
@@ -456,7 +508,7 @@ function _renderBoard(filtered) {
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee || t.repo_key || ''}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee ? '👤 ' + t.assignee : (t.repo_key || '')}</span>
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
           </div>
         </div>`;
@@ -481,11 +533,6 @@ function _render() {
   }
   const cntAll = _tasksAll.length;
 
-  const tab = (key, label, cnt) => {
-    const act = _tasksTab === key ? ' tsk-tab-act' : '';
-    return `<button class="tsk-tab${act}" onclick="_tasksTab='${key}';_taskPage=1;_render()">${label} <span class="tsk-tab-cnt">${cnt}</span></button>`;
-  };
-
   // 筛选下拉：状态 + 排序归到一个 popover（参考 multica issues-header）
   const _sortIcon = _tasksSortOrder === 'desc' ? '↓' : '↑';
   const _filterActive = _taskFilterStatuses.length > 0 || _taskFilterAssignees.length > 0;
@@ -501,12 +548,16 @@ function _render() {
   const _assignees = [...new Set(_tasksAll.map(t => t.assignee).filter(Boolean))].sort();
   const _filterPanel = `
     <div style="position:relative;display:inline-flex;align-items:center;flex-shrink:0">
-      <button class="tsk-tab" onclick="document.getElementById('taskFilterPopover').style.display=document.getElementById('taskFilterPopover').style.display==='block'?'none':'block'" style="border:1px solid var(--b);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;background:var(--bg);display:inline-flex;align-items:center;gap:4px">
+      <button class="tsk-tab" onclick="_toggleFilterPopover()" style="border:1px solid var(--b);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;background:var(--bg);display:inline-flex;align-items:center;gap:4px">
         <span style="font-size:12px">⌥</span> ${I18N.t('tasks.filter')||'筛选'}
         ${_filterActive ? '<span style="width:6px;height:6px;border-radius:50%;background:#3b82f6"></span>' : ''}
       </button>
       <div id="taskFilterPopover" style="display:none;position:absolute;top:calc(100% + 4px);left:0;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.1);padding:12px;min-width:220px;max-height:440px;overflow-y:auto;z-index:50;font-family:-apple-system,BlinkMacSystemFont,sans-serif">
-        <div onclick="var e=document.getElementById('_filterStatusBody');e.style.display=e.style.display==='none'?'block':'none';this.querySelector('span:last-child').textContent=e.style.display==='none'?'▸':'▾'" style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">${I18N.t('tasks.filter_status')||'状态'}<span style="font-size:10px">▸</span></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:6px;border-bottom:0.5px solid var(--b,#e8e8ed)">
+          <span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f)">${I18N.t('tasks.filter')||'筛选'}</span>
+          <button onclick="_closeFilterPopover()" style="border:none;background:none;cursor:pointer;font-size:14px;color:var(--t3,#86868b);padding:2px 6px;border-radius:6px;line-height:1" onmouseover="this.style.background='rgba(0,0,0,.05)'" onmouseout="this.style.background='none'">✕</button>
+        </div>
+        <div onclick="_toggleFilterSection('status')" style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">${I18N.t('tasks.filter_status')||'状态'}<span id="_filterStatusArrow" style="font-size:10px">▸</span></div>
         <div id="_filterStatusBody" style="display:none;flex-direction:column;gap:3px;margin-bottom:12px">
           <label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--t3,#86868b)" onclick="_taskFilterStatuses=[];_taskPage=1;_render()">
             <span style="width:14px;height:14px;border-radius:4px;border:1.5px solid var(--b,#d0d7de);display:flex;align-items:center;justify-content:center;font-size:9px;color:#fff"></span>
@@ -521,7 +572,7 @@ function _render() {
             </label>`;
           }).join('')}
         </div>
-        <div onclick="var e=document.getElementById('_filterCreatorBody');e.style.display=e.style.display==='none'?'block':'none';this.querySelector('span:last-child').textContent=e.style.display==='none'?'▸':'▾'" style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">${I18N.t('tasks.filter_creator')||'创建人'}<span style="font-size:10px">▸</span></div>
+        <div onclick="_toggleFilterSection('creator')" style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">${I18N.t('tasks.filter_creator')||'创建人'}<span id="_filterCreatorArrow" style="font-size:10px">▸</span></div>
         <div id="_filterCreatorBody" style="display:none;flex-direction:column;gap:3px;max-height:160px;overflow-y:auto;margin-bottom:12px">
           <label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--t3,#86868b)" onclick="_taskFilterAssignees=[];_taskPage=1;loadTasks()">
             <span style="width:14px;height:14px;border-radius:4px;border:1.5px solid var(--b,#d0d7de);display:flex;align-items:center;justify-content:center;font-size:9px;color:#fff"></span>
@@ -537,7 +588,7 @@ function _render() {
             </label>`;
           }).join('')}
         </div>
-        <button onclick="toggleTasksSort();document.getElementById('taskFilterPopover').style.display='none'" style="width:100%;padding:6px 8px;border:0.5px solid var(--b,#e5e5ea);border-radius:8px;font-size:11px;cursor:pointer;background:var(--bg);color:var(--t1);display:flex;align-items:center;justify-content:center;gap:4px">${I18N.t('tasks.sort.time')||'时间排序'} ${_sortIcon}</button>
+        <button onclick="toggleTasksSort()" style="width:100%;padding:6px 8px;border:0.5px solid var(--b,#e5e5ea);border-radius:8px;font-size:11px;cursor:pointer;background:var(--bg);color:var(--t1);display:flex;align-items:center;justify-content:center;gap:4px">${I18N.t('tasks.sort.time')||'时间排序'} ${_sortIcon}</button>
       </div>
     </div>`;
 
@@ -564,11 +615,12 @@ function _render() {
     const ms = _mapStatusL(t);
     const si = _lStatusInfo[ms] || _lStatusInfo.pending;
     const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
+    const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';
     return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
       <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">
         <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
-        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}</div>
+        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
       </div>
       <span class="tsk-tag ${si.cls}">${si.text}</span>
     </div>`;
@@ -629,6 +681,10 @@ function _render() {
     <div class="tsk-top">
       <h1>${I18N.t('tasks.page_title')}</h1>
       <div id="deployLinkBar" style="margin-top:4px"></div>
+      <div style="display:flex;gap:0;margin-top:8px;border-bottom:0.5px solid var(--b,#e8e8ed)">
+        <button class="tsk-tab${_tasksViewMode==='mine'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('mine')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='mine'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='mine'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='mine'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_mine')||'我的任务'}</button>
+        <button class="tsk-tab${_tasksViewMode==='repo_all'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('repo_all')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='repo_all'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='repo_all'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='repo_all'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_repo_all')||'仓库全部'}</button>
+      </div>
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:8px">${I18N.t('tasks.create.btn_new')}</button>
         ${_filterPanel}
@@ -673,6 +729,8 @@ function _render() {
       <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('tasks.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('tasks.detail.go_conversation')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
+
+  if (_taskFilterPopoverOpen) _applyFilterPopoverState();
 
   // 加载部署 URL 到任务中心顶部
   _loadDeployLink();

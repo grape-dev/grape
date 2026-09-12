@@ -1,6 +1,7 @@
 let _pipeData = null;
 let _pipeActiveIdx = 0;
 let _pipePage = 1;
+let _pipeQuery = '';
 const _PIPE_PER_PAGE = 10;
 const agentColors = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
 const agentIds = ['vod','issue','coding','qa','sre'];
@@ -28,6 +29,24 @@ function _getPipeNodes(data, pipe) {
   // Fallback: construct from hardcoded arrays
   return agentIds.map(function(id, i) {
     return {id: id, tag: id, skill: '', mode: 'emit', next: i < agentIds.length-1 ? agentIds[i+1] : 'done', handoff: i < agentIds.length-1 ? 'a2a' : 'complete'};
+  });
+}
+
+function _filteredPipes(allPipes) {
+  if (!_pipeQuery) return allPipes;
+  const q = _pipeQuery.toLowerCase().trim();
+  if (!q) return allPipes;
+  return allPipes.filter(function(p) {
+    var haystack = [
+      String(p.issue_id || ''),
+      (p.title || ''),
+      String(p.parent_issue_id || ''),
+      (p.stage || ''),
+      (p.scene_id || ''),
+      (p.scene_name || ''),
+      (p.current_owner || '')
+    ].join(' ').toLowerCase();
+    return haystack.includes(q);
   });
 }
 
@@ -129,11 +148,18 @@ function renderPipeline(data) {
     .pl-table tr:hover td{background:#f5f5f7}
     .pl-table tr.sel td{background:#eef4ff;font-weight:500}
     .pl-table tr:last-child td{border-bottom:none}
+    .pl-search-bar{display:flex;align-items:center;flex-shrink:0;padding:6px 24px}
+    .pl-search-bar .pl-search-wrap{position:relative;flex:0 1 300px}
+    .pl-search-bar .pl-search-wrap .pl-search-ic{position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:12px;color:#86868b;pointer-events:none}
+    .pl-search-bar input{width:100%;padding:5px 10px 5px 30px;border:1px solid #d2d2d7;border-radius:8px;font-size:12px;background:#fff;color:#1d1d1f;outline:none;transition:border-color .2s,box-shadow .2s}
+    .pl-search-bar input:focus{border-color:#0071e3;box-shadow:0 0 0 3px rgba(0,113,227,.08)}
+    .pl-search-bar input::placeholder{color:#86868b}
   </style>
 
   <div class="pl-wrap">`;
 
   const allPipes = active ? [active, ...history] : history;
+  const filteredPipes = _filteredPipes(allPipes);
   // 当前选中的 Issue（默认 active，点击历史行后切换）
   const displayPipe = allPipes[_pipeActiveIdx] || active;
 
@@ -180,13 +206,13 @@ function renderPipeline(data) {
     flowHtml += '</div></div>';
   }
 
-  // 分页计算
-  const totalPipes = allPipes.length;
+  // 分页计算（基于过滤后的列表）
+  const totalPipes = filteredPipes.length;
   const totalPages = Math.ceil(totalPipes / _PIPE_PER_PAGE);
   if (_pipePage > totalPages) _pipePage = 1;
   if (_pipePage < 1) _pipePage = 1;
   const pipeStart = (_pipePage - 1) * _PIPE_PER_PAGE;
-  const pagePipes = allPipes.slice(pipeStart, pipeStart + _PIPE_PER_PAGE);
+  const pagePipes = filteredPipes.slice(pipeStart, pipeStart + _PIPE_PER_PAGE);
 
   // 分页控件（流程图下方）
   let pagerHtml = '';
@@ -208,7 +234,7 @@ function renderPipeline(data) {
     </div>`;
   }
 
-  // 拼接：流程卡片 + 分页（右对齐） + 表格卡片
+  // 拼接：流程卡片 + 分页（右对齐） + 搜索框 + 表格卡片
   html += `${flowHtml}`;
   if (pagerHtml) html += pagerHtml;
 
@@ -222,9 +248,10 @@ function renderPipeline(data) {
     html += `<div style="background:#fff8e8;border:1px solid #ff9f0a;border-radius:12px;padding:10px 16px;margin:0 0 8px;display:flex;align-items:center;gap:8px;flex-shrink:0"><span style="font-size:14px">⚠️</span><span style="font-size:12px;color:#86868b">${I18N.t('pipeline.tasks_without_events_hint')}</span><div style="margin-left:auto;display:flex;align-items:center;gap:2px;flex-wrap:wrap">${_hintItems}${_more}</div></div>`;
   }
 
+  html += `<div class="pl-search-bar"><div class="pl-search-wrap"><span class="pl-search-ic">\ud83d\udd0d</span><input id="pipeSearchInput" placeholder="${I18N.t('pipeline.search_placeholder')}" value="${_pipeQuery}" onkeyup="if(event.key==='Enter'){_pipeQuery=this.value;_pipePage=1;renderPipeline(_pipeData)}" onchange="_pipeQuery=this.value;_pipePage=1;renderPipeline(_pipeData)"></div></div>`;
   html += `<div class="pl-table-card"><div class="pl-table-wrap"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')}</th><th>${I18N.t('pipeline.th_title')}</th><th>${I18N.t('pipeline.th_parent_issue')}</th><th>${I18N.t('pipeline.th_duration')}</th><th>${I18N.t('pipeline.th_agents')}</th><th>${I18N.t('pipeline.th_stage')}</th><th>${I18N.t('pipeline.th_scene')}</th><th>${I18N.t('pipeline.th_owner')}</th></tr>`;
   pagePipes.forEach((p, i) => {
-    const realIdx = pipeStart + i;
+    const realIdx = allPipes.indexOf(p);
     const s = realIdx === _pipeActiveIdx ? ' sel' : '';
     const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
       const hasAgent = p.statuses && p.statuses[j] > 0;
