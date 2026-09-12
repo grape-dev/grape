@@ -330,12 +330,20 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
     # codegraph 探索（Issue #103：每两步续期锁，防止大仓库 build 超时）
     arch = _codegraph_explore(work, "main entry point application startup", 10)
     modules = _codegraph_explore(work, "module import dependency", 15)
-    if renew_fn:
-        renew_fn()
+    if renew_fn and not renew_fn():
+        log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        meta["degraded"] = True
+        meta["note"] = "build aborted: distributed lock lost"
+        _write_meta(repo_key, meta)
+        return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     chains = _codegraph_explore(work, "API routes endpoints handlers", 10)
     files = _codegraph_files(work)
-    if renew_fn:
-        renew_fn()
+    if renew_fn and not renew_fn():
+        log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        meta["degraded"] = True
+        meta["note"] = "build aborted: distributed lock lost"
+        _write_meta(repo_key, meta)
+        return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     tech = _codegraph_explore(work, "tech stack dependencies", 8)
     features = _codegraph_explore(work, "features capabilities", 8)
     api = _codegraph_explore(work, "API endpoints", 8)

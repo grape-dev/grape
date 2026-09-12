@@ -469,6 +469,11 @@ def _fail_queue_task(task_id: int, error: str, retry_count: int):
     new_count = retry_count + 1
     delay = min(new_count * 3, 60)
     next_retry = (datetime.now() + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
+
+    # 监控日志（在 failed 分支之前，确保 count=100 也能触发）
+    if new_count in (10, 50, 100) or (new_count > 100 and new_count % 100 == 0):
+        log.warning(f"[knowledge] queue task {task_id} retried {new_count} times, last_error: {error[:200]}")
+
     if new_count >= 100:
         with db_lock:
             c = db.cursor()
@@ -488,9 +493,6 @@ def _fail_queue_task(task_id: int, error: str, retry_count: int):
             "WHERE id=?",
             (new_count, error[:500], next_retry, next_retry, task_id))
         db.commit()
-    # 监控日志
-    if new_count in (10, 50, 100) or (new_count > 100 and new_count % 100 == 0):
-        log.warning(f"[knowledge] queue task {task_id} retried {new_count} times, last_error: {error[:200]}")
 
 
 # ===== 第二层消费者：后台 worker =====
