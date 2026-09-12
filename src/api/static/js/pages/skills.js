@@ -102,6 +102,7 @@ function _backFromSkillDetail() {
     return;
   }
   if (from.view === 'scene-detail' && from.param) {
+    window._currentView = 'scene-detail';
     renderSceneDetail(from.param);
     // replaceState 更新当前历史记录为场景详情状态，
     // 否则 history.state 仍停留在技能详情，下次进入技能时来源判断错误
@@ -127,6 +128,7 @@ function _backFromSubSkill(pkgId) {
 
 // 从技能详情返回技能列表（渲染完整页面含一级 Tab 栏）
 function _backToSkillList() {
+  window._currentView = 'skills:' + _skillTab;
   renderSkills();
 }
 

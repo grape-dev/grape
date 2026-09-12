@@ -254,7 +254,9 @@ function loadAgentTypes() {
       // Issue #86: Tab 切回前台——重设定时器（后台 setTimeout 被浏览器节流可能没触发）
       API.scheduleProactiveRefresh();
       if (Date.now() - _hiddenSince > 60000) {
-        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(window._currentView, window._currentParam); }, 300);
+        var _v = window._currentView || '';
+        var _baseView = _v.split(':')[0];
+        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(_baseView, window._currentParam); }, 300);
       }
       _hiddenSince = 0;
     }
