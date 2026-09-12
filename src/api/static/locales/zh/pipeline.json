@@ -45,5 +45,6 @@
   "stat_active": "活跃",
   "stat_today": "今日",
   "stat_failed": "失败",
-  "tasks_without_events_hint": "部分任务尚未生成流水线事件"
+  "tasks_without_events_hint": "部分任务尚未生成流水线事件",
+  "search_placeholder": "搜索 Issue 编号、标题、责任人…"
 }
