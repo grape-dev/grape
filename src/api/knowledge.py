@@ -19,7 +19,7 @@ import os
 import threading
 from datetime import datetime, timedelta
 from src.config import log, WORKSPACE_DIR
-from src.lock import acquire_lock, release_lock
+from src.lock import acquire_lock, release_lock, renew_lock
 from src.session_manager import db, db_lock
 
 
@@ -578,7 +578,7 @@ def _worker_process_task(row):
                           content, status, source_seq, created_by,
                           source, description, name, retry_count)
 
-        # 连续处理同维度剩余 pending 任务（不再重新抢锁）
+        # 连续处理同维度剩余 pending 任务（不再重新抢锁，每条后续 renew）
         while True:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with db_lock:
@@ -592,6 +592,10 @@ def _worker_process_task(row):
                     (now, repo_key, scope, agent_type, issue_num)
                 ).fetchone()
             if not next_row:
+                break
+            # 续期锁，防止批量处理时锁过期（返回 False = 锁被别人抢走 → 中止）
+            if not renew_lock(lock_key, ttl=60):
+                log.warning(f"[knowledge] worker lock lost during batch for {repo_key}/{scope}, stopping")
                 break
             _process_one_task(next_row[0], repo_key, scope, agent_type, issue_num,
                               next_row[1], next_row[2], next_row[3], next_row[4],
