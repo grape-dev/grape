@@ -10,13 +10,269 @@
 
 ## 一、概念澄清（Issue / Event / Task）
 
-### 1.1 三者本质区别
+### 1.1 三者本质区别（注意：有两个 "Task"）
+
+> ⚠️ 项目里存在**两个同名 "Task"**，语义不同，需先分清：
+
+| 词 | 载体 | 本质 | 判别 |
+|----|------|------|------|
+| **Task（执行实例）** | `agent_tasks` 表 | 一次 **Agent 引擎执行**（一次事件的具体落地） | `task_id`（`t_` 前缀） |
+| **Task（任务卡片）** | `tasks` 表 | 一次 **Issue 任务卡**（任务中心展示对象，每 Issue 一行） | `id`（自增 int）+ `issue_number` |
 
 | 概念 | 本质 | 载体 | 生命周期 | 判别关键 |
 |------|------|------|----------|----------|
 | **Issue** | GitCode 上的需求/任务单元（`#N`），pipeline 的**主对象** | `issue_state` 表 + GitCode | 创建 → 各阶段 → done/关闭 | **`stage`**（vod/issue/coding/qa/sre/done/pending_review） |
 | **Event** | 一次**触发动作**（webhook/A2A），pipeline 的**执行单元** | `events` 表（`seq` 唯一） | 触发 → running → complete/fail | **`seq`** |
-| **Task** | 一次 **Agent 执行实例**（引擎会话），事件的具体落执行 | `agent_tasks` 表（`task_id`, `event_seq` 关联） | queued → running → completed/cancelled | **`task_id`**（`t_` 前缀） |
+| **Task（执行实例）** | 一次 **Agent 引擎执行**，事件的具体落执行 | `agent_tasks` 表（`event_seq` 关联） | queued → running → completed/cancelled | **`task_id`**（`t_` 前缀） |
+| **Task（任务卡片）** | 任务中心的 **Issue 任务卡**（每 Issue 一行） | `tasks` 表（`issue_number` 关联） | 待处理 → 处理中 → 待澄清 → 待审核 → 已完成 | **`status`** |
+
+### 1.1.1 任务中心状态（`tasks.status`）vs Pipeline 阶段（`issue_state.stage`）
+
+两个"状态字段"并行存在，需明确来源与关系：
+
+**`issue_state.stage`（Pipeline 阶段，权威阶段机）**
+```
+vod / issue / coding / qa / sre / pending_review / done
+```
+- 表示流水线走到哪个 Agent / 是否待审核 / 是否完成
+- 跟踪在 `issue_state` 表
+
+**`tasks.status`（任务中心状态）**
+```
+active(待处理) / processing(处理中) / awaiting_input(待澄清) /
+pending_review(待审核) / completed(已完成) / cancelled(已取消)
+```
+- 表示任务在"任务中心"视角下的用户可读状态
+- 跟踪在 **`tasks` 表**（`_TASKS_DDL`，字段 `status`，默认 `active`）
+
+**联动**（`set_issue_stage` 驱动，session_store.py:97-115）：
+```python
+_STAGE_TO_TASK_STATUS = {
+    "vod": "processing", "issue": "processing", "coding": "processing",
+    "qa": "processing", "sre": "processing",
+    "pending_review": "pending_review", "done": "completed",
+}
+# stage 推进 → 同步 tasks.status（不覆盖 awaiting_input/completed/cancelled，用户操作优先）
+UPDATE tasks SET status=? WHERE repo_key=? AND issue_number=? AND status NOT IN ('completed','cancelled','awaiting_input')
+```
+
+**前端展示映射**（`tasks.js _mapStatusL`）：
+
+| 任务中心显示 | 判定逻辑 | 底层 status / stage |
+|-------------|----------|---------------------|
+| 待处理 | 兜底 `'pending'` | `status='active'` 或 stage 非上述 |
+| 处理中 | `stage ∈ {vod..sre}` 或 `status='processing'` | `processing` |
+| 待澄清 | `status='awaiting_input'` | `awaiting_input` |
+| 待审核 | `status='pending_review'` 或 `stage='pending_review'` | `pending_review` |
+| 已完成 | `status='completed'` 或 `stage='done'` | `completed` |
+| 已取消 | `status='cancelled'` | `cancelled` |
+
+> **本质关系**：`stage` 是 pipeline 视角（机器驱动），`status` 是任务中心视角（用户可读）。
+> `status` 由 `stage` 映射驱动同步，但 `awaiting_input / completed / cancelled` 可由用户操作直接设置（更高优先级）。
+
+### 1.1.2 数据表字段详解
+
+**`tasks` 表（任务中心卡片，每 Issue 一行）** — `src/api/db_setup.py _TASKS_DDL`
+
+```sql
+CREATE TABLE IF NOT EXISTS tasks (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL,        -- 创建者用户 id
+    assignee         TEXT NOT NULL,           -- 责任人（GitCode 用户名）
+    repo_key         TEXT NOT NULL,           -- 仓库（如 gitcode:owner/repo 或 owner/repo）
+    issue_number     INTEGER NOT NULL,        -- 对应 GitCode Issue 号
+    title            TEXT DEFAULT '',         -- Issue 标题
+    task_description TEXT DEFAULT '',         -- Issue body / 描述
+    conversation_id  TEXT DEFAULT '',         -- 关联对话（chat 会话）
+    status           TEXT DEFAULT 'active',   -- 任务中心状态：active/processing/awaiting_input/pending_review/completed/cancelled
+    completed_reason TEXT DEFAULT '',         -- 完成原因（issue_closed / reassigned / bot_takeover 等）
+    created_by       TEXT DEFAULT '',         -- 创建人（GitCode 用户名）
+    created_at       TEXT DEFAULT (datetime('now')),
+    completed_at     TEXT DEFAULT NULL
+)
+```
+
+> 补充：`is_subtask_mode` 不在本表（它存于 `issue_state`）；任务卡片表只保留创建/状态/完成快照。
+
+**`issue_state` 表（Pipeline 阶段状态机，每 Issue 一行）** — `src/api/db_setup.py _ISSUE_STATE_DDL`
+
+```sql
+CREATE TABLE IF NOT EXISTS issue_state (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key     TEXT NOT NULL,
+    issue_id     TEXT NOT NULL,               -- 如 "#5"
+    stage        TEXT NOT NULL DEFAULT 'vod',   -- vod/issue/coding/qa/sre/pending_review/done
+    owner_agent  TEXT NOT NULL DEFAULT 'vod',   -- 当前归属 agent（最新被交办者）
+    assignee     TEXT DEFAULT '',              -- Issue 责任人（GitCode assignee，可为 grape_bot 或用户）
+    a2a_seq      INTEGER,                      -- 触发当前 stage 的 A2A 事件 seq
+    scene_id     TEXT DEFAULT '',              -- Issue 级开发场景（VOD 判定，空=回退仓库默认）
+    parent_issue_id TEXT DEFAULT '',           -- 父任务 Issue ID（如 "#20"，空=普通任务）
+    is_subtask_mode INTEGER DEFAULT 0,         -- 1=多任务模式（Issue Agent 应拆分子任务）
+    scene_user_id INTEGER DEFAULT 0,           -- 用户级场景的创建者 ID（0=非用户级）
+    updated_at   TEXT DEFAULT (datetime('now')),
+    created_at   TEXT DEFAULT (datetime('now')),
+    UNIQUE (repo_key, issue_id)
+)
+```
+
+**两表关键字段对照**
+
+| 含义 | `tasks`（任务中心） | `issue_state`（pipeline） |
+|------|--------------------|--------------------------|
+| 主键 | `id`（自增） | `(repo_key, issue_id)` 唯一 |
+| 关联 Issue | `issue_number`（INT，无 # 前缀） | `issue_id`（TEXT，`#N`） |
+| 子任务模式 | —（不在此表） | `parent_issue_id` / `is_subtask_mode` |
+| 场景 | —（经 issue_number 关联） | `scene_id` / `scene_user_id` |
+| 状态 | `status`（任务中心可读） | `stage`（pipeline 阶段）+ `owner_agent` |
+| 触发者 | `created_by` / `user_id` | `assignee` / `a2a_seq` |
+| 完成 | `completed_at` / `completed_reason` | `stage='done'` |
+
+### 1.1.3 两表合并方案（新表 `issue`）
+
+> 需求：`tasks` 与 `issue_state` 本质都描述**同一个 GitCode Issue**（一个存任务中心状态、一个存 pipeline 阶段），
+> 可融合为一张 **`issue` 表**，同时包含 `status`（任务中心）与 `stage`（pipeline），与对外 `/api/issues` 语义一致。
+
+**拆解：为什么两表能合成一张**
+
+| tasks 独有（任务卡片） | issue_state 独有（pipeline） | 可合并 |
+|----------------------|------------------------------|--------|
+| `status`（任务中心状态） | `stage`（pipeline 阶段） | ✅ 同表两列 |
+| `task_description`（Issue body） | `scene_id / scene_user_id`（场景） | ✅ 合并 |
+| `completed_reason`（完成原因） | `owner_agent / a2a_seq`（当前 agent） | ✅ 合并 |
+| `conversation_id`（对话） | `parent_issue_id / is_subtask_mode`（子任务） | ✅ 合并 |
+| `created_by / user_id / created_at` | `created_at / updated_at / assignee` | ✅ 合并 |
+
+**目标表结构（`issue`）**
+
+```sql
+CREATE TABLE IF NOT EXISTS issue (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key         TEXT NOT NULL,
+    issue_id         TEXT NOT NULL,               -- "#5"（与 events.issue_id 对齐）
+    issue_number     INTEGER,                     -- 5（冗余存数字，便于查询/展示）
+    title            TEXT DEFAULT '',
+    body             TEXT DEFAULT '',             -- Issue body（原 task_description）
+    description      TEXT DEFAULT '',             -- 描述（可选扩展）
+    conversation_id  TEXT DEFAULT '',             -- 对话回话
+    status           TEXT DEFAULT 'active',       -- 任务中心状态：active/processing/awaiting_input/pending_review/completed/cancelled
+    stage            TEXT DEFAULT 'vod',          -- pipeline 阶段：vod/issue/coding/qa/sre/pending_review/done
+    owner_agent      TEXT DEFAULT 'vod',          -- 当前归属 agent
+    assignee         TEXT DEFAULT '',             -- Issue 责任人
+    a2a_seq          INTEGER,                     -- 触发当前 stage 的 A2A 事件 seq
+    scene_id         TEXT DEFAULT '',             -- 场景
+    scene_user_id    INTEGER DEFAULT 0,
+    parent_issue_id  TEXT DEFAULT '',             -- 父 Issue（#20）
+    is_subtask_mode  INTEGER DEFAULT 0,           -- 多任务模式
+    allow_scene_override INTEGER DEFAULT 0,       -- VOD 场景覆盖开关
+    completed_reason TEXT DEFAULT '',
+    created_by       TEXT DEFAULT '',
+    user_id          INTEGER DEFAULT 0,
+    status_updated_at TEXT DEFAULT '',            -- 任务中心状态更新时间（可选）
+    created_at       TEXT DEFAULT (datetime('now')),
+    updated_at       TEXT DEFAULT (datetime('now')),
+    completed_at     TEXT DEFAULT NULL,
+    UNIQUE (repo_key, issue_id)
+)
+```
+
+**合并收益**
+- 对外 `/api/issues` 单表即 `stage + status + events_count` 全出，无需 join
+- 消除 `tasks.id == issue_state 行` 的"一 Issue 两行"冗余与手写同步（`_STAGE_TO_TASK_STATUS`）
+- 状态语义统一：`status`（用户可读）+ `stage`（机器驱动）同表共存
+
+**合并影响面（重构成本）**
+
+| 消费方 | 改动 | 数量 |
+|--------|------|------|
+| `session_store.set_issue_stage/update_task_status` | 改为单表 update | 中 |
+| `routes/tasks.py`（任务中心 CRUD/状态流转） | `tasks.*` → `issue.*` | 大 |
+| `routes/pipeline.py` / `routes/events.py` | join 简化 | 中 |
+| `im/handler_async.py` / `event_pipeline.py` / `service.py` / `cleanup.py` | 表名/列名替换 | 中 |
+| `prompt_builder.py` / `repogit.py`（读 scene_id） | 表名替换 | 小 |
+| `onboarding.cleanup_stale_repo_data`（清残留） | 表名替换 | 小 |
+| 前端 `tasks.js`（状态展示） | 读 `issue.*`（字段名基本不变） | 小 |
+
+**建议过渡（一次性方案）**
+1. **新表 `issue` 先建**（`db_setup`），存量 `tasks`/`issue_state` 数据**一次性迁移**（按 repo_key+issue_id 合并）。
+2. **写路径切换**：`set_issue_stage` / 任务状态流转先写 `issue`（双写容忍期可选）。
+3. **读路径渐进**：任务中心/pipeline/issue API 改读 `issue`，旧表停止写入后 `DROP`（保留审计备份）。
+4. `events.issue_id`、`agent_tasks.issue_id` 不变（仍以 `#N` 关联 `issue.issue_id`）。
+5. 全量回归：任务中心建/改/催/完成/取消、pipeline 各阶段、Issue 详情 API。
+
+### 1.1.4 渐进式迁移方案（**推荐**：tasks 改名 issue，逐步收编 issue_state）
+
+> 替代一次性迁移的更平滑方案：**先把 `tasks` 表 `ALTER TABLE ... RENAME TO issue`**（数据结构原样保留、数据零迁移），
+> 之后**逐步 `ADD COLUMN` 收编 `issue_state` 的字段**，最后一并停用并 DROP `issue_state`。
+
+**核心思路**
+
+```
+Phase 1  表改名      ALTER TABLE tasks RENAME TO issue（结构不变，数据原地）
+Phase 2  字段收编    分批 ADD COLUMN stage/owner_agent/a2a_seq/scene_id/... 
+Phase 3  读写切换    写全走 issue；读 issue 优先、issue_state fallback
+Phase 4  收尾        issue_state 停写 → 只读 → 合并验证 → DROP
+```
+
+**优点（对比一次性新建）**
+
+| 维度 | 一次性新建 issue 表 | 改名渐进式（推荐） |
+|------|--------------------|-------------------|
+| 数据 | 需迁移合并（tasks + issue_state → issue） | **零迁移**（RENAME 数据原地） |
+| 主键/id | 新表新 id | **保留原 tasks.id** |
+| 风险 | 集中一次，回滚难 | 分批上线，每批可验证/回滚 |
+| 与 API 一致性 | 需新建/join | **表名即 issue，天然对齐 /api/issues** |
+| 前端 | 字段名需核对 | **API/字段名不变，前端无感** |
+| 开发量 | 大（一次动 8+ 文件） | 小（先 rename，逐步 ALTER） |
+
+**Phase 1 细节（表改名）**
+- `ALTER TABLE tasks RENAME TO issue`（SQLite 支持；`db_setup._migrate_tables` 已有多处 RENAME 先例）。
+- `_TASKS_DDL` → `_ISSUE_DDL`：`CREATE TABLE IF NOT EXISTS issue`；幂等：已存在 `issue` 则跳过 rename。
+- 无外键依赖（SQLite 表无强 FK），rename 安全。
+- `agent_tasks` **不动**（执行实例表，命名清晰，勿混淆）。
+
+**Phase 2 字段收编批次建议（每批独立可上线）**
+| 批 | 收编字段（ADD COLUMN） | 收编自 issue_state |
+|----|----------------------|-------------------|
+| A | `stage`（默认 vod）、`owner_agent`（默认 vod） | pipeline 阶段/当前 agent |
+| B | `scene_id`、`scene_user_id`、`allow_scene_override` | 场景 + VOD 覆盖开关 |
+| C | `a2a_seq`、`parent_issue_id`（对齐命名）、`is_subtask_mode`（对齐） | A2A 触发/子任务 |
+| D | `body`（收编 task_description 语义）、`status_updated_at` | 正文/状态时间 |
+| E | （保留字段） | assignee 已有，无需收编 |
+
+> 注意：`tasks` 已有补列 `parent_issue_number / is_subtask_mode`（L2619-2620），与 issue_state 的
+> `parent_issue_id / is_subtask_mode` **命名/语义有重叠**——收编时统一为 issue_state 命名（`parent_issue_id`），
+> 旧列弃用或改列名，避免双语义。
+
+**Phase 3 读写切换（关键）**
+- **写**：rename 后新逻辑全写 `issue`；`issue_state` 在字段收编完成前**保留为同步落点或停止写入**（选择：若仍由 pipeline 写 issue_state，则双写过渡）。
+- **读**：优先 `issue`，尚未收编的字段 fallback `issue_state`（`issue.status / issue.stage` 有则用，无则 `issue_state.stage`）。
+- 提供 `_ensure_column(issue, ...)` 逐批补列（已有模式，L2619-2620）。
+
+**Phase 4 收尾**
+- `issue_state` 停止写入 → 只读（历史兼容）→ 数据核对（issue 已含全部字段）→ `DROP TABLE issue_state`（保留备份）。
+
+**影响面（相比一次性方案更可控）**
+| 消费方 | 改动 |
+|--------|------|
+| `session_store.set_issue_stage` | `UPDATE tasks`→`UPDATE issue`；逐步扩字段 |
+| `routes/tasks.py` 等 8 文件 SQL | `tasks` → `issue` 表名替换（字段名基本不变） |
+| `db_setup` | `_TASKS_DDL`→`_ISSUE_DDL` + rename 迁移 + 补列 |
+| 前端 | **无感**（API 响应字段不变） |
+| `onboarding/cleanup` | 清残留表名 `tasks`→`issue` |
+
+**风险与注意**
+- 全局表名替换（8 文件 SQL），需完整回归任务中心 + pipeline。
+- rename 前确认无同名 `issue` 表；`CREATE TABLE IF NOT EXISTS issue` 防重。
+- `agent_tasks` 不参与（勿误改）。
+- 迁移幂等：已有 `issue` 表且列全 → 跳过所有阶段。
+
+**结论（更新）**：渐进式改名是**推荐主方案**（零迁移、分批发、可回滚、前端无感、表名与 /api/issues 对齐）；
+一次性新建保留为**备选**（若需彻底重设计字段布局时考虑）。
+
+> 新 Issues 接口聚合时：`/api/issues` 若落在 Phase 2/3 之间，可先 join `issue`（读 status）+ `issue_state`（读 stage）返回；
+> 收编完成后单表 `issue` 直接出全量（stage + status + 其他）。
+
+> 一次性方案与渐进式均以 `issue` 为最终表；`events.issue_id`、`agent_tasks.issue_id` 继续以 `#N` 关联 `issue.issue_id`。
 
 ### 1.2 层级关系
 
@@ -95,7 +351,8 @@ GET  /api/issues/{owner}/{repo}/{number}/pipeline  # Issue pipeline 路线图（
 | 字段 | 来源 | 说明 |
 |------|------|------|
 | issue 基本信息（title/status/created） | `events` 表首条 issue 事件 或 GitCode API | 首次发生时的标题 |
-| **stage** | `issue_state.stage` | 当前阶段（vod/issue/coding/qa/sre/done/pending_review） |
+| **stage** | `issue_state.stage` | Pipeline 阶段（vod/issue/coding/qa/sre/done/pending_review） |
+| **status** | `tasks.status` | **任务中心状态**（active/processing/awaiting_input/pending_review/completed/cancelled）；由 stage 映射同步，用户操作可覆盖 |
 | **owner_agent** | `issue_state.owner_agent` | 当前执行的 agent |
 | **a2a_seq** | `issue_state.a2a_seq` | 触发当前 stage 的 A2A 事件号 |
 | **scene_id** | `issue_state.scene_id` | 场景 |
@@ -103,6 +360,9 @@ GET  /api/issues/{owner}/{repo}/{number}/pipeline  # Issue pipeline 路线图（
 | event 列表 | `get_events_grouped_by_issue(repo)` 按 issue_id 过滤 | 全部事件（seq/type/agent/status/时间） |
 | pipeline 段 | `load_event_json(repo, number)` | event.json 完整链（各段 structured output/logs） |
 | 摘要 | `get_issue_summary(repo)` 对应段 | 概览 |
+
+> 说明：`stage`（`issue_state`）是 pipeline 权威阶段；`status`（`tasks`）是任务中心可读状态。
+> 二者经 `set_issue_stage → _STAGE_TO_TASK_STATUS` 同步，但 `awaiting_input/completed/cancelled` 可被用户操作直接设置。
 
 ### 2.4 现有可复用能力（改动小）
 
@@ -130,10 +390,10 @@ GET  /api/issues/{owner}/{repo}/{number}/pipeline  # Issue pipeline 路线图（
       "number": 5,
       "title": "优化前端UI",
       "stage": "qa",
+      "task_status": "processing",          // tasks.status 任务中心状态（待处理active/处理中processing/待澄清awaiting_input/待审核pending_review/已完成completed/已取消cancelled）
       "owner_agent": "qa",
       "scene_id": "default",
       "assignee": "grape_bot",
-      "status": "running",
       "events_count": 6,
       "latest_event": {"seq": 102, "agent": "qa", "status": "completed", "created_at": "..."}
     }
@@ -143,8 +403,8 @@ GET  /api/issues/{owner}/{repo}/{number}/pipeline  # Issue pipeline 路线图（
 
 // GET /api/issues/{owner}/{repo}/5
 {
-  "number": 5, "title": "优化前端UI", "stage": "qa", "owner_agent": "qa",
-  "scene_id": "default", "assignee": "grape_bot", "is_subtask_mode": 0,
+  "number": 5, "title": "优化前端UI", "stage": "qa", "task_status": "processing",
+  "owner_agent": "qa", "scene_id": "default", "assignee": "grape_bot", "is_subtask_mode": 0,
   "events": [
     {"seq": 96, "event_type": "issue_opened", "agent": "vod", "status": "completed", "created_at": "..."},
     {"seq": 102, "event_type": "pull_request_updated", "agent": "qa", "status": "completed", "created_at": "..."}
@@ -184,13 +444,13 @@ GET  /api/issues/{owner}/{repo}/{number}/pipeline  # Issue pipeline 路线图（
 
 ## 四、验收标准
 
-- [ ] `GET /api/issues/{owner}/{repo}` 返回仓库 Issue 列表（含 stage/owner_agent/events_count/latest_event）
+- [ ] `GET /api/issues/{owner}/{repo}` 返回仓库 Issue 列表（含 stage/task_status/owner_agent/events_count/latest_event）
 - [ ] `POST /api/issues/{owner}/{repo}` 创建 Issue（复用 tasks/create 逻辑，触发 pipeline）
-- [ ] `GET /api/issues/{owner}/{repo}/{number}` 返回 stage + events + pipeline 聚合
+- [ ] `GET /api/issues/{owner}/{repo}/{number}` 返回 stage + task_status + events + pipeline 聚合
 - [ ] `GET .../{number}/events` 仅返回该 Issue 的事件列表
 - [ ] `GET .../{number}/pipeline` 返回 event.json 结构化链（含各段 conclusion/next_step）
 - [ ] `POST /api/tasks/create` 行为不变（兼容别名），文档标注「实为创建 Issue」
-- [ ] **文档 11-issues.md 含概念澄清表**：Issue/Event/Task 三层级、task complete ≠ issue complete、tasks/create 归属
+- [ ] **文档 11-issues.md 含概念澄清表**：Issue/Event/Task 三层级、task complete ≠ issue complete、tasks/create 归属、`tasks.status` vs `issue_state.stage` 双状态
 - [ ] 认证三通道可用；契约导出；CLI `grape issues` 可用
 - [ ] 现有 events/tasks 接口不回归
 
@@ -285,6 +545,9 @@ python -m pytest tests/test_help_directory.py -q                          # 文�
 | `src/api/session_store.py:42` | `get_issue_stage`（stage/owner/a2a_seq/scene） |
 | `src/api/event_archive.py:249` | `load_event_json`（pipeline 段） |
 | `src/api/event_store.py:531` | `get_issue_summary`（摘要） |
+| `src/api/db_setup.py` `_ISSUE_STATE_DDL` | `issue_state` 表（stage 权威字段） |
+| `src/api/db_setup.py` `_TASKS_DDL` | `tasks` 表（status 任务中心状态字段） |
+| `src/api/session_store.py:97-115` | `set_issue_stage → _STAGE_TO_TASK_STATUS`（stage→status 同步） |
 | `src/api/main.py` | 路由挂载 |
 | `help/api/README.md` | 目录（加第 11 项） |
 | `tests/test_help_directory.py` | `EXPECTED_API_FILES` |
