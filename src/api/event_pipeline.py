@@ -1275,9 +1275,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
         return result
     # Plugin 模式 + engine_id=0：无主池任务（广播），多个引擎通过 claim_by_tag 竞争认领。
-    # 仅 queue_remote 模式走广播；auto/direct 模式走本机 direct（自动选引擎）。
+    # 非 direct 模式均走广播（queue_remote + auto）；仅 direct 模式走本机 direct（自动选引擎）。
     # 场景 engine_runtime_ids 限定广播范围（写入 pool_engine_ids 字段）。
-    if engine_id == 0 and is_plugin_mode() and get_execution_mode() == EXEC_MODE_REMOTE:
+    if engine_id == 0 and is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
         _be = backend or "opencode"
         _pool_engine_ids = get_scene_pool_engine_ids(_issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
         # 智能推荐模式：强制限定 opencode 引擎认领（推荐任务轻量，opencode 最快）

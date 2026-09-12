@@ -456,6 +456,8 @@ BWRAP_RO_ENGINE = {
     "opencode": ("~/.nvm", "~/.config/opencode", "~/.cache", "~/.opencode"),
     "codearts": ("~/.codeartsdoer", "~/.nvm", "~/.local", "~/.cache"),
     "hermes": ("~/.local",),
+    # codex: 二进制 /usr/local/bin/codex 和 node_modules 已在 COMMON(/usr/local) 覆盖；
+    # 系统级 Node.js 也在 /usr/local 或 /usr/bin，无需额外 RO。
 }
 
 # bwrap 白名单（读写）——引擎缓存；hermes overlay 由 sandbox 模块按 md5(cwd) 动态计算绑定。
@@ -468,4 +470,6 @@ BWRAP_RW_ENGINE = {
     "opencode": ("/var/cache/bun-compile",),
     "codearts": ("~/.codeartsdoer", "~/.cache/codearts-tasks", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
     "hermes": (_hermes_home,),
+    # codex: 运行时写 ~/.codex（sqlite/sessions/logs/history）+ ~/.cache（缓存）
+    "codex": ("~/.codex", "~/.cache"),
 }

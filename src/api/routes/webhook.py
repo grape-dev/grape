@@ -643,7 +643,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         try:
             from src.api.event_pipeline import is_plugin_mode
             from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
-            if is_plugin_mode() and get_execution_mode() == EXEC_MODE_REMOTE:
+            if is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
                 import asyncio as _aio
                 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
                 from src.api.pipeline_config import get_pipeline_config, get_node_by_tag
@@ -724,7 +724,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # Plugin 模式 + engine_id=0：仅 queue_remote 走广播；auto/direct 走本机 direct
         from src.api.event_pipeline import is_plugin_mode as _is_plugin
         from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
-        if engine_id == 0 and _is_plugin() and get_execution_mode() == EXEC_MODE_REMOTE:
+        if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:
             from src.api.event_pipeline import _enqueue_pipeline_task
             _be = backend or "opencode"
             _pool_eids = get_scene_pool_engine_ids(_a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
