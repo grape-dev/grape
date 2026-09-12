@@ -304,7 +304,6 @@
 .tsk-list-sec{padding:14px 18px 6px;font-size:11px;font-weight:600;color:var(--t3);letter-spacing:1px;text-transform:uppercase;display:flex;align-items:center;justify-content:space-between}
 .tsk-sec-n{color:var(--a)}
 .tsk-row{display:flex;align-items:center;gap:12px;padding:14px 18px;border-top:1px solid var(--b);cursor:pointer;transition:all .18s;position:relative}
-.tsk-list .tsk-list-sec:first-child ~ .tsk-row{border-top:none}
 .tsk-row:first-of-type{border-top:none}
 .tsk-row:hover{background:#f7f9ff}
 .tsk-row-sel{background:#f0f5ff}
@@ -410,6 +409,13 @@
 .cr-btn-loading{font-size:12.5px}
 @keyframes crFadeIn{from{opacity:0}to{opacity:1}}
 @keyframes crPopUp{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+
+/* ===== Issue #125: 确认对话框（缩小变体，复用 create-repo-overlay）===== */
+.confirm-modal{width:400px;max-width:100%;background:#fff;border-radius:16px;box-shadow:0 24px 60px rgba(15,23,42,.28);animation:crPopUp .22s ease both;padding:24px}
+.confirm-modal-msg{font-size:14px;color:var(--t);line-height:1.5;margin-bottom:20px;text-align:center;white-space:pre-line}
+.confirm-modal-actions{display:flex;justify-content:center;gap:10px}
+.cr-btn-danger{background:#ff3b30;color:#fff;box-shadow:0 6px 16px rgba(255,59,48,.3)}
+.cr-btn-danger:hover{box-shadow:0 9px 22px rgba(255,59,48,.45);transform:translateY(-1px)}
 
 /* ===== Liquid Glass 重新派发弹窗 ===== */
 @keyframes rdpFade{from{opacity:0}to{opacity:1}}
@@ -743,3 +749,8 @@
 .km-del:hover{background:#ff5252}
 .km-close{border:1px solid var(--b);background:transparent;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;color:var(--t)}
 .km-close:hover{background:var(--bg)}
+
+/* 任务卡片雷达扫描动画（进行中状态） */
+.tsk-card-radar{position:relative;overflow:hidden}
+.tsk-radar-sweep{position:absolute;inset:0;border-radius:10px;pointer-events:none;animation:radarRotate 3s linear infinite}
+@keyframes radarRotate{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}

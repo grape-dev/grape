@@ -452,8 +452,9 @@ function unhostRepo(fullName, event) {
       onConfirm: function() { _doUnhost(fullName); }
     }, event);
   } else {
-    if (!confirm(I18N.t('repos.unhost.confirm', {name: fullName}))) return;
-    _doUnhost(fullName);
+    app.showConfirm(I18N.t('repos.unhost.confirm', {name: fullName}), function() {
+      _doUnhost(fullName);
+    }, {danger: true, confirmText: I18N.t('repos.unhost.confirm_btn') || '解除托管'});
   }
 }
 

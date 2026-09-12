@@ -118,6 +118,14 @@
   "parent_task": "父任务",
   "pipeline_scene": "流水线场景",
   "task_mode": "任务模式",
+  "agent_status": {
+    "title": "Agent 节点状态",
+    "pending": "待执行",
+    "running": "执行中",
+    "completed": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消"
+  },
   "filter_options": {
     "created_by_me": "我创建的任务"
   }
