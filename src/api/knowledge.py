@@ -963,20 +963,20 @@ def _sync_baseline_files():
     if not storage:
         return
 
-    # Issue #103：分布式锁保护 baseline 同步
-    _sync_lock_key = f"baseline_sync:{_hl.md5(b'sync').hexdigest()[:16]}"
-    if not acquire_lock(_sync_lock_key, ttl=300):
-        log.info("[knowledge] baseline sync: lock contention, skipped")
-        return
+    # Issue #103：per-repo 分布式锁，不同 repo 可并行同步
+    BASELINE_FILES = ("project-graph.md", "project-capabilities.md", ".metadata.json")
 
-    try:
-        BASELINE_FILES = ("project-graph.md", "project-capabilities.md", ".metadata.json")
+    # 从 managed_repos 表获取所有项目
+    with db_lock:
+        rows = db.cursor().execute("SELECT repo_key FROM managed_repos").fetchall()
 
-        # 从 managed_repos 表获取所有项目
-        with db_lock:
-            rows = db.cursor().execute("SELECT repo_key FROM managed_repos").fetchall()
-
-        for (repo_key,) in rows:
+    for (repo_key,) in rows:
+        # per-repo 锁：同 repo 串行，不同 repo 并行
+        _repo_lock = f"baseline_sync:{_hl.md5(repo_key.encode()).hexdigest()[:16]}"
+        if not acquire_lock(_repo_lock, ttl=300):
+            log.info(f"[knowledge] baseline sync: lock contention for {repo_key}, skipped")
+            continue
+        try:
             owner, repo = split_owner_repo(repo_key)
             if not owner or not repo:
                 continue
@@ -1055,5 +1055,5 @@ def _sync_baseline_files():
                     log.info(f"[knowledge] sync baseline {repo_key}/{fname} → OBS")
                 except Exception as e:
                     log.warning(f"[knowledge] sync baseline failed {repo_key}/{fname}: {e}")
-    finally:
-        release_lock(_sync_lock_key)
+        finally:
+            release_lock(_repo_lock)
