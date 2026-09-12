@@ -79,7 +79,11 @@ def release_lock(lock_key: str):
 
 
 def renew_lock(lock_key: str, ttl: int = 60) -> bool:
-    """续期锁（只续自己的）。返回 True=续期成功，False=锁已被别人抢走。"""
+    """续期锁（只续自己的）。返回 True=续期成功，False=锁已被别人抢走。
+
+    不依赖 cursor.rowcount（MySQL/pymysql 对 UPDATE 返回 rowcount=0 不可靠），
+    改为 UPDATE + SELECT 验证 holder 是否还是自己。
+    """
     now = int(time.time())
     with db_lock:
         c = db.cursor()
@@ -88,7 +92,10 @@ def renew_lock(lock_key: str, ttl: int = 60) -> bool:
             "WHERE lock_key=? AND holder=?",
             (now + ttl, now, lock_key, _holder))
         db.commit()
-        return c.rowcount > 0
+        row = c.execute(
+            "SELECT holder FROM distributed_locks WHERE lock_key=?",
+            (lock_key,)).fetchone()
+        return row and row[0] == _holder
 
 
 def cleanup_expired_locks():
