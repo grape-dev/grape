@@ -367,11 +367,11 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
             db.commit()
         return
 
-    # 内容去重：检查文件里是否已有相同 content 的 marker 行
-    # marker 格式: - [seq N / agent] {content}
-    # 用 "] " 分割行，最后一段就是 content，精确比较
+    # 内容去重 + 崩溃恢复：检查文件内容 + DB 记录 + content_hash 一致性
     file_has_content = False
     db_has_record = False
+    db_content_hash = ""
+    db_knowledge_id = None
     if os.path.isfile(file_path):
         with open(file_path, encoding="utf-8") as f:
             for line in f:
@@ -383,16 +383,37 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
                         break
     with db_lock:
         existing = db.cursor().execute(
-            "SELECT id FROM agent_shared_knowledge "
+            "SELECT id, content_hash FROM agent_shared_knowledge "
             "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
             (repo_key, scope, agent_type, issue_num)
         ).fetchone()
         if existing:
             db_has_record = True
+            db_content_hash = existing[1] or ""
+            db_knowledge_id = existing[0]
 
     if file_has_content and db_has_record:
-        # 文件有 + DB 有 → 完全跳过
-        return
+        # 文件有 + DB 有 → 校验 content_hash 是否匹配当前文件
+        # 不匹配说明上次 DB UPDATE 失败（文件已追加但 hash 没更新）→ 不跳过，补写 OBS + DB
+        current_hash = ""
+        try:
+            with open(file_path, "rb") as f:
+                current_hash = hashlib.sha256(f.read()).hexdigest()
+        except Exception:
+            pass
+        if current_hash and db_content_hash == current_hash:
+            # hash 一致 → 完全跳过，但补 ref + 更新审计字段（上次可能 ref 失败或元数据过期）
+            if db_knowledge_id and scope != "member":
+                _auto_generate_knowledge_ref(db_knowledge_id, scope, agent_type, issue_num)
+            # 更新审计字段（source_seq/created_by/status），不改 content_hash/obs_key
+            with db_lock:
+                db.cursor().execute(
+                    "UPDATE agent_shared_knowledge SET source_seq=?, status=?, "
+                    "updated_at=datetime('now') WHERE id=?",
+                    (source_seq, status, db_knowledge_id))
+                db.commit()
+            return
+        # hash 不一致 → 落入下面的补写流程（不追加文件因为 file_has_content=True）
     # file_has_content and not db_has_record → 不追加文件，补写 OBS + DB
     # not file_has_content → 正常全流程（追加 + OBS + DB）
 
@@ -626,28 +647,28 @@ def _process_one_task(task_id, repo_key, scope, agent_type, issue_num,
 
 
 def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str = "", issue_num: int = 0):
-    """系统写入知识时按 scope 规则自动生成 scene_knowledge_ref 关联记录。"""
+    """系统写入知识时按 scope 规则自动生成 scene_knowledge_ref 关联记录。
+
+    Issue #103：失败时抛异常（不再 catch 吞掉），让上层任务重试。
+    重试时内容去重会跳过文件/DB 写入，但走 ref 补生成路径（见 _do_write_knowledge 跳过分支）。
+    """
     ref_map = {
-        "baseline":    {"scene_id": "", "agent_type": "",           "issue_num": 0},           # 全局（基线分析，所有 Agent 共享）
-        "project":     {"scene_id": "", "agent_type": "",           "issue_num": 0},           # 项目级——全局共享（所有 Agent 共写一个文件）
-        "issue":       {"scene_id": "", "agent_type": "",           "issue_num": issue_num},   # Issue 级——只匹配该 Issue
-        "issue_agent": {"scene_id": "", "agent_type": agent_type,   "issue_num": issue_num},   # Issue+Agent 级——只匹配该 Issue + 该 Agent
-        # member 不自动关联——用户手动选择
+        "baseline":    {"scene_id": "", "agent_type": "",           "issue_num": 0},
+        "project":     {"scene_id": "", "agent_type": "",           "issue_num": 0},
+        "issue":       {"scene_id": "", "agent_type": "",           "issue_num": issue_num},
+        "issue_agent": {"scene_id": "", "agent_type": agent_type,   "issue_num": issue_num},
     }
     ref = ref_map.get(scope)
     if not ref:
         return
-    try:
-        with db_lock:
-            db.cursor().execute(
-                "INSERT OR IGNORE INTO scene_knowledge_ref "
-                "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-                "VALUES (?, ?, ?, ?, 1, ?)",
-                (knowledge_id, ref["scene_id"], ref["agent_type"], ref["issue_num"], "system")
-            )
-            db.commit()
-    except Exception as e:
-        log.warning(f"[knowledge] auto generate ref failed: {e}")
+    with db_lock:
+        db.cursor().execute(
+            "INSERT OR IGNORE INTO scene_knowledge_ref "
+            "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+            "VALUES (?, ?, ?, ?, 1, ?)",
+            (knowledge_id, ref["scene_id"], ref["agent_type"], ref["issue_num"], "system")
+        )
+        db.commit()
 
 
 def _archive_issue_knowledge(repo_key: str, issue_num: int):
