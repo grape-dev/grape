@@ -17,7 +17,8 @@
 9. [Events 事件接口（/api/events）](08-events.md)
 10. [TaskLogs 任务日志接口（/api/task-logs）](09-task-logs.md)
 11. [Git 仓库统一接口（/api/repos）](10-git-repos.md)
-12. [A2A 协作接口（/api/a2a）](12-a2a.md)
+12. [Issues 对外接口（/api/issues）](11-issues.md)
+13. [A2A 协作接口（/api/a2a）](12-a2a.md)
 
 ## 状态码约定
 

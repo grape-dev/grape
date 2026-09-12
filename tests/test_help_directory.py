@@ -4,7 +4,7 @@ Verifies:
 - help/ directory exists with usage/ and api/ subdirectories
 - help/usage/ contains 9 expected markdown files
 - help/usage/ files contain no residual HTML tags
-- help/api/ contains 13 files matching docs/openapi/ source
+- help/api/ contains 14 files matching docs/openapi/ source
 - help.html retained with migration comment
 - file naming is lowercase + hyphens
 """
@@ -48,6 +48,7 @@ EXPECTED_API_FILES = [
     "08-events.md",
     "09-task-logs.md",
     "10-git-repos.md",
+    "11-issues.md",
     "12-a2a.md",
     "README.md",
 ]
@@ -120,7 +121,7 @@ class TestApiFiles:
     def test_file_count(self):
         # 仅统计 markdown 文档（help/api/openapi.json 为启动期生成的契约生成物，不计入）
         files = [f for f in API_DIR.iterdir() if f.is_file() and f.suffix == ".md"]
-        assert len(files) == 13, f"Expected 13 md files, got {len(files)}"
+        assert len(files) == 14, f"Expected 14 md files, got {len(files)}"
 
     @pytest.mark.parametrize("filename", EXPECTED_API_FILES)
     def test_api_matches_openapi_source(self, filename):

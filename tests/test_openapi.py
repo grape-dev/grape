@@ -72,6 +72,17 @@ EXPECTED_PUBLIC = {
     "gitrepo_pulls_comments_list": ("get", "/api/repos/{owner}/{repo}/pulls/{number}/comments"),
     "gitrepo_pulls_comments_create": ("post", "/api/repos/{owner}/{repo}/pulls/{number}/comments"),
     "gitrepo_pulls_files": ("get", "/api/repos/{owner}/{repo}/pulls/{number}/files"),
+    # ===== Issue #114: git-repo tree / contents root 端点 =====
+    "gitrepo_tree": ("get", "/api/repos/{owner}/{repo}/tree"),
+    "gitrepo_contents_root": ("get", "/api/repos/{owner}/{repo}/contents"),
+    # ===== Issues 对外接口（/api/issues，issues-api-design.md）=====
+    "issues_list": ("get", "/api/issues/{owner}/{repo}"),
+    "issues_create": ("post", "/api/issues/{owner}/{repo}"),
+    "issues_detail": ("get", "/api/issues/{owner}/{repo}/{number}"),
+    "issues_events": ("get", "/api/issues/{owner}/{repo}/{number}/events"),
+    "issues_pipeline": ("get", "/api/issues/{owner}/{repo}/{number}/pipeline"),
+    # ===== Issue #113: 任务中心仓库全部视图 =====
+    "tasks_repo_all": ("get", "/api/tasks/repo/{owner}/{repo}"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约

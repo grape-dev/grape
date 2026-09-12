@@ -138,7 +138,9 @@
 - **C2（部分）**：文档 `01-tasks.md`（docs/openapi + help/api 两处）标注 `POST /api/tasks/create` 已废弃并指向 `POST /api/issues/{owner}/{repo}`；
   前端 `tasks.js createTaskSubmit` 已从 `/tasks/create` 迁移至 `/api/issues/{owner}/{repo}`（body 保留 repo_key/title/description/scene_id）。
   **后端端点暂保留**（未移除）：避免既有调用方（含 CLI/Agent）断裂，待 C5 统一清理。
-- **C4（部分）**：`docs/openapi/01-tasks.md` 与 `help/api/01-tasks.md` 同步废弃说明（`test_help_directory` 一致性恢复）
+- **C4（已完成）**：`docs/openapi/01-tasks.md` 与 `help/api/01-tasks.md` 同步废弃说明（`test_help_directory` 一致性恢复）；
+  新增 `help/api/11-issues.md`（docs/openapi + help/api 双份，覆盖 5 端点 + 概念澄清）+ `README.md` 目录 + `tests/test_help_directory.py EXPECTED_API_FILES`（13→14）；
+  顺带补齐 `tests/test_openapi.py EXPECTED_PUBLIC` 契约清单（issues 5 端点 + gitrepo_tree/contents_root + tasks_repo_all，基线遗留缺失）
 
 **C 未完成（留待后续）**：
 - **C3（issue_state 停写）暂不执行**：pipeline 3.1 阶段初始化可能早于 `ensure_issue_task` 建档
