@@ -644,3 +644,111 @@ class TestTaskLifecycle:
         assert r.status_code == 200
         statuses = [t["status"] for t in r.json()["tasks"]]
         assert "processing" in statuses
+
+
+class TestRepoAllTasks:
+    """Issue #72: GET /api/tasks/repo/{owner}/{repo} — 仓库全部任务（不限 user_id）"""
+
+    def test_repo_all_requires_auth(self):
+        r = client.get("/api/tasks/repo/org/test")
+        assert r.status_code == 401
+
+    def test_repo_all_returns_all_users_tasks(self):
+        """返回该仓库所有任务，不限 user_id"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 70))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (9999, "other_user", "gitcode:org/test", 71))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (0, "bot_user", "gitcode:org/test", 72))
+            db.commit()
+        r = client.get("/api/tasks/repo/org/test", headers=_headers)
+        assert r.status_code == 200
+        tasks = r.json()["tasks"]
+        issue_nums = [t["issue_number"] for t in tasks]
+        assert 70 in issue_nums, "应包含当前用户任务"
+        assert 71 in issue_nums, "应包含其他用户任务"
+        assert 72 in issue_nums, "应包含 user_id=0 的任务"
+        # 所有任务都是 org/test 仓库的
+        assert all(t["repo_key"] == "org/test" for t in tasks)
+
+    def test_repo_all_status_filter(self):
+        """status 筛选正常"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 80))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, completed_reason, completed_at) VALUES (?,?,?,?, 'completed', 'issue_closed', datetime('now'))",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 81))
+            db.commit()
+        r_active = client.get("/api/tasks/repo/org/test?status=active", headers=_headers)
+        r_done = client.get("/api/tasks/repo/org/test?status=completed", headers=_headers)
+        assert all(t["status"] == "active" for t in r_active.json()["tasks"])
+        assert all(t["status"] == "completed" for t in r_done.json()["tasks"])
+        assert 80 in [t["issue_number"] for t in r_active.json()["tasks"]]
+        assert 81 in [t["issue_number"] for t in r_done.json()["tasks"]]
+
+    def test_repo_all_includes_assignee(self):
+        """返回的任务包含 assignee 字段"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 85))
+            db.commit()
+        r = client.get("/api/tasks/repo/org/test", headers=_headers)
+        assert r.status_code == 200
+        tasks = r.json()["tasks"]
+        assert len(tasks) > 0
+        assert all("assignee" in t for t in tasks), "每个任务应包含 assignee 字段"
+        assert tasks[0]["assignee"] == "younger_eric"
+
+    def test_repo_all_only_returns_target_repo(self):
+        """只返回指定仓库的任务，不包含其他仓库"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 90))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/other", 91))
+            db.commit()
+        r = client.get("/api/tasks/repo/org/test", headers=_headers)
+        assert r.status_code == 200
+        tasks = r.json()["tasks"]
+        assert all(t["repo_key"] == "org/test" for t in tasks)
+        assert 91 not in [t["issue_number"] for t in tasks]
+
+    def test_repo_all_sort_order(self):
+        """sort_order desc/asc 排序正常"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            for i in range(3):
+                c.execute(
+                    "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) "
+                    "VALUES (?,?,?,?,?, datetime('now', ?))",
+                    (_uid["id"], "younger_eric", "gitcode:org/test", 100 + i, "active",
+                     f"-{i} minutes"))
+            db.commit()
+        r_desc = client.get("/api/tasks/repo/org/test?mode=time&sort_order=desc", headers=_headers)
+        got_desc = [t["issue_number"] for t in r_desc.json()["tasks"]]
+        assert got_desc == [100, 101, 102], f"desc 应最新在前，实际 {got_desc}"
+        r_asc = client.get("/api/tasks/repo/org/test?mode=time&sort_order=asc", headers=_headers)
+        got_asc = [t["issue_number"] for t in r_asc.json()["tasks"]]
+        assert got_asc == [102, 101, 100], f"asc 应最早在前，实际 {got_asc}"
+
+    def test_repo_all_empty_repo(self):
+        """无任务的仓库返回空列表"""
+        _clean_tasks()
+        r = client.get("/api/tasks/repo/org/emptyrepo", headers=_headers)
+        assert r.status_code == 200
+        assert r.json()["tasks"] == []

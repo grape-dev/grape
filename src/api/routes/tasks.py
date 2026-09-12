@@ -1502,3 +1502,104 @@ async def my_tasks(status: str = Query("", pattern="^(active|processing|awaiting
             "is_running": _has_running_agent,
         })
     return {"tasks": tasks_out, "sort_order": sort_order, "mode": mode}
+
+
+@router.get("/repo/{owner}/{repo}", operation_id="tasks_repo_all", summary="仓库全部任务列表")
+async def repo_all_tasks(owner: str,
+                         repo: str,
+                         status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
+                         sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
+                         mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
+                         assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                         user: dict = Depends(get_current_user_or_api_key)):
+    """任务中心「仓库全部」视图：返回该仓库下所有任务（不限 user_id），含 assignee 信息。
+
+    - 按 owner/repo 路径参数定位仓库（to_repo_key 归一化）
+    - status 可选筛选（active/processing/awaiting_input/pending_review/completed/cancelled）
+    - assignees 可选筛选（逗号分隔的创建人列表）
+    - sort_order / mode 与 /mine 一致
+    - 返回格式与 /mine 完全相同（含 assignee / scene / stage / is_running）
+    """
+    from src.repo_key import to_repo_key, from_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
+    clauses = ["repo_key=?"]
+    params: list = [repo_key]
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    if assignees:
+        _assignee_list = [a.strip() for a in assignees.split(",") if a.strip()]
+        if len(_assignee_list) == 1:
+            clauses.append("assignee=?")
+            params.append(_assignee_list[0])
+        elif len(_assignee_list) > 1:
+            clauses.append(f"assignee IN ({','.join('?' * len(_assignee_list))})")
+            params.extend(_assignee_list)
+    where = " AND ".join(clauses)
+    _order_dir = "DESC" if sort_order == "desc" else "ASC"
+    _order_by = f"created_at {_order_dir}"
+    if mode == "default":
+        _order_by = (f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 "
+                     f"WHEN status='awaiting_input' THEN 2 WHEN status='pending_review' THEN 3 "
+                     f"ELSE 4 END, created_at {_order_dir}")
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                f"SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
+                f"status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, user_id "
+                f"FROM tasks WHERE {where} "
+                f"ORDER BY {_order_by}",
+                params
+            )
+            rows = c.fetchall()
+        except Exception:
+            rows = []
+    from src.api.session_store import get_issue_scene, get_issue_stage
+    from src.api.pipeline_config import get_pipeline_config
+    tasks_out = []
+    for r in rows:
+        _rk = to_repo_key(from_repo_key(r[2]))
+        _issue_id = f"#{r[3]}"
+        _st = get_issue_stage(_rk, _issue_id)
+        _issue_scene_id = (_st.get("scene_id") or "") if _st else ""
+        _stage = (_st.get("stage") or "") if _st else ""
+        if _issue_scene_id:
+            _scene_id = _issue_scene_id
+            _scene_source = "vod"
+        else:
+            _scene_id = (get_issue_scene(_rk, _issue_id) or ("default", 0))[0]
+            _scene_source = "repo_default"
+        _scene_name = ""
+        try:
+            _cfg = get_pipeline_config(_scene_id, repo_key=_rk)
+            if _cfg:
+                _scene_name = _cfg.get("name", _scene_id)
+        except Exception:
+            pass
+        _has_running_agent = False
+        if r[3] and _stage in ("vod", "issue", "coding", "qa", "sre"):
+            try:
+                with db_lock:
+                    _rc = db.cursor()
+                    _rc.execute(
+                        "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running') LIMIT 1",
+                        (_rk, _issue_id))
+                    _has_running_agent = _rc.fetchone() is not None
+            except Exception:
+                pass
+        tasks_out.append({
+            "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
+            "title": r[4] or "", "task_description": r[5] or "",
+            "conversation_id": r[6] or "", "status": r[7],
+            "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
+            "is_subtask_mode": r[11] or 0,
+            "parent_issue_number": r[12] or 0,
+            "scene_id": _scene_id,
+            "scene_name": _scene_name,
+            "scene_source": _scene_source,
+            "stage": _stage,
+            "is_running": _has_running_agent,
+            "user_id": r[13] or 0,
+        })
+    return {"tasks": tasks_out, "sort_order": sort_order, "mode": mode, "repo_key": from_repo_key(repo_key)}

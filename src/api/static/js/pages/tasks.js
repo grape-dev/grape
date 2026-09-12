@@ -12,6 +12,7 @@ let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #4
 let _tasksMode = 'time';     // time=纯时间序（唯一模式）
 let _taskFilterStatuses = []; // 按状态多选筛选（空=全部）
 let _taskFilterAssignees = []; // 按创建人多选筛选（空=全部）
+let _tasksViewMode = 'mine';  // 'mine' | 'repo_all'（Issue #72: 仓库全部视图）
 
 function _tasksSortPrefKey(repoKey) {
   return 'task_sort_' + (repoKey || 'all');
@@ -71,6 +72,16 @@ function renderTasks() {
   loadTasks();
   _startScenePoll();
 }
+
+window._switchTasksViewMode = function(mode) {
+  if (_tasksViewMode === mode) return;
+  _tasksViewMode = mode;
+  _taskSel = null;
+  _taskPage = 1;
+  _taskFilterStatuses = [];
+  _taskFilterAssignees = [];
+  loadTasks();
+};
 
 // 场景识别轮询：有待处理任务且场景未识别时，定期刷新
 function _startScenePoll() {
@@ -148,9 +159,20 @@ function loadTasks() {
   const repoKey = repo ? repo.fullName : '';
   _loadTasksSortPref(repoKey);
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
-  API.get('/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
-          '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
-          (_taskFilterAssignees.length ? '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '')).then(d => {
+  // Issue #72: 「仓库全部」视图调用 /tasks/repo/{owner}/{repo}（不限 user_id）
+  let apiUrl;
+  if (_tasksViewMode === 'repo_all' && repo) {
+    apiUrl = '/tasks/repo/' + repo.owner + '/' + repo.name +
+             '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode;
+    if (_taskFilterAssignees.length) {
+      apiUrl += '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(','));
+    }
+  } else {
+    apiUrl = '/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
+             '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
+             (_taskFilterAssignees.length ? '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '');
+  }
+  API.get(apiUrl).then(d => {
     if (window._currentView !== 'tasks') return;  // stale guard
     _tasksAll = d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
@@ -454,7 +476,7 @@ function _renderBoard(filtered) {
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee || t.repo_key || ''}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${_tasksViewMode === 'repo_all' ? (t.assignee ? '👤 ' + t.assignee : '') : (t.assignee || t.repo_key || '')}</span>
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
           </div>
         </div>`;
@@ -562,11 +584,12 @@ function _render() {
     const ms = _mapStatusL(t);
     const si = _lStatusInfo[ms] || _lStatusInfo.pending;
     const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
+    const _assigneeHtml = _tasksViewMode === 'repo_all' && t.assignee ? ` · 👤 ${t.assignee}` : '';
     return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
       <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">
         <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
-        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key}</div>
+        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key}${_assigneeHtml}</div>
       </div>
       <span class="tsk-tag ${si.cls}">${si.text}</span>
     </div>`;
@@ -627,6 +650,10 @@ function _render() {
     <div class="tsk-top">
       <h1>${I18N.t('tasks.page_title')}</h1>
       <div id="deployLinkBar" style="margin-top:4px"></div>
+      <div style="display:flex;gap:0;margin-top:8px;border-bottom:0.5px solid var(--b,#e8e8ed)">
+        <button class="tsk-tab${_tasksViewMode==='mine'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('mine')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='mine'?'var(--a,#0071e3)':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:${_tasksViewMode==='mine'?'600':'400'};color:${_tasksViewMode==='mine'?'var(--a,#0071e3)':'var(--t3,#86868b)'};background:transparent;cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_mine')||'我的任务'}</button>
+        <button class="tsk-tab${_tasksViewMode==='repo_all'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('repo_all')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='repo_all'?'var(--a,#0071e3)':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:${_tasksViewMode==='repo_all'?'600':'400'};color:${_tasksViewMode==='repo_all'?'var(--a,#0071e3)':'var(--t3,#86868b)'};background:transparent;cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_repo_all')||'仓库全部'}</button>
+      </div>
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:8px">${I18N.t('tasks.create.btn_new')}</button>
         ${_filterPanel}
