@@ -49,6 +49,24 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Templates: startup check failed: {e}")
 
+        # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新（改 md 后重启生效）
+        try:
+            from src.help_page_gen import generate as _generate_help_page
+            _n_help = _generate_help_page()
+            log.info(f"Help: help.html regenerated ({_n_help} sources)")
+        except Exception as e:
+            log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
+
+        # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json（固定下载 URL）
+        try:
+            from src.api.openapi import custom_openapi
+            from src.help_page_gen import write_openapi_contract
+            _schema = custom_openapi(app)
+            _n_paths = write_openapi_contract(_schema)
+            log.info(f"OpenAPI: contract dumped ({_n_paths} paths) -> /static/openapi.json")
+        except Exception as e:
+            log.warning(f"OpenAPI: contract dump failed: {e}")
+
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
         lease_store = None
@@ -514,13 +532,7 @@ if os.path.isdir(STATIC_DIR):
             raise HTTPException(status_code=404)
         return _spa_response()
 
-    # SPA catch-all：非 API/static 的路径（如 /login）回退到 index.html
-    @app.get("/{path:path}")
-    async def spa_catch_all(path: str):
-        if path.startswith("api/") or path.startswith("static/"):
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404)
-        return _spa_response()
+    # 注意：SPA catch-all (/{path:path}) 延迟到文件末尾注册，避免拦截 /health /healthz 等系统端点
 
 from src.api.db_setup import init_database
 init_database()
@@ -728,7 +740,7 @@ def _check_and_sync_templates() -> bool:
         _result = _sp.run(
             ["bash", _sync_script],
             capture_output=True, text=True, timeout=60,
-            env={**_os.environ, "TEMPLATES_REPO": "https://mm6667:shhnrXxGm1E1SJ-FxKxQ9M2Q@gitcode.com/grape-dev/grape-template.git"}
+            env={**_os.environ, "TEMPLATES_REPO": "https://gitcode.com/grape-dev/grape-template.git"}
         )
         if _result.returncode == 0:
             log.info(f"Templates: auto-sync OK\n{_result.stdout}")

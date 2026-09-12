@@ -33,6 +33,8 @@ skills/sre/
 skills/chat/
 skills/_template/
 configs/skill-description.json
+# 官方场景由独立仓库供给（scripts/sync_skills.sh 从 grape-skills scenes/ 铺入，不入 git）
+configs/scenes/
 # 官方项目模板由独立仓库供给（scripts/sync_templates.sh 铺入，不入 git）
 examples/hello-*
 configs/project-templates.json
@@ -73,6 +75,7 @@ query_*.py
 monitor_*.py
 monitor_*.sh
 sre_monitor_loop.sh
+merge-remote-branch.sh
 skills.bak.*/
 *.bak.2026082*
 *.bak2
@@ -100,6 +103,12 @@ skills/
 trace_*.py
 configs/scene-sync.json
 .coverage
+
+# help.html 为生成物（由 src/help_page_gen.py 依据 help/ 渲染，启动时生成）
+src/api/static/help.html
+# OpenAPI 契约生成物（启动期由 custom_openapi(app) 落盘；固定 URL=/static/openapi.json）
+help/api/openapi.json
+src/api/static/openapi.json
 
 # grape-cli 已拆为独立仓库管理（D:/Developer/grape-dev/grape/cli）
 cli/

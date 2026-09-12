@@ -34,6 +34,7 @@ _EVENT_SKIPPED_DDL = """
 CREATE TABLE IF NOT EXISTS event_skipped (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_key TEXT DEFAULT '',
+    issue_id TEXT DEFAULT '',
     event_type TEXT DEFAULT '',
     reason TEXT DEFAULT '',
     detail TEXT DEFAULT '',
@@ -668,37 +669,6 @@ CREATE TABLE IF NOT EXISTS skill_likes (
 )
 """
 
-# ===== Issue-45: API Token 认证 =====
-# 会话级临时 token（方式 A）：存在即有效，删除即失效（无 revoked 标记位）。
-# session_key（task_id）仅作失效定位的管理键，不是授权身份（token 设计 §2.3）。
-_SESSION_API_TOKENS_DDL = """
-CREATE TABLE IF NOT EXISTS session_api_tokens (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_key  TEXT NOT NULL,             -- 会话唯一键（task_id），失效时精确定位
-    repo_key     TEXT NOT NULL,             -- 仓库（主作用域）
-    agent_type   TEXT NOT NULL,             -- vod/issue/coding/qa/sre/chat
-    user_id      INTEGER DEFAULT 0,         -- 仅 chat agent（用户身份）绑定；devops 事件 agent 无此概念，0=仓库身份
-    token_sha256 TEXT UNIQUE NOT NULL,      -- SHA-256
-    expires_at   TEXT NOT NULL,             -- 签发时刻 + TTL（校验超时用）
-    created_at   TEXT DEFAULT (datetime('now'))
-)
-"""
-
-# 用户级长期 API Key（方式 B）：sha256 落库（不存明文），支持吊销。
-_API_TOKENS_DDL = """
-CREATE TABLE IF NOT EXISTS api_tokens (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL,                  -- 绑定单用户
-    token_sha256 TEXT UNIQUE NOT NULL,             -- SHA-256（不存明文）
-    name        TEXT DEFAULT '',                   -- token 名称（如 "ci-token-01"）
-    scopes      TEXT DEFAULT '["public"]',         -- 预留：未来 RBAC 扩展
-    created_at  TEXT DEFAULT (datetime('now')),
-    last_used_at TEXT DEFAULT NULL,
-    revoked     INTEGER DEFAULT 0,
-    UNIQUE (user_id, name)
-)
-"""
-
 _UPLOADED_FILES_DDL = """
 CREATE TABLE IF NOT EXISTS uploaded_files (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -774,9 +744,30 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("uploaded_files", _UPLOADED_FILES_DDL),
     ("distributed_locks", _DISTRIBUTED_LOCKS_DDL),
     ("api_latency_log", _API_LATENCY_LOG_DDL),
-    # ===== Issue-45: API Token 认证 =====
-    ("session_api_tokens", _SESSION_API_TOKENS_DDL),
-    ("api_tokens", _API_TOKENS_DDL),
+    # ===== Issue-45: API Token 认证表 =====
+    ("session_api_tokens", """
+CREATE TABLE IF NOT EXISTS session_api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key TEXT NOT NULL,
+    repo_key TEXT NOT NULL DEFAULT '',
+    agent_type TEXT NOT NULL DEFAULT '',
+    user_id INTEGER NOT NULL DEFAULT 0,
+    token_sha256 TEXT NOT NULL,
+    expires_at INTEGER NOT NULL DEFAULT 0
+)"""),
+    ("api_tokens", """
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_sha256 TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    scopes TEXT NOT NULL DEFAULT '["public"]',
+    revoked INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_used_at TEXT DEFAULT ''
+)"""),
+    # ===== legacy: backend_agents（_migrate_tables rebuild 依赖其存在）=====
+    ("backend_agents", _BACKEND_AGENTS_DDL),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -991,6 +982,16 @@ def _seed_event_action_filter():
         ("pull_request_opened", "merge",  1, "any", "", "", ""),
         # pull_request_merged
         ("pull_request_merged", "merge",  1, "any", "", "", ""),
+        # pull_request_updated（Issue #49 补充：normalize 细分后，update/审查类事件走这里；
+        # 无新 commit 的 update（审查/reopen/元数据）由 event_rule 的 no_commit 门控过滤）
+        ("pull_request_updated", "open",   1, "any", "", "", ""),
+        ("pull_request_updated", "update", 1, "user", "", "", ""),
+        ("pull_request_updated", "close",  0, "any", "", "", ""),
+        ("pull_request_updated", "reopen", 0, "any", "", "", ""),
+        # pull_request_review / pull_request_closed（multi-vcs 细分后独立事件，默认不触发执行 agent）
+        ("pull_request_review", "review",  0, "any", "", "", ""),
+        ("pull_request_review", "approve", 0, "any", "", "", ""),
+        ("pull_request_closed", "close",   0, "any", "", "", ""),
     ]
     with db_lock:
         c = db.cursor()
@@ -1357,9 +1358,24 @@ def init_database():
     # MySQL with session_manager
 
 def _migrate_knowledge_issue67():
-    """Issue #67 知识库优化迁移：source 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。"""
+    """Issue #67 知识库优化迁移 + Issue #95 修复：source 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。
+
+    Issue #95：加幂等标记——#95 修复（member ref 清理 + rejected 修复）跑一次后跳过。
+    #67 基础迁移仍每次执行（幂等，开销微量）。
+    """
     from src.mysql_compat import get_db_backend
     _is_mysql = get_db_backend() == "mysql"
+
+    # Issue #95：检查 #95 修复是否已执行过
+    _issue95_done = False
+    with db_lock:
+        try:
+            row = db.cursor().execute(
+                "SELECT value FROM meta WHERE key='issue95_migrate_done'"
+            ).fetchone()
+            _issue95_done = bool(row and row[0] == '1')
+        except Exception:
+            pass
 
     with db_lock:
         c = db.cursor()
@@ -1430,15 +1446,47 @@ def _migrate_knowledge_issue67():
             "SELECT id, '', agent_type, issue_num, 1, 'system' FROM agent_shared_knowledge "
             "WHERE scope = 'issue_agent' AND source = 'agent' AND agent_type != ''")
         # member（agent_type 非空）→ 指定 Agent 关联（issue_num=0）
-        c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'member' AND source = 'manual' AND agent_type != ''")
+        # Issue #95：删除——member 不自动关联，用户手动绑定才注入
+        # c.execute(
+        #     "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+        #     "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
+        #     "WHERE scope = 'member' AND source = 'manual' AND agent_type != ''")
         # member（agent_type 空）→ 全局关联（issue_num=0）
-        c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
+        # Issue #95：删除——违反"member 不自动关联"设计
+        # c.execute(
+        #     "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+        #     "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
+        #     "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
+
+        # Issue #95：清理 migration 自动创建的错误 member ref（幂等）
+        # 只删 created_by='system' 的——用户手动创建的（created_by=username）不删
+        # 加幂等标记：首次执行后设 meta 标记，后续跳过
+        if not _issue95_done:
+            try:
+                c.execute(
+                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN "
+                    "(SELECT id FROM agent_shared_knowledge WHERE scope = 'member') "
+                    "AND created_by = 'system'")
+            except Exception:
+                pass
+
+            # Issue #95：修复 rejected→accepted 老数据（幂等）
+            # 老代码 UPDATE 不改 status，导致先 rejected 再 accepted 的记录仍为 rejected
+            # 有文件内容（obs_key 非空 + content_hash 非空）说明 accepted 写过文件，应为 accepted
+            try:
+                c.execute(
+                    "UPDATE agent_shared_knowledge SET status='accepted' "
+                    "WHERE status='rejected' AND obs_key != '' AND content_hash != '' "
+                    "AND obs_key IS NOT NULL AND content_hash IS NOT NULL")
+            except Exception:
+                pass
+
+            # Issue #95：标记已完成
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('issue95_migrate_done', '1')")
+            except Exception:
+                pass
 
         # 4. content_hash 回填——OBS 模式下 obs_key 非空但 hash 为空的老数据
         try:
@@ -1573,7 +1621,7 @@ def _cleanup_old_latency_logs():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM api_latency_log WHERE created_at < datetime('now', '-7 days')")
+            c.execute("DELETE FROM api_latency_log WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)")
             deleted = c.rowcount
             db.commit()
         if deleted:
@@ -1819,6 +1867,10 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
+        # GitHub OAuth 集成——user_accounts 新增 github 字段
+        "ALTER TABLE user_accounts ADD COLUMN github_id TEXT DEFAULT ''",
+        "ALTER TABLE user_accounts ADD COLUMN github_api_token TEXT DEFAULT ''",
+        "ALTER TABLE user_accounts ADD COLUMN github_login TEXT DEFAULT ''",
         # 飞书 Bot Lease——集群部署保证同一 bot 同一时刻只有一个实例连 WebSocket
         "ALTER TABLE global_im_bot_config ADD COLUMN bot_name VARCHAR(128) DEFAULT ''",
         "ALTER TABLE global_im_bot_config ADD COLUMN lease_token VARCHAR(128) DEFAULT NULL",
@@ -1851,6 +1903,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN scene_tags TEXT DEFAULT '[\"default\"]'",
         # ===== 引擎别名：用户自定义别名，不受心跳覆盖 =====
         "ALTER TABLE agent_runtimes ADD COLUMN alias TEXT DEFAULT ''",
+        # ===== 标签用户标记：用户手动设过标签后置1，心跳注册不再自动补 'all' =====
+        "ALTER TABLE agent_runtimes ADD COLUMN tags_user_set INTEGER DEFAULT 0",
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
@@ -1865,9 +1919,8 @@ def _migrate_tables():
         "ALTER TABLE scene_market ADD COLUMN obs_icon_key VARCHAR(256) DEFAULT ''",
         # ===== Issue-11: scene_category 加 slug（场景包 category 用 slug 引用） =====
         "ALTER TABLE scene_category ADD COLUMN slug VARCHAR(64) DEFAULT ''",
-        # ===== Issue-54: scene_market 加 scope + repo_key 列 =====
-        "ALTER TABLE scene_market ADD COLUMN scope VARCHAR(32) DEFAULT 'official'",
-        "ALTER TABLE scene_market ADD COLUMN repo_key VARCHAR(191) DEFAULT ''",
+        # ===== Issue-89: event_skipped 加 issue_id 列（skipped 事件审计需关联 Issue） =====
+        "ALTER TABLE event_skipped ADD COLUMN issue_id TEXT DEFAULT ''",
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
@@ -2128,6 +2181,9 @@ def _migrate_tables():
             ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
             ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
             ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
+            ("github_oauth_client_id", "oauth_github_client_id"),
+            ("github_oauth_client_secret", "oauth_github_client_secret"),
+            ("github_oauth_redirect_uri", "oauth_github_redirect_uri"),
         ]
         with db_lock:
             c = db.cursor()
@@ -2420,8 +2476,9 @@ def _migrate_tables():
             c = db.cursor()
             _ensure_column(c, "user_accounts", "gitcode_publish_repo", "TEXT DEFAULT ''")
             _ensure_column(c, "user_accounts", "github_publish_repo", "TEXT DEFAULT ''")
+            _ensure_column(c, "user_accounts", "github_login", "TEXT DEFAULT ''")
             db.commit()
-            log.info("Added gitcode_publish_repo / github_publish_repo columns to user_accounts")
+        log.info("Added gitcode_publish_repo / github_publish_repo / github_login columns to user_accounts")
     except Exception as e:
         log.warning(f"Add user_accounts publish repo columns failed: {e}")
     # ===== managed_repos 部署URL列（weekly-01 合并） =====
@@ -2442,15 +2499,6 @@ def _migrate_tables():
             log.info("Added managed_repos.host_status column")
     except Exception as e:
         log.warning(f"Add managed_repos.host_status column failed: {e}")
-    # ===== managed_repos 智能推荐配置列 =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "managed_repos", "scene_recommend_config", "TEXT DEFAULT ''")
-            db.commit()
-            log.info("Added managed_repos.scene_recommend_config column")
-    except Exception as e:
-        log.warning(f"Add managed_repos.scene_recommend_config column failed: {e}")
     # ===== devops_pipeline_scene 高级选项列（场景级工作分支 + 自定义 key:value）=====
     try:
         with db_lock:

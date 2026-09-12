@@ -267,8 +267,11 @@ class TestSkills:
         try:
             sname = "res_%s" % uuid.uuid4().hex[:4]
             udb.create_skill(u["id"], sname, "vod")
-            sid = udb.resolve_skill_id(sname, str(u["id"]))
+            # user scope: 用 user_id 参数查
+            sid = udb.resolve_skill_id(sname, user_id=str(u["id"]))
             assert sid and sid > 0
+            # 旧 owner_id 兼容（非空时作为 repo_key 回退，user scope 查不到）
+            assert udb.resolve_skill_id(sname, owner_id=str(u["id"])) == 0
         finally:
             _cleanup_user(uname)
 

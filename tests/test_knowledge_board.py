@@ -248,22 +248,22 @@ class TestKnowledgeContext:
         assert isinstance(r.json()["context"], str)
 
     def test_context_includes_member_docs(self):
-        """Issue #67: member 知识通过 ref 表注入（不再全量扫描）。"""
-        # 创建知识 + 关联 Agent
+        """Issue #95: member 知识不再内联到 context（_build_agent_knowledge_section 只查 source='agent'）。
+        member 知识走 member_files_pi 物化，不内联到 prompt。context 只显示 member 文档列表。"""
         r = client.post("/api/knowledge/entry", json={
             "name": "部署规范", "content": "部署走灰度发布", "description": "部署规范", "repo": _REPO
         }, headers=_headers)
         assert r.status_code == 200, r.text
         kid = r.json()["id"]
-        # 关联到 vod Agent
         r2 = client.post(f"/api/knowledge/{kid}/refs/batch", json={
             "agent_types": ["vod"]
         }, headers=_headers)
         assert r2.status_code == 200, r2.text
-        # context 应包含
         r3 = client.get(f"/api/knowledge/context?repo={_REPO}&agent_type=vod", headers=_headers)
         assert r3.status_code == 200, r3.text
-        assert "灰度发布" in r3.json()["context"]
+        # Issue #95: member 知识不再内联到 context（_build_agent_knowledge_section source='agent'）
+        # 但 member 文档列表仍然显示
+        assert "entry_" in r3.json()["context"]  # 文档列表里有文件名
 
 
 class TestInjection:
@@ -274,43 +274,41 @@ class TestInjection:
         _clean()
 
     def test_member_doc_injected_into_prompt(self):
-        """Issue #67: manual 知识通过 ref 表注入到 prompt。"""
-        # 创建知识
+        """Issue #95: member 知识不再内联到 chat prompt（_build_agent_knowledge_section source='agent'）。
+        member 知识走 member_files_pi 物化到 .project-info/member/，不内联到 prompt。"""
         r = client.post("/api/knowledge/entry", json={
             "name": "部署规范", "content": "部署走灰度发布", "description": "部署规范", "repo": _REPO
         }, headers=_headers)
         kid = r.json()["id"]
-        # 关联到 vod Agent
         client.post(f"/api/knowledge/{kid}/refs/batch", json={"agent_types": ["vod"]}, headers=_headers)
-        # build_event_chat_prompt 注入
         from src.prompt_builder import build_event_chat_prompt
         evt = {"seq": 1, "repo_key": _REPO_KEY, "issue_id": "#5", "agent_type": "vod",
                "event_type": "issue_opened", "title": "t", "status": "completed", "result": "r"}
         prompt, _ = build_event_chat_prompt(evt, "你好", [], "vod", 5)
-        assert "灰度发布" in prompt
+        # Issue #95: member 不内联到 chat prompt
+        assert "灰度发布" not in prompt
 
     def test_project_info_files_include_member_docs(self):
-        """Issue #67: knowledge_files 走 ref 表——关联了才打包给 worker。"""
-        # 创建知识
+        """Issue #95: member 知识走 project_info_files（不再走 knowledge_files）。
+        knowledge_files 只存 agent 沉淀知识（source='agent'），member 存 project_info_files。"""
         r = client.post("/api/knowledge/entry", json={
             "name": "环境说明", "content": '{"env": "prod"}', "description": "环境说明", "repo": _REPO
         }, headers=_headers)
         assert r.status_code == 200, r.text
         kid = r.json()["id"]
-        # 关联到 vod Agent
         client.post(f"/api/knowledge/{kid}/refs/batch", json={"agent_types": ["vod"]}, headers=_headers)
-        # enqueue_task 应只打包关联的知识
         from src.runtime.service import enqueue_task
         tid = enqueue_task(agent_session_id="sess-kb", runtime_id=1, prompt="p",
                            repo_key=_REPO_KEY, agent_type="vod", issue_id="#5")
         from src.runtime import service
         task = service.get_task(tid)
-        kf = json.loads(task["knowledge_files"] or "{}")
-        assert any("env" in (content or "") for content in kf.values()), f"应包含关联的知识: {list(kf)}"
+        # Issue #95: member 知识在 project_info_files 里（不在 knowledge_files 里）
+        pif = json.loads(task["project_info_files"] or "{}")
+        assert any("env" in (v or "") for v in pif.values()), f"project_info_files 应含 member 知识: {list(pif)}"
 
 
 class TestAgentScopedUpload:
-    """§六 Agent 级成员上传文档定向注入。"""
+    """Issue #95: agent_files 废弃，用户上传知识统一由 member_files_pi 走 ref 表注入。"""
 
     def setup_method(self):
         _clean()
@@ -320,7 +318,6 @@ class TestAgentScopedUpload:
 
     def test_upload_agent_looks_agent_dir(self):
         from src.config import WORKSPACE_DIR
-        # Issue #67: 用 create_knowledge_entry 创建 manual 知识
         r = client.post("/api/knowledge/entry", json={
             "name": "VOD专属知识", "content": "VOD 专属知识", "description": "VOD 专属", "repo": _REPO
         }, headers=_headers)
@@ -330,51 +327,43 @@ class TestAgentScopedUpload:
         assert os.path.isfile(os.path.join(WORKSPACE_DIR, fp.replace("/", os.sep)))
 
     def test_enqueue_only_packs_own_agent_dir(self):
-        from src.config import WORKSPACE_DIR
-        for at, name in (("vod", "v.md"), ("coding", "c.md")):
-            d = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "agent", at)
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, name), "w", encoding="utf-8") as f:
-                f.write(f"{at} 专属")
+        """Issue #95: agent_files 废弃，member 知识走 ref 表。"""
+        # 创建 member 知识 + ref 关联
+        r = client.post("/api/knowledge/entry", json={
+            "name": "coding专属", "content": "coding 专属", "repo": _REPO
+        }, headers=_headers)
+        kid = r.json().get("id")
+        if kid:
+            client.post(f"/api/knowledge/{kid}/refs/batch", json={
+                "scene_ids": [], "agent_types": ["coding"]
+            }, headers=_headers)
         from src.runtime.service import enqueue_task
         tid = enqueue_task(agent_session_id="sess-a1", runtime_id=1, prompt="p",
                            repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
         from src.runtime import service
         task = service.get_task(tid)
         pif = json.loads(task["project_info_files"] or "{}")
-        assert any(rel == "agent/coding/c.md" for rel in pif)
-        assert not any(rel.startswith("agent/vod") for rel in pif)
-        assert all(not rel.startswith("org/test/") for rel in pif)
+        assert any(rel.startswith("member/") for rel in pif), f"应含 member 文档: {list(pif)}"
 
     def test_prompt_tells_agent_dir(self):
-        from src.config import WORKSPACE_DIR
-        d = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "agent", "coding")
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "c.md"), "w", encoding="utf-8") as f:
-            f.write("coding 规范")
-        from src.prompt_builder import _build_project_info_section
+        """Issue #95: agent/{type}/ 引导已删除。"""
         _write_pi("project-graph.md", "# Graph")
+        from src.prompt_builder import _build_project_info_section
         sec = _build_project_info_section(_REPO_KEY, agent_type="coding")
-        assert "{{PROJECT_INFO_DIR}}/agent/coding/" in sec
-        _clean()
-        sec2 = _build_project_info_section(_REPO_KEY, agent_type="coding")
-        assert "{{PROJECT_INFO_DIR}}/agent/coding/" in sec2
+        assert "{{PROJECT_INFO_DIR}}/agent/coding/" not in sec
+        assert "Project Graph" in sec
 
     def test_build_prompt_includes_agent_dir_guide(self):
-        from src.config import WORKSPACE_DIR
-        d = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "agent", "qa")
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "qa规范.md"), "w", encoding="utf-8") as f:
-            f.write("QA 验收规则")
+        """Issue #95: agent/{type}/ 引导已删除。"""
         from src.prompt_builder import build_devops_agent_prompt
         evt = {"type": "issue_opened", "repository": "org/test", "source": "gitcode",
                "payload": {"issue": {"title": "t", "body": "b"}}, "issue_id": "#5", "_skill_path": ""}
         prompt = build_devops_agent_prompt(evt, [], "", ["qa"], runtime_id=1, agent_type="qa")
-        assert "{{PROJECT_INFO_DIR}}/agent/qa/" in prompt
+        assert "{{PROJECT_INFO_DIR}}/agent/qa/" not in prompt
 
 
 class TestProjectScopedShared:
-    """§6.7 方案 A：项目级成员文档全 Agent 共享 + prompt 路径指引。"""
+    """Issue #95: member 知识走 ref 表，需要手动创建 ref 关联。"""
 
     def setup_method(self):
         _clean()
@@ -382,26 +371,29 @@ class TestProjectScopedShared:
     def teardown_method(self):
         _clean()
 
-    def _seed_member_doc(self, name="规范.md", owner="alice"):
-        from src.config import WORKSPACE_DIR
-        d = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", "member", owner)
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
-            f.write(f"{owner} 上传项目规范")
+    def _seed_member_doc_with_ref(self, agent_type="coding"):
+        """创建 member 知识 + ref 关联到 agent。"""
+        r = client.post("/api/knowledge/entry", json={
+            "name": "规范.md", "content": "alice 上传项目规范", "repo": _REPO
+        }, headers=_headers)
+        kid = r.json().get("id")
+        if kid:
+            client.post(f"/api/knowledge/{kid}/refs/batch", json={
+                "scene_ids": [], "agent_types": [agent_type]
+            }, headers=_headers)
 
     def test_enqueue_packs_member_docs_all_agents(self):
-        self._seed_member_doc()
+        self._seed_member_doc_with_ref(agent_type="coding")
         from src.runtime.service import enqueue_task
         from src.runtime import service
-        for at in ("coding", "vod"):
-            tid = enqueue_task(agent_session_id=f"sess-{at}", runtime_id=1, prompt="p",
-                               repo_key=_REPO_KEY, agent_type=at, issue_id="#5")
-            task = service.get_task(tid)
-            pif = json.loads(task["project_info_files"] or "{}")
-            assert any(rel == "member/alice/规范.md" for rel in pif), f"{at} 应含项目级 member 文档: {list(pif)}"
+        tid = enqueue_task(agent_session_id="sess-coding", runtime_id=1, prompt="p",
+                           repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
+        task = service.get_task(tid)
+        pif = json.loads(task["project_info_files"] or "{}")
+        assert any(rel.startswith("member/") for rel in pif), f"应含 member 文档: {list(pif)}"
 
     def test_member_key_is_pi_relative(self):
-        self._seed_member_doc()
+        self._seed_member_doc_with_ref(agent_type="coding")
         from src.runtime.service import enqueue_task
         from src.runtime import service
         tid = enqueue_task(agent_session_id="sess-m", runtime_id=1, prompt="p",
@@ -412,8 +404,9 @@ class TestProjectScopedShared:
         assert any(rel.startswith("member/") for rel in pif)
 
     def test_prompt_tells_member_dir(self):
-        self._seed_member_doc()
+        """Issue #95: member 引导条件输出——有 ref 关联才输出。"""
+        self._seed_member_doc_with_ref(agent_type="coding")
         from src.prompt_builder import _build_project_info_section
         sec = _build_project_info_section(_REPO_KEY, agent_type="coding")
         assert "{{PROJECT_INFO_DIR}}/member/" in sec
-        assert "{{PROJECT_INFO_DIR}}/agent/coding/" in sec
+        assert "{{PROJECT_INFO_DIR}}/agent/coding/" not in sec

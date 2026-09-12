@@ -196,51 +196,11 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
         parts.append("")
 
     # VOD v2.0：项目知识基线 + 生命周期阶段 + Issue 富上下文（见 vod-skill-upgrade-plan.md §3.6）
+    # Issue #95：baseline 注入统一到 _build_project_info_section，删独立查询
     try:
-        from src.repo_key import split_owner_repo
-        _owner, _rname = split_owner_repo(repo_key)
-        _pi = os.path.join(WORKSPACE_DIR, _owner, _rname, "project-info")
-        _g = os.path.join(_pi, "project-graph.md")
-        _c = os.path.join(_pi, "project-capabilities.md")
-        # OBS 优先：查 DB baseline + OBS 读取，失败回退本地
-        _baseline_content = {}
-        try:
-            from src.session_manager import db, db_lock
-            from src.storage import get_storage
-            _storage = get_storage()
-            if _storage:
-                with db_lock:
-                    c = db.cursor()
-                    rows = c.execute(
-                        "SELECT file_path, obs_key, content_hash FROM agent_shared_knowledge "
-                        "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL",
-                        (repo_key,)
-                    ).fetchall()
-                for row in rows:
-                    _fp, _ok, _ch = row
-                    _fname = os.path.basename(_fp) if _fp else ""
-                    if _fname and _ok:
-                        try:
-                            data = _storage.read_bytes(_ok)
-                            if data:
-                                _baseline_content[_fname] = data.decode("utf-8") if isinstance(data, bytes) else data
-                        except Exception:
-                            pass  # OBS 读取失败，回退本地
-        except Exception:
-            pass  # DB 查询失败，回退本地
-
-        _has_baseline = bool(_baseline_content) or os.path.exists(_g) or os.path.exists(_c)
-        if _has_baseline:
-            parts.append("\n## 项目知识基线")
-            for _f, _label in ((_g, "project-graph"), (_c, "project-capabilities")):
-                _fname = os.path.basename(_f)
-                # 优先 OBS 内容，降级本地文件
-                _content = _baseline_content.get(_fname, "")
-                if not _content and os.path.exists(_f):
-                    _content = open(_f, encoding="utf-8").read()
-                if _content:
-                    parts.append(f"\n### {_label}\n{_content[:2500]}")
-            parts.append("\n> 若知识基线缺失或过期，请按 issue-advance/references/codegraph-project-analysis.md 生成/更新。")
+        from src.prompt_builder import _build_project_info_section
+        parts.append(_build_project_info_section(repo_key, ""))
+        parts.append("\n> 若知识基线缺失或过期，请按 issue-advance/references/codegraph-project-analysis.md 生成/更新。")
         # 当前 Issue 生命周期阶段（若有）
         _iid = evt.get("issue_id", "") or ""
         if _iid:
@@ -273,6 +233,9 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
 
     parts.append("## 角色定义")
     parts.append(_VOD_ROLE_DEFINITION)
+
+    # Issue #95：agent 沉淀知识引导（和 build_devops_agent_prompt 一致）
+    parts.append("\n## 共享知识\n> 前序 Agent 沉淀的经验已落地：{{KNOWLEDGE_DIR}}/，存在则用 read tool 读取并遵循。")
 
     try:
         agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
@@ -363,6 +326,13 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             final_text = ""
             exit_code = -1
     else:
+        # Issue #95：direct 模式不走 worker 物化，手动替换占位符为实际路径
+        # _build_project_info_section 生成 {{PROJECT_INFO_DIR}}，新增 {{KNOWLEDGE_DIR}} 引导
+        # direct 模式不物化文件，替换为 ws 下的路径（agent 可读到本地原始文件）
+        _ws_proj = os.path.join(wsd, ".project-info")
+        _ws_know = os.path.join(wsd, ".knowledge")
+        prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _ws_proj)
+        prompt = prompt.replace("{{KNOWLEDGE_DIR}}", _ws_know)
         async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
                                                             backend_name=_be, account=repo_key,
                                                            bot_token=repo_token, agent_name="VOD Agent",

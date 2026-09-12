@@ -66,8 +66,7 @@ def test_provider_header_and_query(gitcode_calls, _client):
 
 def test_unknown_provider_rejected(_client):
     client = _client
-    assert _get(client, f"/api/repos/{OWNER}/{REPO}/branches",
-                headers={"X-Git-Provider": "github"}).status_code == 403
+    # github 现在是受支持的 provider（不再 403）；gitlab 仍然被拒
     assert _get(client, f"/api/repos/{OWNER}/{REPO}/branches?provider=gitlab").status_code == 403
 
 
@@ -112,6 +111,18 @@ def test_issues_crud_mapping(gitcode_calls, _client):
     assert r.status_code == 200
     last = gitcode_calls[-1]
     assert last["method"] == "PATCH" and last["body"]["state"] == "close" and last["body"]["labels"] == "bug"
+
+    # Issue #: issues update 支持修改正文（body）——透传到平台，空 body 不进入 payload
+    r = client.patch(f"{base}/issues/7", json={"body": "新正文内容"})
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "PATCH"
+    assert last["body"].get("body") == "新正文内容"
+    assert "state" not in last["body"]  # 未传字段不出现（空值过滤）
+
+    r = client.patch(f"{base}/issues/7", json={"state": "open"})  # 空 body → 不污染 payload
+    last = gitcode_calls[-1]
+    assert "body" not in last["body"]
 
     assert _get(client, f"{base}/issues/7/comments").status_code == 200
     assert gitcode_calls[-1]["url"].endswith("/issues/7/comments")

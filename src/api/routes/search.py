@@ -13,6 +13,10 @@ def global_search(q: str = Query("", min_length=1),
     results = {"events": [], "repos": [], "agents": []}
     q_lower = q.lower()
 
+    # 当前用户有权访问的仓库集合——事件搜索仅限这些仓库
+    managed = user_db.get_managed_repos(user.get("id", 0))
+    user_repo_keys = {r["repo_key"] for r in managed}
+
     if type in ("all", "event"):
         from src.session_manager import db, db_lock
         with db_lock:
@@ -25,12 +29,12 @@ def global_search(q: str = Query("", min_length=1),
                 results["events"] = [
                     {"seq": r[0], "repo_key": r[1], "event_type": r[2], "title": r[3] or r[2], "status": r[4]}
                     for r in c.fetchall()
+                    if r[1] in user_repo_keys  # 仅返回当前用户有权访问的仓库事件
                 ]
             except Exception:
                 pass
 
     if type in ("all", "repo"):
-        managed = user_db.get_managed_repos(user.get("id", 0)) if hasattr(user, "id") else []
         for r in managed:
             if q_lower in r.get("full_name", "").lower():
                 results["repos"].append({
@@ -49,9 +53,7 @@ def global_search(q: str = Query("", min_length=1),
                 )
                 for r in c.fetchall():
                     results["agents"].append({
-                        "name": r[0],
-                        "display_name": r[1] or r[0],
-                        "icon": r[2] or "",
+                        "name": r[0], "display_name": r[1] or r[0], "icon": r[2] or "",
                     })
             except Exception:
                 pass

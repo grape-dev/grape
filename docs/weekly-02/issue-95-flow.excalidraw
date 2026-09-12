@@ -1,0 +1,1416 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "hermes-agent",
+  "elements": [
+    {
+      "type": "text",
+      "id": "title",
+      "x": 280,
+      "y": 10,
+      "width": 500,
+      "height": 24,
+      "text": "Issue #95 改后：项目知识注入流程",
+      "fontSize": 24,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "originalText": "Issue #95 改后：项目知识注入流程",
+      "autoResize": true
+    },
+    {
+      "type": "text",
+      "id": "label_src",
+      "x": 50,
+      "y": 60,
+      "width": 200,
+      "height": 24,
+      "text": "数据源（三源）",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "originalText": "数据源（三源）",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "src_system",
+      "x": 50,
+      "y": 90,
+      "width": 200,
+      "height": 50,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_src_system",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_src_system",
+      "x": 55,
+      "y": 103,
+      "width": 190,
+      "height": 24,
+      "text": "system (baseline)\ncodegraph 自动生成",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "src_system",
+      "originalText": "system (baseline)\ncodegraph 自动生成",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "src_manual",
+      "x": 300,
+      "y": 90,
+      "width": 200,
+      "height": 50,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_src_manual",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_src_manual",
+      "x": 305,
+      "y": 103,
+      "width": 190,
+      "height": 24,
+      "text": "manual (用户上传)\n知识库页面手动创建",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "src_manual",
+      "originalText": "manual (用户上传)\n知识库页面手动创建",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "src_agent",
+      "x": 550,
+      "y": 90,
+      "width": 200,
+      "height": 50,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_src_agent",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_src_agent",
+      "x": 555,
+      "y": 103,
+      "width": 190,
+      "height": 24,
+      "text": "agent (沉淀知识)\nPOST /api/events/{seq}/knowledge",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "src_agent",
+      "originalText": "agent (沉淀知识)\nPOST /api/events/{seq}/knowledge",
+      "autoResize": true
+    },
+    {
+      "type": "text",
+      "id": "label_filter",
+      "x": 50,
+      "y": 175,
+      "width": 300,
+      "height": 24,
+      "text": "第一步：过滤文件（只做一次）",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "originalText": "第一步：过滤文件（只做一次）",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "fn_load",
+      "x": 50,
+      "y": 205,
+      "width": 200,
+      "height": 60,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_fn_load",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_fn_load",
+      "x": 55,
+      "y": 223,
+      "width": 190,
+      "height": 24,
+      "text": "load_project_info()\n查 DB scope='baseline'\nsource='system'",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "fn_load",
+      "originalText": "load_project_info()\n查 DB scope='baseline'\nsource='system'",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "fn_member",
+      "x": 300,
+      "y": 205,
+      "width": 200,
+      "height": 60,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_fn_member",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_fn_member",
+      "x": 305,
+      "y": 223,
+      "width": 190,
+      "height": 24,
+      "text": "member_files_pi()\nref 表 source='manual'\n+ credential 过滤\n+ key 归一化",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "fn_member",
+      "originalText": "member_files_pi()\nref 表 source='manual'\n+ credential 过滤\n+ key 归一化",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "fn_know",
+      "x": 550,
+      "y": 205,
+      "width": 200,
+      "height": 60,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_fn_know",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_fn_know",
+      "x": 555,
+      "y": 223,
+      "width": 190,
+      "height": 24,
+      "text": "knowledge_files()\nref 表 source='agent'\n+ credential 过滤",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "fn_know",
+      "originalText": "knowledge_files()\nref 表 source='agent'\n+ credential 过滤",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_sys_load",
+      "x": 150,
+      "y": 140,
+      "width": 0,
+      "height": 65,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          65
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "arrow",
+      "id": "a_man_member",
+      "x": 400,
+      "y": 140,
+      "width": 0,
+      "height": 65,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          65
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "arrow",
+      "id": "a_agent_know",
+      "x": 650,
+      "y": 140,
+      "width": 0,
+      "height": 65,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          65
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "rectangle",
+      "id": "ref_table",
+      "x": 425,
+      "y": 290,
+      "width": 120,
+      "height": 35,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#fff3bf",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_ref",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_ref",
+      "x": 430,
+      "y": 295,
+      "width": 110,
+      "height": 24,
+      "text": "scene_knowledge_ref\n三维匹配",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "ref_table",
+      "originalText": "scene_knowledge_ref\n三维匹配",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_member_ref",
+      "x": 400,
+      "y": 265,
+      "width": 25,
+      "height": 25,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          25,
+          25
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "arrow",
+      "id": "a_know_ref",
+      "x": 650,
+      "y": 265,
+      "width": -125,
+      "height": 25,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -125,
+          25
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "text",
+      "id": "label_ret",
+      "x": 50,
+      "y": 340,
+      "width": 300,
+      "height": 24,
+      "text": "返回值: {rel: {content, obs_key}}",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "originalText": "返回值: {rel: {content, obs_key}}",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "ret_load",
+      "x": 50,
+      "y": 365,
+      "width": 200,
+      "height": 45,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#c3fae8",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_ret_load",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_ret_load",
+      "x": 55,
+      "y": 375,
+      "width": 190,
+      "height": 24,
+      "text": "project-graph.md\nproject-capabilities.md",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "ret_load",
+      "originalText": "project-graph.md\nproject-capabilities.md",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "ret_member",
+      "x": 300,
+      "y": 365,
+      "width": 200,
+      "height": 45,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#c3fae8",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_ret_member",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_ret_member",
+      "x": 305,
+      "y": 375,
+      "width": 190,
+      "height": 24,
+      "text": "member/user/xxx.md",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "ret_member",
+      "originalText": "member/user/xxx.md",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "ret_know",
+      "x": 550,
+      "y": 365,
+      "width": 200,
+      "height": 45,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#c3fae8",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_ret_know",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_ret_know",
+      "x": 555,
+      "y": 375,
+      "width": 190,
+      "height": 24,
+      "text": "project/knowledge.md\nissues/5/knowledge.md",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "ret_know",
+      "originalText": "project/knowledge.md\nissues/5/knowledge.md",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_fn_ret1",
+      "x": 150,
+      "y": 265,
+      "width": 0,
+      "height": 100,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          100
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "arrow",
+      "id": "a_fn_ret2",
+      "x": 400,
+      "y": 265,
+      "width": 0,
+      "height": 100,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          100
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "arrow",
+      "id": "a_fn_ret3",
+      "x": 650,
+      "y": 265,
+      "width": 0,
+      "height": 100,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          100
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "text",
+      "id": "label_url",
+      "x": 200,
+      "y": 430,
+      "width": 400,
+      "height": 24,
+      "text": "第二步：基于已过滤结果生成 URL（不查 DB）",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "originalText": "第二步：基于已过滤结果生成 URL（不查 DB）",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "fn_genurl",
+      "x": 280,
+      "y": 460,
+      "width": 240,
+      "height": 50,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_fn_genurl",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_fn_genurl",
+      "x": 285,
+      "y": 473,
+      "width": 230,
+      "height": 24,
+      "text": "generate_file_urls(filtered_files)\nobs_key 非空 → 生成预签名 URL",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "fn_genurl",
+      "originalText": "generate_file_urls(filtered_files)\nobs_key 非空 → 生成预签名 URL",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_ret_url1",
+      "x": 150,
+      "y": 410,
+      "width": 180,
+      "height": 50,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          180,
+          50
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid",
+      "boundElements": [
+        {
+          "id": "t_a_ret_url1",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_a_ret_url1",
+      "x": 210,
+      "y": 425,
+      "width": 60,
+      "height": 20,
+      "text": "content+obs_key",
+      "fontSize": 14,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "a_ret_url1",
+      "originalText": "content+obs_key",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_ret_url2",
+      "x": 400,
+      "y": 410,
+      "width": 0,
+      "height": 50,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "arrow",
+      "id": "a_ret_url3",
+      "x": 650,
+      "y": 410,
+      "width": -260,
+      "height": 50,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -260,
+          50
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "rectangle",
+      "id": "local_note",
+      "x": 580,
+      "y": 460,
+      "width": 170,
+      "height": 50,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#ffc9c9",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_local_note",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_local_note",
+      "x": 585,
+      "y": 473,
+      "width": 160,
+      "height": 24,
+      "text": "本地模式:\nstorage=None\nfile_urls={}\n跳过此步",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "local_note",
+      "originalText": "本地模式:\nstorage=None\nfile_urls={}\n跳过此步",
+      "autoResize": true
+    },
+    {
+      "type": "text",
+      "id": "label_task",
+      "x": 100,
+      "y": 535,
+      "width": 300,
+      "height": 24,
+      "text": "第三步：分配到 task 字段",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "originalText": "第三步：分配到 task 字段",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "task_pif",
+      "x": 50,
+      "y": 565,
+      "width": 280,
+      "height": 60,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_task_pif",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_task_pif",
+      "x": 55,
+      "y": 583,
+      "width": 270,
+      "height": 24,
+      "text": "project_info_files = baseline + member content\nproject_info_file_urls = baseline + member URL",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "task_pif",
+      "originalText": "project_info_files = baseline + member content\nproject_info_file_urls = baseline + member URL",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "task_know",
+      "x": 470,
+      "y": 565,
+      "width": 280,
+      "height": 60,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_task_know",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_task_know",
+      "x": 475,
+      "y": 583,
+      "width": 270,
+      "height": 24,
+      "text": "knowledge_files = agent content\nknowledge_file_urls = agent URL",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "task_know",
+      "originalText": "knowledge_files = agent content\nknowledge_file_urls = agent URL",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_url_task1",
+      "x": 330,
+      "y": 510,
+      "width": -80,
+      "height": 55,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -80,
+          55
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid",
+      "boundElements": [
+        {
+          "id": "t_a_url_task1",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_a_url_task1",
+      "x": 260,
+      "y": 527,
+      "width": 60,
+      "height": 20,
+      "text": "baseline+member",
+      "fontSize": 14,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "a_url_task1",
+      "originalText": "baseline+member",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_url_task2",
+      "x": 480,
+      "y": 510,
+      "width": 80,
+      "height": 55,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          80,
+          55
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid",
+      "boundElements": [
+        {
+          "id": "t_a_url_task2",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_a_url_task2",
+      "x": 490,
+      "y": 527,
+      "width": 60,
+      "height": 20,
+      "text": "agent",
+      "fontSize": 14,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "a_url_task2",
+      "originalText": "agent",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "db_task",
+      "x": 280,
+      "y": 660,
+      "width": 240,
+      "height": 45,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#c3fae8",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_db_task",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_db_task",
+      "x": 285,
+      "y": 670,
+      "width": 230,
+      "height": 24,
+      "text": "存 task 到 DB\n(只存 content，不存 obs_key)",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "db_task",
+      "originalText": "存 task 到 DB\n(只存 content，不存 obs_key)",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_task_db1",
+      "x": 190,
+      "y": 625,
+      "width": 180,
+      "height": 35,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          180,
+          35
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "arrow",
+      "id": "a_task_db2",
+      "x": 610,
+      "y": 625,
+      "width": -180,
+      "height": 35,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -180,
+          35
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "text",
+      "id": "label_worker",
+      "x": 100,
+      "y": 725,
+      "width": 200,
+      "height": 24,
+      "text": "Worker 端执行",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "originalText": "Worker 端执行",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "w_mat_pi",
+      "x": 50,
+      "y": 755,
+      "width": 280,
+      "height": 60,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_w_mat_pi",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_w_mat_pi",
+      "x": 55,
+      "y": 773,
+      "width": 270,
+      "height": 24,
+      "text": "物化到 .project-info/\n.materialize_files()\n降级: URL下载→content→storage",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "w_mat_pi",
+      "originalText": "物化到 .project-info/\n.materialize_files()\n降级: URL下载→content→storage",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "w_mat_know",
+      "x": 470,
+      "y": 755,
+      "width": 280,
+      "height": 60,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_w_mat_know",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_w_mat_know",
+      "x": 475,
+      "y": 773,
+      "width": 270,
+      "height": 24,
+      "text": "物化到 .knowledge/\n.materialize_files()\n降级: URL下载→content→storage",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "w_mat_know",
+      "originalText": "物化到 .knowledge/\n.materialize_files()\n降级: URL下载→content→storage",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_db_w1",
+      "x": 330,
+      "y": 705,
+      "width": -80,
+      "height": 50,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -80,
+          50
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "arrow",
+      "id": "a_db_w2",
+      "x": 490,
+      "y": 705,
+      "width": 90,
+      "height": 50,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          90,
+          50
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "text",
+      "id": "label_prompt",
+      "x": 100,
+      "y": 835,
+      "width": 200,
+      "height": 24,
+      "text": "Prompt 构建",
+      "fontSize": 18,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "originalText": "Prompt 构建",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "prompt_pi",
+      "x": 50,
+      "y": 865,
+      "width": 280,
+      "height": 60,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_prompt_pi",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_prompt_pi",
+      "x": 55,
+      "y": 883,
+      "width": 270,
+      "height": 24,
+      "text": "_build_project_info_section()\n内联 baseline 摘要(2500字)\n有 manual 关联 → 输出 member 引导\nreplace {{PROJECT_INFO_DIR}}",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "prompt_pi",
+      "originalText": "_build_project_info_section()\n内联 baseline 摘要(2500字)\n有 manual 关联 → 输出 member 引导\nreplace {{PROJECT_INFO_DIR}}",
+      "autoResize": true
+    },
+    {
+      "type": "rectangle",
+      "id": "prompt_know",
+      "x": 470,
+      "y": 865,
+      "width": 280,
+      "height": 45,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#fff3bf",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "opacity": 100,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "t_prompt_know",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": "t_prompt_know",
+      "x": 475,
+      "y": 875,
+      "width": 270,
+      "height": 24,
+      "text": "不调 _build_knowledge_section\ndevops 走 worker 物化路径",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "strokeColor": "#1e1e1e",
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "prompt_know",
+      "originalText": "不调 _build_knowledge_section\ndevops 走 worker 物化路径",
+      "autoResize": true
+    },
+    {
+      "type": "arrow",
+      "id": "a_w_prompt1",
+      "x": 190,
+      "y": 815,
+      "width": 0,
+      "height": 50,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "arrow",
+      "id": "a_w_prompt2",
+      "x": 610,
+      "y": 815,
+      "width": 0,
+      "height": 50,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "strokeColor": "#1e1e1e",
+      "strokeWidth": 2,
+      "roughness": 1,
+      "strokeStyle": "solid"
+    },
+    {
+      "type": "text",
+      "id": "note1",
+      "x": 50,
+      "y": 945,
+      "width": 600,
+      "height": 24,
+      "text": "三源职责隔离: system→load_project_info | manual→member_files_pi | agent→knowledge_files",
+      "fontSize": 14,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "originalText": "三源职责隔离: system→load_project_info | manual→member_files_pi | agent→knowledge_files",
+      "autoResize": true
+    },
+    {
+      "type": "text",
+      "id": "note2",
+      "x": 50,
+      "y": 965,
+      "width": 600,
+      "height": 24,
+      "text": "过滤只做一次 → content 和 URL 天然一致 → generate_file_urls 不查 DB 只生成 URL",
+      "fontSize": 14,
+      "fontFamily": 1,
+      "strokeColor": "#495057",
+      "originalText": "过滤只做一次 → content 和 URL 天然一致 → generate_file_urls 不查 DB 只生成 URL",
+      "autoResize": true
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  }
+}

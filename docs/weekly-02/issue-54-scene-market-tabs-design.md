@@ -902,7 +902,7 @@ https://raw.gitcode.com/{owner}/{repo}/archive/refs/heads/{branch}.zip
 
 ### 2.1 测试环境
 
-- 仓库：`grape-dev/grape-skills`（私有），分支 `dev`
+- 仓库：`grape-dev/grape-skills`（私有），分支 `main`
 - token：`configs/scene-sync.json` 的 `gitcode_api_token`
 - 工具：curl + Python httpx
 

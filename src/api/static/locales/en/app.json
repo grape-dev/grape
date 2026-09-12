@@ -20,7 +20,7 @@
     "event_detail": "Event Detail",
     "skill_detail": "Skill Detail",
     "sub_skill_detail": "Sub Skill Detail",
-    "gitcode_repo": "GitCode Repo",
+    "gitcode_repo": "Repository Settings",
     "scene_center": "Project Scenes",
     "scene_skill_market": "Scenes & Skills",
     "scene_market": "Scene Market",
@@ -37,6 +37,7 @@
   },
   "login": {
     "gitcode_login": "Sign in with GitCode",
+    "github_login": "Sign in with GitHub",
     "pwd_login": "← Sign in with username",
     "username": "Username",
     "password": "Password",

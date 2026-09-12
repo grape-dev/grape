@@ -53,6 +53,12 @@
     "path": "qa/qa",
     "description": "pr 技能的平替与增强：PR 全流程审查 + Agent Work Loop 五维工作流审查（任务理解/受控执行/变更验证/可靠交付/经验沉淀）"
   },
+  "impact-analysis": {
+    "name": "PR 影响范围评估",
+    "agent_type": "qa",
+    "path": "qa/impact-analysis",
+    "description": "qa 技能的增强超集：PR 全生命周期审查 + 工作流五维审查 + 影响范围评估（解析 git diff → codegraph 追溯调用链 → 匹配测试用例 → 风险评级），补齐 5 轴审查之外的影响面评估视角"
+  },
   "skill-pr": {
     "name": "技能仓库 PR 审查",
     "agent_type": "qa",
