@@ -1621,6 +1621,12 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                     _sync_issue_comments_to_conversation(_repo_key, _issue_num, _token, _agent_type, _repo)
                 except Exception as _se:
                     log.warning(f"complete_task sync issue comments failed: {_se}")
+            # 5. VOD 智能推荐完成 → redispatch（remote worker 模式下 _execute_agent 不执行，此处补触发）
+            if _agent_type == "vod" and _result_text and _issue_id:
+                try:
+                    _handle_vod_recommend_complete(_repo_key, _issue_id, _result_text, task_id, task, _token)
+                except Exception as _se:
+                    log.warning(f"complete_task vod recommend handler failed: {_se}")
         except Exception as _pe:
             log.warning(f"complete_task post-completion hooks failed: {_pe}")
     # 可观察性埋点：任务到达终态
@@ -1652,6 +1658,75 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                           task_id=task_id, payload={"exit_code": exit_code}))
     except Exception:
         pass
+
+
+def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: str,
+                                   task_id: str, task: dict, repo_gitcode_token: str = ""):
+    """VOD 智能推荐完成处理：解析 scene_id → 持久化 → 重派 VOD。
+
+    remote worker 模式下 _execute_agent 不执行，此函数在 complete_task 中补触发，
+    与 _execute_agent_inner 中的逻辑等价（event_pipeline.py L2261-2310）。
+    """
+    import re as _re
+    # 查 task prompt 判断是否为智能推荐任务
+    _task_prompt = ""
+    try:
+        from src.session_manager import db as _rdb, db_lock as _rdb_lock
+        with _rdb_lock:
+            c = _rdb.cursor()
+            c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
+            _trow = c.fetchone()
+            _task_prompt = _trow[0] if _trow else ""
+    except Exception:
+        pass
+    if not (_task_prompt and "智能推荐器" in _task_prompt and "{{SKILL_DIR}}" not in _task_prompt):
+        return  # 不是智能推荐任务，跳过
+
+    _rec_scene = ""
+    try:
+        from src.api.event_store import parse_agent_output_json
+        _scene_out = parse_agent_output_json(result_text) or {}
+        _rec_scene = _scene_out.get("scene_id", "") or ""
+    except Exception:
+        pass
+    if not _rec_scene:
+        _m_rec = _re.search(r'"scene_id"\s*:\s*"([^"]*)"', result_text)
+        _rec_scene = _m_rec.group(1) if _m_rec else ""
+
+    if not _rec_scene:
+        log.info(f"VOD recommend: no scene_id for {issue_id}, pipeline terminated")
+        return
+
+    from src.api.session_store import set_issue_scene
+    from src.runtime.engine_select import _repo_user_id
+    _vod_uid = _repo_user_id(repo_key)
+    set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
+    log.info(f"VOD recommend: scene_id={_rec_scene} set for {issue_id}")
+
+    from src.api.pipeline_config import get_first_node, get_pipeline_config
+    _vod_node = get_first_node(_rec_scene)
+    if not _vod_node:
+        _pcfg = get_pipeline_config(_rec_scene, repo_key=repo_key)
+        _nodes = (_pcfg or {}).get("nodes", [])
+        if _nodes:
+            _vod_node = _nodes[0]
+    if not _vod_node:
+        log.warning(f"VOD recommend: no vod node for scene={_rec_scene}, skip redispatch")
+        return
+
+    _vod_skill = _vod_node.get("skill", "vod")
+    log.info(f"VOD recommend: redispatch VOD with skill={_vod_skill} for {issue_id}")
+
+    # 构建 evt 给 _redispatch_vod_after_recommend（prompt_builder 需要 payload 字段）
+    _issue_num = str(issue_id).lstrip("#")
+    _evt = {
+        "repository": task.get("account") or "",
+        "issue_id": issue_id,
+        "payload": {"issue_number": _issue_num, "issue": {"number": int(_issue_num) if _issue_num.isdigit() else _issue_num}},
+    }
+    _runtime_id = task.get("runtime_id") or 0
+    from src.api.event_pipeline import _redispatch_vod_after_recommend
+    _redispatch_vod_after_recommend(repo_key, issue_id, _vod_skill, _evt, _runtime_id, repo_gitcode_token)
 
 
 def fail_task(task_id, error, exit_code=-1):

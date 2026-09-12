@@ -245,7 +245,7 @@ window._openBoardDetail = function(taskId) {
 window._jumpToPipeline = function(nodeId) {
   const t = window._currentDetailTask;
   if (!t || !t.repo_key) { console.warn('jumpToPipeline: no current detail task'); return; }
-  const repoKey = t.repo_key.replace('gitcode:', '');
+  const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
   const parts = repoKey.split('/');
   if (parts.length < 2) { console.warn('jumpToPipeline: bad repo_key', t.repo_key); return; }
   // 设置当前 repo 到 localStorage（app.currentRepo 从这里读）
@@ -265,7 +265,7 @@ window._jumpToNodeEvent = function(seq) {
   // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
   const t = window._currentDetailTask;
   if (t && t.repo_key) {
-    const repoKey = t.repo_key.replace('gitcode:', '');
+    const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
     const parts = repoKey.split('/');
     if (parts.length >= 2) {
       const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
@@ -280,7 +280,7 @@ window._jumpToNodeEvent = function(seq) {
 window._jumpToPipePage = function() {
   const t = window._currentDetailTask;
   if (!t || !t.repo_key) { console.warn('jumpToPipePage: no current detail task'); return; }
-  const repoKey = t.repo_key.replace('gitcode:', '');
+  const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
   const parts = repoKey.split('/');
   if (parts.length < 2) return;
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
@@ -568,7 +568,7 @@ function _render() {
       <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">
         <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
-        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key}</div>
+        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}</div>
       </div>
       <span class="tsk-tag ${si.cls}">${si.text}</span>
     </div>`;
@@ -709,8 +709,8 @@ function _detailHtml(t) {
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.status')}</span><b style="${_valueStyle};color:${isDone?'#34c759':isCancelled?'#86868b':isProc?'#3b82f6':'#86868b'}">${tagText}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.task_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">Issue</span><b style="${_valueStyle}"><a href="https://gitcode.com/${t.repo_key}/issues/${t.issue_number}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">Issue</span><b style="${_valueStyle}"><a href="https://${t.repo_key.startsWith('github:') ? 'github.com' : 'gitcode.com'}/${t.repo_key.replace(/^(github|gitcode):/, '')}/issues/${t.issue_number}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">Stage</span><b style="${_valueStyle}">${_stageLabel}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.pipeline_scene')||'流水线场景'}</span><b style="${_valueStyle}">${sceneName}${sceneBadge}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.task_mode')}</span><b style="${_valueStyle}">${subtaskBadge}${parentIssue}</b></div>

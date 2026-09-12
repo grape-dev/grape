@@ -1621,7 +1621,7 @@ def _cleanup_old_latency_logs():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM api_latency_log WHERE created_at < datetime('now', '-7 days')")
+            c.execute("DELETE FROM api_latency_log WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)")
             deleted = c.rowcount
             db.commit()
         if deleted:
@@ -2476,8 +2476,9 @@ def _migrate_tables():
             c = db.cursor()
             _ensure_column(c, "user_accounts", "gitcode_publish_repo", "TEXT DEFAULT ''")
             _ensure_column(c, "user_accounts", "github_publish_repo", "TEXT DEFAULT ''")
+            _ensure_column(c, "user_accounts", "github_login", "TEXT DEFAULT ''")
             db.commit()
-            log.info("Added gitcode_publish_repo / github_publish_repo columns to user_accounts")
+        log.info("Added gitcode_publish_repo / github_publish_repo / github_login columns to user_accounts")
     except Exception as e:
         log.warning(f"Add user_accounts publish repo columns failed: {e}")
     # ===== managed_repos 部署URL列（weekly-01 合并） =====
