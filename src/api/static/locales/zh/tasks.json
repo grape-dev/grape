@@ -1,5 +1,7 @@
 {
   "page_title": "任务中心",
+  "view_mine": "我的任务",
+  "view_repo_all": "仓库全部",
   "loading": "加载中...",
   "load_failed": "加载失败: {{msg}}",
   "view_list": "列表",
