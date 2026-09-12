@@ -1,7 +1,8 @@
-"""仓库路由：列表、托管、移除、同步"""
-from fastapi import APIRouter, HTTPException, Depends
+"""仓库路由：列表、托管、移除、同步 + git 平台凭据/工作区（方案③ CLI 支撑）"""
+import os
+from fastapi import APIRouter, HTTPException, Depends, Header, Query
 from pydantic import BaseModel
-from src.config import log
+from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
 from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token
@@ -1114,3 +1115,109 @@ def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfi
 
     set_scene_recommend_config(repo_key, body.fallback_scene.strip(), body.rules or [])
     return {"message": "智能推荐规则已保存"}
+
+
+# ===================== git 传输支撑（方案③，grape 平台私有能力）=====================
+# git-credential / workspace 是 grape 自身能力（非 gitcode/github/gitlab 平台原生），
+# 故置于 /api/repos（grape 平台业务）而非 /api/git-repo（平台透传）。
+
+_SUPPORTED_PROVIDERS = {"gitcode", "github"}
+_GITCODE_API_BASE = "https://gitcode.com/api/v5"
+_GITHUB_API_BASE = "https://api.github.com"
+_CREDENTIAL_TTL = 600
+
+
+def _repo_provider(header: str = Header("", alias="X-Git-Provider"),
+                   provider: str = Query("", description="gitcode/github，缺省 gitcode")) -> str:
+    p = (header or "").strip() or (provider or "").strip() or "gitcode"
+    if p not in _SUPPORTED_PROVIDERS:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": f"Git provider 未接入: {p}"})
+    return p
+
+
+def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "gitcode") -> str:
+    """平台 token 解析（仅会话级临时 token tk_；用户 API Key / Web JWT 不适用）。
+
+    chat agent → 用户 token；devops 事件 agent → 仓库 bot token；一种缺失交叉回退；均缺失 502。
+    """
+    if user.get("auth_type") != "session_token":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
+    from src.repo_key import to_repo_key
+
+    if provider == "github":
+        rk = to_repo_key(f"github:{owner}/{repo}")
+        def _bot():
+            try:
+                from src.user.db import get_github_token
+                return get_github_token(repo_key=rk) or ""
+            except Exception:
+                return ""
+        def _user():
+            try:
+                from src.api.deps import get_user_github_token
+                username = user.get("username") or ""
+                if not username and user.get("id", 0) > 0:
+                    from src.user.db import get_user
+                    username = (get_user(user["id"]) or {}).get("username", "")
+                return get_user_github_token(username) or ""
+            except Exception:
+                return ""
+    else:
+        rk = to_repo_key(f"{owner}/{repo}")
+        def _bot():
+            try:
+                from src.user.db import get_gitcode_token
+                return get_gitcode_token(repo_key=rk) or ""
+            except Exception:
+                return ""
+        def _user():
+            try:
+                from src.api.deps import get_user_token_with_refresh
+                uid = user.get("id") or 0
+                username = user.get("username") or ""
+                if not username and uid > 0:
+                    from src.user.db import get_user
+                    username = (get_user(uid) or {}).get("username", "")
+                return get_user_token_with_refresh(username, user_id=uid)
+            except Exception:
+                return ""
+
+    if user.get("agent_type") == "chat":
+        tok = _user()
+        if not tok:
+            tok = _bot()
+    else:
+        tok = _bot()
+        if not tok:
+            tok = _user()
+    if tok:
+        return tok
+    _vcs = "GitHub" if provider == "github" else "GitCode"
+    raise HTTPException(status_code=502, detail={"code": 502, "message": f"{_vcs} 仓库 token 解析失败"})
+
+
+@router.get("/{owner}/{repo}/git-credential", operation_id="repos_git_credential",
+            summary="一次性 git 平台凭据（方案③ CLI 内部使用，TTL 过期）")
+def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
+                            p: str = Depends(_repo_provider)):
+    """返回 CLI 本地执行 git 所需的平台凭据（一次性/短期，进程内使用不落盘）。
+
+    gitcode：Basic 用 username=`x-access-token`、password=配置的 gitcode token。
+    """
+    token = _repo_platform_token(owner, repo, user, p)
+    _gh = "github.com" if p == "github" else "gitcode.com"
+    return {
+        "provider": p,
+        "username": "x-access-token",
+        "password": token,
+        "clone_url": f"https://{_gh}/{owner}/{repo}.git",
+        "expires_in": _CREDENTIAL_TTL,
+    }
+
+
+@router.get("/{owner}/{repo}/workspace", operation_id="repos_workspace", summary="仓库工作区路径（CLI 本地 git 用）")
+def get_repo_workspace(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
+                       p: str = Depends(_repo_provider)):
+    ws = os.path.join(WORKSPACE_DIR, owner, repo)
+    _gh = "github.com" if p == "github" else "gitcode.com"
+    return {"workspace": ws, "clone_url": f"https://{_gh}/{owner}/{repo}.git"}

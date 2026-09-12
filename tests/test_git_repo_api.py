@@ -74,14 +74,14 @@ def test_repo_info_workspace(_client, gitcode_calls):
     client = _client
     assert _get(client, f"/api/git-repo/{OWNER}/{REPO}").status_code == 200
     assert gitcode_calls[-1]["method"] == "GET" and gitcode_calls[-1]["url"].endswith(f"/repos/{OWNER}/{REPO}")
-    ws = _get(client, f"/api/git-repo/{OWNER}/{REPO}/workspace").json()
+    ws = _get(client, f"/api/repos/{OWNER}/{REPO}/workspace").json()
     assert ws["clone_url"] == f"https://gitcode.com/{OWNER}/{REPO}.git"
     assert "workspace" in ws
 
 
 def test_git_credential(_client):
     client = _client
-    r = client.get(f"/api/git-repo/{OWNER}/{REPO}/git-credential")
+    r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
     assert r.status_code == 200
     cred = r.json()
     assert cred["provider"] == "gitcode"

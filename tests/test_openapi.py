@@ -38,6 +38,8 @@ EXPECTED_PUBLIC = {
     "repos_member": ("get", "/api/repos/member"),
     "repos_managed": ("get", "/api/repos/managed"),
     "repos_deploy_url": ("get", "/api/repos/deploy-url/{owner}/{repo_name}"),
+    "repos_git_credential": ("get", "/api/repos/{owner}/{repo}/git-credential"),
+    "repos_workspace": ("get", "/api/repos/{owner}/{repo}/workspace"),
     "agents_detail": ("get", "/api/agents/{name}/{owner}/{repo}"),
     "chat_conversations": ("get", "/api/chat/conversations"),
     "chat_messages": ("get", "/api/chat/messages/{conv_id}"),
@@ -48,10 +50,8 @@ EXPECTED_PUBLIC = {
     "knowledge_content": ("get", "/api/knowledge/content"),
     "knowledge_context": ("get", "/api/knowledge/context"),
     "events_detail": ("get", "/api/events/detail/{seq}"),
-    # ===== Issue-45 M3：Git 仓库统一接口 =====
+    # ===== Issue-45 M3：Git 仓库统一接口（/api/git-repo 平台透传；git-credential/workspace 归 /api/repos 平台）=====
     "gitrepo_repo": ("get", "/api/git-repo/{owner}/{repo}"),
-    "gitrepo_workspace": ("get", "/api/git-repo/{owner}/{repo}/workspace"),
-    "gitrepo_git_credential": ("get", "/api/git-repo/{owner}/{repo}/git-credential"),
     "gitrepo_branches": ("get", "/api/git-repo/{owner}/{repo}/branches"),
     "gitrepo_commits": ("get", "/api/git-repo/{owner}/{repo}/commits"),
     "gitrepo_contents": ("get", "/api/git-repo/{owner}/{repo}/contents/{path}"),
