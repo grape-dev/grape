@@ -39,7 +39,13 @@
     "running": "进行中",
     "recent_n": "最近 {{n}} 条",
     "history_title": "事件历史",
-    "table_actor": "Actor"
+    "table_actor": "Actor",
+    "search_placeholder": "搜索事件序号/Issue编号/类型/标题...",
+    "search_no_result": "无匹配事件",
+    "prev_page": "‹ 上一页",
+    "next_page": "下一页 ›",
+    "rows_per_page": "每页",
+    "page_info": "共 {{total}} 条 — 第 {{page}}/{{pages}} 页"
   },
   "config": {
     "im_title": "IM 配置",
