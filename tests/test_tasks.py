@@ -58,6 +58,8 @@ def setup_module():
         c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token) VALUES (?,?,?,?,?,?)",
                   ("gitcode:org/test", "org", "test", "org/test", 1, _BOT_TOKEN))
         db.commit()
+    # 建 user_repos 成员关系（repo_all 走 get_managed_repos 成员校验，防 IDOR 加固后依赖此关系）
+    user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test", True, True)
 
 
 def teardown_module():
@@ -67,6 +69,7 @@ def teardown_module():
         c = db.cursor()
         c.execute("DELETE FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user')")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('younger_eric','bob')")
+        c.execute("DELETE FROM user_repos WHERE user_id IN (SELECT id FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user'))")
         db.commit()
 
 
@@ -370,11 +373,11 @@ class TestMine:
         r = client.get("/api/tasks/mine?repo_key=" + "org/repoA", headers=_headers)
         assert r.status_code == 200
         tasks = r.json()["tasks"]
-        assert all(t["repo_key"] == "org/repoA" for t in tasks)
+        assert all(t["repo_key"].endswith("org/repoA") for t in tasks)
         assert len(tasks) == 1
         # 不传 repo → 全部
         r_all = client.get("/api/tasks/mine", headers=_headers)
-        assert all(t["repo_key"] in ("org/repoA", "org/repoB") for t in r_all.json()["tasks"])
+        assert all(t["repo_key"].endswith(("org/repoA", "org/repoB")) for t in r_all.json()["tasks"])
         assert len(r_all.json()["tasks"]) == 2
 
     def test_mine_sort_order(self):
@@ -644,3 +647,161 @@ class TestTaskLifecycle:
         assert r.status_code == 200
         statuses = [t["status"] for t in r.json()["tasks"]]
         assert "processing" in statuses
+
+
+class TestRepoAllTasks:
+    """Issue #72: GET /api/tasks/repo/{owner}/{repo} — 仓库全部任务（不限 user_id）"""
+
+    def test_repo_all_requires_auth(self):
+        r = client.get("/api/tasks/repo/org/test")
+        assert r.status_code == 401
+
+    def test_repo_all_returns_all_users_tasks(self):
+        """返回该仓库所有任务，不限 user_id"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 70))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (9999, "other_user", "gitcode:org/test", 71))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (0, "bot_user", "gitcode:org/test", 72))
+            db.commit()
+        r = client.get("/api/tasks/repo/org/test", headers=_headers)
+        assert r.status_code == 200
+        tasks = r.json()["tasks"]
+        issue_nums = [t["issue_number"] for t in tasks]
+        assert 70 in issue_nums, "应包含当前用户任务"
+        assert 71 in issue_nums, "应包含其他用户任务"
+        assert 72 in issue_nums, "应包含 user_id=0 的任务"
+        # 所有任务都是 org/test 仓库的
+        assert all(t["repo_key"] == "org/test" for t in tasks)
+
+    def test_repo_all_status_filter(self):
+        """status 筛选正常"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 80))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, completed_reason, completed_at) VALUES (?,?,?,?, 'completed', 'issue_closed', datetime('now'))",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 81))
+            db.commit()
+        r_active = client.get("/api/tasks/repo/org/test?status=active", headers=_headers)
+        r_done = client.get("/api/tasks/repo/org/test?status=completed", headers=_headers)
+        assert all(t["status"] == "active" for t in r_active.json()["tasks"])
+        assert all(t["status"] == "completed" for t in r_done.json()["tasks"])
+        assert 80 in [t["issue_number"] for t in r_active.json()["tasks"]]
+        assert 81 in [t["issue_number"] for t in r_done.json()["tasks"]]
+
+    def test_repo_all_includes_assignee(self):
+        """返回的任务包含 assignee 字段"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 85))
+            db.commit()
+        r = client.get("/api/tasks/repo/org/test", headers=_headers)
+        assert r.status_code == 200
+        tasks = r.json()["tasks"]
+        assert len(tasks) > 0
+        assert all("assignee" in t for t in tasks), "每个任务应包含 assignee 字段"
+        assert tasks[0]["assignee"] == "younger_eric"
+
+    def test_repo_all_only_returns_target_repo(self):
+        """只返回指定仓库的任务，不包含其他仓库"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 90))
+            db.commit()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/other", 91))
+            db.commit()
+        r = client.get("/api/tasks/repo/org/test", headers=_headers)
+        assert r.status_code == 200
+        tasks = r.json()["tasks"]
+        assert all(t["repo_key"] == "org/test" for t in tasks)
+        assert 91 not in [t["issue_number"] for t in tasks]
+
+    def test_repo_all_sort_order(self):
+        """sort_order desc/asc 排序正常"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            for i in range(3):
+                c.execute(
+                    "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) "
+                    "VALUES (?,?,?,?,?, datetime('now', ?))",
+                    (_uid["id"], "younger_eric", "gitcode:org/test", 100 + i, "active",
+                     f"-{i} minutes"))
+            db.commit()
+        r_desc = client.get("/api/tasks/repo/org/test?mode=time&sort_order=desc", headers=_headers)
+        got_desc = [t["issue_number"] for t in r_desc.json()["tasks"]]
+        assert got_desc == [100, 101, 102], f"desc 应最新在前，实际 {got_desc}"
+        r_asc = client.get("/api/tasks/repo/org/test?mode=time&sort_order=asc", headers=_headers)
+        got_asc = [t["issue_number"] for t in r_asc.json()["tasks"]]
+        assert got_asc == [102, 101, 100], f"asc 应最早在前，实际 {got_asc}"
+
+    def test_repo_all_empty_repo(self):
+        """有权限但无任务的仓库返回空列表"""
+        _clean_tasks()
+        r = client.get("/api/tasks/repo/org/test", headers=_headers)
+        assert r.status_code == 200
+        assert r.json()["tasks"] == []
+
+    def test_repo_all_non_member_forbidden(self):
+        """未托管/未加入该仓库的用户访问「仓库全部」应 403（防 IDOR）"""
+        _clean_tasks()
+        outsider = user_db.create_user("outsider_task_user", "test123")
+        if not outsider:
+            outsider = user_db.get_user_by_username("outsider_task_user")
+        try:
+            with db_lock:
+                db.cursor().execute("DELETE FROM user_repos WHERE user_id=?", (outsider["id"],))
+                db.commit()
+            tok = _jwt_access_token(outsider["id"], outsider["username"])
+            r = client.get("/api/tasks/repo/org/test", headers={"Authorization": f"Bearer {tok}"})
+            assert r.status_code == 403, f"非成员应 403，实际 {r.status_code}"
+        finally:
+            user_db.delete_user(outsider["id"])
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM user_repos WHERE user_id=?", (outsider["id"],))
+                c.execute("DELETE FROM user_accounts WHERE username='outsider_task_user'")
+                db.commit()
+
+    def test_repo_all_assignees_filter(self):
+        """assignees 筛选（单值 / 多值逗号分隔）"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            for _assignee, _num in (("alice", 120), ("bob", 121), ("carol", 122)):
+                c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                          (_uid["id"], _assignee, "gitcode:org/test", _num))
+            db.commit()
+        r1 = client.get("/api/tasks/repo/org/test?assignees=alice", headers=_headers)
+        assert [t["issue_number"] for t in r1.json()["tasks"]] == [120]
+        r2 = client.get("/api/tasks/repo/org/test?assignees=alice,bob", headers=_headers)
+        got = sorted(t["issue_number"] for t in r2.json()["tasks"])
+        assert got == [120, 121], f"多值筛选应返回 alice+bob 任务，实际 {got}"
+
+    def test_mine_assignees_filter(self):
+        """mine 视图 assignees 筛选（共享 _build_assignee_filter）"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 130))
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "someone_else", "gitcode:org/test", 131))
+            db.commit()
+        r = client.get("/api/tasks/mine?assignees=younger_eric", headers=_headers)
+        got = [t["issue_number"] for t in r.json()["tasks"]]
+        assert got == [130], f"assignees 筛选应只返回 younger_eric，实际 {got}"

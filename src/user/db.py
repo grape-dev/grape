@@ -339,7 +339,7 @@ def get_credentials(user_id: int) -> list[dict]:
     """获取用户凭据（从 user_accounts 表读取）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT * FROM user_accounts WHERE id=?", (user_id,))
+        c.execute(f"SELECT {','.join(USER_ACCOUNT_FIELDS)} FROM user_accounts WHERE id=?", (user_id,))
         row = c.fetchone()
     if not row:
         return []

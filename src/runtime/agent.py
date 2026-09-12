@@ -47,6 +47,7 @@ _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
+    "codex": ["codex", "exec", "--json", "--sandbox", "workspace-write", "hello"],
     "cursor": ["cursor", "run", "hello"],
     "codex": ["codex", "exec", "--json", "hello"],
 }
@@ -192,7 +193,27 @@ def _collect_worker_metrics() -> dict:
     采集失败的字段保持 0.0 / 空字符串。
     CPU 使用两次调用的差值计算，首次调用返回 0.0（无基准）。
     """
-    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "load_avg": ""}
+    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "load_avg": "", "spec": ""}
+
+    # spec: CPU 核数 + 总内存（如 "4C8G"），首次采集后缓存
+    if not hasattr(_collect_worker_metrics, "_spec"):
+        try:
+            _cpu_count = os.cpu_count() or 1
+            _mem_kb = 0
+            with open("/proc/meminfo") as f:
+                for _line in f:
+                    if _line.startswith("MemTotal:"):
+                        _mem_kb = int(_line.split()[1])
+                        break
+            if _mem_kb > 0:
+                _mem_gb = _mem_kb * 1024 // (1024**3)
+                _mem_label = f"{_mem_gb}G" if _mem_gb >= 1 else f"{_mem_kb // 1024}MB"
+            else:
+                _mem_label = "?"
+            _collect_worker_metrics._spec = f"{_cpu_count}C{_mem_label}"
+        except Exception:
+            _collect_worker_metrics._spec = ""
+    metrics["spec"] = _collect_worker_metrics._spec
 
     # CPU: 读 /proc/stat，用上次缓存值计算差值（无 sleep，非阻塞）
     try:
@@ -595,6 +616,7 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
     patterns = {
         "hermes": ["hermes acp", "hermes chat", "hermes -z"],
         "codearts": ["codearts run"],
+        "codex": ["codex exec"],
     }.get(backend, ["opencode run"])
     killed_any = False
     for pattern in patterns:

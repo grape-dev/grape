@@ -289,6 +289,14 @@ install_bwrap() {
 }
 install_bwrap
 
+# ===== 5.6 安装 sshpass（SRE 远程部署密码认证；root 自动装）=====
+if [ "$ROOT_MODE" = "1" ]; then
+  if ! command -v sshpass >/dev/null 2>&1; then
+    apt-get install -y -qq sshpass 2>/dev/null || yum install -y -q sshpass 2>/dev/null || true
+    log "sshpass 已安装（SRE 远程部署密码认证）"
+  fi
+fi
+
 # ===== 6. 生成启动脚本并启动 =====
 # systemd 可用性检测：容器环境（如 DevSpace）通常无 systemd（PID 1 非 systemd），
 # 此时 root 模式也必须回退到 nohup/setsid，否则 systemctl restart 会 fail 退出。

@@ -103,6 +103,43 @@ class TestDetail:
         assert data["status"] == "idle"
         assert data["metrics"]["total_events"] == 1
         assert data["repo_gitcode_token"] == "tok"
+        assert data["highlight_issue_id"] == ""
+
+    def test_detail_with_issue_number_highlight(self, _client):
+        """Issue #108: issue_number 参数归一化为 #N 并在响应中返回"""
+        _seed_agent_types()
+        rk = "gitcode:org/agih1"
+        _seed_session(rk, "coding")
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, issue_id) VALUES (?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "t1", "{}", "completed", "#108"))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, issue_id) VALUES (?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "t2", "{}", "completed", "#99"))
+            db.commit()
+        r = _client.get("/api/agents/coding/org/agih1?issue_number=108")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["highlight_issue_id"] == "#108"
+        assert len(data["recent_events"]) == 2
+
+    def test_detail_with_issue_number_strips_hash(self, _client):
+        """Issue #108: issue_number 带不带 # 都能归一化"""
+        _seed_agent_types()
+        rk = "gitcode:org/agih2"
+        _seed_session(rk, "qa")
+        r = _client.get("/api/agents/qa/org/agih2?issue_number=%2342")
+        assert r.status_code == 200
+        assert r.json()["highlight_issue_id"] == "#42"
+
+    def test_detail_without_issue_number_no_highlight(self, _client):
+        """Issue #108: 不传 issue_number 时 highlight_issue_id 为空（向后兼容）"""
+        _seed_agent_types()
+        rk = "gitcode:org/agih3"
+        _seed_session(rk, "sre")
+        r = _client.get("/api/agents/sre/org/agih3")
+        assert r.status_code == 200
+        assert r.json()["highlight_issue_id"] == ""
 
     def test_detail_vod_conversations(self, _client):
         _seed_agent_types()

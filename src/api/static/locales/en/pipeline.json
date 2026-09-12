@@ -45,5 +45,6 @@
   "stat_active": "Active",
   "stat_today": "Today",
   "stat_failed": "Failed",
-  "tasks_without_events_hint": "Some tasks have not generated pipeline events yet"
+  "tasks_without_events_hint": "Some tasks have not generated pipeline events yet",
+  "search_placeholder": "Search issue, title, owner…"
 }
