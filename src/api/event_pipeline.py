@@ -712,7 +712,7 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
             ), name=f"sub-{agent_type}-{seq}")
         else:
             from src.runtime.engine_select import _repo_user_id
-            _sub_uid = _repo_user_id(repo_key)
+            _sub_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
                                    skill_id, skill_path, engine_id, issue_id, user_id=_sub_uid)
         log.info(f"Pipeline subscription: dispatched seq={seq} agent={agent_type} mode={kind}")
@@ -1071,10 +1071,11 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         except Exception:
             pass
     # scene_user_id=0 时兜底反查（旧数据 is_join=0 导致 scene_user_id 未写入）
+    # 优先用 issue 创建者（actor）查 unified_user_mapping，避免多人仓库取错用户
     if not _issue_scene_uid:
         try:
             from src.runtime.engine_select import _repo_user_id
-            _issue_scene_uid = _repo_user_id(repo_key)
+            _issue_scene_uid = _repo_user_id(repo_key, issue_creator=actor)
         except Exception:
             pass
     log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
@@ -1277,9 +1278,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # Plugin 模式 + engine_id=0：无主池任务（广播），多个引擎通过 claim_by_tag 竞争认领。
     # 仅 queue_remote 模式走广播；auto/direct 模式走本机 direct（自动选引擎）。
     # 场景 engine_runtime_ids 限定广播范围（写入 pool_engine_ids 字段）。
+    # Issue #112 修复：所有模式都获取 pool_engine_ids，确保场景引擎绑定生效
+    _pool_engine_ids = get_scene_pool_engine_ids(_issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
     if engine_id == 0 and is_plugin_mode() and get_execution_mode() == EXEC_MODE_REMOTE:
         _be = backend or "opencode"
-        _pool_engine_ids = get_scene_pool_engine_ids(_issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
         # 智能推荐模式：强制限定 opencode 引擎认领（推荐任务轻量，opencode 最快）
         if _is_scene_recommend:
             try:
@@ -1344,7 +1346,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
         _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
-                               skill_id, skill_path, engine_id, issue_id, user_id=_issue_scene_uid,
+                               skill_id, skill_path, engine_id, issue_id,
+                               pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid,
                                is_scene_recommend=_is_scene_recommend)
     elif _be and seq > 0 and (skill_name or _is_scene_recommend):
         # 智能推荐模式 skill_name 可为空（纯 prompt）

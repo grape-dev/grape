@@ -20,12 +20,12 @@ EXEC_MODE_REMOTE = "queue_remote"
 _DEFAULT_MODE = EXEC_MODE_AUTO
 
 
-def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = "") -> bool:
+def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = "", task_user_id: int = 0) -> bool:
     """检查 pool_engine_ids 中的引擎是否有任何一个能真正认领该 tag 的任务。
 
-    检查三个维度：在线 + 有 tag 能力（engine_capabilities）+ scope 匹配（repo scope 的 owner_id 对齐 repo_key）。
+    检查维度：在线 + healthy + probe_status + 有 tag 能力 + scope 匹配 + 并发槽。
     返回 True = 池里有能干的引擎，不应清空 pool_engine_ids。
-    返回 False = 池里全不可达（离线/无 tag/scope 不匹配），应清空 pool_engine_ids 放行。
+    返回 False = 池里全不可达，应清空 pool_engine_ids 放行。
     """
     from src.repo_key import from_repo_key
     _repo_norm = (from_repo_key(repo_key) or "").strip()
@@ -33,10 +33,16 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
         try:
             with db_lock:
                 c = db.cursor()
-                # 引擎在线？
-                c.execute("SELECT status FROM agent_runtimes WHERE id=?", (eid,))
+                # 引擎在线 + healthy + probe 正常？
+                c.execute("SELECT status, healthy, probe_status FROM agent_runtimes WHERE id=?", (eid,))
                 r = c.fetchone()
                 if not r or (r[0] or "") != "online":
+                    continue
+                _healthy = r[1] if r[1] is not None else 0
+                _probe = r[2] or ""
+                if _healthy != 1:
+                    continue
+                if _probe not in ("ok", "pending", ""):
                     continue
                 # 有 tag 能力？
                 c.execute(
@@ -46,17 +52,36 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                     continue
                 # scope 匹配？
                 c.execute(
-                    "SELECT rc.scope, rc.owner_id FROM agent_runtimes r "
+                    "SELECT rc.scope, rc.owner_id, rc.owner_name FROM agent_runtimes r "
                     "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id WHERE r.id=?", (eid,))
                 sr = c.fetchone()
                 if sr:
                     _scope = sr[0] or "global"
                     _owner = sr[1] or ""
+                    _owner_name = sr[2] or ""
                     if _scope == "repo" and _owner:
                         _owner_norm = (from_repo_key(_owner) or "").strip()
                         if _repo_norm and _owner_norm != _repo_norm:
                             continue  # repo scope 但仓库不匹配
-                # 三项全部通过：有能干的引擎
+                    elif _scope == "user" and task_user_id > 0 and _owner_name:
+                        # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
+                        try:
+                            c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1", (_owner_name,))
+                            _ur = c.fetchone()
+                            _engine_uid = _ur[0] if _ur else 0
+                            if _engine_uid != task_user_id:
+                                continue  # user scope 但用户不匹配
+                        except Exception:
+                            pass
+                # 并发槽可用？
+                c.execute("SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?", (eid,))
+                _br = c.fetchone()
+                if _br:
+                    _busy = _br[0] or 0
+                    _max = _br[1] or 1
+                    if _busy >= _max:
+                        continue  # 已满载
+                # 全部通过：有能干的引擎
                 return True
         except Exception:
             continue
@@ -884,15 +909,17 @@ def claim(runtime_id) -> dict | None:
                             # 全部不可达时清空 pool_engine_ids，让 task 可被任意引擎认领
                             _task_tag = ""
                             _task_repo = ""
+                            _task_uid = 0
                             try:
-                                c.execute("SELECT pool_tag, repo_key FROM agent_tasks WHERE id=?", (task_id,))
+                                c.execute("SELECT pool_tag, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
                                 _trow = c.fetchone()
                                 if _trow:
                                     _task_tag = _trow[0] or ""
                                     _task_repo = _trow[1] or ""
+                                    _task_uid = _trow[2] or 0
                             except Exception:
                                 pass
-                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo)
+                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo, task_user_id=_task_uid)
                             if not _has_capable:
                                 log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
                                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
@@ -1128,15 +1155,17 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                             # 全部不可达时清空 pool_engine_ids，让 task 可被任意引擎认领
                             _task_tag = ""
                             _task_repo = ""
+                            _task_uid = 0
                             try:
-                                c.execute("SELECT pool_tag, repo_key FROM agent_tasks WHERE id=?", (task_id,))
+                                c.execute("SELECT pool_tag, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
                                 _trow = c.fetchone()
                                 if _trow:
                                     _task_tag = _trow[0] or ""
                                     _task_repo = _trow[1] or ""
+                                    _task_uid = _trow[2] or 0
                             except Exception:
                                 pass
-                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo)
+                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo, task_user_id=_task_uid)
                             if not _has_capable:
                                 log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
                                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
