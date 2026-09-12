@@ -323,8 +323,8 @@ Issue (#5, stage=qa)
 
 **设计建议**：
 - **新增 `POST /api/issues`（创建）**：作为对外统一入口，语义清晰（对应 /api/issues 列表/详情）。
-- `POST /api/tasks/create` **保留为兼容别名**（文档标注「实为创建 Issue，建议改用 /api/issues」），避免破坏现有调用（CLI/Agent 已用）。
-- 实现可复用同一逻辑（`ensure_issue_task` / GitCode create），仅路由层包装。
+- **`POST /api/tasks/create` 直接废弃/迁移**：不保留兼容别名（避免双入口混乱）。调用方（CLI/Agent）统一改用 `/api/issues`；`01-tasks.md` 移除该端点或标注「已迁移至 /api/issues」。
+- 实现复用现有逻辑（`ensure_issue_task` / GitCode create），仅路由按 `/api/issues` 暴露。
 
 ### 2.1.2 Issue/Event/Task 归属对照（接口层）
 
@@ -430,7 +430,7 @@ GET  /api/issues/{owner}/{repo}/{number}/pipeline  # Issue pipeline 路线图（
 |---|----|------|--------|
 | 1 | 新增 `src/api/routes/issues.py` | `/api/issues` 5 个端点（list/create/detail/events/pipeline） | 必须 |
 | 2 | 新增 `POST /api/issues/{owner}/{repo}`（创建） | 复用 tasks/create 逻辑（ensure_issue_task + GitCode create）；标记为 Issue 创建官方入口 | 必须 |
-| 3 | `POST /api/tasks/create` 标记为兼容别名 | 标注「实为创建 Issue，建议改用 /api/issues」；行为不变 | 必须 |
+| 3 | `POST /api/tasks/create` 废弃/迁移 | 移除兼容别名，调用方统一改 `/api/issues`；`01-tasks.md` 同步说明 | 必须 |
 | 4 | `main.py` 挂载 router | `include_router` | 必须 |
 | 5 | `help/api/11-issues.md` | 接口文档 + **概念澄清表**（Issue/Event/Task + task complete≠issue complete + tasks/create 归属） | 必须 |
 | 6 | `help/api/01-tasks.md` | 修正 create 措辞：标注「实为创建 Issue」 | 必须 |
@@ -449,7 +449,7 @@ GET  /api/issues/{owner}/{repo}/{number}/pipeline  # Issue pipeline 路线图（
 - [ ] `GET /api/issues/{owner}/{repo}/{number}` 返回 stage + task_status + events + pipeline 聚合
 - [ ] `GET .../{number}/events` 仅返回该 Issue 的事件列表
 - [ ] `GET .../{number}/pipeline` 返回 event.json 结构化链（含各段 conclusion/next_step）
-- [ ] `POST /api/tasks/create` 行为不变（兼容别名），文档标注「实为创建 Issue」
+- [ ] `POST /api/tasks/create` 已废弃（不保留兼容别名），调用方统一走 `POST /api/issues`
 - [ ] **文档 11-issues.md 含概念澄清表**：Issue/Event/Task 三层级、task complete ≠ issue complete、tasks/create 归属、`tasks.status` vs `issue_state.stage` 双状态
 - [ ] 认证三通道可用；契约导出；CLI `grape issues` 可用
 - [ ] 现有 events/tasks 接口不回归
@@ -512,7 +512,7 @@ GET  /api/issues/{owner}/{repo}/{number}/pipeline  # Issue pipeline 路线图（
 
 | # | 用例 | 验证点 |
 |---|------|--------|
-| T22 | `test_tasks_create_alias_unchanged` | `POST /api/tasks/create` 行为不变（兼容别名） |
+| T22 | `test_tasks_create_removed_migrated` | `POST /api/tasks/create` 已移除/返回迁移提示，不再作为创建入口 |
 | T23 | `test_events_api_unchanged` | `/api/events` 平铺接口不回归 |
 | T24 | `test_tasks_api_unchanged` | `/api/tasks` 既有接口不回归（complete/cancel/confirm-done） |
 | T25 | `test_openapi_contract_exported` | `issues` 操作出现在 `openapi.json`（`gitrepo` 或 `/api/issues` 路径） |
