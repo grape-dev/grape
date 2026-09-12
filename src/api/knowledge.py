@@ -230,7 +230,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
     - 立即尝试消费（第一层），抢到锁同步处理，抢不到锁返回 task_id 留 pending
     - 后台 worker 兜底消费（第二层）
     - 同维度（repo_key+scope+agent_type+issue_num）分布式锁串行
-    - 内容去重：按行 endswith(content) 防重复追加
+    - 内容去重：split("] ", 1)[1] == content 精确匹配，防重复追加
 
     Issue #67 / #95 保留：
     - 先查 DB 有无同 scope+repo_key+agent_type+issue_num 的记录——有就 UPDATE，没有才 INSERT
