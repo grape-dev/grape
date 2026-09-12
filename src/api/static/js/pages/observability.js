@@ -860,9 +860,9 @@ function renderTimelineList(container, issues, repoKey) {
   if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_task_events') + '</div>'; return; }
   _timelineIssues = issues;
   _timelineIssuesSorted = issues.slice().sort((a, b) => {
-    const ta = a.lastAt ? new Date(a.lastAt).getTime() : 0;
-    const tb = b.lastAt ? new Date(b.lastAt).getTime() : 0;
-    return tb - ta;
+    const na = parseInt((a.issueId || '').replace(/^#/, '')) || 0;
+    const nb = parseInt((b.issueId || '').replace(/^#/, '')) || 0;
+    return nb - na;
   });
   _timelineDevIpMap = {};
   try {
