@@ -8,7 +8,7 @@
   * 分析副本:      {WORKSPACE_DIR}/{owner}/{repo}/project-info/codegraph-repo/  （生成器专用，非 bare）
   * 产物:          {WORKSPACE_DIR}/{owner}/{repo}/project-info/
 """
-import json, os, shutil, subprocess, threading
+import json, os, shutil, subprocess, hashlib
 from src.config import log, WORKSPACE_DIR
 from src.repo_key import split_owner_repo
 
@@ -282,11 +282,13 @@ def _build_capabilities_md(repo_key: str, meta: dict, tech: str, features: str, 
     )
 
 
-def build_project_info(repo_key: str, token: str = "") -> dict:
+def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew_fn=None) -> dict:
     """生成/更新某 repo 的 project-info，返回 {ok, degraded, reason}。
 
     codegraph 可用 → 分析副本 + codegraph explore 生成（degraded=false）；
     codegraph 不可用 → 降级：仅基于 README + GitCode API 的基础信息（degraded=true）。
+
+    Issue #103：lock_key + renew_fn 支持构建过程中锁续期，防止大仓库 build 超时锁过期。
     """
     owner, rname = split_owner_repo(repo_key)
     meta = _read_meta(repo_key)
@@ -325,11 +327,36 @@ def build_project_info(repo_key: str, token: str = "") -> dict:
         _write_meta(repo_key, meta)
         return {"ok": False, "degraded": True, "reason": "analysis worktree failed"}
 
-    # codegraph 探索
+    # codegraph 探索（Issue #103：每两步续期锁，防止大仓库 build 超时）
     arch = _codegraph_explore(work, "main entry point application startup", 10)
     modules = _codegraph_explore(work, "module import dependency", 15)
+    if renew_fn and not renew_fn():
+        log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        # 只写本地 meta，不调 _write_meta（避免 _write_to_obs 在无锁状态下写 OBS+DB）
+        meta["degraded"] = True
+        meta["note"] = "build aborted: distributed lock lost"
+        try:
+            p = os.path.join(_pi_dir(repo_key), _META_FILE)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     chains = _codegraph_explore(work, "API routes endpoints handlers", 10)
     files = _codegraph_files(work)
+    if renew_fn and not renew_fn():
+        log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        meta["degraded"] = True
+        meta["note"] = "build aborted: distributed lock lost"
+        try:
+            p = os.path.join(_pi_dir(repo_key), _META_FILE)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     tech = _codegraph_explore(work, "tech stack dependencies", 8)
     features = _codegraph_explore(work, "features capabilities", 8)
     api = _codegraph_explore(work, "API endpoints", 8)
@@ -382,24 +409,20 @@ def should_refresh(repo_key: str) -> bool:
     return False
 
 
-_lock_guard = threading.Lock()
-_building: set[str] = set()
-
-
 def maybe_refresh_project_info(repo_key: str, token: str = ""):
-    """webhook 触发的后台刷新（不阻塞调用方）。并发防重。"""
+    """webhook 触发的后台刷新（不阻塞调用方）。分布式锁跨实例互斥（Issue #103）。"""
     if not repo_key:
         return
-    with _lock_guard:
-        if repo_key in _building:
-            return
-        _building.add(repo_key)
+    from src.lock import acquire_lock, release_lock, renew_lock
+    lock_key = f"project_info_build:{hashlib.md5(repo_key.encode()).hexdigest()[:16]}"
+    if not acquire_lock(lock_key, ttl=300):
+        log.info(f"project-info: lock contention for {repo_key}, skipped")
+        return
     try:
         if should_refresh(repo_key):
             log.info(f"project-info refresh triggered for {repo_key}")
-            build_project_info(repo_key, token)
+            build_project_info(repo_key, token, lock_key=lock_key, renew_fn=lambda: renew_lock(lock_key, ttl=300))
     except Exception as e:
         log.warning(f"project-info refresh failed {repo_key}: {e}")
     finally:
-        with _lock_guard:
-            _building.discard(repo_key)
+        release_lock(lock_key)

@@ -17,7 +17,9 @@ import hashlib
 import json
 import os
 import threading
+from datetime import datetime, timedelta
 from src.config import log, WORKSPACE_DIR
+from src.lock import acquire_lock, release_lock, renew_lock
 from src.session_manager import db, db_lock
 
 
@@ -220,18 +222,25 @@ def read_knowledge(repo_key: str, agent_type: str = "", issue_num: int = 0) -> d
 def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "accepted",
                     agent_type: str = "", issue_num: int = 0,
                     source_seq: int = 0, created_by: str = "",
-                    source: str = "", description: str = "", name: str = "") -> str:
-    """写入知识正文文件 + 登记索引行。返回文件绝对路径。
+                    source: str = "", description: str = "", name: str = "") -> int:
+    """写入知识正文文件 + 登记索引行。返回 task_id（Issue #103：生产者-消费者模式）。
 
-    Issue #67 改动：
+    Issue #103 改动：
+    - 入队 knowledge_write_queue 表（生产者）
+    - 立即尝试消费（第一层），抢到锁同步处理，抢不到锁返回 task_id 留 pending
+    - 后台 worker 兜底消费（第二层）
+    - 同维度（repo_key+scope+agent_type+issue_num）分布式锁串行
+    - 内容去重：split("] ", 1)[1] == content 精确匹配，防重复追加
+
+    Issue #67 / #95 保留：
     - 先查 DB 有无同 scope+repo_key+agent_type+issue_num 的记录——有就 UPDATE，没有才 INSERT
     - rejected 不覆盖已有记录
-    - 写入后自动生成 scene_knowledge_ref 关联记录（scope=member 除外——用户手动关联）
-    - 新增 source 参数（system/agent/manual）
+    - 写入后自动生成 scene_knowledge_ref 关联记录（scope=member 除外）
+    - source 参数（system/agent/manual）
     """
     content = (content or "").strip()
     if not content:
-        return ""
+        return 0
     if scope == "project":
         issue_num = 0
         agent_type = ""
@@ -244,56 +253,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
     if not source:
         source = "system" if scope == "baseline" else "agent"
 
-    file_path = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-    rel_path = os.path.relpath(file_path, WORKSPACE_DIR)
-
-    # rejected 只登记索引，不落文件——有已存在记录则跳过
-    if status == "rejected":
-        with db_lock:
-            existing = db.cursor().execute(
-                "SELECT id FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-                (repo_key, scope, agent_type, issue_num)
-            ).fetchone()
-            if existing:
-                return ""  # 已有记录，跳过
-            db.cursor().execute(
-                "INSERT INTO agent_shared_knowledge "
-                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (scope, repo_key, agent_type, issue_num, rel_path, "", "", status, source_seq, created_by, source)
-            )
-            db.commit()
-        return ""
-
-    # 1. 先写本地文件（追加）
-    try:
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        marker = f"- [seq {source_seq or 0} / {created_by or ''}] {content}"
-        with open(file_path, "a", encoding="utf-8") as f:
-            f.write(marker + "\n")
-    except Exception as e:
-        raise RuntimeError(f"write knowledge file failed: {e}") from e
-
-    # 2. 写 OBS（启用时） + 计算 content_hash
-    obs_key = ""
-    content_hash = ""
-    try:
-        from src.storage import get_storage
-        storage = get_storage()
-        if storage is not None:
-            obs_key = knowledge_storage_key(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-            with open(file_path, "rb") as f:
-                file_bytes = f.read()
-            storage.save_bytes(obs_key, file_bytes)
-            content_hash = hashlib.sha256(file_bytes).hexdigest()
-    except Exception as e:
-        log.warning(f"[knowledge] OBS write failed for {repo_key}/{scope}: {e} — local file unaffected")
-        obs_key = ""
-        content_hash = ""
-
-    # 3. DB 写入——先查有无已存在记录（Issue #67：一个 scope 一条记录）
-    # 自动生成描述（如果调用方没传）
+    # 自动生成 description（如果调用方没传）
     if not description:
         _agent_desc = {
             "vod": "VOD Agent：需求分析、拆解 Issue、规划开发路径",
@@ -332,6 +292,159 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             _an = _agent_name.get(agent_type, agent_type or "Agent")
             name = f"Issue #{issue_num} - {_an} 知识"
 
+    # 1. 入队（生产者）
+    task_id = _enqueue_knowledge_write(
+        repo_key=repo_key, scope=scope, agent_type=agent_type, issue_num=issue_num,
+        content=content, status=status, source_seq=source_seq, created_by=created_by,
+        source=source, description=description, name=name)
+
+    # 2. 第一层消费：立即尝试加锁处理
+    lock_key = _knowledge_lock_key(repo_key, scope, agent_type, issue_num)
+    if acquire_lock(lock_key, ttl=60):
+        try:
+            _do_write_knowledge(
+                repo_key=repo_key, scope=scope, agent_type=agent_type, issue_num=issue_num,
+                content=content, status=status, source_seq=source_seq, created_by=created_by,
+                source=source, description=description, name=name)
+            _delete_queue_task(task_id)
+        except Exception as e:
+            log.warning(f"[knowledge] first-layer consume failed for task {task_id}: {e}")
+            _fail_queue_task(task_id, str(e), retry_count=0)
+        finally:
+            release_lock(lock_key)
+
+    # 拿不到锁 → 返回 task_id，任务留 pending，worker 兜底
+    return task_id
+
+
+def _knowledge_lock_key(repo_key: str, scope: str, agent_type: str, issue_num: int) -> str:
+    """分布式锁 key——MD5 压缩防 VARCHAR(128) 溢出。"""
+    raw = f"{repo_key}:{scope}:{agent_type}:{issue_num}"
+    return f"knowledge_write:{hashlib.md5(raw.encode()).hexdigest()[:16]}"
+
+
+def _enqueue_knowledge_write(*, repo_key, scope, agent_type, issue_num, content, status,
+                             source_seq, created_by, source, description, name) -> int:
+    """INSERT 到 knowledge_write_queue 表，返回自增 id。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO knowledge_write_queue "
+            "(repo_key, scope, agent_type, issue_num, content, status, "
+            " source_seq, created_by, source, description, name) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (repo_key, scope, agent_type, issue_num, content, status,
+             source_seq, created_by, source, description, name))
+        db.commit()
+        return c.lastrowid
+
+
+def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, status,
+                        source_seq, created_by, source, description, name):
+    """实际写入逻辑（从原 write_knowledge 提取）。在分布式锁内调用。
+
+    name/description 从队列任务取（入队时已生成），不重新计算。
+    """
+    file_path = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
+    rel_path = os.path.relpath(file_path, WORKSPACE_DIR)
+
+    # rejected 只登记索引，不落文件——有已存在记录则跳过
+    if status == "rejected":
+        with db_lock:
+            existing = db.cursor().execute(
+                "SELECT id FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+                (repo_key, scope, agent_type, issue_num)
+            ).fetchone()
+            if existing:
+                return
+            db.cursor().execute(
+                "INSERT INTO agent_shared_knowledge "
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (scope, repo_key, agent_type, issue_num, rel_path, "", "", status, source_seq, created_by, source)
+            )
+            db.commit()
+        return
+
+    # 内容去重 + 崩溃恢复：检查文件内容 + DB 记录 + content_hash 一致性
+    file_has_content = False
+    db_has_record = False
+    db_content_hash = ""
+    db_knowledge_id = None
+    if os.path.isfile(file_path):
+        with open(file_path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.rstrip("\n")
+                if stripped.startswith("- [seq ") and "] " in stripped:
+                    existing_content = stripped.split("] ", 1)[1]
+                    if existing_content == content:
+                        file_has_content = True
+                        break
+    with db_lock:
+        existing = db.cursor().execute(
+            "SELECT id, content_hash FROM agent_shared_knowledge "
+            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            (repo_key, scope, agent_type, issue_num)
+        ).fetchone()
+        if existing:
+            db_has_record = True
+            db_content_hash = existing[1] or ""
+            db_knowledge_id = existing[0]
+
+    if file_has_content and db_has_record:
+        # 文件有 + DB 有 → 校验 content_hash 是否匹配当前文件
+        # 不匹配说明上次 DB UPDATE 失败（文件已追加但 hash 没更新）→ 不跳过，补写 OBS + DB
+        current_hash = ""
+        try:
+            with open(file_path, "rb") as f:
+                current_hash = hashlib.sha256(f.read()).hexdigest()
+        except Exception:
+            pass
+        if current_hash and db_content_hash == current_hash:
+            # hash 一致 → 完全跳过，但补 ref + 更新审计字段（上次可能 ref 失败或元数据过期）
+            if db_knowledge_id and scope != "member":
+                _auto_generate_knowledge_ref(db_knowledge_id, scope, agent_type, issue_num)
+            # 更新审计字段（source_seq/created_by/status），不改 content_hash/obs_key
+            with db_lock:
+                db.cursor().execute(
+                    "UPDATE agent_shared_knowledge SET source_seq=?, status=?, "
+                    "updated_at=datetime('now') WHERE id=?",
+                    (source_seq, status, db_knowledge_id))
+                db.commit()
+            return
+        # hash 不一致 → 落入下面的补写流程（不追加文件因为 file_has_content=True）
+    # file_has_content and not db_has_record → 不追加文件，补写 OBS + DB
+    # not file_has_content → 正常全流程（追加 + OBS + DB）
+
+    # 1. 文件追加（仅当文件没有此 content）
+    if not file_has_content:
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            marker = f"- [seq {source_seq or 0} / {created_by or ''}] {content}"
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(marker + "\n")
+        except Exception as e:
+            raise RuntimeError(f"write knowledge file failed: {e}") from e
+
+    # 2. 写 OBS（启用时） + 计算 content_hash
+    obs_key = ""
+    content_hash = ""
+    try:
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None:
+            obs_key = knowledge_storage_key(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+            storage.save_bytes(obs_key, file_bytes)
+            content_hash = hashlib.sha256(file_bytes).hexdigest()
+    except Exception as e:
+        log.warning(f"[knowledge] OBS write failed for {repo_key}/{scope}: {e} — local file unaffected")
+        obs_key = ""
+        content_hash = ""
+
+    # 3. DB 写入——先查有无已存在记录
     knowledge_id = None
     with db_lock:
         c = db.cursor()
@@ -340,10 +453,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
             (repo_key, scope, agent_type, issue_num)
         ).fetchone()
-
         if existing:
-            # 有记录 → UPDATE（不插入新记录，保留 id，ref 不失效）
-            # Issue #95：UPDATE 补 source 和 status（修复 rejected→accepted 不更新的 bug）
             c.execute(
                 "UPDATE agent_shared_knowledge "
                 "SET content_hash=?, obs_key=?, source_seq=?, description=?, name=?, "
@@ -355,7 +465,6 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             )
             knowledge_id = existing[0]
         else:
-            # 无记录 → INSERT
             c.execute(
                 "INSERT INTO agent_shared_knowledge "
                 "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description, name) "
@@ -365,36 +474,201 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             knowledge_id = c.lastrowid
         db.commit()
 
-    # 4. 自动生成 scene_knowledge_ref 关联记录（scope=member 除外——用户手动关联）
+    # 4. 自动生成 scene_knowledge_ref（scope=member 除外）
     if knowledge_id and scope != "member":
         _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num)
 
-    return file_path
+
+def _delete_queue_task(task_id: int):
+    """任务处理成功后直接 DELETE。"""
+    with db_lock:
+        db.cursor().execute(
+            "DELETE FROM knowledge_write_queue WHERE id=?", (task_id,))
+        db.commit()
+
+
+def _fail_queue_task(task_id: int, error: str, retry_count: int):
+    """任务处理失败——更新 last_error + next_retry_at（指数退避）。
+
+    retry_count >= 100 → 标记 failed，不再重试（防止永久性错误无限重试）。
+    """
+    new_count = retry_count + 1
+    delay = min(new_count * 3, 60)
+    next_retry = (datetime.now() + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
+
+    # 监控日志（在 failed 分支之前，确保 count=100 也能触发）
+    if new_count in (10, 50, 100):
+        log.warning(f"[knowledge] queue task {task_id} retried {new_count} times, last_error: {error[:200]}")
+
+    if new_count >= 100:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE knowledge_write_queue SET queue_status='failed', "
+                "retry_count=?, last_error=?, updated_at=? "
+                "WHERE id=?",
+                (new_count, error[:500], next_retry, task_id))
+            db.commit()
+        log.warning(f"[knowledge] queue task {task_id} marked failed after {new_count} retries, last_error: {error[:200]}")
+        return
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE knowledge_write_queue SET queue_status='pending', "
+            "retry_count=?, last_error=?, next_retry_at=?, updated_at=? "
+            "WHERE id=?",
+            (new_count, error[:500], next_retry, next_retry, task_id))
+        db.commit()
+
+
+# ===== 第二层消费者：后台 worker =====
+
+_worker_pool = None
+
+
+def _get_worker_pool():
+    """模块级全局 ThreadPoolExecutor 复用。"""
+    global _worker_pool
+    if _worker_pool is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _worker_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="kwq-worker")
+    return _worker_pool
+
+
+async def knowledge_write_worker():
+    """后台 worker：每 3 秒轮询 pending 任务，线程池并行消费。
+
+    同维度串行靠分布式锁保证。拿不到锁的跳过留 pending。
+    """
+    import asyncio
+    while True:
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # 1. 捞 pending 任务
+            with db_lock:
+                rows = db.cursor().execute(
+                    "SELECT id, repo_key, scope, agent_type, issue_num, content, status, "
+                    "source_seq, created_by, source, description, name, retry_count "
+                    "FROM knowledge_write_queue "
+                    "WHERE queue_status='pending' AND next_retry_at <= ? "
+                    "ORDER BY created_at LIMIT 50", (now,)
+                ).fetchall()
+            if not rows:
+                await asyncio.sleep(3)
+                continue
+
+            # 2. 按维度分组，每组取最老一条
+            seen_dims = set()
+            tasks_to_process = []
+            for row in rows:
+                dim = (row[1], row[2], row[3], row[4])  # repo_key, scope, agent_type, issue_num
+                if dim not in seen_dims:
+                    seen_dims.add(dim)
+                    tasks_to_process.append(row)
+
+            # 3. 线程池并行处理
+            loop = asyncio.get_running_loop()
+            futures = []
+            for row in tasks_to_process:
+                futures.append(loop.run_in_executor(_get_worker_pool(), _worker_process_task, row))
+            if futures:
+                await asyncio.gather(*futures, return_exceptions=True)
+
+        except asyncio.CancelledError:
+            log.info("Knowledge write worker cancelled")
+            raise
+        except Exception:
+            log.exception("Knowledge write worker error")
+        await asyncio.sleep(3)
+
+
+def _worker_process_task(row):
+    """worker 线程内处理单条任务。拿到锁后连续处理同维度所有 pending。"""
+    task_id = row[0]
+    repo_key, scope, agent_type, issue_num = row[1], row[2], row[3], row[4]
+    content, status, source_seq, created_by = row[5], row[6], row[7], row[8]
+    source, description, name, retry_count = row[9], row[10], row[11], row[12]
+
+    lock_key = _knowledge_lock_key(repo_key, scope, agent_type, issue_num)
+    if not acquire_lock(lock_key, ttl=60):
+        return  # 拿不到锁，留 pending 下一轮
+
+    try:
+        # 处理当前任务（可能已被第一层 DELETE）
+        _process_one_task(task_id, repo_key, scope, agent_type, issue_num,
+                          content, status, source_seq, created_by,
+                          source, description, name, retry_count)
+
+        # 连续处理同维度剩余 pending 任务（不再重新抢锁，每条后续 renew）
+        while True:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with db_lock:
+                next_row = db.cursor().execute(
+                    "SELECT id, content, status, source_seq, created_by, "
+                    "source, description, name, retry_count "
+                    "FROM knowledge_write_queue "
+                    "WHERE queue_status='pending' AND next_retry_at <= ? "
+                    "AND repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
+                    "ORDER BY created_at LIMIT 1",
+                    (now, repo_key, scope, agent_type, issue_num)
+                ).fetchone()
+            if not next_row:
+                break
+            # 续期锁，防止批量处理时锁过期（返回 False = 锁被别人抢走 → 中止）
+            if not renew_lock(lock_key, ttl=60):
+                log.warning(f"[knowledge] worker lock lost during batch for {repo_key}/{scope}, stopping")
+                break
+            _process_one_task(next_row[0], repo_key, scope, agent_type, issue_num,
+                              next_row[1], next_row[2], next_row[3], next_row[4],
+                              next_row[5], next_row[6], next_row[7], next_row[8])
+    finally:
+        release_lock(lock_key)
+
+
+def _process_one_task(task_id, repo_key, scope, agent_type, issue_num,
+                      content, status, source_seq, created_by,
+                      source, description, name, retry_count):
+    """处理单条队列任务。在锁内调用，不抢锁。"""
+    # 再查任务是否存在（可能已被第一层 DELETE）
+    with db_lock:
+        exists = db.cursor().execute(
+            "SELECT 1 FROM knowledge_write_queue WHERE id=?", (task_id,)).fetchone()
+    if not exists:
+        return  # 已被第一层消费
+
+    try:
+        _do_write_knowledge(
+            repo_key=repo_key, scope=scope, agent_type=agent_type, issue_num=issue_num,
+            content=content, status=status, source_seq=source_seq, created_by=created_by,
+            source=source, description=description, name=name)
+        _delete_queue_task(task_id)
+    except Exception as e:
+        _fail_queue_task(task_id, str(e), retry_count)
 
 
 def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str = "", issue_num: int = 0):
-    """系统写入知识时按 scope 规则自动生成 scene_knowledge_ref 关联记录。"""
+    """系统写入知识时按 scope 规则自动生成 scene_knowledge_ref 关联记录。
+
+    Issue #103：失败时抛异常（不再 catch 吞掉），让上层任务重试。
+    重试时内容去重会跳过文件/DB 写入，但走 ref 补生成路径（见 _do_write_knowledge 跳过分支）。
+    """
     ref_map = {
-        "baseline":    {"scene_id": "", "agent_type": "",           "issue_num": 0},           # 全局（基线分析，所有 Agent 共享）
-        "project":     {"scene_id": "", "agent_type": "",           "issue_num": 0},           # 项目级——全局共享（所有 Agent 共写一个文件）
-        "issue":       {"scene_id": "", "agent_type": "",           "issue_num": issue_num},   # Issue 级——只匹配该 Issue
-        "issue_agent": {"scene_id": "", "agent_type": agent_type,   "issue_num": issue_num},   # Issue+Agent 级——只匹配该 Issue + 该 Agent
-        # member 不自动关联——用户手动选择
+        "baseline":    {"scene_id": "", "agent_type": "",           "issue_num": 0},
+        "project":     {"scene_id": "", "agent_type": "",           "issue_num": 0},
+        "issue":       {"scene_id": "", "agent_type": "",           "issue_num": issue_num},
+        "issue_agent": {"scene_id": "", "agent_type": agent_type,   "issue_num": issue_num},
     }
     ref = ref_map.get(scope)
     if not ref:
         return
-    try:
-        with db_lock:
-            db.cursor().execute(
-                "INSERT OR IGNORE INTO scene_knowledge_ref "
-                "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-                "VALUES (?, ?, ?, ?, 1, ?)",
-                (knowledge_id, ref["scene_id"], ref["agent_type"], ref["issue_num"], "system")
-            )
-            db.commit()
-    except Exception as e:
-        log.warning(f"[knowledge] auto generate ref failed: {e}")
+    with db_lock:
+        db.cursor().execute(
+            "INSERT OR IGNORE INTO scene_knowledge_ref "
+            "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+            "VALUES (?, ?, ?, ?, 1, ?)",
+            (knowledge_id, ref["scene_id"], ref["agent_type"], ref["issue_num"], "system")
+        )
+        db.commit()
 
 
 def _archive_issue_knowledge(repo_key: str, issue_num: int):
@@ -713,6 +987,17 @@ async def knowledge_sync_loop():
                 _sync_baseline_files()
             except Exception as e:
                 log.error(f"[knowledge] sync baseline files error: {e}")
+            # Issue #103：清理 7 天前的 failed 队列记录
+            try:
+                _cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+                with db_lock:
+                    db.cursor().execute(
+                        "DELETE FROM knowledge_write_queue "
+                        "WHERE queue_status='failed' AND created_at < ?",
+                        (_cutoff,))
+                    db.commit()
+            except Exception:
+                pass
         except Exception as e:
             log.error(f"[knowledge] sync error: {e}")
         finally:
@@ -727,6 +1012,8 @@ def _sync_baseline_files():
     从 managed_repos 表获取项目列表，检查每个项目的 project-info 目录下
     3 个基线文件（project-graph.md / project-capabilities.md / .metadata.json）
     是否已在 DB 有 baseline 记录。没有就写 OBS + INSERT DB。
+
+    Issue #103：加分布式锁保护，防止多实例同时写 baseline。
     """
     import hashlib as _hl
     from src.repo_key import split_owner_repo
@@ -736,6 +1023,7 @@ def _sync_baseline_files():
     if not storage:
         return
 
+    # Issue #103：per-repo 分布式锁，不同 repo 可并行同步
     BASELINE_FILES = ("project-graph.md", "project-capabilities.md", ".metadata.json")
 
     # 从 managed_repos 表获取所有项目
@@ -743,81 +1031,89 @@ def _sync_baseline_files():
         rows = db.cursor().execute("SELECT repo_key FROM managed_repos").fetchall()
 
     for (repo_key,) in rows:
-        owner, repo = split_owner_repo(repo_key)
-        if not owner or not repo:
+        # per-repo 锁：同 repo 串行，不同 repo 并行
+        _repo_lock = f"project_info_build:{_hl.md5(repo_key.encode()).hexdigest()[:16]}"
+        if not acquire_lock(_repo_lock, ttl=300):
+            log.info(f"[knowledge] baseline sync: lock contention for {repo_key}, skipped")
             continue
-        pi_dir = os.path.join(WORKSPACE_DIR, owner, repo, "project-info")
-        if not os.path.isdir(pi_dir):
-            continue
-
-        for fname in BASELINE_FILES:
-            fpath = os.path.join(pi_dir, fname)
-            if not os.path.isfile(fpath):
+        try:
+            owner, repo = split_owner_repo(repo_key)
+            if not owner or not repo:
+                continue
+            pi_dir = os.path.join(WORKSPACE_DIR, owner, repo, "project-info")
+            if not os.path.isdir(pi_dir):
                 continue
 
-            file_path = os.path.relpath(fpath, WORKSPACE_DIR)
+            for fname in BASELINE_FILES:
+                fpath = os.path.join(pi_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
 
-            # 查 DB 是否已有 baseline 记录
-            with db_lock:
-                row = db.cursor().execute(
-                    "SELECT id, obs_key FROM agent_shared_knowledge "
-                    "WHERE repo_key=? AND scope='baseline' AND file_path=? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (repo_key, file_path)
-                ).fetchone()
+                file_path = os.path.relpath(fpath, WORKSPACE_DIR)
 
-            if row and row[1]:  # DB 有记录且 obs_key 非空
-                # Issue #95：检测旧格式 obs_key（project-info/ 前缀但不含 knowledge/）→ 强制更新
-                _old_obs = row[1] or ""
-                if _old_obs.startswith("project-info/") and not _old_obs.startswith("knowledge/"):
-                    # 旧格式 → 重新写 OBS + UPDATE
-                    pass  # 不 continue，走下面的写入逻辑
-                else:
-                    continue  # 新格式或本地模式 → 跳过
+                # 查 DB 是否已有 baseline 记录
+                with db_lock:
+                    row = db.cursor().execute(
+                        "SELECT id, obs_key FROM agent_shared_knowledge "
+                        "WHERE repo_key=? AND scope='baseline' AND file_path=? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (repo_key, file_path)
+                    ).fetchone()
 
-            # 写 OBS + DB
-            try:
-                with open(fpath, "rb") as f:
-                    content_bytes = f.read()
-                # Issue #95：OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
-                _owner, _rname = _owner_repo(repo_key)
-                storage_key = f"knowledge/{_owner}/{_rname}/project-info/{fname}"
-                storage.save_bytes(storage_key, content_bytes)
-                content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
+                if row and row[1]:  # DB 有记录且 obs_key 非空
+                    # Issue #95：检测旧格式 obs_key（project-info/ 前缀但不含 knowledge/）→ 强制更新
+                    _old_obs = row[1] or ""
+                    if _old_obs.startswith("project-info/") and not _old_obs.startswith("knowledge/"):
+                        # 旧格式 → 重新写 OBS + UPDATE
+                        pass  # 不 continue，走下面的写入逻辑
+                    else:
+                        continue  # 新格式或本地模式 → 跳过
 
-                if row:  # DB 有记录但 obs_key 为空 → UPDATE
-                    with db_lock:
-                        c = db.cursor()
-                        # Issue #95：UPDATE 补 source/name/description（COALESCE 空值不覆盖）
-                        _bn = {"project-graph.md": "项目结构图谱", "project-capabilities.md": "项目能力清单", ".metadata.json": "项目元数据"}.get(fname, fname)
-                        c.execute(
-                            "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
-                            "source=COALESCE(NULLIF(source, ''), 'system'), "
-                            "name=COALESCE(NULLIF(name, ''), ?) "
-                            "WHERE id=?",
-                            (storage_key, content_hash, _bn, row[0])
-                        )
-                        db.commit()
-                else:  # DB 无记录 → INSERT
-                    _baseline_desc = {
-                        "project-graph.md": "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）",
-                        "project-capabilities.md": "VOD 基线分析：项目能力清单（功能特性/支持能力）",
-                        ".metadata.json": "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）",
-                    }.get(fname, "VOD 基线分析自动生成")
-                    _baseline_name = {
-                        "project-graph.md": "项目结构图谱",
-                        "project-capabilities.md": "项目能力清单",
-                        ".metadata.json": "项目元数据",
-                    }.get(fname, "项目基线分析")
-                    with db_lock:
-                        c = db.cursor()
-                        c.execute(
-                            "INSERT INTO agent_shared_knowledge "
-                            "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, description, name) "
-                            "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync', 'system', ?, ?)",
-                            (repo_key, file_path, storage_key, content_hash, _baseline_desc, _baseline_name)
-                        )
-                        db.commit()
-                log.info(f"[knowledge] sync baseline {repo_key}/{fname} → OBS")
-            except Exception as e:
-                log.warning(f"[knowledge] sync baseline failed {repo_key}/{fname}: {e}")
+                # 写 OBS + DB
+                try:
+                    with open(fpath, "rb") as f:
+                        content_bytes = f.read()
+                    # Issue #95：OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
+                    _owner, _rname = _owner_repo(repo_key)
+                    storage_key = f"knowledge/{_owner}/{_rname}/project-info/{fname}"
+                    storage.save_bytes(storage_key, content_bytes)
+                    content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
+
+                    if row:  # DB 有记录但 obs_key 为空 → UPDATE
+                        with db_lock:
+                            c = db.cursor()
+                            # Issue #95：UPDATE 补 source/name/description（COALESCE 空值不覆盖）
+                            _bn = {"project-graph.md": "项目结构图谱", "project-capabilities.md": "项目能力清单", ".metadata.json": "项目元数据"}.get(fname, fname)
+                            c.execute(
+                                "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
+                                "source=COALESCE(NULLIF(source, ''), 'system'), "
+                                "name=COALESCE(NULLIF(name, ''), ?) "
+                                "WHERE id=?",
+                                (storage_key, content_hash, _bn, row[0])
+                            )
+                            db.commit()
+                    else:  # DB 无记录 → INSERT
+                        _baseline_desc = {
+                            "project-graph.md": "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）",
+                            "project-capabilities.md": "VOD 基线分析：项目能力清单（功能特性/支持能力）",
+                            ".metadata.json": "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）",
+                        }.get(fname, "VOD 基线分析自动生成")
+                        _baseline_name = {
+                            "project-graph.md": "项目结构图谱",
+                            "project-capabilities.md": "项目能力清单",
+                            ".metadata.json": "项目元数据",
+                        }.get(fname, "项目基线分析")
+                        with db_lock:
+                            c = db.cursor()
+                            c.execute(
+                                "INSERT INTO agent_shared_knowledge "
+                                "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, description, name) "
+                                "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync', 'system', ?, ?)",
+                                (repo_key, file_path, storage_key, content_hash, _baseline_desc, _baseline_name)
+                            )
+                            db.commit()
+                    log.info(f"[knowledge] sync baseline {repo_key}/{fname} → OBS")
+                except Exception as e:
+                    log.warning(f"[knowledge] sync baseline failed {repo_key}/{fname}: {e}")
+        finally:
+            release_lock(_repo_lock)

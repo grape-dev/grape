@@ -768,6 +768,28 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 )"""),
     # ===== legacy: backend_agents（_migrate_tables rebuild 依赖其存在）=====
     ("backend_agents", _BACKEND_AGENTS_DDL),
+    # ===== Issue #103: 知识写入队列 =====
+    ("knowledge_write_queue", """
+CREATE TABLE IF NOT EXISTS knowledge_write_queue (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key      TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    agent_type    TEXT NOT NULL DEFAULT '',
+    issue_num     INTEGER DEFAULT 0,
+    content       TEXT NOT NULL,
+    status        TEXT DEFAULT 'accepted',
+    source_seq    INTEGER DEFAULT 0,
+    created_by    TEXT DEFAULT '',
+    source        TEXT DEFAULT '',
+    description   TEXT DEFAULT '',
+    name          TEXT DEFAULT '',
+    queue_status  TEXT NOT NULL DEFAULT 'pending',
+    retry_count   INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT NOT NULL DEFAULT '',
+    next_retry_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now'))
+)"""),
 ]
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -885,6 +907,10 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_latency_log_path ON api_latency_log(path)",
         "CREATE INDEX IF NOT EXISTS idx_latency_log_duration ON api_latency_log(duration_ms)",
         "CREATE INDEX IF NOT EXISTS idx_latency_log_source ON api_latency_log(source)",
+        # ===== Issue #103: 知识写入队列索引 =====
+        "CREATE INDEX IF NOT EXISTS idx_kwq_status_retry ON knowledge_write_queue(queue_status, next_retry_at)",
+        "CREATE INDEX IF NOT EXISTS idx_kwq_dim_created ON knowledge_write_queue(repo_key, scope, agent_type, issue_num, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_kwq_source_seq ON knowledge_write_queue(repo_key, source_seq)",
     ]
     for idx in indexes:
         try:
