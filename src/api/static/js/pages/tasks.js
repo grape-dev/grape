@@ -471,12 +471,12 @@ function _renderBoard(filtered) {
   filtered.forEach(t => { grouped[_mapStatus(t)].push(t); });
 
   // 苹果风格看板：响应式列宽，水平滚动，列独立垂直滚动
-  let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px">';
+  let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px;flex-shrink:0">';
   statusCols.forEach(s => {
     const list = grouped[s];
     const col = statusColors[s];
     const dim = (s === 'cancelled') ? ';opacity:.65' : '';
-    html += `<div style="min-width:240px;max-width:300px;flex:1 1 240px;display:flex;flex-direction:column;background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed)${dim}">`;
+    html += `<div style="min-width:240px;max-width:300px;flex:1 1 240px;flex-shrink:0;display:flex;flex-direction:column;background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);height:100%;overflow:hidden${dim}">`;
     // 列头：颜色圆点 + 名称 + 计数
     html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
       <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
@@ -484,7 +484,7 @@ function _renderBoard(filtered) {
       <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${list.length}</span>
     </div>`;
     // 卡片容器：独立垂直滚动
-    html += `<div style="flex:1;overflow-y:auto;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
+    html += `<div style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
     if (list.length === 0) {
       html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无任务'}</div>`;
     } else {
@@ -497,7 +497,7 @@ function _renderBoard(filtered) {
         const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
         const _cardCls = _isRunning ? ' tsk-card-radar' : '';
         const _cardOverflow = _isRunning ? ';overflow:hidden' : '';
-        html += `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
+        html += `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;flex:0 0 auto;min-height:76px;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
         if (_isRunning) {
           html += `<div class="tsk-radar-sweep" style="background:conic-gradient(from 0deg,transparent 0deg,${_stageColor}14 40deg,transparent 90deg)"></div>`;
         }
@@ -826,8 +826,7 @@ function _detailHtml(t) {
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.created_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
       ${t.completed_at ? `<div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.completed_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
       ${t.task_description ? `<div style="${_rowStyle};border-bottom:none;flex-direction:column;align-items:flex-start"><span style="${_labelStyle};margin-bottom:4px">${I18N.t('tasks.detail.no_description')}</span><div style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.5;white-space:pre-wrap;width:100%">${t.task_description}</div></div>` : ''}
-    </div>
-    ${_renderAgentStatusCard(t)}`;
+    </div>`;
 }
 
 function _renderTaskActionsInline(t) {
