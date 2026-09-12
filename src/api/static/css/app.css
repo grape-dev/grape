@@ -411,6 +411,13 @@
 @keyframes crFadeIn{from{opacity:0}to{opacity:1}}
 @keyframes crPopUp{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
 
+/* ===== Issue #125: 确认对话框（缩小变体，复用 create-repo-overlay）===== */
+.confirm-modal{width:400px;max-width:100%;background:#fff;border-radius:16px;box-shadow:0 24px 60px rgba(15,23,42,.28);animation:crPopUp .22s ease both;padding:24px}
+.confirm-modal-msg{font-size:14px;color:var(--t);line-height:1.5;margin-bottom:20px;text-align:center;white-space:pre-line}
+.confirm-modal-actions{display:flex;justify-content:center;gap:10px}
+.cr-btn-danger{background:#ff3b30;color:#fff;box-shadow:0 6px 16px rgba(255,59,48,.3)}
+.cr-btn-danger:hover{box-shadow:0 9px 22px rgba(255,59,48,.45);transform:translateY(-1px)}
+
 /* ===== Liquid Glass 重新派发弹窗 ===== */
 @keyframes rdpFade{from{opacity:0}to{opacity:1}}
 @keyframes rdpPop{from{opacity:0;transform:scale(0.9) translateY(-8px)}to{opacity:1;transform:scale(1) translateY(0)}}

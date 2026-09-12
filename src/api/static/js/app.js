@@ -578,6 +578,36 @@ function loadAgentTypes() {
     setTimeout(() => t.remove(), duration || 3000);
   }
 
+  // ── 通用确认对话框（Issue #125: 替换原生 confirm）──
+  // 复用 .create-repo-overlay + .confirm-modal CSS，居中显示，防滚动
+  function showConfirm(message, onConfirm, opts) {
+    closeConfirm();
+    var o = opts || {};
+    var danger = !!o.danger;
+    var confirmText = o.confirmText || (I18N.t('common.confirm') || '确认');
+    var cancelText = o.cancelText || (I18N.t('common.cancel') || '取消');
+    var overlay = document.createElement('div');
+    overlay.id = 'grapeConfirmOverlay';
+    overlay.className = 'create-repo-overlay';
+    overlay.innerHTML = '<div class="confirm-modal">' +
+      '<div class="confirm-modal-msg">' + message + '</div>' +
+      '<div class="confirm-modal-actions">' +
+        '<button class="cr-btn cr-btn-ghost" id="grapeConfirmCancel">' + cancelText + '</button>' +
+        '<button class="cr-btn ' + (danger ? 'cr-btn-danger' : 'cr-btn-primary') + '" id="grapeConfirmOk">' + confirmText + '</button>' +
+      '</div>' +
+    '</div>';
+    document.body.appendChild(overlay);
+    document.body.style.overflow = 'hidden';
+    function _close() { overlay.remove(); document.body.style.overflow = ''; }
+    overlay.onclick = function(e) { if (e.target === overlay) _close(); };
+    document.getElementById('grapeConfirmOk').onclick = function() { _close(); if (onConfirm) onConfirm(); };
+    document.getElementById('grapeConfirmCancel').onclick = _close;
+  }
+  function closeConfirm() {
+    var ex = document.getElementById('grapeConfirmOverlay');
+    if (ex) { ex.remove(); document.body.style.overflow = ''; }
+  }
+
   // ── 帮助抽屉 ──
   function openHelp() {
     const overlay = document.getElementById('helpOverlay');
@@ -712,7 +742,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup};
+  return {nav, search, oauthLogin, oauthLoginGithub, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
