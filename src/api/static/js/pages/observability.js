@@ -859,28 +859,76 @@ function _bindMermaidClicks(box, iss, evTypes) {
 function renderTimelineList(container, issues, repoKey) {
   if (!issues.length) { container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_task_events') + '</div>'; return; }
   _timelineIssues = issues;
-  // 构建 device_name → IP 映射（从 ops/overview workers 数据）
-  const _devIpMap = {};
+  _timelineIssuesSorted = issues.slice().sort((a, b) => {
+    const ta = a.lastAt ? new Date(a.lastAt).getTime() : 0;
+    const tb = b.lastAt ? new Date(b.lastAt).getTime() : 0;
+    return tb - ta;
+  });
+  _timelineDevIpMap = {};
   try {
     const _workers = (_obsData.ops && _obsData.ops.workers && _obsData.ops.workers.list) || [];
-    _workers.forEach(w => { if (w.device_name) _devIpMap[w.device_name] = w.last_ip || ''; });
+    _workers.forEach(w => { if (w.device_name) _timelineDevIpMap[w.device_name] = w.last_ip || ''; });
   } catch(e) {}
+  _timelineGlobalRepoPath = (repoKey || '').replace(/^gitcode:/, '');
+  let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
+  html += '<div style="margin-bottom:10px;display:flex;align-items:center;gap:8px">';
+  html += '<input type="text" id="timelineSearchInput" placeholder="' + I18N.t('observability.search_tasks_placeholder') + '" value="' + _timelineSearch.replace(/"/g, '&quot;') + '" oninput="_timelineSearch=this.value;_filterTimelineIssues()" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+  html += '</div>';
+  html += '<div id="obs-timeline-issues"></div>';
+  container.innerHTML = html;
+  _filterTimelineIssues();
+}
+
+function _filterTimelineIssues() {
+  const container = document.getElementById('obs-timeline-issues');
+  if (!container) return;
+  const issues = _timelineIssuesSorted || [];
+
+  let filtered = issues;
+  let locateIssueId = null;
+  if (_timelineSearch) {
+    const q = _timelineSearch.trim();
+    if (q.startsWith('#')) {
+      const num = q.substring(1);
+      if (num) {
+        filtered = issues.filter(iss => (iss.issueId || '').replace(/^#/, '').includes(num));
+        const exact = issues.find(iss => (iss.issueId || '').replace(/^#/, '') === num);
+        if (exact) locateIssueId = exact.issueId;
+      }
+    } else {
+      const ql = q.toLowerCase();
+      filtered = issues.filter(iss => {
+        const id = (iss.issueId || '').toLowerCase();
+        const title = (iss.title || '').toLowerCase();
+        return id.includes(ql) || title.includes(ql);
+      });
+    }
+  }
+
+  if (locateIssueId) {
+    _expandedIssues.add(locateIssueId);
+    if (!_issueViewMode[locateIssueId]) _issueViewMode[locateIssueId] = 'diagram';
+  }
+
+  if (!filtered.length) {
+    container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_matching_tasks') + '</div>';
+    return;
+  }
+
   function _engineWithIp(engine) {
     if (!engine) return '-';
     const _devName = engine.split('-').slice(1).join('-');
-    const _ip = _devIpMap[_devName];
+    const _ip = _timelineDevIpMap[_devName];
     return _ip ? engine + ' (' + _ip + ')' : engine;
   }
-  // 构建 GitCode issue URL：优先用 issue 自身 repoKey，回退全局 repoKey
-  const _globalRepoPath = (repoKey || '').replace(/^gitcode:/, '');
   function _issueUrl(issueId, issueRepoKey) {
     const num = (issueId || '').replace(/^#/, '');
-    const repoPath = (issueRepoKey || '').replace(/^gitcode:/, '') || _globalRepoPath;
+    const repoPath = (issueRepoKey || '').replace(/^gitcode:/, '') || _timelineGlobalRepoPath;
     return repoPath && num ? 'https://gitcode.com/' + repoPath + '/issues/' + num : '';
   }
-  let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
-  html += '<div style="display:flex;flex-direction:column;gap:0">';
-  issues.forEach(iss => {
+
+  let html = '<div style="display:flex;flex-direction:column;gap:0">';
+  filtered.forEach(iss => {
     const expanded = _expandedIssues.has(iss.issueId);
     const hasFailed = iss.events.some(e => e.status === 'failed');
     const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">' + I18N.t('observability.has_failure') + '</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">' + I18N.t('observability.normal') + '</span>';
@@ -900,14 +948,11 @@ function renderTimelineList(container, issues, repoKey) {
     html += '<span class="ts t3">' + fmtLocalTime(iss.lastAt || '').substring(0,16) + '</span>';
     html += '</div>';
     html += '<div id="tl-body-' + iss.issueId + '" style="display:' + (expanded ? 'block' : 'none') + ';padding:10px 14px;border-top:1px solid var(--b)">';
-    // 切换按钮
     html += '<div style="display:flex;gap:0;margin-bottom:10px">';
     html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] !== 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'diagram\')">' + I18N.t('observability.sequence_diagram') + '</button>';
     html += '<button class="bt bt-s ' + (_issueViewMode[iss.issueId] === 'events' ? 'bt-p' : 'bt-o') + '" onclick="switchIssueView(\'' + iss.issueId + '\',\'events\')">' + I18N.t('observability.event_list') + '</button>';
     html += '</div>';
-    // 时序图容器
     html += '<div id="tl-diagram-' + iss.issueId + '" class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto;' + (_issueViewMode[iss.issueId] === 'events' ? 'display:none' : '') + '"></div>';
-    // 事件列表容器
     html += '<div id="tl-events-' + iss.issueId + '" style="' + (_issueViewMode[iss.issueId] !== 'events' ? 'display:none' : '') + '">';
     html += '<table style="width:100%;font-size:11px"><thead><tr><th>' + I18N.t('observability.col_seq') + '</th><th>' + I18N.t('observability.col_event') + '</th><th>' + I18N.t('observability.col_agent') + '</th><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_skill') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
     html += iss.events.map(ev => {
@@ -921,16 +966,28 @@ function renderTimelineList(container, issues, repoKey) {
   });
   html += '</div>';
   container.innerHTML = html;
-  // 渲染已展开的 mermaid
-  issues.forEach(iss => {
+  filtered.forEach(iss => {
     if (_expandedIssues.has(iss.issueId) && _issueViewMode[iss.issueId] !== 'events') {
       const box = container.querySelector('#tl-diagram-' + iss.issueId);
       if (box) _renderMermaid(box, iss);
     }
   });
+  if (locateIssueId) {
+    setTimeout(() => {
+      const body = document.getElementById('tl-body-' + locateIssueId);
+      if (body) {
+        const card = body.parentElement;
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 100);
+  }
 }
 
 let _timelineIssues = [];
+let _timelineIssuesSorted = [];
+let _timelineSearch = '';
+let _timelineDevIpMap = {};
+let _timelineGlobalRepoPath = '';
 let _issueViewMode = {};
 let _timelineCache = null;  // {repo, ts, issues} — 30s TTL 避免重复 fetch
 
