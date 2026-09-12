@@ -140,5 +140,6 @@
   "col_agent": "Agent",
   "col_skill": "技能",
   "col_issue_seq": "Issue / 序号",
-  "col_failed_short": "失败"
+  "col_failed_short": "失败",
+  "rows_per_page": "每页"
 }

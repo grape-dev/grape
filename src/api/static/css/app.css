@@ -594,7 +594,8 @@
   100%{background-color:#fff8e1;box-shadow:inset 2px 0 0 rgba(255,159,10,.4)}
 }
 .highlight-flash{animation:highlight-flash 2s ease-in-out forwards}
-/* ===== Issue #67: 知识库页面 Vue 组件样式 ===== */
+
+/* ===== Issue #67: 知识库页面 Vue 组件样式（恢复自合并覆盖丢失）===== */
 .knowledge-page .stats-bar{display:flex;gap:12px;margin-bottom:16px}
 .knowledge-page .stat-card{flex:1;padding:16px 20px;border-radius:14px;background:var(--c);border:1px solid var(--b);display:flex;align-items:center;justify-content:space-between;box-shadow:none}
 .knowledge-page .stat-info{display:flex;flex-direction:column}

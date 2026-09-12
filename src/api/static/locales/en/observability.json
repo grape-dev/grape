@@ -140,5 +140,6 @@
   "col_agent": "Agent",
   "col_skill": "Skill",
   "col_issue_seq": "Issue / Seq",
-  "col_failed_short": "Failed"
+  "col_failed_short": "Failed",
+  "rows_per_page": "Per page"
 }
