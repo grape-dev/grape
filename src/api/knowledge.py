@@ -377,8 +377,7 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
             for line in f:
                 stripped = line.rstrip("\n")
                 if stripped.startswith("- [seq ") and "] " in stripped:
-                    # 取 "] " 后面的部分作为 content
-                    existing_content = stripped.split("] ", 1)[1] if "] " in stripped else ""
+                    existing_content = stripped.split("] ", 1)[1]
                     if existing_content == content:
                         file_has_content = True
                         break
