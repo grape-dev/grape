@@ -894,6 +894,9 @@ function _tlLoadInfo(taskId) {
       if (info.device_name) bits.push('🖥 ' + _tlEsc(info.device_name));
       if (info.last_ip) bits.push('🌐 ' + _tlEsc(info.last_ip));
       if (info.owner_name) bits.push('👤 ' + _tlEsc(info.owner_name));
+      if (info.spec) bits.push('⚙️ ' + _tlEsc(info.spec));
+      if (info.cpu_percent) bits.push('📊 CPU ' + Number(info.cpu_percent).toFixed(1) + '%');
+      if (info.memory_percent) bits.push('💾 MEM ' + Number(info.memory_percent).toFixed(1) + '%');
       el.innerHTML = bits.map(b => '<span>' + b + '</span>').join('');
     })
     .catch(() => {});

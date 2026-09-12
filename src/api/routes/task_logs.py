@@ -41,7 +41,8 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_user)):
         c = db.cursor()
         c.execute(
             """SELECT ar.name, ar.version, rc.device_name, rc.last_ip, rc.owner_name, t.prompt,
-                      t.created_at, t.started_at, t.completed_at, t.status, t.issue_id, t.event_seq, t.repo_key
+                      t.created_at, t.started_at, t.completed_at, t.status, t.issue_id, t.event_seq, t.repo_key,
+                      rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.load_avg, rc.spec
                FROM agent_tasks t
                LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id
                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
@@ -52,7 +53,8 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_user)):
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
     agent_name, agent_version, device_name, last_ip, owner_name, prompt = row[:6]
-    created_at, started_at, completed_at, status, issue_id, event_seq, repo_key = row[6:]
+    created_at, started_at, completed_at, status, issue_id, event_seq, repo_key = row[6:13]
+    cpu_pct, mem_pct, disk_pct, load_avg, spec = row[13:18] if len(row) > 17 else (0, 0, 0, "", "")
     import re as _re
     _m = _re.search(r"(\d+\.\d+\.\d+)", str(agent_version or ""))
     ver = _m.group(1) if _m else str(agent_version or "")
@@ -73,6 +75,11 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_user)):
         "issue_id": issue_id or "",
         "event_seq": event_seq or 0,
         "repo_key": repo_key or "",
+        "spec": spec or "",
+        "cpu_percent": cpu_pct or 0,
+        "memory_percent": mem_pct or 0,
+        "disk_percent": disk_pct or 0,
+        "load_avg": load_avg or "",
     }
 
 
