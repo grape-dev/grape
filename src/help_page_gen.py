@@ -9,6 +9,8 @@ v2 设计（见 docs/weekly-02/help-page-prototype.md）：
 
 数据流：help/*.md → 启动期生成 → /static/help.html（生成物，.gitignore）
 """
+from __future__ import annotations
+
 import html as _html
 import json
 import os

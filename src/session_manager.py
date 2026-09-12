@@ -1,4 +1,6 @@
 """Session 管理：DB 初始化、Session CRUD、飞书绑定、Feishu 用户映射"""
+from __future__ import annotations
+
 import sqlite3, json, threading, os, time, shutil
 from datetime import datetime
 from src.config import log
