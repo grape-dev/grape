@@ -1,6 +1,9 @@
 # Repos 仓库接口（/api/repos）
 
 > 对外公开（部分只读），认证：`get_current_user_or_api_key`。
+> ⚠️ **与 `/api/git-repo` 区分**：本接口（`/api/repos`）是 **grape 平台的仓库接口**，承载 grape 平**台业务属性
+> （托管/同步/成员/bot token/部署 URL/项目知识等）；而 `/api/git-repo`（见 10-git-repos.md）是
+> **Git 仓库透传接口**（Issue/PR/内容/分支等由 gitcode/github/gitlab 提供，`X-Git-Provider` 区分后端）。
 
 ## GET /api/repos/managed — 托管仓库列表
 

@@ -1,6 +1,7 @@
 ﻿# Git 仓库统一接口（/api/git-repo）
 
 > 设计：技能/第三方访问 Git 仓库资源（Issue/PR/内容/分支等）时，统一走 grape 的 Git 仓库 API。
+> ⚠️ **grape `/api/repos` 是平台业务接口**（托管/同步/成员/部署 URL 等，见 02-repos.md）；**本接口 `/api/git-repo` 是 Git 仓库透传**（Issue/PR/内容/分支等由 gitcode/github/gitlab 提供）。
 > **不是 GitCode 代理**：grape 侧定义中立的 Git 仓库资源语义，backend 由请求头/参数区分（gitcode / github / gitlab，未来扩展）。
 > 认证：`get_current_user_or_api_key`（API Key 用于 worker/技能）。写操作需授权。
 > Base：`{{SERVER_URL}}/api/git-repo`
