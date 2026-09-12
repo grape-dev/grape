@@ -194,6 +194,8 @@ function renderAgent(name, data) {
   const m = data.metrics || {};
   const es = m.event_stats || {};
   const events = data.recent_events || [];
+  const highlightId = data.highlight_issue_id || '';
+  const _normIss = s => String(s || '').replace(/^#/, '');
   const evtHtml = events.length > 0 ? `
     <table style="width:100%;font-size:12px;table-layout:fixed">
       <thead><tr>
@@ -212,7 +214,8 @@ function renderAgent(name, data) {
           const _issLink = (_issNum && ev.repo_key)
             ? `<a href="${_vcsUrl(ev.repo_key, '/issues/' + _issNum)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">${ev.issue_id}</a>`
             : ev.issue_id || '—';
-          return `<tr class="pipe-row" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
+          const _isHl = highlightId && _normIss(ev.issue_id) === _normIss(highlightId);
+          return `<tr class="pipe-row${_isHl ? ' highlight-flash' : ''}" onclick="_agentRowClick('${highlightId}', ${ev.seq})" style="cursor:pointer">
           <td style="padding:8px 10px;font-size:11px;font-weight:600;color:var(--t2)">#${ev.seq || '?'}</td>
           <td style="padding:8px 10px;white-space:nowrap;font-size:10px;color:var(--t3)">${fmtLocalTime(ev.created_at).substring(5,16) || '--:--'}</td>
           <td style="padding:8px 10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${ev.summary || ev.title || ev.event_type}</td>
@@ -231,8 +234,11 @@ function renderAgent(name, data) {
   const et = m.total_events || 0;
 
   const engineText = data.backend || (data.backends && data.backends.length ? data.backends.join(', ') : '');
+  const _ENGINE_TYPE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
+  const _engineTypeOf = n => { const l = (n || '').toLowerCase(); if (l.includes('hermes')) return 'hermes'; if (l.includes('opencode')) return 'opencode'; if (l.includes('codearts')) return 'codearts'; if (l.includes('codex')) return 'codex'; return ''; };
+  const _engineDot = _ENGINE_TYPE_DOT[_engineTypeOf(engineText)] || '';
   const engineBadge = engineText
-    ? `<span class="ts t3" style="font-weight:600">${I18N.t('agents.engine.label', {text: engineText})}</span>`
+    ? `<span class="ts t3" style="font-weight:600;display:inline-flex;align-items:center;gap:5px">${_engineDot ? `<span style="width:7px;height:7px;border-radius:50%;background:${_engineDot};flex-shrink:0"></span>` : ''}${I18N.t('agents.engine.label', {text: engineText})}</span>`
     : `<span class="ts t3" style="color:var(--r);font-weight:700">${I18N.t('agents.engine.no_engine')}</span>`;
 
   let html = `
@@ -250,6 +256,13 @@ function renderAgent(name, data) {
 <div class="cd"><div class="cd-h"><h2>${I18N.t('agents.event.history_title')}</h2><span class="ts t3">${I18N.t('agents.event.recent_n', {n: events.length})}</span></div>${evtHtml}</div>`;
 
   el.innerHTML = html;
+  // Issue #108: 滚动定位到第一个高亮事件行
+  if (highlightId) {
+    const _firstHl = el.querySelector('.highlight-flash');
+    if (_firstHl) {
+      setTimeout(function() { _firstHl.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 120);
+    }
+  }
   // 根据已配置 skill 的 scope 设置初始页签（避免回显时看不到已配置的 skill）
   _skillScope = (data.skill_scope === 'repo') ? 'repo' : (data.skill_scope === 'user') ? 'user' : 'official';
   const scopeSel = document.querySelector('.cfg-skill-scope');
@@ -345,4 +358,13 @@ function refreshVodOnboard() {
     const secretEl = document.getElementById('vodImSecret');
     if (secretEl) secretEl.value = im.connected ? '********' : '';
   }).catch(() => {});
+}
+// Issue #108: 点击事件行时清除当前history state中的param（issue_number）
+// 这样返回时popstate调nav(view, undefined)不再传issue_number，不会重新高亮
+function _agentRowClick(highlightId, seq) {
+  var cur = window.history.state;
+  if (cur && cur.param) {
+    window.history.replaceState({view: cur.view, param: null}, '', '#' + (cur.view || ''));
+  }
+  app.nav('event', seq);
 }

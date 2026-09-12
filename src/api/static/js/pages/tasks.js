@@ -508,7 +508,7 @@ function _renderBoard(filtered) {
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${_tasksViewMode === 'repo_all' ? (t.assignee ? '👤 ' + t.assignee : '') : (t.assignee || t.repo_key || '')}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee ? '👤 ' + t.assignee : (t.repo_key || '')}</span>
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
           </div>
         </div>`;
@@ -615,7 +615,7 @@ function _render() {
     const ms = _mapStatusL(t);
     const si = _lStatusInfo[ms] || _lStatusInfo.pending;
     const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
-    const _assigneeHtml = _tasksViewMode === 'repo_all' && t.assignee ? ` · 👤 ${t.assignee}` : '';
+    const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';
     return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
       <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">
@@ -682,8 +682,8 @@ function _render() {
       <h1>${I18N.t('tasks.page_title')}</h1>
       <div id="deployLinkBar" style="margin-top:4px"></div>
       <div style="display:flex;gap:0;margin-top:8px;border-bottom:0.5px solid var(--b,#e8e8ed)">
-        <button class="tsk-tab${_tasksViewMode==='mine'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('mine')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='mine'?'var(--a,#0071e3)':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:${_tasksViewMode==='mine'?'600':'400'};color:${_tasksViewMode==='mine'?'var(--a,#0071e3)':'var(--t3,#86868b)'};background:transparent;cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_mine')||'我的任务'}</button>
-        <button class="tsk-tab${_tasksViewMode==='repo_all'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('repo_all')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='repo_all'?'var(--a,#0071e3)':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:${_tasksViewMode==='repo_all'?'600':'400'};color:${_tasksViewMode==='repo_all'?'var(--a,#0071e3)':'var(--t3,#86868b)'};background:transparent;cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_repo_all')||'仓库全部'}</button>
+        <button class="tsk-tab${_tasksViewMode==='mine'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('mine')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='mine'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='mine'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='mine'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_mine')||'我的任务'}</button>
+        <button class="tsk-tab${_tasksViewMode==='repo_all'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('repo_all')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='repo_all'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='repo_all'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='repo_all'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_repo_all')||'仓库全部'}</button>
       </div>
       <div class="tsk-controls">
         <button class="tsk-btn tsk-btn-primary" onclick="openTaskCreateModal()" style="margin-right:8px">${I18N.t('tasks.create.btn_new')}</button>
