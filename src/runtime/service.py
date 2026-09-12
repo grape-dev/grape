@@ -1699,7 +1699,21 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
 
     from src.api.session_store import set_issue_scene
     from src.runtime.engine_select import _repo_user_id
-    _vod_uid = _repo_user_id(repo_key)
+    _vod_issue_creator = ""
+    try:
+        from src.session_manager import db as _evdb, db_lock as _evdb_lock
+        with _evdb_lock:
+            _ec = _evdb.cursor()
+            _ec.execute(
+                "SELECT actor FROM events WHERE repo_key=? AND issue_id=? AND actor!='' "
+                "ORDER BY seq ASC LIMIT 1",
+                (repo_key, issue_id))
+            _erow = _ec.fetchone()
+            if _erow:
+                _vod_issue_creator = _erow[0] or ""
+    except Exception:
+        pass
+    _vod_uid = _repo_user_id(repo_key, issue_creator=_vod_issue_creator)
     set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
     log.info(f"VOD recommend: scene_id={_rec_scene} set for {issue_id}")
 

@@ -1057,7 +1057,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         if body.scene_id and body.scene_id != "vod-auto":
             from src.api.session_store import set_issue_scene
             from src.runtime.engine_select import _repo_user_id
-            scene_uid = _repo_user_id(repo_key) or 0
+            scene_uid = _repo_user_id(repo_key, issue_creator=user["username"]) or 0
             set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
     except Exception as _e:
         from src.config import log

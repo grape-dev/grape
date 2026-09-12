@@ -712,7 +712,7 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
             ), name=f"sub-{agent_type}-{seq}")
         else:
             from src.runtime.engine_select import _repo_user_id
-            _sub_uid = _repo_user_id(repo_key)
+            _sub_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
                                    skill_id, skill_path, engine_id, issue_id, user_id=_sub_uid)
         log.info(f"Pipeline subscription: dispatched seq={seq} agent={agent_type} mode={kind}")
@@ -1074,7 +1074,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if not _issue_scene_uid:
         try:
             from src.runtime.engine_select import _repo_user_id
-            _issue_scene_uid = _repo_user_id(repo_key)
+            _issue_scene_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
         except Exception:
             pass
     log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
@@ -2288,7 +2288,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             if _rec_scene:
                                 from src.api.session_store import set_issue_scene
                                 from src.runtime.engine_select import _repo_user_id
-                                _vod_uid = _repo_user_id(repo_key)
+                                _vod_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
                                 set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
                                 log.info(f"智能推荐完成: scene_id={_rec_scene} set for {issue_id}")
                                 # 重派 VOD（用匹配场景的 vod 技能）
@@ -2799,7 +2799,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     _scene_id = _scene_id or "default"
     if not _scene_uid:
         from src.runtime.engine_select import _repo_user_id
-        _scene_uid = _repo_user_id(repo_key)
+        _scene_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
 
     # skill 解析
     from src.user.db import resolve_skill_id, get_skill_by_id, get_skill_path
