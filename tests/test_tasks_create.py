@@ -86,7 +86,7 @@ def test_create_task_creates_issue_and_task():
     assert d["assignee"] == "tc_user"          # General Settings Account = 当前登录用户名（settings.credentials.account）
     with db_lock:
         row = db.cursor().execute(
-            "SELECT assignee, repo_key, issue_number, status FROM tasks WHERE id=?", (d["task_id"],)).fetchone()
+            "SELECT assignee, repo_key, issue_number, status FROM issue WHERE id=?", (d["task_id"],)).fetchone()
     assert row[0] == "tc_user"
     assert row[1] == "tc_git/demo" or row[1] == "gitcode:tc_git/demo"
     assert row[2] == 42

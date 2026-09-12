@@ -20,14 +20,14 @@ REPO = "gitcode:owner/repo"
 def _count(repo_key: str = REPO, issue: int = 1):
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM tasks WHERE repo_key=? AND issue_number=?", (repo_key, issue))
+        c.execute("SELECT COUNT(*) FROM issue WHERE repo_key=? AND issue_number=?", (repo_key, issue))
         return c.fetchone()[0]
 
 
 def _rows(repo_key: str = REPO, issue: int = 1):
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT user_id, assignee, status, title, task_description FROM tasks WHERE repo_key=? AND issue_number=?",
+        c.execute("SELECT user_id, assignee, status, title, task_description FROM issue WHERE repo_key=? AND issue_number=?",
                   (repo_key, issue))
         return c.fetchall()
 
@@ -35,7 +35,7 @@ def _rows(repo_key: str = REPO, issue: int = 1):
 def _cleanup():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM tasks WHERE repo_key=?", (REPO,))
+        c.execute("DELETE FROM issue WHERE repo_key=?", (REPO,))
         db.commit()
 
 
@@ -87,13 +87,13 @@ def test_close_issue_tasks_completes_active():
     assert n == 1
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT status, completed_reason FROM tasks WHERE repo_key=? AND issue_number=4", (REPO,))
+        c.execute("SELECT status, completed_reason FROM issue WHERE repo_key=? AND issue_number=4", (REPO,))
         row = c.fetchone()
     assert row and row[0] == "completed" and row[1] == "issue_closed"
     # issue 5 未关闭 → 仍 active
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_number=5", (REPO,))
+        c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=5", (REPO,))
         row = c.fetchone()
     assert row and row[0] == "active"
 
@@ -136,7 +136,7 @@ def test_ensure_links_conversation():
         tid = tasks_mod.ensure_issue_task(REPO, 8, title="Linked", assignee="carol", event_type="issue_opened")
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT conversation_id FROM tasks WHERE id=?", (tid,))
+        c.execute("SELECT conversation_id FROM issue WHERE id=?", (tid,))
         conv_id = c.fetchone()[0]
     assert conv_id, "任务应关联对话"
     with db_lock:
@@ -157,6 +157,6 @@ def test_ensure_skips_conversation_when_user0():
         tid = tasks_mod.ensure_issue_task(REPO, 9, title="NoUser", assignee="ghost2", event_type="issue_opened")
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT conversation_id FROM tasks WHERE id=?", (tid,))
+        c.execute("SELECT conversation_id FROM issue WHERE id=?", (tid,))
         conv_id = c.fetchone()[0]
     assert not conv_id

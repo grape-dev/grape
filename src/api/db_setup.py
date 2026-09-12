@@ -253,8 +253,9 @@ CREATE TABLE IF NOT EXISTS feishu_onboard_task (
 )
 """
 
-_TASKS_DDL = """
-CREATE TABLE IF NOT EXISTS tasks (
+# ===== Issue 任务卡片表（原 tasks，Phase B1 改名；结构不变，后续 B2 收编 issue_state 字段）=====
+_ISSUE_DDL = """
+CREATE TABLE IF NOT EXISTS issue (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id          INTEGER NOT NULL,
     assignee         TEXT NOT NULL,
@@ -721,7 +722,7 @@ _NEW_TABLES = [
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
-    ("tasks", _TASKS_DDL),
+    ("issue", _ISSUE_DDL),
     ("event_thread", _EVENT_THREAD_DDL),
     ("agent_shared_knowledge", _AGENT_SHARED_KNOWLEDGE_DDL),
     ("scene_knowledge_ref", _SCENE_KNOWLEDGE_REF_DDL),
@@ -1817,6 +1818,20 @@ def _migrate_tables():
                     pass
     except Exception as e:
         log.warning(f"Pre-migration backup skipped: {e}")
+    # ===== Phase B1: tasks 表改名为 issue（结构不变，后续 B2 收编 issue_state 字段）=====
+    # 幂等：已存在 issue 表则跳过（新建库直接建 issue；老库 tasks→issue）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "issue" not in _tables and "tasks" in _tables:
+                c.execute("ALTER TABLE tasks RENAME TO issue")
+                db.commit()
+                log.info("Migrated table tasks -> issue (Phase B1, 结构不变)")
+            elif "issue" in _tables:
+                log.info("issue table already exists (Phase B1 rename skipped)")
+    except Exception as e:
+        log.warning(f"tasks->issue rename failed: {e}")
     migrations = [
         "ALTER TABLE agent_type_config ADD COLUMN parent_agent_type TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN agent_type TEXT DEFAULT ''",
@@ -2619,12 +2634,12 @@ def _migrate_tables():
             c = db.cursor()
             _ensure_column(c, "issue_state", "parent_issue_id", "TEXT DEFAULT ''")
             _ensure_column(c, "issue_state", "is_subtask_mode", "INTEGER DEFAULT 0")
-            _ensure_column(c, "tasks", "parent_issue_number", "INTEGER DEFAULT 0")
-            _ensure_column(c, "tasks", "is_subtask_mode", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "parent_issue_number", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "is_subtask_mode", "INTEGER DEFAULT 0")
             _ensure_column(c, "chat_messages", "task_id", "TEXT")
             _ensure_column(c, "chat_messages", "generate_status", "INTEGER DEFAULT NULL")
             db.commit()
-        log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + tasks + task_id/generate_status to chat_messages")
+        log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + issue + task_id/generate_status to chat_messages")
     except Exception as e:
         log.warning(f"Add multi-task columns failed: {e}")
     # ===== event_thread: task_id + generate_status（对齐 Chat Agent 持久化查询）=====
@@ -2683,9 +2698,9 @@ def _migrate_tables():
     try:
         with db_lock:
             c = db.cursor()
-            _ensure_column(c, "tasks", "created_by", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "created_by", "TEXT DEFAULT ''")
             db.commit()
-        log.info("Added created_by column to tasks")
+        log.info("Added created_by column to issue")
     except Exception as e:
         log.warning(f"Add tasks.created_by column failed: {e}")
     # ===== Scene scope downgrade 已在 _migrate_scene_table_to_repo_model 中处理（Issue-39 方案 B）=====

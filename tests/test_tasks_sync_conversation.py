@@ -33,9 +33,9 @@ def setup_module():
     _conv_id = create_conversation(_uid, "gitcode:tc_sync/demo", title="Issue #99")
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM tasks WHERE repo_key='gitcode:tc_sync/demo' AND issue_number=99")
+        c.execute("DELETE FROM issue WHERE repo_key='gitcode:tc_sync/demo' AND issue_number=99")
         c.execute(
-            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, conversation_id) "
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, conversation_id) "
             "VALUES (?,?, 'gitcode:tc_sync/demo', 99, '同步测试', 'test', 'active', ?)",
             (_uid, "tc_sync_user", _conv_id))
         db.commit()

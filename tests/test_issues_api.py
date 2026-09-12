@@ -47,7 +47,7 @@ def setup_module():
 def teardown_module():
     with db_lock:
         c = db.cursor()
-        for t in ("events", "issue_state", "tasks", "agent_tasks"):
+        for t in ("events", "issue_state", "issue", "agent_tasks"):
             try:
                 c.execute(f"DELETE FROM {t} WHERE repo_key=?", (REPO_KEY,))
             except Exception:
@@ -81,7 +81,7 @@ def _mk_task(number, status="processing"):
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT OR REPLACE INTO tasks (user_id, assignee, repo_key, issue_number, title, status) "
+            "INSERT OR REPLACE INTO issue (user_id, assignee, repo_key, issue_number, title, status) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (_uid["id"], "grape_bot", REPO_KEY, number, f"Task #{number}", status))
         db.commit()

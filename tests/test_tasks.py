@@ -76,7 +76,7 @@ def teardown_module():
 def _clean_tasks():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM tasks")
+        c.execute("DELETE FROM issue")
         db.commit()
 
 
@@ -125,7 +125,7 @@ class TestNotify:
         # 任务落库 active
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT user_id, assignee, repo_key, issue_number, status FROM tasks WHERE id=?", (data["task_id"],)).fetchone()
+            row = c.execute("SELECT user_id, assignee, repo_key, issue_number, status FROM issue WHERE id=?", (data["task_id"],)).fetchone()
         assert row and row[0] == _uid["id"]
         assert row and row[1] == "younger_eric"
         assert row and row[4] == "active"
@@ -135,7 +135,7 @@ class TestNotify:
         # 先建 alice 任务（未注册则直接插库模拟）
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "alice", "gitcode:org/test", 7))
             db.commit()
             alice_task = c.lastrowid
@@ -165,7 +165,7 @@ class TestNotify:
         # alice 任务应被关闭（reassigned）
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (alice_task,)).fetchone()
+            row = c.execute("SELECT status, completed_reason FROM issue WHERE id=?", (alice_task,)).fetchone()
         assert row and row[0] == "completed"
         assert row and row[1] == "reassigned"
 
@@ -190,7 +190,7 @@ class TestNotify:
         with db_lock:
             c = db.cursor()
             rows = c.execute(
-                "SELECT id, task_description FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number=9 AND assignee='younger_eric' AND status='active'"
+                "SELECT id, task_description FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=9 AND assignee='younger_eric' AND status='active'"
             ).fetchall()
         assert len(rows) == 1, rows
 
@@ -305,7 +305,7 @@ class TestClose:
         _clean_tasks()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 11))
             db.commit()
             tid = c.lastrowid
@@ -314,7 +314,7 @@ class TestClose:
         assert r.json()["closed"] >= 1
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (tid,)).fetchone()
+            row = c.execute("SELECT status, completed_reason FROM issue WHERE id=?", (tid,)).fetchone()
         assert row and row[0] == "pending_review"
 
     def test_close_missing_fields(self):
@@ -331,10 +331,10 @@ class TestMine:
         _clean_tasks()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 13))
             db.commit()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (9999,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (9999,?,?,?, 'active')",
                       ("other", "gitcode:org/test", 14))
             db.commit()
         r = client.get("/api/tasks/mine", headers=_headers)
@@ -347,10 +347,10 @@ class TestMine:
         _clean_tasks()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 15))
             db.commit()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, completed_reason, completed_at) VALUES (?,?,?,?, 'completed', 'issue_closed', datetime('now'))",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, completed_reason, completed_at) VALUES (?,?,?,?, 'completed', 'issue_closed', datetime('now'))",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 16))
             db.commit()
         r_active = client.get("/api/tasks/mine?status=active", headers=_headers)
@@ -363,10 +363,10 @@ class TestMine:
         _clean_tasks()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/repoA", 20))
             db.commit()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/repoB", 21))
             db.commit()
         # 按 repoA 过滤
@@ -387,7 +387,7 @@ class TestMine:
             c = db.cursor()
             for i, st in enumerate(("active", "processing", "completed", "active")):
                 c.execute(
-                    "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) "
+                    "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_at) "
                     "VALUES (?,?,?,?,?, datetime('now', ?))",
                     (_uid["id"], "younger_eric", "gitcode:org/sort", 30 + i, st,
                      f"-{i} minutes"))
@@ -412,9 +412,9 @@ class TestMine:
         with db_lock:
             c = db.cursor()
             # 故意乱序插入：completed 最晚建，active 最早建
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'completed', datetime('now','-1 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 101))
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'active', datetime('now','-3 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 102))
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'processing', datetime('now','-2 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 103))
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'completed', datetime('now','-1 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 101))
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'active', datetime('now','-3 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 102))
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_at) VALUES (?,?,?,?,'processing', datetime('now','-2 minutes'))", (_uid["id"], "younger_eric", "gitcode:org/md", 103))
             db.commit()
         r = client.get("/api/tasks/mine?mode=default&sort_order=desc", headers=_headers)
         got = [t["issue_number"] for t in r.json()["tasks"]]
@@ -430,7 +430,7 @@ class TestUserMappingBackfill:
             c = db.cursor()
             c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('backfill_user_1','oauth_user_1')")
             c.execute("DELETE FROM user_accounts WHERE username IN ('backfill_user_1','oauth_user_1')")
-            c.execute("DELETE FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number IN (91, 92)")
+            c.execute("DELETE FROM issue WHERE repo_key='gitcode:org/test' AND issue_number IN (91, 92)")
             db.commit()
 
     def _run_backfill(self):
@@ -481,7 +481,7 @@ class TestUserMappingBackfill:
             assert r.json().get("ok") is True, r.json()
             with db_lock:
                 row = db.cursor().execute(
-                    "SELECT COUNT(*) FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number=91 AND assignee='backfill_user_1'"
+                    "SELECT COUNT(*) FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=91 AND assignee='backfill_user_1'"
                 ).fetchone()
             assert row[0] == 1, "回填后 notify 应成功创建任务"
         finally:
@@ -500,10 +500,10 @@ class TestTaskLifecycle:
         self._clean()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 50))
             db.commit()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 50))
             db.commit()
         r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
@@ -514,7 +514,7 @@ class TestTaskLifecycle:
         with db_lock:
             c = db.cursor()
             rows = c.execute(
-                "SELECT status, completed_reason FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number=50").fetchall()
+                "SELECT status, completed_reason FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=50").fetchall()
         assert rows, "应有任务"
         for status, reason in rows:
             assert status == "completed", f"bot 接管后应为 completed，实际 {status}"
@@ -534,7 +534,7 @@ class TestTaskLifecycle:
         self._clean()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 52))
             db.commit()
             tid = c.lastrowid
@@ -543,7 +543,7 @@ class TestTaskLifecycle:
         assert r.json()["status"] == "active"
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+            row = c.execute("SELECT status FROM issue WHERE id=?", (tid,)).fetchone()
         assert row and row[0] == "active"
 
     def test_start_task_not_owner_rejected(self):
@@ -551,7 +551,7 @@ class TestTaskLifecycle:
         self._clean()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (9999, "other", "gitcode:org/test", 53))
             db.commit()
             tid = c.lastrowid
@@ -563,7 +563,7 @@ class TestTaskLifecycle:
         self._clean()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 54))
             db.commit()
             tid = c.lastrowid
@@ -572,7 +572,7 @@ class TestTaskLifecycle:
         assert r.json()["status"] == "processing"
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+            row = c.execute("SELECT status FROM issue WHERE id=?", (tid,)).fetchone()
         assert row and row[0] == "processing"
 
     def test_close_marks_processing_completed(self):
@@ -580,7 +580,7 @@ class TestTaskLifecycle:
         self._clean()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 55))
             db.commit()
         r = client.post("/api/tasks/close", headers=_bot_headers(), json={"repo_key": "org/test", "issue_number": 55})
@@ -588,7 +588,7 @@ class TestTaskLifecycle:
         assert r.json()["closed"] >= 1
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT status, completed_reason FROM tasks WHERE repo_key='gitcode:org/test' AND issue_number=55").fetchone()
+            row = c.execute("SELECT status, completed_reason FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=55").fetchone()
         assert row and row[0] == "pending_review"
 
     def test_reassign_closes_processing_old_assignee(self):
@@ -605,7 +605,7 @@ class TestTaskLifecycle:
                 c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) VALUES (?,?,?,?,datetime('now'))",
                           (bob["id"], "bob", "ou_bob", "鲍勃"))
                 db.commit()
-                c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+                c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
                           (_uid["id"], "younger_eric", "gitcode:org/test", 56))
                 db.commit()
                 old_tid = c.lastrowid
@@ -624,7 +624,7 @@ class TestTaskLifecycle:
             assert r.status_code == 200
             with db_lock:
                 c = db.cursor()
-                row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (old_tid,)).fetchone()
+                row = c.execute("SELECT status, completed_reason FROM issue WHERE id=?", (old_tid,)).fetchone()
             # 原 assignee（younger_eric）的 processing 任务应被换人关闭
             assert row and row[0] == "completed", f"原 assignee processing 任务应 completed，实际 {row}"
             assert row and row[1] == "reassigned"
@@ -640,7 +640,7 @@ class TestTaskLifecycle:
         self._clean()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 57))
             db.commit()
         r = client.get("/api/tasks/mine", headers=_headers)
@@ -661,13 +661,13 @@ class TestRepoAllTasks:
         _clean_tasks()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 70))
             db.commit()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (9999, "other_user", "gitcode:org/test", 71))
             db.commit()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (0, "bot_user", "gitcode:org/test", 72))
             db.commit()
         r = client.get("/api/tasks/repo/org/test", headers=_headers)
@@ -685,10 +685,10 @@ class TestRepoAllTasks:
         _clean_tasks()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 80))
             db.commit()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, completed_reason, completed_at) VALUES (?,?,?,?, 'completed', 'issue_closed', datetime('now'))",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, completed_reason, completed_at) VALUES (?,?,?,?, 'completed', 'issue_closed', datetime('now'))",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 81))
             db.commit()
         r_active = client.get("/api/tasks/repo/org/test?status=active", headers=_headers)
@@ -703,7 +703,7 @@ class TestRepoAllTasks:
         _clean_tasks()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 85))
             db.commit()
         r = client.get("/api/tasks/repo/org/test", headers=_headers)
@@ -718,10 +718,10 @@ class TestRepoAllTasks:
         _clean_tasks()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 90))
             db.commit()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/other", 91))
             db.commit()
         r = client.get("/api/tasks/repo/org/test", headers=_headers)
@@ -737,7 +737,7 @@ class TestRepoAllTasks:
             c = db.cursor()
             for i in range(3):
                 c.execute(
-                    "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, created_at) "
+                    "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_at) "
                     "VALUES (?,?,?,?,?, datetime('now', ?))",
                     (_uid["id"], "younger_eric", "gitcode:org/test", 100 + i, "active",
                      f"-{i} minutes"))
@@ -783,7 +783,7 @@ class TestRepoAllTasks:
         with db_lock:
             c = db.cursor()
             for _assignee, _num in (("alice", 120), ("bob", 121), ("carol", 122)):
-                c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                           (_uid["id"], _assignee, "gitcode:org/test", _num))
             db.commit()
         r1 = client.get("/api/tasks/repo/org/test?assignees=alice", headers=_headers)
@@ -797,9 +797,9 @@ class TestRepoAllTasks:
         _clean_tasks()
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 130))
-            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
                       (_uid["id"], "someone_else", "gitcode:org/test", 131))
             db.commit()
         r = client.get("/api/tasks/mine?assignees=younger_eric", headers=_headers)

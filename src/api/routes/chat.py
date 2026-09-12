@@ -146,7 +146,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
         from src.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            c.execute("UPDATE tasks SET conversation_id=? WHERE repo_key=? AND issue_number=?",
+            c.execute("UPDATE issue SET conversation_id=? WHERE repo_key=? AND issue_number=?",
                       (conv_id, rk, body.issue_number))
             _db.commit()
     except Exception:

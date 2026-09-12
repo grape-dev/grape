@@ -61,7 +61,7 @@ def teardown_module():
 def _clean():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM tasks")
+        c.execute("DELETE FROM issue")
         c.execute("DELETE FROM issue_state WHERE repo_key='gitcode:org/lifecycle'")
         c.execute("DELETE FROM events WHERE repo_key='gitcode:org/lifecycle'")
         db.commit()
@@ -72,7 +72,7 @@ def _insert_task(status='active', issue_number=100, stage=None):
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status) "
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status) "
             "VALUES (?,?,?,?,?,?,?)",
             (_uid["id"], "lifecycle_tester", "gitcode:org/lifecycle", issue_number,
              "Test Task #" + str(issue_number), "desc", status))
@@ -111,7 +111,7 @@ class TestConfirmDone:
         assert r.json()["stage"] == "done"
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (tid,)).fetchone()
+            row = c.execute("SELECT status, completed_reason FROM issue WHERE id=?", (tid,)).fetchone()
         assert row[0] == "completed"
         assert row[1] == "user_confirmed"
 
@@ -163,7 +163,7 @@ class TestCancelTask:
         assert r.json()["status"] == "cancelled"
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (tid,)).fetchone()
+            row = c.execute("SELECT status, completed_reason FROM issue WHERE id=?", (tid,)).fetchone()
         assert row[0] == "cancelled"
         assert row[1] == "user_cancelled"
 
@@ -198,7 +198,7 @@ class TestResumeTask:
         assert r.json()["status"] == "processing"
         with db_lock:
             c = db.cursor()
-            row = c.execute("SELECT status, completed_reason FROM tasks WHERE id=?", (tid,)).fetchone()
+            row = c.execute("SELECT status, completed_reason FROM issue WHERE id=?", (tid,)).fetchone()
         assert row[0] == "processing"
         assert row[1] is None
 

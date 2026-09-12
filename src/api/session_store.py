@@ -107,7 +107,7 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
             with db_lock:
                 _c = db.cursor()
                 _c.execute(
-                    "UPDATE tasks SET status=? "
+                    "UPDATE issue SET status=? "
                     "WHERE repo_key=? AND issue_number=? AND status NOT IN ('completed','cancelled','awaiting_input')",
                     (_task_status, repo_key, _issue_num))
                 db.commit()

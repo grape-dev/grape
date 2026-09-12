@@ -66,7 +66,7 @@ def _task_status_map(repo_key: str) -> dict:
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT issue_number, status FROM tasks WHERE repo_key=?", (repo_key,))
+            c.execute("SELECT issue_number, status FROM issue WHERE repo_key=?", (repo_key,))
             for r in c.fetchall():
                 out[str(r[0])] = r[1]
         except Exception as e:

@@ -860,11 +860,11 @@ def _get_task_description(conv: dict | None) -> str:
             c = db.cursor()
             if conv_id:
                 c.execute(
-                    "SELECT task_description FROM tasks WHERE conversation_id=? AND task_description!='' ORDER BY id DESC LIMIT 1",
+                    "SELECT task_description FROM issue WHERE conversation_id=? AND task_description!='' ORDER BY id DESC LIMIT 1",
                     (conv_id,))
             else:
                 c.execute(
-                    "SELECT task_description FROM tasks WHERE repo_key=? AND issue_number=? AND task_description!='' ORDER BY id DESC LIMIT 1",
+                    "SELECT task_description FROM issue WHERE repo_key=? AND issue_number=? AND task_description!='' ORDER BY id DESC LIMIT 1",
                     (repo_key, issue_number))
             row = c.fetchone()
             return row[0] if row else ""

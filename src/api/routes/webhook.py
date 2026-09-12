@@ -265,7 +265,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             from src.session_manager import db as _ck_db, db_lock as _ck_lock
             with _ck_lock:
                 _ck_c = _ck_db.cursor()
-                _ck_c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
+                _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
                               (repo_key, int(issue_number)))
                 if _ck_c.fetchone():
                     log.info(f"A2A: rejected — task cancelled, issue=#{issue_number}, agent={agent_name}")

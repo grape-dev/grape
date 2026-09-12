@@ -27,7 +27,7 @@ def _cleanup():
         c = db.cursor()
         c.execute("DELETE FROM events WHERE repo_key=?", (REPO,))
         c.execute("DELETE FROM event_skipped WHERE repo_key=?", (REPO,))
-        c.execute("DELETE FROM tasks WHERE repo_key=?", (REPO,))
+        c.execute("DELETE FROM issue WHERE repo_key=?", (REPO,))
         c.execute("DELETE FROM issue_state WHERE repo_key=?", (REPO,))
         db.commit()
 

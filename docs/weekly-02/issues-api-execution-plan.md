@@ -33,18 +33,31 @@
 
 > A1-A5 数据聚合：`issues.py` 内复用 `get_issue_stage`（issue_state）+ `get_events_grouped_by_issue`（events）+ `load_event_json`（pipeline）；`stage/status` 双字段（期初 join 双表，见 1.1.4 过渡）。
 
-### Phase B：`tasks` → `issue` 表迁移（渐进式）
+### Phase B：`tasks` → `issue` 表迁移（渐进式，拆为两个子阶段）
+
+> **B1（先，只改表名）**：`tasks` → `issue`，**不新增字段**，确保功能正常后再继续。
+> **B2（后，加字段）**：在 `issue` 上逐步收编 `issue_state` 的字段。
+
+#### Phase B1：仅表改名（不增字段）
 
 | # | 任务 | 产出 | 验收 | 依赖 |
 |---|------|------|------|------|
-| B1 | `db_setup._migrate_tables` | `ALTER TABLE tasks RENAME TO issue`（幂等）+ `_ISSUE_DDL` | 已存在 `issue` 则跳过；老库 `tasks`→`issue` | — |
-| B2 | `db_setup` 补列（收编批 A） | `issue` 加 `stage`/`owner_agent`（默认 vod） | `_ensure_column`；老 tasks 行 stage 默认 vod | B1 |
-| B3 | `db_setup` 补列（收编批 B） | `scene_id`/`scene_user_id`/`allow_scene_override` | 补列成功 | B2 |
-| B4 | `db_setup` 补列（收编批 C） | `a2a_seq`/`parent_issue_id`/`is_subtask_mode`（命名对齐） | 旧 `parent_issue_number` 弃用或改名 | B3 |
-| B5 | 存量回填 | issue_state 数据按 repo_key+issue_id 并入 issue（`UPDATE issue SET stage=..., scene_id=... WHERE repo_key=? AND issue_number=?`） | 迁移后 issue_state 与 issue 对齐（抽样核对） | B4 |
-| B6 | 消费方表名替换（`tasks`→`issue`） | `session_store.py`/`routes/tasks.py`/`routes/pipeline.py`/`im/handler_async.py`/`event_pipeline.py`/`runtime/service.py`/`prompt_builder.py`/`repogit.py`/`onboarding.py`/`cleanup.py` | 全局 grep `FROM/INTO/UPDATE tasks` 归零（除 agent_tasks） | B5 |
+| B1.1 | `db_setup` 迁移 | `ALTER TABLE tasks RENAME TO issue`（幂等：已存在 `issue` 跳过）；`_TASKS_DDL` → `_ISSUE_DDL`（结构=原 tasks） | 老库 `tasks`→`issue`；列结构原样 | — |
+| B1.2 | 消费方表名替换 | 10+ 文件 SQL `FROM/INTO/UPDATE tasks` → `issue`（除 `agent_tasks`） | 全局 grep 归零；任务中心/接口功能回归绿 | B1.1 |
 
-> 收编批 D（`body`/`status_updated_at`）按需做；`agent_tasks` 不参与改名。
+> B1 里程碑：**表名已是 `issue`，字段仍同旧 tasks**（status/title/issue_number/task_description/conversation_id/...），功能零变化。
+
+#### Phase B2：字段收编（ADD COLUMN）
+
+| # | 任务 | 产出 | 验收 | 依赖 |
+|---|------|------|------|------|
+| B2.1 | 补列（批 A） | `issue` 加 `stage`（默认 vod）、`owner_agent`（默认 vod） | `_ensure_column`；老 issue 行 stage 默认 vod | B1 |
+| B2.2 | 补列（批 B） | `scene_id`/`scene_user_id`/`allow_scene_override` | 补列成功 | B2.1 |
+| B2.3 | 补列（批 C） | `a2a_seq`/`parent_issue_id`/`is_subtask_mode`（命名对齐） | 旧 `parent_issue_number` 弃用或改名；is_subtask_mode 去重 | B2.2 |
+| B2.4 | 存量回填 | `issue_state` 数据并入 `issue`（stage/scene/owner_agent/...） | 迁移后两表对齐（抽样核对） | B2.3 |
+| B2.5 | 读写切换 | pipeline 写 `issue`；读 `issue` 优先、`issue_state` fallback | 双读一致 | B2.4 |
+
+> 批 D（`body`/`status_updated_at`）按需做；`agent_tasks` 不参与改名。
 
 ### Phase C：接口与表统一 + 收尾
 
@@ -62,13 +75,14 @@
 
 ```
 A1 → A2/A3/A4 → A5 → A6 ──┐
-                           ├─ B1 → B2 → B3/B4 → B5 → B6 ──┐
-                           └───────────────────────────────┼─ C1 → C2 → C3 → C4 → C5
+                           ├─ B1.1 → B1.2 ──┐
+                           │                 ├─ B2.1 → B2.2 → B2.3 → B2.4 → B2.5 ──┐
+                           └────────────────────────────────────────────────────┴─ C1 → C2 → C3 → C4 → C5
 ```
 
 **关键**：
 - A 阶段先交付 `/api/issues`（join 读），业务角度立即可用、风险低。
-- B 阶段表迁移独立，风险集中在 B6（全局表名替换）。
+- B 阶段拆 B1（只改名）/ B2（加字段）：B1 独立验证功能正常后再 B2，风险隔离。
 - C 阶段统一单表 + 废弃 tasks/create + 收尾。
 
 ---
