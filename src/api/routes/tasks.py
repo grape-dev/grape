@@ -1660,11 +1660,12 @@ async def my_tasks(status: str = Query("", pattern="^(active|processing|awaiting
     if repo_key:
         repo_key = to_repo_key(repo_key)
     if created_by_me and created_by_me.lower() == "true":
-        # 仅我创建的任务：严格匹配 user_id，排除 user_id=0（bot 创建）
+        # 仅我创建的任务：严格匹配 user_id
         clauses = ["user_id=?"]
         params = [user["id"]]
     else:
-        clauses = ["(user_id=? OR user_id=0)"]
+        # 我的任务：只返回当前用户创建的任务（不包含 user_id=0 的未注册用户任务）
+        clauses = ["user_id=?"]
         params = [user["id"]]
     if status:
         clauses.append("status=?")
