@@ -24,6 +24,8 @@ def _clean_tables(monkeypatch):
         c.execute("DELETE FROM agent_runtimes")
         c.execute("DELETE FROM runtime_credentials")
         c.execute("DELETE FROM devops_pipeline_scene")
+        c.execute("DELETE FROM unified_user_mapping")
+        c.execute("DELETE FROM user_repos")
         db.commit()
     yield
     with db_lock:
@@ -34,6 +36,8 @@ def _clean_tables(monkeypatch):
         c.execute("DELETE FROM agent_runtimes")
         c.execute("DELETE FROM runtime_credentials")
         c.execute("DELETE FROM devops_pipeline_scene")
+        c.execute("DELETE FROM unified_user_mapping")
+        c.execute("DELETE FROM user_repos")
         db.commit()
 
 
@@ -200,3 +204,51 @@ class TestScenePoolEngineIds:
 
     def test_no_scene_returns_empty(self):
         assert es.get_scene_pool_engine_ids("nonexistent", "vod", repo_key="owner/repo", user_id=1) == ""
+
+
+class TestRepoUserIdIssueCreator:
+    """回归测试：_repo_user_id(repo_key, issue_creator=...) 4 场景（Issue #116）。
+
+    PR #123 修复：6 处调用点补传 issue_creator，使多用户仓库下 _repo_user_id
+    优先按 Issue 创建者反查 unified_user_mapping，而非取 user_repos 中 user_id 最小行。
+    """
+
+    REPO = "multiuser/demo"
+    GITCODE_REPO = "gitcode:multiuser/demo"
+
+    def _seed(self, users, mapping=None):
+        """插入 user_repos 多用户 + 可选 unified_user_mapping 记录。"""
+        with db_lock:
+            c = db.cursor()
+            for uid in users:
+                c.execute(
+                    "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_join) "
+                    "VALUES (?, ?, 'multiuser', 'demo', 1)",
+                    (uid, self.GITCODE_REPO))
+            if mapping:
+                for uid, gcu in mapping:
+                    c.execute(
+                        "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user) "
+                        "VALUES (?, ?)",
+                        (uid, gcu))
+            db.commit()
+
+    def test_issue_creator_resolved_to_mapping(self):
+        """场景1：issue_creator 匹配 unified_user_mapping → 返回该 user_id（非最小 user_id）。"""
+        self._seed(users=[100, 501], mapping=[(501, "creator_alice")])
+        assert es._repo_user_id(self.REPO, issue_creator="creator_alice") == 501
+
+    def test_unknown_issue_creator_falls_back(self):
+        """场景2：issue_creator 未知 → 回退 user_repos ORDER BY user_id ASC（取最小）。"""
+        self._seed(users=[100, 200])
+        assert es._repo_user_id(self.REPO, issue_creator="ghost_user") == 100
+
+    def test_empty_issue_creator_falls_back(self):
+        """场景3：issue_creator="" → 回退 user_repos ORDER BY user_id ASC。"""
+        self._seed(users=[100, 200])
+        assert es._repo_user_id(self.REPO, issue_creator="") == 100
+
+    def test_no_issue_creator_arg_falls_back(self):
+        """场景4：不传 issue_creator（默认 ""）→ 回退 user_repos ORDER BY user_id ASC。"""
+        self._seed(users=[100, 200])
+        assert es._repo_user_id(self.REPO) == 100
