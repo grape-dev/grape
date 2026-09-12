@@ -102,6 +102,7 @@ function _backFromSkillDetail() {
     return;
   }
   if (from.view === 'scene-detail' && from.param) {
+    window._currentView = 'scene-detail';
     renderSceneDetail(from.param);
     // replaceState 更新当前历史记录为场景详情状态，
     // 否则 history.state 仍停留在技能详情，下次进入技能时来源判断错误
