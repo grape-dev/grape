@@ -63,7 +63,7 @@ function renderChat(openConvId) {
         <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
       <div id="chatImgPreview" style="display:none;padding:6px 12px;border-top:1px solid var(--b);flex-wrap:wrap;gap:6px"></div>
-      <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" data-tooltip="${I18N.t('chat.video_tooltip')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><input type="file" accept="video/*" style="display:none" onchange="_onChatVideoSelect(this)"></label><input id="chatInput" placeholder="${I18N.t('chat.placeholder')}" style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
+      <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" data-tooltip="${I18N.t('chat.video_tooltip')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><input type="file" accept="video/*" style="display:none" onchange="_onChatVideoSelect(this)"></label><textarea id="chatInput" rows="1" placeholder="${I18N.t('chat.placeholder')}" style="flex:1" oninput="_autoResizeTextarea(this)"></textarea><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
     </div>
     <div class="chat-side" id="chatSide"></div>
   </div>`;
@@ -394,9 +394,18 @@ function switchConversation(convId) {
   });
 }
 
+function _autoResizeTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function _resetTextareaHeight(el) {
+  el.style.height = '';
+}
+
 function setupChatStream() {
   const input = document.getElementById('chatInput');
-  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') sendChatStream(); });
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatStream(); } });
 }
 
 const _MAX_IMAGES = 9;
@@ -550,6 +559,7 @@ function doSend(input, body) {
   const vid = _pendingVideo ? _pendingVideo.data : '';
   if (!msg && imgs.length === 0) return;
   input.value = '';
+  _resetTextareaHeight(input);
   _clearAllImages();
   _clearVideo();
   // 显示用户消息（图片直接显示缩略图）

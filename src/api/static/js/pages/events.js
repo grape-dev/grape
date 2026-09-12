@@ -2,6 +2,11 @@
 let _convSeq = null;
 let _convAgent = '';
 
+function _autoResizeTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
 function navEvent(seq) {
   if (!seq || seq < 1) return;
   // 局部刷新：直接拿数据调 renderEventDetail，不走路由避免整体闪抖
@@ -145,7 +150,7 @@ function renderEventDetail(data) {
       <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">${I18N.t('events.section_conversation', {name: agentName})} <button onclick="toggleConvFullscreen()" title="${I18N.t('events.fullscreen_title')}" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">${I18N.t('events.fullscreen_btn')}</button></h3>
       <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
       <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
-        <input id="convInput" placeholder="${I18N.t('events.conv_input_placeholder')}" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendConversation();}">
+        <textarea id="convInput" rows="1" placeholder="${I18N.t('events.conv_input_placeholder')}" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);resize:vertical;max-height:120px;overflow-y:auto" oninput="_autoResizeTextarea(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendConversation()}"></textarea>
         <button class="bt bt-p bt-s" onclick="sendConversation()">${I18N.t('events.btn_send')}</button>
       </div>
     </div>
@@ -318,6 +323,7 @@ function sendConversation() {
   const msg = (input.value || '').trim();
   if (!msg) return;
   input.value = '';
+  input.style.height = '';
   const messagesEl = document.getElementById('convMessages');
   if (messagesEl) messagesEl.insertAdjacentHTML('beforeend', _convBubble('user', msg));
   const replyId = 'convReply' + Date.now();
