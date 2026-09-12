@@ -331,108 +331,6 @@ var _TAG_HIGHLIGHTS = {
   'cncf':       'CNCF \u751f\u6001\u9879\u76ee',
 };
 
-var _LOCAL_PREVIEW = {
-  'hello-flask': '<div style="background:#f0f2f5;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
-    '<div style="text-align:center;font-size:11px;color:#888;margin-bottom:6px">Mood Tracker \u9884\u89c8</div>' +
-    '<div style="display:flex;justify-content:space-around;margin-bottom:6px">' +
-      '<span style="font-size:18px">\ud83d\ude00</span><span style="font-size:18px">\ud83d\ude0a</span><span style="font-size:18px">\ud83d\ude10</span><span style="font-size:18px">\ud83d\ude1f</span><span style="font-size:18px">\ud83d\ude22</span>' +
-    '</div>' +
-    '<div style="background:#fff;border-radius:6px;padding:6px 8px;margin-bottom:4px"><div style="font-size:9px;color:#4caf50;font-weight:600">\u5f00\u5fc3 \u00b7 \u4eca\u5929\u5b8c\u6210\u4e86\u4e00\u4e2a\u6709\u8da3\u7684\u529f\u80fd</div></div>' +
-    '<div style="display:flex;gap:6px;margin-top:4px"><div style="flex:1;background:#fff;border-radius:4px;padding:4px;text-align:center"><div style="font-size:14px;font-weight:700;color:#3168e0">3</div><div style="font-size:7px;color:#888">\u8bb0\u5f55</div></div><div style="flex:1;background:#fff;border-radius:4px;padding:4px;text-align:center"><div style="font-size:14px;font-weight:700;color:#3168e0">4.3</div><div style="font-size:7px;color:#888">\u5e73\u5747</div></div></div>' +
-  '</div>',
-  'hello-fastapi': '<div style="background:#0d1117;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px;font-family:monospace">' +
-    '<div style="font-size:9px;color:#58a6ff;margin-bottom:4px">GET /</div>' +
-    '<div style="font-size:9px;color:#7ee787;margin-bottom:6px">{ "message": "Hello, World!" }</div>' +
-    '<div style="font-size:9px;color:#58a6ff;margin-bottom:4px">GET /health</div>' +
-    '<div style="font-size:9px;color:#7ee787">{ "status": "ok", "service": "hello-fastapi" }</div>' +
-    '<div style="position:absolute;bottom:8px;right:10px;font-size:8px;color:#8b949e">\u26a1 FastAPI</div>' +
-  '</div>',
-  'hello-todo': '<div style="background:#fff;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px;font-family:monospace">' +
-    '<div style="font-size:10px;color:#333;font-weight:600;margin-bottom:6px">TODO CLI</div>' +
-    '<div style="font-size:9px;color:#888;margin-bottom:3px">> add \u5b66\u4e60 Flask</div>' +
-    '<div style="font-size:9px;color:#888;margin-bottom:3px">> add \u5199\u5355\u5143\u6d4b\u8bd5</div>' +
-    '<div style="font-size:9px;color:#4caf50;margin-bottom:3px">\u2713 \u5b66\u4e60 Flask</div>' +
-    '<div style="font-size:9px;color:#888;margin-bottom:3px">> list</div>' +
-    '<div style="font-size:9px;color:#888">1. [\u2713] \u5b66\u4e60 Flask</div>' +
-    '<div style="font-size:9px;color:#888">2. [ ] \u5199\u5355\u5143\u6d4b\u8bd5</div>' +
-  '</div>',
-  'hello-calculator': '<div style="background:#1a1a2e;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
-    '<div style="text-align:center;font-size:10px;color:#888;margin-bottom:6px">\u7b80\u5355\u8ba1\u7b97\u5668</div>' +
-    '<div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:6px;text-align:right"><span style="font-size:16px;color:#4caf50;font-family:monospace">3 + 4 = 7</span></div>' +
-    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px">' +
-      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">7</div>' +
-      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">8</div>' +
-      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">9</div>' +
-      '<div style="background:#4caf50;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#fff">\u00f7</div>' +
-      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">4</div>' +
-      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">5</div>' +
-      '<div style="background:#2a2a4e;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#ccc">6</div>' +
-      '<div style="background:#4caf50;border-radius:3px;padding:3px;text-align:center;font-size:10px;color:#fff">\u00d7</div>' +
-    '</div>' +
-  '</div>',
-  'hello-html': '<div style="background:#fff;border-radius:8px;padding:0;overflow:hidden;position:relative;height:140px">' +
-    '<div style="background:#3168e0;padding:6px 10px"><span style="font-size:9px;color:#fff">Hello Static Site</span></div>' +
-    '<div style="padding:10px">' +
-      '<div style="font-size:14px;font-weight:700;color:#1a1a2e;margin-bottom:4px">Hello, World!</div>' +
-      '<div style="font-size:9px;color:#666;margin-bottom:6px">\u9759\u6001\u7f51\u9875\u6a21\u677f\uff0cHTML + CSS + JavaScript</div>' +
-      '<div style="display:inline-block;background:#3168e0;color:#fff;font-size:9px;padding:3px 10px;border-radius:4px;cursor:pointer">\u70b9\u51fb\u4ea4\u4e92</div>' +
-      '<div style="margin-top:6px;display:flex;gap:4px"><div style="width:24px;height:24px;background:#f0f4f8;border-radius:4px"></div><div style="width:24px;height:24px;background:#e8f5e9;border-radius:4px"></div><div style="width:24px;height:24px;background:#fff3e0;border-radius:4px"></div></div>' +
-    '</div>' +
-  '</div>',
-  'hello-blog': '<div style="background:#fff;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
-    '<div style="font-size:12px;font-weight:700;color:#333;margin-bottom:8px">\ud83d\udcd8 Hello Mini Blog</div>' +
-    '<div style="padding:4px 0;border-bottom:1px solid #eee"><div style="font-size:10px;color:#2563eb">\u6211\u7684\u7b2c\u4e00\u7bc7\u535a\u5ba2</div></div>' +
-    '<div style="padding:4px 0;border-bottom:1px solid #eee"><div style="font-size:10px;color:#2563eb">Hello World</div></div>' +
-    '<div style="padding:4px 0"><div style="font-size:9px;color:#888">\u6b22\u8fce\u6765\u5230\u6211\u7684\u8ff7\u4f60\u535a\u5ba2\uff01\u8fd9\u662f\u5b66\u4e60 Flask \u7684\u7b2c\u4e00\u7ad9\u3002</div></div>' +
-    '<div style="position:absolute;bottom:8px;right:10px;font-size:8px;color:#ccc">Flask</div>' +
-  '</div>',
-  'snake-game': '<div style="background:#16213e;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
-    '<div style="display:flex;gap:12px;margin-bottom:6px"><span style="font-size:10px;color:#4caf50">\u5f97\u5206: 30</span><span style="font-size:10px;color:#888">\u901f\u5ea6: 2</span></div>' +
-    '<div style="position:relative;width:100%;height:90px;background:#0d1117;border-radius:4px;overflow:hidden">' +
-      '<div style="position:absolute;top:20px;left:40px;width:14px;height:14px;background:#4caf50;border-radius:2px"></div>' +
-      '<div style="position:absolute;top:20px;left:26px;width:14px;height:14px;background:#388e3c;border-radius:2px"></div>' +
-      '<div style="position:absolute;top:20px;left:12px;width:14px;height:14px;background:#388e3c;border-radius:2px"></div>' +
-      '<div style="position:absolute;top:40px;left:120px;width:12px;height:12px;background:#f44336;border-radius:50%"></div>' +
-    '</div>' +
-    '<div style="position:absolute;bottom:8px;right:10px;font-size:8px;color:#4caf50">\u2191\u2193\u2190\u2192 \u63a7\u5236</div>' +
-  '</div>',
-  'alien-invasion': '<div style="background:#000;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px;font-family:monospace">' +
-    '<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:10px;color:#4caf50">SCORE: 1200</span><span style="font-size:10px;color:#f44336">LIVES: 3</span></div>' +
-    '<div style="position:relative;width:100%;height:90px;background:#111;border-radius:4px;overflow:hidden">' +
-      '<div style="position:absolute;bottom:6px;left:40px;font-size:16px">\ud83d\ude80</div>' +
-      '<div style="position:absolute;top:10px;left:30px;font-size:14px">\ud83d\udd25</div>' +
-      '<div style="position:absolute;top:10px;left:60px;font-size:14px">\ud83d\udd25</div>' +
-      '<div style="position:absolute;top:20px;right:30px;font-size:16px">\ud83d\udd25</div>' +
-      '<div style="position:absolute;top:20px;right:60px;font-size:16px">\ud83d\udd25</div>' +
-      '<div style="position:absolute;top:20px;right:90px;font-size:16px">\ud83d\udd25</div>' +
-    '</div>' +
-    '<div style="position:absolute;bottom:8px;left:12px;font-size:8px;color:#666">pygame \u00b7 \u65b9\u5411\u952e\u79fb\u52a8 \u00b7 \u7a7a\u683c\u5c04\u51fb</div>' +
-  '</div>',
-  'alien-game': '<div style="background:#0a0a23;border-radius:8px;padding:12px;overflow:hidden;position:relative;height:140px">' +
-    '<div style="text-align:center;font-size:10px;color:#4caf50;margin-bottom:4px">ALIEN GAME</div>' +
-    '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:9px;color:#888">Score: 560</span><span style="font-size:9px;color:#888">High: 1200</span></div>' +
-    '<div style="position:relative;width:100%;height:80px;background:#111827;border-radius:4px;overflow:hidden">' +
-      '<div style="position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font-size:14px">\ud83d\udef3</div>' +
-      '<div style="position:absolute;top:8px;left:20%;font-size:12px">\ud83d\udc7d</div>' +
-      '<div style="position:absolute;top:8px;left:50%;font-size:12px">\ud83d\udc7d</div>' +
-      '<div style="position:absolute;top:8px;left:80%;font-size:12px">\ud83d\udc7d</div>' +
-      '<div style="position:absolute;top:24px;left:50%;width:2px;height:12px;background:#4caf50"></div>' +
-    '</div>' +
-    '<div style="position:absolute;bottom:8px;right:10px;font-size:8px;color:#555">pygame</div>' +
-  '</div>',
-  'hello-blog-sys': '<div style="background:#fff;border-radius:8px;padding:0;overflow:hidden;position:relative;height:140px">' +
-    '<div style="background:#2c3e50;padding:6px 10px;display:flex;justify-content:space-between"><span style="font-size:9px;color:#fff;font-weight:600">BLOG-SYS API</span><span style="font-size:8px;color:#95a5a6">v1.0</span></div>' +
-    '<div style="padding:8px;font-family:monospace">' +
-      '<div style="font-size:9px;color:#e74c3c;margin-bottom:3px">POST /api/posts</div>' +
-      '<div style="font-size:8px;color:#888;margin-bottom:4px">{ "title": "Hello", "content": "..." }</div>' +
-      '<div style="font-size:9px;color:#27ae60;margin-bottom:3px">GET /api/posts</div>' +
-      '<div style="font-size:8px;color:#888;margin-bottom:4px">[ { "id": 1, ... }, { "id": 2, ... } ]</div>' +
-      '<div style="font-size:9px;color:#f39c12;margin-bottom:3px">DELETE /api/posts/1</div>' +
-      '<div style="font-size:8px;color:#888">{ "status": "deleted" }</div>' +
-    '</div>' +
-    '<div style="position:absolute;bottom:6px;right:10px;font-size:8px;color:#ccc">Flask REST</div>' +
-  '</div>',
-};
 
 function createFromTemplate(templateId, defaultName) {
   var t = _findTemplateById(templateId) || {};
@@ -514,71 +412,110 @@ function createFromTemplate(templateId, defaultName) {
     ? '<a href="' + tplUrl + '" target="_blank" style="font-size:10px;color:var(--a);text-decoration:none;margin-left:8px">\u67e5\u770b\u539f\u9879\u76ee \u2197</a>'
     : '';
 
-  var previewHtml = _LOCAL_PREVIEW[templateId] || '';
+  var previewHtml = '<div id="ptPreview" style="background:var(--bg);border-radius:10px;padding:40px 20px;text-align:center;height:220px;display:flex;align-items:center;justify-content:center"><span style="font-size:48px;opacity:.3">' + tplIcon + '</span></div>';
 
   var modal = document.createElement('div');
   modal.id = 'ptCreateModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:stretch;justify-content:center;padding:0;z-index:999';
   modal.innerHTML =
-    '<div class="cd" style="width:520px;padding:24px;border-radius:12px;max-height:90vh;overflow-y:auto">' +
-      '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px">' +
-        '<div style="flex:1;min-width:0">' +
-          '<div style="display:flex;align-items:center;gap:10px">' +
-            '<span style="font-size:28px;flex-shrink:0">' + tplIcon + '</span>' +
+    '<div class="cd" style="width:100%;max-width:900px;margin:0 auto;padding:0;border-radius:12px;overflow:hidden;display:flex;flex-direction:column;height:100vh">' +
+
+      '<div style="padding:20px 32px 14px;flex-shrink:0;border-bottom:1px solid var(--b)">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between">' +
+          '<div style="display:flex;align-items:center;gap:14px;flex:1;min-width:0">' +
+            '<span style="font-size:36px;flex-shrink:0">' + tplIcon + '</span>' +
             '<div style="flex:1;min-width:0">' +
-              '<div style="display:flex;align-items:center;flex-wrap:wrap">' +
-                '<span style="font-size:16px;font-weight:700;color:var(--t)">' + tplName + '</span>' +
+              '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px">' +
+                '<span style="font-size:20px;font-weight:700;color:var(--t)">' + tplName + '</span>' +
                 platformTag +
               '</div>' +
-              '<div style="display:flex;align-items:center;gap:8px;margin-top:3px">' +
+              '<div style="display:flex;align-items:center;gap:12px;margin-top:5px;flex-wrap:wrap">' +
                 sourceBadge + starsHtml + langHtml + externalLink +
               '</div>' +
             '</div>' +
           '</div>' +
-          '<p style="font-size:12px;color:var(--t2);line-height:1.6;margin-top:8px">' + tplDesc + '</p>' +
-          (previewHtml ? '<div style="margin-top:10px">' + previewHtml + '</div>' : '') +
-        '</div>' +
-        '<span style="font-size:18px;color:var(--t3);cursor:pointer;flex-shrink:0;margin:-4px -4px 0 0;padding:4px" onclick="document.getElementById(\'ptCreateModal\').remove()">\u00d7</span>' +
-      '</div>' +
-
-      '<div style="height:1px;background:var(--b);margin:14px 0"></div>' +
-
-      (highlightsHtml || tagsHtml || reasonHtml
-        ? '<div style="margin-bottom:14px">' +
-            (highlightsHtml
-              ? '<div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:8px">\u2728 \u6a21\u677f\u4eae\u70b9</div>' +
-                highlightsHtml
-              : '') +
-            (tagsHtml
-              ? '<div style="display:flex;gap:4px;flex-wrap:wrap;' + (highlightsHtml ? 'margin-top:8px' : '') + '">' + tplTags.map(function(tg) {
-                  return '<span class="tg tg-d" style="font-size:10px">#' + tg + '</span>';
-                }).join('') + '</div>'
-              : '') +
-            reasonHtml +
-          '</div>'
-        : '') +
-
-      '<div style="margin-bottom:16px">' +
-        '<div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:8px">\ud83d\udca1 \u6d41\u6c34\u7ebf\u9884\u89c8\uff08' + tplScene + '\uff09</div>' +
-        '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0;background:var(--bg);padding:10px 12px;border-radius:8px">' +
-          stagesHtml +
+          '<span style="font-size:22px;color:var(--t3);cursor:pointer;flex-shrink:0;padding:4px 8px" onclick="document.getElementById(\'ptCreateModal\').remove()">\u00d7</span>' +
         '</div>' +
       '</div>' +
 
-      '<div style="height:1px;background:var(--b);margin:0 0 14px"></div>' +
+      '<div style="flex:1;min-height:0;overflow-y:auto;padding:20px 32px;display:flex;flex-direction:column;gap:18px">' +
 
-      '<label class="ts t2" style="display:block;margin-bottom:4px;font-size:12px">' + I18N.t('templates.repo_name') + '</label>' +
-      '<input id="ptRepoName" value="' + defaultName + '" style="width:100%;padding:9px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:13px;outline:none;background:var(--c);box-sizing:border-box">' +
+        (previewHtml
+          ? '<div style="flex-shrink:0">' + previewHtml + '</div>'
+          : '') +
 
-      '<div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:18px">' +
-        (tplUrl ? '<button class="bt bt-o bt-s" onclick="window.open(\'' + tplUrl + '\',\'_blank\')">\u67e5\u770b\u6e90\u4ee3\u7801 \u2197</button>' : '') +
-        '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">' + I18N.t('templates.cancel') + '</button>' +
-        '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')" style="padding:6px 18px">' + I18N.t('templates.create_from_template_arrow') + '</button>' +
+        '<div style="flex-shrink:0">' +
+          '<div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:8px">\ud83d\udcdd \u6a21\u677f\u63cf\u8ff0</div>' +
+          '<p style="font-size:13px;color:var(--t2);line-height:1.7">' + tplDesc + '</p>' +
+        '</div>' +
+
+        (highlightsHtml
+          ? '<div style="flex-shrink:0">' +
+              '<div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:10px">\u2728 \u6a21\u677f\u4eae\u70b9</div>' +
+              highlightsHtml +
+            '</div>'
+          : '') +
+
+        '<div style="flex:1;min-height:120px;display:flex;flex-direction:column">' +
+          '<div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:10px;flex-shrink:0">\ud83d\udcd6 \u9879\u76ee\u6587\u6863</div>' +
+          '<div id="ptReadme" style="background:var(--bg);border-radius:8px;padding:14px 16px;flex:1;overflow-y:auto;font-size:12px;line-height:1.7;color:var(--t2);white-space:pre-wrap">' +
+            '<span style="color:var(--t3)">\u52a0\u8f7d\u4e2d...</span>' +
+          '</div>' +
+        '</div>' +
+
+        '<div style="flex-shrink:0">' +
+          '<div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:10px">\ud83d\udca1 \u6d41\u6c34\u7ebf\u9884\u89c8\uff08' + tplScene + '\uff09</div>' +
+          '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0;background:var(--bg);padding:12px 14px;border-radius:8px">' +
+            stagesHtml +
+          '</div>' +
+        '</div>' +
+
+        (tplTags.length
+          ? '<div style="flex-shrink:0;display:flex;gap:5px;flex-wrap:wrap">' + tplTags.map(function(tg) {
+              return '<span class="tg tg-d" style="font-size:11px">#' + tg + '</span>';
+            }).join('') + '</div>'
+          : '') +
+        (reasonHtml ? '<div style="flex-shrink:0">' + reasonHtml + '</div>' : '') +
       '</div>' +
+
+      '<div style="padding:14px 32px;flex-shrink:0;border-top:1px solid var(--b);display:flex;align-items:center;justify-content:space-between;gap:16px;background:var(--c)">' +
+        '<div style="flex:1;min-width:0;display:flex;align-items:center;gap:12px">' +
+          '<label class="ts t2" style="font-size:13px;white-space:nowrap;flex-shrink:0">' + I18N.t('templates.repo_name') + '</label>' +
+          '<input id="ptRepoName" value="' + defaultName + '" style="flex:1;padding:10px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:14px;outline:none;background:var(--bg);box-sizing:border-box">' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
+          (tplUrl ? '<button class="bt bt-o bt-s" onclick="window.open(\'' + tplUrl + '\',\'_blank\')">\u67e5\u770b\u6e90\u4ee3\u7801 \u2197</button>' : '') +
+          '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">' + I18N.t('templates.cancel') + '</button>' +
+          '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')" style="padding:8px 24px">' + I18N.t('templates.create_from_template_arrow') + '</button>' +
+        '</div>' +
+      '</div>' +
+
     '</div>';
   document.body.appendChild(modal);
   document.getElementById('ptRepoName').focus();
   document.getElementById('ptRepoName').select();
+
+  API.get('/project-templates/' + encodeURIComponent(templateId) + '/readme').then(function(data) {
+    var el = document.getElementById('ptReadme');
+    if (!el) return;
+    var content = (data.content || '').trim();
+    if (!content) {
+      el.innerHTML = '<span style="color:var(--t3)">\u8be5\u6a21\u677f\u6682\u65e0\u6587\u6863</span>';
+      return;
+    }
+    el.textContent = content;
+  }).catch(function() {
+    var el = document.getElementById('ptReadme');
+    if (el) el.innerHTML = '<span style="color:var(--t3)">\u6587\u6863\u52a0\u8f7d\u5931\u8d25</span>';
+  });
+
+  API.get('/project-templates/' + encodeURIComponent(templateId) + '/preview').then(function(data) {
+    var el = document.getElementById('ptPreview');
+    if (!el) return;
+    var content = (data.content || '').trim();
+    if (!content) return;
+    el.outerHTML = content;
+  }).catch(function() {});
 }
 
 function doCreateFromTemplate(templateId) {

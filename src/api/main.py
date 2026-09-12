@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage
+from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency
 
 
 bot_manager = None
@@ -124,6 +124,25 @@ async def lifespan(app: FastAPI):
         start_upload_cleanup_scheduler()
     except Exception as e:
         log.warning(f"Upload cleanup scheduler start failed: {e}")
+
+    # Issue #67: 归档知识定时清理——每天清理超过 90 天的归档知识
+    try:
+        from src.api.knowledge import cleanup_archived_knowledge
+        import threading, time as _t
+
+        def _knowledge_cleanup_loop():
+            while True:
+                _t.sleep(86400)  # 24 小时
+                try:
+                    cleanup_archived_knowledge()
+                except Exception as _e:
+                    log.warning(f"Knowledge cleanup failed: {_e}")
+
+        _t2 = threading.Thread(target=_knowledge_cleanup_loop, daemon=True)
+        _t2.start()
+        log.info("Knowledge cleanup scheduler started (daily)")
+    except Exception as e:
+        log.warning(f"Knowledge cleanup scheduler start failed: {e}")
 
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
@@ -412,6 +431,20 @@ async def request_id_and_log_middleware(request: Request, call_next):
                 _log.warning(msg, extra=extra)
             else:
                 _log.info(msg, extra=extra)
+            # 慢请求入库（方案C）
+            from src.config import SLOW_REQUEST_THRESHOLD_MS
+            if duration >= SLOW_REQUEST_THRESHOLD_MS:
+                try:
+                    from src.session_manager import db as _sdb, db_lock as _sdbl
+                    with _sdbl:
+                        _sdb.execute(
+                            "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, 'backend')",
+                            (rid, request.method, redacted_path, status, round(duration), _repo, _uid)
+                        )
+                        _sdb.commit()
+                except Exception:
+                    pass  # 入库失败不影响请求
         request_id_var.reset(token_rid)
         repo_var.reset(token_repo)
         user_var.reset(token_uid)
@@ -440,6 +473,7 @@ app.include_router(task_logs.router)
 app.include_router(knowledge.router)
 app.include_router(health.router)
 app.include_router(devstage.router)
+app.include_router(latency.router)
 
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
