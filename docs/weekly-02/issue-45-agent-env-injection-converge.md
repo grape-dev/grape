@@ -1,4 +1,4 @@
-# Issue-45 设计文档：Agent 环境变量注入链路与敏感凭证收敛（先增后减）
+﻿# Issue-45 设计文档：Agent 环境变量注入链路与敏感凭证收敛（先增后减）
 
 > Issue：https://gitcode.com/grape-dev/grape/issues/45
 > 类型：Feature（安全收敛）| P1 | 状态：spec-ready
@@ -147,7 +147,7 @@ ps eww <pid>            # 或 cat /proc/<pid>/environ
 
 | 步 | 移除项 | 前置（必须先完成） | 文件 |
 |----|--------|--------------------|------|
-| 2.1 | devops 事件任务不再注入 `BOT_GITCODE_TOKEN` env | 技能已切换 `$BOT_GITCODE_TOKEN` 直连 → `{{SERVER_URL}}/api/repos/...` + `$GRAPE_API_TOKEN` / `grape git`，现网 skill 验证通过 | `src/agent/executor.py._assemble_env` devops 分支 |
+| 2.1 | devops 事件任务不再注入 `BOT_GITCODE_TOKEN` env | 技能已切换 `$BOT_GITCODE_TOKEN` 直连 → `{{SERVER_URL}}/api/git-repo/...` + `$GRAPE_API_TOKEN` / `grape git`，现网 skill 验证通过 | `src/agent/executor.py._assemble_env` devops 分支 |
 | 2.2 | 废弃 askpass 脚本（`_write_askpass`/`askpass_path`） | git clone/push 已改走 `grape git`（方案③，CLI 进程内 `/git-credential`） | `src/runtime/repogit.py` |
 | 2.3 | （候选）检查 `http.extraheader` 命令行路径不再使用 | 全部 git 操作走 CLI | `src/runtime/repogit.py` |
 | 2.4 | （候选）收敛云 AK/SK 注入面 | 引入 `GRAPE_ENV_WHITELIST` 过滤开关 | `service.py/_assemble_env` |
@@ -185,7 +185,7 @@ ps eww <pid>            # 或 cat /proc/<pid>/environ
 |---|------|------|--------|------|
 | 4 | `src/agent/executor.py` | `_assemble_env` devops 分支移除 `BOT_GITCODE_TOKEN` 注入 | P0（验证后） | ⏳ 待验证 |
 | 5 | `src/runtime/repogit.py` | `_write_askpass`/`askpass_path` 废弃 | P0（验证后） | ⏳ 待验证 |
-| 6 | 技能包（F-2） | `gitcode-api-reference.md` 与技能引用切换 `api.gitcode.com`→`/api/repos/*`、`$BOT_GITCODE_TOKEN`→`$GRAPE_API_TOKEN` | P0（先行铺垫） | ⏳ 待验证 |
+| 6 | 技能包（F-2） | `gitcode-api-reference.md` 与技能引用切换 `api.gitcode.com`→`/api/git-repo/*`、`$BOT_GITCODE_TOKEN`→`$GRAPE_API_TOKEN` | P0（先行铺垫） | ⏳ 待验证 |
 | 7 | `tests/test_executor_token_env.py` | 断言：devops 事件任务 env 无 GitCode 平台 token、有 `GRAPE_SESSION_TOKEN` | P1 | ⏳ 待验证 |
 | 8 | 开关 | `GRAPE_CONVERGE_BOT_ENV=1` 灰度（默认关，单仓库可开可回滚） | P1 | ⏳ 待验证 |
 | 9 | 文档 | `docs/openapi/10-git-repos.md` 技能迁移说明同步 | P1 | ⏳ 待验证 |
@@ -201,7 +201,7 @@ ps eww <pid>            # 或 cat /proc/<pid>/environ
 
 ### 阶段 2（远期，逐项完成后勾记）
 - [ ] devops 事件任务 env 不含 `BOT_GITCODE_TOKEN`；agent 工作区无 askpass 残留；`http.extraheader` 命令行路径不再使用
-- [ ] 技能已全量走 `/api/repos/*` + `$GRAPE_API_TOKEN`（grep 无 `\$BOT_GITCODE_TOKEN` 残留）
+- [ ] 技能已全量走 `/api/git-repo/*` + `$GRAPE_API_TOKEN`（grep 无 `\$BOT_GITCODE_TOKEN` 残留）
 - [ ] chat 语义不变（`USER_GITCODE_TOKEN` 保留、与 bot 互斥）；`GRAPE_SESSION_TOKEN` 注入不受影响
 - [ ] 每步移除均有现网灰度验证记录，`GRAPE_CONVERGE_BOT_ENV` 可回滚
 
@@ -212,7 +212,7 @@ ps eww <pid>            # 或 cat /proc/<pid>/environ
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | 阶段1 误动了现有 env | 高 | **阶段1 只增不减**：diff 只含 `GRAPE_SESSION_TOKEN` 一行，评审可核对 |
-| 阶段2 技能未迁移即移除 env → 执行中断 | 高 | **验证前置**：技能先走 `/api/repos` 替代路径并在现网验证 → 才移除；`GRAPE_CONVERGE_BOT_ENV` 可回滚 |
+| 阶段2 技能未迁移即移除 env → 执行中断 | 高 | **验证前置**：技能先走 `/api/git-repo` 替代路径并在现网验证 → 才移除；`GRAPE_CONVERGE_BOT_ENV` 可回滚 |
 | askpass 依赖残留在旧 worktree | 中 | askpass 废弃与 2.1 同批；存量 worktree 复用 `grape git` 重建 |
 | 云 AK/SK 裸奔 | 中 | 远期 `GRAPE_ENV_WHITELIST` 过滤（阶段2.4 候选） |
 
@@ -222,7 +222,7 @@ ps eww <pid>            # 或 cat /proc/<pid>/environ
    → 阶段2 逐项：① skill 迁移 → ② 灰度开关按仓库开（GRAPE_CONVERGE_BOT_ENV）
    → ③ 全量移除 BOT env → ④ askpass 废弃/extraheader 收敛 → ⑤ 白名单收窄
 ```
-> 与执行规划 M3.4 一致（"先改技能引用到 `/api/repos`，再撤 env"），但执行节奏更保守：**先增量、后验证、再逐一减法**。
+> 与执行规划 M3.4 一致（"先改技能引用到 `/api/git-repo`，再撤 env"），但执行节奏更保守：**先增量、后验证、再逐一减法**。
 
 ---
 

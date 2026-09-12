@@ -1,4 +1,4 @@
-# git-repo `issues update` 支持修改 Issue 正文（body）——平台侧实现方案
+﻿# git-repo `issues update` 支持修改 Issue 正文（body）——平台侧实现方案
 
 > 需求来源：grape-cli 仓库 `docs/grape-server-requirement-issues-update-body.md`
 > 目标仓库：grape 主仓库（`src/api/git_repo_api.py` / OpenAPI 契约）
@@ -16,7 +16,7 @@
 | Issue（Issue #7） | 15:52 | 改用评论承载（正确绕过） |
 | VOD（Issue #8） | 17:27 | 再次 update，指数退避重试并用 `issues list` 验证"没变更"后继续重试 |
 
-**根因**：`PATCH /api/repos/{owner}/{repo}/issues/{number}`（`gitrepo_issues_update`）
+**根因**：`PATCH /api/git-repo/{owner}/{repo}/issues/{number}`（`gitrepo_issues_update`）
 请求体 `IssueUpdateBody` **只有 `labels / assignee / milestone_id / state`，没有 `body`**。
 服务端收到未知字段 `body` 直接忽略并返回 **200** —— 静默空转、无报错、无变更，
 agent 只能靠"验证是否变更"发现失败，陷入无限重试。

@@ -220,7 +220,7 @@ grape --base-url https://grape.example.com --grape_api_token grape_xxx git-repo 
 |---|------|------|
 | R1 | `/openapi.json` 中 operation 动态注册命令 | `grape --help` 列出 `tasks mine`、`tasks create` 等组/动词 |
 | R2 | query 参数映射 | `grape tasks mine --status active` → `GET /api/tasks/mine?status=active` |
-| R3 | path 参数映射 | `grape git-repo issues get --issue 5` → `GET /api/repos/.../issues/5` |
+| R3 | path 参数映射 | `grape git-repo issues get --issue 5` → `GET /api/git-repo/.../issues/5` |
 | R4 | body → `--json '<body>'` | `grape tasks create --json '{"repo_key":...}'` → POST body 正确 |
 | R5 | provider 参数 | operation 含 `X-Git-Provider` → `--provider github` 生效 |
 | R6 | 安全自动带 token | 命令请求自动带 `Authorization: Bearer` |
@@ -248,7 +248,7 @@ grape --base-url https://grape.example.com --grape_api_token grape_xxx git-repo 
 | C2 | git 原生命令透传 | `grape git log --oneline -5` → spawn git 参数含 `log --oneline -5` |
 | C3 | **token 不进 git 命令行** | mock 后断言 git argv 无 token；token 只经 `GIT_CONFIG` env / credential helper 传递 |
 | C4 | **token 不落 agent 可见** | CLI 运行前后，工作区无 token 文件；stdout 不含 token |
-| C5 | credential 获取 | 调 `GET /api/repos/{o}/{r}/git-credential` 取一次性 token；失败 → 明确报错 |
+| C5 | credential 获取 | 调 `GET /api/git-repo/{o}/{r}/git-credential` 取一次性 token；失败 → 明确报错 |
 | C6 | 401 处理 | 无效 api_key → 提示 "token 无效" |
 | C7 | 网络失败 | base_url 不可达 → 提示检查 base_url |
 

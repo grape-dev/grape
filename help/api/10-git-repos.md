@@ -1,9 +1,9 @@
-# Git 仓库统一接口（/api/repos）
+﻿# Git 仓库统一接口（/api/git-repo）
 
 > 设计：技能/第三方访问 Git 仓库资源（Issue/PR/内容/分支等）时，统一走 grape 的 Git 仓库 API。
 > **不是 GitCode 代理**：grape 侧定义中立的 Git 仓库资源语义，backend 由请求头/参数区分（gitcode / github / gitlab，未来扩展）。
 > 认证：`get_current_user_or_api_key`（API Key 用于 worker/技能）。写操作需授权。
-> Base：`{{SERVER_URL}}/api/repos`
+> Base：`{{SERVER_URL}}/api/git-repo`
 > 出参结构为 **gitcode 平台实际结构**（与技能 `gitcode-api-reference.md` 一致）；github/gitlab 未来映射。
 
 ## 后端区分（Git Provider 判定）
@@ -13,7 +13,7 @@
 ```
 X-Git-Provider: gitcode | github | gitlab
  或
-GET .../api/repos/...?provider=github
+GET .../api/git-repo/...?provider=github
 ```
 
 | provider | 内部实现 |
@@ -28,13 +28,13 @@ GET .../api/repos/...?provider=github
 
 ## Git 传输层：clone / push 代码（不是 REST 接口）
 
-**clone / push 不属于 `/api/repos` 的 REST 资源接口**——它们是 **git 协议传输（Smart HTTP）**，由 worker/agent 在本地执行 `git` 命令完成，grape 负责给出 **clone URL** 与 **传输凭据**。
+**clone / push 不属于 `/api/git-repo` 的 REST 资源接口**——它们是 **git 协议传输（Smart HTTP）**，由 worker/agent 在本地执行 `git` 命令完成，grape 负责给出 **clone URL** 与 **传输凭据**。
 
 ### ⚠️ 两套独立认证（关键）
 
 | 场景 | 认证方式 | token 类型 |
 |------|----------|-----------|
-| REST `/api/repos/*` | `Authorization: Bearer <grape api_key>`（三通道） | **grape API Key** |
+| REST `/api/git-repo/*` | `Authorization: Bearer <grape api_key>`（三通道） | **grape API Key** |
 | git 协议 clone/push | `git http.extraheader` / `GIT_ASKPASS` 注入 | **对应平台 token**（如 GitCode bot token） |
 
 **git 协议不认 grape api_key**：`git clone` 走 smart HTTP，只接受 Basic / 自定义 header 中的**平台凭据**，不能带 grape 的 Bearer api_key。
@@ -101,13 +101,13 @@ agent / 技能
    │  只调 grape CLI：grapecli git <原生git命令>（含 setup/clone/fetch/push/...）
    ▼
 grape CLI（grape_cli，本地进程）
-   │  内部：解析工作区 + 用 api_key 调 GET /api/repos/{o}/{r}/git-credential 取 token
+   │  内部：解析工作区 + 用 api_key 调 GET /api/git-repo/{o}/{r}/git-credential 取 token
    │  在 CLI 进程内以 credential helper 注入 → 执行 git
    ▼
 Git 仓库（gitcode/github/gitlab）
 ```
 
-- **token 获取**：CLI 通过 grape API 查询该用户/仓库当前可用的平台 git token（`GET /api/repos/{o}/{r}/git-credential`），服务端按权限返回一次性/短期凭据。
+- **token 获取**：CLI 通过 grape API 查询该用户/仓库当前可用的平台 git token（`GET /api/git-repo/{o}/{r}/git-credential`），服务端按权限返回一次性/短期凭据。
 - **token 使用**：在 **grape CLI 进程内**（credential helper 返回给 git 内存使用），git 命令由 CLI 在本地 spawn；不落磁盘、不进 agent 可读文件/输出；进程结束即释放。
 - **agent 隔离**：agent 只给 CLI 传仓库/分支/commit 消息；platform token 在 CLI 内部，不对外暴露。
 - **服务端不跑 git**：grape 服务端只提供 token/工作区查询接口，不实际执行 git（git 传输在 agent 本地完成）。
@@ -116,8 +116,8 @@ Git 仓库（gitcode/github/gitlab）
 
 | 能力 | API（CLI 内部调用） | 说明 |
 |------|---------------------|------|
-| 查询可用 git token | `GET /api/repos/{o}/{r}/git-credential` | 按调用者权限返回 user/bot git token 的**一次性值**（或短期凭证），仅服务端→CLI 安全通道 |
-| 获取工作区路径 | `GET /api/repos/{o}/{r}/workspace` | 返回工作区位置（如 worktree 路径），CLI 本地执行 |
+| 查询可用 git token | `GET /api/git-repo/{o}/{r}/git-credential` | 按调用者权限返回 user/bot git token 的**一次性值**（或短期凭证），仅服务端→CLI 安全通道 |
+| 获取工作区路径 | `GET /api/git-repo/{o}/{r}/workspace` | 返回工作区位置（如 worktree 路径），CLI 本地执行 |
 | CLI 侧 git 透传 | `grapecli git <任何 git 原生命令>` | `--repo/--issue` 解析目录 + credential 注入，其余原样透传 git |
 
 > ⚠️ token 经 API 返回给 CLI 有传输风险 → 建议：
@@ -127,7 +127,7 @@ Git 仓库（gitcode/github/gitlab）
 **更优实现（credential helper 接 grape）**：
 
 ```
-git (本地，CLI 内) -- 缺凭据 → grape credential helper → POST/GET /api/repos/{o}/{r}/git-credential
+git (本地，CLI 内) -- 缺凭据 → grape credential helper → POST/GET /api/git-repo/{o}/{r}/git-credential
                                                           → 返回 {username, password} → git 内存使用
 ```
 
@@ -155,14 +155,14 @@ grapecli git diff --repo Jason7602/hello
 
 - `--repo` 解析工作区目录，`--issue`（可选）指定 Issue 分支；其余参数**原样透传 git**。
 - agent 全程只传"仓库 + 分支 + commit 消息"，**看不到任何平台 token**。
-- 文件在 grape 管理的工作区（REST `GET /api/repos/{o}/{r}/contents/*` 同源），git 动作统一走 `grapecli git`。
+- 文件在 grape 管理的工作区（REST `GET /api/git-repo/{o}/{r}/contents/*` 同源），git 动作统一走 `grapecli git`。
 
 ### 需要在 grape API 层暴露的能力（方案③）
 
 | 资源/命令 | 说明 |
 |------|------|
-| `GET /api/repos/{o}/{r}/git-credential` | **CLI 内部**取一次性 git token（user/bot），服务端按权限返回；仅 HTTPS 安全通道、一次性失效、可审计 |
-| `GET /api/repos/{owner}/{repo}` | 返回 `clone_url`/`http_url`/`default_branch`，供 CLI 确定 clone 地址（token 由 credential 端点提供） |
+| `GET /api/git-repo/{o}/{r}/git-credential` | **CLI 内部**取一次性 git token（user/bot），服务端按权限返回；仅 HTTPS 安全通道、一次性失效、可审计 |
+| `GET /api/git-repo/{owner}/{repo}` | 返回 `clone_url`/`http_url`/`default_branch`，供 CLI 确定 clone 地址（token 由 credential 端点提供） |
 | `grapecli git <任意 git 原生命令>` | CLI 本地执行 git：`--repo/--issue` 解析目录 + credential 注入，其余原样透传（setup/clone/fetch/checkout/commit/push/log/diff/status 等全部支持） |
 | `grapecli git usertoken --repo o/r` | （可选）辅助：内部打印/user 自查，非 agent 使用 |
 
@@ -172,7 +172,7 @@ grapecli git diff --repo Jason7602/hello
 
 ## 1. 仓库信息
 
-### GET /api/repos/{owner}/{repo}
+### GET /api/git-repo/{owner}/{repo}
 
 **入参**
 
@@ -202,7 +202,7 @@ grapecli git diff --repo Jason7602/hello
 
 ## 2. 分支
 
-### GET /api/repos/{owner}/{repo}/branches
+### GET /api/git-repo/{owner}/{repo}/branches
 
 **入参**：同仓库信息（Path owner/repo + provider）；Query `?per_page=50`（技能用）。
 
@@ -219,7 +219,7 @@ grapecli git diff --repo Jason7602/hello
 
 ## 3. 文件内容
 
-### GET /api/repos/{owner}/{repo}/tree?ref={branch}&depth={single|recursive}
+### GET /api/git-repo/{owner}/{repo}/tree?ref={branch}&depth={single|recursive}
 
 **入参**
 
@@ -243,7 +243,7 @@ grapecli git diff --repo Jason7602/hello
 
 ---
 
-### GET /api/repos/{owner}/{repo}/contents/{path}?ref={branch}
+### GET /api/git-repo/{owner}/{repo}/contents/{path}?ref={branch}
 
 **入参**
 
@@ -265,7 +265,7 @@ grapecli git diff --repo Jason7602/hello
    "type": "file", "download_url": "..."}
   ```
 
-> **根目录列表**：`GET /api/repos/{owner}/{repo}/contents`（无尾斜杠的根路由
+> **根目录列表**：`GET /api/git-repo/{owner}/{repo}/contents`（无尾斜杠的根路由
 > `gitrepo_contents_root`）或 `/contents?ref=` 请求根目录，平台返回条目数组。
 
 **错误**：401 / 403 / 404（路径不存在）。
@@ -275,7 +275,7 @@ grapecli git diff --repo Jason7602/hello
 
 ## 4. 提交历史
 
-### GET /api/repos/{owner}/{repo}/commits
+### GET /api/git-repo/{owner}/{repo}/commits
 
 **入参**：Path owner/repo；Query `?per_page=`（可选）。
 
@@ -290,11 +290,11 @@ grapecli git diff --repo Jason7602/hello
 
 ## 5. 标签
 
-### GET /api/repos/{owner}/{repo}/labels
+### GET /api/git-repo/{owner}/{repo}/labels
 
 **返回（200）**：标签数组 `[{"id":1,"name":"bug","color":"#ff0000","description":""}]`
 
-### POST /api/repos/{owner}/{repo}/labels
+### POST /api/git-repo/{owner}/{repo}/labels
 
 **Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `#d73a4a`）
 
@@ -304,7 +304,7 @@ grapecli git diff --repo Jason7602/hello
 
 ## 6. 里程碑
 
-### GET /api/repos/{owner}/{repo}/milestones?state=all
+### GET /api/git-repo/{owner}/{repo}/milestones?state=all
 
 **Query**：`state`（open/closed/all，技能用 all）
 
@@ -316,7 +316,7 @@ grapecli git diff --repo Jason7602/hello
 
 ## 7. Issues
 
-### GET /api/repos/{owner}/{repo}/issues
+### GET /api/git-repo/{owner}/{repo}/issues
 
 **入参**：Query `?state=open&page=1&per_page=50`（state: open/closed/all）
 
@@ -328,7 +328,7 @@ grapecli git diff --repo Jason7602/hello
   "closed_at": null, "created_at": "2026-...", "milestone": null}]
 ```
 
-### POST /api/repos/{owner}/{repo}/issues
+### POST /api/git-repo/{owner}/{repo}/issues
 
 **入参**：
 - GitCode（issue-advance 风格）：Body `{repo, title, body}`（repo = 仓库名，可省略）
@@ -344,11 +344,11 @@ grapecli git diff --repo Jason7602/hello
 
 **返回（201）**：创建后的 Issue 对象（同 GET 单个结构）。
 
-### GET /api/repos/{owner}/{repo}/issues/{number}
+### GET /api/git-repo/{owner}/{repo}/issues/{number}
 
 **返回（200）**：单个 Issue 对象（结构同上）。**错误**：404。
 
-### PATCH /api/repos/{owner}/{repo}/issues/{number}
+### PATCH /api/git-repo/{owner}/{repo}/issues/{number}
 
 **入参 Body（JSON）**：
 
@@ -363,12 +363,12 @@ grapecli git diff --repo Jason7602/hello
 
 **返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
 
-### GET/POST /api/repos/{owner}/{repo}/issues/{number}/comments
+### GET/POST /api/git-repo/{owner}/{repo}/issues/{number}/comments
 
 - **GET**：返回评论数组 `[{"id":1,"body":"...","user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）创建后的评论对象。
 
-### GET/DELETE /api/repos/{owner}/{repo}/issues/{number}/labels
+### GET/DELETE /api/git-repo/{owner}/{repo}/issues/{number}/labels
 
 - **GET**：返回标签数组。
 - **DELETE**：清除全部标签 → 返回 204（空）。
@@ -377,7 +377,7 @@ grapecli git diff --repo Jason7602/hello
 
 ## 8. Pull Requests
 
-### GET /api/repos/{owner}/{repo}/pulls
+### GET /api/git-repo/{owner}/{repo}/pulls
 
 **返回（200）**：PR 对象数组
 ```json
@@ -387,7 +387,7 @@ grapecli git diff --repo Jason7602/hello
   "created_at": "...", "html_url": "..."}]
 ```
 
-### POST /api/repos/{owner}/{repo}/pulls
+### POST /api/git-repo/{owner}/{repo}/pulls
 
 **入参 Body（JSON）**：
 
@@ -401,27 +401,27 @@ grapecli git diff --repo Jason7602/hello
 
 **返回（201）**：创建的 PR 对象。**错误**：400（缺 head/base）/ 404 / 403。
 
-### GET /api/repos/{owner}/{repo}/pulls/{number}
+### GET /api/git-repo/{owner}/{repo}/pulls/{number}
 
 **返回（200）**：单个 PR 对象（结构同上）。**错误**：404。
 
-### PATCH /api/repos/{owner}/{repo}/pulls/{number}
+### PATCH /api/git-repo/{owner}/{repo}/pulls/{number}
 
 **入参 Body（JSON）**：`title` / `body` / `labels`（按需更新字段）。
 
 **返回（200）**：更新后的 PR 对象。
 
-### PUT /api/repos/{owner}/{repo}/pulls/{number}/merge
+### PUT /api/git-repo/{owner}/{repo}/pulls/{number}/merge
 
 **返回（200）**：`{"merged": true, "sha": "..."}`。**错误**：409（不可合并）。
 
-### GET/POST /api/repos/{owner}/{repo}/pulls/{number}/comments
+### GET/POST /api/git-repo/{owner}/{repo}/pulls/{number}/comments
 
 - **GET**：返回 PR 行内评论数组 `[{"id":1,"body":"LGTM","path":"a.py","line":5,"user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）评论对象。
 - **PUT /pulls/{number}/comments/{discussion_id}**：标记 resolved → 更新后的评论对象。
 
-### GET /api/repos/{owner}/{repo}/pulls/{number}/files
+### GET /api/git-repo/{owner}/{repo}/pulls/{number}/files
 
 **返回（200）**：变更文件数组
 ```json
@@ -442,4 +442,4 @@ grapecli git diff --repo Jason7602/hello
 | 502 | 平台 token 解析失败 | `{"detail":{"code":502,"message":"Git 仓库 token 解析失败"}}` |
 | 429 | 平台限流（400/min，4000/hour） | 透传 |
 
-> 技能迁移后：`gitcode-api-reference.md` 中 `api.gitcode.com/api/v5` → `{{SERVER_URL}}/api/repos/...`；认证 `$BOT_GITCODE_TOKEN` → `$GRAPE_API_TOKEN`。
+> 技能迁移后：`gitcode-api-reference.md` 中 `api.gitcode.com/api/v5` → `{{SERVER_URL}}/api/git-repo/...`；认证 `$BOT_GITCODE_TOKEN` → `$GRAPE_API_TOKEN`。

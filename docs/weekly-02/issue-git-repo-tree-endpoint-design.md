@@ -1,4 +1,4 @@
-# git-repo 增加仓库目录树（tree）获取接口——平台侧独立方案（选项 B）
+﻿# git-repo 增加仓库目录树（tree）获取接口——平台侧独立方案（选项 B）
 
 > 需求关联：`docs/grape-server-requirement-gitrepo-tree-list.md`（与选项 A「contents 目录列表」并列的独立方案）
 > 目标仓库：grape 主仓库（`src/api/git_repo_api.py` / OpenAPI 契约）
@@ -49,7 +49,7 @@
 ### 4.1 接口定义
 
 ```
-GET /api/repos/{owner}/{repo}/tree
+GET /api/git-repo/{owner}/{repo}/tree
     query: ref（分支/引用，默认 "" → 自动解析 main/默认分支）
            depth(可选)："single"（单层，默认） | "recursive"（递归，平台支持时）
 
