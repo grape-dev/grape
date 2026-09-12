@@ -28,6 +28,7 @@ USAGE_ORDER = [
     "overview.md",
     "quickstart.md",
     "agents.md",
+    "agent-environment-variables.md",
     "pipeline.md",
     "skills.md",
     "runtimes.md",
