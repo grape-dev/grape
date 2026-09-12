@@ -582,3 +582,15 @@
 .select2-container--default .select2-results__option[aria-selected=true]{background:rgba(0,113,227,.06);color:var(--a);font-weight:500}
 .select2-results__group{padding:6px 10px;font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;background:var(--bg);border-bottom:1px solid var(--b)}
 .select2-results__message{color:var(--t3);font-size:10px;padding:8px;text-align:center}
+
+/* ===== Issue #108: 事件行高亮闪烁动画（3次脉冲，约2秒）===== */
+@keyframes highlight-flash{
+  0%{background-color:#fff3cd;box-shadow:inset 2px 0 0 #ff9f0a}
+  16%{background-color:#ffe082;box-shadow:inset 2px 0 0 #ff9f0a}
+  33%{background-color:#fff3cd;box-shadow:inset 2px 0 0 #ff9f0a}
+  50%{background-color:#ffe082;box-shadow:inset 2px 0 0 #ff9f0a}
+  67%{background-color:#fff3cd;box-shadow:inset 2px 0 0 #ff9f0a}
+  84%{background-color:#ffe082;box-shadow:inset 2px 0 0 #ff9f0a}
+  100%{background-color:#fff8e1;box-shadow:inset 2px 0 0 rgba(255,159,10,.4)}
+}
+.highlight-flash{animation:highlight-flash 2s ease-in-out forwards}
