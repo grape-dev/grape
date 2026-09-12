@@ -10,6 +10,25 @@ from src.api.time_utils import normalize_event_time
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
+def _resolve_repo_key(owner_repo: str) -> str:
+    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(owner_repo)
+    if ":" in owner_repo:
+        return rk
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            c = _db.cursor()
+            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+                            (f"gitcode:{owner_repo}", f"github:{owner_repo}")).fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return rk
+
+
 # ====== Credentials ======
 
 @router.get("/credentials")
@@ -20,6 +39,10 @@ def get_credentials(user: dict = Depends(get_current_user), repo_key: str = ""):
             "api_token_exists": bool(acc.get("gitcode_api_token")),
             "account": user["username"],
             "auto_filled": True,
+        },
+        "github": {
+            "token_exists": bool(acc.get("github_api_token")),
+            "login": acc.get("github_login", ""),
         },
         "huawei_cloud": {
             "ak_exists": bool(acc.get("huawei_cloud_ak")),
@@ -39,6 +62,7 @@ class UpdateCredentials(BaseModel):
     huawei_cloud_sk: str = ""
     codearts_ak: str = ""
     codearts_sk: str = ""
+    github_token: str = ""
     repo_key: str = ""
 
 
@@ -72,8 +96,92 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(get_current
         acc["CODEARTS_CLI_AK"] = body.codearts_ak.strip()
     if body.codearts_sk and not _is_placeholder(body.codearts_sk):
         acc["CODEARTS_CLI_SK"] = body.codearts_sk.strip()
+    if body.github_token and not _is_placeholder(body.github_token):
+        _gh_tok = body.github_token.strip()
+        acc["github_api_token"] = _gh_tok
+        # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
+        try:
+            import requests as _req
+            _resp = _req.get("https://api.github.com/user",
+                             headers={"Authorization": f"Bearer {_gh_tok}", "Accept": "application/vnd.github+json"},
+                             timeout=10)
+            if _resp.status_code == 200:
+                _gh_user = _resp.json()
+                acc["github_login"] = _gh_user.get("login", "")
+                # 关联到用户表
+                user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
+                log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
+            else:
+                log.warning(f"GitHub token validation failed: {_resp.status_code}")
+        except Exception as _e:
+            log.warning(f"GitHub token validation error: {_e}")
     user_db.save_user_account(user["username"], acc)
     return {"message": "凭据已更新"}
+
+
+# ====== API Keys (Issue #69: grape_ 前缀用户级 key 管理) ======
+
+class CreateApiKeyBody(BaseModel):
+    name: str = ""
+
+
+@router.post("/api-keys")
+def create_api_key(body: CreateApiKeyBody, user: dict = Depends(get_current_user)):
+    """生成 grape_ 前缀 API key——明文仅返回一次，DB 存 SHA-256 hash。
+
+    复用 auth_token.generate_api_token（Issue-45 方式 B 已有后端），
+    补齐 Web UI 管理入口（Issue #69 验收标准）。
+    """
+    from src.api.auth_token import generate_api_token
+
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "Key 名称不能为空"})
+    if len(name) > 64:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "Key 名称不能超过 64 字符"})
+
+    result = generate_api_token(user["id"], name)
+    if not result:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "生成 API Key 失败（同名 key 可能已存在）"})
+
+    log.info(f"API key created: user={user['username']} id={result['id']} name={name}")
+    return {
+        "id": result["id"],
+        "key": result["token"],       # 明文——仅此一次返回
+        "name": name,
+        "message": "API Key 已生成，明文仅展示此次，请立即保存",
+    }
+
+
+@router.get("/api-keys")
+def list_api_keys(user: dict = Depends(get_current_user)):
+    """列出当前用户的所有 API key（不含明文，仅展示名称+状态+时间）。"""
+    from src.api.auth_token import list_api_tokens, API_KEY_PREFIX
+
+    tokens = list_api_tokens(user["id"])
+    return {"keys": [
+        {
+            "id": t["id"],
+            "name": t["name"],
+            "prefix": API_KEY_PREFIX + "••••",
+            "created_at": normalize_event_time(t.get("created_at")),
+            "last_used_at": normalize_event_time(t.get("last_used_at")) if t.get("last_used_at") else None,
+        }
+        for t in tokens
+    ]}
+
+
+@router.delete("/api-keys/{key_id}")
+def revoke_api_key(key_id: int, user: dict = Depends(get_current_user)):
+    """吊销 API key——软删除（revoked=1），立即失效，保审计。"""
+    from src.api.auth_token import revoke_api_token
+
+    ok = revoke_api_token(user["id"], key_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "API Key 不存在或已吊销"})
+
+    log.info(f"API key revoked: user={user['username']} id={key_id}")
+    return {"message": "API Key 已吊销，立即失效"}
 
 
 # ====== Notifications ======
@@ -131,11 +239,10 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_curr
     from src.repo_key import to_repo_key
     bot_token = get_bot_token_by_repo(owner, repo)
     bot_username = "devops-bot"
-    # GitCode name 可能是显示名（≠URL path），按 repo_key 匹配更稳（见 repo_manager.fetch_repos_with_role）
-    target_key = to_repo_key(f"{owner}/{repo}")
+    target_key = _resolve_repo_key(f"{owner}/{repo}")
     repos = user_db.get_managed_repos(user["id"])
     for r in repos:
-        if to_repo_key(f'{r.get("repo_owner", "")}/{r.get("repo_name", "")}') == target_key:
+        if _resolve_repo_key(f'{r.get("repo_owner", "")}/{r.get("repo_name", "")}') == target_key:
             bot_username = r.get("bot_username", "") or "devops-bot"
             break
 
@@ -156,8 +263,7 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                                      user: dict = Depends(get_current_user)):
     # 将 Bot Token / Bot Username 存储到 managed_repos（webhook_token 由托管流程自动维护）
     from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _resolve_repo_key(f"{owner}/{repo}")
     if body.bot_token and not _is_placeholder(body.bot_token):
         update_managed_repo_bot_token(repo_key, body.bot_token.strip())
     if body.bot_username:
@@ -192,6 +298,33 @@ def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_current_user
     if body.gitcode_oauth_redirect_uri:
         set_meta_value("oauth_gitcode_redirect_uri", body.gitcode_oauth_redirect_uri)
     return {"message": "OAuth 配置已更新"}
+
+
+class GitHubOAuthConfig(BaseModel):
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    github_oauth_redirect_uri: str = ""
+
+
+@router.get("/oauth-github")
+def get_github_oauth_config(user: dict = Depends(get_current_user)):
+    from src.user.db import get_meta_value
+    return {
+        "github_oauth_client_id": bool(get_meta_value("oauth_github_client_id")),
+        "github_oauth_redirect_uri": get_meta_value("oauth_github_redirect_uri"),
+    }
+
+
+@router.put("/oauth-github")
+def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(get_current_user)):
+    from src.user.db import set_meta_value
+    if body.github_oauth_client_id:
+        set_meta_value("oauth_github_client_id", body.github_oauth_client_id)
+    if body.github_oauth_client_secret:
+        set_meta_value("oauth_github_client_secret", body.github_oauth_client_secret)
+    if body.github_oauth_redirect_uri:
+        set_meta_value("oauth_github_redirect_uri", body.github_oauth_redirect_uri)
+    return {"message": "GitHub OAuth 配置已更新"}
 
 
 # ====== Agent Runtimes ======

@@ -31,19 +31,10 @@ function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStore
  */
 function linkifyIssueNumbers(text, repoKey) {
   if (!text) return '';
-  // repoKey 可能为空（普通对话无仓库）→ 仅当能解析出 owner/repo 时才链接化
-  let ownerRepo = '';
-  if (repoKey) {
-    // 去掉可能的 gitcode: 前缀
-    const parts = repoKey.replace(/^gitcode:/, '').split('/');
-    if (parts.length === 2 && parts[0] && parts[1]) {
-      ownerRepo = parts[0] + '/' + parts[1];
-    }
-  }
   // 匹配 "Issue #N" 或 "issue #N"（N 为数字）
   return text.replace(/(Issue\s*#(\d+))/gi, (match, full, num) => {
-    if (ownerRepo) {
-      const url = `https://gitcode.com/${ownerRepo}/issues/${num}`;
+    if (repoKey) {
+      const url = _vcsUrl(repoKey, '/issues/' + num);
       return `<a href="${url}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${full}</a>`;
     }
     return match; // 无仓库信息时保持原文

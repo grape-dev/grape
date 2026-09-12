@@ -58,6 +58,19 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
         except Exception:
             pass
     scene_list = get_scenes(repo_key=repo_key)
+
+    # 构建 skill_name → display_name 映射，给每个 node 补 skill_display_name
+    # 这样前端查看模式直接用 node 上的 display_name，不依赖 dashboard API 绑定的 agent skill
+    skill_display_map = {}
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT skill_name, display_name FROM skill WHERE is_active=1 AND scope='official'")
+            skill_display_map = {r[0]: r[1] or r[0] for r in c.fetchall()}
+    except Exception:
+        pass
+
     result = []
     for s in scene_list:
         # get_scenes 已返回 nodes，直接用；DB 查不到的（official 模板）回退 get_pipeline_config
@@ -66,6 +79,10 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
             cfg = {"name": s["name"], "nodes": nodes, "onboarding": s.get("onboarding") or "repo-onboarding"}
         else:
             cfg = get_pipeline_config(s["id"], repo_key=repo_key)
+        # 给每个 node 补 skill_display_name
+        for n in (cfg.get("nodes") or []):
+            _sk = n.get("skill", "")
+            n["skill_display_name"] = skill_display_map.get(_sk, _sk) if _sk else ""
         result.append({"id": s["id"], "name": s["name"],
                        "display_name": s.get("display_name") or s["name"],
                        "description": s.get("description") or "",
@@ -325,7 +342,7 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(get_current_
 
 @router.post("/market/{market_id}/apply")
 def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
-                       owner: str = "", repo: str = ""):
+                       owner: str = "", repo: str = "", repo_key: str = ""):
     """应用场景：从市场复制配置到仓库级 devops_pipeline_scene。
 
     - scope='repo'（方案 B：场景只与仓库关联，无 user 级）
@@ -346,7 +363,9 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
     if not scene:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
 
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    # repo_key：优先用传入的（保留 provider 前缀），否则默认 gitcode:
+    if not repo_key:
+        repo_key = to_repo_key(f"{owner}/{repo}")
     nodes_json = scene["nodes_json"]
     try:
         nodes = json.loads(nodes_json) if nodes_json else []
@@ -727,7 +746,7 @@ def list_repo_branches(owner: str, repo: str, user: dict = Depends(get_current_u
     try:
         page = 1
         while page <= 5:
-            url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/branches?per_page=100&page={page}"
+            url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/branches?per_page=100&page={page}"
             data = _req("GET", url, token)
             if not isinstance(data, list) or not data:
                 break
@@ -772,7 +791,7 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         raise HTTPException(status_code=400, detail={"code": 400, "message": "分支名不能为空"})
 
     try:
-        url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/branches"
+        url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/branches"
         result = _req("POST", url, token, {
             "branch_name": body.branch_name.strip(),
             "refs": body.refs or "main",
@@ -1433,7 +1452,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
             try:
                 from src.user.db import resolve_skill_id
                 from src.api.session_store import get_agent_type_enable
-                skill_id = resolve_skill_id(skill)
+                skill_id = resolve_skill_id(skill, repo_key=repo_key, user_id=user.get("id", ""))
 
                 runtime_id = 0
                 try:

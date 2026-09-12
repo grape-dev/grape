@@ -117,31 +117,72 @@ def _write_file(repo_key: str, name: str, content: str):
 def _write_to_obs(repo_key: str, name: str, content: str):
     """写 OBS + 落库 baseline 记录。OBS 写失败时只 log warning（降级到本地）。
 
-    OBS 未启用时：跳过 OBS 上传，但仍写 DB（obs_key 留空），
-    保证 agent_shared_knowledge 表的 content_hash/file_path 与本地文件同步，
-    防止前端读到旧记录（如 codegraph 重新生成后 DB 仍为降级版本）。
+    Issue #95：补 source='system' / name / description / created_by / OBS key 格式统一。
     """
     import hashlib
     try:
         from src.storage import get_storage
+        from src.repo_key import split_owner_repo
         storage = get_storage()
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
         file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)
+        # Issue #95：name 映射为中文展示名
+        _name_map = {
+            _GRAPH_FILE: "项目结构图谱",
+            _CAP_FILE: "项目能力清单",
+            _META_FILE: "项目元数据",
+        }
+        display_name = _name_map.get(name, name)
         storage_key = ""
         if storage:
-            storage_key = f"project-info/{repo_key}/{name}"
+            # Issue #95：OBS key 格式统一为 knowledge/{owner}/{repo}/project-info/{name}
+            owner, rname = split_owner_repo(repo_key)
+            storage_key = f"knowledge/{owner}/{rname}/project-info/{name}"
             storage.save_bytes(storage_key, content.encode("utf-8"))
-        # 无论 OBS 是否启用，都写 DB（obs_key 留空时前端走本地文件读取）
+        # 无论 OBS 是否启用，都写 DB
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "INSERT OR REPLACE INTO agent_shared_knowledge "
-                "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by) "
-                "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'vod')",
-                (repo_key, file_path, storage_key, content_hash)
-            )
+            # Issue #95：先查有没有已存在记录（避免 INSERT OR REPLACE 删旧 id 导致 ref 失效）
+            existing = c.execute(
+                "SELECT id FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope='baseline' AND file_path=?",
+                (repo_key, file_path)
+            ).fetchone()
+            if existing:
+                # 已存在 → UPDATE（保留原 id，ref 不失效）
+                kid = existing[0]
+                c.execute(
+                    "UPDATE agent_shared_knowledge SET "
+                    "status='accepted', obs_key=?, content_hash=?, created_by='system', "
+                    "source='system', name=?, description=? "
+                    "WHERE id=?",
+                    (storage_key, content_hash, display_name,
+                     "codegraph 自动生成的项目基线知识", kid)
+                )
+            else:
+                # 不存在 → INSERT
+                c.execute(
+                    "INSERT INTO agent_shared_knowledge "
+                    "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, name, description) "
+                    "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'system', 'system', ?, ?)",
+                    (repo_key, file_path, storage_key, content_hash, display_name,
+                     "codegraph 自动生成的项目基线知识")
+                )
+                kid = c.lastrowid
             db.commit()
+            # Issue #95：自动创建 ref（baseline → 全局关联，幂等）
+            if kid:
+                try:
+                    c.execute(
+                        "INSERT OR IGNORE INTO scene_knowledge_ref "
+                        "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+                        "VALUES (?, '', '', 0, 1, 'system')",
+                        (kid,)
+                    )
+                    db.commit()
+                except Exception:
+                    pass
     except Exception as e:
         log.warning(f"project-info OBS write failed {repo_key}/{name}: {e}")
 
@@ -259,7 +300,7 @@ def build_project_info(repo_key: str, token: str = "") -> dict:
         tok = token or get_gitcode_token(repo_key=repo_key) or ""
         if tok:
             req = urllib.request.Request(
-                f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
                 headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
             import json as _json
             commits = _json.load(urllib.request.urlopen(req, timeout=20))
@@ -322,7 +363,7 @@ def should_refresh(repo_key: str) -> bool:
             if tok:
                 owner, rname = split_owner_repo(repo_key)
                 req = urllib.request.Request(
-                    f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                    f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
                     headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
                 commits = _json.load(urllib.request.urlopen(req, timeout=20))
                 if commits and commits[0].get("sha", "") != last_sha:

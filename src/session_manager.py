@@ -82,11 +82,11 @@ if _is_mysql_backend():
     log.info(f"DB backend: MySQL RDS ({mysql_config()['host']}:{mysql_config()['port']}/{mysql_config()['database']})")
 else:
     db = sqlite3.connect(_db_path, check_same_thread=False)
-    # WAL + busy_timeout：跨进程写安全（双进程 3000/8080 共享 DB，见 concurrency-design.md §2.1）
+    # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
     try:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=5000")
-        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA synchronous=FULL")  # FULL: commit 时 fsync WAL 到磁盘
         db.execute("PRAGMA foreign_keys=ON")
     except Exception as e:
         log.warning(f"SQLite pragma setup failed: {e}")
@@ -805,7 +805,7 @@ def set_chat_config(user_id: int, **kwargs):
     # skill name → skill_id（若未显式传 skill_id）
     if data.get("skill") and not data.get("skill_id"):
         from src.user.db import resolve_skill_id
-        data["skill_id"] = resolve_skill_id(data["skill"])
+        data["skill_id"] = resolve_skill_id(data["skill"], user_id=user_id)
     _write_chat_config_row(user_id, runtime_id=runtime_id, skill=data["skill"],
                            skill_id=data.get("skill_id", 0), im_app_id=data["im_app_id"],
                            im_app_secret=data["im_app_secret"], im_provider=data["im_provider"])

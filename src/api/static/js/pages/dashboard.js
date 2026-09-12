@@ -387,11 +387,12 @@ function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
   if (scenePipes.length === 0) {
     html += `<div style="text-align:center;padding:24px;color:#86868b;font-size:13px">${I18N.t('pipeline.no_issues')||'暂无 Issue'}</div>`;
   } else {
-    const _repoParts = (dashData.repo || '').replace(/^gitcode:/, '').split('/');
+    const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
     html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap" style="max-height:320px"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
     scenePipes.slice(0, 20).forEach(p => {
       const _issueNum = String(p.issue_id || '').replace(/^#/, '');
-      const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
+      const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
+      const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
       const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
         const hasAgent = p.statuses && p.statuses[j] > 0;
         const cls = ['tg-v','tg-i','tg-c','tg-q','tg-s'][j];
@@ -790,7 +791,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
     const skIcon = meta.icon || '◈';
     const skLabel = meta.label || tag;
     const agent = agents.find(a => a.agent_type === tag) || {};
-    const skillName = node.skill ? (agent.skill_display_name || node.skill) : (agent.skill_display_name || agent.skill || '');
+    const skillName = node.skill_display_name || node.skill || agent.skill_display_name || agent.skill || '';
     const engineIds = node.engine_runtime_ids || agent.engine_runtime_ids || [];
     const modeIcon = {emit:'→',waterfall:'◇',serial:'↻',parallel:'⇄'}[node.mode] || '→';
     const en = editNodes.find(n => n.id === tag);
@@ -986,7 +987,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes) {
     const skIcon = meta.icon || '◈';
     const skLabel = meta.label || tag;
     const ag = agents.find(a => a.agent_type === tag) || {};
-    const skillDisplay = ag.skill_display_name || ag.skill || node.skill || '';
+    const skillDisplay = node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '';
     const engineIds = node.engine_runtime_ids || [];
     const enabled = node.enabled !== false;
 
@@ -1438,7 +1439,7 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     const node = isEditing ? editNodes.find(n => n.id === at) : null;
     const enabled = node ? node.enabled : (ag.enabled_in_scene !== false);
     const skill = node ? (node.skill || '') : (ag.skill || '');
-    const skillDisplay = node ? (ag.skill_display_name || ag.skill || node.skill || '') : (ag.skill_display_name || ag.skill || '');
+    const skillDisplay = node ? (node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '') : (ag.skill_display_name || ag.skill || '');
     const engineIds = node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []);
     const accentColor = meta.color || colors[at] || '#86868b';
     // 语言包优先于后端 description（后端返回中文时英文模式用前端翻译）

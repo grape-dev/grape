@@ -20,8 +20,8 @@ USERNAME = "agent_tester"
 
 @pytest.fixture(autouse=True)
 def _client():
-    app.dependency_overrides[get_current_user] = lambda: {"id": UID, "username": USERNAME}
-    app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": UID, "username": USERNAME}
+    app.dependency_overrides[get_current_user] = lambda: {"id": UID, "username": USERNAME, "auth_type": "session_token"}
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": UID, "username": USERNAME, "auth_type": "session_token"}
     c = TestClient(app)
     yield c
     app.dependency_overrides.clear()

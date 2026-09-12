@@ -370,11 +370,11 @@ class TestMine:
         r = client.get("/api/tasks/mine?repo_key=" + "org/repoA", headers=_headers)
         assert r.status_code == 200
         tasks = r.json()["tasks"]
-        assert all(t["repo_key"] == "org/repoA" for t in tasks)
+        assert all(t["repo_key"].endswith("org/repoA") for t in tasks)
         assert len(tasks) == 1
         # 不传 repo → 全部
         r_all = client.get("/api/tasks/mine", headers=_headers)
-        assert all(t["repo_key"] in ("org/repoA", "org/repoB") for t in r_all.json()["tasks"])
+        assert all(t["repo_key"].endswith(("org/repoA", "org/repoB")) for t in r_all.json()["tasks"])
         assert len(r_all.json()["tasks"]) == 2
 
     def test_mine_sort_order(self):

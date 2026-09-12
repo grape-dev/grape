@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.config import log, COOKIE_SECURE
 import hashlib, os, time
 
@@ -164,11 +164,13 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
 
     gitcode_user = None
     try:
-        user_req = urllib.request.Request(
-            "https://api.gitcode.com/api/v5/user",
-            headers={"Authorization": f"Bearer {access_token}"}
+        import requests as _req
+        _user_resp = _req.get(
+            "https://gitcode.com/api/v5/user",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
         )
-        gitcode_user = json.loads(urllib.request.urlopen(user_req, timeout=10).read())
+        gitcode_user = _user_resp.json()
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"获取用户信息失败: {e}"})
 
@@ -232,8 +234,171 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     return resp
 
 
+# ====== GitHub OAuth ======
+
+def _oauth_error_redirect(request: Request, message: str):
+    """OAuth 回调失败 → 重定向到前端登录页并带错误信息（前端 toast 提示）。"""
+    import urllib.parse
+    scheme = request.url.scheme
+    host = request.url.hostname
+    port = request.url.port
+    # 前端 SPA 路由：/login?oauth_error=xxx
+    base = f"{scheme}://{host}"
+    if port and port not in (80, 443):
+        base += f":{port}"
+    _encoded = urllib.parse.quote(message)
+    return RedirectResponse(url=f"{base}/login?oauth_error={_encoded}", status_code=302)
+
+
+@router.get("/login/github")
+def github_oauth_login(request: Request):
+    """GitHub OAuth 第一步：跳转 GitHub 授权页。"""
+    from src.user.db import get_meta_value
+    client_id = get_meta_value("oauth_github_client_id")
+    if not client_id:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitHub OAuth 未配置"})
+
+    redirect_uri = os.environ.get("OAUTH_REDIRECT_URI") or get_meta_value("oauth_github_redirect_uri")
+    if not redirect_uri:
+        scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
+        host = request.headers.get("Host", "localhost:80").split(":")[0]
+        redirect_uri = f"{scheme}://{host}:80/api/auth/callback/github"
+
+    state = hashlib.sha256(os.urandom(32)).hexdigest()
+    user_db.save_oauth_state(state, "github", {})
+
+    import urllib.parse
+    auth_url = (f"https://github.com/login/oauth/authorize"
+                f"?client_id={urllib.parse.quote(client_id)}"
+                f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+                f"&response_type=code"
+                f"&scope=repo%20user%20admin:repo_hook%20offline_access"
+                f"&state={urllib.parse.quote(state)}")
+    return {"redirect_url": auth_url}
+
+
+@router.get("/callback/github")
+def github_oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    """GitHub OAuth 回调：用 code 换 access_token → 获取用户信息 → 创建/绑定本地用户 → 签发 JWT。"""
+    if error:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"GitHub 授权失败: {error}"})
+
+    state_data = user_db.validate_oauth_state(state, "github")
+    if state_data is None:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "state 无效或已过期"})
+
+    from src.user.db import get_meta_value
+    client_id = get_meta_value("oauth_github_client_id")
+    client_secret = get_meta_value("oauth_github_client_secret")
+
+    import urllib.parse, json
+    _proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
+
+    def _github_post(url, data, headers, timeout=15):
+        """向 github.com 发 POST 请求。有代理走代理，否则直连。"""
+        import requests as _req
+        if _proxy:
+            return _req.post(url, data=data, headers=headers, timeout=timeout, proxies={"https": _proxy, "http": _proxy})
+        return _req.post(url, data=data, headers=headers, timeout=timeout)
+
+    token_data = None
+    try:
+        _token_body = urllib.parse.urlencode({
+            "client_id": client_id, "client_secret": client_secret,
+            "code": code,
+        }).encode()
+        _token_headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+        _resp = _github_post("https://github.com/login/oauth/access_token", data=_token_body, headers=_token_headers)
+        token_data = _resp.json()
+    except Exception as e:
+        _msg = str(e)
+        if "timed out" in _msg or "ConnectTimeout" in _msg or "Max retries" in _msg:
+            _user_msg = "GitHub 登录失败：服务器无法连接 github.com（网络超时）。请稍后重试，或联系管理员配置代理。"
+        else:
+            _user_msg = f"GitHub 登录失败：{_msg[:120]}"
+        return _oauth_error_redirect(request, _user_msg)
+
+    access_token = token_data.get("access_token", "")
+    refresh_token = token_data.get("refresh_token", "")
+    if not access_token:
+        return _oauth_error_redirect(request, "GitHub 登录失败：未获取到 access_token，请重试。")
+
+    github_user = None
+    try:
+        import requests as _req
+        _user_headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"}
+        _proxies = {"https": _proxy, "http": _proxy} if _proxy else None
+        _user_resp = _req.get("https://api.github.com/user", headers=_user_headers, timeout=10, proxies=_proxies)
+        _user_resp.raise_for_status()
+        github_user = _user_resp.json()
+    except Exception as e:
+        return _oauth_error_redirect(request, f"GitHub 登录失败：获取用户信息失败（{str(e)[:80]}）")
+
+    github_id = str(github_user.get("id", ""))
+    github_login = github_user.get("login", "")
+    github_name = github_user.get("name") or github_login
+    if not github_id:
+        return _oauth_error_redirect(request, "GitHub 登录失败：无法获取用户信息。")
+
+    local_user = user_db.get_user_by_github_id(github_id)
+    if not local_user:
+        local_user = user_db.get_user_by_username(github_login)
+
+    # 白名单校验
+    from src.config import is_github_user_allowed
+    if not is_github_user_allowed(github_login):
+        return _oauth_error_redirect(request, "您的 GitHub 账号不在白名单内，无法登录本系统。请联系统管理员。")
+
+    # 新用户才创建
+    if not local_user:
+        result = user_db.create_user(github_login, hashlib.sha256(os.urandom(16)).hexdigest(), 0)
+        if not result:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
+        local_user = user_db.get_user(result["id"])
+
+    user_db.link_github_user(local_user["id"], github_id, access_token, refresh_token)
+
+    user_acc = user_db.get_user_account(local_user["username"]) or {}
+    user_acc["github_api_token"] = access_token
+    if github_name:
+        user_acc["nickname"] = github_name
+    user_db.save_user_account(local_user["username"], user_acc)
+    # WAL 模式下确保写入持久化到主 DB 文件（防止进程退出后丢失）
+    try:
+        from src.session_manager import db as _db, db_lock as _db_lock
+        with _db_lock:
+            _db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
+    log.info(f"GitHub OAuth: user={local_user['username']} github_id={github_id} token={access_token[:10]}...{access_token[-5:]} saved+checkpointed")
+
+    # 签发 JWT
+    from src.api.jwt_utils import create_access_token, create_refresh_token
+    token_version = user_db.get_token_version(local_user["id"])
+    jwt_access_token = create_access_token(local_user["id"], local_user["username"], token_version)
+    jwt_refresh_token = create_refresh_token(local_user["id"], local_user["username"], token_version)
+
+    # OAuth App 不需要 installation 检查（scope 在授权 URL 里已指定）
+    _gh_perm_warning = ""
+
+    try:
+        from src.session_manager import update_unified_user_info
+        update_unified_user_info(github_login, open_id="", github_login=github_login)
+    except Exception as e:
+        log.warning(f"GitHub OAuth login: write user mapping failed: {e}")
+
+    has_repos = bool(user_db.get_managed_repos(local_user["id"]))
+    lang = request.cookies.get("grapeLang", "zh")
+    prefix = f"/{lang}" if lang != "zh" else ""
+    _warn_param = f"&gh_perm_warning={urllib.parse.quote(_gh_perm_warning)}" if _gh_perm_warning else ""
+    resp = RedirectResponse(url=f"{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}{_warn_param}", status_code=302)
+    _set_refresh_cookie(resp, jwt_refresh_token)
+    return resp
+
+
 @router.get("/profile")
-def get_profile(user: dict = Depends(get_current_user)):
+def get_profile(user: dict = Depends(get_current_user_or_api_key)):
+    """用户信息——支持 JWT 会话 / grape_ API Key / tk_ 会话 token（Issue #69）。"""
     acc = user_db.get_user_account(user["username"]) or {}
     managed_repos_raw = user_db.get_managed_repos(user["id"])
     managed = [{"key": r["full_name"], "full_name": r["full_name"], "is_admin": r["is_admin"]}
@@ -244,6 +409,7 @@ def get_profile(user: dict = Depends(get_current_user)):
         "status": "online",
         "managed_repos": managed,
         "gitcode_bound": bool(user_db.get_credential(user["id"], "gitcode_oauth")),
+        "github_bound": bool(user_db.get_credential(user["id"], "github_oauth")),
     }
 
 

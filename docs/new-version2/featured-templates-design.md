@@ -416,8 +416,9 @@ async def list_featured_templates(user: dict = Depends(get_current_user)):
 
 ```bash
 # crontab -e
-# 每天凌晨 2:00 同步优选项目模板
-0 2 * * * cd /home/grape/grape-new-version2 && GITCODE_PAT=yXgZq-rf19PW2cmMoyXF_xbK .venv/bin/python scripts/sync_featured_templates.py --limit 100 >> /tmp/featured-sync.log 2>&1
+# 每天凌晨 2:00 同步优选项目模板（凭据走环境变量注释，见 2.1 节）
+# crontab 中真实凭据放在 ~/.cronenv（chmod 600）里 source，避免写死进 git
+0 2 * * * cd /home/grape/grape-new-version2 && source ~/.cronenv && .venv/bin/python scripts/sync_featured_templates.py --limit 100 >> /tmp/featured-sync.log 2>&1
 ```
 
 或用 Grape 内置的 cronjob 机制（如果已部署 Hermes Agent）。

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from src.config import log
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
-from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token, get_user_token
+from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
@@ -28,9 +28,28 @@ class CreateRepoBody(BaseModel):
     host_after_create: bool = False
 
 
-def _fetch_and_cache(user_id: int, api_token: str) -> list[dict]:
-    """从 GitCode 拉取仓库列表，写入 user_repos 缓存，返回过滤后的结果"""
-    repos = fetch_repos_with_role(api_token)
+def _get_user_provider_and_token(username: str) -> tuple[str, str]:
+    """根据用户已绑定的令牌自动选择 provider，返回 (provider, token)。"""
+    github_token = get_user_github_token(username)
+    if github_token:
+        return "github", github_token
+    gitcode_token = get_user_token(username)
+    if gitcode_token:
+        return "gitcode", gitcode_token
+    return "", ""
+
+
+def _fetch_and_cache(user_id: int, api_token: str, provider: str = "gitcode") -> list[dict]:
+    """从 VCS 拉取仓库列表，写入 user_repos 缓存，返回过滤后的结果"""
+    if provider == "github":
+        from src.user.repo_manager import fetch_github_repos_with_role
+        repos = fetch_github_repos_with_role(api_token)
+        # fetch_github_repos_with_role 不返回 repo_key，补上 github: 前缀
+        for r in repos:
+            if not r.get("repo_key"):
+                r["repo_key"] = f"github:{r.get('full_name', '')}"
+    else:
+        repos = fetch_repos_with_role(api_token)
     user_db.save_user_repos(user_id, repos)
     return repos
 
@@ -97,7 +116,7 @@ def _probe_stale_repos(api_token: str, user_id: int):
         if not owner or not repo_name:
             return None
         repo_key = r["repo_key"]
-        url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo_name}"
+        url = f"https://gitcode.com/api/v5/repos/{owner}/{repo_name}"
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
             with urllib.request.urlopen(req, timeout=5) as resp:
@@ -139,7 +158,7 @@ def _probe_stale_repos(api_token: str, user_id: int):
         if not owner or not repo_name:
             continue
         repo_key = r["repo_key"]
-        url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo_name}/hooks"
+        url = f"https://gitcode.com/api/v5/repos/{owner}/{repo_name}/hooks"
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
             with urllib.request.urlopen(req, timeout=5) as resp:
@@ -172,21 +191,23 @@ def list_member_repos(user: dict = Depends(get_current_user_or_api_key)):
     """
     from datetime import datetime, timezone
 
-    api_token = get_user_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"])
     if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
     # 异步探活清理失效托管（C2）：后台线程执行，接口不等待、页面保持秒开；
     # 失效（GitCode 已删/丢 webhook）的托管记录在后台被清掉，下一次刷新/进入时数字才校准。
-    try:
-        import threading
-        threading.Thread(
-            target=_probe_stale_repos,
-            args=(api_token, user["id"]),
-            daemon=True,
-        ).start()
-    except Exception as e:
-        log.warning(f"member: background stale probe start failed: {e}")
+    # 仅 GitCode 探活，GitHub 暂不探活
+    if provider == "gitcode":
+        try:
+            import threading
+            threading.Thread(
+                target=_probe_stale_repos,
+                args=(api_token, user["id"]),
+                daemon=True,
+            ).start()
+        except Exception as e:
+            log.warning(f"member: background stale probe start failed: {e}")
 
     # 优先读取 DB 缓存（未过期）
     cached = user_db.get_user_repos(user["id"])
@@ -206,9 +227,9 @@ def list_member_repos(user: dict = Depends(get_current_user_or_api_key)):
     if cached and not _is_expired():
         return {"repos": _filter_repos(user["id"], cached), "_cached": True}
 
-    # 缓存为空或已过期 → 从 GitCode 拉取并刷新缓存
+    # 缓存为空或已过期 → 从 VCS 拉取并刷新缓存
     try:
-        repos = _fetch_and_cache(user["id"], api_token)
+        repos = _fetch_and_cache(user["id"], api_token, provider)
     except Exception as e:
         # 拉取失败但有旧缓存兜底（避免 GitCode 抖动导致页面空白）
         if cached:
@@ -220,15 +241,16 @@ def list_member_repos(user: dict = Depends(get_current_user_or_api_key)):
 
 @router.post("/sync")
 def sync_repos(user: dict = Depends(get_current_user)):
-    """手动从 GitCode 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录"""
-    api_token = get_user_token(user["username"])
+    """手动从 VCS 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录"""
+    provider, api_token = _get_user_provider_and_token(user["username"])
     if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
-    _probe_stale_repos(api_token, user["id"])
+    if provider == "gitcode":
+        _probe_stale_repos(api_token, user["id"])
 
     try:
-        repos = _fetch_and_cache(user["id"], api_token)
+        repos = _fetch_and_cache(user["id"], api_token, provider)
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"同步失败: {e}"})
 
@@ -238,15 +260,33 @@ def sync_repos(user: dict = Depends(get_current_user)):
 @router.get("/check-name")
 def check_repo_name(name: str, user: dict = Depends(get_current_user)):
     """检查当前用户名下是否已存在同名仓库"""
-    from src.user.repo_manager import _req, get_user_gitcode_login
-    api_token = get_user_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"])
     if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
+
+    if provider == "github":
+        from src.user.repo_manager import _github_req, get_user_github_login
+        try:
+            login = get_user_github_login(api_token)
+            if not login:
+                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
+            _github_req("GET", f"https://api.github.com/repos/{login}/{name}", api_token)
+            return {"exists": True, "full_name": f"{login}/{name}"}
+        except RuntimeError as e:
+            if "404" in str(e) or "Not Found" in str(e):
+                return {"exists": False}
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
+
+    from src.user.repo_manager import _req, get_user_gitcode_login
     try:
         login = get_user_gitcode_login(api_token)
         if not login:
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
-        _req("GET", f"https://api.gitcode.com/api/v5/repos/{login}/{name}", api_token)
+        _req("GET", f"https://gitcode.com/api/v5/repos/{login}/{name}", api_token)
         return {"exists": True, "full_name": f"{login}/{name}"}
     except RuntimeError as e:
         if "404" in str(e) or "Not Found" in str(e):
@@ -260,7 +300,7 @@ def check_repo_name(name: str, user: dict = Depends(get_current_user)):
 
 @router.post("/create")
 def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)):
-    """通过 GitCode API 新建仓库，可选创建后自动托管"""
+    """通过 VCS API 新建仓库，可选创建后自动托管"""
     import re as _re
     from src.repo_key import to_repo_key
     name = (body.name or "").strip()
@@ -274,14 +314,21 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)
     else:
         private = body.private
 
-    api_token = get_user_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"])
     if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
-    try:
-        repo_info = create_repo(api_token=api_token, name=name, description=body.description, private=private)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {e}"})
+    if provider == "github":
+        from src.user.repo_manager import create_github_repo as _create_gh_repo
+        try:
+            repo_info = _create_gh_repo(api_token=api_token, name=name, description=body.description, private=private)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {e}"})
+    else:
+        try:
+            repo_info = create_repo(api_token=api_token, name=name, description=body.description, private=private)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {e}"})
 
     full_name = repo_info.get("full_name") or ""
     owner = repo_info.get("owner") or ""
@@ -290,7 +337,7 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)
     repo_name = repo_info.get("name") or name
 
     try:
-        _fetch_and_cache(user["id"], api_token)
+        _fetch_and_cache(user["id"], api_token, provider)
     except Exception:
         pass
 
@@ -299,25 +346,40 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)
         webhook_url = get_webhook_url()
         if not webhook_url:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "webhook_url 未配置，无法托管"})
-        # 读取全局 bot token（托管时存入 managed_repos.bot_gitcode_token）
-        _create_global_bot_token = ""
+        # GitHub 仓库用 /webhook/github 路由
+        if provider == "github":
+            webhook_url = webhook_url.replace("/webhook/gitcode", "/webhook/github")
+        if provider == "github":
+            from src.user.repo_manager import find_existing_github_webhook, setup_github_webhook
+            _create_global_bot_token = ""
+        else:
+            _create_global_bot_token = ""
+            try:
+                import json as _json, os as _os2
+                _gbt_path2 = _os2.path.join(_os2.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+                if _os2.path.exists(_gbt_path2):
+                    with open(_gbt_path2, "r", encoding="utf-8") as _f2:
+                        _create_global_bot_token = _json.load(_f2).get("gitcode_api_token", "") or ""
+            except Exception:
+                pass
         try:
-            import json as _json, os as _os2
-            _gbt_path2 = _os2.path.join(_os2.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-            if _os2.path.exists(_gbt_path2):
-                with open(_gbt_path2, "r", encoding="utf-8") as _f2:
-                    _create_global_bot_token = _json.load(_f2).get("gitcode_api_token", "") or ""
-        except Exception:
-            pass
-        try:
-            existing_id = find_existing_webhook(api_token, owner, repo_name, webhook_url)
-            repo_key = to_repo_key(full_name)
+            if provider == "github":
+                existing_id = find_existing_github_webhook(api_token, owner, repo_name, webhook_url)
+                repo_key = to_repo_key(full_name, provider="github")
+                wh_col = "github_webhook_token"
+            else:
+                existing_id = find_existing_webhook(api_token, owner, repo_name, webhook_url)
+                repo_key = to_repo_key(full_name)
+                wh_col = "gitcode_webhook_token"
             if existing_id:
-                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=api_token, bot_gitcode_token=_create_global_bot_token)
+                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, **{wh_col: api_token, "bot_gitcode_token": _create_global_bot_token})
                 user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             else:
-                hook_id = setup_webhook(api_token, owner, repo_name, webhook_url, webhook_password=api_token)
-                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=api_token, bot_gitcode_token=_create_global_bot_token)
+                if provider == "github":
+                    hook_id = setup_github_webhook(api_token, owner, repo_name, webhook_url)
+                else:
+                    hook_id = setup_webhook(api_token, owner, repo_name, webhook_url, webhook_password=api_token)
+                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, **{wh_col: api_token, "bot_gitcode_token": _create_global_bot_token})
                 user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
@@ -325,12 +387,69 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)
             return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": f"仓库已创建，但托管失败: {e}"}
 
         try:
-            _fetch_and_cache(user["id"], api_token)
+            _fetch_and_cache(user["id"], api_token, provider)
         except Exception:
             pass
         return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": True, "message": "仓库创建并托管成功"}
 
     return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": "仓库创建成功"}
+
+
+def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: str,
+                                 owner: str, repo: str) -> dict:
+    """尝试将 GitHub bot 加入仓库维护者，返回结果信号给前端。
+
+    流程：
+    1. 用 bot token 调 GET /repos/{owner}/{repo}，看 permissions 判断 bot 当前权限
+    2. 权限够（maintain/admin/push）→ 直接返回 ok
+    3. 权限不够但已是 collaborator（有 pull）→ 用用户 token PUT 升级为 maintain（无需邀请）
+    4. 不是 collaborator → 用用户 token 邀请 → bot token accept → 再查权限
+    """
+    if not bot_token or not bot_username:
+        return {"bot_collaborator_needed": True, "bot_username": "", "bot_status": "not_configured"}
+
+    from src.user.repo_manager import add_github_collaborator, accept_github_invite, get_github_repo_permissions
+
+    # 0. 用 bot token 查自己对该仓库的权限
+    perms = get_github_repo_permissions(bot_token, owner, repo)
+    if perms and (perms.get("admin") or perms.get("maintain") or perms.get("push")):
+        log.info(f"GitHub bot {bot_username} has sufficient permissions in {owner}/{repo}: {perms}")
+        return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
+
+    # 权限不够或不是 collaborator → 尝试用用户 token 升级/邀请
+    # PUT /repos/{owner}/{repo}/collaborators/{username}：
+    #   - 已是 collaborator → 直接更新权限（无需 accept）
+    #   - 不是 collaborator → 发送邀请（需 bot accept）
+    if user_token:
+        added = add_github_collaborator(user_token, owner, repo, bot_username, "push")
+        if added:
+            # PUT 成功 → 查 bot 权限是否已生效（已是 collaborator 的情况直接生效）
+            perms_after = get_github_repo_permissions(bot_token, owner, repo)
+            if perms_after and (perms_after.get("admin") or perms_after.get("maintain") or perms_after.get("push")):
+                log.info(f"GitHub bot {bot_username} permissions upgraded to {perms_after}")
+                return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
+
+            # 权限还没生效 → 可能是新邀请需要 accept
+            accepted = accept_github_invite(bot_token, owner, repo)
+            if accepted:
+                perms_final = get_github_repo_permissions(bot_token, owner, repo)
+                if perms_final and (perms_final.get("admin") or perms_final.get("maintain") or perms_final.get("push")):
+                    log.info(f"GitHub bot {bot_username} permissions after accept: {perms_final}")
+                    return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
+            # accept 失败或权限未生效 → 提示用户手动操作
+            log.info(f"GitHub bot {bot_username} invite sent but accept/perm not effective (accepted={accepted})")
+            return {"bot_collaborator_needed": True, "bot_username": bot_username,
+                    "bot_status": "invite_pending",
+                    "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
+        else:
+            return {"bot_collaborator_needed": True, "bot_username": bot_username,
+                    "bot_status": "add_failed",
+                    "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
+    else:
+        # 无用户 token → 无法自动操作
+        return {"bot_collaborator_needed": True, "bot_username": bot_username,
+                "bot_status": "insufficient_permission" if (perms and perms.get("pull")) else "not_configured",
+                "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
 
 
 @router.post("/host")
@@ -341,13 +460,71 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
 
-    api_token = get_user_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"])
     from src.user.db import get_webhook_url
     webhook_url = get_webhook_url()
+    # GitHub 仓库用 /webhook/github 路由
+    if provider == "github":
+        webhook_url = webhook_url.replace("/webhook/gitcode", "/webhook/github")
 
     if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
+    # ===== GitHub 仓库托管 =====
+    if provider == "github":
+        from src.user.repo_manager import find_existing_github_webhook, setup_github_webhook
+        from src.user.repo_manager import add_github_collaborator, accept_github_invite, get_github_collaborator_permission
+        from src.api.session_store import ensure_default_agent_sessions
+        repo_key = to_repo_key(body.full_name, provider="github")
+
+        # 读取 GitHub bot 全局配置
+        gh_bot_token = ""
+        gh_bot_username = ""
+        try:
+            import json as _json, os as _os
+            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+            if _os.path.exists(_gbt_path):
+                with open(_gbt_path, "r", encoding="utf-8") as _f:
+                    _gbt = _json.load(_f)
+                gh_bot_token = _gbt.get("github_bot_token", "") or ""
+                gh_bot_username = _gbt.get("github_bot_username", "") or ""
+        except Exception:
+            pass
+
+        try:
+            existing_id = find_existing_github_webhook(api_token, owner, repo_name, webhook_url)
+            if existing_id:
+                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
+                                         github_webhook_token=api_token,
+                                         bot_github_token=gh_bot_token, bot_username=gh_bot_username)
+                user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
+                ensure_default_agent_sessions(repo_key)
+                _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
+                return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id, **_bot_result}
+
+            hook_id = setup_github_webhook(api_token, owner, repo_name, webhook_url)
+            from src.api.onboarding import cleanup_stale_repo_data
+            cleanup_stale_repo_data(repo_key)
+            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id,
+                                     github_webhook_token=api_token,
+                                     bot_github_token=gh_bot_token, bot_username=gh_bot_username)
+            user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
+            ensure_default_agent_sessions(repo_key)
+            try:
+                from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
+                _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+            except HTTPException:
+                raise
+            except Exception as e:
+                log.warning(f"host_repo: auto-fork scenes failed: {e}")
+            _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
+            return {"message": "仓库托管成功", "webhook_id": hook_id, **_bot_result}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
+
+    # ===== GitCode 仓库托管（原有逻辑）=====
     # 读取全局 bot 配置（configs/global-bot-token.json）
     global_bot_token = ""
     global_bot_username = ""
@@ -370,7 +547,7 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
 
     from src.user.repo_manager import _check_collaborator_admin, _req
     try:
-        user_data = _req("GET", f"https://api.gitcode.com/api/v5/user", api_token)
+        user_data = _req("GET", f"https://gitcode.com/api/v5/user", api_token)
         current_user = user_data.get("login", "")
         if not current_user:
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
@@ -446,6 +623,8 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             try:
                 from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
                 _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+            except HTTPException:
+                raise
             except Exception as e:
                 log.warning(f"host_repo: auto-fork scenes failed: {e}")
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
@@ -462,6 +641,8 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         try:
             from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
             _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+        except HTTPException:
+            raise
         except Exception as e:
             log.warning(f"host_repo: auto-fork scenes failed: {e}")
         return {"message": "仓库托管成功", "webhook_id": hook_id}
@@ -546,6 +727,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
 def list_managed_repos(user: dict = Depends(get_current_user_or_api_key)):
     repos = user_db.get_managed_repos(user["id"])
     return {"repos": [{
+        "repo_key": r["repo_key"],
         "full_name": r["full_name"],
         "role": "Admin" if r["is_admin"] else "Member",
         "webhook_ok": bool(r["webhook_id"]),
@@ -584,7 +766,7 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user
     repo_bot_username = ""
     try:
         from src.user.repo_manager import _req
-        user_data = _req("GET", "https://api.gitcode.com/api/v5/user", body.bot_token)
+        user_data = _req("GET", "https://gitcode.com/api/v5/user", body.bot_token)
         repo_bot_username = user_data.get("login", "") or ""
     except Exception:
         pass
@@ -746,56 +928,110 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
-    repo_key = to_repo_key(body.full_name)
 
-    # 删除 webhook 优先个人 token（用户已授权全权限）；repo bot / 全局 bot token 兜底
-    api_token = get_user_token(user["username"])
-    if not api_token:
-        api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
-    if not api_token:
-        try:
-            import json as _json, os as _os
-            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-            if _os.path.exists(_gbt_path):
-                with open(_gbt_path, "r", encoding="utf-8") as _f:
-                    api_token = _json.load(_f).get("gitcode_api_token", "") or ""
-        except Exception:
-            pass
+    # 按 provider 分流：前端传的 full_name 不含前缀
+    # 先尝试 gitcode:（默认），不存在再尝试 github:
+    from src.repo_key import to_repo_key as _rk
+    gc_key = to_repo_key(body.full_name)  # 默认 gitcode:
+    gh_key = _rk(body.full_name, provider="github")
 
+    # 判断实际存在的 repo_key（直接查 managed_repos 表）
+    repo_key = gc_key
+    repo_provider = "gitcode"
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c0 = db.cursor()
+            c0.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)", (gh_key, gc_key))
+            row0 = c0.fetchone()
+            if row0 and row0[0].startswith("github:"):
+                repo_key = gh_key
+                repo_provider = "github"
+    except Exception:
+        pass  # 测试环境（mock）走默认 gitcode:
+
+    # token 按 provider 分流
+    if repo_provider == "github":
+        from src.api.deps import get_user_github_token
+        api_token = get_user_github_token(user["username"])
+        if not api_token:
+            api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
+        if not api_token:
+            try:
+                import json as _json, os as _os
+                _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+                if _os.path.exists(_gbt_path):
+                    with open(_gbt_path, "r", encoding="utf-8") as _f:
+                        api_token = _json.load(_f).get("github_bot_token", "") or ""
+            except Exception:
+                pass
+    else:
+        api_token = get_user_token(user["username"])
+        if not api_token:
+            api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
+        if not api_token:
+            try:
+                import json as _json, os as _os
+                _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+                if _os.path.exists(_gbt_path):
+                    with open(_gbt_path, "r", encoding="utf-8") as _f:
+                        api_token = _json.load(_f).get("gitcode_api_token", "") or ""
+            except Exception:
+                pass
+
+    # 删除 webhook（按 provider 选择 API）
     if api_token:
         try:
-            from src.user.repo_manager import _get_managed_webhook, remove_webhook
-            wh_id = _get_managed_webhook(repo_key)
-            if wh_id:
-                remove_webhook(api_token, owner, repo_name, wh_id)
+            if repo_provider == "github":
+                from src.user.repo_manager import _get_managed_webhook, remove_github_webhook
+                wh_id = _get_managed_webhook(repo_key)
+                if wh_id:
+                    remove_github_webhook(api_token, owner, repo_name, wh_id)
+            else:
+                from src.user.repo_manager import _get_managed_webhook, remove_webhook
+                wh_id = _get_managed_webhook(repo_key)
+                if wh_id:
+                    remove_webhook(api_token, owner, repo_name, wh_id)
         except Exception:
             pass
 
-    # 解除托管：移除全局 bot 与 repo bot 的项目维护者身份（失败仅记日志）
+    # 解除托管：移除 bot 协作者身份（失败仅记日志）
     try:
         import json, os as _os
-        from src.user.repo_manager import remove_collaborator
         # 读取该仓库配置的 repo bot（先取，再删 managed_repos）
         repo_bot_token = ""
         repo_bot_username = ""
         for _r in user_db.get_managed_repos(user["id"]):
             if _r["repo_key"] == repo_key:
-                repo_bot_token = _r.get("bot_gitcode_token", "") or ""
+                repo_bot_token = _r.get("bot_gitcode_token", "") or _r.get("bot_github_token", "") or ""
                 repo_bot_username = _r.get("bot_username", "") or ""
                 break
-        # 全局 bot 用户名（移除用 owner token）
+        # 全局 bot 用户名
         _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
         global_bot_username = ""
         if _os.path.exists(_gbt_path):
             with open(_gbt_path, "r", encoding="utf-8") as _f:
                 _gbt = json.load(_f)
-            _us = _gbt.get("bot_usernames") or []
-            global_bot_username = _us[0] if _us else ""
-        # 移除协作者需个人 owner token（GitCode 拒绝 bot 操作自己；api_token 此时是全局 bot token 用于删 webhook）
-        owner_token = get_user_token(user["username"])
+            if repo_provider == "github":
+                global_bot_username = _gbt.get("github_bot_username", "") or ""
+            else:
+                _us = _gbt.get("bot_usernames") or []
+                global_bot_username = _us[0] if _us else ""
+        # owner token 按 provider 分流
+        if repo_provider == "github":
+            from src.api.deps import get_user_github_token
+            owner_token = get_user_github_token(user["username"])
+        else:
+            owner_token = get_user_token(user["username"])
+        # 移除协作者
         if owner_token and global_bot_username:
             try:
-                _rm_ok = remove_collaborator(owner_token, owner, repo_name, global_bot_username)
+                if repo_provider == "github":
+                    from src.user.repo_manager import remove_github_collaborator
+                    _rm_ok = remove_github_collaborator(owner_token, owner, repo_name, global_bot_username)
+                else:
+                    from src.user.repo_manager import remove_collaborator
+                    _rm_ok = remove_collaborator(owner_token, owner, repo_name, global_bot_username)
                 if not _rm_ok:
                     log.warning(f"Remove global bot collaborator failed (perm?): {global_bot_username} @ {owner}/{repo_name}")
             except Exception as e:
@@ -803,7 +1039,12 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)
         # repo bot（若配置且非全局 bot）
         if owner_token and repo_bot_username and repo_bot_username != global_bot_username:
             try:
-                _rm_ok2 = remove_collaborator(owner_token, owner, repo_name, repo_bot_username)
+                if repo_provider == "github":
+                    from src.user.repo_manager import remove_github_collaborator
+                    _rm_ok2 = remove_github_collaborator(owner_token, owner, repo_name, repo_bot_username)
+                else:
+                    from src.user.repo_manager import remove_collaborator
+                    _rm_ok2 = remove_collaborator(owner_token, owner, repo_name, repo_bot_username)
                 if not _rm_ok2:
                     log.warning(f"Remove repo bot collaborator failed (perm?): {repo_bot_username} @ {owner}/{repo_name}")
             except Exception as e:

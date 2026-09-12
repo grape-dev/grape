@@ -134,3 +134,24 @@ def test_t6_terminal_idempotent():
 
 def test_t7_no_token_401():
     assert _client.post("/api/tasks/complete", json={"result_text": "x"}).status_code == 401
+
+
+def test_t8_structured_fields_compose_result_text():
+    import json
+    _seed_task("running")
+    tok = _session_token()
+    r = _post_complete(tok, {
+        "actions": ["改代码", "push"],
+        "conclusion": "已修复待重审",
+        "artifacts": ["PR #1", "commit abc"],
+        "next_step": "qa_review",
+        "issue_summary": "已修复 | 待重审",
+    })
+    assert r.status_code == 200
+    with db_lock:
+        row = db.cursor().execute("SELECT result_text FROM agent_tasks WHERE id=?", (TASK,)).fetchone()
+    d = json.loads(row[0])
+    assert d["conclusion"] == "已修复待重审"
+    assert d["actions"] == ["改代码", "push"]
+    assert "PR #1" in d["artifacts"]
+    assert d["next_step"] == "qa_review"

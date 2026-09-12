@@ -27,6 +27,10 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
 
+    # 权限校验：用户必须有权访问该事件所属仓库
+    from src.api.deps import check_repo_access
+    check_repo_access(user, row[1] or "")
+
     import json
     from src.repo_key import from_repo_key
     payload = {}
@@ -43,7 +47,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
 
     result = {
         "seq": row[0],
-        "repo_key": from_repo_key(row[1] or ""),
+        "repo_key": row[1] or "",
         "issue_id": row[2],
         "event_type": row[3],
         "source": row[4],
@@ -562,7 +566,55 @@ def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
             else:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
         else:
-            # 无关联任务（引擎不可用时未创建 task 快照的历史事件）→ 从 events 表恢复参数重走 run_pipeline
+            # 无关联任务（引擎不可用时未创建 task 快照的历史事件）
+            _event_type = evt.get("event_type", "unknown")
+
+            # A2A 事件不能走 run_pipeline（payload 格式不同，且无 webhook header 映射）
+            # → 直接重新触发 A2A 交办
+            if _event_type == "a2a_event":
+                try:
+                    _payload = evt.get("payload") or evt.get("payload_raw") or "{}"
+                    if isinstance(_payload, str):
+                        _payload = _json.loads(_payload)
+                    _repo_key = evt.get("repo_key", "") or ""
+                    _bot_token = ""
+                    try:
+                        from src.user.db import get_repo_bot_token_no_global
+                        _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
+                    except Exception:
+                        pass
+                    import urllib.request as _url_req
+                    _a2a_body = _json.dumps({"agent": evt.get("agent_type", ""), "payload": _payload}).encode()
+                    _a2a_req = _url_req.Request(
+                        f"http://localhost:3000/api/a2a",
+                        data=_a2a_body,
+                        headers={"Content-Type": "application/json", "X-Bot-Token": _bot_token},
+                        method="POST"
+                    )
+                    with _url_req.urlopen(_a2a_req, timeout=30) as _a2a_resp:
+                        _a2a_result = _json.loads(_a2a_resp.read().decode())
+                    if _a2a_result.get("status") == "ok":
+                        _new_seq = _a2a_result.get("seq", 0)
+                        log.info(f"[redispatch] seq={seq} a2a re-dispatch ok, new seq={_new_seq}")
+                        update_event_status(seq, "failed")
+                        try:
+                            from src.user.db import set_meta_value as _smv
+                            import time as _tm
+                            _smv(f"redispatch:{seq}", str(_tm.time()))
+                        except Exception:
+                            pass
+                        return {"status": "redispatched", "task_id": "(new)", "event_seq": _new_seq,
+                                "original_seq": seq}
+                    else:
+                        raise HTTPException(status_code=409, detail={"code": 409,
+                            "message": f"重派失败：A2A 重新交办未成功（{_a2a_result.get('status', 'unknown')}）"})
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    log.warning(f"[redispatch] seq={seq} a2a re-dispatch failed: {e}")
+                    raise HTTPException(status_code=500, detail={"code": 500, "message": f"重派异常: {str(e)[:100]}"})
+
+            # 非 A2A 事件：从 events 表恢复参数重走 run_pipeline
             # 构建最小 webhook evt，复用 run_pipeline 路由+引擎选择+入队/执行
             try:
                 from src.api.event_pipeline import run_pipeline as _rp
@@ -970,6 +1022,75 @@ def get_event_thread(seq: int, user: dict = Depends(get_current_user)):
     }
 
 
+@router.delete("/{seq}/chat")
+def delete_event_thread(seq: int, user: dict = Depends(get_current_user)):
+    """Issue #100: 清理事件关联的对话消息（event_thread 记录）。"""
+    evt = _load_event(seq)
+    from src.api.routes.knowledge import _check_repo_member
+    _check_repo_member(user, evt["repo_key"])
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM event_thread WHERE anchor_seq=?", (seq,))
+        db.commit()
+    return {"ok": True, "message": "对话已清理"}
+
+
+@router.delete("/{seq}/knowledge/{scope}")
+def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(get_current_user)):
+    """Issue #100: 删除事件关联的 agent 沉淀知识（文件 + DB + ref）。"""
+    evt = _load_event(seq)
+    if scope not in ("project", "issue", "issue_agent"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 project/issue/issue_agent"})
+    from src.api.routes.knowledge import _check_repo_member
+    _check_repo_member(user, evt["repo_key"])
+
+    from src.api.knowledge import knowledge_path, knowledge_storage_key, _issue_num_from
+    from src.session_manager import db, db_lock
+    import os
+
+    issue_num = _issue_num_from(evt["issue_id"])
+    agent_type = evt["agent_type"]
+    _ag = agent_type if scope == "issue_agent" else ""
+    _in = issue_num if scope != "project" else 0
+
+    # Issue #100: issue/issue_agent 级必须有 issue_id
+    if scope != "project" and _in == 0:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "该事件无关联 Issue，无法删除 issue/issue_agent 级知识"})
+
+    # 1. 删工作区文件
+    file_path = knowledge_path(evt["repo_key"], scope, agent_type=_ag, issue_num=_in)
+    if os.path.isfile(file_path):
+        os.remove(file_path)
+
+    # 2. 删 OBS 对象（如有）
+    try:
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None:
+            obs_key = knowledge_storage_key(evt["repo_key"], scope, agent_type=_ag, issue_num=_in)
+            storage.delete_object(obs_key)
+    except Exception:
+        pass
+
+    # 3. 删 DB 记录（agent_shared_knowledge + scene_knowledge_ref）
+    with db_lock:
+        c = db.cursor()
+        rows = c.execute(
+            "SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            (evt["repo_key"], scope, _ag, _in)
+        ).fetchall()
+        for (kid,) in rows:
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
+        c.execute(
+            "DELETE FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            (evt["repo_key"], scope, _ag, _in)
+        )
+        db.commit()
+
+    return {"ok": True, "scope": scope, "message": "知识已删除"}
+
+
 @router.post("/{seq}/chat")
 async def send_conversation(seq: int, body: ConversationMessage, user: dict = Depends(get_current_user)):
     evt = _load_event(seq)
@@ -1332,10 +1453,20 @@ def list_events(owner: str, repo: str,
                       user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
+
+    # 权限校验：用户必须有权访问该仓库
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+
     from src.session_manager import db, db_lock
 
-    where_clauses = ["repo_key=?"]
-    params = [repo_key]
+    # 跨平台 repo_key 候选（用户可能通过 GitHub OAuth 登录）
+    _owner_repo = f"{owner}/{repo}"
+    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
+    _rk_placeholders = ",".join("?" * len(_repo_keys))
+
+    where_clauses = [f"repo_key IN ({_rk_placeholders})"]
+    params = _repo_keys
     if status:
         where_clauses.append("status=?")
         params.append(status)

@@ -36,6 +36,32 @@ def _repo_base(repo_key: str) -> str:
     return os.path.join(WORKSPACE_DIR, owner, rname)
 
 
+def _resolve_repo_key(repo: str) -> str:
+    """将前端传入的 owner/repo 解析为 DB 中实际使用的 repo_key。
+    
+    to_repo_key 默认 gitcode: 前缀，但 GitHub OAuth 仓库在 DB 中是 github: 前缀。
+    查 managed_repos 表确定实际前缀，找不到则回退 to_repo_key 默认值。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo)
+    if ":" in repo:
+        return repo_key  # 已带前缀，直接返回
+    # 查 DB 确定实际前缀
+    base = repo
+    candidates = [f"gitcode:{base}", f"github:{base}"]
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            placeholders = ",".join("?" * len(candidates))
+            row = c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({placeholders}) LIMIT 1", candidates).fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return repo_key
+
+
 def _safe_rel(rel: str) -> str:
     """白名单相对路径（防路径穿越，只读工作区仓库目录内）。"""
     rel = (rel or "").replace("\\", "/").strip().lstrip("/")
@@ -246,8 +272,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
     """统一知识列表——只查 DB 返回分页列表（不含统计，统计走独立接口）。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(repo)
+    repo_key = _resolve_repo_key(repo)
     _check_repo_member(user, repo_key)
 
     from src.session_manager import db, db_lock
@@ -345,8 +370,7 @@ def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
     """独立统计接口——返回 system/agent/manual/unlinked 数量。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(repo)
+    repo_key = _resolve_repo_key(repo)
     _check_repo_member(user, repo_key)
 
     from src.session_manager import db, db_lock
@@ -387,8 +411,7 @@ def read_knowledge_content(repo: str = Query(""),
             try:
                 data = storage.read_bytes(obs_key)
                 if data is not None:
-                    from src.repo_key import to_repo_key
-                    return {"repo_key": to_repo_key(repo), "obs_key": obs_key,
+                    return {"repo_key": _resolve_repo_key(repo), "obs_key": obs_key,
                             "content": data.decode("utf-8", errors="replace")}
             except Exception as e:
                 log.warning(f"OBS read failed for obs_key={obs_key}: {e} — fallback to file")
@@ -399,8 +422,7 @@ def read_knowledge_content(repo: str = Query(""),
     _file = file or obs_key
     if not _file:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "file 或 obs_key 必填"})
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(repo)
+    repo_key = _resolve_repo_key(repo)
     return {"repo_key": repo_key, "file": _file, "content": _read_file(repo_key, _file)}
 
 
@@ -413,16 +435,16 @@ def knowledge_context(repo: str = Query(""),
     """返回合并注入上下文文本（project-info 摘要 + 共享知识 + 成员文档）。"""
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(repo)
+    repo_key = _resolve_repo_key(repo)
 
     lines = []
     try:
-        from src.prompt_builder import _build_project_info_section, _build_knowledge_section
-        pi = _build_project_info_section(repo_key)
+        from src.prompt_builder import _build_project_info_section, _build_agent_knowledge_section
+        pi = _build_project_info_section(repo_key, agent_type=agent_type,
+                                         issue_num=issue_num, scene_id=scene_id)
         if pi:
             lines.append(pi)
-        k, _ = _build_knowledge_section(repo_key, agent_type=agent_type, issue_num=issue_num, scene_id=scene_id)
+        k, _ = _build_agent_knowledge_section(repo_key, agent_type=agent_type, issue_num=issue_num, scene_id=scene_id)
         if k:
             lines.append(k)
     except Exception:
@@ -442,8 +464,8 @@ def delete_knowledge(repo: str = Query(""),
     """删除成员上传的知识文档（仅限本人上传）。"""
     if not repo or not file:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repo 与 file 必填"})
-    from src.repo_key import to_repo_key, from_repo_key
-    repo_key = to_repo_key(repo)
+    from src.repo_key import from_repo_key
+    repo_key = _resolve_repo_key(repo)
     rel = _safe_rel(file)
     is_member = rel.startswith("project-info/member/")
     is_agent = rel.startswith("project-info/agent/")
@@ -700,8 +722,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_cu
     if not body.repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
 
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(body.repo)
+    repo_key = _resolve_repo_key(body.repo)
     _check_repo_member(user, repo_key)
 
     base = _repo_base(repo_key)
@@ -923,6 +944,10 @@ def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
     from src.session_manager import db, db_lock
     scene_id = body.scene_id or ""
     agent_type = body.agent_type or ""
+    # Issue #95：禁止空关联——scene_id 和 agent_type 不能同时为空（否则全局注入）
+    if not scene_id and not agent_type:
+        raise HTTPException(status_code=400,
+            detail={"code": 400, "message": "scene_id 和 agent_type 不能同时为空，必须绑定到场景或 Agent"})
     with db_lock:
         count = db.cursor().execute(
             "SELECT COUNT(*) FROM scene_knowledge_ref "

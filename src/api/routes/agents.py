@@ -108,7 +108,20 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"Agent 类型未配置: {name}"})
 
     from src.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    _owner_repo = f"{owner}/{repo}"
+    repo_key = to_repo_key(_owner_repo)
+
+    # 权限校验：用户必须有权访问该仓库
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+
+    # 同时查 gitcode: 和 github: 前缀（用户可能切换了 provider）
+    _repo_keys = [repo_key]
+    if repo_key.startswith("gitcode:"):
+        _repo_keys.append(f"github:{_owner_repo}")
+    elif repo_key.startswith("github:"):
+        _repo_keys.append(f"gitcode:{_owner_repo}")
+    _rk_placeholders = ",".join("?" * len(_repo_keys))
 
     # Issue #108: 归一化 issue_number → #N 格式，供前端高亮匹配
     highlight_issue_id = ""
@@ -128,8 +141,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, runtime_id, skill, skill_id, repo_gitcode_token, runtime_session_id, status, last_active_at, im_app_id, enable, subscribe_events FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                (repo_key, name)
+                "SELECT id, runtime_id, skill, skill_id, repo_gitcode_token, runtime_session_id, status, last_active_at, im_app_id, enable, subscribe_events FROM devops_agent_session WHERE repo_key IN ({}) AND agent_type=?".format(_rk_placeholders),
+                (*_repo_keys, name)
             )
             row = c.fetchone()
             if row:
@@ -183,8 +196,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
 
         try:
             c.execute(
-                "SELECT status, COUNT(*) as cnt FROM events WHERE repo_key=? AND agent_type=? GROUP BY status",
-                (repo_key, name)
+                "SELECT status, COUNT(*) as cnt FROM events WHERE repo_key IN ({}) AND agent_type=? GROUP BY status".format(_rk_placeholders),
+                (*_repo_keys, name)
             )
             for r in c.fetchall():
                 event_stats[r[0]] = r[1]
@@ -193,8 +206,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
 
         try:
             c.execute(
-                "SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id, repo_key FROM events WHERE repo_key=? AND agent_type=? ORDER BY seq DESC LIMIT 10",
-                (repo_key, name)
+                "SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id, repo_key FROM events WHERE repo_key IN ({}) AND agent_type=? ORDER BY seq DESC LIMIT 10".format(_rk_placeholders),
+                (*_repo_keys, name)
             )
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "title": r[2] or r[1], "actor": r[3] or "",

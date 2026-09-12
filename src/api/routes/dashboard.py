@@ -36,9 +36,11 @@ def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
     _repo_params = []
     repo_key = ""
     if repo:
-        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
-        _repo_filter = " AND repo_key=?"
-        _repo_params = [repo_key]
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        _repo_keys = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_key = _repo_keys[0]
+        _repo_filter = f" AND repo_key IN ({','.join('?' * len(_repo_keys))})"
+        _repo_params = _repo_keys
     # stuck 阈值：running 超 22 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=1800s=30min，22min 能在超时前预警）
     stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=22)).isoformat()
 
@@ -525,9 +527,12 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
 
     # repo/user_id 过滤条件
     _repo_filter = ""
+    _repo_filter_list = []
+    _base = ""
     if repo:
-        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
-        _repo_filter = repo_key
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        _repo_filter_list = [f"gitcode:{_base}", f"github:{_base}"]
+        _repo_filter = _repo_filter_list[0]
 
     entries = []
     files_read = []
@@ -535,17 +540,17 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     def _match_repo(entry):
         """检查日志条目是否匹配指定的 repo。
         - 无 repo 过滤条件：全部返回
-        - 日志有 repo_key：必须精确匹配
+        - 日志有 repo_key：必须精确匹配（支持跨平台前缀）
         - 日志无 repo_key 但 message 含 owner/repo 格式仓库名：
           匹配当前仓库则展示，含其他仓库则不展示
         - 日志不含任何仓库名：始终展示（系统级日志）"""
-        if not _repo_filter:
+        if not _repo_filter_list:
             return True
         entry_repo = entry.get("repo_key", "")
         if entry_repo:
-            return entry_repo == _repo_filter
+            return entry_repo in _repo_filter_list
         msg = entry.get("message", "")
-        repo_short = _repo_filter.replace("gitcode:", "")
+        repo_short = _base
         if repo_short in msg:
             return True
         # 检查 message 中是否含其他仓库名（owner/repo 格式，排除路径段如 api/v5）
@@ -712,16 +717,19 @@ async def get_ops_timeline(repo: str = ""):
     import json as _json
 
     repo_key = ""
+    _repo_keys = []
     if repo:
-        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        _repo_keys = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_key = _repo_keys[0]
 
     with db_lock:
         c = db.cursor()
-        if repo_key:
+        if _repo_keys:
             c.execute(
                 "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, repo_key "
-                "FROM events WHERE repo_key=? AND issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at",
-                (repo_key,)
+                "FROM events WHERE repo_key IN (" + ",".join("?" * len(_repo_keys)) + ") AND issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at",
+                _repo_keys
             )
         else:
             c.execute(
@@ -898,6 +906,15 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 
+    # 权限校验：用户必须有权访问该仓库
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+
+    # 跨平台 repo_key 候选：DB 中可能是 gitcode: 或 github: 前缀
+    _owner_repo = f"{owner}/{repo}"
+    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
+    _rk_placeholders = ",".join("?" * len(_repo_keys))
+
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -905,8 +922,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         recent_events = []
         try:
             c.execute(
-                "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key=? ORDER BY seq DESC LIMIT 5",
-                (repo_key,)
+                "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (?,?) ORDER BY seq DESC LIMIT 5",
+                (_repo_keys)
             )
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
@@ -922,8 +939,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
                 "SELECT s.agent_type, r.name, s.status, s.last_active_at, s.enable, COALESCE(rc.status,'') "
                 "FROM devops_agent_session s LEFT JOIN agent_runtimes r ON s.runtime_id=r.id "
                 "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                "WHERE s.repo_key=? ORDER BY s.agent_type",
-                (repo_key,)
+                "WHERE s.repo_key IN (?,?) ORDER BY s.agent_type",
+                (_repo_keys)
             )
             agent_sessions = []
             for r in c.fetchall():
@@ -943,8 +960,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         try:
             for atype in ["vod", "issue", "coding", "qa", "sre"]:
                 c.execute(
-                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key=? AND agent_type=? ORDER BY seq DESC LIMIT 2",
-                    (repo_key, atype)
+                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (?,?) AND agent_type=? ORDER BY seq DESC LIMIT 2",
+                    (_repo_keys + [atype])
                 )
                 agent_recent_events[atype] = [
                     {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
@@ -1000,15 +1017,25 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
 
     scenes = []
     scene_nodes = []
+    # 查 DB 中实际使用的 repo_key（可能是 github: 前缀）
+    _actual_repo_key = repo_key
+    try:
+        with db_lock:
+            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (" + _rk_placeholders + ") LIMIT 1", _repo_keys)
+            _row = c.fetchone()
+            if _row:
+                _actual_repo_key = _row[0]
+    except Exception:
+        pass
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
-        scenes = get_scenes(repo_key=repo_key)
+        scenes = get_scenes(repo_key=_actual_repo_key)
         # dev_scene 必须在可见场景列表中才加载，否则自动选中第一个场景
         scene_ids = {s["id"] for s in scenes}
         if scenes:
             if not dev_scene or dev_scene not in scene_ids:
                 dev_scene = scenes[0]["id"]
-            cfg = get_pipeline_config(dev_scene, repo_key=repo_key)
+            cfg = get_pipeline_config(dev_scene, repo_key=_actual_repo_key)
             if cfg:
                 scene_nodes = cfg.get("nodes", [])
         else:
@@ -1078,18 +1105,18 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         with db_lock:
             # total_issues: 统计不同 issue_id 的数量（去重）
             c.execute(
-                "SELECT COUNT(DISTINCT issue_id) FROM events WHERE repo_key=? AND issue_id!='' AND issue_id IS NOT NULL",
-                (repo_key,))
+                "SELECT COUNT(DISTINCT issue_id) FROM events WHERE repo_key IN (?,?) AND issue_id!='' AND issue_id IS NOT NULL",
+                (_repo_keys))
             metrics["total_issues"] = c.fetchone()[0] or 0
             # Auto-Resolution: completed / (completed + failed)
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key=? AND status='completed'",
-                (repo_key,)
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND status='completed'",
+                (_repo_keys)
             )
             completed = c.fetchone()[0] or 0
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key=? AND status='failed'",
-                (repo_key,)
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND status='failed'",
+                (_repo_keys)
             )
             failed = c.fetchone()[0] or 0
             total_done = completed + failed
@@ -1097,15 +1124,15 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
 
             # Events/Week: 最近 7 天事件数
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key=? AND created_at >= datetime('now', '-7 days')",
-                (repo_key,)
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND created_at >= datetime('now', '-7 days')",
+                (_repo_keys)
             )
             metrics["events_week"] = c.fetchone()[0] or 0
 
             # Avg Response: 已完成事件的平均 duration（秒）
             c.execute(
-                "SELECT AVG(duration) FROM events WHERE repo_key=? AND status='completed' AND duration IS NOT NULL AND duration > 0",
-                (repo_key,)
+                "SELECT AVG(duration) FROM events WHERE repo_key IN (?,?) AND status='completed' AND duration IS NOT NULL AND duration > 0",
+                (_repo_keys)
             )
             avg_dur = c.fetchone()[0]
             metrics["avg_response"] = round(avg_dur, 1) if avg_dur else 0
@@ -1115,7 +1142,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
     metrics["active_agents"] = sum(1 for a in agent_sessions if a["status"] == "running")
 
     # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
-    host_status = _check_host_status(owner, repo, repo_key)
+    host_status = _check_host_status(owner, repo, _actual_repo_key)
 
     # 读取当前场景的高级选项（工作分支 + 自定义 key:value）
     advanced_options = {}
@@ -1124,8 +1151,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
             with db_lock:
                 c.execute(
                     "SELECT advanced_options FROM devops_pipeline_scene "
-                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                    (dev_scene, repo_key))
+                    "WHERE scene_id=? AND repo_key IN (?,?) AND is_active=1 LIMIT 1",
+                    ([dev_scene] + _repo_keys))
                 _adv_row = c.fetchone()
             if _adv_row and _adv_row[0]:
                 import json as _json
@@ -1134,7 +1161,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
         pass
 
     return {
-        "repo": repo_key,
+        "repo": _actual_repo_key,
         "role": role,
         "dev_scene": dev_scene,
         "advanced_options": advanced_options,

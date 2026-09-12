@@ -172,8 +172,12 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                 rid = c.lastrowid
             # 自动写入默认 "all" 标签——新引擎默认可认领任意角色任务。
             # 若已有 capabilities 行则跳过（用户手动配置过标签的不覆盖）。
+            # tags_user_set=1 时也跳过（用户已手动清空/设过标签，心跳不再自动补 'all'）
+            c.execute("SELECT tags_user_set FROM agent_runtimes WHERE id=?", (rid,))
+            _ts_row = c.fetchone()
+            _user_set = (_ts_row[0] if _ts_row else 0) or 0
             c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-            if not c.fetchone():
+            if not c.fetchone() and not _user_set:
                 from datetime import datetime as _dt, timezone as _tz
                 _now_ec = _dt.now(_tz.utc).isoformat()
                 c.execute(
@@ -355,16 +359,18 @@ def _attach_skill_obs(task: dict) -> None:
             return
         from src.user.db import resolve_skill_id, get_skill_object_key, get_skill_by_id
         _skill_id = task.get("skill_id") or 0
+        _task_repo = task.get("repo_key") or ""
+        _task_uid = task.get("user_id") or ""
         if _skill_id:
             _sk = get_skill_by_id(_skill_id)
             if _sk:
                 _okey = _sk.get("file_path") or ""
             else:
                 # stale skill_id → 回退按名字解析
-                _sid = resolve_skill_id(skill)
+                _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
                 _okey = get_skill_object_key(_sid) if _sid else ""
         else:
-            _sid = resolve_skill_id(skill)
+            _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
             _okey = get_skill_object_key(_sid) if _sid else ""
         if not _okey:
             return
@@ -497,15 +503,17 @@ def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_require_c
         from src.user.db import resolve_skill_id, get_skill_object_key, get_skill_by_id
         from src.storage import get_skill_zip_bytes
         _skill_id = task.get("skill_id") or 0
+        _task_repo = task.get("repo_key") or ""
+        _task_uid = task.get("user_id") or ""
         if _skill_id:
             _sk = get_skill_by_id(_skill_id)
             if _sk:
                 _okey = _sk.get("file_path") or ""
             else:
-                _sid = resolve_skill_id(skill)
+                _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
                 _okey = get_skill_object_key(_sid) if _sid else ""
         else:
-            _sid = resolve_skill_id(skill)
+            _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
             _okey = get_skill_object_key(_sid) if _sid else ""
         if not _okey:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "skill not on OBS"})
@@ -668,9 +676,11 @@ def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
         clauses.append("status=?")
         params.append(status)
     if repo:
-        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
-        clauses.append("repo_key=?")
-        params.append(repo_key)
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        repo_key = f"gitcode:{_base}"
+        _rk_list = [f"gitcode:{_base}", f"github:{_base}"]
+        clauses.append(f"repo_key IN ({','.join('?' * len(_rk_list))})")
+        params.extend(_rk_list)
     with db_lock:
         c = db.cursor()
         c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at, issue_id, event_seq FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
@@ -699,9 +709,10 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user
     repo_clause = ""
     params: list = []
     if repo:
-        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
-        repo_clause = " AND repo_key=?"
-        params.append(repo_key)
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        _rk_list = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_clause = f" AND repo_key IN ({','.join('?' * len(_rk_list))})"
+        params.extend(_rk_list)
 
     with db_lock:
         c = db.cursor()
@@ -755,7 +766,7 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user
             sessions.append({
                 "id": sid,
                 "agent_type": agent_type,
-                "repo_key": repo_key_raw.replace("gitcode:", ""),
+                "repo_key": repo_key_raw.split(":", 1)[1] if ":" in repo_key_raw else repo_key_raw,
                 "status": "running" if current else "idle",
                 "skill": r[4] or "",
                 "created_at": normalize_event_time(r[5]),
@@ -1086,6 +1097,8 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_curre
                 )
             except Exception:
                 pass
+        # 标记用户已手动设过标签，心跳注册不再自动补 'all'
+        c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=?", (runtime_id,))
         # 再回写 agent_tags（派生缓存，保持与 engine_capabilities 一致）
         _sync_agent_tags(runtime_id, c)
         db.commit()

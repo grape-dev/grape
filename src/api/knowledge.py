@@ -14,6 +14,7 @@ OBS 改造（feat/knowledge-obs）：
 - storage_key 生成不依赖 rel_path，只依赖 repo_key + scope + filename
 """
 import hashlib
+import json
 import os
 import threading
 from src.config import log, WORKSPACE_DIR
@@ -341,12 +342,16 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
         ).fetchone()
 
         if existing:
-            # 有记录 → UPDATE（不插入新记录）
+            # 有记录 → UPDATE（不插入新记录，保留 id，ref 不失效）
+            # Issue #95：UPDATE 补 source 和 status（修复 rejected→accepted 不更新的 bug）
             c.execute(
                 "UPDATE agent_shared_knowledge "
-                "SET content_hash=?, obs_key=?, source_seq=?, description=?, name=?, updated_at=datetime('now') "
+                "SET content_hash=?, obs_key=?, source_seq=?, description=?, name=?, "
+                "source=COALESCE(NULLIF(source, ''), ?), status=?, "
+                "updated_at=datetime('now') "
                 "WHERE id=?",
-                (content_hash, obs_key, source_seq, description, name, existing[0])
+                (content_hash, obs_key, source_seq, description, name,
+                 source, status, existing[0])
             )
             knowledge_id = existing[0]
         else:
@@ -452,16 +457,13 @@ def cleanup_archived_knowledge():
             log.info(f"[knowledge] cleaned up {len(rows)} archived knowledge entries")
 
 
-def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> dict:
-    """任务级交付快照：{rel_path: content}（供远端 worker materialize）。
+def agent_knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> dict:
+    """查 ref 表返回关联的 agent 沉淀知识（source='agent'），供 worker 物化到 .knowledge/。
 
-    Issue #67：改为走 scene_knowledge_ref 表——只交付关联的知识文件。
-    未关联的知识不打包给 worker（和 prompt 注入逻辑一致）。
+    Issue #95：source='agent' 过滤——只查 agent 沉淀知识，和 member_files_pi(source='manual') /
+    load_project_info(scope='baseline') 不交叉。加 credential 过滤。
+    返回 {rel: {content, obs_key}}，obs_key 供 generate_file_urls 生成 URL。
     """
-    from src.session_manager import db, db_lock
-    from src.storage import get_storage
-    _storage = get_storage()
-
     files = {}
     try:
         with db_lock:
@@ -474,223 +476,132 @@ def knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
                 "AND (r.agent_type = ? OR r.agent_type = '') "
                 "AND (r.issue_num = ? OR r.issue_num = 0) "
                 "AND k.repo_key = ? "
+                "AND k.source = 'agent' "
                 "AND k.status = 'accepted' "
                 "AND k.archived = 0",
                 (scene_id, agent_type, issue_num, repo_key)
             ).fetchall()
 
         for kid, obs_key, file_path, content_hash in rows:
+            if _is_credential_file(file_path):
+                continue
             content = read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
             if content:
-                files[file_path or ""] = content
+                files[file_path or ""] = {"content": content, "obs_key": obs_key or ""}
     except Exception:
-        # 向后兼容：ref 表不存在时回退到 read_knowledge 三级 scope
+        # 向后兼容：ref 表不存在时回退到 read_knowledge 三级 scope（只查 agent 知识）
         for scope, content in read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num).items():
             p = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
             rel = os.path.relpath(p, WORKSPACE_DIR)
             if content:
-                files[rel] = content
+                files[rel] = {"content": content, "obs_key": ""}
     return files
 
 
-_CREDENTIAL_SUBSTRINGS = (
+# 默认值——配置文件 configs/credential-filter.json 不存在时使用
+_DEFAULT_CREDENTIAL_SUBSTRINGS = (
     "credential", "token", "secret", "password", "passwd",
     "apikey", "api_key", "api-key",
     "private_key", "private-key",
     "access_key", "access-key",
+    "repo-cr",
 )
-_CREDENTIAL_EXTENSIONS = (".pem", ".key", ".env", ".p12", ".pfx")
+# Issue #95：精确匹配的凭证文件名（basename 完全匹配）
+# "cr" 单独作为子串会误伤 cr-notes.md / scrum-cr.md
+# 但 cr.json / cr.yaml 是凭证文件——用精确匹配避免误伤
+_DEFAULT_CREDENTIAL_EXACT_NAMES = frozenset({
+    "cr.json", "cr.yaml", "cr.yml", "cr.txt",
+    "cr.env",
+})
+_DEFAULT_CREDENTIAL_EXTENSIONS = (".pem", ".key", ".env", ".p12", ".pfx")
+
+def _load_credential_filter():
+    """从 configs/credential-filter.json 加载凭证过滤配置，失败用默认值。"""
+    try:
+        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "configs", "credential-filter.json")
+        with open(config_path, encoding="utf-8") as f:
+            cfg = json.loads(f.read())
+        substrings = tuple(cfg.get("substrings") or _DEFAULT_CREDENTIAL_SUBSTRINGS)
+        extensions = tuple(cfg.get("extensions") or _DEFAULT_CREDENTIAL_EXTENSIONS)
+        return substrings, extensions
+    except Exception:
+        return _DEFAULT_CREDENTIAL_SUBSTRINGS, _DEFAULT_CREDENTIAL_EXTENSIONS
+
+_CREDENTIAL_SUBSTRINGS, _CREDENTIAL_EXTENSIONS = _load_credential_filter()
 
 
 def _is_credential_file(rel_path: str) -> bool:
     """按文件名判断是否凭证类文件（token/密钥/password 等），用于知识库物化前过滤。
 
-    仅匹配文件名（basename），布尔子串 + 敏感扩展名；不拦普通文档与 pipelines-user.json。
+    仅匹配文件名（basename），布尔子串 + 敏感扩展名 + 精确匹配；不拦普通文档与 pipelines-user.json。
+    Issue #95：cr.json/cr.yaml 用精确匹配，避免 "cr" 子串误伤 cr-notes.md。
     """
     if not rel_path:
         return False
     name = os.path.basename(rel_path).lower()
+    if name in _DEFAULT_CREDENTIAL_EXACT_NAMES:
+        return True
     if name.endswith(_CREDENTIAL_EXTENSIONS):
         return True
     return any(sub in name for sub in _CREDENTIAL_SUBSTRINGS)
 
 
 def member_files(repo_key: str) -> dict:
-    """成员上传文档快照：{rel_path: content}（project-info/member/ 下 md/txt/json）。
+    """[Issue #95 废弃] 用户上传知识统一由 member_files_pi 走 ref 表注入，此函数保留向后兼容但不再被调用。"""
+    return {}
 
-    rel 相对 WORKSPACE_DIR（与 knowledge_files 交付语义一致，供 worker materialize 到 .knowledge/）。
-    OBS 模式：查 DB scope='member' + OBS 读取（不依赖本地磁盘）。
+
+def member_files_pi(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> dict:
+    """查 ref 表返回关联的用户知识（source='manual'），key 相对 project-info 目录。
+
+    Issue #95：走 ref 表 source='manual' + 三维匹配，不再全量查 scope='member'。
+    member 知识不自动关联——用户手动绑定到场景或 agent 才注入。
+    ref 表里绑定到场景（scene_id 非空）或绑定到 agent（agent_type 非空）都算匹配。
+    返回 {rel: {content, obs_key}}，obs_key 供 generate_file_urls 生成 URL。
+    返回 key 统一 member/ 前缀（老数据 agent/{type}/ 归一化为 member/{type}/）。
     """
-    owner, rname = _owner_repo(repo_key)
     files = {}
-    # OBS 分支：查 DB + OBS 读取
-    from src.storage import get_storage
-    storage = get_storage()
-    if storage is not None:
+    try:
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='member' AND (agent_type='' OR agent_type IS NULL) "
-                "AND obs_key!='' AND obs_key IS NOT NULL "
-                "ORDER BY id DESC",
-                (repo_key,)
+                "SELECT DISTINCT k.id, k.obs_key, k.file_path, k.content_hash "
+                "FROM scene_knowledge_ref r "
+                "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+                "WHERE r.enabled = 1 "
+                "AND (r.scene_id = ? OR r.scene_id = '') "
+                "AND (r.agent_type = ? OR r.agent_type = '') "
+                "AND (r.issue_num = ? OR r.issue_num = 0) "
+                "AND k.repo_key = ? "
+                "AND k.source = 'manual' "
+                "AND k.status = 'accepted' "
+                "AND k.archived = 0",
+                (scene_id, agent_type, issue_num, repo_key)
             ).fetchall()
-        seen = set()
-        for rid, fp, ok in rows:
-            if fp and ok and fp not in seen:
-                ext = os.path.splitext(fp)[1].lower()
-                if ext not in (".md", ".txt", ".json"):
-                    continue
-                if _is_credential_file(fp):
-                    continue
-                seen.add(fp)
-                try:
-                    data = storage.read_bytes(ok)
-                    if data:
-                        rel = os.path.join(owner, rname, fp).replace("\\", "/")
-                        files[rel] = data.decode("utf-8", errors="replace")
-                except Exception:
-                    continue
-        return files
-    # 本地模式（和 dev 一致）
-    base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "member")
-    if not os.path.isdir(base):
-        return files
-    for root, _dirs, names in os.walk(base):
-        for n in sorted(names):
-            ext = os.path.splitext(n)[1].lower()
+        for kid, obs_key, file_path, content_hash in rows:
+            if _is_credential_file(file_path):
+                continue
+            ext = os.path.splitext(file_path)[1].lower()
             if ext not in (".md", ".txt", ".json"):
                 continue
-            if _is_credential_file(n):
-                continue
-            p = os.path.join(root, n)
-            try:
-                rel = os.path.relpath(p, WORKSPACE_DIR).replace("\\", "/")
-                with open(p, encoding="utf-8") as f:
-                    files[rel] = f.read()
-            except Exception:
-                continue
-    return files
-
-
-def member_files_pi(repo_key: str) -> dict:
-    """项目级成员上传文档快照（key 相对 project-info 目录）。
-
-    `member/{username}/{name}`，与 load_project_info / agent_files 的 key 语义一致，
-    供 enqueue_task 并入 project_info_files → worker 物化到 `.project-info/member/`。
-    见 knowledge-board-design.md §6.7（方案 A：项目级全 Agent 共享）。
-    OBS 模式：查 DB scope='member' + OBS 读取（不依赖本地磁盘）。
-    """
-    owner, rname = _owner_repo(repo_key)
-    files = {}
-    # OBS 分支：查 DB + OBS 读取
-    from src.storage import get_storage
-    storage = get_storage()
-    if storage is not None:
-        with db_lock:
-            rows = db.cursor().execute(
-                "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='member' AND (agent_type='' OR agent_type IS NULL) "
-                "AND obs_key!='' AND obs_key IS NOT NULL "
-                "ORDER BY id DESC",
-                (repo_key,)
-            ).fetchall()
-        seen = set()
-        for rid, fp, ok in rows:
-            if fp and ok and fp not in seen:
-                ext = os.path.splitext(fp)[1].lower()
-                if ext not in (".md", ".txt", ".json"):
-                    continue
-                if _is_credential_file(fp):
-                    continue
-                seen.add(fp)
-                try:
-                    data = storage.read_bytes(ok)
-                    if data:
-                        # rel_path 相对 project-info 目录（member/user1/design.md）
-                        files[fp.replace("project-info/", "", 1).replace("\\", "/")] = data.decode("utf-8", errors="replace")
-                except Exception:
-                    continue
-        return files
-    # 本地模式（和 dev 一致）
-    base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "member")
-    files = {}
-    if not os.path.isdir(base):
-        return files
-    for root, _dirs, names in os.walk(base):
-        for n in sorted(names):
-            ext = os.path.splitext(n)[1].lower()
-            if ext not in (".md", ".txt", ".json"):
-                continue
-            if _is_credential_file(n):
-                continue
-            p = os.path.join(root, n)
-            try:
-                rel = os.path.relpath(p, os.path.join(WORKSPACE_DIR, owner, rname, "project-info")).replace("\\", "/")
-                with open(p, encoding="utf-8") as f:
-                    files[rel] = f.read()
-            except Exception:
-                continue
+            content = read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
+            if content:
+                # key 归一化：取 project-info/ 后面的部分，agent/ 替换为 member/
+                if "project-info/" in file_path:
+                    rel = file_path.split("project-info/", 1)[-1]
+                else:
+                    rel = file_path
+                rel = rel.replace("\\", "/")
+                if rel.startswith("agent/"):
+                    rel = "member/" + rel[len("agent/"):]
+                files[rel] = {"content": content, "obs_key": obs_key or ""}
+    except Exception:
+        pass  # ref 表异常时 member 不注入（符合"没关联不注入"设计）
     return files
 
 
 def agent_files(repo_key: str, agent_type: str = "") -> dict:
-    """Agent 专属成员上传文档快照：{rel_path: content}（project-info/agent/{agent_type}/ 下 md/txt/json）。
-
-    key 相对 project-info 目录（`agent/{agent_type}/{name}`，与 load_project_info 的 files key 语义一致），
-    供 enqueue_task 定向打包到 project_info_files → worker 物化到 `.project-info/agent/{agent_type}/`。
-    见 knowledge-board-design.md §六。
-    OBS 模式：查 DB scope='member' AND agent_type + OBS 读取（不依赖本地磁盘）。
-    """
-    owner, rname = _owner_repo(repo_key)
-    files = {}
-    # OBS 分支：查 DB + OBS 读取
-    from src.storage import get_storage
-    storage = get_storage()
-    if storage is not None:
-        with db_lock:
-            rows = db.cursor().execute(
-                "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='member' AND agent_type=? AND obs_key!='' AND obs_key IS NOT NULL "
-                "ORDER BY id DESC",
-                (repo_key, agent_type or "")
-            ).fetchall()
-        seen = set()
-        for rid, fp, ok in rows:
-            if fp and ok and fp not in seen:
-                ext = os.path.splitext(fp)[1].lower()
-                if ext not in (".md", ".txt", ".json"):
-                    continue
-                if _is_credential_file(fp):
-                    continue
-                seen.add(fp)
-                try:
-                    data = storage.read_bytes(ok)
-                    if data:
-                        files[fp.replace("project-info/", "", 1).replace("\\", "/")] = data.decode("utf-8", errors="replace")
-                except Exception:
-                    continue
-        return files
-    # 本地模式（和 dev 一致）
-    base = os.path.join(WORKSPACE_DIR, owner, rname, "project-info", "agent", agent_type or "")
-    files = {}
-    if not os.path.isdir(base):
-        return files
-    for root, _dirs, names in os.walk(base):
-        for n in sorted(names):
-            ext = os.path.splitext(n)[1].lower()
-            if ext not in (".md", ".txt", ".json"):
-                continue
-            if _is_credential_file(n):
-                continue
-            p = os.path.join(root, n)
-            try:
-                rel = os.path.relpath(p, os.path.join(WORKSPACE_DIR, owner, rname, "project-info")).replace("\\", "/")
-                with open(p, encoding="utf-8") as f:
-                    files[rel] = f.read()
-            except Exception:
-                continue
-    return files
+    """[Issue #95 废弃] 用户上传知识统一由 member_files_pi 走 ref 表注入，此函数保留向后兼容但不再被调用。"""
+    return {}
 
 
 async def knowledge_sync_loop():
@@ -764,9 +675,9 @@ async def knowledge_sync_loop():
                                 # member 文档：用 file_path 生成 storage_key
                                 storage_key = f"knowledge/{owner}/{rname}/{file_path.replace('project-info/', '', 1)}"
                             elif scope == "baseline":
-                                # 基线文件：用 file_path 生成（和 builder.py 一致）
+                                # Issue #95：基线文件 OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
                                 _fname = os.path.basename(file_path)
-                                storage_key = f"project-info/{repo_key}/{_fname}"
+                                storage_key = f"knowledge/{owner}/{rname}/project-info/{_fname}"
                             else:
                                 # 共享知识：project/issue/issue_agent
                                 storage_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
@@ -774,8 +685,12 @@ async def knowledge_sync_loop():
                             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
                             with db_lock:
                                 c2 = db.cursor()
+                                # Issue #95：UPDATE 补 source（COALESCE 空值不覆盖）
                                 c2.execute(
-                                    "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=? WHERE id=?",
+                                    "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
+                                    "source=COALESCE(NULLIF(source, ''), CASE WHEN scope='baseline' THEN 'system' "
+                                    "WHEN scope='member' THEN 'manual' ELSE 'agent' END) "
+                                    "WHERE id=?",
                                     (storage_key, content_hash, rid)
                                 )
                                 db.commit()
@@ -851,23 +766,36 @@ def _sync_baseline_files():
                     (repo_key, file_path)
                 ).fetchone()
 
-            if row and row[1]:  # DB 有记录且 obs_key 非空 → 跳过
-                continue
+            if row and row[1]:  # DB 有记录且 obs_key 非空
+                # Issue #95：检测旧格式 obs_key（project-info/ 前缀但不含 knowledge/）→ 强制更新
+                _old_obs = row[1] or ""
+                if _old_obs.startswith("project-info/") and not _old_obs.startswith("knowledge/"):
+                    # 旧格式 → 重新写 OBS + UPDATE
+                    pass  # 不 continue，走下面的写入逻辑
+                else:
+                    continue  # 新格式或本地模式 → 跳过
 
             # 写 OBS + DB
             try:
                 with open(fpath, "rb") as f:
                     content_bytes = f.read()
-                storage_key = f"project-info/{repo_key}/{fname}"
+                # Issue #95：OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
+                _owner, _rname = _owner_repo(repo_key)
+                storage_key = f"knowledge/{_owner}/{_rname}/project-info/{fname}"
                 storage.save_bytes(storage_key, content_bytes)
                 content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
 
                 if row:  # DB 有记录但 obs_key 为空 → UPDATE
                     with db_lock:
                         c = db.cursor()
+                        # Issue #95：UPDATE 补 source/name/description（COALESCE 空值不覆盖）
+                        _bn = {"project-graph.md": "项目结构图谱", "project-capabilities.md": "项目能力清单", ".metadata.json": "项目元数据"}.get(fname, fname)
                         c.execute(
-                            "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=? WHERE id=?",
-                            (storage_key, content_hash, row[0])
+                            "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
+                            "source=COALESCE(NULLIF(source, ''), 'system'), "
+                            "name=COALESCE(NULLIF(name, ''), ?) "
+                            "WHERE id=?",
+                            (storage_key, content_hash, _bn, row[0])
                         )
                         db.commit()
                 else:  # DB 无记录 → INSERT

@@ -112,7 +112,7 @@ function _summaryStatsBar(data, devices) {
   return `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;margin-bottom:10px;font-size:12px;color:var(--t2);background:var(--bg);border-radius:8px">${parts.join('<span style="color:var(--t3)">·</span>')}</div>`;
 }
 
-// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts/codex）
+// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts）
 function _engineWatermark(name) {
   const n = (name || '').toLowerCase();
   if (n.includes('opencode')) {
@@ -125,7 +125,7 @@ function _engineWatermark(name) {
     return `<img src="/static/img/engines/codearts.jpg" style="position:absolute;right:12px;bottom:8px;width:50px;height:50px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
   }
   if (n.includes('codex')) {
-    return `<div style="position:absolute;right:12px;bottom:8px;width:48px;height:48px;border-radius:10px;background:linear-gradient(135deg,#10a37f,#0d8a6a);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:#fff;opacity:.25;pointer-events:none">C</div>`;
+    return `<img src="/static/img/engines/codex.png" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
   }
   return '';
 }

@@ -41,11 +41,10 @@ function renderEventDetail(data) {
   _convSeq = data.seq;
   _convAgent = agent;
 
-  // Issue 编号 → GitCode 超链接（repo_key 已去前缀为 owner/repo，issue_id 为 #N）
+  // Issue 编号 → VCS 超链接
   const _issNum = String(data.issue_id || '').replace(/^#/, '');
-  const _repoParts = (data.repo_key || '').replace(/^gitcode:/, '').split('/');
-  const _issueLink = (_issNum && _repoParts.length === 2)
-    ? `<a href="https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issNum}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${data.issue_id}</a>`
+  const _issueLink = (_issNum && data.repo_key)
+    ? `<a href="${_vcsUrl(data.repo_key, '/issues/' + _issNum)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${data.issue_id}</a>`
     : `Issue ${data.issue_id || '—'}`;
 
   // 重新派发按钮显示条件（event-redispatch-design.md §3.1）：
@@ -56,25 +55,29 @@ function renderEventDetail(data) {
     (data.status === 'running' && _ts && (Date.now() - _ts) > 10 * 60 * 1000) ||
     (data.task && data.task.task_status === 'dispatched');
 
-  // M4：结构化产出（event.json archive 对应段，见 §11.4）
-  // "Agent 处理记录" 作为方框外部左上角标题，与下方"Agent 答复结论"上下对齐
-  let structuredHtml = '';
-  const arch = data.archive || null;
-  if (arch && arch.output) {
-    const o = arch.output;
+  // M4：结构化产出（唯一结论）：优先 event.json archive.output，其次 events.result 自身的结构化 JSON。
+  // "Agent 处理记录" 作为方框外部左上角标题，与下方结构化结论分离（不再重复展示 result 原文）。
+  const _buildStructuredHtml = (o) => {
+    if (!o) return '';
     const actions = Array.isArray(o.actions) ? o.actions.map(a => `<div>• ${a}</div>`).join('') : '';
     const arts = Array.isArray(o.artifacts) ? o.artifacts.map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('') : '';
-    const _lblConclusion = I18N.t('events.label_conclusion');
-    const _lblActions = I18N.t('events.label_actions');
-    const _lblArtifacts = I18N.t('events.label_artifacts');
-    const _lblNextStep = I18N.t('events.label_next_step');
-    const _lblIssueSummary = I18N.t('events.label_issue_summary');
-    structuredHtml = `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblConclusion}</b> ${o.conclusion}</div>` : ''}
-      ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblActions}</b> ${actions}</div>` : ''}
-      ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblArtifacts}</b> ${arts}</div>` : ''}
-      ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>${_lblNextStep}</b> ${o.next_step}</div>` : ''}
-      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>${_lblIssueSummary}</b> ${o.issue_summary}</div>` : ''}`;
-  }
+    return `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_conclusion')}</b> ${o.conclusion}</div>` : ''}
+      ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_actions')}</b> ${actions}</div>` : ''}
+      ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_artifacts')}</b> ${arts}</div>` : ''}
+      ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_next_step')}</b> ${o.next_step}</div>` : ''}
+      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>${I18N.t('events.label_issue_summary')}</b> ${o.issue_summary}</div>` : ''}`;
+  };
+  const _tryStructuredResult = (r) => {
+    if (!r) return null;
+    const s = String(r).trim();
+    if (!(s.startsWith('{') && s.endsWith('}'))) return null;
+    try {
+      const o = JSON.parse(s);
+      return (o && (o.conclusion || o.actions || o.artifacts || o.issue_summary)) ? o : null;
+    } catch (e) { return null; }
+  };
+  const arch = data.archive || null;
+  let structuredHtml = _buildStructuredHtml((arch && arch.output) || _tryStructuredResult(result));
 
   // 上下文折叠区块摘要（折叠时显示）
   const _ctxSummary = `${data.event_type || '—'} · ${data.actor || '—'}`;
@@ -140,14 +143,20 @@ function renderEventDetail(data) {
       <!-- 区块3：Agent 处理记录与答复结论（统一标题，内置框+结论，整体滑动） -->
       <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">${I18N.t('events.section_processing')}</h3>
       <div style="flex:1;overflow-y:auto;background:var(--bg);color:var(--t);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
-        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>` : ''}
-        ${result ? renderMarkdown(result) : '<div style="color:var(--t3)">' + I18N.t('events.no_conclusion') + '</div>'}
+        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>`
+          : `${result ? renderMarkdown(result) : '<div style="color:var(--t3)">' + I18N.t('events.no_conclusion') + '</div>'}`}
       </div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
     <!-- 右栏：对话面板（有对话/门禁开放才显示，见 loadConversation 条件渲染 Issue #35） -->
     <div id="convPanel" class="cd" style="padding:14px;display:none;flex-direction:column;gap:8px;height:100%;overflow:hidden">
-      <h3 style="font-size:12px;font-weight:600;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">${I18N.t('events.section_conversation', {name: agentName})} <button onclick="toggleConvFullscreen()" title="${I18N.t('events.fullscreen_title')}" style="border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">${I18N.t('events.fullscreen_btn')}</button></h3>
+      <div style="flex-shrink:0;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <h3 style="font-size:12px;font-weight:600;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${I18N.t('events.section_conversation', {name: agentName})}</h3>
+        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0">
+          <button onclick="clearConversation(event, ${_convSeq})" title="${I18N.t('events.clear_conv_title')}" style="border:1px solid var(--b);background:transparent;color:#ff3b30;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap">${I18N.t('events.clear_conv_btn')}</button>
+          <button onclick="toggleConvFullscreen()" title="${I18N.t('events.fullscreen_title')}" style="border:1px solid var(--b);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap">${I18N.t('events.fullscreen_btn')}</button>
+        </div>
+      </div>
       <div id="convMessages" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12px"></div>
       <div id="convInputRow" style="display:none;gap:6px;flex-shrink:0">
         <textarea id="convInput" rows="1" placeholder="${I18N.t('events.conv_input_placeholder')}" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);resize:vertical;max-height:120px;overflow-y:auto" oninput="_autoResizeTextarea(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendConversation()}"></textarea>
@@ -288,16 +297,201 @@ function loadConversation() {
 function renderOutcome(knowledge, messages) {
   const el = document.getElementById('convOutcome');
   if (!el) return;
-  const kRows = Object.keys(knowledge || {}).map(scope =>
-    `<div style="padding:3px 0;border-bottom:1px dashed var(--b)"><b>${scope === 'project' ? I18N.t('events.scope_project') : scope === 'issue' ? I18N.t('events.scope_issue') : I18N.t('events.scope_agent')}</b> · ${knowledge[scope]}</div>`
-  ).join('');
+  _convKnowledge = knowledge || {};
+  var scopeLabels = {project: I18N.t('events.scope_project'), issue: I18N.t('events.scope_issue'), issue_agent: I18N.t('events.scope_agent_solo')};
+  var scopeIcons = {project: '📦', issue: '📋', issue_agent: '🤖'};
+  var kCards = Object.keys(knowledge || {}).map(function(scope) {
+    if (!knowledge[scope]) return '';
+    var content = knowledge[scope];
+    var summary = content.substring(0, 30).replace(/\n/g, ' ').replace(/- \[seq[^\]]*\] /g, '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    var len = content.length;
+    return '<div class="k-card" onclick="showKnowledgeDetail(\'' + scope + '\')">'
+      + '<span class="k-card-label">' + scopeIcons[scope] + ' ' + scopeLabels[scope] + '</span>'
+      + '<span class="k-card-summary">' + summary + '… (' + len + '字)</span>'
+      + '<button class="k-card-x" onclick="event.stopPropagation();quickDeleteKnowledge(\'' + scope + '\')">&times;</button>'
+      + '</div>';
+  }).join('');
   const flowRows = (messages || []).filter(m => m.role === 'system' && (m.content || '').indexOf('🔄') === 0)
     .map(m => `<div style="padding:3px 0;border-bottom:1px dashed var(--b)">${m.content}</div>`).join('');
-  if (!kRows && !flowRows) { el.style.display = 'none'; return; }
+  if (!kCards && !flowRows) { el.style.display = 'none'; return; }
   el.style.display = 'block';
   el.innerHTML = `<h3 style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--a)">${I18N.t('events.outcome_title')}</h3>`
-    + (kRows ? `<div style="margin-top:2px"><b>${I18N.t('events.outcome_knowledge')}</b>${kRows}</div>` : '')
+    + (kCards ? `<div style="margin-top:2px"><b>${I18N.t('events.outcome_knowledge')}</b><div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">${kCards}</div></div>` : '')
     + (flowRows ? `<div style="margin-top:4px"><b>${I18N.t('events.outcome_flow')}</b>${flowRows}</div>` : '');
+}
+
+// Issue #100: 知识缓存
+var _convKnowledge = {};
+
+// Issue #100: 知识详情弹窗
+function showKnowledgeDetail(scope) {
+  var content = (_convKnowledge || {})[scope] || '';
+  var scopeLabels = {project: I18N.t('events.scope_project'), issue: I18N.t('events.scope_issue'), issue_agent: I18N.t('events.scope_agent_solo')};
+  _closeKnowledgeModal();
+  var overlay = document.createElement('div');
+  overlay.className = 'km-overlay show';
+  overlay.id = 'kmOverlay';
+  overlay.onclick = function(e) { if (e.target === overlay) _closeKnowledgeModal(); };
+  var modal = document.createElement('div');
+  modal.className = 'km-modal';
+  var hdr = document.createElement('div');
+  hdr.className = 'km-hdr';
+  hdr.textContent = scopeLabels[scope] + I18N.t('events.outcome_knowledge');
+  modal.appendChild(hdr);
+  var body = document.createElement('div');
+  body.className = 'km-body';
+  body.innerHTML = renderMarkdown(content);
+  modal.appendChild(body);
+  var footer = document.createElement('div');
+  footer.className = 'km-footer';
+  var closeBtn = document.createElement('button');
+  closeBtn.className = 'km-close';
+  closeBtn.textContent = I18N.t('events.knowledge_modal_close');
+  closeBtn.onclick = _closeKnowledgeModal;
+  footer.appendChild(closeBtn);
+  var delBtn = document.createElement('button');
+  delBtn.className = 'km-del';
+  delBtn.textContent = I18N.t('events.delete_knowledge_btn');
+  delBtn.onclick = function() { _closeKnowledgeModal(); _deleteKnowledge(scope); };
+  footer.appendChild(delBtn);
+  modal.appendChild(footer);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
+function _closeKnowledgeModal() {
+  var el = document.getElementById('kmOverlay');
+  if (el) el.remove();
+}
+
+// Issue #100: 快速删除知识（卡片 X 按钮）
+function quickDeleteKnowledge(scope) {
+  if (scope === 'project') {
+    _showProjectDeleteConfirm(scope);
+  } else {
+    _deleteKnowledge(scope);
+  }
+}
+
+// Issue #100: project 级二次确认
+function _showProjectDeleteConfirm(scope) {
+  _closeClearConvPopover();
+  var overlay = document.createElement('div');
+  overlay.className = 'chat-del-overlay';
+  overlay.id = 'kmConfirmOverlay';
+  overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+  var pop = document.createElement('div');
+  pop.className = 'chat-del-pop';
+  pop.style.left = (window.innerWidth / 2 - 110) + 'px';
+  pop.style.top = (window.innerHeight / 2 - 70) + 'px';
+  var title = document.createElement('div');
+  title.className = 'chat-del-title';
+  title.style.color = '#ff3b30';
+  title.innerHTML = I18N.t('events.knowledge_delete_confirm_project');
+  pop.appendChild(title);
+  var btns = document.createElement('div');
+  btns.className = 'chat-del-btns';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'chat-del-cancel';
+  cancelBtn.textContent = I18N.t('common.cancel');
+  cancelBtn.onclick = function() { overlay.remove(); };
+  btns.appendChild(cancelBtn);
+  var okBtn = document.createElement('button');
+  okBtn.className = 'chat-del-ok';
+  okBtn.textContent = I18N.t('common.confirm');
+  okBtn.onclick = function() { overlay.remove(); _deleteKnowledge(scope); };
+  btns.appendChild(okBtn);
+  pop.appendChild(btns);
+  overlay.appendChild(pop);
+  document.body.appendChild(overlay);
+  requestAnimationFrame(function() { pop.classList.add('show'); });
+}
+
+// Issue #100: 删除知识（防重复点击）
+var _delKnowBusy = false;
+function _deleteKnowledge(scope) {
+  if (_delKnowBusy) return;
+  _delKnowBusy = true;
+  fetch('/api/events/' + _convSeq + '/knowledge/' + scope, {
+    method: 'DELETE',
+    headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')}
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    _delKnowBusy = false;
+    if (d.ok) {
+      app.showToast(I18N.t('events.knowledge_deleted'));
+      loadConversation();
+    } else {
+      app.showToast(I18N.t('events.knowledge_delete_failed', {msg: (d.detail || {}).message || ''}));
+    }
+  }).catch(function(e) {
+    _delKnowBusy = false;
+    app.showToast(I18N.t('events.knowledge_delete_failed', {msg: e.message}));
+  });
+}
+
+// Issue #100: 清理对话
+function clearConversation(ev, seq) {
+  _showClearConvPopover(ev, seq);
+}
+
+function _showClearConvPopover(ev, seq) {
+  _closeClearConvPopover();
+  var overlay = document.createElement('div');
+  overlay.className = 'chat-del-overlay';
+  overlay.id = 'clearConvOverlay';
+  overlay.onclick = function(e) { if (e.target === overlay) _closeClearConvPopover(); };
+  var pop = document.createElement('div');
+  pop.className = 'chat-del-pop';
+  pop.style.left = Math.min(ev.clientX, window.innerWidth - 240) + 'px';
+  pop.style.top = Math.min(ev.clientY + 10, window.innerHeight - 140) + 'px';
+  var title = document.createElement('div');
+  title.className = 'chat-del-title';
+  title.textContent = I18N.t('events.clear_conv_confirm');
+  pop.appendChild(title);
+  var btns = document.createElement('div');
+  btns.className = 'chat-del-btns';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'chat-del-cancel';
+  cancelBtn.textContent = I18N.t('common.cancel');
+  cancelBtn.onclick = _closeClearConvPopover;
+  btns.appendChild(cancelBtn);
+  var okBtn = document.createElement('button');
+  okBtn.className = 'chat-del-ok';
+  okBtn.textContent = I18N.t('common.confirm');
+  okBtn.onclick = function() { _closeClearConvPopover(); _doClearConv(seq); };
+  btns.appendChild(okBtn);
+  pop.appendChild(btns);
+  overlay.appendChild(pop);
+  document.body.appendChild(overlay);
+  requestAnimationFrame(function() { pop.classList.add('show'); });
+}
+
+function _closeClearConvPopover() {
+  var el = document.getElementById('clearConvOverlay');
+  if (el) el.remove();
+}
+
+// Issue #100: 防重复点击
+var _clearBusy = false;
+
+function _doClearConv(seq) {
+  if (_clearBusy) return;
+  _clearBusy = true;
+  fetch('/api/events/' + seq + '/chat', {
+    method: 'DELETE',
+    headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')}
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    _clearBusy = false;
+    if (d.ok) {
+      app.showToast(I18N.t('events.clear_conv_done'));
+      loadConversation();
+    } else {
+      app.showToast(I18N.t('events.clear_conv_failed', {msg: (d.detail || {}).message || ''}));
+    }
+  }).catch(function(e) {
+    _clearBusy = false;
+    app.showToast(I18N.t('events.clear_conv_failed', {msg: e.message}));
+  });
 }
 
 // ===== 事件对话持久化查询（对齐 Chat Agent v31）=====
@@ -464,7 +658,17 @@ function toggleConvFullscreen() {
     btn.style.cssText = 'border:1px solid var(--b,#2a3140);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer';
     btn.onclick = toggleConvFullscreen;
     bar.appendChild(title);
-    bar.appendChild(btn);
+    // Issue #100: 全屏时也显示清理对话按钮
+    var btnsDiv = document.createElement('div');
+    btnsDiv.style.cssText = 'display:flex;gap:6px;align-items:center';
+    var clearBtn = document.createElement('button');
+    clearBtn.textContent = I18N.t('events.clear_conv_btn');
+    clearBtn.title = I18N.t('events.clear_conv_title');
+    clearBtn.style.cssText = 'border:1px solid var(--b);background:transparent;color:#ff3b30;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap';
+    clearBtn.onclick = function(ev) { clearConversation(ev, _convSeq); };
+    btnsDiv.appendChild(clearBtn);
+    btnsDiv.appendChild(btn);
+    bar.appendChild(btnsDiv);
     fs.appendChild(bar);
     fs.appendChild(messages);
     fs.appendChild(inputRow);

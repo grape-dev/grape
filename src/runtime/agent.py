@@ -49,6 +49,7 @@ _PROBE_COMMANDS = {
     "codearts": ["codearts", "run", "hello"],
     "codex": ["codex", "exec", "--json", "--sandbox", "workspace-write", "hello"],
     "cursor": ["cursor", "run", "hello"],
+    "codex": ["codex", "exec", "--json", "hello"],
 }
 _PROBE_TIMEOUT = 30
 _PROBE_INTERVAL = 600  # 10 分钟
