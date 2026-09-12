@@ -40,11 +40,17 @@ def is_agent_enabled(repo_key: str, agent_type: str) -> bool:
 # ===== Issue 生命周期状态机（issue_state，见 vod-skill-upgrade-plan.md §3.0.2）=====
 
 def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
-    """读 Issue 当前阶段。无记录返回 None。"""
+    """读 Issue 当前阶段。无记录返回 None。
+
+    Phase B2.5（双读一致）：`issue_state` 为权威阶段机（停写前不改变语义），
+    缺失时回退收编后的 `issue` 单表（按 issue_number，卡片行已回填/双写）。
+    两表由 set_* 双写保持一致。
+    """
+    # 1. issue_state（权威；过渡期与收编后均正确）
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode FROM issue_state WHERE repo_key=? AND issue_id=?",
+            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?",
                       (repo_key, issue_id))
             row = c.fetchone()
             if row:
@@ -53,10 +59,65 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
                         "scene_id": row[6] or "",
                         "scene_user_id": row[7] or 0,
                         "parent_issue_id": row[8] or "",
-                        "is_subtask_mode": row[9] or 0}
+                        "is_subtask_mode": row[9] or 0,
+                        "allow_scene_override": row[10] or 0}
     except Exception:
         pass
+    # 2. issue 单表兜底（无 issue_state，但已有卡片行的收编数据）
+    _num = None
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+    except Exception:
+        _num = None
+    if _num:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT stage, owner_agent, a2a_seq, updated_at, assignee, "
+                    "scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override "
+                    "FROM issue WHERE repo_key=? AND issue_number=?",
+                    (repo_key, _num))
+                row = c.fetchone()
+            if row:
+                return {"id": None, "stage": row[0], "owner_agent": row[1],
+                        "a2a_seq": row[2], "updated_at": row[3], "assignee": row[4] or "",
+                        "scene_id": row[5] or "",
+                        "scene_user_id": row[6] or 0,
+                        "parent_issue_id": row[7] or "",
+                        "is_subtask_mode": row[8] or 0,
+                        "allow_scene_override": row[9] or 0}
+        except Exception:
+            pass
     return None
+
+
+def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated_at: bool = True):
+    """Phase B2.5：将收编字段双写回 `issue` 卡片行（按 issue_number；无卡片行则跳过）。
+
+    幂等：仅 UPDATE issue 卡片，不建档（建档仍由 ensure_issue_task 负责）。
+    与 get_issue_stage 的 issue 优先读对应，保证单表数据一致。
+    """
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+    except Exception:
+        return
+    if not _num:
+        return
+    sets = ", ".join(f"{k}=?" for k in fields)
+    if not sets:
+        return
+    if touch_updated_at:
+        sets += ", updated_at=datetime('now')"
+    params = list(fields.values()) + [repo_key, _num]
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
+            db.commit()
+    except Exception as e:
+        from src.config import log as _log2
+        _log2.warning(f"sync issue table failed for {repo_key} #{_num}: {e}")
 
 
 def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
@@ -90,6 +151,11 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                 (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, _init_scene),
             )
         db.commit()
+    # Phase B2：双写 stage 到 issue 表（收编后的单表；issue 有卡片行则同步）
+    _sync_issue_fields(repo_key, issue_id, {
+        "stage": stage, "owner_agent": owner_agent, "assignee": assignee or "",
+        "a2a_seq": a2a_seq,
+    })
     from src.config import log
     _scene_log = _init_scene if not row else '(existing)'
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee} scene={_scene_log}")
@@ -167,6 +233,7 @@ def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: 
                 (repo_key, issue_id, scene_id or "", scene_user_id),
             )
         db.commit()
+    _sync_issue_fields(repo_key, issue_id, {"scene_id": scene_id or "", "scene_user_id": scene_user_id})
     from src.config import log
     log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
 
@@ -186,6 +253,7 @@ def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
                 "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
                 (repo_key, issue_id, val))
         db.commit()
+    _sync_issue_fields(repo_key, issue_id, {"allow_scene_override": val})
     log.info(f"SceneOverride: repo={repo_key} issue={issue_id} allowed={val}")
 
 
@@ -218,6 +286,7 @@ def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):
                 (repo_key, issue_id, parent_issue_id or ""),
             )
         db.commit()
+    _sync_issue_fields(repo_key, issue_id, {"parent_issue_id": parent_issue_id or ""})
     from src.config import log
     log.info(f"ParentIssue: repo={repo_key} issue={issue_id} parent={parent_issue_id}")
 
@@ -244,6 +313,7 @@ def set_subtask_mode(repo_key: str, issue_id: str, enabled: bool = True):
                 (repo_key, issue_id, val),
             )
         db.commit()
+    _sync_issue_fields(repo_key, issue_id, {"is_subtask_mode": val})
     from src.config import log
     log.info(f"SubtaskMode: repo={repo_key} issue={issue_id} enabled={enabled}")
 

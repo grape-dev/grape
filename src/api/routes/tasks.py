@@ -87,10 +87,11 @@ def _create_task(user_id: int, assignee: str, repo_key: str, issue_number: int,
         if row:
             return row[0]
         c.execute(
-            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number) "
-            "VALUES (?,?,?,?,?,?,'active',?,?)",
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
+            "VALUES (?,?,?,?,?,?,'active',?,?,?)",
             (user_id, assignee, repo_key, issue_number, title, task_description,
-             _get_issue_subtask_mode(repo_key, issue_number), _get_issue_parent(repo_key, issue_number))
+             _get_issue_subtask_mode(repo_key, issue_number), _get_issue_parent(repo_key, issue_number),
+             _get_issue_parent_id(repo_key, issue_number))
         )
         db.commit()
         return c.lastrowid
@@ -206,10 +207,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
             c.execute(
-                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number) "
-                "VALUES (?,?,?,?,?,?,'active',?,?)",
+                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
-                 _subtask_val, _parent_val)
+                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number))
             )
             db.commit()
             task_id = c.lastrowid
@@ -350,12 +351,17 @@ def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:
     return 0
 
 
-def _get_issue_parent(repo_key: str, issue_number: int) -> int:
-    """从 issue_state 读取 parent_issue_number"""
+def _get_issue_parent_id(repo_key: str, issue_number: int) -> str:
+    """从 issue_state 读取 parent_issue_id（文本，如 "#20"；空=普通任务）。"""
     from src.api.session_store import get_issue_stage
     issue_id = f"#{issue_number}"
     state = get_issue_stage(repo_key, issue_id) or {}
-    parent = state.get("parent_issue_id", "") or ""
+    return (state.get("parent_issue_id") or "").strip()
+
+
+def _get_issue_parent(repo_key: str, issue_number: int) -> int:
+    """从 issue_state 读取 parent_issue_id 并转为 int（前端兼容 parent_issue_number）。"""
+    parent = _get_issue_parent_id(repo_key, issue_number)
     parent_num = str(parent).replace("#", "").strip()
     return int(parent_num) if parent_num.isdigit() else 0
 
@@ -1580,7 +1586,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     """
     _select = (
         "SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
-        "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number"
+        "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, parent_issue_id"
         + (", user_id" if include_user_id else "")
     )
     with db_lock:
@@ -1629,6 +1635,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
             "is_subtask_mode": r[11] or 0,
             "parent_issue_number": r[12] or 0,
+            "parent_issue_id": r[13] or "",
             "scene_id": _scene_id,
             "scene_name": _scene_name,
             "scene_source": _scene_source,
@@ -1636,7 +1643,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "is_running": _has_running_agent,
         }
         if include_user_id:
-            item["user_id"] = r[13] or 0
+            item["user_id"] = r[14] or 0
         tasks_out.append(item)
     return tasks_out
 

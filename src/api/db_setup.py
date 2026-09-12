@@ -2675,6 +2675,63 @@ def _migrate_tables():
         log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + issue + task_id/generate_status to chat_messages")
     except Exception as e:
         log.warning(f"Add multi-task columns failed: {e}")
+    # ===== Phase B2: issue 收编 issue_state 字段（新增列 + 存量数据回填）=====
+    # 目标：issue 单表承载 stage/status 全量，为 C 阶段弃用 issue_state 做准备。
+    # 幂等：列已存在则跳过；回填按 issue_state 为权威对齐（两表一致，重复执行结果不变）。
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 批 A：stage + owner_agent（默认 vod）
+            _ensure_column(c, "issue", "stage", "TEXT DEFAULT 'vod'")
+            _ensure_column(c, "issue", "owner_agent", "TEXT DEFAULT 'vod'")
+            # 批 B：场景相关
+            _ensure_column(c, "issue", "scene_id", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "scene_user_id", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "allow_scene_override", "INTEGER DEFAULT 0")
+            # 批 C：A2A 触发 + 子任务归属 + 更新时间
+            _ensure_column(c, "issue", "a2a_seq", "INTEGER")
+            _ensure_column(c, "issue", "parent_issue_id", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "updated_at", "TEXT DEFAULT ''")
+            db.commit()
+        # 存量回填：从 issue_state 并入 issue（按 issue_id == "#{issue_number}"）
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET "
+                "stage = COALESCE((SELECT s.stage FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), 'vod'), "
+                "owner_agent = COALESCE((SELECT s.owner_agent FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), 'vod'), "
+                "scene_id = COALESCE((SELECT s.scene_id FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), ''), "
+                "scene_user_id = COALESCE((SELECT s.scene_user_id FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), 0), "
+                "allow_scene_override = COALESCE((SELECT s.allow_scene_override FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), 0), "
+                "a2a_seq = COALESCE((SELECT s.a2a_seq FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), a2a_seq), "
+                "parent_issue_id = COALESCE((SELECT s.parent_issue_id FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), ''), "
+                "is_subtask_mode = COALESCE((SELECT s.is_subtask_mode FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), is_subtask_mode), "
+                "updated_at = COALESCE((SELECT s.updated_at FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), '') "
+                "WHERE EXISTS (SELECT 1 FROM issue_state s "
+                "              WHERE s.repo_key=issue.repo_key AND s.issue_id='#'||issue.issue_number)")
+            _backfilled = c.rowcount
+            db.commit()
+        log.info(f"Phase B2: issue 收编 issue_state 字段完成（补列 + 回填 {_backfilled} 行）")
+    except Exception as e:
+        log.warning(f"Phase B2 issue 收编 issue_state 字段失败: {e}")
     # ===== event_thread: task_id + generate_status（对齐 Chat Agent 持久化查询）=====
     try:
         with db_lock:
