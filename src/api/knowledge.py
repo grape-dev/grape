@@ -557,7 +557,7 @@ async def knowledge_write_worker():
 
 
 def _worker_process_task(row):
-    """worker 线程内处理单条任务。"""
+    """worker 线程内处理单条任务。拿到锁后连续处理同维度所有 pending。"""
     task_id = row[0]
     repo_key, scope, agent_type, issue_num = row[1], row[2], row[3], row[4]
     content, status, source_seq, created_by = row[5], row[6], row[7], row[8]
@@ -568,13 +568,45 @@ def _worker_process_task(row):
         return  # 拿不到锁，留 pending 下一轮
 
     try:
-        # 再查任务是否存在（可能已被第一层 DELETE）
-        with db_lock:
-            exists = db.cursor().execute(
-                "SELECT 1 FROM knowledge_write_queue WHERE id=?", (task_id,)).fetchone()
-        if not exists:
-            return  # 已被第一层消费
+        # 处理当前任务（可能已被第一层 DELETE）
+        _process_one_task(task_id, repo_key, scope, agent_type, issue_num,
+                          content, status, source_seq, created_by,
+                          source, description, name, retry_count)
 
+        # 连续处理同维度剩余 pending 任务（不再重新抢锁）
+        while True:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with db_lock:
+                next_row = db.cursor().execute(
+                    "SELECT id, content, status, source_seq, created_by, "
+                    "source, description, name, retry_count "
+                    "FROM knowledge_write_queue "
+                    "WHERE queue_status='pending' AND next_retry_at <= ? "
+                    "AND repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
+                    "ORDER BY created_at LIMIT 1",
+                    (now, repo_key, scope, agent_type, issue_num)
+                ).fetchone()
+            if not next_row:
+                break
+            _process_one_task(next_row[0], repo_key, scope, agent_type, issue_num,
+                              next_row[1], next_row[2], next_row[3], next_row[4],
+                              next_row[5], next_row[6], next_row[7], next_row[8])
+    finally:
+        release_lock(lock_key)
+
+
+def _process_one_task(task_id, repo_key, scope, agent_type, issue_num,
+                      content, status, source_seq, created_by,
+                      source, description, name, retry_count):
+    """处理单条队列任务。在锁内调用，不抢锁。"""
+    # 再查任务是否存在（可能已被第一层 DELETE）
+    with db_lock:
+        exists = db.cursor().execute(
+            "SELECT 1 FROM knowledge_write_queue WHERE id=?", (task_id,)).fetchone()
+    if not exists:
+        return  # 已被第一层消费
+
+    try:
         _do_write_knowledge(
             repo_key=repo_key, scope=scope, agent_type=agent_type, issue_num=issue_num,
             content=content, status=status, source_seq=source_seq, created_by=created_by,
@@ -582,8 +614,6 @@ def _worker_process_task(row):
         _delete_queue_task(task_id)
     except Exception as e:
         _fail_queue_task(task_id, str(e), retry_count)
-    finally:
-        release_lock(lock_key)
 
 
 def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str = "", issue_num: int = 0):

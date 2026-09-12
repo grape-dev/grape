@@ -33,7 +33,7 @@ def acquire_lock(lock_key: str, ttl: int = 60) -> bool:
             db.commit()
             return True  # INSERT 成功 = 拿到锁
         except Exception:
-            pass  # 主键冲突 → 查现有锁是否过期
+            db.rollback()  # INSERT 冲突后清理 cursor 状态（SQLite 需要）
 
         # 2. 查现有锁
         row = c.execute(
