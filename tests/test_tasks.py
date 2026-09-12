@@ -58,6 +58,8 @@ def setup_module():
         c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token) VALUES (?,?,?,?,?,?)",
                   ("gitcode:org/test", "org", "test", "org/test", 1, _BOT_TOKEN))
         db.commit()
+    # 建 user_repos 成员关系（repo_all 走 get_managed_repos 成员校验，防 IDOR 加固后依赖此关系）
+    user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test", True, True)
 
 
 def teardown_module():
@@ -67,6 +69,7 @@ def teardown_module():
         c = db.cursor()
         c.execute("DELETE FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user')")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('younger_eric','bob')")
+        c.execute("DELETE FROM user_repos WHERE user_id IN (SELECT id FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user'))")
         db.commit()
 
 
@@ -747,8 +750,58 @@ class TestRepoAllTasks:
         assert got_asc == [102, 101, 100], f"asc 应最早在前，实际 {got_asc}"
 
     def test_repo_all_empty_repo(self):
-        """无任务的仓库返回空列表"""
+        """有权限但无任务的仓库返回空列表"""
         _clean_tasks()
-        r = client.get("/api/tasks/repo/org/emptyrepo", headers=_headers)
+        r = client.get("/api/tasks/repo/org/test", headers=_headers)
         assert r.status_code == 200
         assert r.json()["tasks"] == []
+
+    def test_repo_all_non_member_forbidden(self):
+        """未托管/未加入该仓库的用户访问「仓库全部」应 403（防 IDOR）"""
+        _clean_tasks()
+        outsider = user_db.create_user("outsider_task_user", "test123")
+        if not outsider:
+            outsider = user_db.get_user_by_username("outsider_task_user")
+        try:
+            with db_lock:
+                db.cursor().execute("DELETE FROM user_repos WHERE user_id=?", (outsider["id"],))
+                db.commit()
+            tok = _jwt_access_token(outsider["id"], outsider["username"])
+            r = client.get("/api/tasks/repo/org/test", headers={"Authorization": f"Bearer {tok}"})
+            assert r.status_code == 403, f"非成员应 403，实际 {r.status_code}"
+        finally:
+            user_db.delete_user(outsider["id"])
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM user_repos WHERE user_id=?", (outsider["id"],))
+                c.execute("DELETE FROM user_accounts WHERE username='outsider_task_user'")
+                db.commit()
+
+    def test_repo_all_assignees_filter(self):
+        """assignees 筛选（单值 / 多值逗号分隔）"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            for _assignee, _num in (("alice", 120), ("bob", 121), ("carol", 122)):
+                c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                          (_uid["id"], _assignee, "gitcode:org/test", _num))
+            db.commit()
+        r1 = client.get("/api/tasks/repo/org/test?assignees=alice", headers=_headers)
+        assert [t["issue_number"] for t in r1.json()["tasks"]] == [120]
+        r2 = client.get("/api/tasks/repo/org/test?assignees=alice,bob", headers=_headers)
+        got = sorted(t["issue_number"] for t in r2.json()["tasks"])
+        assert got == [120, 121], f"多值筛选应返回 alice+bob 任务，实际 {got}"
+
+    def test_mine_assignees_filter(self):
+        """mine 视图 assignees 筛选（共享 _build_assignee_filter）"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "younger_eric", "gitcode:org/test", 130))
+            c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
+                      (_uid["id"], "someone_else", "gitcode:org/test", 131))
+            db.commit()
+        r = client.get("/api/tasks/mine?assignees=younger_eric", headers=_headers)
+        got = [t["issue_number"] for t in r.json()["tasks"]]
+        assert got == [130], f"assignees 筛选应只返回 younger_eric，实际 {got}"
