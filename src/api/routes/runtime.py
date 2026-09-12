@@ -67,6 +67,7 @@ class HeartbeatBody(BaseModel):
     disk_percent: float = 0.0
     tmp_percent: float = 0.0
     load_avg: str = ""
+    spec: str = ""
     log_lines: list[LogLineBody] = []
     probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 
@@ -220,8 +221,13 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
     cancelled_tasks = []
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
-                  (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, credential_id))
+        # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
+        if body.spec:
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=?, spec=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, body.spec, credential_id))
+        else:
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
