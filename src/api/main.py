@@ -122,6 +122,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Knowledge sync loop start failed: {e}")
 
+    # Issue #103：知识写入队列消费者——后台兜底处理 pending 任务
+    _knowledge_write_task = None
+    try:
+        from src.api.knowledge import knowledge_write_worker
+        _knowledge_write_task = asyncio.create_task(knowledge_write_worker())
+        log.info("Knowledge write worker started")
+    except Exception as e:
+        log.warning(f"Knowledge write worker start failed: {e}")
+
     # 官方技能 OBS 自动同步：定时扫描本地技能变更，上传 OBS（每 30 分钟）
     try:
         from src.storage.skill_sync import start_skill_sync_scheduler

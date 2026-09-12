@@ -8,7 +8,7 @@
   * 分析副本:      {WORKSPACE_DIR}/{owner}/{repo}/project-info/codegraph-repo/  （生成器专用，非 bare）
   * 产物:          {WORKSPACE_DIR}/{owner}/{repo}/project-info/
 """
-import json, os, shutil, subprocess, threading
+import json, os, shutil, subprocess, hashlib
 from src.config import log, WORKSPACE_DIR
 from src.repo_key import split_owner_repo
 
@@ -382,18 +382,15 @@ def should_refresh(repo_key: str) -> bool:
     return False
 
 
-_lock_guard = threading.Lock()
-_building: set[str] = set()
-
-
 def maybe_refresh_project_info(repo_key: str, token: str = ""):
-    """webhook 触发的后台刷新（不阻塞调用方）。并发防重。"""
+    """webhook 触发的后台刷新（不阻塞调用方）。分布式锁跨实例互斥（Issue #103）。"""
     if not repo_key:
         return
-    with _lock_guard:
-        if repo_key in _building:
-            return
-        _building.add(repo_key)
+    from src.lock import acquire_lock, release_lock
+    lock_key = f"project_info_build:{hashlib.md5(repo_key.encode()).hexdigest()[:16]}"
+    if not acquire_lock(lock_key, ttl=120):
+        log.info(f"project-info: lock contention for {repo_key}, skipped")
+        return
     try:
         if should_refresh(repo_key):
             log.info(f"project-info refresh triggered for {repo_key}")
@@ -401,5 +398,4 @@ def maybe_refresh_project_info(repo_key: str, token: str = ""):
     except Exception as e:
         log.warning(f"project-info refresh failed {repo_key}: {e}")
     finally:
-        with _lock_guard:
-            _building.discard(repo_key)
+        release_lock(lock_key)

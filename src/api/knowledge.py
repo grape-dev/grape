@@ -17,7 +17,9 @@ import hashlib
 import json
 import os
 import threading
+from datetime import datetime, timedelta
 from src.config import log, WORKSPACE_DIR
+from src.lock import acquire_lock, release_lock
 from src.session_manager import db, db_lock
 
 
@@ -220,18 +222,25 @@ def read_knowledge(repo_key: str, agent_type: str = "", issue_num: int = 0) -> d
 def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "accepted",
                     agent_type: str = "", issue_num: int = 0,
                     source_seq: int = 0, created_by: str = "",
-                    source: str = "", description: str = "", name: str = "") -> str:
-    """写入知识正文文件 + 登记索引行。返回文件绝对路径。
+                    source: str = "", description: str = "", name: str = "") -> int:
+    """写入知识正文文件 + 登记索引行。返回 task_id（Issue #103：生产者-消费者模式）。
 
-    Issue #67 改动：
+    Issue #103 改动：
+    - 入队 knowledge_write_queue 表（生产者）
+    - 立即尝试消费（第一层），抢到锁同步处理，抢不到锁返回 task_id 留 pending
+    - 后台 worker 兜底消费（第二层）
+    - 同维度（repo_key+scope+agent_type+issue_num）分布式锁串行
+    - 内容去重：按行 endswith(content) 防重复追加
+
+    Issue #67 / #95 保留：
     - 先查 DB 有无同 scope+repo_key+agent_type+issue_num 的记录——有就 UPDATE，没有才 INSERT
     - rejected 不覆盖已有记录
-    - 写入后自动生成 scene_knowledge_ref 关联记录（scope=member 除外——用户手动关联）
-    - 新增 source 参数（system/agent/manual）
+    - 写入后自动生成 scene_knowledge_ref 关联记录（scope=member 除外）
+    - source 参数（system/agent/manual）
     """
     content = (content or "").strip()
     if not content:
-        return ""
+        return 0
     if scope == "project":
         issue_num = 0
         agent_type = ""
@@ -244,56 +253,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
     if not source:
         source = "system" if scope == "baseline" else "agent"
 
-    file_path = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-    rel_path = os.path.relpath(file_path, WORKSPACE_DIR)
-
-    # rejected 只登记索引，不落文件——有已存在记录则跳过
-    if status == "rejected":
-        with db_lock:
-            existing = db.cursor().execute(
-                "SELECT id FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-                (repo_key, scope, agent_type, issue_num)
-            ).fetchone()
-            if existing:
-                return ""  # 已有记录，跳过
-            db.cursor().execute(
-                "INSERT INTO agent_shared_knowledge "
-                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (scope, repo_key, agent_type, issue_num, rel_path, "", "", status, source_seq, created_by, source)
-            )
-            db.commit()
-        return ""
-
-    # 1. 先写本地文件（追加）
-    try:
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        marker = f"- [seq {source_seq or 0} / {created_by or ''}] {content}"
-        with open(file_path, "a", encoding="utf-8") as f:
-            f.write(marker + "\n")
-    except Exception as e:
-        raise RuntimeError(f"write knowledge file failed: {e}") from e
-
-    # 2. 写 OBS（启用时） + 计算 content_hash
-    obs_key = ""
-    content_hash = ""
-    try:
-        from src.storage import get_storage
-        storage = get_storage()
-        if storage is not None:
-            obs_key = knowledge_storage_key(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
-            with open(file_path, "rb") as f:
-                file_bytes = f.read()
-            storage.save_bytes(obs_key, file_bytes)
-            content_hash = hashlib.sha256(file_bytes).hexdigest()
-    except Exception as e:
-        log.warning(f"[knowledge] OBS write failed for {repo_key}/{scope}: {e} — local file unaffected")
-        obs_key = ""
-        content_hash = ""
-
-    # 3. DB 写入——先查有无已存在记录（Issue #67：一个 scope 一条记录）
-    # 自动生成描述（如果调用方没传）
+    # 自动生成 description（如果调用方没传）
     if not description:
         _agent_desc = {
             "vod": "VOD Agent：需求分析、拆解 Issue、规划开发路径",
@@ -332,6 +292,133 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             _an = _agent_name.get(agent_type, agent_type or "Agent")
             name = f"Issue #{issue_num} - {_an} 知识"
 
+    # 1. 入队（生产者）
+    task_id = _enqueue_knowledge_write(
+        repo_key=repo_key, scope=scope, agent_type=agent_type, issue_num=issue_num,
+        content=content, status=status, source_seq=source_seq, created_by=created_by,
+        source=source, description=description, name=name)
+
+    # 2. 第一层消费：立即尝试加锁处理
+    lock_key = _knowledge_lock_key(repo_key, scope, agent_type, issue_num)
+    if acquire_lock(lock_key, ttl=60):
+        try:
+            _do_write_knowledge(
+                repo_key=repo_key, scope=scope, agent_type=agent_type, issue_num=issue_num,
+                content=content, status=status, source_seq=source_seq, created_by=created_by,
+                source=source, description=description, name=name)
+            _delete_queue_task(task_id)
+        except Exception as e:
+            log.warning(f"[knowledge] first-layer consume failed for task {task_id}: {e}")
+            _fail_queue_task(task_id, str(e), retry_count=0)
+        finally:
+            release_lock(lock_key)
+
+    # 拿不到锁 → 返回 task_id，任务留 pending，worker 兜底
+    return task_id
+
+
+def _knowledge_lock_key(repo_key: str, scope: str, agent_type: str, issue_num: int) -> str:
+    """分布式锁 key——MD5 压缩防 VARCHAR(128) 溢出。"""
+    raw = f"{repo_key}:{scope}:{agent_type}:{issue_num}"
+    return f"knowledge_write:{hashlib.md5(raw.encode()).hexdigest()[:16]}"
+
+
+def _enqueue_knowledge_write(*, repo_key, scope, agent_type, issue_num, content, status,
+                             source_seq, created_by, source, description, name) -> int:
+    """INSERT 到 knowledge_write_queue 表，返回自增 id。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO knowledge_write_queue "
+            "(repo_key, scope, agent_type, issue_num, content, status, "
+            " source_seq, created_by, source, description, name) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (repo_key, scope, agent_type, issue_num, content, status,
+             source_seq, created_by, source, description, name))
+        db.commit()
+        return c.lastrowid
+
+
+def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, status,
+                        source_seq, created_by, source, description, name):
+    """实际写入逻辑（从原 write_knowledge 提取）。在分布式锁内调用。
+
+    name/description 从队列任务取（入队时已生成），不重新计算。
+    """
+    file_path = knowledge_path(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
+    rel_path = os.path.relpath(file_path, WORKSPACE_DIR)
+
+    # rejected 只登记索引，不落文件——有已存在记录则跳过
+    if status == "rejected":
+        with db_lock:
+            existing = db.cursor().execute(
+                "SELECT id FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+                (repo_key, scope, agent_type, issue_num)
+            ).fetchone()
+            if existing:
+                return
+            db.cursor().execute(
+                "INSERT INTO agent_shared_knowledge "
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (scope, repo_key, agent_type, issue_num, rel_path, "", "", status, source_seq, created_by, source)
+            )
+            db.commit()
+        return
+
+    # 内容去重：读文件按行 endswith(content) + 查 DB 记录
+    file_has_content = False
+    db_has_record = False
+    if os.path.isfile(file_path):
+        with open(file_path, encoding="utf-8") as f:
+            for line in f:
+                if line.rstrip("\n").endswith(content):
+                    file_has_content = True
+                    break
+    with db_lock:
+        existing = db.cursor().execute(
+            "SELECT id FROM agent_shared_knowledge "
+            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            (repo_key, scope, agent_type, issue_num)
+        ).fetchone()
+        if existing:
+            db_has_record = True
+
+    if file_has_content and db_has_record:
+        # 文件有 + DB 有 → 完全跳过
+        return
+    # file_has_content and not db_has_record → 不追加文件，补写 OBS + DB
+    # not file_has_content → 正常全流程（追加 + OBS + DB）
+
+    # 1. 文件追加（仅当文件没有此 content）
+    if not file_has_content:
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            marker = f"- [seq {source_seq or 0} / {created_by or ''}] {content}"
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(marker + "\n")
+        except Exception as e:
+            raise RuntimeError(f"write knowledge file failed: {e}") from e
+
+    # 2. 写 OBS（启用时） + 计算 content_hash
+    obs_key = ""
+    content_hash = ""
+    try:
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage is not None:
+            obs_key = knowledge_storage_key(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+            storage.save_bytes(obs_key, file_bytes)
+            content_hash = hashlib.sha256(file_bytes).hexdigest()
+    except Exception as e:
+        log.warning(f"[knowledge] OBS write failed for {repo_key}/{scope}: {e} — local file unaffected")
+        obs_key = ""
+        content_hash = ""
+
+    # 3. DB 写入——先查有无已存在记录
     knowledge_id = None
     with db_lock:
         c = db.cursor()
@@ -340,10 +427,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
             (repo_key, scope, agent_type, issue_num)
         ).fetchone()
-
         if existing:
-            # 有记录 → UPDATE（不插入新记录，保留 id，ref 不失效）
-            # Issue #95：UPDATE 补 source 和 status（修复 rejected→accepted 不更新的 bug）
             c.execute(
                 "UPDATE agent_shared_knowledge "
                 "SET content_hash=?, obs_key=?, source_seq=?, description=?, name=?, "
@@ -355,7 +439,6 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             )
             knowledge_id = existing[0]
         else:
-            # 无记录 → INSERT
             c.execute(
                 "INSERT INTO agent_shared_knowledge "
                 "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description, name) "
@@ -365,11 +448,126 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             knowledge_id = c.lastrowid
         db.commit()
 
-    # 4. 自动生成 scene_knowledge_ref 关联记录（scope=member 除外——用户手动关联）
+    # 4. 自动生成 scene_knowledge_ref（scope=member 除外）
     if knowledge_id and scope != "member":
         _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num)
 
-    return file_path
+
+def _delete_queue_task(task_id: int):
+    """任务处理成功后直接 DELETE。"""
+    with db_lock:
+        db.cursor().execute(
+            "DELETE FROM knowledge_write_queue WHERE id=?", (task_id,))
+        db.commit()
+
+
+def _fail_queue_task(task_id: int, error: str, retry_count: int):
+    """任务处理失败——更新 last_error + next_retry_at（指数退避）。"""
+    delay = min((retry_count + 1) * 3, 60)
+    next_retry = (datetime.now() + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE knowledge_write_queue SET queue_status='pending', "
+            "retry_count=?, last_error=?, next_retry_at=?, updated_at=? "
+            "WHERE id=?",
+            (retry_count + 1, error[:500], next_retry, next_retry, task_id))
+        db.commit()
+    # 监控日志
+    new_count = retry_count + 1
+    if new_count in (10, 50, 100) or (new_count > 100 and new_count % 100 == 0):
+        log.warning(f"[knowledge] queue task {task_id} retried {new_count} times, last_error: {error[:200]}")
+
+
+# ===== 第二层消费者：后台 worker =====
+
+_worker_pool = None
+
+
+def _get_worker_pool():
+    """模块级全局 ThreadPoolExecutor 复用。"""
+    global _worker_pool
+    if _worker_pool is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _worker_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="kwq-worker")
+    return _worker_pool
+
+
+async def knowledge_write_worker():
+    """后台 worker：每 3 秒轮询 pending 任务，线程池并行消费。
+
+    同维度串行靠分布式锁保证。拿不到锁的跳过留 pending。
+    """
+    import asyncio
+    while True:
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # 1. 捞 pending 任务
+            with db_lock:
+                rows = db.cursor().execute(
+                    "SELECT id, repo_key, scope, agent_type, issue_num, content, status, "
+                    "source_seq, created_by, source, description, name, retry_count "
+                    "FROM knowledge_write_queue "
+                    "WHERE queue_status='pending' AND next_retry_at <= ? "
+                    "ORDER BY created_at LIMIT 50", (now,)
+                ).fetchall()
+            if not rows:
+                await asyncio.sleep(3)
+                continue
+
+            # 2. 按维度分组，每组取最老一条
+            seen_dims = set()
+            tasks_to_process = []
+            for row in rows:
+                dim = (row[1], row[2], row[3], row[4])  # repo_key, scope, agent_type, issue_num
+                if dim not in seen_dims:
+                    seen_dims.add(dim)
+                    tasks_to_process.append(row)
+
+            # 3. 线程池并行处理
+            loop = asyncio.get_running_loop()
+            futures = []
+            for row in tasks_to_process:
+                futures.append(loop.run_in_executor(_get_worker_pool(), _worker_process_task, row))
+            if futures:
+                await asyncio.gather(*futures, return_exceptions=True)
+
+        except asyncio.CancelledError:
+            log.info("Knowledge write worker cancelled")
+            raise
+        except Exception:
+            log.exception("Knowledge write worker error")
+        await asyncio.sleep(3)
+
+
+def _worker_process_task(row):
+    """worker 线程内处理单条任务。"""
+    task_id = row[0]
+    repo_key, scope, agent_type, issue_num = row[1], row[2], row[3], row[4]
+    content, status, source_seq, created_by = row[5], row[6], row[7], row[8]
+    source, description, name, retry_count = row[9], row[10], row[11], row[12]
+
+    lock_key = _knowledge_lock_key(repo_key, scope, agent_type, issue_num)
+    if not acquire_lock(lock_key, ttl=60):
+        return  # 拿不到锁，留 pending 下一轮
+
+    try:
+        # 再查任务是否存在（可能已被第一层 DELETE）
+        with db_lock:
+            exists = db.cursor().execute(
+                "SELECT 1 FROM knowledge_write_queue WHERE id=?", (task_id,)).fetchone()
+        if not exists:
+            return  # 已被第一层消费
+
+        _do_write_knowledge(
+            repo_key=repo_key, scope=scope, agent_type=agent_type, issue_num=issue_num,
+            content=content, status=status, source_seq=source_seq, created_by=created_by,
+            source=source, description=description, name=name)
+        _delete_queue_task(task_id)
+    except Exception as e:
+        _fail_queue_task(task_id, str(e), retry_count)
+    finally:
+        release_lock(lock_key)
 
 
 def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str = "", issue_num: int = 0):
@@ -713,6 +911,17 @@ async def knowledge_sync_loop():
                 _sync_baseline_files()
             except Exception as e:
                 log.error(f"[knowledge] sync baseline files error: {e}")
+            # Issue #103：清理 7 天前的 failed 队列记录
+            try:
+                _cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+                with db_lock:
+                    db.cursor().execute(
+                        "DELETE FROM knowledge_write_queue "
+                        "WHERE queue_status='failed' AND created_at < ?",
+                        (_cutoff,))
+                    db.commit()
+            except Exception:
+                pass
         except Exception as e:
             log.error(f"[knowledge] sync error: {e}")
         finally:

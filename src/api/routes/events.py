@@ -1412,13 +1412,13 @@ def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     from src.api.knowledge import write_knowledge, _issue_num_from
     issue_num = _issue_num_from(evt["issue_id"])
-    fp = write_knowledge(repo_key=evt["repo_key"], scope=body.scope, content=body.content,
+    task_id = write_knowledge(repo_key=evt["repo_key"], scope=body.scope, content=body.content,
                          status=body.status or "accepted", agent_type=evt["agent_type"],
                          issue_num=issue_num, source_seq=seq, created_by="agent")
     # 对话产出：线程留痕（📌 知识沉淀）
     _add_thread_message(seq, evt["repo_key"], evt["issue_id"], evt["agent_type"], "system",
                         f"📌 已沉淀 {body.scope} 级共享知识：{body.content}")
-    return {"ok": True, "scope": body.scope, "file_path": fp}
+    return {"ok": True, "scope": body.scope, "task_id": task_id}
 
 
 @router.post("/{seq}/flow/reset")
