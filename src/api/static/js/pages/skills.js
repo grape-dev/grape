@@ -127,6 +127,7 @@ function _backFromSubSkill(pkgId) {
 
 // 从技能详情返回技能列表（渲染完整页面含一级 Tab 栏）
 function _backToSkillList() {
+  window._currentView = 'skills:' + _skillTab;
   renderSkills();
 }
 
