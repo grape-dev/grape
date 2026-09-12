@@ -15,7 +15,11 @@ Task 对象字段：`id / user_id / assignee / repo_key / issue_number / title /
 
 ---
 
-## POST /api/tasks/create — 创建任务（同时建 GitCode Issue）
+## POST /api/tasks/create — 已迁移至 POST /api/issues（废弃）
+
+> ⚠️ **本端点已废弃**：其行为是**创建 GitCode Issue**（body 含 repo_key/title/description，调 GitCode 建 Issue + 建档触发 pipeline）。
+> **请改用 `POST /api/issues/{owner}/{repo}`**（对外统一入口）。**不保留兼容别名**，避免双入口混乱。
+> 本段仅供历史参考；调用方（CLI/Agent）已统一迁移。
 
 请求头：`Content-Type: application/json`
 

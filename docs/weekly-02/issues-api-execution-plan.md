@@ -3,7 +3,7 @@
 > 关联设计：`docs/weekly-02/issues-api-design.md`
 > 目标：新增 `/api/issues` 对外接口，澄清 Issue/Event/Task 概念，并迁移 `tasks/create`
 > 分支：`weekly-02-lyz`
-> 状态：**实施计划（待执行）**
+> 状态：**实施计划（执行中：B2/C 部分完成）**
 > 日期：2026-09-11
 
 ---
@@ -93,6 +93,34 @@
 
 > 批 D（`body`/`status_updated_at`）按需做；`agent_tasks` 不参与改名。
 
+#### Phase B2 实施记录（2026-09-12，部分上线）
+
+**B2 已完成**：
+- B2.1/B2.2/B2.3 补列：`issue` 加 `stage`/`owner_agent`/`scene_id`/`scene_user_id`/`allow_scene_override`/`a2a_seq`/`parent_issue_id`/`updated_at`（`_ensure_column`，幂等）
+- B2.4 存量回填：`UPDATE issue SET stage=..., owner_agent=..., scene_id=..., scene_user_id=..., allow_scene_override=..., a2a_seq=..., parent_issue_id=..., is_subtask_mode=..., updated_at=... FROM issue_state`（按 `issue_id=='#'||issue_number` 关联，权威对齐两表）
+- B2.5 读写切换（双写 + 双读）：
+  - **写**：`session_store.set_issue_stage / set_issue_scene / set_scene_override_flag / set_parent_issue / set_subtask_mode` 统一经 `_sync_issue_fields()` 双写 `issue` 单表（issue 有卡片行则同步）
+  - **读**：`get_issue_stage` **`issue_state` 优先 + `issue` 兜底**（见坑 4）
+
+> **坑 4：读切换方向反了——`issue_state` 才是权威阶段机，`issue` 只能兜底**
+>
+> 初版按「读 `issue` 优先、`issue_state` fallback」实现。实测 `test_issues_api::test_aggregates_stage_and_status`
+> 直接把 stage 写在 `issue_state` 表（绕过双写），若 read 优先 `issue`（stage 默认 vod）→ 返回 'vod' 而非 'qa'。
+> 且 pipeline 阶段写在 `issue_state`（权威，Issue #85 联动 `task.status` 亦由 set_issue_stage 触发）。
+> **修复**：过渡期 `issue_state` 为权威读，`issue` 卡片行兜底；等 C3 停写/迁移验收后再切单表。
+
+> **坑 5：B2 须补 `parent_issue_id` 列——旧 `parent_issue_number` 保留兼容输出**
+>
+> `issue` 表原仅 `parent_issue_number INTEGER`（multi-task 遗留）。B2.3 命名对齐新增 `parent_issue_id TEXT`（如 "#20"），
+> `tasks._create_task`/`ensure_issue_task` INSERT 同时写两列，`_query_tasks` SELECT 双字段输出，
+> 前端 `parent_issue_number` 兼容展示不受影响。
+
+**B2 关键产物**：
+- `src/api/db_setup.py`：B2 补列 + 回填块（幂等）
+- `src/api/session_store.py`：`_sync_issue_fields()` + 5 个 set_* 双写 + `get_issue_stage` 双读
+- `src/api/routes/tasks.py`：`_get_issue_parent_id()` + INSERT/SELECT 双列
+- 验证：本地 `test_issues_api` 14 passed + 端到端双写脚本（issue 行 9 字段与 get_* 一致）
+
 ### Phase C：接口与表统一 + 收尾
 
 | # | 任务 | 产出 | 验收 | 依赖 |
@@ -102,6 +130,21 @@
 | C3 | `issue_state` 停写 | pipeline 写路径改 `issue`；`issue_state` 只读 | 无新写入 issue_state | B6/C1 |
 | C4 | 文档 | `help/api/11-issues.md` + `README.md` 目录 + `EXPECTED_API_FILES` + 01-tasks 迁移说明 | 契约/文档一致 | C1 |
 | C5 | 迁移验收 | `issue_state` 数据核对后 `DROP`（保留备份）；全量回归 | 任务中心建/改/催/完成/取消 + pipeline 各阶段正常 | C3/C4 |
+
+#### Phase C 实施记录（2026-09-12，部分完成）
+
+**C 已完成**：
+- **C1**：`issues.py._issue_stage_map` 双表聚合——`issue_state`（权威阶段）优先 + `issue` 卡片兜底（无 issue_state 记录但已有卡片行的 issue 也能列出）
+- **C2（部分）**：文档 `01-tasks.md`（docs/openapi + help/api 两处）标注 `POST /api/tasks/create` 已废弃并指向 `POST /api/issues/{owner}/{repo}`；
+  前端 `tasks.js createTaskSubmit` 已从 `/tasks/create` 迁移至 `/api/issues/{owner}/{repo}`（body 保留 repo_key/title/description/scene_id）。
+  **后端端点暂保留**（未移除）：避免既有调用方（含 CLI/Agent）断裂，待 C5 统一清理。
+- **C4（部分）**：`docs/openapi/01-tasks.md` 与 `help/api/01-tasks.md` 同步废弃说明（`test_help_directory` 一致性恢复）
+
+**C 未完成（留待后续）**：
+- **C3（issue_state 停写）暂不执行**：pipeline 3.1 阶段初始化可能早于 `ensure_issue_task` 建档
+  （无 `issue` 卡片行时 `issue_state` 是唯一数据落点）。直接停写会丢数据。故过渡期保留双写
+  （issue 权威 + issue_state 同步），C5 数据核对后再切。
+- **C5（DROP issue_state）**：依赖 C3 全部落定，上线生产验证后再做。
 
 ---
 

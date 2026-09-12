@@ -33,15 +33,20 @@ def _repo_key_of(owner: str, repo: str) -> str:
 
 
 def _issue_stage_map(repo_key: str) -> dict:
-    """仓库内 issue number → issue_state 摘要（stage/owner/scene/assignee/subtask）。"""
+    """仓库内 issue number → issue 阶段摘要（stage/owner/scene/assignee/subtask）。
+
+    Phase C1 过渡：阶段字段以 `issue_state`（权威阶段机）为准，`issue` 卡片行兜底
+    （收编后字段回填/双写期间两表一致；issue_state 停写后自动落在单表）。
+    """
     from src.session_manager import db, db_lock
     out = {}
-    with db_lock:
-        c = db.cursor()
-        try:
+    # 1. issue_state（权威阶段；收编前亦正确）
+    try:
+        with db_lock:
+            c = db.cursor()
             c.execute(
                 "SELECT issue_id, stage, owner_agent, assignee, a2a_seq, scene_id, "
-                "parent_issue_id, is_subtask_mode, scene_user_id "
+                "parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
                 "FROM issue_state WHERE repo_key=?",
                 (repo_key,))
             for r in c.fetchall():
@@ -53,9 +58,32 @@ def _issue_stage_map(repo_key: str) -> dict:
                     "assignee": r[3] or "", "a2a_seq": r[4],
                     "scene_id": r[5] or "", "parent_issue_id": r[6] or "",
                     "is_subtask_mode": r[7] or 0, "scene_user_id": r[8] or 0,
+                    "allow_scene_override": r[9] or 0,
                 }
-        except Exception as e:
-            log.warning(f"issues: load issue_state failed: {e}")
+    except Exception as e:
+        log.warning(f"issues: load issue_state failed: {e}")
+    # 2. issue 单表兜底（无 issue_state 记录，但已有卡片行的 issue）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT issue_number, stage, owner_agent, assignee, a2a_seq, scene_id, "
+                "parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
+                "FROM issue WHERE repo_key=?",
+                (repo_key,))
+            for r in c.fetchall():
+                n = str(r[0])
+                if not n or n in out:
+                    continue
+                out[n] = {
+                    "issue_id": f"#{n}", "stage": r[1], "owner_agent": r[2],
+                    "assignee": r[3] or "", "a2a_seq": r[4],
+                    "scene_id": r[5] or "", "parent_issue_id": r[6] or "",
+                    "is_subtask_mode": r[7] or 0, "scene_user_id": r[8] or 0,
+                    "allow_scene_override": r[9] or 0,
+                }
+    except Exception as e:
+        log.warning(f"issues: load issue table failed: {e}")
     return out
 
 

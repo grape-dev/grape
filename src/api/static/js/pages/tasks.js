@@ -964,7 +964,16 @@ function createTaskSubmit() {
   }
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.create.btn_creating'); }
-  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
+  // C2: /api/tasks/create 已废弃 → 统一走 POST /api/issues/{owner}/{repo}（对外唯一创建入口）
+  var _owner = repo ? (repo.owner || '') : '';
+  var _rname = repo ? (repo.name || '') : '';
+  if (!_owner || !_rname) {
+    var _p = String(repoKey).split('/');
+    _owner = _p[0] || '';
+    _rname = _p[1] || '';
+  }
+  API.post('/issues/' + encodeURIComponent(_owner) + '/' + encodeURIComponent(_rname),
+           {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
     .then(d => {
       const ov = document.getElementById('taskCreateOverlay');
       if (ov) ov.remove();
