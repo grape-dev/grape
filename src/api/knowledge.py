@@ -367,15 +367,21 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
             db.commit()
         return
 
-    # 内容去重：读文件按行 endswith(content) + 查 DB 记录
+    # 内容去重：检查文件里是否已有相同 content 的 marker 行
+    # marker 格式: - [seq N / agent] {content}
+    # 用 "] " 分割行，最后一段就是 content，精确比较
     file_has_content = False
     db_has_record = False
     if os.path.isfile(file_path):
         with open(file_path, encoding="utf-8") as f:
             for line in f:
-                if line.rstrip("\n").endswith(content):
-                    file_has_content = True
-                    break
+                stripped = line.rstrip("\n")
+                if stripped.startswith("- [seq ") and "] " in stripped:
+                    # 取 "] " 后面的部分作为 content
+                    existing_content = stripped.split("] ", 1)[1] if "] " in stripped else ""
+                    if existing_content == content:
+                        file_has_content = True
+                        break
     with db_lock:
         existing = db.cursor().execute(
             "SELECT id FROM agent_shared_knowledge "
@@ -471,7 +477,7 @@ def _fail_queue_task(task_id: int, error: str, retry_count: int):
     next_retry = (datetime.now() + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
 
     # 监控日志（在 failed 分支之前，确保 count=100 也能触发）
-    if new_count in (10, 50, 100) or (new_count > 100 and new_count % 100 == 0):
+    if new_count in (10, 50, 100):
         log.warning(f"[knowledge] queue task {task_id} retried {new_count} times, last_error: {error[:200]}")
 
     if new_count >= 100:
@@ -1002,7 +1008,7 @@ def _sync_baseline_files():
 
     for (repo_key,) in rows:
         # per-repo 锁：同 repo 串行，不同 repo 并行
-        _repo_lock = f"baseline_sync:{_hl.md5(repo_key.encode()).hexdigest()[:16]}"
+        _repo_lock = f"project_info_build:{_hl.md5(repo_key.encode()).hexdigest()[:16]}"
         if not acquire_lock(_repo_lock, ttl=300):
             log.info(f"[knowledge] baseline sync: lock contention for {repo_key}, skipped")
             continue

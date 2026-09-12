@@ -332,9 +332,16 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
     modules = _codegraph_explore(work, "module import dependency", 15)
     if renew_fn and not renew_fn():
         log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        # 只写本地 meta，不调 _write_meta（避免 _write_to_obs 在无锁状态下写 OBS+DB）
         meta["degraded"] = True
         meta["note"] = "build aborted: distributed lock lost"
-        _write_meta(repo_key, meta)
+        try:
+            p = os.path.join(_pi_dir(repo_key), _META_FILE)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     chains = _codegraph_explore(work, "API routes endpoints handlers", 10)
     files = _codegraph_files(work)
@@ -342,7 +349,13 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
         meta["degraded"] = True
         meta["note"] = "build aborted: distributed lock lost"
-        _write_meta(repo_key, meta)
+        try:
+            p = os.path.join(_pi_dir(repo_key), _META_FILE)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     tech = _codegraph_explore(work, "tech stack dependencies", 8)
     features = _codegraph_explore(work, "features capabilities", 8)
