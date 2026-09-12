@@ -112,7 +112,7 @@ function _summaryStatsBar(data, devices) {
   return `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;margin-bottom:10px;font-size:12px;color:var(--t2);background:var(--bg);border-radius:8px">${parts.join('<span style="color:var(--t3)">·</span>')}</div>`;
 }
 
-// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts）
+// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts/codex）
 function _engineWatermark(name) {
   const n = (name || '').toLowerCase();
   if (n.includes('opencode')) {
