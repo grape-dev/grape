@@ -294,13 +294,13 @@ def _collect_toc(tokens: list, prefix: str) -> list[dict]:
 
 def _adorn_blockquotes(body: str) -> str:
     def _repl(m):
-        open_tag, inner = m.group(1), m.group(2)
+        open_tag, inner, close_tag = m.group(1), m.group(2), m.group(3)
         head = (inner or "").lstrip()[:24]
         if "💡" in head or "TIP" in head.upper():
-            return open_tag.replace("<blockquote>", '<blockquote class="card tip">')
+            return open_tag.replace("<blockquote>", '<blockquote class="card tip">') + inner + close_tag
         if any(k in head for k in ("⚠️", "⚠", "❌", "🚫", "注意", "安全")):
-            return open_tag.replace("<blockquote>", '<blockquote class="card warn">')
-        return open_tag
+            return open_tag.replace("<blockquote>", '<blockquote class="card warn">') + inner + close_tag
+        return open_tag + inner + close_tag
 
     return re.sub(r"(<blockquote>)(.*?)(</blockquote>)", _repl, body, flags=re.DOTALL)
 
