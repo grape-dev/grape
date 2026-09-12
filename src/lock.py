@@ -78,6 +78,19 @@ def release_lock(lock_key: str):
         db.commit()
 
 
+def renew_lock(lock_key: str, ttl: int = 60) -> bool:
+    """续期锁（只续自己的）。返回 True=续期成功，False=锁已被别人抢走。"""
+    now = int(time.time())
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE distributed_locks SET expires_at=?, update_at=? "
+            "WHERE lock_key=? AND holder=?",
+            (now + ttl, now, lock_key, _holder))
+        db.commit()
+        return c.rowcount > 0
+
+
 def cleanup_expired_locks():
     """清理过期锁（后台定时调用，5 分钟一次）。
 

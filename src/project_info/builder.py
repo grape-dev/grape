@@ -282,11 +282,13 @@ def _build_capabilities_md(repo_key: str, meta: dict, tech: str, features: str, 
     )
 
 
-def build_project_info(repo_key: str, token: str = "") -> dict:
+def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew_fn=None) -> dict:
     """生成/更新某 repo 的 project-info，返回 {ok, degraded, reason}。
 
     codegraph 可用 → 分析副本 + codegraph explore 生成（degraded=false）；
     codegraph 不可用 → 降级：仅基于 README + GitCode API 的基础信息（degraded=true）。
+
+    Issue #103：lock_key + renew_fn 支持构建过程中锁续期，防止大仓库 build 超时锁过期。
     """
     owner, rname = split_owner_repo(repo_key)
     meta = _read_meta(repo_key)
@@ -325,11 +327,15 @@ def build_project_info(repo_key: str, token: str = "") -> dict:
         _write_meta(repo_key, meta)
         return {"ok": False, "degraded": True, "reason": "analysis worktree failed"}
 
-    # codegraph 探索
+    # codegraph 探索（Issue #103：每两步续期锁，防止大仓库 build 超时）
     arch = _codegraph_explore(work, "main entry point application startup", 10)
     modules = _codegraph_explore(work, "module import dependency", 15)
+    if renew_fn:
+        renew_fn()
     chains = _codegraph_explore(work, "API routes endpoints handlers", 10)
     files = _codegraph_files(work)
+    if renew_fn:
+        renew_fn()
     tech = _codegraph_explore(work, "tech stack dependencies", 8)
     features = _codegraph_explore(work, "features capabilities", 8)
     api = _codegraph_explore(work, "API endpoints", 8)
@@ -386,7 +392,7 @@ def maybe_refresh_project_info(repo_key: str, token: str = ""):
     """webhook 触发的后台刷新（不阻塞调用方）。分布式锁跨实例互斥（Issue #103）。"""
     if not repo_key:
         return
-    from src.lock import acquire_lock, release_lock
+    from src.lock import acquire_lock, release_lock, renew_lock
     lock_key = f"project_info_build:{hashlib.md5(repo_key.encode()).hexdigest()[:16]}"
     if not acquire_lock(lock_key, ttl=300):
         log.info(f"project-info: lock contention for {repo_key}, skipped")
@@ -394,7 +400,7 @@ def maybe_refresh_project_info(repo_key: str, token: str = ""):
     try:
         if should_refresh(repo_key):
             log.info(f"project-info refresh triggered for {repo_key}")
-            build_project_info(repo_key, token)
+            build_project_info(repo_key, token, lock_key=lock_key, renew_fn=lambda: renew_lock(lock_key, ttl=300))
     except Exception as e:
         log.warning(f"project-info refresh failed {repo_key}: {e}")
     finally:

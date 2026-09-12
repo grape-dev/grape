@@ -1416,8 +1416,9 @@ def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
                          status=body.status or "accepted", agent_type=evt["agent_type"],
                          issue_num=issue_num, source_seq=seq, created_by="agent")
     # 对话产出：线程留痕（📌 知识沉淀）
-    _add_thread_message(seq, evt["repo_key"], evt["issue_id"], evt["agent_type"], "system",
-                        f"📌 已沉淀 {body.scope} 级共享知识：{body.content}")
+    if task_id:
+        _add_thread_message(seq, evt["repo_key"], evt["issue_id"], evt["agent_type"], "system",
+                            f"📌 已提交 {body.scope} 级知识沉淀任务：{body.content}")
     return {"ok": True, "scope": body.scope, "task_id": task_id}
 
 
