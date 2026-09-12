@@ -131,3 +131,26 @@
 | Path | `{owner}` `{repo}` |
 | 出参 | `{"project-graph.md": "...", "project-capabilities.md": "..."}` |
 | 返回 | 200 |
+
+---
+
+## GET /api/repos/{owner}/{repo}/git-credential — 一次性 git 平台凭据（grape 私有，方案③ CLI 内部使用）
+
+> ⚠️ 非 any gitcode/github/gitlab 平台原生接口——是 **grape 自身能力**：把平台 token 按会话身份
+> （chat→用户 token / devops agent→仓库 bot token）以**一次性/短期凭证**形式交 CLI 本地 `git clone/push` 用。
+
+| Path | `{owner}` `{repo}` |
+| Header/Query | `X-Git-Provider` / `provider` 缺省 gitcode |
+| 出参 | `{provider: "gitcode", username: "x-access-token", password: "<一次性 token>", clone_url: "...", expires_in: 600}` |
+| 返回 | 200；403 非会话级 token / provider 未接入；502 平台 token 解析失败 |
+
+---
+
+## GET /api/repos/{owner}/{repo}/workspace — 仓库工作区路径（grape 私有）
+
+> ⚠️ 非平台原生——返回 grape 管理工作区（worktree）的本地路径，供 CLI 在本地执行 git。
+
+| Path | `{owner}` `{repo}` |
+| Header/Query | `X-Git-Provider` / `provider` 缺省 gitcode |
+| 出参 | `{workspace: "<本地路径>", clone_url: "https://gitcode.com/{owner}/{repo}.git"}` |
+| 返回 | 200 |

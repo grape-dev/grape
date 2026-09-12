@@ -102,13 +102,13 @@ agent / 技能
    │  只调 grape CLI：grapecli git <原生git命令>（含 setup/clone/fetch/push/...）
    ▼
 grape CLI（grape_cli，本地进程）
-   │  内部：解析工作区 + 用 api_key 调 GET /api/git-repo/{o}/{r}/git-credential 取 token
+   │  内部：解析工作区 + 用 api_key 调 GET /api/repos/{o}/{r}/git-credential 取 token
    │  在 CLI 进程内以 credential helper 注入 → 执行 git
    ▼
 Git 仓库（gitcode/github/gitlab）
 ```
 
-- **token 获取**：CLI 通过 grape API 查询该用户/仓库当前可用的平台 git token（`GET /api/git-repo/{o}/{r}/git-credential`），服务端按权限返回一次性/短期凭据。
+- **token 获取**：CLI 通过 grape API 查询该用户/仓库当前可用的平台 git token（`GET /api/repos/{o}/{r}/git-credential`），服务端按权限返回一次性/短期凭据。
 - **token 使用**：在 **grape CLI 进程内**（credential helper 返回给 git 内存使用），git 命令由 CLI 在本地 spawn；不落磁盘、不进 agent 可读文件/输出；进程结束即释放。
 - **agent 隔离**：agent 只给 CLI 传仓库/分支/commit 消息；platform token 在 CLI 内部，不对外暴露。
 - **服务端不跑 git**：grape 服务端只提供 token/工作区查询接口，不实际执行 git（git 传输在 agent 本地完成）。
@@ -117,8 +117,8 @@ Git 仓库（gitcode/github/gitlab）
 
 | 能力 | API（CLI 内部调用） | 说明 |
 |------|---------------------|------|
-| 查询可用 git token | `GET /api/git-repo/{o}/{r}/git-credential` | 按调用者权限返回 user/bot git token 的**一次性值**（或短期凭证），仅服务端→CLI 安全通道 |
-| 获取工作区路径 | `GET /api/git-repo/{o}/{r}/workspace` | 返回工作区位置（如 worktree 路径），CLI 本地执行 |
+| 查询可用 git token | `GET /api/repos/{o}/{r}/git-credential` | 按调用者权限返回 user/bot git token 的**一次性值**（或短期凭证），仅服务端→CLI 安全通道 |
+| 获取工作区路径 | `GET /api/repos/{o}/{r}/workspace` | 返回工作区位置（如 worktree 路径，grape 私有能力），CLI 本地执行 |
 | CLI 侧 git 透传 | `grapecli git <任何 git 原生命令>` | `--repo/--issue` 解析目录 + credential 注入，其余原样透传 git |
 
 > ⚠️ token 经 API 返回给 CLI 有传输风险 → 建议：
@@ -128,7 +128,7 @@ Git 仓库（gitcode/github/gitlab）
 **更优实现（credential helper 接 grape）**：
 
 ```
-git (本地，CLI 内) -- 缺凭据 → grape credential helper → POST/GET /api/git-repo/{o}/{r}/git-credential
+git (本地，CLI 内) -- 缺凭据 → grape credential helper → POST/GET /api/repos/{o}/{r}/git-credential
                                                           → 返回 {username, password} → git 内存使用
 ```
 
@@ -162,7 +162,7 @@ grapecli git diff --repo Jason7602/hello
 
 | 资源/命令 | 说明 |
 |------|------|
-| `GET /api/git-repo/{o}/{r}/git-credential` | **CLI 内部**取一次性 git token（user/bot），服务端按权限返回；仅 HTTPS 安全通道、一次性失效、可审计 |
+| `GET /api/repos/{o}/{r}/git-credential` | **CLI 内部**取一次性 git token（user/bot），服务端按权限返回；仅 HTTPS 安全通道、一次性失效、可审计 |
 | `GET /api/git-repo/{owner}/{repo}` | 返回 `clone_url`/`http_url`/`default_branch`，供 CLI 确定 clone 地址（token 由 credential 端点提供） |
 | `grapecli git <任意 git 原生命令>` | CLI 本地执行 git：`--repo/--issue` 解析目录 + credential 注入，其余原样透传（setup/clone/fetch/checkout/commit/push/log/diff/status 等全部支持） |
 | `grapecli git usertoken --repo o/r` | （可选）辅助：内部打印/user 自查，非 agent 使用 |

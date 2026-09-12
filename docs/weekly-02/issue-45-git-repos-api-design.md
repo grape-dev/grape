@@ -73,7 +73,7 @@ agent → grape git <任意 git 原生命令> → 本地 git（CLI 内经 /git-c
 ```
 
 - `grape git` 是 **git 原生命令透传**（clone/fetch/checkout/commit/push/log/diff/status 全支持）。
-- CLI 持有 grape api_key，通过 `GET /api/git-repo/{o}/{r}/git-credential` 取一次性平台 token，在 CLI 进程内（credential helper）注入 git。
+- CLI 持有 grape api_key，通过 `GET /api/repos/{o}/{r}/git-credential` 取一次性平台 token，在 CLI 进程内（credential helper）注入 git。
 - **token 不进 agent env、不落磁盘、不进 git 命令行**；进程结束即释放。
 - 服务端不实际跑 git（只提供 token/工作区查询）。
 
@@ -81,8 +81,8 @@ agent → grape git <任意 git 原生命令> → 本地 git（CLI 内经 /git-c
 
 | 能力 | API |
 |------|-----|
-| 取一次性 git token | `GET /api/git-repo/{o}/{r}/git-credential`（HTTPS，一次性失效，可审计） |
-| 工作区路径 | `GET /api/git-repo/{o}/{r}/workspace` |
+| 取一次性 git token | `GET /api/repos/{o}/{r}/git-credential`（HTTPS，一次性失效，可审计） |
+| 工作区路径 | `GET /api/repos/{o}/{r}/workspace` |
 
 **现状风险点（需配合收敛）**：
 - `BOT_GITCODE_TOKEN` env 注入 agent 可见 → 不再注入；

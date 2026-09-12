@@ -84,7 +84,7 @@ F Settings 面板 ──> A（api_tokens 管理）
 |---|------|------|------|
 | 3.1 | 新增 `git_repo_api.py`：白名单 14 类资源端点 dispatch（provider 头/query → 复用 `repo_manager` gitcode client），出参/入参对齐 `docs/openapi/10-git-repos.md` | `src/api/git_repo_api.py`（新） | 白名单端点可用；白名单外透传被拒（401/404） |
 | 3.2 | 挂载路由 + provider 判定 + 认证（对外 Depends） | `src/api/main.py` / `src/api/git_repo_api.py` | `/api/git-repo/{o}/{r}/...` 三通道可调 |
-| 3.3 | `GET /api/git-repo/{o}/{r}/git-credential`：短期平台凭据（TTL 600s、优先 bot token、回退调用者 token、可审计）；`GET /api/git-repo/{o}/{r}/workspace` | `git_repo_api.py` | git-credential 返回 username/password/clone_url/expires_in；CLI 进程内使用 |
+| 3.3 | `GET /api/repos/{o}/{r}/git-credential`：短期平台凭据（TTL 600s、优先 bot token、回退调用者 token、可审计）；`GET /api/repos/{o}/{r}/workspace` | `git_repo_api.py` | git-credential 返回 username/password/clone_url/expires_in；CLI 进程内使用 |
 | 3.4 | **收敛现状泄露点（随 F-2 技能迁移同步做，推迟到 M5 同批）**：devops 不再注入 `BOT_GITCODE_TOKEN` env + askpass 废弃。原因：技能仍引用 `$BOT_GITCODE_TOKEN`，单独移除会中断执行 | `src/agent/executor.py`（L209 `_assemble_env`）、`src/runtime/repogit.py`（L168 askpass） | 技能迁移完成后移除 env，`test_executor_token_env.py` 断言 devops 无 GITCODE token |
 
 **退出标准**：`tests/test_git_repo_api.py`（新建）provider 分派、白名单、credential 一次性全通过；devops 任务 env 无 GITCODE token 暴露。

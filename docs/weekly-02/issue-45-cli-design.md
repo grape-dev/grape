@@ -248,7 +248,7 @@ grape --base-url https://grape.example.com --grape_api_token grape_xxx git-repo 
 | C2 | git 原生命令透传 | `grape git log --oneline -5` → spawn git 参数含 `log --oneline -5` |
 | C3 | **token 不进 git 命令行** | mock 后断言 git argv 无 token；token 只经 `GIT_CONFIG` env / credential helper 传递 |
 | C4 | **token 不落 agent 可见** | CLI 运行前后，工作区无 token 文件；stdout 不含 token |
-| C5 | credential 获取 | 调 `GET /api/git-repo/{o}/{r}/git-credential` 取一次性 token；失败 → 明确报错 |
+| C5 | credential 获取 | 调 `GET /api/repos/{o}/{r}/git-credential` 取一次性 token；失败 → 明确报错 |
 | C6 | 401 处理 | 无效 api_key → 提示 "token 无效" |
 | C7 | 网络失败 | base_url 不可达 → 提示检查 base_url |
 
