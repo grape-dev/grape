@@ -258,13 +258,13 @@ function renderAgent(name, data) {
   el.innerHTML = html;
   // Issue #108: 滚动定位到第一个高亮事件行
   if (highlightId) {
+    // 标记此 view+issue 组合已高亮过，返回时不再触发
+    if (typeof _agentHlDone !== 'undefined') {
+      _agentHlDone[(window._currentView || name) + ':' + highlightId.replace(/^#/, '')] = true;
+    }
     const _firstHl = el.querySelector('.highlight-flash');
     if (_firstHl) {
       setTimeout(function() { _firstHl.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 120);
-      // 动画播放完后移除highlight-flash class，避免返回页面时重新触发闪烁
-      setTimeout(function() {
-        document.querySelectorAll('.highlight-flash').forEach(function(el) { el.classList.remove('highlight-flash'); });
-      }, 2100);
     }
   }
   // 根据已配置 skill 的 scope 设置初始页签（避免回显时看不到已配置的 skill）

@@ -245,6 +245,7 @@ function loadAgentTypes() {
 
   let _refreshTimer = null;
   let _currentParam = null;
+  let _agentHlDone = {};  // Issue #108: 记录已高亮过的 view+issue 组合，避免返回时重复触发
   let _hiddenSince = 0;
   // 页面从后台回到前台时，若隐藏超过 30 秒才刷新（避免短时间切换标签页频繁刷新）
   document.addEventListener('visibilitychange', function() {
@@ -311,6 +312,11 @@ function loadAgentTypes() {
       _convStreamAbort = null;
     }
 
+    // Issue #108: 用户主动导航（非popstate回退）时清除高亮标记，允许重新高亮
+    if (!_replaying && ['vod','issue','coding','qa','sre'].includes(view) && param) {
+      var _hlKey = view + ':' + param;
+      if (_agentHlDone[_hlKey]) delete _agentHlDone[_hlKey];
+    }
     // 技能详情返回：记录来源视图（pushHistory 之前 history.state 还是上一个视图）
     if (view === 'skill') {
       const _prev = window.history.state;
@@ -424,7 +430,10 @@ function loadAgentTypes() {
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
-      var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
+      // Issue #108: 高亮只触发一次——记录已高亮过的 view+issue 组合，返回时不再传 issue_number
+      var _hlKey = view + ':' + (param || '');
+      var _skipHl = _agentHlDone && _agentHlDone[_hlKey];
+      var _agentQs = (param && !_skipHl) ? '?issue_number=' + encodeURIComponent(param) : '';
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'event') {
       title.textContent = I18N.t('app.current_project');
