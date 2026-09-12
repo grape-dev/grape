@@ -1,4 +1,4 @@
-# Agent 执行环境变量（Grape 服务端注入）
+# 4. Agent 执行环境变量
 
 > Grape 将任务调度给不同类型的 Agent（VOD / Issue / Coding / QA / SRE / Chat）时，
 > 会在 Agent 的**执行环境**中注入一组环境变量（`env`），供 Skill 脚本 / Agent 读取。
