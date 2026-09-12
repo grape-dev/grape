@@ -55,33 +55,33 @@ def _get(client, path, **kw):
 
 def test_provider_header_and_query(gitcode_calls, _client):
     client = _client
-    assert _get(client, f"/api/repos/{OWNER}/{REPO}/branches").status_code == 200
+    assert _get(client, f"/api/git-repo/{OWNER}/{REPO}/branches").status_code == 200
     assert "/branches" in gitcode_calls[-1]["url"]
     assert gitcode_calls[-1]["token"] == BOT
 
-    assert _get(client, f"/api/repos/{OWNER}/{REPO}/branches",
+    assert _get(client, f"/api/git-repo/{OWNER}/{REPO}/branches",
                 headers={"X-Git-Provider": "gitcode"}).status_code == 200
-    assert _get(client, f"/api/repos/{OWNER}/{REPO}/branches?provider=gitcode").status_code == 200
+    assert _get(client, f"/api/git-repo/{OWNER}/{REPO}/branches?provider=gitcode").status_code == 200
 
 
 def test_unknown_provider_rejected(_client):
     client = _client
     # github 现在是受支持的 provider（不再 403）；gitlab 仍然被拒
-    assert _get(client, f"/api/repos/{OWNER}/{REPO}/branches?provider=gitlab").status_code == 403
+    assert _get(client, f"/api/git-repo/{OWNER}/{REPO}/branches?provider=gitlab").status_code == 403
 
 
 def test_repo_info_workspace(_client, gitcode_calls):
     client = _client
-    assert _get(client, f"/api/repos/{OWNER}/{REPO}").status_code == 200
+    assert _get(client, f"/api/git-repo/{OWNER}/{REPO}").status_code == 200
     assert gitcode_calls[-1]["method"] == "GET" and gitcode_calls[-1]["url"].endswith(f"/repos/{OWNER}/{REPO}")
-    ws = _get(client, f"/api/repos/{OWNER}/{REPO}/workspace").json()
+    ws = _get(client, f"/api/git-repo/{OWNER}/{REPO}/workspace").json()
     assert ws["clone_url"] == f"https://gitcode.com/{OWNER}/{REPO}.git"
     assert "workspace" in ws
 
 
 def test_git_credential(_client):
     client = _client
-    r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
+    r = client.get(f"/api/git-repo/{OWNER}/{REPO}/git-credential")
     assert r.status_code == 200
     cred = r.json()
     assert cred["provider"] == "gitcode"
@@ -93,7 +93,7 @@ def test_git_credential(_client):
 
 def test_issues_crud_mapping(gitcode_calls, _client):
     client = _client
-    base = f"/api/repos/{OWNER}/{REPO}"
+    base = f"/api/git-repo/{OWNER}/{REPO}"
 
     assert _get(client, f"{base}/issues?state=all&per_page=10").status_code == 200
     last = gitcode_calls[-1]
@@ -134,7 +134,7 @@ def test_issues_crud_mapping(gitcode_calls, _client):
 
 def test_pulls_mapping(gitcode_calls, _client):
     client = _client
-    base = f"/api/repos/{OWNER}/{REPO}"
+    base = f"/api/git-repo/{OWNER}/{REPO}"
 
     r = client.post(f"{base}/pulls",
                     json={"title": "feat", "head": "feat/x", "base": "main", "close_related_issue": True})
@@ -155,7 +155,7 @@ def test_pulls_mapping(gitcode_calls, _client):
 
 def test_contents_branches_milestones_labels(gitcode_calls, _client):
     client = _client
-    base = f"/api/repos/{OWNER}/{REPO}"
+    base = f"/api/git-repo/{OWNER}/{REPO}"
 
     # 根路径（path 空）→ 请求 /contents/（目录列表语义，GitCode 返回数组）
     assert _get(client, f"{base}/contents?ref=main").status_code == 200
@@ -187,7 +187,7 @@ def test_contents_branches_milestones_labels(gitcode_calls, _client):
 def test_no_token_502(monkeypatch, _client):
     monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "")
     client = _client
-    r = client.get(f"/api/repos/{OWNER}/{REPO}/branches")
+    r = client.get(f"/api/git-repo/{OWNER}/{REPO}/branches")
     assert r.status_code == 502
 
 
@@ -251,13 +251,13 @@ def test_repo_token_all_missing_502(monkeypatch):
 def test_unauthenticated_401():
     app.dependency_overrides.clear()
     client = TestClient(app)
-    assert client.get(f"/api/repos/{OWNER}/{REPO}/branches").status_code == 401
+    assert client.get(f"/api/git-repo/{OWNER}/{REPO}/branches").status_code == 401
 
 
 def test_tree_single_level(gitcode_calls, _client):
     """选项 B：单层树透传 git/trees/{ref}。"""
     client = _client
-    base = f"/api/repos/{OWNER}/{REPO}"
+    base = f"/api/git-repo/{OWNER}/{REPO}"
     r = client.get(f"{base}/tree?ref=main")
     assert r.status_code == 200
     last = gitcode_calls[-1]
@@ -267,7 +267,7 @@ def test_tree_single_level(gitcode_calls, _client):
 def test_tree_ref_empty_resolves_default(gitcode_calls, _client):
     """选项 B：ref 空时解析默认分支（branches[0]）再取树。"""
     client = _client
-    base = f"/api/repos/{OWNER}/{REPO}"
+    base = f"/api/git-repo/{OWNER}/{REPO}"
     # gitcode_calls 的 mock _req 对 branches 返回 {"ok": True}（非 list）→ _default_ref 落到 "main" 兜底
     r = client.get(f"{base}/tree")
     assert r.status_code == 200
@@ -278,7 +278,7 @@ def test_tree_ref_empty_resolves_default(gitcode_calls, _client):
 def test_tree_recursive_gitcode_rejected(_client):
     """选项 B：GitCode 平台 recursive → 明确 400 拒绝，不产出破碎树。"""
     client = _client
-    base = f"/api/repos/{OWNER}/{REPO}"
+    base = f"/api/git-repo/{OWNER}/{REPO}"
     r = client.get(f"{base}/tree?ref=main&depth=recursive")
     assert r.status_code == 400
     assert "暂不支持递归" in r.json()["detail"]["message"]

@@ -533,10 +533,10 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
                 parts.append("(User @mentioned the bot)")
         if number is None:
             parts.append(f"\n⚠️ 本评论事件未携带 Issue 编号。你必须先通过 {_vcs} API 定位该评论落在哪个 Issue：")
-            parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /repos/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
+            parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /git-repo/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
             parts.append("  用评论内容匹配确认 Issue 编号，然后对用户评论进行回复。")
             parts.append("  注意：即使缺少编号，也必须对用户评论作出回复，不得静默跳过。")
-        parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 按你的技能规定的评论前缀开头，并引用用户评论原文。")
+        parts.append("\n必须回复该评论：使用 POST /git-repo/{owner}/{repo}/issues/{n}/comments，body 按你的技能规定的评论前缀开头，并引用用户评论原文。")
         parts.append("\n⚠️ **Issue 评论格式规范（必须遵守）**：评论 body 开头必须用 `[角色名 Agent]` 做前缀（如 `[Coding Agent]`、`[QA Agent]`、`[SRE Agent]`、`[Issue Agent]`、`[VOD Agent]`），角色名首字母大写。**禁止**使用 skill 名、仓库名或其他自定义前缀。")
     elif evt_type == "vod_signal":
         user_msg = payload.get("user_message", "")

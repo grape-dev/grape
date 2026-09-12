@@ -1,4 +1,4 @@
-"""Git 仓库统一接口（Issue-45 M3）：`/api/repos/{owner}/{repo}/...` 白名单资源端点。
+"""Git 仓库统一接口（Issue-45 M3）：`/api/git-repo/{owner}/{repo}/...` 白名单资源端点。
 
 - 认证：`get_current_user_or_api_key`（对外安全路由，进 OpenAPI 契约）。
 - provider：`X-Git-Provider` 头优先，其次 `provider` query，缺省 `gitcode`；github/gitlab 预留（403）。
@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key
 from src.config import log, WORKSPACE_DIR
 
-router = APIRouter(prefix="/api/repos", tags=["git-repo"])
+router = APIRouter(prefix="/api/git-repo", tags=["git-repo"])
 
 _SUPPORTED_PROVIDERS = {"gitcode", "github"}
 
