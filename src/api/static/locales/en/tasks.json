@@ -1,5 +1,7 @@
 {
   "page_title": "Task Center",
+  "view_mine": "My Tasks",
+  "view_repo_all": "All Repo Tasks",
   "loading": "Loading...",
   "load_failed": "Failed to load: {{msg}}",
   "view_list": "List",
