@@ -12,7 +12,7 @@ let _rtSearch = '';            // Runtime 引擎搜索筛选
 let _rtDeviceFilter = '';      // Runtime 设备下拉筛选
 let _workerPage = 0;           // Worker 卡片当前页（0 基）
 let _runtimePage = 0;          // Runtime 引擎当前页（0 基）
-const _OBS_PAGE_SIZE = 10;     // 概览分页大小（参照异常任务 Tab _ANOMALY_PAGE_SIZE）
+const _OBS_PAGE_SIZE = 10;     // 概览分页大小（参照异常任务 Tab anomalyPageSize）
 
 function renderObservability() {
   const pc = document.getElementById('pageContent');
@@ -561,7 +561,7 @@ function loadA2aHealth() {
 
 // ===== Tab: 异常任务 =====
 let _anomalyPage = 0;
-const _ANOMALY_PAGE_SIZE = 10;
+let anomalyPageSize = 10;
 
 function renderAnomalyTab(container, ops) {
   const stuck = (ops.tasks || {}).stuck_tasks || [];
@@ -605,24 +605,29 @@ function renderAnomalyTab(container, ops) {
 
   // Failed 任务（分页）
   if (failed.length) {
-    const totalPages = Math.ceil(failed.length / _ANOMALY_PAGE_SIZE);
+    const totalPages = Math.ceil(failed.length / anomalyPageSize);
     if (_anomalyPage >= totalPages) _anomalyPage = 0;
-    const start = _anomalyPage * _ANOMALY_PAGE_SIZE;
-    const pageItems = failed.slice(start, start + _ANOMALY_PAGE_SIZE);
+    const start = _anomalyPage * anomalyPageSize;
+    const pageItems = failed.slice(start, start + anomalyPageSize);
 
     html += section(I18N.t('observability.failed_tasks'), I18N.t('observability.failed_tasks_subtitle', {total: failed.length, page: (_anomalyPage+1), pages: totalPages}));
     html += table([I18N.t('observability.col_issue_seq'), I18N.t('observability.col_agent'), I18N.t('observability.col_repo'), I18N.t('observability.col_failed_short'), I18N.t('observability.col_result')],
       pageItems.map(s => _row(s, true))
     );
 
-    // 分页栏
-    if (totalPages > 1) {
-      html += `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0">
-        <button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObs()">${I18N.t('observability.prev_page')}</button>
-        <span class="ts t3">${_anomalyPage+1} / ${totalPages}</span>
-        <button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObs()">${I18N.t('observability.next_page')}</button>
-      </div>`;
-    }
+    // 分页栏（含每页条数选择器）
+    html += `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0;flex-wrap:wrap">
+      ${totalPages > 1 ? `<button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObs()">${I18N.t('observability.prev_page')}</button>` : ''}
+      <span class="ts t3">${_anomalyPage+1} / ${totalPages}</span>
+      ${totalPages > 1 ? `<button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObs()">${I18N.t('observability.next_page')}</button>` : ''}
+      <label class="ts t3" style="display:flex;align-items:center;gap:4px;margin-left:8px">${I18N.t('observability.rows_per_page')}
+        <select onchange="anomalyPageSize=parseInt(this.value)||10;_anomalyPage=0;refreshObs()" style="padding:4px 8px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">
+          <option value="10"${anomalyPageSize===10?' selected':''}>10</option>
+          <option value="20"${anomalyPageSize===20?' selected':''}>20</option>
+          <option value="50"${anomalyPageSize===50?' selected':''}>50</option>
+        </select>
+      </label>
+    </div>`;
   }
 
   container.innerHTML = html;
