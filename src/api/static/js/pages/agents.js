@@ -215,7 +215,7 @@ function renderAgent(name, data) {
             ? `<a href="${_vcsUrl(ev.repo_key, '/issues/' + _issNum)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">${ev.issue_id}</a>`
             : ev.issue_id || '—';
           const _isHl = highlightId && _normIss(ev.issue_id) === _normIss(highlightId);
-          return `<tr class="pipe-row${_isHl ? ' highlight-flash' : ''}" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
+          return `<tr class="pipe-row${_isHl ? ' highlight-flash' : ''}" onclick="_agentRowClick('${highlightId}', ${ev.seq})" style="cursor:pointer">
           <td style="padding:8px 10px;font-size:11px;font-weight:600;color:var(--t2)">#${ev.seq || '?'}</td>
           <td style="padding:8px 10px;white-space:nowrap;font-size:10px;color:var(--t3)">${fmtLocalTime(ev.created_at).substring(5,16) || '--:--'}</td>
           <td style="padding:8px 10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${ev.summary || ev.title || ev.event_type}</td>
@@ -358,4 +358,13 @@ function refreshVodOnboard() {
     const secretEl = document.getElementById('vodImSecret');
     if (secretEl) secretEl.value = im.connected ? '********' : '';
   }).catch(() => {});
+}
+// Issue #108: 点击事件行时清除当前history state中的param（issue_number）
+// 这样返回时popstate调nav(view, undefined)不再传issue_number，不会重新高亮
+function _agentRowClick(highlightId, seq) {
+  var cur = window.history.state;
+  if (cur && cur.param) {
+    window.history.replaceState({view: cur.view, param: null}, '', '#' + (cur.view || ''));
+  }
+  app.nav('event', seq);
 }
