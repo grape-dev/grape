@@ -1300,6 +1300,7 @@ def init_database():
             try:
                 # 迁移逻辑在同一个 with db_lock 块内——同一个连接
                 # db_lock 是 RLock（可重入）——_create_tables() 等内部 with db_lock 不会死锁
+                _tasks_to_issue_rename_pre_create()
                 _create_tables()
                 _migrate_tables()
                 _create_indexes()
@@ -1330,6 +1331,7 @@ def init_database():
                 c.execute("SELECT RELEASE_LOCK('grape_migrate')")
     else:
         # SQLite——单实例不需要锁
+        _tasks_to_issue_rename_pre_create()
         _create_tables()
         _migrate_tables()
         _create_indexes()
@@ -1789,6 +1791,37 @@ def _alter_skill_files_if_needed() -> str:
         return "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT"
     except Exception:
         return "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT"
+
+
+def _tasks_to_issue_rename_pre_create():
+    """Phase B1：`tasks` 表改名为 `issue`（结构不变，数据零迁移）。
+
+    必须在 `_create_tables()` **之前**执行——否则 `CREATE TABLE IF NOT EXISTS issue` 会先建出空
+    `issue` 表，导致 `_migrate_tables` 里"issue 已存在则跳过 rename"，数据滞留旧 `tasks` 表。
+    幂等：无 `tasks` 表或已有 `issue` 表（非空）则跳过。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "tasks" not in _tables:
+                return
+            if "issue" in _tables:
+                _issue_cnt = c.execute("SELECT COUNT(*) FROM issue").fetchone()[0]
+                _tasks_cnt = c.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+                if _issue_cnt == 0 and _tasks_cnt > 0:
+                    c.execute("DROP TABLE issue")
+                    c.execute("ALTER TABLE tasks RENAME TO issue")
+                    db.commit()
+                    log.info(f"Phase B1: tasks -> issue (dropped empty issue, renamed), {_tasks_cnt} rows")
+                else:
+                    log.info(f"Phase B1: issue already exists ({_issue_cnt} rows), rename skipped")
+                return
+            c.execute("ALTER TABLE tasks RENAME TO issue")
+            db.commit()
+            log.info("Phase B1: tasks -> issue (structure unchanged)")
+    except Exception as e:
+        log.warning(f"Phase B1 tasks->issue pre-create rename failed: {e}")
 
 
 def _migrate_tables():
