@@ -462,19 +462,33 @@ def _delete_queue_task(task_id: int):
 
 
 def _fail_queue_task(task_id: int, error: str, retry_count: int):
-    """任务处理失败——更新 last_error + next_retry_at（指数退避）。"""
-    delay = min((retry_count + 1) * 3, 60)
+    """任务处理失败——更新 last_error + next_retry_at（指数退避）。
+
+    retry_count >= 100 → 标记 failed，不再重试（防止永久性错误无限重试）。
+    """
+    new_count = retry_count + 1
+    delay = min(new_count * 3, 60)
     next_retry = (datetime.now() + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
+    if new_count >= 100:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE knowledge_write_queue SET queue_status='failed', "
+                "retry_count=?, last_error=?, updated_at=? "
+                "WHERE id=?",
+                (new_count, error[:500], next_retry, task_id))
+            db.commit()
+        log.warning(f"[knowledge] queue task {task_id} marked failed after {new_count} retries, last_error: {error[:200]}")
+        return
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE knowledge_write_queue SET queue_status='pending', "
             "retry_count=?, last_error=?, next_retry_at=?, updated_at=? "
             "WHERE id=?",
-            (retry_count + 1, error[:500], next_retry, next_retry, task_id))
+            (new_count, error[:500], next_retry, next_retry, task_id))
         db.commit()
     # 监控日志
-    new_count = retry_count + 1
     if new_count in (10, 50, 100) or (new_count > 100 and new_count % 100 == 0):
         log.warning(f"[knowledge] queue task {task_id} retried {new_count} times, last_error: {error[:200]}")
 
@@ -936,6 +950,8 @@ def _sync_baseline_files():
     从 managed_repos 表获取项目列表，检查每个项目的 project-info 目录下
     3 个基线文件（project-graph.md / project-capabilities.md / .metadata.json）
     是否已在 DB 有 baseline 记录。没有就写 OBS + INSERT DB。
+
+    Issue #103：加分布式锁保护，防止多实例同时写 baseline。
     """
     import hashlib as _hl
     from src.repo_key import split_owner_repo
@@ -945,88 +961,97 @@ def _sync_baseline_files():
     if not storage:
         return
 
-    BASELINE_FILES = ("project-graph.md", "project-capabilities.md", ".metadata.json")
+    # Issue #103：分布式锁保护 baseline 同步
+    _sync_lock_key = f"baseline_sync:{_hl.md5(b'sync').hexdigest()[:16]}"
+    if not acquire_lock(_sync_lock_key, ttl=300):
+        log.info("[knowledge] baseline sync: lock contention, skipped")
+        return
 
-    # 从 managed_repos 表获取所有项目
-    with db_lock:
-        rows = db.cursor().execute("SELECT repo_key FROM managed_repos").fetchall()
+    try:
+        BASELINE_FILES = ("project-graph.md", "project-capabilities.md", ".metadata.json")
 
-    for (repo_key,) in rows:
-        owner, repo = split_owner_repo(repo_key)
-        if not owner or not repo:
-            continue
-        pi_dir = os.path.join(WORKSPACE_DIR, owner, repo, "project-info")
-        if not os.path.isdir(pi_dir):
-            continue
+        # 从 managed_repos 表获取所有项目
+        with db_lock:
+            rows = db.cursor().execute("SELECT repo_key FROM managed_repos").fetchall()
 
-        for fname in BASELINE_FILES:
-            fpath = os.path.join(pi_dir, fname)
-            if not os.path.isfile(fpath):
+        for (repo_key,) in rows:
+            owner, repo = split_owner_repo(repo_key)
+            if not owner or not repo:
+                continue
+            pi_dir = os.path.join(WORKSPACE_DIR, owner, repo, "project-info")
+            if not os.path.isdir(pi_dir):
                 continue
 
-            file_path = os.path.relpath(fpath, WORKSPACE_DIR)
+            for fname in BASELINE_FILES:
+                fpath = os.path.join(pi_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
 
-            # 查 DB 是否已有 baseline 记录
-            with db_lock:
-                row = db.cursor().execute(
-                    "SELECT id, obs_key FROM agent_shared_knowledge "
-                    "WHERE repo_key=? AND scope='baseline' AND file_path=? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (repo_key, file_path)
-                ).fetchone()
+                file_path = os.path.relpath(fpath, WORKSPACE_DIR)
 
-            if row and row[1]:  # DB 有记录且 obs_key 非空
-                # Issue #95：检测旧格式 obs_key（project-info/ 前缀但不含 knowledge/）→ 强制更新
-                _old_obs = row[1] or ""
-                if _old_obs.startswith("project-info/") and not _old_obs.startswith("knowledge/"):
-                    # 旧格式 → 重新写 OBS + UPDATE
-                    pass  # 不 continue，走下面的写入逻辑
-                else:
-                    continue  # 新格式或本地模式 → 跳过
+                # 查 DB 是否已有 baseline 记录
+                with db_lock:
+                    row = db.cursor().execute(
+                        "SELECT id, obs_key FROM agent_shared_knowledge "
+                        "WHERE repo_key=? AND scope='baseline' AND file_path=? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (repo_key, file_path)
+                    ).fetchone()
 
-            # 写 OBS + DB
-            try:
-                with open(fpath, "rb") as f:
-                    content_bytes = f.read()
-                # Issue #95：OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
-                _owner, _rname = _owner_repo(repo_key)
-                storage_key = f"knowledge/{_owner}/{_rname}/project-info/{fname}"
-                storage.save_bytes(storage_key, content_bytes)
-                content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
+                if row and row[1]:  # DB 有记录且 obs_key 非空
+                    # Issue #95：检测旧格式 obs_key（project-info/ 前缀但不含 knowledge/）→ 强制更新
+                    _old_obs = row[1] or ""
+                    if _old_obs.startswith("project-info/") and not _old_obs.startswith("knowledge/"):
+                        # 旧格式 → 重新写 OBS + UPDATE
+                        pass  # 不 continue，走下面的写入逻辑
+                    else:
+                        continue  # 新格式或本地模式 → 跳过
 
-                if row:  # DB 有记录但 obs_key 为空 → UPDATE
-                    with db_lock:
-                        c = db.cursor()
-                        # Issue #95：UPDATE 补 source/name/description（COALESCE 空值不覆盖）
-                        _bn = {"project-graph.md": "项目结构图谱", "project-capabilities.md": "项目能力清单", ".metadata.json": "项目元数据"}.get(fname, fname)
-                        c.execute(
-                            "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
-                            "source=COALESCE(NULLIF(source, ''), 'system'), "
-                            "name=COALESCE(NULLIF(name, ''), ?) "
-                            "WHERE id=?",
-                            (storage_key, content_hash, _bn, row[0])
-                        )
-                        db.commit()
-                else:  # DB 无记录 → INSERT
-                    _baseline_desc = {
-                        "project-graph.md": "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）",
-                        "project-capabilities.md": "VOD 基线分析：项目能力清单（功能特性/支持能力）",
-                        ".metadata.json": "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）",
-                    }.get(fname, "VOD 基线分析自动生成")
-                    _baseline_name = {
-                        "project-graph.md": "项目结构图谱",
-                        "project-capabilities.md": "项目能力清单",
-                        ".metadata.json": "项目元数据",
-                    }.get(fname, "项目基线分析")
-                    with db_lock:
-                        c = db.cursor()
-                        c.execute(
-                            "INSERT INTO agent_shared_knowledge "
-                            "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, description, name) "
-                            "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync', 'system', ?, ?)",
-                            (repo_key, file_path, storage_key, content_hash, _baseline_desc, _baseline_name)
-                        )
-                        db.commit()
-                log.info(f"[knowledge] sync baseline {repo_key}/{fname} → OBS")
-            except Exception as e:
-                log.warning(f"[knowledge] sync baseline failed {repo_key}/{fname}: {e}")
+                # 写 OBS + DB
+                try:
+                    with open(fpath, "rb") as f:
+                        content_bytes = f.read()
+                    # Issue #95：OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
+                    _owner, _rname = _owner_repo(repo_key)
+                    storage_key = f"knowledge/{_owner}/{_rname}/project-info/{fname}"
+                    storage.save_bytes(storage_key, content_bytes)
+                    content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
+
+                    if row:  # DB 有记录但 obs_key 为空 → UPDATE
+                        with db_lock:
+                            c = db.cursor()
+                            # Issue #95：UPDATE 补 source/name/description（COALESCE 空值不覆盖）
+                            _bn = {"project-graph.md": "项目结构图谱", "project-capabilities.md": "项目能力清单", ".metadata.json": "项目元数据"}.get(fname, fname)
+                            c.execute(
+                                "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
+                                "source=COALESCE(NULLIF(source, ''), 'system'), "
+                                "name=COALESCE(NULLIF(name, ''), ?) "
+                                "WHERE id=?",
+                                (storage_key, content_hash, _bn, row[0])
+                            )
+                            db.commit()
+                    else:  # DB 无记录 → INSERT
+                        _baseline_desc = {
+                            "project-graph.md": "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）",
+                            "project-capabilities.md": "VOD 基线分析：项目能力清单（功能特性/支持能力）",
+                            ".metadata.json": "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）",
+                        }.get(fname, "VOD 基线分析自动生成")
+                        _baseline_name = {
+                            "project-graph.md": "项目结构图谱",
+                            "project-capabilities.md": "项目能力清单",
+                            ".metadata.json": "项目元数据",
+                        }.get(fname, "项目基线分析")
+                        with db_lock:
+                            c = db.cursor()
+                            c.execute(
+                                "INSERT INTO agent_shared_knowledge "
+                                "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, description, name) "
+                                "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'sync', 'system', ?, ?)",
+                                (repo_key, file_path, storage_key, content_hash, _baseline_desc, _baseline_name)
+                            )
+                            db.commit()
+                    log.info(f"[knowledge] sync baseline {repo_key}/{fname} → OBS")
+                except Exception as e:
+                    log.warning(f"[knowledge] sync baseline failed {repo_key}/{fname}: {e}")
+    finally:
+        release_lock(_sync_lock_key)

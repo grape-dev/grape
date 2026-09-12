@@ -172,8 +172,8 @@ DDL 用 SQLite 语法，MySQL 后端靠 `mysql_compat.py` 的 `translate_sql` �
 - 拿不到锁的跳过
 
 **重试策略**:
-- 无限次重试 + 指数退避（3s → 6s → 12s → 24s → 48s → 60s 封顶）
-- retry_count 只做记录和监控，不作为停止条件
+- 重试 99 次 + 指数退避（3s → 6s → 12s → 24s → 48s → 60s 封顶），第 100 次标记 failed
+- retry_count >= 100 → queue_status='failed'，不再重试（防止永久性错误无限重试）
 - 永久性错误（content 空、scope 非法）在入队前已过滤
 - retry_count 达到 10/50/100 时 log warning，运维能从日志发现卡死任务
 
@@ -287,7 +287,7 @@ return {"ok": True, "scope": body.scope, "task_id": task_id}
 | 项 | 决策 | 来源 |
 |----|------|------|
 | 锁 key 粒度 | knowledge_write:{md5(repo_key:scope:agent_type:issue_num)[:16]} | 确认（MD5 压缩防 VARCHAR(128) 溢出） |
-| TTL | write=30s, builder=120s | 确认 |
+| TTL | write=60s, builder=300s | 确认（30→60 兼容 OBS，120→300 兼容大仓库） |
 | maybe_refresh 锁策略 | 去掉 _lock_guard，直接用分布式锁 | 确认（选项A） |
 | 抢不到锁策略 | 入队方返回 + 后台 worker 兜底 | 确认 |
 | 内容去重 | 单条 content 精确匹配（content in existing_content） | 确认 |

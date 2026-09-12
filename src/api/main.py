@@ -278,6 +278,12 @@ async def lifespan(app: FastAPI):
         _probe_task.cancel()
     if _reap_task:
         _reap_task.cancel()
+    if _knowledge_write_task:
+        _knowledge_write_task.cancel()
+        try:
+            await asyncio.wait_for(_knowledge_write_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
     # 官方技能 OBS 同步：优雅关闭定时任务
     try:
         from src.storage.skill_sync import stop_skill_sync_scheduler

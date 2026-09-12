@@ -388,7 +388,7 @@ def maybe_refresh_project_info(repo_key: str, token: str = ""):
         return
     from src.lock import acquire_lock, release_lock
     lock_key = f"project_info_build:{hashlib.md5(repo_key.encode()).hexdigest()[:16]}"
-    if not acquire_lock(lock_key, ttl=120):
+    if not acquire_lock(lock_key, ttl=300):
         log.info(f"project-info: lock contention for {repo_key}, skipped")
         return
     try:
