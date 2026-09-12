@@ -304,7 +304,6 @@
 .tsk-list-sec{padding:14px 18px 6px;font-size:11px;font-weight:600;color:var(--t3);letter-spacing:1px;text-transform:uppercase;display:flex;align-items:center;justify-content:space-between}
 .tsk-sec-n{color:var(--a)}
 .tsk-row{display:flex;align-items:center;gap:12px;padding:14px 18px;border-top:1px solid var(--b);cursor:pointer;transition:all .18s;position:relative}
-.tsk-list .tsk-list-sec:first-child ~ .tsk-row{border-top:none}
 .tsk-row:first-of-type{border-top:none}
 .tsk-row:hover{background:#f7f9ff}
 .tsk-row-sel{background:#f0f5ff}
@@ -750,3 +749,8 @@
 .km-del:hover{background:#ff5252}
 .km-close{border:1px solid var(--b);background:transparent;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;color:var(--t)}
 .km-close:hover{background:var(--bg)}
+
+/* 任务卡片雷达扫描动画（进行中状态） */
+.tsk-card-radar{position:relative;overflow:hidden}
+.tsk-radar-sweep{position:absolute;inset:0;border-radius:10px;pointer-events:none;animation:radarRotate 3s linear infinite}
+@keyframes radarRotate{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
