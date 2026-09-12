@@ -10,6 +10,9 @@ let _obsRendered = false;      // 概览/任务 Tab 是否已用 innerHTML 渲�
 let _obsRenderedTab = null;    // 已渲染骨架的 tab（切换 tab 时需重新建骨架）
 let _rtSearch = '';            // Runtime 引擎搜索筛选
 let _rtDeviceFilter = '';      // Runtime 设备下拉筛选
+let _workerPage = 0;           // Worker 卡片当前页（0 基）
+let _runtimePage = 0;          // Runtime 引擎当前页（0 基）
+const _OBS_PAGE_SIZE = 10;     // 概览分页大小（参照异常任务 Tab _ANOMALY_PAGE_SIZE）
 
 function renderObservability() {
   const pc = document.getElementById('pageContent');
@@ -44,6 +47,8 @@ function switchObsTab(tab, ev) {
   // 切换 tab 时重置渲染状态，强制重建 DOM 骨架
   _obsRendered = false;
   _obsRenderedTab = null;
+  _workerPage = 0;
+  _runtimePage = 0;
   // 直接用缓存数据渲染，不重新 fetch
   if (_obsData.ops) {
     renderObsContent(false);
@@ -96,13 +101,33 @@ function refreshObs(isAutoRefresh) {
   });
 }
 
-function _rerenderRuntimeTable() {
-  // 只重新渲染表格行（不重建筛选栏，避免 input 失焦）
-  const { ops } = _obsData;
-  if (!ops || ops.error) return;
-  const r = ops.runtimes || {};
-  const runtimes = (r.list || []).slice().sort((a, b) => (a.device_name || '').localeCompare(b.device_name || ''));
-  const _filteredRuntimes = runtimes.filter(rt => {
+// ===== 概览分页辅助函数（参照异常任务 Tab 的 slice 分页模式）=====
+
+function _paginationHTML(page, totalPages, prevExpr, nextExpr) {
+  if (totalPages <= 1) return '';
+  const prevDis = page === 0 ? 'disabled style="opacity:.4;cursor:not-allowed"' : '';
+  const nextDis = page >= totalPages - 1 ? 'disabled style="opacity:.4;cursor:not-allowed"' : '';
+  return `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0">
+    <button class="bt bt-o bt-s" ${prevDis} onclick="${prevExpr}">${I18N.t('observability.prev_page')}</button>
+    <span class="ts t3">${page + 1} / ${totalPages}</span>
+    <button class="bt bt-o bt-s" ${nextDis} onclick="${nextExpr}">${I18N.t('observability.next_page')}</button>
+  </div>`;
+}
+
+function _sortedWorkers(w) {
+  return (w.list || []).slice().sort((a, b) => {
+    const na = (a.device_name || a.name || '').toLowerCase();
+    const nb = (b.device_name || b.name || '').toLowerCase();
+    return na < nb ? -1 : na > nb ? 1 : 0;
+  });
+}
+
+function _sortedRuntimes(r) {
+  return (r.list || []).slice().sort((a, b) => (a.device_name || '').localeCompare(b.device_name || ''));
+}
+
+function _filterRuntimes(runtimes) {
+  return runtimes.filter(rt => {
     const _dev = rt.device_name || '';
     if (_rtDeviceFilter && _dev !== _rtDeviceFilter) return false;
     if (_rtSearch) {
@@ -114,48 +139,105 @@ function _rerenderRuntimeTable() {
     }
     return true;
   });
-  // 只更新表格行容器 + 计数
+}
+
+function _workerCardHTML(wk) {
+  const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
+  const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
+  return `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
+      <b style="font-size:13px">${wk.device_name || wk.name || I18N.t('observability.worker_id', {id: wk.id})}</b>
+      <span id="wk-${wid}-health" style="margin-left:auto;font-size:10px;color:${hc};font-weight:600">${I18N.t("observability." + (wk.health || "offline"))}</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:10px;color:var(--t3);margin-bottom:8px">
+      <div>IP: ${wk.last_ip || '-'}</div>
+      <div>${I18N.t('observability.heartbeat')}: <span id="wk-${wid}-seen">${fmtLocalTime(wk.last_seen_at||'').substring(11,19)}</span></div>
+    </div>
+    ${_barHTML(I18N.t('observability.cpu'), wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
+    ${_barHTML(I18N.t('observability.mem'), wk.memory_percent, null, 'wk-' + wid + '-mem')}
+    ${_barHTML(I18N.t('observability.tmp'), wk.tmp_percent, null, 'wk-' + wid + '-tmp')}
+    ${_barHTML(I18N.t('observability.disk'), wk.disk_percent, null, 'wk-' + wid + '-disk')}
+  </div>`;
+}
+
+function _runtimeRowHTML(rti) {
+  const rid = rti.id;
+  const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
+  const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
+  const running = rti.running || 0;
+  const maxC = rti.max_concurrent || 0;
+  const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
+  const modeTag = rti.mode === 'local' ? '<span class="tg tg-ch">' + I18N.t('observability.mode_local') + '</span>' : '<span class="tg tg-c">' + I18N.t('observability.mode_remote') + '</span>';
+  const avgDur = rti.avg_duration || 0;
+  const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
+  const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
+  const ps = rti.probe_status || 'pending';
+  const pl = rti.probe_latency || 0;
+  const pe = rti.probe_error || '';
+  const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
+  const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
+  const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? I18N.t('observability.probe_pending') : ps === 'skip' ? I18N.t('observability.probe_skip') : I18N.t('observability.probe_fail');
+  const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
+  return `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
+    <td>${dot} <b>${rti.name}</b></td>
+    <td><span id="rt-${rid}-version" class="ts t3">${rti.version || '-'}</span></td>
+    <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${I18N.t('observability.' + (rti.health || 'offline'))}</span></td>
+    <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
+    <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
+    <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
+    <td>${modeTag}</td>
+    <td><span id="rt-${rid}-device" class="ts t3">${rti.device_name || '-'}</span></td>
+  </tr>`;
+}
+
+function _rerenderWorkerGrid() {
+  const { ops, realtime } = _obsData;
+  const realOps = (ops && !ops.error) ? ops : fallbackOps(realtime);
+  if (!realOps) return;
+  const workers = _sortedWorkers(realOps.workers || {});
+  const totalPages = Math.max(1, Math.ceil(workers.length / _OBS_PAGE_SIZE));
+  if (_workerPage >= totalPages) _workerPage = 0;
+  const start = _workerPage * _OBS_PAGE_SIZE;
+  const pageWorkers = workers.slice(start, start + _OBS_PAGE_SIZE);
+  const gridEl = document.getElementById('wk-grid');
+  if (gridEl) {
+    gridEl.innerHTML = workers.length === 0
+      ? '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_remote_worker') + '</div>'
+      : pageWorkers.map(_workerCardHTML).join('');
+  }
+  const pagerEl = document.getElementById('wk-pager');
+  if (pagerEl) pagerEl.innerHTML = _paginationHTML(_workerPage, totalPages, '_workerPage--;_rerenderWorkerGrid()', '_workerPage++;_rerenderWorkerGrid()');
+}
+
+function _rerenderRuntimeTable() {
+  const { ops, realtime } = _obsData;
+  const realOps = (ops && !ops.error) ? ops : fallbackOps(realtime);
+  if (!realOps) return;
+  const r = realOps.runtimes || {};
+  const runtimes = _sortedRuntimes(r);
+  const _filteredRuntimes = _filterRuntimes(runtimes);
+  const totalPages = Math.max(1, Math.ceil(_filteredRuntimes.length / _OBS_PAGE_SIZE));
+  if (_runtimePage >= totalPages) _runtimePage = 0;
+  const start = _runtimePage * _OBS_PAGE_SIZE;
+  const pageRuntimes = _filteredRuntimes.slice(start, start + _OBS_PAGE_SIZE);
   const rowsEl = document.getElementById('obs-runtime-rows');
   const countEl = document.getElementById('obs-runtime-count');
   if (countEl) countEl.textContent = _filteredRuntimes.length + '/' + runtimes.length;
-  if (!rowsEl) return;
-  let html = '';
-  if (_filteredRuntimes.length) {
-    html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
-    _filteredRuntimes.forEach(rti => {
-      const rid = rti.id;
-      const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
-      const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
-      const running = rti.running || 0;
-      const maxC = rti.max_concurrent || 0;
-      const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
-      const modeTag = rti.mode === 'local' ? '<span class="tg tg-ch">' + I18N.t('observability.mode_local') + '</span>' : '<span class="tg tg-c">' + I18N.t('observability.mode_remote') + '</span>';
-      const avgDur = rti.avg_duration || 0;
-      const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
-      const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
-      const ps = rti.probe_status || 'pending';
-      const pl = rti.probe_latency || 0;
-      const pe = rti.probe_error || '';
-      const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
-      const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
-      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? I18N.t('observability.probe_pending') : ps === 'skip' ? I18N.t('observability.probe_skip') : I18N.t('observability.probe_fail');
-      const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
-      html += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
-        <td>${dot} <b>${rti.name}</b></td>
-        <td><span id="rt-${rid}-version" class="ts t3">${rti.version || '-'}</span></td>
-        <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${I18N.t('observability.' + (rti.health || 'offline'))}</span></td>
-        <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
-        <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
-        <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
-        <td>${modeTag}</td>
-        <td><span id="rt-${rid}-device" class="ts t3">${rti.device_name || '-'}</span></td>
-      </tr>`;
-    });
-    html += '</tbody></table></div>';
-  } else {
-    html += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
+  if (rowsEl) {
+    let html = '';
+    if (pageRuntimes.length) {
+      html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
+      html += pageRuntimes.map(_runtimeRowHTML).join('');
+      html += '</tbody></table></div>';
+    } else {
+      html += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
+    }
+    rowsEl.innerHTML = html;
   }
-  rowsEl.innerHTML = html;
+  const pagerEl = document.getElementById('rt-pager');
+  if (pagerEl) pagerEl.innerHTML = _paginationHTML(_runtimePage, totalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()');
 }
 
 function renderObsContent(isAutoRefresh) {
@@ -265,65 +347,29 @@ function renderOverview(ops, rt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
 
-  // Worker 卡片（带 id 供局部更新）— 按 device_name 排序保证位置稳定
-  let workerCards = '';
-  const workers = (w.list || []).slice().sort((a, b) => {
-    const na = (a.device_name || a.name || '').toLowerCase();
-    const nb = (b.device_name || b.name || '').toLowerCase();
-    return na < nb ? -1 : na > nb ? 1 : 0;
-  });
-  if (workers.length === 0) {
-    workerCards = '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_remote_worker') + '</div>';
-  } else {
-    workers.forEach(wk => {
-      const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
-      const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
-      const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
-      const isMain = wk.last_ip === '127.0.0.1' || (wk.name || '').startsWith('grape-main');
-      const mainTag = isMain ? `<span style="font-size:9px;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 6px;margin-left:4px">${I18N.t('observability.main_tag')}</span>` : '';
-      workerCards += `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
-          <b style="font-size:13px">${wk.device_name || wk.name || I18N.t('observability.worker_id', {id: wk.id})}</b>
-          <span id="wk-${wid}-health" style="margin-left:auto;font-size:10px;color:${hc};font-weight:600">${I18N.t("observability." + (wk.health || "offline"))}</span>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:10px;color:var(--t3);margin-bottom:8px">
-          <div>IP: ${wk.last_ip || '-'}</div>
-          <div>${I18N.t('observability.heartbeat')}: <span id="wk-${wid}-seen">${fmtLocalTime(wk.last_seen_at||'').substring(11,19)}</span></div>
-        </div>
-        ${_barHTML(I18N.t('observability.cpu'), wk.cpu_percent, null, 'wk-' + wid + '-cpu')}
-        ${_barHTML(I18N.t('observability.mem'), wk.memory_percent, null, 'wk-' + wid + '-mem')}
-        ${_barHTML(I18N.t('observability.tmp'), wk.tmp_percent, null, 'wk-' + wid + '-tmp')}
-        ${_barHTML(I18N.t('observability.disk'), wk.disk_percent, null, 'wk-' + wid + '-disk')}
-      </div>`;
-    });
-  }
+  // Worker 卡片（带 id 供局部更新）— 按 device_name 排序保证位置稳定，分页渲染
+  const workers = _sortedWorkers(w);
+  const _wkTotalPages = Math.max(1, Math.ceil(workers.length / _OBS_PAGE_SIZE));
+  if (_workerPage >= _wkTotalPages) _workerPage = 0;
+  const _wkStart = _workerPage * _OBS_PAGE_SIZE;
+  const _pageWorkers = workers.slice(_wkStart, _wkStart + _OBS_PAGE_SIZE);
+  let workerCards = workers.length === 0
+    ? '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_remote_worker') + '</div>'
+    : _pageWorkers.map(_workerCardHTML).join('');
 
   // Runtime 表格（行带 id，各 td 带 id 供局部更新）
-  const runtimes = r.list || [];
-  // 按设备名排序
-  runtimes.sort((a, b) => (a.device_name || '').localeCompare(b.device_name || ''));
-  // 设备列表（去重，供下拉框）
+  const runtimes = _sortedRuntimes(r);
   const _devices = [...new Set(runtimes.map(rt => rt.device_name || '-').filter(d => d && d !== '-'))];
-  // 应用筛选
-  const _filteredRuntimes = runtimes.filter(rt => {
-    const _dev = rt.device_name || '';
-    if (_rtDeviceFilter && _dev !== _rtDeviceFilter) return false;
-    if (_rtSearch) {
-      const _q = _rtSearch.toLowerCase();
-      if (!(rt.name || '').toLowerCase().includes(_q) &&
-          !(rt.device_name || '').toLowerCase().includes(_q) &&
-          !(rt.version || '').toLowerCase().includes(_q) &&
-          !(rt.mode || '').toLowerCase().includes(_q)) return false;
-    }
-    return true;
-  });
+  const _filteredRuntimes = _filterRuntimes(runtimes);
+  const _rtTotalPages = Math.max(1, Math.ceil(_filteredRuntimes.length / _OBS_PAGE_SIZE));
+  if (_runtimePage >= _rtTotalPages) _runtimePage = 0;
+  const _rtStart = _runtimePage * _OBS_PAGE_SIZE;
+  const _pageRuntimes = _filteredRuntimes.slice(_rtStart, _rtStart + _OBS_PAGE_SIZE);
   let runtimeTable = '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_engine') + '</div>';
   if (runtimes.length) {
-    // 筛选栏
     let _filterBar = '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">';
-    _filterBar += '<input type="text" placeholder="' + I18N.t('observability.search_engine_placeholder') + '" value="' + _rtSearch.replace(/"/g,'&quot;') + '" oninput="_rtSearch=this.value;_rerenderRuntimeTable()" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
-    _filterBar += '<select onchange="_rtDeviceFilter=this.value;_rerenderRuntimeTable()" style="padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+    _filterBar += '<input type="text" placeholder="' + I18N.t('observability.search_engine_placeholder') + '" value="' + _rtSearch.replace(/"/g,'&quot;') + '" oninput="_rtSearch=this.value;_runtimePage=0;_rerenderRuntimeTable()" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+    _filterBar += '<select onchange="_rtDeviceFilter=this.value;_runtimePage=0;_rerenderRuntimeTable()" style="padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
     _filterBar += '<option value="">' + I18N.t('observability.all_devices') + '</option>';
     _devices.forEach(d => {
       _filterBar += '<option value="' + d + '"' + (_rtDeviceFilter === d ? ' selected' : '') + '>' + d + '</option>';
@@ -333,43 +379,15 @@ function renderOverview(ops, rt) {
     _filterBar += '</div>';
     runtimeTable = _filterBar;
     runtimeTable += '<div id="obs-runtime-rows">';
-    if (_filteredRuntimes.length) {
-    runtimeTable += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
-    _filteredRuntimes.forEach(rti => {
-      const rid = rti.id;
-      const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
-      const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
-      const running = rti.running || 0;
-      const maxC = rti.max_concurrent || 0;
-      const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
-      const modeTag = rti.mode === 'local' ? '<span class="tg tg-ch">' + I18N.t('observability.mode_local') + '</span>' : '<span class="tg tg-c">' + I18N.t('observability.mode_remote') + '</span>';
-      const avgDur = rti.avg_duration || 0;
-      const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
-      const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
-      // 探测状态
-      const ps = rti.probe_status || 'pending';
-      const pl = rti.probe_latency || 0;
-      const pe = rti.probe_error || '';
-      const probeIcon = { ok: '✅', fail: '❌', skip: '⏭', pending: '⏳' }[ps] || '⏳';
-      const probeColor = ps === 'ok' ? 'var(--g)' : ps === 'fail' ? 'var(--r)' : 'var(--t3)';
-      const probeStr = ps === 'ok' ? pl + 's' : ps === 'pending' ? I18N.t('observability.probe_pending') : ps === 'skip' ? I18N.t('observability.probe_skip') : I18N.t('observability.probe_fail');
-      const probeTitle = pe ? ' title="' + pe.replace(/"/g, '&quot;') + '"' : '';
-      runtimeTable += `<tr id="rt-${rid}" style="cursor:pointer" onclick="openRuntimeSessionModal(${rid}, '${(rti.name||'').replace(/'/g,"")}')">
-        <td>${dot} <b>${rti.name}</b></td>
-        <td><span id="rt-${rid}-version" class="ts t3">${rti.version || '-'}</span></td>
-        <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${I18N.t('observability.' + (rti.health || 'offline'))}</span></td>
-        <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
-        <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
-        <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
-        <td>${modeTag}</td>
-        <td><span id="rt-${rid}-device" class="ts t3">${rti.device_name || '-'}</span></td>
-      </tr>`;
-    });
-    runtimeTable += '</tbody></table></div>';
+    if (_pageRuntimes.length) {
+      runtimeTable += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
+      runtimeTable += _pageRuntimes.map(_runtimeRowHTML).join('');
+      runtimeTable += '</tbody></table></div>';
     } else {
       runtimeTable += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
     }
     runtimeTable += '</div>';
+    runtimeTable += '<div id="rt-pager">' + _paginationHTML(_runtimePage, _rtTotalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()') + '</div>';
   }
 
   return `
@@ -383,6 +401,7 @@ function renderOverview(ops, rt) {
     <div id="wk-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:16px">
       ${workerCards}
     </div>
+    <div id="wk-pager">${_paginationHTML(_workerPage, _wkTotalPages, '_workerPage--;_rerenderWorkerGrid()', '_workerPage++;_rerenderWorkerGrid()')}</div>
     ${section(I18N.t('observability.runtime_engine'), I18N.t('observability.runtime_subtitle', {online: (r.online || 0), total: (r.total || 0)}))}
     <div id="obs-runtime-table">${runtimeTable}</div>
   `;
@@ -400,66 +419,78 @@ function updateOverview(ops, rt) {
   _setText('kpi-w-offline', w.offline || 0);
   _setText('kpi-r-total', r.total || 0);
 
-  // 2) 更新 Worker 卡片
-  const workers = w.list || [];
-  if (workers.length) {
-    for (const wk of workers) {
-      const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
-      const card = document.getElementById('wk-' + wid);
-      if (!card) return false;  // 新增 worker → 回退完整渲染
+  // 2) 更新 Worker 卡片（仅当前页元素，避免分页后找不到未渲染的卡片）
+  const workers = _sortedWorkers(w);
+  const _wkTotalPages = Math.max(1, Math.ceil(workers.length / _OBS_PAGE_SIZE));
+  if (_workerPage >= _wkTotalPages) { _workerPage = 0; return false; }
+  const _wkStart = _workerPage * _OBS_PAGE_SIZE;
+  const _pageWorkers = workers.slice(_wkStart, _wkStart + _OBS_PAGE_SIZE);
+  for (const wk of _pageWorkers) {
+    const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const card = document.getElementById('wk-' + wid);
+    if (!card) return false;
 
-      const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
-      const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
+    const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
+    const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
 
-      const dotEl = document.getElementById('wk-' + wid + '-dot');
-      if (dotEl) dotEl.textContent = dot;
+    const dotEl = document.getElementById('wk-' + wid + '-dot');
+    if (dotEl) dotEl.textContent = dot;
 
-      const healthEl = document.getElementById('wk-' + wid + '-health');
-      if (healthEl) { healthEl.textContent = I18N.t("observability." + (wk.health || "offline")); healthEl.style.color = hc; }
+    const healthEl = document.getElementById('wk-' + wid + '-health');
+    if (healthEl) { healthEl.textContent = I18N.t("observability." + (wk.health || "offline")); healthEl.style.color = hc; }
 
-      const seenEl = document.getElementById('wk-' + wid + '-seen');
-      if (seenEl) seenEl.textContent = fmtLocalTime(wk.last_seen_at || '').substring(11, 19);
+    const seenEl = document.getElementById('wk-' + wid + '-seen');
+    if (seenEl) seenEl.textContent = fmtLocalTime(wk.last_seen_at || '').substring(11, 19);
 
-      // 进度条
-      _updateBar('wk-' + wid + '-cpu', wk.cpu_percent);
-      _updateBar('wk-' + wid + '-mem', wk.memory_percent);
-      _updateBar('wk-' + wid + '-tmp', wk.tmp_percent);
-      _updateBar('wk-' + wid + '-disk', wk.disk_percent);
-    }
+    _updateBar('wk-' + wid + '-cpu', wk.cpu_percent);
+    _updateBar('wk-' + wid + '-mem', wk.memory_percent);
+    _updateBar('wk-' + wid + '-tmp', wk.tmp_percent);
+    _updateBar('wk-' + wid + '-disk', wk.disk_percent);
   }
+  // 同步 Worker 分页控件（总页数可能变化）
+  const wkPager = document.getElementById('wk-pager');
+  if (wkPager) wkPager.innerHTML = _paginationHTML(_workerPage, _wkTotalPages, '_workerPage--;_rerenderWorkerGrid()', '_workerPage++;_rerenderWorkerGrid()');
 
-  // 3) 更新 Runtime 表格行
-  const runtimes = r.list || [];
-  if (runtimes.length) {
-    for (const rti of runtimes) {
-      const rid = rti.id;
-      const tr = document.getElementById('rt-' + rid);
-      if (!tr) return false;  // 新增 runtime → 回退完整渲染
+  // 3) 更新 Runtime 表格行（仅当前页元素）
+  const runtimes = _sortedRuntimes(r);
+  const _filteredRt = _filterRuntimes(runtimes);
+  const _rtTotalPages = Math.max(1, Math.ceil(_filteredRt.length / _OBS_PAGE_SIZE));
+  if (_runtimePage >= _rtTotalPages) { _runtimePage = 0; return false; }
+  const _rtStart = _runtimePage * _OBS_PAGE_SIZE;
+  const _pageRt = _filteredRt.slice(_rtStart, _rtStart + _OBS_PAGE_SIZE);
+  for (const rti of _pageRt) {
+    const rid = rti.id;
+    const tr = document.getElementById('rt-' + rid);
+    if (!tr) return false;
 
-      const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
-      const running = rti.running || 0;
-      const maxC = rti.max_concurrent || 0;
-      const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
-      const avgDur = rti.avg_duration || 0;
-      const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
-      const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
+    const hc = _OBS_HEALTH_COLOR[rti.health] || 'var(--t3)';
+    const running = rti.running || 0;
+    const maxC = rti.max_concurrent || 0;
+    const loadColor = running >= maxC * 2 ? 'var(--r)' : running >= maxC ? 'var(--y)' : running > 0 ? 'var(--g)' : 'var(--t3)';
+    const avgDur = rti.avg_duration || 0;
+    const avgDurStr = avgDur > 60 ? Math.round(avgDur/60) + 'm' + Math.round(avgDur%60) + 's' : avgDur + 's';
+    const avgDurColor = avgDur > 300 ? 'var(--r)' : avgDur > 60 ? 'var(--y)' : 'var(--g)';
 
-      const healthEl = document.getElementById('rt-' + rid + '-health');
-      if (healthEl) { healthEl.textContent = I18N.t("observability." + (rti.health || "offline")); healthEl.style.color = hc; }
+    const healthEl = document.getElementById('rt-' + rid + '-health');
+    if (healthEl) { healthEl.textContent = I18N.t("observability." + (rti.health || "offline")); healthEl.style.color = hc; }
 
-      const loadEl = document.getElementById('rt-' + rid + '-load');
-      if (loadEl) { loadEl.textContent = running + '/' + maxC; loadEl.style.color = loadColor; }
+    const loadEl = document.getElementById('rt-' + rid + '-load');
+    if (loadEl) { loadEl.textContent = running + '/' + maxC; loadEl.style.color = loadColor; }
 
-      const durEl = document.getElementById('rt-' + rid + '-dur');
-      if (durEl) { durEl.textContent = avgDur ? avgDurStr : '-'; durEl.style.color = avgDurColor; }
+    const durEl = document.getElementById('rt-' + rid + '-dur');
+    if (durEl) { durEl.textContent = avgDur ? avgDurStr : '-'; durEl.style.color = avgDurColor; }
 
-      const versionEl = document.getElementById('rt-' + rid + '-version');
-      if (versionEl) versionEl.textContent = rti.version || '-';
+    const versionEl = document.getElementById('rt-' + rid + '-version');
+    if (versionEl) versionEl.textContent = rti.version || '-';
 
-      const deviceEl = document.getElementById('rt-' + rid + '-device');
-      if (deviceEl) deviceEl.textContent = rti.device_name || '-';
-    }
+    const deviceEl = document.getElementById('rt-' + rid + '-device');
+    if (deviceEl) deviceEl.textContent = rti.device_name || '-';
   }
+  // 同步 Runtime 分页控件 + 计数
+  const countEl = document.getElementById('obs-runtime-count');
+  if (countEl) countEl.textContent = _filteredRt.length + '/' + runtimes.length;
+  const rtPager = document.getElementById('rt-pager');
+  if (rtPager) rtPager.innerHTML = _paginationHTML(_runtimePage, _rtTotalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()');
 
   return true;
 }
