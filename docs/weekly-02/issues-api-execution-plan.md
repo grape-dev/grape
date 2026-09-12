@@ -47,6 +47,40 @@
 
 > B1 里程碑：**表名已是 `issue`，字段仍同旧 tasks**（status/title/issue_number/task_description/conversation_id/...），功能零变化。
 
+#### Phase B1 实施记录（2026-09-12，已上线生产）
+
+> **坑 1：迁移顺序导致空 `issue` 表吞数据**
+>
+> 初始实现把 rename 放在 `_migrate_tables()` 里，而 `init_database()` 顺序是
+> `_create_tables()` → `_migrate_tables()`。`_create_tables` 的 `CREATE TABLE IF NOT EXISTS issue`
+> **先建出空 `issue` 表**，`_migrate_tables` 检查 `"issue" in tables` → **跳过 rename** →
+> 数据滞留旧 `tasks` 表、空 `issue` 供代码读 → 迁移失败（生产实测：issue 0 行、tasks 182 行）。
+>
+> **修复**：抽出 `_tasks_to_issue_rename_pre_create()`，在 `_create_tables()` **之前**执行；
+> 逻辑处理三种情况：
+> 1. 无 `tasks` 表 → skip（新库）
+> 2. 有 `tasks` 且无 `issue` → `ALTER TABLE tasks RENAME TO issue`
+> 3. 有 `tasks` 且 `issue` 存在：若 `issue` 为空且有 tasks 数据 → `DROP TABLE issue`（误建空表）+ rename；
+>    否则（issue 非空）→ skip（正常已迁移）
+>
+> 生产验证：`Phase B1: tasks -> issue (dropped empty issue, renamed), 182 rows` —— 数据完整迁移。
+
+> **坑 2：表名替换需覆盖测试文件**
+>
+> `FROM/INTO/UPDATE tasks` 的 SQL 在 **src 53 处 + 测试 74 处**。若只改 src，
+> 测试里 `INSERT INTO tasks` 会因 rename 后无 `tasks` 表而失败。需 src + tests 同步替换。
+
+> **坑 3：`_tasks_to_issue_rename_pre_create` 依赖 `_create_tables` 前的时机，不能放迁移列表里**
+>
+> rename 必须在 `CREATE TABLE IF NOT EXISTS issue` 之前 —— 迁移列表（`_migrate_tables`）时机太晚。
+> 因此拆成独立函数，在 `init_database` 的 SQLite/MySQL 两个分支的 `_create_tables()` 前显式调用。
+
+**B1 关键产物**：
+- `src/api/db_setup.py`：`_ISSUE_DDL`（结构=原 tasks）+ `_tasks_to_issue_rename_pre_create()`（pre-create 迁移）
+- src 10 文件 + tests 12 文件：表名 `tasks`→`issue`（agent_tasks 不受影响）
+- 提交：`cccd891a`（表名替换+迁移）+ `e9c92d56`（迁移顺序修复）
+- 验证：本地 `test_issues_api` 14 passed；生产 `tasks`(182)→`issue`(182) 数据完整、服务 active
+
 #### Phase B2：字段收编（ADD COLUMN）
 
 | # | 任务 | 产出 | 验收 | 依赖 |
