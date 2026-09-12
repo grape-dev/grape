@@ -194,6 +194,8 @@ function renderAgent(name, data) {
   const m = data.metrics || {};
   const es = m.event_stats || {};
   const events = data.recent_events || [];
+  const highlightId = data.highlight_issue_id || '';
+  const _normIss = s => String(s || '').replace(/^#/, '');
   const evtHtml = events.length > 0 ? `
     <table style="width:100%;font-size:12px;table-layout:fixed">
       <thead><tr>
@@ -212,7 +214,8 @@ function renderAgent(name, data) {
           const _issLink = (_issNum && ev.repo_key)
             ? `<a href="${_vcsUrl(ev.repo_key, '/issues/' + _issNum)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">${ev.issue_id}</a>`
             : ev.issue_id || '—';
-          return `<tr class="pipe-row" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
+          const _isHl = highlightId && _normIss(ev.issue_id) === _normIss(highlightId);
+          return `<tr class="pipe-row${_isHl ? ' highlight-flash' : ''}" onclick="app.nav('event',${ev.seq})" style="cursor:pointer">
           <td style="padding:8px 10px;font-size:11px;font-weight:600;color:var(--t2)">#${ev.seq || '?'}</td>
           <td style="padding:8px 10px;white-space:nowrap;font-size:10px;color:var(--t3)">${fmtLocalTime(ev.created_at).substring(5,16) || '--:--'}</td>
           <td style="padding:8px 10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${ev.summary || ev.title || ev.event_type}</td>
@@ -250,6 +253,13 @@ function renderAgent(name, data) {
 <div class="cd"><div class="cd-h"><h2>${I18N.t('agents.event.history_title')}</h2><span class="ts t3">${I18N.t('agents.event.recent_n', {n: events.length})}</span></div>${evtHtml}</div>`;
 
   el.innerHTML = html;
+  // Issue #108: 滚动定位到第一个高亮事件行
+  if (highlightId) {
+    const _firstHl = el.querySelector('.highlight-flash');
+    if (_firstHl) {
+      setTimeout(function() { _firstHl.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 120);
+    }
+  }
   // 根据已配置 skill 的 scope 设置初始页签（避免回显时看不到已配置的 skill）
   _skillScope = (data.skill_scope === 'repo') ? 'repo' : (data.skill_scope === 'user') ? 'user' : 'official';
   const scopeSel = document.querySelector('.cfg-skill-scope');

@@ -98,7 +98,8 @@ def list_agent_types():
 
 
 @router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Agent 会话配置查看")
-def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key)):
+def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
+                     user: dict = Depends(get_current_user_or_api_key)):
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
@@ -121,6 +122,13 @@ def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depends(get_
     elif repo_key.startswith("github:"):
         _repo_keys.append(f"gitcode:{_owner_repo}")
     _rk_placeholders = ",".join("?" * len(_repo_keys))
+
+    # Issue #108: 归一化 issue_number → #N 格式，供前端高亮匹配
+    highlight_issue_id = ""
+    if issue_number:
+        _inum = str(issue_number).strip().lstrip("#")
+        if _inum:
+            highlight_issue_id = f"#{_inum}"
 
     from src.session_manager import db, db_lock
     session_data = {}
@@ -270,6 +278,7 @@ def get_agent_detail(name: str, owner: str, repo: str, user: dict = Depends(get_
             "event_stats": event_stats,
         },
         "recent_events": recent_events,
+        "highlight_issue_id": highlight_issue_id,
         "im": {
             "im_app_id": session_data.get("im_app_id", ""),
             "connected": vod_bot_connected,
