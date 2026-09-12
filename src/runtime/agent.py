@@ -47,6 +47,7 @@ _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
+    "codex": ["codex", "exec", "--json", "--sandbox", "workspace-write", "hello"],
     "cursor": ["cursor", "run", "hello"],
     "codex": ["codex", "exec", "--json", "hello"],
 }
@@ -595,6 +596,7 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
     patterns = {
         "hermes": ["hermes acp", "hermes chat", "hermes -z"],
         "codearts": ["codearts run"],
+        "codex": ["codex exec"],
     }.get(backend, ["opencode run"])
     killed_any = False
     for pattern in patterns:

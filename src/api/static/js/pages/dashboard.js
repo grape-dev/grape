@@ -1108,7 +1108,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   }
 
   window._engCurIds = currentIds.slice();
-  const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; return ''; }).filter(Boolean))];
+  const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; if (n.includes('codex')) return 'codex'; return ''; }).filter(Boolean))];
   const _availScopes = [...new Set(sorted.map(e => e.scope || 'global'))];
   const _SCOPE_LABELS_ALL = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
   const _SCOPE_ORDER_ALL = ['local','user','repo','global'];
