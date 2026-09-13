@@ -1,14 +1,15 @@
 """Git 仓库统一接口（Issue-45 M3）：`/api/git-repo/{owner}/{repo}/...` 白名单资源端点。
 
 - 认证：`get_current_user_or_api_key`（对外安全路由，进 OpenAPI 契约）。
-- provider：`X-Git-Provider` 头优先，其次 `provider` query，缺省 `gitcode`；github/gitlab 预留（403）。
+- provider：**由认证 token 的 repo_key 前缀派生**（gitcode:/github:），不接受调用方参数，
+  `git_repo_provider_from_token` 设计（单一信息源，消除错配）；github/gitlab 预留（403）。
 - 白名单：只暴露 Issue/PR/评论/内容/分支/提交/标签/里程碑等资源端点，**无限制透传被拒**。
 - gitcode 后端：复用 `repo_manager._req` 调 `api.gitcode.com/api/v5`，token 取仓库 bot token。
 - git-credential / workspace：供 CLI（方案③ 本地执行 git）内部取一次性/短期平台 token 与工作区。
 
 出参结构 = gitcode 平台实际结构（与技能 `gitcode-api-reference.md` 一致，见 docs/openapi/10-git-repos.md）。
 """
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key
@@ -60,9 +61,15 @@ class CommentBody(BaseModel):
     body: str
 
 
-def _provider(header: str = Header("", alias="X-Git-Provider"),
-              provider: str = Query("", description="gitcode/github/gitlab，缺省 gitcode")) -> str:
-    p = (header or "").strip() or (provider or "").strip() or "gitcode"
+def _provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
+    """Git provider（gitcode/github）：由认证 token 的 repo_key 前缀派生，不接受调用方参数。
+
+    单一信息源：token 签发时 repo_key 即带前缀（gitcode:/github:），
+    不需要也不再接受 X-Git-Provider / provider query——消除双信息源错配
+    （见 docs/weekly-02/git-repo-provider-from-token-design.md）。
+    """
+    from src.repo_key import parse_repo_key
+    p = parse_repo_key(user.get("repo_key") or "")[0] or "gitcode"
     if p not in _SUPPORTED_PROVIDERS:
         raise HTTPException(status_code=403, detail={"code": 403, "message": f"Git provider 未接入: {p}"})
     return p

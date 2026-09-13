@@ -1,4 +1,4 @@
-"""Issue-45 M3：Git 仓库统一接口测试.
+﻿"""Issue-45 M3：Git 仓库统一接口测试.
 
 覆盖：
 - provider 判定（头/query/缺省/未知）
@@ -34,6 +34,15 @@ def _client(monkeypatch):
 @pytest.fixture(autouse=True)
 def _token(monkeypatch):
     monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.user.db.get_github_token", lambda *a, **k: BOT)
+
+
+def _override_user(repo_key: str):
+    """设置会话 token 用户（依赖覆盖，auth_type=session_token）。"""
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: {
+        "id": UID, "username": "git_tester", "auth_type": "session_token",
+        "agent_type": "vod", "user_id": 0, "session_key": "s1",
+        "repo_key": repo_key}
 
 
 @pytest.fixture
@@ -49,25 +58,70 @@ def gitcode_calls(monkeypatch):
     return recorded
 
 
+@pytest.fixture
+def github_calls(monkeypatch):
+    """Mock repo_manager._github_req（provider=github 分流）；记录调用。"""
+    recorded = []
+
+    def _fake_gh_req(method, url, token="", body=None):
+        recorded.append({"method": method, "url": url, "token": token, "body": body})
+        return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
+
+    monkeypatch.setattr("src.user.repo_manager._github_req", _fake_gh_req)
+    return recorded
+
+
 def _get(client, path, **kw):
     return client.get(path, **kw)
 
 
 def test_provider_header_and_query(gitcode_calls, _client):
+    """provider 由 token 的 repo_key 前缀派生（gitcode）；不再接受调用方 header/query 覆盖。"""
     client = _client
+    # 缺省 user repo_key = gitcode:o/hello → 走 GitCode
     assert _get(client, f"/api/git-repo/{OWNER}/{REPO}/branches").status_code == 200
     assert "/branches" in gitcode_calls[-1]["url"]
     assert gitcode_calls[-1]["token"] == BOT
-
+    assert "gitcode.com" in gitcode_calls[-1]["url"]
+    # 调用方误传 provider 参数/头 → 忽略，仍以 token 派生为准
     assert _get(client, f"/api/git-repo/{OWNER}/{REPO}/branches",
-                headers={"X-Git-Provider": "gitcode"}).status_code == 200
-    assert _get(client, f"/api/git-repo/{OWNER}/{REPO}/branches?provider=gitcode").status_code == 200
+                headers={"X-Git-Provider": "github"}).status_code == 200
+    assert "gitcode.com" in gitcode_calls[-1]["url"]
+    assert _get(client, f"/api/git-repo/{OWNER}/{REPO}/branches?provider=github").status_code == 200
+    assert "gitcode.com" in gitcode_calls[-1]["url"]
+
+
+def test_provider_derived_from_token_gitcode(_client, gitcode_calls):
+    _override_user(f"gitcode:{OWNER}/{REPO}")
+    r = _get(_client, f"/api/git-repo/{OWNER}/{REPO}/branches")
+    assert r.status_code == 200
+    assert "gitcode.com" in gitcode_calls[-1]["url"]
+
+
+def test_provider_derived_from_token_github(_client, github_calls):
+    _override_user(f"github:{OWNER}/{REPO}")
+    r = _get(_client, f"/api/git-repo/{OWNER}/{REPO}/branches")
+    assert r.status_code == 200
+    assert "api.github.com" in github_calls[-1]["url"]
+    assert github_calls[-1]["token"] == BOT
+
+
+def test_provider_param_ignored_when_token_authoritative(_client, github_calls):
+    """token=github 时调用方误传 X-Git-Provider: gitcode → 仍走 GitHub（以 token 为准）。"""
+    _override_user(f"github:{OWNER}/{REPO}")
+    r = _get(_client, f"/api/git-repo/{OWNER}/{REPO}/branches",
+             headers={"X-Git-Provider": "gitcode"})
+    assert r.status_code == 200
+    _u = github_calls[-1]["url"]
+    assert "api.github.com" in _u and "gitcode.com" not in _u
 
 
 def test_unknown_provider_rejected(_client):
-    client = _client
-    # github 现在是受支持的 provider（不再 403）；gitlab 仍然被拒
-    assert _get(client, f"/api/git-repo/{OWNER}/{REPO}/branches?provider=gitlab").status_code == 403
+    """token 绑定未接入 provider（gitlab）→ 403 防御。"""
+    _override_user(f"gitlab:{OWNER}/{REPO}")
+    r = _get(_client, f"/api/git-repo/{OWNER}/{REPO}/branches")
+    assert r.status_code == 403
+    assert "未接入" in (r.json().get("detail", {}).get("message", ""))
 
 
 def test_repo_info_workspace(_client, gitcode_calls):
@@ -77,6 +131,16 @@ def test_repo_info_workspace(_client, gitcode_calls):
     ws = _get(client, f"/api/repos/{OWNER}/{REPO}/workspace").json()
     assert ws["clone_url"] == f"https://gitcode.com/{OWNER}/{REPO}.git"
     assert "workspace" in ws
+
+
+def test_repos_credential_provider_from_token(_client):
+    """TC-4: /api/repos git-credential/workspace 的 provider 同样由 token 派生（github）。"""
+    _override_user(f"github:{OWNER}/{REPO}")
+    cred = _client.get(f"/api/repos/{OWNER}/{REPO}/git-credential").json()
+    assert cred["provider"] == "github"
+    assert cred["clone_url"].startswith("https://github.com/")
+    ws = _client.get(f"/api/repos/{OWNER}/{REPO}/workspace").json()
+    assert ws["clone_url"].startswith("https://github.com/")
 
 
 def test_git_credential(_client):

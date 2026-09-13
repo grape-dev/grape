@@ -1,6 +1,6 @@
 """仓库路由：列表、托管、移除、同步 + git 平台凭据/工作区（方案③ CLI 支撑）"""
 import os
-from fastapi import APIRouter, HTTPException, Depends, Header, Query
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
@@ -1127,9 +1127,10 @@ _GITHUB_API_BASE = "https://api.github.com"
 _CREDENTIAL_TTL = 600
 
 
-def _repo_provider(header: str = Header("", alias="X-Git-Provider"),
-                   provider: str = Query("", description="gitcode/github，缺省 gitcode")) -> str:
-    p = (header or "").strip() or (provider or "").strip() or "gitcode"
+def _repo_provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
+    """Git provider（gitcode/github）：由认证 token 的 repo_key 前缀派生（见 git-repo-provider-from-token-design.md）。"""
+    from src.repo_key import parse_repo_key
+    p = parse_repo_key(user.get("repo_key") or "")[0] or "gitcode"
     if p not in _SUPPORTED_PROVIDERS:
         raise HTTPException(status_code=403, detail={"code": 403, "message": f"Git provider 未接入: {p}"})
     return p
