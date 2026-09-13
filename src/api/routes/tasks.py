@@ -604,10 +604,10 @@ class TaskConfirmBody(BaseModel):
 async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = Depends(get_current_user)):
     """开发者确认任务完成（Issue #51）。
 
-    将 task status → done，issue_state stage → done，
+    将 task status → completed，issue_state stage → done，
     completed_reason → 'user_confirmed' / 'issue_comment' / 'chat_agent'。
-    仅 pending_review 阶段可确认；已 done 幂等跳过。
-    Issue #85: 收紧校验——只允许 pending_review 和 done 阶段确认，不再允许 sre 阶段绕过。
+    Issue #131: 移除 stage 强制校验——任意阶段均可确认完成；
+    已 completed/done 幂等跳过；cancelled 拒绝确认。
     """
     from src.api.session_store import set_issue_stage, get_issue_stage
     with db_lock:
@@ -620,14 +620,8 @@ async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = De
         _repo_key, _issue_num, _status = row[0], row[1], row[2]
         if _status == 'completed' or _status == 'done':
             return {"ok": True, "already_done": True}
-        # 获取 stage 判断是否可确认
-        _st = None
-        if _issue_num:
-            _st = get_issue_stage(_repo_key, f"#{_issue_num}")
-        _stage = (_st.get("stage") if _st else "") or ""
-        # Issue #85: 只允许 pending_review 和 done 阶段确认
-        if _stage not in ("pending_review", "done"):
-            raise HTTPException(status_code=400, detail={"code": 400, "message": f"任务尚未到待审核阶段，当前阶段：{_stage}"})
+        if _status == 'cancelled':
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "已取消任务不可确认完成"})
         c.execute(
             "UPDATE tasks SET status='completed', completed_reason=?, completed_at=datetime('now') WHERE id=?",
             (body.confirmation, task_id))

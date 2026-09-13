@@ -115,22 +115,35 @@ class TestConfirmDone:
         assert row[0] == "completed"
         assert row[1] == "user_confirmed"
 
-    def test_confirm_done_rejected_when_not_in_review_stage(self):
+    def test_confirm_done_from_any_stage(self):
+        """Issue #131: 任意阶段均可确认完成，不再强制 stage 门控"""
+        for _stage in ('vod', 'issue', 'coding', 'qa', 'sre', 'sre_completed', 'pending_review'):
+            _clean()
+            tid = _insert_task(status='processing', issue_number=200 + hash(_stage) % 100, stage=_stage)
+            r = client.post(f"/api/tasks/{tid}/confirm-done", headers=_headers,
+                            json={"confirmation": "user_confirmed"})
+            assert r.status_code == 200, f"stage={_stage} 应允许确认完成，got {r.status_code}"
+            assert r.json()["status"] == "completed"
+            assert r.json()["stage"] == "done"
+
+    def test_confirm_done_rejected_when_cancelled(self):
+        """Issue #131: cancelled 状态任务不可确认完成"""
         _clean()
-        tid = _insert_task(status='active', issue_number=103, stage='vod')
+        tid = _insert_task(status='cancelled', issue_number=103, stage='vod')
         r = client.post(f"/api/tasks/{tid}/confirm-done", headers=_headers,
                         json={"confirmation": "user_confirmed"})
         assert r.status_code == 400
-        assert "尚未到待审核阶段" in r.json()["detail"]["message"]
+        assert "不可确认完成" in r.json()["detail"]["message"]
 
     def test_confirm_done_from_sre_stage(self):
-        """Issue #85: sre 阶段不再允许直接确认，必须先进入 pending_review"""
+        """Issue #131: sre 阶段也可直接确认完成"""
         _clean()
         tid = _insert_task(status='processing', issue_number=104, stage='sre')
         r = client.post(f"/api/tasks/{tid}/confirm-done", headers=_headers,
                         json={"confirmation": "user_confirmed"})
-        assert r.status_code == 400
-        assert "尚未到待审核阶段" in r.json()["detail"]["message"]
+        assert r.status_code == 200
+        assert r.json()["status"] == "completed"
+        assert r.json()["stage"] == "done"
 
 
 class TestCancelTask:
