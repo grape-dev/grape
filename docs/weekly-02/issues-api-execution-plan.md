@@ -142,11 +142,20 @@
   新增 `help/api/11-issues.md`（docs/openapi + help/api 双份，覆盖 5 端点 + 概念澄清）+ `README.md` 目录 + `tests/test_help_directory.py EXPECTED_API_FILES`（13→14）；
   顺带补齐 `tests/test_openapi.py EXPECTED_PUBLIC` 契约清单（issues 5 端点 + gitrepo_tree/contents_root + tasks_repo_all，基线遗留缺失）
 
-**C 未完成（留待后续）**：
-- **C3（issue_state 停写）暂不执行**：pipeline 3.1 阶段初始化可能早于 `ensure_issue_task` 建档
-  （无 `issue` 卡片行时 `issue_state` 是唯一数据落点）。直接停写会丢数据。故过渡期保留双写
-  （issue 权威 + issue_state 同步），C5 数据核对后再切。
-- **C5（DROP issue_state）**：依赖 C3 全部落定，上线生产验证后再做。
+**C 未完成（留待后续专项）**：
+- **C3 前置（已完成，2026-09-13）**：`_sync_issue_fields` 支持 `ensure_row` 建档最小行——
+  `set_issue_stage/set_issue_scene/set_scene_override_flag/set_parent_issue/set_subtask_mode` 在
+  issue 无卡片行时自动建档（user_id=0/status=active，幂等），解决「pipeline 3.1 建档早于
+  `ensure_issue_task` → issue 无行」的停写前置问题。端到端验证全过。
+- **C1（单表读）不单独切**：`issues.py._issue_stage_map` 保持双表聚合（issue_state 权威 + issue 兜底）。
+  若强制切为 issue 单表权威，会破坏 `test_issues_api`（测试直插 issue_state 绕过双写，见坑 4）。
+  **真单表读依赖 C3 停写后数据全落 issue 表**。
+- **C3（issue_state 停写）继续待专项**：新增建档兜底后已具备停写条件，但**停写须同时切读**——
+  `get_issue_stage / get_scene_override_flag / get_subtask_issues / cleanup.py:25 / event_pipeline / routing / tasks.py / pipeline.py`
+  等多处直接读 issue_state。切读会破坏直插 issue_state 的测试契约（坑 4），需先改测试为经 `set_*` 写数据。
+  这是一次性大改造，建议专项排期 + 生产双写观察后再执行。
+- **C5（DROP issue_state）**：依赖 C3 停写稳定 + 数据核对（备份后 DROP），上线生产验证后再做。
+- **C2（后端端点移除）**：`POST /api/tasks/create` 保留（避免 CLI/Agent 断裂），待 C5 统一清理。
 
 ---
 
