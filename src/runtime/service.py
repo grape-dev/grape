@@ -1292,6 +1292,12 @@ def update_task_status(task_id, status, **kw):
             revoke_session_token(task_id)
         except Exception as e:
             log.warning(f"update_task_status: revoke session token failed for {task_id}: {e}")
+        # Issue #134：任务终态后刷新健康度缓存（增强层，不改派发/广播语义）
+        try:
+            from src.runtime.health_scorer import record_task_completion
+            record_task_completion(row[1], status)
+        except Exception:
+            pass
 
 
 def cancel_task(task_id):
