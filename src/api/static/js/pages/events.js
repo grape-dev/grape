@@ -119,7 +119,7 @@ function renderEventDetail(data) {
               <div><span style="color:var(--t3)">Engine:</span> <b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}</div>
               <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
               <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
-              <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : I18N.t('events.status_running_prefix') + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}</div>
+              <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : I18N.t('events.status_running_prefix') + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}</div>
               ${data.task && data.task.task_id
                 ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_realtime_log')}</a></div>`
                 : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_log')}</a></div>`}
@@ -809,6 +809,66 @@ function _doRedispatch(seq) {
   }).catch(e => {
     const msg = (e.detail && e.detail.message) || e.message || e;
     app.showToast(I18N.t('events.redispatch_toast_failed', {msg: msg}));
+  });
+}
+
+// ===== 本机重试（Issue #128）=====
+function localRetryEvent(seq) {
+  _showLocalRetryGlass(seq);
+}
+
+function _showLocalRetryGlass(seq) {
+  _closeLocalRetryGlass();
+  const overlay = document.createElement('div');
+  overlay.className = 'lr-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
+  const modal = document.createElement('div');
+  modal.className = 'lr-glass';
+  modal.style.cssText = 'width:340px;background:rgba(255,255,255,0.72);backdrop-filter:blur(28px) saturate(200%);-webkit-backdrop-filter:blur(28px) saturate(200%);border-radius:18px;border:1px solid rgba(255,255,255,0.6);box-shadow:0 12px 40px rgba(0,0,0,0.12),0 2px 8px rgba(0,0,0,0.06);overflow:hidden;animation:rdpPop .25s cubic-bezier(0.34,1.56,0.64,1)';
+  modal.innerHTML = `
+    <div style="padding:18px 20px 14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#34c759,#30d158);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;box-shadow:0 4px 12px rgba(52,199,89,0.3)">🖥</div>
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--t,#1d1d1f);letter-spacing:-0.2px">${I18N.t('events.local_retry_title')}</div>
+          <div style="font-size:11px;color:var(--t3,#86868b)">Seq #${seq}</div>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--t2,#6e6e73);line-height:1.6;margin-bottom:14px">
+        ${I18N.t('events.local_retry_desc')}
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="bt bt-o bt-s" style="padding:8px 16px;font-size:12px" onclick="_closeLocalRetryGlass()">${I18N.t('events.local_retry_cancel')}</button>
+        <button class="bt bt-s" style="padding:8px 16px;font-size:12px;background:linear-gradient(135deg,#34c759,#30d158);color:#fff;border:none;box-shadow:0 4px 12px rgba(52,199,89,0.35)" onclick="_doLocalRetry(${seq})">${I18N.t('events.local_retry_confirm')}</button>
+      </div>
+    </div>`;
+  overlay.appendChild(modal);
+  overlay.addEventListener('mousedown', function(e) {
+    if (e.target === overlay) _closeLocalRetryGlass();
+  });
+  const _escHandler = function(e) {
+    if (e.key === 'Escape') {
+      _closeLocalRetryGlass();
+      document.removeEventListener('keydown', _escHandler);
+    }
+  };
+  document.addEventListener('keydown', _escHandler);
+  document.body.appendChild(overlay);
+}
+
+function _closeLocalRetryGlass() {
+  const ex = document.querySelector('.lr-overlay');
+  if (ex) ex.remove();
+}
+
+function _doLocalRetry(seq) {
+  _closeLocalRetryGlass();
+  API.post('/events/' + seq + '/redispatch?local_only=true').then(d => {
+    app.showToast(I18N.t('events.local_retry_toast_success'));
+    app.nav('event', seq);
+  }).catch(e => {
+    const msg = (e.detail && e.detail.message) || e.message || e;
+    app.showToast(I18N.t('events.local_retry_toast_failed', {msg: msg}));
   });
 }
 
