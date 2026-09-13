@@ -191,14 +191,16 @@ def terminate_event(seq: int, user: dict = Depends(get_current_user)):
     from src.session_manager import db, db_lock
     from src.api.event_store import update_event_status
 
-    # 查事件状态
+    # 查事件状态（含 repo_key 供归属校验）
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+        c.execute("SELECT status, repo_key FROM events WHERE seq=?", (seq,))
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件不存在"})
     evt_status = row[0]
+    from src.api.deps import check_repo_access
+    check_repo_access(user, row[1] or "")
 
     if evt_status not in ('running', 'dispatched'):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"事件状态为 {evt_status}，无法终止"})
@@ -280,6 +282,10 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
         pass
 
     evt = _load_event(seq)
+
+    # 1.0）归属校验：仅仓库归属人（managed_repos）可重派
+    from src.api.deps import check_repo_access
+    check_repo_access(user, evt.get("repo_key", "") or "")
 
     # 1.5）onboarding 主事件重派 → 任务级自愈（Issue #46 重构后兼容）：
     #     历史 onboarding_exp/onboarding_explore 事件仍可能被 redispatch；onboarding 后端已改为「按模板创建标准任务」，
