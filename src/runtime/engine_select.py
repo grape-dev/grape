@@ -258,6 +258,39 @@ def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
     return result
 
 
+# ===== 健康度过滤增强层（Issue #134）=====
+# 健康度过滤作为派发链路的增强层插入，不改变广播协议/分发语义/A2A 事件流转。
+# 仅在 pick_engine 的候选机器筛选阶段生效：过滤低健康分引擎，全部不健康时降级兜底。
+
+
+def _filter_by_health(members: list[dict]) -> list[dict]:
+    """健康度过滤增强层：从候选引擎中过滤出健康的。
+
+    健康分 >= HEALTH_SCORE_THRESHOLD（默认 30）且连续失败 < MAX_CONSECUTIVE_FAILURES（默认 5）。
+    全部不健康时返回空列表（调用方降级兜底）。
+    """
+    try:
+        from src.runtime.health_scorer import filter_healthy
+        rids = [m["runtime_id"] for m in members if m.get("runtime_id")]
+        healthy_rids = set(filter_healthy(rids))
+        return [m for m in members if m.get("runtime_id") in healthy_rids]
+    except Exception as e:
+        log.warning(f"_filter_by_health failed, skipping health filter: {e}")
+        return members  # 模块异常时不过滤（不阻塞派发）
+
+
+def _best_health_fallback(members: list[dict]) -> int | None:
+    """全部不健康时的降级兜底：取健康分最高的引擎。"""
+    try:
+        from src.runtime.health_scorer import best_fallback
+        rids = [m["runtime_id"] for m in members if m.get("runtime_id")]
+        return best_fallback(rids)
+    except Exception as e:
+        log.warning(f"_best_health_fallback failed: {e}")
+        # 兜底的兜底：取第一个候选
+        return members[0]["runtime_id"] if members else None
+
+
 def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
                 scene_id: str = "", user_id: int = 0,
                 issue_creator: str = "") -> int | None:
@@ -300,9 +333,21 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
                 cand = _apply_filters([m for m in members if _member_scope(m, repo) == scope], cfg)
                 if not cand:
                     continue
+                # Issue #134: 健康度过滤增强层——在候选机器筛选阶段过滤低健康分引擎
+                # 不改变广播协议/分发语义：仅在 pick_engine 选机阶段生效
+                cand = _filter_by_health(cand)
+                if not cand:
+                    continue  # 该档位全不健康，尝试下一档位
                 if cfg.get("rule") == "order":
                     return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
                 return random.choice(cand)["runtime_id"]
+            # 所有档位均无健康引擎 → 降级兜底：取所有候选中健康分最高的
+            all_cand = _apply_filters(members, cfg)
+            if all_cand:
+                _best = _best_health_fallback(all_cand)
+                if _best:
+                    log.info(f"pick_engine: all scopes unhealthy, fallback to best={_best}")
+                    return _best
             return None     # 集合存在但无健康成员 → engine_unavailable
     # engine_runtime_ids 为空 → 回退会话主引擎（legacy）
     if fallback_runtime_id:
