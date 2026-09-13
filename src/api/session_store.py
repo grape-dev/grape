@@ -92,11 +92,14 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     return None
 
 
-def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated_at: bool = True):
-    """Phase B2.5：将收编字段双写回 `issue` 卡片行（按 issue_number；无卡片行则跳过）。
+def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated_at: bool = True,
+                       ensure_row: bool = False, assignee: str = ""):
+    """Phase B2.5/C3：将收编字段写回 `issue` 卡片行（按 issue_number）。
 
-    幂等：仅 UPDATE issue 卡片，不建档（建档仍由 ensure_issue_task 负责）。
-    与 get_issue_stage 的 issue 优先读对应，保证单表数据一致。
+    - ensure_row=True：issue 无卡片行时**建档最小行**（status='active'，保证 ensure_issue_task 幂等复用；
+      建行后按 fields 更新）。用于 stage/scene/parent 等写入路径，为 C3 停写 issue_state 铺路。
+    - ensure_row=False：仅 UPDATE 已有行（默认，保持既有行为）。
+    幂等：UPDATE 按 repo_key+issue_number，无行建档仅一次。
     """
     try:
         _num = int(str(issue_id or "").lstrip("#"))
@@ -113,7 +116,17 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
+            if ensure_row:
+                # 建档最小行（幂等：仅当无该卡片行时 INSERT；后再 UPDATE 收编字段）。
+                # SQLite 与 MySQL 均支持 INSERT..SELECT..WHERE NOT EXISTS。
+                c.execute(
+                    "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) "
+                    "SELECT 0, ?, ?, ?, 'active' WHERE NOT EXISTS "
+                    "(SELECT 1 FROM issue WHERE repo_key=? AND issue_number=?)",
+                    (assignee, repo_key, _num, repo_key, _num))
+                c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
+            else:
+                c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
             db.commit()
     except Exception as e:
         from src.config import log as _log2
@@ -151,11 +164,11 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                 (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, _init_scene),
             )
         db.commit()
-    # Phase B2：双写 stage 到 issue 表（收编后的单表；issue 有卡片行则同步）
+    # Phase B2.5/C3：双写 stage 到 issue 单表（无卡片行则建档最小行，为停写 issue_state 铺路）
     _sync_issue_fields(repo_key, issue_id, {
         "stage": stage, "owner_agent": owner_agent, "assignee": assignee or "",
         "a2a_seq": a2a_seq,
-    })
+    }, ensure_row=True, assignee=assignee)
     from src.config import log
     _scene_log = _init_scene if not row else '(existing)'
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee} scene={_scene_log}")
@@ -233,7 +246,8 @@ def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: 
                 (repo_key, issue_id, scene_id or "", scene_user_id),
             )
         db.commit()
-    _sync_issue_fields(repo_key, issue_id, {"scene_id": scene_id or "", "scene_user_id": scene_user_id})
+    _sync_issue_fields(repo_key, issue_id, {"scene_id": scene_id or "", "scene_user_id": scene_user_id},
+                       ensure_row=True)
     from src.config import log
     log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
 
@@ -253,7 +267,7 @@ def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
                 "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
                 (repo_key, issue_id, val))
         db.commit()
-    _sync_issue_fields(repo_key, issue_id, {"allow_scene_override": val})
+    _sync_issue_fields(repo_key, issue_id, {"allow_scene_override": val}, ensure_row=True)
     log.info(f"SceneOverride: repo={repo_key} issue={issue_id} allowed={val}")
 
 
@@ -286,7 +300,7 @@ def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):
                 (repo_key, issue_id, parent_issue_id or ""),
             )
         db.commit()
-    _sync_issue_fields(repo_key, issue_id, {"parent_issue_id": parent_issue_id or ""})
+    _sync_issue_fields(repo_key, issue_id, {"parent_issue_id": parent_issue_id or ""}, ensure_row=True)
     from src.config import log
     log.info(f"ParentIssue: repo={repo_key} issue={issue_id} parent={parent_issue_id}")
 
@@ -313,7 +327,7 @@ def set_subtask_mode(repo_key: str, issue_id: str, enabled: bool = True):
                 (repo_key, issue_id, val),
             )
         db.commit()
-    _sync_issue_fields(repo_key, issue_id, {"is_subtask_mode": val})
+    _sync_issue_fields(repo_key, issue_id, {"is_subtask_mode": val}, ensure_row=True)
     from src.config import log
     log.info(f"SubtaskMode: repo={repo_key} issue={issue_id} enabled={enabled}")
 
