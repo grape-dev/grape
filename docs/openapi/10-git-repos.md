@@ -181,7 +181,6 @@ grapecli git diff --repo Jason7602/hello
 |------|------|------|------|
 | Path | `owner` | string | 仓库属主 |
 | Path | `repo` | string | 仓库名 |
-| Provider | — | — | 由认证 token 的 `repo_key` 前缀派生（gitcode:/github:） |
 
 **返回（200）**：仓库对象
 ```json
@@ -205,7 +204,7 @@ grapecli git diff --repo Jason7602/hello
 
 ### GET /api/git-repo/{owner}/{repo}/branches
 
-**入参**：同仓库信息（Path owner/repo + provider）；Query `?per_page=50`（技能用）。
+**入参**：Path `{owner}`/`{repo}`（provider 由 token 派生，不传）；Query `?per_page=50`（技能用）。
 
 **返回（200）**：分支对象数组
 ```json
