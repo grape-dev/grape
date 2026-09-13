@@ -788,9 +788,22 @@ CREATE TABLE IF NOT EXISTS knowledge_write_queue (
     last_error    TEXT NOT NULL DEFAULT '',
     next_retry_at TEXT NOT NULL DEFAULT (datetime('now')),
     created_at    TEXT DEFAULT (datetime('now')),
-    updated_at    TEXT DEFAULT (datetime('now'))
-)"""),
-]
+    updated_at      TEXT DEFAULT (datetime('now'))
+)"""""),    # ===== Issue #134: 机器健康度持久化表 =====
+    ("runtime_health_scores", """
+CREATE TABLE IF NOT EXISTS runtime_health_scores (
+    runtime_id          INTEGER PRIMARY KEY,          -- agent_runtimes.id
+    health_score        INTEGER NOT NULL DEFAULT 100,  -- 0-100, 越高越健康
+    total_tasks         INTEGER NOT NULL DEFAULT 0,    -- 近 N 天总任务数
+    failed_tasks        INTEGER NOT NULL DEFAULT 0,    -- 近 N 天失败数
+    completed_tasks     INTEGER NOT NULL DEFAULT 0,    -- 近 N 天完成数
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,   -- 连续失败次数
+    failure_rate        REAL NOT NULL DEFAULT 0.0,     -- 失败率 (0-1)
+    last_status         TEXT DEFAULT '',               -- 最近一条任务状态
+    window_days         INTEGER NOT NULL DEFAULT 7,    -- 滑动窗口天数
+    updated_at          TEXT DEFAULT (datetime('now'))
+)"""""),]
+
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 

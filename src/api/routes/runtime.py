@@ -334,6 +334,34 @@ def event_bus_debug(user: dict = Depends(get_current_user)):
     }
 
 
+# ===== Issue #134: 机器健康度查询 API =====
+
+@router.get("/admin/machine-health")
+def machine_health_overview(user: dict = Depends(get_current_user)):
+    """获取所有引擎的机器健康度概览（供前端/运维查看）。
+
+    返回 [{runtime_id, name, health_score, total_tasks, failed_tasks,
+           consecutive_failures, failure_rate, ...}]
+    """
+    from src.runtime.health_scorer import get_all_health_scores
+    from src.runtime.instances import runtime_instance_name
+    scores = get_all_health_scores()
+    # 补充引擎名
+    for s in scores:
+        s["engine_name"] = runtime_instance_name(s.get("runtime_id", 0))
+    return {"engines": scores}
+
+
+@router.get("/admin/machine-health/{runtime_id}")
+def machine_health_detail(runtime_id: int, user: dict = Depends(get_current_user)):
+    """获取单个引擎的健康度详情。"""
+    from src.runtime.health_scorer import get_health_score
+    from src.runtime.instances import runtime_instance_name
+    data = get_health_score(runtime_id, force_refresh=True)
+    data["engine_name"] = runtime_instance_name(runtime_id)
+    return data
+
+
 @router.post("/admin/batch-recover")
 def batch_recover_stale_tasks_api(user: dict = Depends(get_current_user)):
     """Manually trigger batch stale task recovery (Phase 5)."""

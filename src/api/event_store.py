@@ -383,10 +383,25 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
 
 
 def update_event_status(seq: int, status: str):
-    """更新事件状态"""
+    """更新事件状态（含终态保护）。
+
+    幂等保护：已终态（completed/failed/cancelled）的事件不允许被其他终态覆盖。
+    - 已 completed 的事件不允许被 failed 覆盖（防止任务成功后延迟的 failed 信号覆盖结果，
+      Issue #130 seq#5304 场景：任务实际成功但事件被错误标记失败）。
+    - 已 failed 的事件不允许被 completed 覆盖（防止用户终止后残留进程跑完调 complete 把
+      failed 覆盖成 completed，2026-08-24 seq#2488 实例）。
+    - 非终态（running/dispatched）→终态或非终态→非终态的更新不受限制。
+    """
+    _TERMINAL = ("completed", "failed", "cancelled")
     with db_lock:
         try:
             c = db.cursor()
+            if status in _TERMINAL:
+                c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+                row = c.fetchone()
+                if row and row[0] in _TERMINAL and row[0] != status:
+                    log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (terminal state protection)")
+                    return
             c.execute("UPDATE events SET status=? WHERE seq=?", (status, seq))
             db.commit()
         except Exception as e:

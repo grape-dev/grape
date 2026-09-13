@@ -830,14 +830,11 @@ function _detailHtml(t) {
 }
 
 function _renderTaskActionsInline(t) {
-  const _stage = t.stage || '';
   const _status = t.status || '';
   let html = '';
-  // Issue #51: 确认完成
-  if (_stage === 'pending_review' || _stage === 'sre' || _stage === 'sre_completed') {
-    if (_status !== 'completed' && _status !== 'cancelled') {
-      html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')}</button>`;
-    }
+  // Issue #131: 任意阶段均可确认完成（cancelled/completed 不显示）
+  if (_status !== 'completed' && _status !== 'cancelled') {
+    html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')}</button>`;
   }
   // 取消任务
   if (_status !== 'completed' && _status !== 'cancelled') {
