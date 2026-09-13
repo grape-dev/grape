@@ -53,6 +53,12 @@ EXPECTED_API_FILES = [
     "README.md",
 ]
 
+# help/api 面向用户，允许与 docs/openapi 源文件不一致（docs 保留完整设计/实现说明，help 只留 API 参考）。
+# 对这类文件仍校验存在性 + 非空，但不要求字节一致。
+API_FILES_DIVERGENT_FROM_SOURCE = {
+    "10-git-repos.md",  # GitHub 等都透传；docs 版含方案③/token 不可感知等内部实现，help 版精简为纯 API 参考
+}
+
 
 class TestHelpDirectoryStructure:
     """Verify help/ directory structure."""
@@ -125,12 +131,27 @@ class TestApiFiles:
 
     @pytest.mark.parametrize("filename", EXPECTED_API_FILES)
     def test_api_matches_openapi_source(self, filename):
-        """help/api/ files must be identical to docs/openapi/ source."""
+        """help/api/ files must be identical to docs/openapi/ source.
+
+        豁免 API_FILES_DIVERGENT_FROM_SOURCE：这些文件 help 版面向用户、docs 版含完整设计/实现说明，
+        仅校验存在性 + 非空（见 _test_api_help_usable）。
+        """
+        if filename in API_FILES_DIVERGENT_FROM_SOURCE:
+            self._test_api_help_usable(filename)
+            return
         src = OPENAPI_DIR / filename
         dst = API_DIR / filename
         assert src.exists(), f"Source {src} not found"
         assert dst.exists(), f"Destination {dst} not found"
         assert src.read_bytes() == dst.read_bytes(), f"{filename} differs from source"
+
+    def _test_api_help_usable(self, filename):
+        src = OPENAPI_DIR / filename
+        dst = API_DIR / filename
+        assert src.exists(), f"Source {src} not found"
+        assert dst.exists(), f"Destination {dst} not found"
+        content = dst.read_text(encoding="utf-8").strip()
+        assert len(content) > 200, f"{filename} help 版为空或过短（面向用户不可用）"
 
 
 class TestHelpHtmlMigration:
