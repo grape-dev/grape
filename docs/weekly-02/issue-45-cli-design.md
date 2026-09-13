@@ -7,6 +7,9 @@
 > 范围：`grape` 独立发布包的形态、子命令、与 git/worker 集成。
 >
 > ⚠️ **2026-09-08：`grape` CLI 已拆为独立项目** `https://gitcode.com/grape-dev/grape-cli`，父仓库不再跟踪 `cli/`。本设计文档为历史设计记录，实现与后续迭代以新仓库为准。
+>
+> ⚠️ **属性修订（2026-09-12）**：git-repo provider 已改由认证 token 的 `repo_key` 前缀派生，
+> 不再接受 `--provider`/`X-Git-Provider`（R5 项已过时，见 `git-repo-provider-from-token-design.md`）。
 
 ## 关联文档
 

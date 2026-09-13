@@ -6,6 +6,10 @@
 > 日期：2026-09-07
 > 范围：技能使用到的 GitCode API 包装为 grape 统一 Git 仓库接口；git clone/push 的 token 不可感知。
 
+> ⚠️ **设计修订（2026-09-12）**：provider 判定已从「`X-Git-Provider` / `provider` 参数」改为
+> **由认证 token 的 `repo_key` 前缀派生**（见 `git-repo-provider-from-token-design.md`）。下文中
+> 2.1 节的 provider 说明已过时，以修订文档为准。
+
 ## 关联文档
 
 - API 认证：`docs/weekly-02/issue-45-openapi-api-design.md`

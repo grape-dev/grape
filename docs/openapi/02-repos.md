@@ -3,7 +3,7 @@
 > 对外公开（部分只读），认证：`get_current_user_or_api_key`。
 > ⚠️ **与 `/api/git-repo` 区分**：本接口（`/api/repos`）是 **grape 平台的仓库接口**，承载 grape 平**台业务属性
 > （托管/同步/成员/bot token/部署 URL/项目知识等）；而 `/api/git-repo`（见 10-git-repos.md）是
-> **Git 仓库透传接口**（Issue/PR/内容/分支等由 gitcode/github/gitlab 提供，`X-Git-Provider` 区分后端）。
+> **Git 仓库透传接口**（Issue/PR/内容/分支等由 gitcode/github/gitlab 提供，后端由 token 的 repo_key 前缀判定）。
 
 ## GET /api/repos/managed — 托管仓库列表
 
@@ -140,7 +140,7 @@
 > （chat→用户 token / devops agent→仓库 bot token）以**一次性/短期凭证**形式交 CLI 本地 `git clone/push` 用。
 
 | Path | `{owner}` `{repo}` |
-| Header/Query | `X-Git-Provider` / `provider` 缺省 gitcode |
+| Provider | 由认证 token 的 `repo_key` 前缀派生（gitcode:/github:），不传 provider 参数 |
 | 出参 | `{provider: "gitcode", username: "x-access-token", password: "<一次性 token>", clone_url: "...", expires_in: 600}` |
 | 返回 | 200；403 非会话级 token / provider 未接入；502 平台 token 解析失败 |
 
@@ -151,6 +151,6 @@
 > ⚠️ 非平台原生——返回 grape 管理工作区（worktree）的本地路径，供 CLI 在本地执行 git。
 
 | Path | `{owner}` `{repo}` |
-| Header/Query | `X-Git-Provider` / `provider` 缺省 gitcode |
+| Provider | 由认证 token 的 `repo_key` 前缀派生（gitcode:/github:），不传 provider 参数 |
 | 出参 | `{workspace: "<本地路径>", clone_url: "https://gitcode.com/{owner}/{repo}.git"}` |
 | 返回 | 200 |

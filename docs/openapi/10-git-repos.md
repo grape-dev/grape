@@ -9,12 +9,12 @@
 
 ## 后端区分（Git Provider 判定）
 
-通过 **`X-Git-Provider` 请求头**（推荐）或 **`provider` query 参数**指定后端，缺省默认 `gitcode`：
+Git provider（gitcode / github）**由认证 token 的 `repo_key` 前缀派生**（`gitcode:` / `github:`），
+不接受 `X-Git-Provider` / `provider` 参数（单一信息源，避免错配，见 `docs/weekly-02/git-repo-provider-from-token-design.md`）：
 
 ```
-X-Git-Provider: gitcode | github | gitlab
- 或
-GET .../api/git-repo/...?provider=github
+token（tk_）repo_key = gitcode:owner/repo  → GitCode 后端
+token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ```
 
 | provider | 内部实现 |
@@ -181,7 +181,7 @@ grapecli git diff --repo Jason7602/hello
 |------|------|------|------|
 | Path | `owner` | string | 仓库属主 |
 | Path | `repo` | string | 仓库名 |
-| Header/Query | `X-Git-Provider` / `provider` | string | 缺省 gitcode |
+| Provider | — | — | 由认证 token 的 `repo_key` 前缀派生（gitcode:/github:） |
 
 **返回（200）**：仓库对象
 ```json
