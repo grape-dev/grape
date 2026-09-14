@@ -1311,13 +1311,16 @@ SANDBOX_CREDENTIAL_ENV_VARS = [v.strip() for v in os.environ.get("SANDBOX_CREDEN
 | 步骤 | 内容 | 参考 |
 |------|------|------|
 | 0 | **实施前验证（已完成）** | — |
-| 0a | ✅ 验证通过：opencode（bun 编译）原生走 HTTP_PROXY。bwrap --unshare-net 内 opencode run 成功调模型 API，代理拦截到 3 个 CONNECT 请求到 opengw.clouddeveloper.club:443。bun 的 strings 确认含 http_proxy/https_proxy 支持。不需要 global-agent | 确定 global-agent 不需要 |
+| 0a | ✅ 验证通过：四个引擎全部走 HTTP_PROXY。opencode（bun）3 个 CONNECT → 模型回复 "hello"。codearts（bun）4 个 CONNECT（含 snap-access.cn-north-4.myhuaweicloud.com）。hermes（Python httpx）5 个 CONNECT → 模型回复 "hello"。codex 环境未安装，待远程 Worker 验证（底层 Node.js，预计走 HTTP_PROXY） | 不需要 global-agent |
 | 0b | ✅ 验证通过：--cap-drop ALL 不影响 pip install / npm / node / touch / chmod。whoami=id=yangaiwu（非 root，正常用户） | 保留 --cap-drop ALL |
-| 0c | ✅ 验证通过：bwrap --unshare-net 后 lo（127.0.0.1）可用。沙箱内 Python ThreadingTCPServer bind 127.0.0.1:3128 成功，curl 和 opencode 都连上了 | 确定沙箱内桥接可行 |
+| 0c | ✅ 验证通过：bwrap --unshare-net 后 lo（127.0.0.1）可用。沙箱内 Python ThreadingTCPServer bind 127.0.0.1:3128 成功，三个引擎都连上了代理 | 确定沙箱内桥接可行 |
 
 **验证中发现的兼容性问题**：
 - bwrap 0.4.1 **不支持 --disable-userns**（`Unknown option --disable-userns`）。从方案中去掉此项。
 - Unix socket 文件必须用 `--bind`（不是 `--ro-bind`），且路径不能在被 `--tmpfs` 覆盖的 /tmp 下。建议放在 `{WORKSPACE_DIR}` 或 home 目录下。
+- codearts 尝试连 `snap-access.cn-north-4.myhuaweicloud.com:443`（华为云 xCenter），不在白名单中。需确认是否必须，如是则加入白名单或确保 OPENCODE_DISABLE_MODELS_FETCH=1 生效。
+- codearts 需要可写的 `.local/state/codeartsdoer` 和 `.cache/codeartsdoer` 目录（bwrap --bind 而非 --ro-bind）。
+- hermes 需要 grape 的 venv 路径（`/home/yangaiwu/grape/.venv`）在沙箱内可见。
 | 1 | detect.py — 环境预检 + 敏感 env 扫描 | deepagents detect.py |
 | 2 | audit.py — RotatingAuditLog + 哈希链 + verify_chain | agent-bom proxy_audit.py |
 | 3 | cgroup.py — CgroupSlice + 降级 + context manager | deepagents cgroup.py |
