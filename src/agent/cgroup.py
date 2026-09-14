@@ -122,7 +122,14 @@ class CgroupSlice:
         return self._created
 
     def create(self) -> bool:
-        """创建 cgroup 子组。返回 False = 降级（不可用但已告警）。"""
+        """创建 cgroup 子组。返回 False = 降级（不可用但已告警）。
+
+        并发安全：每个任务用唯一的 cgroup 子组名（sha256(task_id)），不同任务
+        的 cgroup 路径不同，不存在并发写同一目录的竞态。
+        bwrap 的 --info-fd / --json-status-fd 在 fork 后有竞态，但我们未使用这些
+        接口。如果后续引入 bwrap --info-fd 做进程追踪，需要加原子锁串行化 namespace
+        初始化阶段（参考 tallyrun 的 lockfile 机制）。
+        """
         if not self._has_sudo:
             log.warning(
                 "cgroup: sudo not available, resource limits disabled (degraded)"
@@ -184,6 +191,10 @@ class CgroupSlice:
                     str(mem_limit * 1024 * 1024),
                 )
                 # memory.high（90% 软上限 — 内核回收内存但不杀进程，借鉴 m9m）
+                # 注意：memory.high 单独设置只是延迟 OOM，不避免 OOM。
+                # 完整方案需要监控 memory.events 的 high 计数器 + 接入 systemd-oomd
+                # 在节流持续时采取动作。当前仅设阈值，硬上限 memory.max 仍然有效。
+                # 后续增强：读 memory.events high 计数器，记录到审计日志。
                 high_bytes = mem_limit * 1024 * 1024 * 90 // 100
                 try:
                     self._write(f"{base}/memory.high", str(high_bytes))
@@ -247,6 +258,7 @@ class CgroupSlice:
                     str(mem_limit * 1024 * 1024),
                 )
                 # memory.soft_limit_in_bytes（90% 软上限 — 内核回收内存但不杀进程）
+                # 注意：同 v2 memory.high，单独设置只延迟 OOM。需后续补 memory.events 监控。
                 soft_bytes = mem_limit * 1024 * 1024 * 90 // 100
                 try:
                     self._write(

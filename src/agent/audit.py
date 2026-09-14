@@ -34,6 +34,11 @@ class _AsyncWriter:
 
     哈希链计算同步执行（保证链连续性），磁盘 I/O 异步（不阻塞代理请求）。
     每个 (path, line) 放入 Queue，后台线程串行写入。
+
+    崩溃风险：进程在 flush 前崩溃时，Queue 中的审计事件会丢失。
+    完整方案应使用 Transactional Outbox Pattern（先写 DB outbox 表，后台 worker
+    再异步移动到审计存储）。当前场景：审计日志是安全审计用，非交易凭证，
+    丢失少量记录可接受。Queue 满时降级为同步写（不丢数据）。
     """
 
     def __init__(self):

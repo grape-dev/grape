@@ -449,6 +449,10 @@ BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/run")
 
 # /etc 安全子集（借鉴 Shadi/isolate 的 safeEtcMounts）— 只挂程序运行必需的文件，
 # 不含 ssh 密钥/shadow/nginx 配置/数据库密码等敏感文件。用 --ro-bind-try（不存在时跳过）。
+# 注意：/etc/resolv.conf 在 WSL 等环境中可能是符号链接指向另一个挂载点，
+# --ro-bind 符号链接会失败。--ro-bind-try 不报错但可能挂载失败。
+# 如果部署到 WSL 环境，需要实现 cross-mount repair（先 --tmpfs 占位再 --ro-bind 真实目标）。
+# grape 当前部署目标是 Linux（非 WSL），resolv.conf 是普通文件，不受影响。
 BWRAP_RO_ETC_SAFE = (
     "/etc/ssl",                  # CA 证书（HTTPS 验证）
     "/etc/ca-certificates",      # CA 证书（Debian/Ubuntu）
