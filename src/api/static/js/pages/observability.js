@@ -165,6 +165,15 @@ function _workerCardHTML(wk) {
   </div>`;
 }
 
+function _obsHealthScoreHTML(rt) {
+  const s = rt.health_score;
+  if (s === null || s === undefined) return '-';
+  const c = s === 0 ? 'var(--r)' : s < 50 ? 'var(--y)' : 'var(--g)';
+  const cf = rt.health_consecutive_failures > 0 ? ` <span style="font-size:9px;opacity:.7">连失${rt.health_consecutive_failures}</span>` : '';
+  const hb = rt.health_heartbeat_alive === false ? ' · 失联' : '';
+  return `<span style="color:${c};font-weight:600">${s}</span>${cf}<span style="font-size:9px;opacity:.7">${hb}</span>`;
+}
+
 function _runtimeRowHTML(rti) {
   const rid = rti.id;
   const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
@@ -187,6 +196,7 @@ function _runtimeRowHTML(rti) {
     <td>${dot} <b>${rti.name}</b></td>
     <td><span id="rt-${rid}-version" class="ts t3">${rti.version || '-'}</span></td>
     <td><span id="rt-${rid}-health" style="color:${hc};font-weight:600">${I18N.t('observability.' + (rti.health || 'offline'))}</span></td>
+    <td><span id="rt-${rid}-score" class="ts t3">${_obsHealthScoreHTML(rti)}</span></td>
     <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
     <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
     <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
@@ -231,7 +241,7 @@ function _rerenderRuntimeTable() {
   if (rowsEl) {
     let html = '';
     if (pageRuntimes.length) {
-      html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
+      html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>健康分</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
       html += pageRuntimes.map(_runtimeRowHTML).join('');
       html += '</tbody></table></div>';
     } else {
@@ -383,7 +393,7 @@ function renderOverview(ops, rt) {
     runtimeTable = _filterBar;
     runtimeTable += '<div id="obs-runtime-rows">';
     if (_pageRuntimes.length) {
-      runtimeTable += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
+      runtimeTable += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>健康分</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
       runtimeTable += _pageRuntimes.map(_runtimeRowHTML).join('');
       runtimeTable += '</tbody></table></div>';
     } else {
@@ -476,6 +486,9 @@ function updateOverview(ops, rt) {
 
     const healthEl = document.getElementById('rt-' + rid + '-health');
     if (healthEl) { healthEl.textContent = I18N.t("observability." + (rti.health || "offline")); healthEl.style.color = hc; }
+
+    const scoreEl = document.getElementById('rt-' + rid + '-score');
+    if (scoreEl) { scoreEl.innerHTML = _obsHealthScoreHTML(rti); }
 
     const loadEl = document.getElementById('rt-' + rid + '-load');
     if (loadEl) { loadEl.textContent = running + '/' + maxC; loadEl.style.color = loadColor; }
