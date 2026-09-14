@@ -3,7 +3,7 @@
 > 目标：将前端「任务中心」页面更名为「需求中心」（英文 Issues Center），与当前以 Issue 为中心的语义对齐。
 > 背景：`/api/issues` 对外接口已落地、`tasks` 表已收编为 `issue` 单表（见 `docs/weekly-03/issues-api-design.md`），
 > 但前端页面仍叫「任务中心（Task Center）」，与实际语义（管理 GitCode Issue/需求）脱节。
-> 分支：`weekly-02-lyz`；状态：设计草案；日期：2026-09-14
+> 分支：`weekly-02-lyz`；状态：**已实施（2026-09-14）**；日期：2026-09-14
 
 ---
 
@@ -90,3 +90,18 @@
   `_currentView` 判断 + tasksApi，破坏面大；且 `/api/issues`（只读）+ tasks view（操作台）语义本就分离，
   强行同名易混淆。**不推荐**，除非产品明确要求「端点与页面完全统一为 issues」。
 - **页面文件重命名 `tasks.js` → `issues.js`**：纯代码组织调整，无用户可见收益，风险大于收益，不推荐。
+
+---
+
+## 八、实施记录（2026-09-14，已完成）
+
+- 文案更新：
+  - `locales/zh/app.json` `nav.tasks`：任务中心 → 需求中心
+  - `locales/en/app.json` `nav.tasks`：Task Center → Issues Center
+  - `locales/zh/tasks.json` `page_title`：任务中心 → 需求中心
+  - `locales/en/tasks.json` `page_title`：Task Center → Issues Center
+  - `index.html` 侧边栏 fallback 文案同步（data-i18n="app.nav.tasks" 标签内文本）
+- 注释同步（低优先项一并处理）：`tasks.js`（顶部 + 部署链接注释）、`app.js:378`、`chat.js:186/190/226`
+- 缓存版本号提升：`I18N.init('11')→('12')`（JSON 加载）、`tasks.js?v=83→84`、`app.js?v=71→72`、`chat.js?v=33→34`
+- 保持不改：view key `tasks`、`/api/tasks/*` 接口、`app.nav.tasks` JSON key、页面文件/路由
+- 验证：JSON 可解析且文案正确；node --check 三个 JS 通过；test_help_directory 45 passed

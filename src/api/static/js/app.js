@@ -375,7 +375,7 @@ function loadAgentTypes() {
       var tb = $('tb'); if (tb) tb.style.display = 'flex';
       var mv = $('mainView'); if (mv) { mv.style.position = ''; mv.style.inset = ''; mv.style.zIndex = ''; }
     }
-    // 离开任务中心时停止场景识别轮询
+    // 离开需求中心时停止场景识别轮询
     if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
     // 离开 observability 时停止定时轮询
     if (view !== 'observability' && typeof stopObsAuto === 'function') stopObsAuto();

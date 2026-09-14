@@ -1,4 +1,4 @@
-// ====== 任务中心（Account ▸ 任务中心）======
+// ====== 需求中心（Account ▸ 需求中心 / Issues Center）======
 // 方案 B：列表工作流风（左列表 + 右详情面板）
 let _tasksAll = [];           // 全部任务缓存
 let _taskSel = null;          // 选中的任务
@@ -735,7 +735,7 @@ function _render() {
 
   if (_taskFilterPopoverOpen) _applyFilterPopoverState();
 
-  // 加载部署 URL 到任务中心顶部
+  // 加载部署 URL 到需求中心顶部
   _loadDeployLink();
 
   // 建立 id → task 映射供行点击
