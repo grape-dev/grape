@@ -133,3 +133,36 @@ class TaskResourceStack:
                     proc.kill()
         except Exception:
             pass
+
+    # ===== Issue #134: 健康度查询接口（增强层，不改派发语义）=====
+
+    def get_engine_health(self, runtime_id: int) -> dict:
+        """查询单个引擎的健康度数据（委托 health_scorer 模块）。
+
+        返回 {health_score, total_tasks, failed_tasks, consecutive_failures, ...}
+        """
+        try:
+            from src.runtime.health_scorer import get_health_score
+            return get_health_score(runtime_id)
+        except Exception:
+            return {"health_score": 100, "total_tasks": 0, "failed_tasks": 0,
+                    "consecutive_failures": 0, "failure_rate": 0.0}
+
+    def is_engine_healthy(self, runtime_id: int) -> bool:
+        """判断引擎是否健康（健康分 >= 阈值）。"""
+        try:
+            from src.runtime.health_scorer import is_healthy
+            return is_healthy(runtime_id)
+        except Exception:
+            return True  # 模块异常时不阻塞派发
+
+    def filter_healthy_engines(self, runtime_ids: list[int]) -> list[int]:
+        """从候选引擎列表中过滤健康的（增强层入口）。
+
+        全部不健康时降级兜底取最优机器，始终返回非空列表（只要输入非空）。
+        """
+        try:
+            from src.runtime.health_scorer import filter_or_fallback
+            return filter_or_fallback(runtime_ids)
+        except Exception:
+            return list(runtime_ids)  # 模块异常时不过滤（不阻塞派发）

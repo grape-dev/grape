@@ -420,36 +420,51 @@ def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int = 0):
 
 
 def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
-    """应用默认场景到仓库：从 scene_market(source='official') 复刻默认场景为仓库场景。
+    """应用默认场景到仓库：直接调 apply_market_scene 走场景中心应用逻辑。
 
-    默认场景名读 configs/default-scene.json single config（default_scene_market_name，默认 'default'=通用开发）。
-    配置为 '' 时不自动配置场景（仓库无场景 → VOD 输出「未配置场景」）。
-    幂等：仓库已有同名场景则不重复创建。
+    默认场景名读 configs/default-scene.json（default_scene_market_name，默认 'default'=通用开发）。
+    配置为 '' 时不自动配置场景。
+    幂等：仓库已有同 market_scene_id 的场景则不重复创建。
+
+    与用户从场景中心手动应用走完全相同的逻辑：
+    skill 校验 → 幂等查重 → 创建/更新场景 + 回写 market_scene_id。
+    skill 缺失时抛 HTTPException(400)，托管流程应让异常冒出暴露给前端。
     """
+    from fastapi import HTTPException
+    from src.repo_key import from_repo_key
     default_name = _get_default_scene_market_name()
     if not default_name:
         log.info(f"apply_default_scene_to_repo: default scene disabled ({repo_key})")
         return False
-    official = _load_official_scene_from_market(default_name)
-    if not official:
+
+    # 按 name 查 scene_market 拿 market_id
+    db, lock = _db()
+    with lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id FROM scene_market WHERE name=? AND source='official' AND is_active=1 LIMIT 1",
+            (default_name,),
+        )
+        row = c.fetchone()
+    if not row:
         log.warning(f"apply_default_scene_to_repo: market scene '{default_name}' not found for {repo_key}")
         return False
-    # 检查仓库是否已有该场景
-    existing = _query_scene_by_id(default_name, repo_key=repo_key)
-    if existing:
+    market_id = row[0]
+
+    # 从 repo_key 拆 owner/repo（apply_market_scene 需要这两个参数）
+    full_name = from_repo_key(repo_key)  # "XOcto/repo-name"
+    parts = full_name.split("/", 1)
+    if len(parts) != 2:
+        log.warning(f"apply_default_scene_to_repo: invalid repo_key '{repo_key}'")
         return False
-    try:
-        create_custom_scene(
-            scene_id=default_name, name=official["name"] or default_name,
-            display_name=official.get("display_name") or official["name"] or default_name,
-            description=official.get("description", "") or "",
-            repo_key=repo_key, nodes=official.get("nodes") or [],
-            onboarding=official.get("onboarding", "repo-onboarding"))
-        log.info(f"Applied default scene '{default_name}' to {repo_key}")
-        return True
-    except Exception as e:
-        log.warning(f"apply_default_scene_to_repo: create failed: {e}")
-        return False
+    owner, repo_name = parts
+
+    # 调 apply_market_scene，走场景中心完整逻辑
+    # 传入 repo_key 避免 apply_market_scene 内部用 to_repo_key 默认 gitcode: 前缀
+    from src.api.routes.scenes import apply_market_scene
+    result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
+    log.info(f"apply_default_scene_to_repo: applied market scene {market_id} to {repo_key}: {result}")
+    return True
 
 
 def fork_official_scene(scene_id: str, user_id: int = 0, repo_key: str = "") -> bool:

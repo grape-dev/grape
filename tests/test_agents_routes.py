@@ -103,6 +103,43 @@ class TestDetail:
         assert data["status"] == "idle"
         assert data["metrics"]["total_events"] == 1
         assert data["repo_gitcode_token"] == "tok"
+        assert data["highlight_issue_id"] == ""
+
+    def test_detail_with_issue_number_highlight(self, _client):
+        """Issue #108: issue_number 参数归一化为 #N 并在响应中返回"""
+        _seed_agent_types()
+        rk = "gitcode:org/agih1"
+        _seed_session(rk, "coding")
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, issue_id) VALUES (?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "t1", "{}", "completed", "#108"))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, issue_id) VALUES (?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "t2", "{}", "completed", "#99"))
+            db.commit()
+        r = _client.get("/api/agents/coding/org/agih1?issue_number=108")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["highlight_issue_id"] == "#108"
+        assert len(data["recent_events"]) == 2
+
+    def test_detail_with_issue_number_strips_hash(self, _client):
+        """Issue #108: issue_number 带不带 # 都能归一化"""
+        _seed_agent_types()
+        rk = "gitcode:org/agih2"
+        _seed_session(rk, "qa")
+        r = _client.get("/api/agents/qa/org/agih2?issue_number=%2342")
+        assert r.status_code == 200
+        assert r.json()["highlight_issue_id"] == "#42"
+
+    def test_detail_without_issue_number_no_highlight(self, _client):
+        """Issue #108: 不传 issue_number 时 highlight_issue_id 为空（向后兼容）"""
+        _seed_agent_types()
+        rk = "gitcode:org/agih3"
+        _seed_session(rk, "sre")
+        r = _client.get("/api/agents/sre/org/agih3")
+        assert r.status_code == 200
+        assert r.json()["highlight_issue_id"] == ""
 
     def test_detail_vod_conversations(self, _client):
         _seed_agent_types()
@@ -120,6 +157,141 @@ class TestDetail:
         assert data["im"]["connected"] is True
         assert len(data["im"]["conversations"]) == 1
         assert data["im"]["conversations"][0]["chat_id"] == "oc_v"
+
+    # ── Issue #127: 搜索 + 分页测试 ──
+
+    def test_detail_pagination_default(self, _client):
+        """默认 page=1, page_size=10，返回 events_total"""
+        _seed_agent_types()
+        rk = "gitcode:org/agpg1"
+        _seed_session(rk, "coding")
+        with db_lock:
+            c = db.cursor()
+            for i in range(15):
+                c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq) VALUES (?,?,?,?,?,?,?)",
+                          (rk, "a2a_event", "coding", f"evt-{i}", "{}", "completed", 100 + i))
+            db.commit()
+        r = _client.get("/api/agents/coding/org/agpg1")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["events_total"] == 15
+        assert data["events_page"] == 1
+        assert data["events_page_size"] == 10
+        assert len(data["recent_events"]) == 10
+
+    def test_detail_pagination_custom_page_size(self, _client):
+        """page_size=5 返回 5 条，page=2 返回后 5 条"""
+        _seed_agent_types()
+        rk = "gitcode:org/agpg2"
+        _seed_session(rk, "coding")
+        with db_lock:
+            c = db.cursor()
+            for i in range(12):
+                c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq) VALUES (?,?,?,?,?,?,?)",
+                          (rk, "a2a_event", "coding", f"evt-{i}", "{}", "completed", 200 + i))
+            db.commit()
+        r = _client.get("/api/agents/coding/org/agpg2?page=2&page_size=5")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["events_total"] == 12
+        assert data["events_page"] == 2
+        assert data["events_page_size"] == 5
+        assert len(data["recent_events"]) == 5
+
+    def test_detail_keyword_search_by_title(self, _client):
+        """keyword 搜索 title 字段"""
+        _seed_agent_types()
+        rk = "gitcode:org/agkw1"
+        _seed_session(rk, "coding")
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq) VALUES (?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "fix login bug", "{}", "completed", 300))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq) VALUES (?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "add feature", "{}", "completed", 301))
+            db.commit()
+        r = _client.get("/api/agents/coding/org/agkw1?keyword=login")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["events_total"] == 1
+        assert len(data["recent_events"]) == 1
+        assert data["recent_events"][0]["title"] == "fix login bug"
+
+    def test_detail_keyword_search_by_seq(self, _client):
+        """keyword 搜索 seq 字段（数字模糊匹配）"""
+        _seed_agent_types()
+        rk = "gitcode:org/agkw2"
+        _seed_session(rk, "coding")
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq) VALUES (?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "t1", "{}", "completed", 400))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq) VALUES (?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "t2", "{}", "completed", 401))
+            db.commit()
+        r = _client.get("/api/agents/coding/org/agkw2?keyword=400")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["events_total"] == 1
+        assert data["recent_events"][0]["seq"] == 400
+
+    def test_detail_keyword_search_by_issue_id(self, _client):
+        """keyword 搜索 issue_id 字段"""
+        _seed_agent_types()
+        rk = "gitcode:org/agkw3"
+        _seed_session(rk, "coding")
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq, issue_id) VALUES (?,?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "t1", "{}", "completed", 500, "#127"))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq, issue_id) VALUES (?,?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "t2", "{}", "completed", 501, "#99"))
+            db.commit()
+        r = _client.get("/api/agents/coding/org/agkw3?keyword=127")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["events_total"] == 1
+        assert data["recent_events"][0]["issue_id"] == "#127"
+
+    def test_detail_keyword_search_combined_with_pagination(self, _client):
+        """搜索 + 分页组合：keyword 过滤后分页"""
+        _seed_agent_types()
+        rk = "gitcode:org/agkw4"
+        _seed_session(rk, "coding")
+        with db_lock:
+            c = db.cursor()
+            for i in range(8):
+                c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq, issue_id) VALUES (?,?,?,?,?,?,?,?)",
+                          (rk, "a2a_event", "coding", f"search-match-{i}", "{}", "completed", 600 + i, f"#{i}"))
+            for i in range(5):
+                c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq) VALUES (?,?,?,?,?,?,?)",
+                          (rk, "a2a_event", "coding", f"other-{i}", "{}", "completed", 700 + i))
+            db.commit()
+        r = _client.get("/api/agents/coding/org/agkw4?keyword=search&page=1&page_size=5")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["events_total"] == 8
+        assert len(data["recent_events"]) == 5
+        # 第二页
+        r2 = _client.get("/api/agents/coding/org/agkw4?keyword=search&page=2&page_size=5")
+        data2 = r2.json()
+        assert len(data2["recent_events"]) == 3
+
+    def test_detail_keyword_no_result(self, _client):
+        """keyword 无匹配时返回空列表 + total=0"""
+        _seed_agent_types()
+        rk = "gitcode:org/agkw5"
+        _seed_session(rk, "coding")
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, payload, status, seq) VALUES (?,?,?,?,?,?,?)",
+                      (rk, "a2a_event", "coding", "visible", "{}", "completed", 800))
+            db.commit()
+        r = _client.get("/api/agents/coding/org/agkw5?keyword=nonexistent")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["events_total"] == 0
+        assert len(data["recent_events"]) == 0
 
 
 class TestClean:

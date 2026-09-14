@@ -387,11 +387,12 @@ function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
   if (scenePipes.length === 0) {
     html += `<div style="text-align:center;padding:24px;color:#86868b;font-size:13px">${I18N.t('pipeline.no_issues')||'暂无 Issue'}</div>`;
   } else {
-    const _repoParts = (dashData.repo || '').replace(/^gitcode:/, '').split('/');
+    const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
     html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap" style="max-height:320px"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
     scenePipes.slice(0, 20).forEach(p => {
       const _issueNum = String(p.issue_id || '').replace(/^#/, '');
-      const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://gitcode.com/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
+      const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
+      const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
       const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
         const hasAgent = p.statuses && p.statuses[j] > 0;
         const cls = ['tg-v','tg-i','tg-c','tg-q','tg-s'][j];
@@ -1107,7 +1108,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   }
 
   window._engCurIds = currentIds.slice();
-  const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; return ''; }).filter(Boolean))];
+  const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; if (n.includes('codex')) return 'codex'; return ''; }).filter(Boolean))];
   const _availScopes = [...new Set(sorted.map(e => e.scope || 'global'))];
   const _SCOPE_LABELS_ALL = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
   const _SCOPE_ORDER_ALL = ['local','user','repo','global'];

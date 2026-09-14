@@ -81,6 +81,11 @@ class TestBackendForEngine:
     def test_codearts_engine(self):
         assert _backend_for_engine("codearts-x") == "codearts"
 
+    def test_codex_engine(self):
+        assert _backend_for_engine("codex-worker-ecs-grape-git-9ad") == "codex"
+        assert _backend_for_engine("codex") == "codex"
+        assert _backend_for_engine("CODEX-worker-1") == "codex"
+
     def test_unknown_defaults_to_opencode(self):
         assert _backend_for_engine("") == "opencode"
         assert _backend_for_engine("some-engine") == "opencode"

@@ -768,7 +768,42 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 )"""),
     # ===== legacy: backend_agents（_migrate_tables rebuild 依赖其存在）=====
     ("backend_agents", _BACKEND_AGENTS_DDL),
-]
+    # ===== Issue #103: 知识写入队列 =====
+    ("knowledge_write_queue", """
+CREATE TABLE IF NOT EXISTS knowledge_write_queue (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key      TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    agent_type    TEXT NOT NULL DEFAULT '',
+    issue_num     INTEGER DEFAULT 0,
+    content       TEXT NOT NULL,
+    status        TEXT DEFAULT 'accepted',
+    source_seq    INTEGER DEFAULT 0,
+    created_by    TEXT DEFAULT '',
+    source        TEXT DEFAULT '',
+    description   TEXT DEFAULT '',
+    name          TEXT DEFAULT '',
+    queue_status  TEXT NOT NULL DEFAULT 'pending',
+    retry_count   INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT NOT NULL DEFAULT '',
+    next_retry_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+)"""""),    # ===== Issue #134: 机器健康度持久化表 =====
+    ("runtime_health_scores", """
+CREATE TABLE IF NOT EXISTS runtime_health_scores (
+    runtime_id          INTEGER PRIMARY KEY,          -- agent_runtimes.id
+    health_score        INTEGER NOT NULL DEFAULT 100,  -- 0-100, 越高越健康
+    total_tasks         INTEGER NOT NULL DEFAULT 0,    -- 近 N 天总任务数
+    failed_tasks        INTEGER NOT NULL DEFAULT 0,    -- 近 N 天失败数
+    completed_tasks     INTEGER NOT NULL DEFAULT 0,    -- 近 N 天完成数
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,   -- 连续失败次数
+    failure_rate        REAL NOT NULL DEFAULT 0.0,     -- 失败率 (0-1)
+    last_status         TEXT DEFAULT '',               -- 最近一条任务状态
+    window_days         INTEGER NOT NULL DEFAULT 7,    -- 滑动窗口天数
+    updated_at          TEXT DEFAULT (datetime('now'))
+)"""""),]
+
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 
@@ -885,6 +920,10 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_latency_log_path ON api_latency_log(path)",
         "CREATE INDEX IF NOT EXISTS idx_latency_log_duration ON api_latency_log(duration_ms)",
         "CREATE INDEX IF NOT EXISTS idx_latency_log_source ON api_latency_log(source)",
+        # ===== Issue #103: 知识写入队列索引 =====
+        "CREATE INDEX IF NOT EXISTS idx_kwq_status_retry ON knowledge_write_queue(queue_status, next_retry_at)",
+        "CREATE INDEX IF NOT EXISTS idx_kwq_dim_created ON knowledge_write_queue(repo_key, scope, agent_type, issue_num, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_kwq_source_seq ON knowledge_write_queue(repo_key, source_seq)",
     ]
     for idx in indexes:
         try:
@@ -1621,7 +1660,7 @@ def _cleanup_old_latency_logs():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM api_latency_log WHERE created_at < datetime('now', '-7 days')")
+            c.execute("DELETE FROM api_latency_log WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)")
             deleted = c.rowcount
             db.commit()
         if deleted:
@@ -2476,8 +2515,9 @@ def _migrate_tables():
             c = db.cursor()
             _ensure_column(c, "user_accounts", "gitcode_publish_repo", "TEXT DEFAULT ''")
             _ensure_column(c, "user_accounts", "github_publish_repo", "TEXT DEFAULT ''")
+            _ensure_column(c, "user_accounts", "github_login", "TEXT DEFAULT ''")
             db.commit()
-            log.info("Added gitcode_publish_repo / github_publish_repo columns to user_accounts")
+        log.info("Added gitcode_publish_repo / github_publish_repo / github_login columns to user_accounts")
     except Exception as e:
         log.warning(f"Add user_accounts publish repo columns failed: {e}")
     # ===== managed_repos 部署URL列（weekly-01 合并） =====
@@ -2557,6 +2597,8 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "memory_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "disk_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "load_avg", "TEXT DEFAULT ''")
+                _ensure_column(c, "runtime_credentials", "spec", "TEXT DEFAULT ''")
+                _ensure_column(c, "runtime_credentials", "tmp_percent", "REAL DEFAULT 0")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute("""
                     DELETE FROM runtime_credentials WHERE id NOT IN (

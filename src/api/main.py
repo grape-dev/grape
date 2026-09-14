@@ -122,6 +122,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Knowledge sync loop start failed: {e}")
 
+    # Issue #103：知识写入队列消费者——后台兜底处理 pending 任务
+    _knowledge_write_task = None
+    try:
+        from src.api.knowledge import knowledge_write_worker
+        _knowledge_write_task = asyncio.create_task(knowledge_write_worker())
+        log.info("Knowledge write worker started")
+    except Exception as e:
+        log.warning(f"Knowledge write worker start failed: {e}")
+
     # 官方技能 OBS 自动同步：定时扫描本地技能变更，上传 OBS（每 30 分钟）
     try:
         from src.storage.skill_sync import start_skill_sync_scheduler
@@ -221,6 +230,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Reap stale runtimes loop start failed: {e}")
 
+    # Issue #85：引擎健康度定时刷新——每 5 分钟对所有引擎 force_refresh，
+    # 覆盖离线引擎无任务事件触发的场景（失联引擎不会产生任务完成事件）
+    try:
+        from src.runtime.health_scorer import start_health_refresh_scheduler
+        start_health_refresh_scheduler()
+    except Exception as e:
+        log.warning(f"Health refresh scheduler start failed: {e}")
+
     # 用户活跃状态追踪：每 30 秒批量更新 last_active_at
     _active_tracker_task = None
     try:
@@ -269,6 +286,12 @@ async def lifespan(app: FastAPI):
         _probe_task.cancel()
     if _reap_task:
         _reap_task.cancel()
+    if _knowledge_write_task:
+        _knowledge_write_task.cancel()
+        try:
+            await asyncio.wait_for(_knowledge_write_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
     # 官方技能 OBS 同步：优雅关闭定时任务
     try:
         from src.storage.skill_sync import stop_skill_sync_scheduler
@@ -279,6 +302,12 @@ async def lifespan(app: FastAPI):
     try:
         from src.storage.scene_sync import stop_scene_sync_scheduler
         await stop_scene_sync_scheduler()
+    except Exception:
+        pass
+    # Issue #85：健康度定时刷新线程优雅关闭
+    try:
+        from src.runtime.health_scorer import stop_health_refresh_scheduler
+        stop_health_refresh_scheduler()
     except Exception:
         pass
     # 终止运行中的 agent 子进程（opencode），使 executor 线程尽快结束，

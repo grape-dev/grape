@@ -52,6 +52,7 @@ class IssueUpdateBody(BaseModel):
     assignee: str = ""
     milestone_id: int = 0
     state: str = ""
+    body: str = ""
 
 
 class LabelCreateBody(BaseModel):
@@ -278,6 +279,7 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
     payload = {k: v for k, v in {
         "labels": body.labels, "assignee": body.assignee,
         "milestone_id": body.milestone_id or None, "state": body.state,
+        "body": body.body,
     }.items() if v not in (None, "", 0)}
     return _gitcode(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)

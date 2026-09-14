@@ -39,7 +39,13 @@
     "running": "Running",
     "recent_n": "Recent {{n}}",
     "history_title": "Event History",
-    "table_actor": "Actor"
+    "table_actor": "Actor",
+    "search_placeholder": "Search seq/issue#/type/title...",
+    "search_no_result": "No matching events",
+    "prev_page": "‹ Prev",
+    "next_page": "Next ›",
+    "rows_per_page": "Per page",
+    "page_info": "{{total}} total — page {{page}}/{{pages}}"
   },
   "config": {
     "im_title": "IM Configuration",

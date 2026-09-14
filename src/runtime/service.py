@@ -20,12 +20,12 @@ EXEC_MODE_REMOTE = "queue_remote"
 _DEFAULT_MODE = EXEC_MODE_AUTO
 
 
-def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = "") -> bool:
+def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = "", task_user_id: int = 0) -> bool:
     """检查 pool_engine_ids 中的引擎是否有任何一个能真正认领该 tag 的任务。
 
-    检查三个维度：在线 + 有 tag 能力（engine_capabilities）+ scope 匹配（repo scope 的 owner_id 对齐 repo_key）。
+    检查维度：在线 + healthy + probe_status + 有 tag 能力 + scope 匹配 + 并发槽。
     返回 True = 池里有能干的引擎，不应清空 pool_engine_ids。
-    返回 False = 池里全不可达（离线/无 tag/scope 不匹配），应清空 pool_engine_ids 放行。
+    返回 False = 池里全不可达，应清空 pool_engine_ids 放行。
     """
     from src.repo_key import from_repo_key
     _repo_norm = (from_repo_key(repo_key) or "").strip()
@@ -33,10 +33,16 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
         try:
             with db_lock:
                 c = db.cursor()
-                # 引擎在线？
-                c.execute("SELECT status FROM agent_runtimes WHERE id=?", (eid,))
+                # 引擎在线 + healthy + probe 正常？
+                c.execute("SELECT status, healthy, probe_status FROM agent_runtimes WHERE id=?", (eid,))
                 r = c.fetchone()
                 if not r or (r[0] or "") != "online":
+                    continue
+                _healthy = r[1] if r[1] is not None else 0
+                _probe = r[2] or ""
+                if _healthy != 1:
+                    continue
+                if _probe not in ("ok", "pending", ""):
                     continue
                 # 有 tag 能力？
                 c.execute(
@@ -46,17 +52,36 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                     continue
                 # scope 匹配？
                 c.execute(
-                    "SELECT rc.scope, rc.owner_id FROM agent_runtimes r "
+                    "SELECT rc.scope, rc.owner_id, rc.owner_name FROM agent_runtimes r "
                     "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id WHERE r.id=?", (eid,))
                 sr = c.fetchone()
                 if sr:
                     _scope = sr[0] or "global"
                     _owner = sr[1] or ""
+                    _owner_name = sr[2] or ""
                     if _scope == "repo" and _owner:
                         _owner_norm = (from_repo_key(_owner) or "").strip()
                         if _repo_norm and _owner_norm != _repo_norm:
                             continue  # repo scope 但仓库不匹配
-                # 三项全部通过：有能干的引擎
+                    elif _scope == "user" and task_user_id > 0 and _owner_name:
+                        # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
+                        try:
+                            c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1", (_owner_name,))
+                            _ur = c.fetchone()
+                            _engine_uid = _ur[0] if _ur else 0
+                            if _engine_uid != task_user_id:
+                                continue  # user scope 但用户不匹配
+                        except Exception:
+                            pass
+                # 并发槽可用？
+                c.execute("SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?", (eid,))
+                _br = c.fetchone()
+                if _br:
+                    _busy = _br[0] or 0
+                    _max = _br[1] or 1
+                    if _busy >= _max:
+                        continue  # 已满载
+                # 全部通过：有能干的引擎
                 return True
         except Exception:
             continue
@@ -884,15 +909,17 @@ def claim(runtime_id) -> dict | None:
                             # 全部不可达时清空 pool_engine_ids，让 task 可被任意引擎认领
                             _task_tag = ""
                             _task_repo = ""
+                            _task_uid = 0
                             try:
-                                c.execute("SELECT pool_tag, repo_key FROM agent_tasks WHERE id=?", (task_id,))
+                                c.execute("SELECT pool_tag, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
                                 _trow = c.fetchone()
                                 if _trow:
                                     _task_tag = _trow[0] or ""
                                     _task_repo = _trow[1] or ""
+                                    _task_uid = _trow[2] or 0
                             except Exception:
                                 pass
-                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo)
+                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo, task_user_id=_task_uid)
                             if not _has_capable:
                                 log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
                                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
@@ -1128,15 +1155,17 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                             # 全部不可达时清空 pool_engine_ids，让 task 可被任意引擎认领
                             _task_tag = ""
                             _task_repo = ""
+                            _task_uid = 0
                             try:
-                                c.execute("SELECT pool_tag, repo_key FROM agent_tasks WHERE id=?", (task_id,))
+                                c.execute("SELECT pool_tag, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
                                 _trow = c.fetchone()
                                 if _trow:
                                     _task_tag = _trow[0] or ""
                                     _task_repo = _trow[1] or ""
+                                    _task_uid = _trow[2] or 0
                             except Exception:
                                 pass
-                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo)
+                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo, task_user_id=_task_uid)
                             if not _has_capable:
                                 log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
                                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
@@ -1263,6 +1292,12 @@ def update_task_status(task_id, status, **kw):
             revoke_session_token(task_id)
         except Exception as e:
             log.warning(f"update_task_status: revoke session token failed for {task_id}: {e}")
+        # Issue #134：任务终态后刷新健康度缓存（增强层，不改派发/广播语义）
+        try:
+            from src.runtime.health_scorer import record_task_completion
+            record_task_completion(row[1], status)
+        except Exception:
+            pass
 
 
 def cancel_task(task_id):
@@ -1621,6 +1656,12 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                     _sync_issue_comments_to_conversation(_repo_key, _issue_num, _token, _agent_type, _repo)
                 except Exception as _se:
                     log.warning(f"complete_task sync issue comments failed: {_se}")
+            # 5. VOD 智能推荐完成 → redispatch（remote worker 模式下 _execute_agent 不执行，此处补触发）
+            if _agent_type == "vod" and _result_text and _issue_id:
+                try:
+                    _handle_vod_recommend_complete(_repo_key, _issue_id, _result_text, task_id, task, _token)
+                except Exception as _se:
+                    log.warning(f"complete_task vod recommend handler failed: {_se}")
         except Exception as _pe:
             log.warning(f"complete_task post-completion hooks failed: {_pe}")
     # 可观察性埋点：任务到达终态
@@ -1652,6 +1693,89 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                           task_id=task_id, payload={"exit_code": exit_code}))
     except Exception:
         pass
+
+
+def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: str,
+                                   task_id: str, task: dict, repo_gitcode_token: str = ""):
+    """VOD 智能推荐完成处理：解析 scene_id → 持久化 → 重派 VOD。
+
+    remote worker 模式下 _execute_agent 不执行，此函数在 complete_task 中补触发，
+    与 _execute_agent_inner 中的逻辑等价（event_pipeline.py L2261-2310）。
+    """
+    import re as _re
+    # 查 task prompt 判断是否为智能推荐任务
+    _task_prompt = ""
+    try:
+        from src.session_manager import db as _rdb, db_lock as _rdb_lock
+        with _rdb_lock:
+            c = _rdb.cursor()
+            c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
+            _trow = c.fetchone()
+            _task_prompt = _trow[0] if _trow else ""
+    except Exception:
+        pass
+    if not (_task_prompt and "智能推荐器" in _task_prompt and "{{SKILL_DIR}}" not in _task_prompt):
+        return  # 不是智能推荐任务，跳过
+
+    _rec_scene = ""
+    try:
+        from src.api.event_store import parse_agent_output_json
+        _scene_out = parse_agent_output_json(result_text) or {}
+        _rec_scene = _scene_out.get("scene_id", "") or ""
+    except Exception:
+        pass
+    if not _rec_scene:
+        _m_rec = _re.search(r'"scene_id"\s*:\s*"([^"]*)"', result_text)
+        _rec_scene = _m_rec.group(1) if _m_rec else ""
+
+    if not _rec_scene:
+        log.info(f"VOD recommend: no scene_id for {issue_id}, pipeline terminated")
+        return
+
+    from src.api.session_store import set_issue_scene
+    from src.runtime.engine_select import _repo_user_id
+    _vod_issue_creator = ""
+    try:
+        from src.session_manager import db as _evdb, db_lock as _evdb_lock
+        with _evdb_lock:
+            _ec = _evdb.cursor()
+            _ec.execute(
+                "SELECT actor FROM events WHERE repo_key=? AND issue_id=? AND actor!='' "
+                "ORDER BY seq ASC LIMIT 1",
+                (repo_key, issue_id))
+            _erow = _ec.fetchone()
+            if _erow:
+                _vod_issue_creator = _erow[0] or ""
+    except Exception:
+        pass
+    _vod_uid = _repo_user_id(repo_key, issue_creator=_vod_issue_creator)
+    set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
+    log.info(f"VOD recommend: scene_id={_rec_scene} set for {issue_id}")
+
+    from src.api.pipeline_config import get_first_node, get_pipeline_config
+    _vod_node = get_first_node(_rec_scene)
+    if not _vod_node:
+        _pcfg = get_pipeline_config(_rec_scene, repo_key=repo_key)
+        _nodes = (_pcfg or {}).get("nodes", [])
+        if _nodes:
+            _vod_node = _nodes[0]
+    if not _vod_node:
+        log.warning(f"VOD recommend: no vod node for scene={_rec_scene}, skip redispatch")
+        return
+
+    _vod_skill = _vod_node.get("skill", "vod")
+    log.info(f"VOD recommend: redispatch VOD with skill={_vod_skill} for {issue_id}")
+
+    # 构建 evt 给 _redispatch_vod_after_recommend（prompt_builder 需要 payload 字段）
+    _issue_num = str(issue_id).lstrip("#")
+    _evt = {
+        "repository": task.get("account") or "",
+        "issue_id": issue_id,
+        "payload": {"issue_number": _issue_num, "issue": {"number": int(_issue_num) if _issue_num.isdigit() else _issue_num}},
+    }
+    _runtime_id = task.get("runtime_id") or 0
+    from src.api.event_pipeline import _redispatch_vod_after_recommend
+    _redispatch_vod_after_recommend(repo_key, issue_id, _vod_skill, _evt, _runtime_id, repo_gitcode_token)
 
 
 def fail_task(task_id, error, exit_code=-1):

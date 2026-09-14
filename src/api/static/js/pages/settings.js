@@ -262,37 +262,38 @@ function saveGitcodeRepoConfig() {
 }
 
 function unhostFromSettings(fullName) {
-  if (!confirm(I18N.t('settings.host.confirm_remove', {name: fullName}))) return;
-  API.post('/repos/remove', {full_name: fullName}).then(r => {
-    app.showToast(I18N.t('settings.host.unhost_done'));
-    const cur = app.currentRepo();
-    const wasCurrent = cur && cur.fullName === fullName;
-    if (wasCurrent) {
-      localStorage.removeItem('currentRepo');
-    }
-    app.initSidebarRepos();
-    API.get('/repos/managed').then(md => {
-      const remaining = md.repos || [];
-      if (wasCurrent || remaining.length === 0) {
-        // 当前仓库被解除或已无托管仓库 → 回到仓库选择页
-        API.get('/repos/member').then(d => {
-          const repos = d.repos || [];
-          document.getElementById('sidebar').style.display = 'none';
-          document.getElementById('tb').style.display = 'none';
-          const mv = document.getElementById('mainView');
-          mv.style.display = 'flex';
-          mv.style.position = 'fixed';
-          mv.style.inset = '0';
-          mv.style.zIndex = '100';
-          document.getElementById('pageTitle').textContent = I18N.t('settings.host.select_repo');
-          renderRepoSelection(repos);
-        });
-      } else {
-        // 还有其他托管仓库 → 回到 Dashboard
-        app.nav('dash');
+  app.showConfirm(I18N.t('settings.host.confirm_remove', {name: fullName}), function() {
+    API.post('/repos/remove', {full_name: fullName}).then(r => {
+      app.showToast(I18N.t('settings.host.unhost_done'));
+      const cur = app.currentRepo();
+      const wasCurrent = cur && cur.fullName === fullName;
+      if (wasCurrent) {
+        localStorage.removeItem('currentRepo');
       }
-    });
-  }).catch(e => app.showToast(I18N.t('settings.host.unhost_failed', {msg: e.message})));
+      app.initSidebarRepos();
+      API.get('/repos/managed').then(md => {
+        const remaining = md.repos || [];
+        if (wasCurrent || remaining.length === 0) {
+          // 当前仓库被解除或已无托管仓库 → 回到仓库选择页
+          API.get('/repos/member').then(d => {
+            const repos = d.repos || [];
+            document.getElementById('sidebar').style.display = 'none';
+            document.getElementById('tb').style.display = 'none';
+            const mv = document.getElementById('mainView');
+            mv.style.display = 'flex';
+            mv.style.position = 'fixed';
+            mv.style.inset = '0';
+            mv.style.zIndex = '100';
+            document.getElementById('pageTitle').textContent = I18N.t('settings.host.select_repo');
+            renderRepoSelection(repos);
+          });
+        } else {
+          // 还有其他托管仓库 → 回到 Dashboard
+          app.nav('dash');
+        }
+      });
+    }).catch(e => app.showToast(I18N.t('settings.host.unhost_failed', {msg: e.message})));
+  }, {danger: true});
 }
 
 // ── Theme switching ──

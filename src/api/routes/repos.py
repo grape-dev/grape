@@ -513,6 +513,8 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             try:
                 from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
                 _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+            except HTTPException:
+                raise
             except Exception as e:
                 log.warning(f"host_repo: auto-fork scenes failed: {e}")
             _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
@@ -621,6 +623,8 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             try:
                 from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
                 _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+            except HTTPException:
+                raise
             except Exception as e:
                 log.warning(f"host_repo: auto-fork scenes failed: {e}")
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
@@ -637,6 +641,8 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         try:
             from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
             _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
+        except HTTPException:
+            raise
         except Exception as e:
             log.warning(f"host_repo: auto-fork scenes failed: {e}")
         return {"message": "仓库托管成功", "webhook_id": hook_id}
@@ -664,6 +670,8 @@ def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
     from src.user.db import get_global_bot_credential, get_webhook_url, set_host_status
 
     repo_key = to_repo_key(f"{owner}/{repo}")
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
     api_token = get_user_token(user["username"])
     bot_token, bot_username = get_global_bot_credential()
     if not api_token or not bot_token:
@@ -752,6 +760,8 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
     repo_key = to_repo_key(body.full_name)
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
     ok = update_managed_repo_bot_token(repo_key, body.bot_token)
     if not ok:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
@@ -790,6 +800,8 @@ def set_deploy_url(body: DeployUrlBody, user: dict = Depends(get_current_user)):
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
     repo_key = to_repo_key(body.full_name)
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE managed_repos SET deploy_url=? WHERE repo_key=?", (body.deploy_url or "", repo_key))

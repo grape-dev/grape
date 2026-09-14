@@ -1,5 +1,7 @@
 {
   "page_title": "Task Center",
+  "view_mine": "My Tasks",
+  "view_repo_all": "All Repo Tasks",
   "loading": "Loading...",
   "load_failed": "Failed to load: {{msg}}",
   "view_list": "List",
@@ -116,6 +118,14 @@
   "parent_task": "Parent",
   "pipeline_scene": "Pipeline Scene",
   "task_mode": "Task Mode",
+  "agent_status": {
+    "title": "Agent Node Status",
+    "pending": "Pending",
+    "running": "Running",
+    "completed": "Completed",
+    "failed": "Failed",
+    "cancelled": "Cancelled"
+  },
   "filter_options": {
     "created_by_me": "My Tasks"
   }

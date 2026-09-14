@@ -62,6 +62,8 @@
   "no_task_events": "暂无任务事件",
   "task_list": "任务列表",
   "task_list_subtitle": "{{count}} 个 Issue — 点击展开",
+  "search_tasks_placeholder": "搜索 Issue 编号或标题...（输入 #编号 定位）",
+  "no_matching_tasks": "无匹配任务",
   "has_failure": "❌ 有失败",
   "normal": "✓ 正常",
   "events_count": "{{count}} 事件",
@@ -138,5 +140,6 @@
   "col_agent": "Agent",
   "col_skill": "技能",
   "col_issue_seq": "Issue / 序号",
-  "col_failed_short": "失败"
+  "col_failed_short": "失败",
+  "rows_per_page": "每页"
 }

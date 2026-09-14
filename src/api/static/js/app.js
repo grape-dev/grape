@@ -254,7 +254,9 @@ function loadAgentTypes() {
       // Issue #86: Tab 切回前台——重设定时器（后台 setTimeout 被浏览器节流可能没触发）
       API.scheduleProactiveRefresh();
       if (Date.now() - _hiddenSince > 60000) {
-        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(window._currentView, window._currentParam); }, 300);
+        var _v = window._currentView || '';
+        var _baseView = _v.split(':')[0];
+        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(_baseView, window._currentParam); }, 300);
       }
       _hiddenSince = 0;
     }
@@ -424,7 +426,8 @@ function loadAgentTypes() {
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
-      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
+      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'event') {
       title.textContent = I18N.t('app.current_project');
       API.get('/events/detail/' + param).then(d => { if (window._currentView !== 'event') return; renderEventDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'event') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
@@ -577,6 +580,36 @@ function loadAgentTypes() {
     setTimeout(() => t.remove(), duration || 3000);
   }
 
+  // ── 通用确认对话框（Issue #125: 替换原生 confirm）──
+  // 复用 .create-repo-overlay + .confirm-modal CSS，居中显示，防滚动
+  function showConfirm(message, onConfirm, opts) {
+    closeConfirm();
+    var o = opts || {};
+    var danger = !!o.danger;
+    var confirmText = o.confirmText || (I18N.t('common.confirm') || '确认');
+    var cancelText = o.cancelText || (I18N.t('common.cancel') || '取消');
+    var overlay = document.createElement('div');
+    overlay.id = 'grapeConfirmOverlay';
+    overlay.className = 'create-repo-overlay';
+    overlay.innerHTML = '<div class="confirm-modal">' +
+      '<div class="confirm-modal-msg">' + message + '</div>' +
+      '<div class="confirm-modal-actions">' +
+        '<button class="cr-btn cr-btn-ghost" id="grapeConfirmCancel">' + cancelText + '</button>' +
+        '<button class="cr-btn ' + (danger ? 'cr-btn-danger' : 'cr-btn-primary') + '" id="grapeConfirmOk">' + confirmText + '</button>' +
+      '</div>' +
+    '</div>';
+    document.body.appendChild(overlay);
+    document.body.style.overflow = 'hidden';
+    function _close() { overlay.remove(); document.body.style.overflow = ''; }
+    overlay.onclick = function(e) { if (e.target === overlay) _close(); };
+    document.getElementById('grapeConfirmOk').onclick = function() { _close(); if (onConfirm) onConfirm(); };
+    document.getElementById('grapeConfirmCancel').onclick = _close;
+  }
+  function closeConfirm() {
+    var ex = document.getElementById('grapeConfirmOverlay');
+    if (ex) { ex.remove(); document.body.style.overflow = ''; }
+  }
+
   // ── 帮助抽屉 ──
   function openHelp() {
     const overlay = document.getElementById('helpOverlay');
@@ -711,7 +744,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup};
+  return {nav, search, oauthLogin, oauthLoginGithub, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

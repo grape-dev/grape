@@ -191,14 +191,16 @@ def terminate_event(seq: int, user: dict = Depends(get_current_user)):
     from src.session_manager import db, db_lock
     from src.api.event_store import update_event_status
 
-    # 查事件状态
+    # 查事件状态（含 repo_key 供归属校验）
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+        c.execute("SELECT status, repo_key FROM events WHERE seq=?", (seq,))
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件不存在"})
     evt_status = row[0]
+    from src.api.deps import check_repo_access
+    check_repo_access(user, row[1] or "")
 
     if evt_status not in ('running', 'dispatched'):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"事件状态为 {evt_status}，无法终止"})
@@ -247,13 +249,16 @@ def terminate_event(seq: int, user: dict = Depends(get_current_user)):
 
 
 @router.post("/{seq}/redispatch")
-def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
+def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(get_current_user)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
 
     见 event-redispatch-design.md §4.1.2：
     - 关联任务非终态（dispatched/running）→ requeue 置回 queued；
     - 关联任务终态/缺失（含事件 failed）→ 复用原 task 快照参数重新 enqueue_task；
     - 事件状态回写 running。30s 内重复调用幂等拒绝。
+
+    local_only=True（本机重试）：强制使用原 task.runtime_id 同机重跑，
+    跳过 pick_engine，不换机器。原 runtime_id 不可用（下线/不健康）→ 返回 4xx 错误，不切换。
     """
     import json as _json
     from src.session_manager import db, db_lock
@@ -277,6 +282,10 @@ def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
         pass
 
     evt = _load_event(seq)
+
+    # 1.0）归属校验：仅仓库归属人（managed_repos）可重派
+    from src.api.deps import check_repo_access
+    check_repo_access(user, evt.get("repo_key", "") or "")
 
     # 1.5）onboarding 主事件重派 → 任务级自愈（Issue #46 重构后兼容）：
     #     历史 onboarding_exp/onboarding_explore 事件仍可能被 redispatch；onboarding 后端已改为「按模板创建标准任务」，
@@ -312,10 +321,109 @@ def redispatch_event(seq: int, user: dict = Depends(get_current_user)):
     task_id = ""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, status FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (seq,))
+        c.execute("SELECT id, status, runtime_id FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (seq,))
         tr = c.fetchone()
         if tr:
-            task_id, task_status = tr[0], tr[1] or ""
+            task_id, task_status, _orig_rid = tr[0], tr[1] or "", tr[2] or 0
+
+    # 2.5) local_only：本机重试分支 — 强制使用原 runtime_id，跳过 pick_engine，不换机器
+    if local_only:
+        if not task_id:
+            raise HTTPException(status_code=409, detail={"code": 409,
+                "message": "无关联任务，无法本机重试"})
+        old = get_task(task_id)
+        if not old:
+            raise HTTPException(status_code=404, detail={"code": 404,
+                "message": "关联任务不存在，无法本机重试"})
+        _orig_rid = old.get("runtime_id") or 0
+        if not _orig_rid:
+            raise HTTPException(status_code=409, detail={"code": 409,
+                "message": "原任务未绑定引擎（runtime_id=0），无法本机重试"})
+        # 健康校验：原 runtime_id 必须 online + healthy
+        from src.runtime.service import runtime_credential_id, _remote_runtime_ready
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT status, healthy FROM agent_runtimes WHERE id=?", (_orig_rid,))
+                _rh = c.fetchone()
+        except Exception:
+            _rh = None
+        if not _rh or (_rh[0] or "") != "online" or not _rh[1]:
+            raise HTTPException(status_code=409, detail={"code": 409,
+                "message": "原执行机器不可用（引擎下线或不健康），无法本机重试"})
+        # 远端引擎额外心跳校验
+        _cid = runtime_credential_id(_orig_rid) or 0
+        if _cid > 0 and not _remote_runtime_ready(_orig_rid):
+            raise HTTPException(status_code=409, detail={"code": 409,
+                "message": "原执行机器不可用（远端引擎失联），无法本机重试"})
+
+        # 校验通过 → 复用原 task 快照参数 + 原 runtime_id 新建任务（不调 pick_engine）
+        from src.api.event_pipeline import is_plugin_mode as _is_plugin_mode
+        _sid = old.get("issue_session_id") or ""
+        try:
+            from src.api.event_pipeline import get_agent_workdir
+            _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
+                                    old.get("issue_id") or "")
+        except Exception:
+            _cwd = old.get("cwd") or ""
+        _is_local_direct = (_cid == 0)
+        _new_task_id = enqueue_task(
+            agent_session_id=old.get("agent_session_id") or "",
+            runtime_id=_orig_rid,
+            event_seq=old.get("event_seq"),
+            issue_id=old.get("issue_id") or "#0",
+            repo_key=old.get("repo_key") or "",
+            agent_type=old.get("agent_type") or "",
+            skill=old.get("skill") or "",
+            skill_id=old.get("skill_id") or 0,
+            prompt=old.get("prompt") or "",
+            cwd=_cwd,
+            runtime_session_id=old.get("runtime_session_id") or "",
+            event_type=old.get("event_type") or "",
+            account=old.get("account") or "",
+            user_id=old.get("user_id") or 0,
+            repo_gitcode_token=old.get("repo_gitcode_token") or "",
+            env_extra={},
+            server_url=old.get("server_url") or "",
+            issue_session_id=_sid,
+            pool_tag=old.get("agent_type") or "" if _is_plugin_mode() else "",
+        )
+        # 本机 direct 引擎 → 触发直接执行
+        if _is_local_direct and _new_task_id:
+            try:
+                from src.api.event_pipeline import _execute_agent, start_direct_agent
+                from src.runtime.engine_select import engine_name as _en
+                from src.repo_key import from_repo_key as _frk
+                _be = _en(_orig_rid) or ""
+                _skill_name = old.get("skill") or ""
+                _rk = old.get("repo_key") or ""
+                _evt = {
+                    "repo_key": _rk,
+                    "repository": _frk(_rk),
+                    "source": (_rk.split(":", 1)[0] if ":" in _rk else "gitcode"),
+                    "issue_id": old.get("issue_id") or "",
+                    "agent_type": old.get("agent_type") or "",
+                    "event_type": old.get("event_type") or "",
+                    "type": old.get("event_type") or "",
+                    "payload": {},
+                }
+                start_direct_agent(_execute_agent, (
+                    old.get("repo_key") or "", seq, old.get("agent_type") or "",
+                    _be, _skill_name, _evt, _orig_rid, _new_task_id,
+                ), name=f"redispatch-{seq}")
+                log.info(f"[redispatch] seq={seq} local_only: direct execution started on rid={_orig_rid}")
+            except Exception as e:
+                log.warning(f"[redispatch] seq={seq} local_only: direct execution failed: {e}")
+        # 事件状态回写 running
+        update_event_status(seq, "running")
+        try:
+            from src.user.db import set_meta_value
+            import time as _time
+            set_meta_value(f"redispatch:{seq}", str(_time.time()))
+        except Exception:
+            pass
+        log.info(f"[redispatch] seq={seq} local_only: same-machine retry on rid={_orig_rid} task={_new_task_id} by={user.get('username','')}")
+        return {"status": "redispatched", "task_id": _new_task_id or "(new)", "event_seq": seq, "local_only": True}
 
     # 3) 分支处理
     if task_id and task_status in ("dispatched", "running"):
@@ -1412,13 +1520,14 @@ def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     from src.api.knowledge import write_knowledge, _issue_num_from
     issue_num = _issue_num_from(evt["issue_id"])
-    fp = write_knowledge(repo_key=evt["repo_key"], scope=body.scope, content=body.content,
+    task_id = write_knowledge(repo_key=evt["repo_key"], scope=body.scope, content=body.content,
                          status=body.status or "accepted", agent_type=evt["agent_type"],
                          issue_num=issue_num, source_seq=seq, created_by="agent")
     # 对话产出：线程留痕（📌 知识沉淀）
-    _add_thread_message(seq, evt["repo_key"], evt["issue_id"], evt["agent_type"], "system",
-                        f"📌 已沉淀 {body.scope} 级共享知识：{body.content}")
-    return {"ok": True, "scope": body.scope, "file_path": fp}
+    if task_id:
+        _add_thread_message(seq, evt["repo_key"], evt["issue_id"], evt["agent_type"], "system",
+                            f"📌 已提交 {body.scope} 级知识沉淀任务：{body.content}")
+    return {"ok": True, "scope": body.scope, "task_id": task_id}
 
 
 @router.post("/{seq}/flow/reset")
