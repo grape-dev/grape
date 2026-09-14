@@ -503,8 +503,18 @@ GRAPE_SANDBOX_NET = os.environ.get("GRAPE_SANDBOX_NET", "off").lower() in ("1", 
 # 沙箱白名单 — 环境变量作为 DB 不可用时的降级默认值
 
 # cgroup 限额（0 = 不限制；memory 0 = 自动取宿主机 50%）
-GRAPE_SANDBOX_MEM_LIMIT_MB = int(os.environ.get("GRAPE_SANDBOX_MEM_LIMIT_MB", "0"))
-GRAPE_SANDBOX_CPU_QUOTA = int(os.environ.get("GRAPE_SANDBOX_CPU_QUOTA", "0"))
+# 支持 K8s 格式：GRAPE_SANDBOX_MEM_LIMIT_MB=2Gi, GRAPE_SANDBOX_CPU_QUOTA=500m
+def _parse_cgroup_env(env_key: str, default: str = "0", is_memory: bool = True):
+    """从环境变量解析 cgroup 限额，支持 K8s 格式（2Gi/500m）或纯数字。"""
+    raw = os.environ.get(env_key, default)
+    try:
+        from src.agent.cgroup import parse_memory, parse_cpu
+        return parse_memory(raw) if is_memory else parse_cpu(raw)
+    except ImportError:
+        return int(raw) if raw.isdigit() else 0
+
+GRAPE_SANDBOX_MEM_LIMIT_MB = _parse_cgroup_env("GRAPE_SANDBOX_MEM_LIMIT_MB", "0", is_memory=True)
+GRAPE_SANDBOX_CPU_QUOTA = _parse_cgroup_env("GRAPE_SANDBOX_CPU_QUOTA", "0", is_memory=False)
 GRAPE_SANDBOX_MAX_PIDS = int(os.environ.get("GRAPE_SANDBOX_MAX_PIDS", "0"))
 
 # 审计日志路径（空 = 默认 {WORKSPACE_DIR}/logs/sandbox-audit.jsonl）

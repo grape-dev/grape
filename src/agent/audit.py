@@ -26,7 +26,7 @@ log = logging.getLogger("devops-bot")
 
 _MAX_BYTES = 100 * 1024 * 1024  # 100 MB
 _MAX_ROTATED = 5
-_lock = threading.Lock()  # 哈希链全局锁
+_lock = threading.Lock()  # 哈希链 + 轮转全局锁（统一一把锁，避免双锁不一致）
 
 
 class _AsyncWriter:
@@ -102,10 +102,12 @@ _async_writer = _AsyncWriter()
 
 
 class RotatingAuditLog:
-    """JSONL 审计日志 + 轮转 + 哈希链。"""
+    """JSONL 审计日志 + 哈希链 + 轮转。
+
+    所有写入操作使用模块级 _lock（统一锁，避免双锁不一致）。
+    """
 
     _chain_state: dict[str, str] = {}  # log_path → last record_hash
-    _lock = threading.Lock()
 
     def __init__(self, path: str, hmac_key: str = ""):
         self._path = path
@@ -133,7 +135,7 @@ class RotatingAuditLog:
                     record = json.loads(line)
                     last_hash = record.get("record_hash", "")
                 if last_hash:
-                    with RotatingAuditLog._lock:
+                    with _lock:
                         self._chain_state[self._path] = last_hash
         except Exception as e:
             log.warning(f"audit: failed to restore chain state from disk: {e}")
