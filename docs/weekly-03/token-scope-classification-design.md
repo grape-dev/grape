@@ -4,7 +4,7 @@
 > 禁用 session_token（403），防止 agent 会话凭据用于管理操作。
 > **本次仅约束 session_token**；`grape_`（API Key）与 JWT（Web 登录）**维持现状，不做任何变更**。
 > 参照：CLI 命令分类（Core workflows / Agent Context / Code & repositories / Account & platform）
-> 分支：`weekly-02-lyz`；状态：设计草案；日期：2026-09-14
+> 分支：`weekly-02-lyz`；状态：**已实施并上线生产（2026-09-14）**；日期：2026-09-14
 
 ---
 
@@ -110,11 +110,13 @@
 在 `src/api/deps.py` 新增一个依赖函数，仅用于 **D 类（账户/平台）** 端点：
 
 ```python
-def require_no_session_token(request: Request) -> dict:
-    """账户/平台管理端点：session_token（tk_）→ 403；API Key / JWT 维持现状放行。"""
-    user = get_current_user_or_api_key(request)
+# src/api/deps.py（已实施）
+def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) -> dict:
+    """账户/平台管理端点：session_token（tk_）→ 403；API Key / JWT 维持现状放行。
+    （经 Depends 复用 get_current_user_or_api_key，override 可注入、测试友好。）"""
     if user.get("auth_type") == "session_token":
-        raise HTTPException(403, detail={"code": 403, "message": "该接口不支持会话 token（agent 凭据不能用于账户/平台管理）"})
+        raise HTTPException(status_code=403, detail={"code": 403,
+                                                     "message": "该接口不支持会话 token（agent 凭据不能用于账户/平台管理）"})
     return user  # api_key / jwt 均放行（维持现状）
 ```
 
@@ -156,13 +158,25 @@ def require_no_session_token(request: Request) -> dict:
 
 ---
 
-## 六、验证
+## 六、验证（已完成 ✅）
 
-1. D 类端点冒烟：`session_token` → 403；`API Key` → 200；`JWT` → 200。
-2. A/B/C 类端点不回归（session/API Key/JWT 均如现状）。
-3. 前端页面（Web JWT）回归：需求中心 mine、仓库管理、场景、技能——**全部正常**。
-4. agent/skill 对 B/C/A 端点正常；若原本未调 D 类则无感知。
-5. 全量 pytest。
+1. ✅ D 类端点冒烟：`session_token` → 403；`API Key` → 200；`JWT` → 200（本地 + 生产实测均通过）。
+2. ✅ A/B/C 类端点不回归（session/API Key/JWT 均如现状）。
+3. ✅ 前端页面（Web JWT）回归：需求中心 mine、仓库管理、场景、技能——**全部正常**（JWT 不收紧）。
+4. ✅ agent/skill 对 B/C/A 端点正常；`/api/scenes`（VOD 技能用 session 调）维持 200。
+5. ✅ 全量 pytest（基线 6 failed 零新增；`test_token_scope_guard` 25 passed）。
+
+### 生产实测（2026-09-14，`grape.example.com`）
+
+| 端点 | 分类 | 真实 tk_ 结果 |
+|------|------|:---:|
+| `/api/skills` | D | **403** ✅ |
+| `/api/repos/managed` | D | **403** ✅ |
+| `/api/auth/profile` | D | **403** ✅ |
+| `/api/skills/by-id/1` | D | **403** ✅ |
+| `/api/issues/o/r` | 非 D | 200 ✅ |
+| `/api/scenes` | 非 D（VOD 技能） | 200 ✅ |
+| `/api/tasks/mine` | 非 D | 200 ✅ |
 
 ---
 
@@ -171,9 +185,9 @@ def require_no_session_token(request: Request) -> dict:
 > 测试对象：`deps.require_no_session_token`（D 类端点）对三类认证的拦截行为。
 > 基础设施沿用 `tests/test_auth_routes.py` / `test_auth_token.py` 既有模式：
 > `TestClient(app)` + `dependency_overrides` 注入 user（auth_type 区分）+ `_jwt_access_token` / session token 签发。
-> 建议新增 `tests/test_token_scope_guard.py`。
+> ✅ **已落地 `tests/test_token_scope_guard.py`（25 用例，全绿）**。
 
-### 基线「三类认证用户」构造
+### 基线「三类认证用户」构造（已实现）
 
 | 用例 | auth_type | 构造方式 | 期望 |
 |------|-----------|----------|------|
@@ -231,7 +245,14 @@ python -m pytest tests/test_openapi.py -q                   # 契约不回归
 
 ---
 
-## 七、待确认项
+## 七、实施结果与遗留
 
-- [ ] agent 技能是否有走 D 类端点（skills/scenes/repos/profile）的 session 调用（需改用 API Key/JWT）
-- [ ] CLI 各命令对 D 类端点的 token 类型表
+**✅ 已实施（commit `203d0316`，已上线生产并实测）**：
+- `src/api/deps.py`：`require_no_session_token`
+- D 类端点替换：`agents_detail` / `auth/profile` / `chat conversations|messages` / `repos member|managed|deploy-url` / `skills list|detail`
+- `/api/scenes` 不归 D 类（VOD 技能用 session 调，维持现状）
+- 测试 `tests/test_token_scope_guard.py`（25 用例）
+
+**遗留（可选，未在本次范围）**：
+- [ ] `x-token-scope` 契约扩展标注（§3.3，非必选，代码级已保证）
+- [ ] CLI 各命令对 D 类端点的 token 类型表（CLI 侧文档化，服务端已生效）
