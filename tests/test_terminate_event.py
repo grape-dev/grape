@@ -92,6 +92,9 @@ def _insert_task(task_id, event_seq, runtime_id, status="dispatched"):
         db.commit()
 
 
+_TEST_USER = {"id": 1, "username": "test", "auth_type": "session_token"}
+
+
 class TestTerminateWorkerMode:
     """worker 模式终止 → cancel_task（status=cancelled）。"""
 
@@ -102,7 +105,7 @@ class TestTerminateWorkerMode:
         rt_id, _ = _insert_remote_runtime()
         _insert_task("task-worker-1", event_seq=100, runtime_id=rt_id)
 
-        result = terminate_event(seq=100, user={"id": 1, "username": "test"})
+        result = terminate_event(seq=100, user=_TEST_USER)
 
         assert result["cancelled"] is True
         task = service.get_task("task-worker-1")
@@ -117,7 +120,7 @@ class TestTerminateWorkerMode:
         rt_id, _ = _insert_remote_runtime()
         _insert_task("task-worker-2", event_seq=101, runtime_id=rt_id)
 
-        terminate_event(seq=101, user={"id": 1, "username": "test"})
+        terminate_event(seq=101, user=_TEST_USER)
 
         with db_lock:
             c = db.cursor()
@@ -135,7 +138,7 @@ class TestTerminateWorkerMode:
         rt_id, cred_id = _insert_remote_runtime()
         _insert_task("task-worker-3", event_seq=102, runtime_id=rt_id)
 
-        terminate_event(seq=102, user={"id": 1, "username": "test"})
+        terminate_event(seq=102, user=_TEST_USER)
 
         # 模拟 worker 心跳查询 cancelled_tasks（runtime.py 中的查询逻辑）
         with db_lock:
@@ -160,7 +163,7 @@ class TestTerminateDirectMode:
         # runtime_id=0 → direct 模式
         _insert_task("task-direct-1", event_seq=200, runtime_id=0)
 
-        result = terminate_event(seq=200, user={"id": 1, "username": "test"})
+        result = terminate_event(seq=200, user=_TEST_USER)
 
         assert result["cancelled"] is True
         task = service.get_task("task-direct-1")
@@ -174,7 +177,7 @@ class TestTerminateDirectMode:
         _insert_event(seq=201, status="running")
         _insert_task("task-direct-2", event_seq=201, runtime_id=0)
 
-        terminate_event(seq=201, user={"id": 1, "username": "test"})
+        terminate_event(seq=201, user=_TEST_USER)
 
         with db_lock:
             c = db.cursor()
@@ -190,7 +193,7 @@ class TestTerminateDirectMode:
         rt_id = _insert_local_runtime()
         _insert_task("task-local-1", event_seq=202, runtime_id=rt_id)
 
-        terminate_event(seq=202, user={"id": 1, "username": "test"})
+        terminate_event(seq=202, user=_TEST_USER)
 
         task = service.get_task("task-local-1")
         assert task["status"] == "failed", (
@@ -206,7 +209,7 @@ class TestTerminateEdgeCases:
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc:
-            terminate_event(seq=999, user={"id": 1, "username": "test"})
+            terminate_event(seq=999, user=_TEST_USER)
         assert exc.value.status_code == 404
 
     def test_event_already_completed(self):
@@ -215,7 +218,7 @@ class TestTerminateEdgeCases:
 
         _insert_event(seq=300, status="completed")
         with pytest.raises(HTTPException) as exc:
-            terminate_event(seq=300, user={"id": 1, "username": "test"})
+            terminate_event(seq=300, user=_TEST_USER)
         assert exc.value.status_code == 400
 
     def test_no_task_id_still_works(self):
@@ -223,7 +226,7 @@ class TestTerminateEdgeCases:
         from src.api.routes.events import terminate_event
 
         _insert_event(seq=400, status="running")
-        result = terminate_event(seq=400, user={"id": 1, "username": "test"})
+        result = terminate_event(seq=400, user=_TEST_USER)
         # cancel_direct_task 无 future → False，但事件状态仍回写 failed
         with db_lock:
             c = db.cursor()
