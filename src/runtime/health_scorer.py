@@ -1,11 +1,13 @@
-"""机器健康度评估模块（Issue #134 / #133 Spec）。
+"""机器健康度评估模块（Issue #134 / #133 / #135 Spec）。
 
 基于任务中心 DB 的历史执行记录，按滑动窗口（近 7 天）计算 per-machine：
 - 总任务数、失败数、失败率
 - 连续失败次数（consecutive_failures）
 - 健康分（0-100，越高越健康）
 
-健康分 = round(100 * (1 - failure_rate)) - consecutive_failure_penalty
+健康分计算（Issue #135 加入心跳因素）：
+1. 心跳检查（优先）：引擎 last_seen_at 超时或为 NULL、status 非 online/active → 健康分 = 0
+2. 失败率计算：health_score = round(100 * (1 - failure_rate)) - consecutive_failure_penalty
   - failure_rate = failed / total（total=0 时返回满分 100）
   - consecutive_failure_penalty = min(consecutive_failures * 5, 20)
   - 最终 clamp 到 [0, 100]
@@ -31,6 +33,9 @@ _CACHE_TTL = int(os.environ.get("HEALTH_CACHE_TTL", "60"))
 _HEALTH_THRESHOLD = int(os.environ.get("HEALTH_SCORE_THRESHOLD", "30"))
 # 连续失败上限：超过此值直接视为不健康（无需等失败率累积）
 _MAX_CONSECUTIVE_FAILURES = int(os.environ.get("HEALTH_MAX_CONSECUTIVE_FAILURES", "5"))
+# 心跳超时阈值（秒）：last_seen_at 超过此值视为失联，健康分直接为 0。
+# 与 engine_select._RUNTIME_STALE_SECONDS 保持一致（Issue #135）。
+_HEARTBEAT_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "300"))
 
 # ===== 内存缓存 =====
 
@@ -130,8 +135,80 @@ def _fetch_task_stats(runtime_id: int) -> dict:
     return result
 
 
+def _fetch_heartbeat(runtime_id: int) -> dict:
+    """从 agent_runtimes 表查询引擎心跳信息（Issue #135）。
+
+    返回 {status, last_seen_at, heartbeat_ok}
+    - heartbeat_ok=True：status 为 online/active 且 last_seen_at 在 _HEARTBEAT_STALE_SECONDS 内
+    - heartbeat_ok=False：last_seen_at 为 NULL、超时、或 status 非 online/active
+    """
+    result = {"status": "", "last_seen_at": "", "heartbeat_ok": False}
+    try:
+        with _lock():
+            c = _db().cursor()
+            c.execute(
+                "SELECT status, last_seen_at FROM agent_runtimes WHERE id=?",
+                (runtime_id,))
+            row = c.fetchone()
+        if not row:
+            return result
+        status = row[0] or ""
+        last_seen = row[1] or ""
+        result["status"] = status
+        result["last_seen_at"] = last_seen
+        # status 非 online/active → 不在线
+        if status not in ("online", "active"):
+            result["heartbeat_ok"] = False
+            return result
+        # last_seen_at 为空 → 无心跳记录
+        if not last_seen:
+            result["heartbeat_ok"] = False
+            return result
+        # 检查心跳新鲜度
+        from src.runtime.health import parse_dt
+        ts = parse_dt(last_seen)
+        if ts is None:
+            result["heartbeat_ok"] = False
+            return result
+        result["heartbeat_ok"] = (time.time() - ts) <= _HEARTBEAT_STALE_SECONDS
+    except Exception as e:
+        log.warning(f"health_scorer: fetch_heartbeat failed for runtime={runtime_id}: {e}")
+    return result
+
+
 def _compute_and_persist(runtime_id: int) -> dict:
-    """计算健康分并持久化到 DB + 更新内存缓存。返回健康度数据 dict。"""
+    """计算健康分并持久化到 DB + 更新内存缓存。返回健康度数据 dict。
+
+    Issue #135：心跳检查优先于失败率计算。
+    引擎无心跳（last_seen_at 超时或为 NULL）→ 健康分直接为 0。
+    """
+    # 心跳检查（优先于失败率）
+    hb = _fetch_heartbeat(runtime_id)
+    if not hb["heartbeat_ok"]:
+        score = 0
+        data = {
+            "runtime_id": runtime_id,
+            "health_score": score,
+            "total_tasks": 0,
+            "failed_tasks": 0,
+            "completed_tasks": 0,
+            "consecutive_failures": 0,
+            "failure_rate": 0.0,
+            "last_status": "",
+            "status": hb["status"],
+            "last_seen_at": hb["last_seen_at"],
+            "window_days": _WINDOW_DAYS,
+            "updated_at": _utcnow().isoformat(),
+        }
+        with _cache_lock:
+            _cache[runtime_id] = {
+                "score": score,
+                "data": data,
+                "expires": time.time() + _CACHE_TTL,
+            }
+        _persist_score(data)
+        return data
+
     stats = _fetch_task_stats(runtime_id)
     score = _compute_health_score(
         stats["total"], stats["failed"], stats["consecutive_failures"])
@@ -144,6 +221,8 @@ def _compute_and_persist(runtime_id: int) -> dict:
         "consecutive_failures": stats["consecutive_failures"],
         "failure_rate": round(stats["failed"] / stats["total"], 4) if stats["total"] > 0 else 0.0,
         "last_status": stats["last_status"],
+        "status": hb["status"],
+        "last_seen_at": hb["last_seen_at"],
         "window_days": _WINDOW_DAYS,
         "updated_at": _utcnow().isoformat(),
     }
@@ -167,12 +246,15 @@ def _persist_score(data: dict):
             c.execute(
                 "INSERT OR REPLACE INTO runtime_health_scores "
                 "(runtime_id, health_score, total_tasks, failed_tasks, completed_tasks, "
-                "consecutive_failures, failure_rate, last_status, window_days, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "consecutive_failures, failure_rate, last_status, status, last_seen_at, "
+                "window_days, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (data["runtime_id"], data["health_score"], data["total_tasks"],
                  data["failed_tasks"], data["completed_tasks"],
                  data["consecutive_failures"], data["failure_rate"],
-                 data["last_status"], data["window_days"], data["updated_at"]))
+                 data["last_status"], data.get("status", ""),
+                 data.get("last_seen_at", ""),
+                 data["window_days"], data["updated_at"]))
             _db().commit()
     except Exception as e:
         log.warning(f"health_scorer: persist_score failed for runtime={data['runtime_id']}: {e}")
@@ -186,7 +268,7 @@ def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
     force_refresh=True 时跳过缓存重新计算。
     返回 dict：{runtime_id, health_score, total_tasks, failed_tasks,
                completed_tasks, consecutive_failures, failure_rate,
-               last_status, window_days, updated_at}
+               last_status, status, last_seen_at, window_days, updated_at}
     """
     if not runtime_id:
         return _empty_score(0)
@@ -289,6 +371,8 @@ def _empty_score(runtime_id: int) -> dict:
         "consecutive_failures": 0,
         "failure_rate": 0.0,
         "last_status": "",
+        "status": "",
+        "last_seen_at": "",
         "window_days": _WINDOW_DAYS,
         "updated_at": _utcnow().isoformat(),
     }
