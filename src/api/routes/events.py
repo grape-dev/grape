@@ -640,7 +640,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
                                 _rid = _tagged_rid[0]
                     except Exception:
                         pass
-                if not _rid:
+                if not _rid and not is_plugin_mode():
                     raise HTTPException(status_code=409, detail={"code": 409, "message": "无可用引擎，无法重派"})
                 # Determine engine type to choose execution path
                 # Check credential_id directly (not just runtime_execution_kind, which is affected by global mode)
@@ -679,6 +679,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
                     server_url=old.get("server_url") or "",
                     issue_session_id=_sid,
                     pool_tag=old.get("agent_type") or "" if is_plugin_mode() else "",
+                    pool_agent_type=old.get("agent_type") or "" if is_plugin_mode() else "",
                 )
                 # If local direct engine, trigger direct execution (no worker will claim)
                 if _is_local_direct and _new_task_id:
@@ -1068,7 +1069,9 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
             except Exception:
                 runtime_id = 0
             if not runtime_id:
-                final_text = "（对话执行失败：无可用引擎/会话）"
+                from src.api.event_pipeline import is_plugin_mode
+                if not is_plugin_mode():
+                    final_text = "（对话执行失败：无可用引擎/会话）"
             else:
                 tid = enqueue_task(
                     agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
@@ -1080,6 +1083,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
                     skill_path=event_dialogue_path,
                     account=repository, repo_gitcode_token=bot_token,
                     issue_id=issue_id or "#0",
+                    pool_agent_type=agent_type if not runtime_id else "",  # plugin 广播模式下需要 pool_tag
                 )
                 # Fix C：超时/失败要有回显与清理，不再 30 分钟静默
                 task = None

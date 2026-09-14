@@ -1660,7 +1660,7 @@ def _cleanup_old_latency_logs():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM api_latency_log WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)")
+            c.execute("DELETE FROM api_latency_log WHERE created_at < datetime('now', '-7 days')")
             deleted = c.rowcount
             db.commit()
         if deleted:

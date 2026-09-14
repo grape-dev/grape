@@ -49,31 +49,21 @@ function renderChat(openConvId) {
   el.innerHTML = `<div class="chat-wrap" style="height:calc(100vh - 96px)">
     <div class="chat-convlist" id="convList"></div>
     <div class="chat-main">
-      <div class="chat-hdr"><h2>${I18N.t('chat.header.title')}</h2><button class="chat-cfg-btn" id="chatCfgBtn" onclick="toggleChatSide()">${I18N.t('chat.header.config_btn')}</button></div>
+      <div class="chat-hdr"><h2>${I18N.t('chat.header.title')}</h2></div>
       <div class="chat-body" id="chatBody">
         <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
       <div id="chatImgPreview" style="display:none;padding:6px 12px;border-top:1px solid var(--b);flex-wrap:wrap;gap:6px"></div>
       <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" data-tooltip="${I18N.t('chat.video_tooltip')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><input type="file" accept="video/*" style="display:none" onchange="_onChatVideoSelect(this)"></label><textarea id="chatInput" rows="1" placeholder="${I18N.t('chat.placeholder')}" style="flex:1" oninput="_autoResizeTextarea(this)"></textarea><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
     </div>
-    <div class="chat-side" id="chatSide"></div>
   </div>`;
   loadConversations(true);  // auto-select first
-  loadSideConfig();
   setupChatStream();
   // Issue #63: 切回来时如果有进行中的接入任务，恢复轮询
   if (typeof _onboardTaskId !== 'undefined' && _onboardTaskId) pollOnboardStatus();
 }
 
-let _chatSkillScope = 'official';
-
-function toggleChatSide() {
-  const side = document.getElementById('chatSide');
-  const btn = document.getElementById('chatCfgBtn');
-  if (!side) return;
-  side.classList.toggle('open');
-  if (btn) btn.classList.toggle('active', side.classList.contains('open'));
-}
+let _chatSkillScope = 'official';  // retained for im_channel.js compatibility
 
 function _switchChatSkillScope(scope) {
   _chatSkillScope = scope;
@@ -106,78 +96,6 @@ function _loadChatSkillOptions() {
       html = `<option value="0" disabled>${scope === 'repo' ? I18N.t('chat.skill.no_repo_skill') : I18N.t('chat.skill.no_personal_skill')}</option>`;
     }
     skillSelect.innerHTML = html;
-  }).catch(() => {});
-}
-
-function loadSideConfig() {
-  const _repo = app.currentRepo();
-  const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
-  API.get('/chat/config' + _qs).then(d => {
-    const feishu = d.im?.feishu || {};
-    const backend = d.backend || {};
-    const backendsOpts = (d._backends || []).map(b =>
-      `<option value="${b.name}" data-rid="${b.runtime_id || ''}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${(b.display_name || b.name) + (b.scope === 'local' ? ' (' + I18N.t('chat.local_direct') + ')' : '')}</option>`
-    ).join('') || '<option value="">Default</option>';
-    const side = document.getElementById('chatSide');
-    if (!side) return;
-    // scope 初始值从已配置 skill 的 scope 推导
-    _chatSkillScope = (d.skill_scope === 'repo') ? 'repo' : (d.skill_scope === 'user') ? 'user' : 'official';
-    side.innerHTML = `
-      <div class="cd" style="padding:12px;font-size:11px">
-        <div style="font-weight:600;margin-bottom:8px">${I18N.t('chat.backend')}</div>
-        <select id="cfgBackend" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">${backendsOpts}</select>
-      </div>
-      <div class="cd" style="padding:12px;font-size:11px">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="font-weight:600;flex-shrink:0">${I18N.t('chat.skill_label')}</span>
-          <select id="cfgSkillScope" onchange="_switchChatSkillScope(this.value)" style="flex:0 0 70px;max-width:70px;padding:5px 6px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg);outline:none">
-            <option value="official">${I18N.t('chat.scope_short.global')}</option>
-            <option value="repo">${I18N.t('chat.scope_short.repo')}</option>
-            <option value="user">${I18N.t('chat.scope_short.user')}</option>
-          </select>
-        </div>
-        <select id="cfgSkill" data-skill-id="${d.skill_id || 0}" style="width:100%;padding:5px 8px;border:1px solid var(--b);border-radius:4px;font-size:11px;background:var(--bg)">
-          <option value="0">${I18N.t('chat.skill.default_official')}</option>
-        </select>
-      </div>
-      <div class="cd" style="padding:12px;font-size:11px">
-        <div style="font-weight:600;margin-bottom:8px">IM</div>
-        <select id="cfgImProvider" onchange="switchImProvider()" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
-          <option value="feishu" ${d.im?.feishu?.app_id ? 'selected' : ''}>Feishu</option>
-          <option value="wecom" ${d.im?.wecom?.app_id ? 'selected' : ''}>WeCom</option>
-          <option value="dingtalk" ${d.im?.dingtalk?.app_id ? 'selected' : ''}>DingTalk</option>
-        </select>
-        <div style="margin-bottom:4px"><span class="t3">${I18N.t('chat.app_id')}</span></div>
-        <input id="cfgImAppId" placeholder="App ID" value="${feishu.app_id || ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:4px">
-        <div style="margin-bottom:4px"><span class="t3">${I18N.t('chat.app_secret')}</span></div>
-        <input id="cfgImSecret" type="password" placeholder="App Secret" value="${feishu.app_secret_exists ? '********' : ''}" style="width:100%;padding:4px 6px;border:1px solid var(--b);border-radius:4px;font-size:10px;background:var(--bg);margin-bottom:6px">
-        <button class="bt bt-o bt-s" onclick="startFeishuOnboard('chat_bot')" style="width:100%;margin-bottom:6px">${I18N.t('chat.scan_config')}</button>
-        <button class="bt bt-p bt-s" onclick="saveChatConfig()" style="width:100%">${I18N.t('common.save')}</button>
-      </div>
-      <div class="cd" style="padding:12px;font-size:11px">
-        <div style="font-weight:600;margin-bottom:6px">${I18N.t('chat.agents')}</div>
-        <div class="chat-agents" id="chatAgents"></div>
-      </div>`;
-    // 设置 scope 下拉框初始值
-    const scopeSel = document.getElementById('cfgSkillScope');
-    if (scopeSel) scopeSel.value = _chatSkillScope;
-    // 加载 skill 下拉
-    _loadChatSkillOptions();
-    // Load agent stats
-    const repo = app.currentRepo();
-    if (repo) {
-      ['vod','issue','coding','qa','sre'].forEach((at, i) => {
-        const COLORS = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
-        const LABELS = ['VOD','Issue','Coding','QA','SRE'];
-        API.get('/agents/' + at + '/' + repo.owner + '/' + repo.name).then(d => {
-          const m = d.metrics || {};
-          const es = m.event_stats || {};
-          const total = m.total_events || 0;
-          const el2 = document.getElementById('chatAgents');
-          if (el2) el2.innerHTML += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:10px"><span style="width:6px;height:6px;border-radius:50%;background:${COLORS[i]};display:inline-block"></span>${LABELS[i]}<span class="t3" style="margin-left:auto">${total}</span></div>`;
-        }).catch(() => {});
-      });
-    }
   }).catch(() => {});
 }
 
@@ -747,32 +665,6 @@ function renderChatMessages(messages) {
     }
   });
   body.scrollTop = body.scrollHeight;
-}
-
-function saveChatConfig() {
-  const _bkSel = document.getElementById('cfgBackend');
-  const backend = _bkSel?.value || '';
-  const rid = _bkSel?.selectedOptions?.[0]?.dataset?.rid || '';
-  const skillVal = document.getElementById('cfgSkill')?.value || '0';
-  const skillId = parseInt(skillVal) || 0;
-  // 项目/个人 scope 下不允许保存空值（无"默认技能"选项）
-  if (_chatSkillScope !== 'official' && !skillId) {
-    if (app && app.showToast) app.showToast(I18N.t('chat.skill.select_required'));
-    return;
-  }
-  const provider = document.getElementById('cfgImProvider')?.value || 'feishu';
-  const appId = document.getElementById('cfgImAppId')?.value || '';
-  const rawSecret = document.getElementById('cfgImSecret')?.value || '';
-  const secret = rawSecret === '********' ? '' : rawSecret;
-  const im = {};
-  im[provider] = {app_id: appId, app_secret: secret};
-  const _repo = app.currentRepo();
-  const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
-  const _body = {backend, skill_id: skillId, im};
-  if (rid) _body.runtime_id = parseInt(rid, 10);
-  API.put('/chat/config' + _qs, _body).then(() => {
-    app.showToast(I18N.t('chat.config.saved'));
-  }).catch(e => app.showToast(I18N.t('chat.config.save_failed', {msg: e.message})));
 }
 
 function switchImProvider() {
