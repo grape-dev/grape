@@ -802,7 +802,23 @@ CREATE TABLE IF NOT EXISTS runtime_health_scores (
     last_status         TEXT DEFAULT '',               -- 最近一条任务状态
     window_days         INTEGER NOT NULL DEFAULT 7,    -- 滑动窗口天数
     updated_at          TEXT DEFAULT (datetime('now'))
-)"""""),]
+)"""""),
+    # ===== Issue #139: sandbox whitelist =====
+    ("sandbox_whitelist", """CREATE TABLE IF NOT EXISTS sandbox_whitelist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'global',
+    scope_value TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (domain, scope, scope_value),
+    CHECK (scope = 'global' OR scope_value != '')
+    )"""),
+    ("idx_whitelist_scope", "CREATE INDEX IF NOT EXISTS idx_whitelist_scope ON sandbox_whitelist(scope, scope_value, enabled)"),
+    ("idx_whitelist_domain", "CREATE INDEX IF NOT EXISTS idx_whitelist_domain ON sandbox_whitelist(domain, enabled)"),
+]
 
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -1044,6 +1060,36 @@ def _seed_event_action_filter():
             except Exception as e:
                 log.warning(f"event_action_filter seed failed ({evt}:{act}): {e}")
         db.commit()
+
+
+def _seed_sandbox_whitelist():
+    """Issue #139: 初始化沙箱白名单到 DB 表（幂等）。
+
+    把 SANDBOX_WHITELIST_FALLBACK 的默认域名写入 sandbox_whitelist 表，
+    scope='global', enabled=1。已有记录跳过（UNIQUE 约束）。
+    """
+    try:
+        from src.config import SANDBOX_WHITELIST_FALLBACK
+    except ImportError:
+        return
+    with db_lock:
+        c = db.cursor()
+        # 检查表是否已有数据
+        c.execute("SELECT COUNT(*) FROM sandbox_whitelist")
+        if c.fetchone()[0] > 0:
+            return  # 已有数据，不重复 seed
+        for domain in SANDBOX_WHITELIST_FALLBACK:
+            try:
+                c.execute(
+                    "INSERT OR IGNORE INTO sandbox_whitelist "
+                    "(domain, scope, scope_value, enabled, description, created_at, updated_at) "
+                    "VALUES (?, 'global', '', 1, 'seed default', datetime('now'), datetime('now'))",
+                    (domain,)
+                )
+            except Exception:
+                pass
+        db.commit()
+        log.info(f"sandbox_whitelist seeded {len(SANDBOX_WHITELIST_FALLBACK)} domains")
 
 
 def _insert_seed_data(table: str, data: dict):
@@ -1343,6 +1389,7 @@ def init_database():
                 _create_indexes()
                 _seed_from_json()
                 _seed_event_action_filter()
+                _seed_sandbox_whitelist()
                 _sync_official_skills()
                 _align_agent_enable()
                 _cleanup_stale_meta()
@@ -1373,6 +1420,7 @@ def init_database():
         _create_indexes()
         _seed_from_json()
         _seed_event_action_filter()
+        _seed_sandbox_whitelist()
         _sync_official_skills()
         _align_agent_enable()
         _cleanup_stale_meta()
