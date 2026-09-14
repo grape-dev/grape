@@ -78,12 +78,101 @@ def _cleanup_temp_files():
         release_lock(_LOCK_KEY)
 
 
+_ATTACH_MAX_AGE_HOURS = 48   # 附件有效期 48 小时，不论任务成功与否
+
+
+def _cleanup_stale_attachments():
+    """清理超过 48h 的附件（不论任务成功与否）。
+
+    判断依据：附件对象的 last_modified 时间，超过 48h 即删除。
+    集群分布式锁互斥。
+    """
+    from datetime import datetime, timedelta, timezone
+    from src.lock import acquire_lock, release_lock
+    from src.config import OBS_PREFIX
+
+    acquired = acquire_lock("attach_cleanup", ttl=_LOCK_TTL)
+    if not acquired:
+        log.info("Attachment cleanup: lock contention, skipped")
+        return
+
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=_ATTACH_MAX_AGE_HOURS)
+        cleaned = 0
+
+        from src.storage import get_storage
+        storage = get_storage()
+
+        if storage:
+            # OBS 模式：遍历 OBS 对象，按 last_modified 判断
+            prefix = (OBS_PREFIX or "").strip("/")
+            _attach_prefix = f"{prefix}/issue_attachments/"
+            cursor = ""
+            while True:
+                items, cursor = storage.list_objects_with_meta(_attach_prefix, cursor=cursor, limit=1000)
+                for item in items:
+                    key = item["key"]
+                    last_mod = item.get("last_modified", "")
+                    if not last_mod:
+                        continue
+                    try:
+                        mod_dt = datetime.fromisoformat(last_mod.replace("Z", "+00:00"))
+                    except Exception:
+                        continue
+                    if mod_dt < cutoff:
+                        storage.delete_object(key)
+                        cleaned += 1
+                if not cursor:
+                    break
+        else:
+            # 本地模式：扫描目录按文件修改时间判断
+            _ATTACH_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "issue_attachments")
+            _ATTACH_DIR = os.path.abspath(_ATTACH_DIR)
+            if not os.path.isdir(_ATTACH_DIR):
+                return
+            import shutil
+            for owner in os.listdir(_ATTACH_DIR):
+                owner_dir = os.path.join(_ATTACH_DIR, owner)
+                if not os.path.isdir(owner_dir):
+                    continue
+                for repo in os.listdir(owner_dir):
+                    repo_dir = os.path.join(owner_dir, repo)
+                    if not os.path.isdir(repo_dir):
+                        continue
+                    for issue_dir_name in os.listdir(repo_dir):
+                        issue_dir = os.path.join(repo_dir, issue_dir_name)
+                        if not os.path.isdir(issue_dir):
+                            continue
+                        # 检查目录下所有文件的修改时间，全部超过 48h 才删目录
+                        all_stale = True
+                        for fname in os.listdir(issue_dir):
+                            fpath = os.path.join(issue_dir, fname)
+                            if not os.path.isfile(fpath):
+                                continue
+                            try:
+                                mtime = datetime.fromtimestamp(os.path.getmtime(fpath), tz=timezone.utc)
+                                if mtime >= cutoff:
+                                    all_stale = False
+                                    break
+                            except Exception:
+                                pass
+                        if all_stale:
+                            shutil.rmtree(issue_dir, ignore_errors=True)
+                            cleaned += 1
+
+        if cleaned > 0:
+            log.info(f"Attachment cleanup: removed {cleaned} stale attachment objects (age > {_ATTACH_MAX_AGE_HOURS}h)")
+    finally:
+        release_lock("attach_cleanup")
+
+
 async def _upload_cleanup_worker(interval: float = _CLEANUP_INTERVAL):
     """定时清理 worker：启动后等 5 分钟首次执行（避免和启动同步抢资源），之后每 interval 秒。"""
     await asyncio.sleep(300)  # 启动后 5 分钟首次执行
     while True:
         try:
             _cleanup_temp_files()
+            _cleanup_stale_attachments()
         except asyncio.CancelledError:
             logger.info("Upload cleanup worker cancelled")
             raise
