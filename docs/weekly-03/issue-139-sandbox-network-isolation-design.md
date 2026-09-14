@@ -3,7 +3,7 @@
 > Issue：https://gitcode.com/grape-dev/grape/issues/139
 > 父 Issue：#64 支持任务执行沙箱隔离
 > 分支：`feat/issue-139-sandbox-network-isolation`（基于 `weekly-03`）
-> 日期：2026-09-14（v5 — 功能影响分析后修正阻断性问题）
+> 日期：2026-09-14（v6 — 实施前验证完成，修正 bwrap 兼容性问题）
 
 ---
 
@@ -153,7 +153,7 @@ grape 主进程（executor.py）
   │         ├─ --unshare-net（完全隔离网络）
   │         ├─ --unshare-pid --proc /proc（PID 隔离）
   │         ├─ --new-session --die-with-parent（加固）
-  │         ├─ --cap-drop ALL --disable-userns（v4 加固，需验证 terraform/npm 影响）
+  │         ├─ --cap-drop ALL（加固，bwrap 0.4.1 不支持 --disable-userns 已去掉）
   │         ├─ --bind socket_path（挂入 Unix socket）
   │         ├─ --ro-bind /etc/ssl/certs + /etc/pki（CA 证书）
   │         ├─ --symlink /dev/null /etc/shadow（遮蔽敏感文件）
@@ -823,9 +823,9 @@ class CgroupSlice:
 ```python
 # src/agent/sandbox.py — build_bwrap_cmd 中新增
 
-# v4 加固项（采纳 deepagents executor.py:149-160）
+# v4 加固（采纳 deepagents executor.py:149-160）
 opts += ["--cap-drop", "ALL"]       # 丢弃所有 capabilities
-opts += ["--disable-userns"]        # 禁止嵌套 user namespace
+# 注：bwrap 0.4.1 不支持 --disable-userns（Unknown option），已去掉
 # 注：不加 --clearenv（会破坏引擎运行时依赖的 env）
 # 注：不加 --unshare-user --uid 1000（grape worktree 属主是当前用户，uid 映射可能导致权限问题）
 ```
@@ -1310,10 +1310,14 @@ SANDBOX_CREDENTIAL_ENV_VARS = [v.strip() for v in os.environ.get("SANDBOX_CREDEN
 
 | 步骤 | 内容 | 参考 |
 |------|------|------|
-| 0 | **实施前验证（阻断性）** | — |
-| 0a | 验证 Node.js 是否走 HTTP_PROXY：bwrap --unshare-net 内跑 `node -e "fetch(...)"` | 确定 global-agent 需求 |
-| 0b | 验证 --cap-drop ALL 是否影响 terraform/npm install | 确定 cap-drop 策略 |
-| 0c | 验证 bwrap --unshare-net 后 lo 接口（127.0.0.1）可用 | 确定沙箱内桥接可行 |
+| 0 | **实施前验证（已完成）** | — |
+| 0a | ✅ 验证通过：opencode（bun 编译）原生走 HTTP_PROXY。bwrap --unshare-net 内 opencode run 成功调模型 API，代理拦截到 3 个 CONNECT 请求到 opengw.clouddeveloper.club:443。bun 的 strings 确认含 http_proxy/https_proxy 支持。不需要 global-agent | 确定 global-agent 不需要 |
+| 0b | ✅ 验证通过：--cap-drop ALL 不影响 pip install / npm / node / touch / chmod。whoami=id=yangaiwu（非 root，正常用户） | 保留 --cap-drop ALL |
+| 0c | ✅ 验证通过：bwrap --unshare-net 后 lo（127.0.0.1）可用。沙箱内 Python ThreadingTCPServer bind 127.0.0.1:3128 成功，curl 和 opencode 都连上了 | 确定沙箱内桥接可行 |
+
+**验证中发现的兼容性问题**：
+- bwrap 0.4.1 **不支持 --disable-userns**（`Unknown option --disable-userns`）。从方案中去掉此项。
+- Unix socket 文件必须用 `--bind`（不是 `--ro-bind`），且路径不能在被 `--tmpfs` 覆盖的 /tmp 下。建议放在 `{WORKSPACE_DIR}` 或 home 目录下。
 | 1 | detect.py — 环境预检 + 敏感 env 扫描 | deepagents detect.py |
 | 2 | audit.py — RotatingAuditLog + 哈希链 + verify_chain | agent-bom proxy_audit.py |
 | 3 | cgroup.py — CgroupSlice + 降级 + context manager | deepagents cgroup.py |
@@ -1336,14 +1340,14 @@ SANDBOX_CREDENTIAL_ENV_VARS = [v.strip() for v in os.environ.get("SANDBOX_CREDEN
 | 1 | --unshare-net | Agent 调 grape API（localhost:3000）不可达 | NO_PROXY 移除 localhost/127.0.0.1 + 白名单动态加入 127.0.0.1 + 代理转发到宿主 3000 | ✅ 已更新方案 |
 | 2 | --unsetenv BOT_GITCODE_TOKEN | QA/SRE skill 全部 curl 调 GitCode API 401 | P0 不遮蔽，靠网络白名单限制 | ✅ 已更新方案 |
 | 3 | --unsetenv HUAWEICLOUD_SDK_AK/SK | QA/SRE terraform plan/apply 失败 | P0 不遮蔽，靠网络白名单限制 | ✅ 已更新方案 |
-| 4 | Node.js 不认 HTTP_PROXY | opencode/codearts 调模型 API 失败 | 实施前验证；如需要注入 global-agent | ⏳ 待验证（步骤 0a） |
+| 4 | Node.js 不认 HTTP_PROXY | opencode/codearts 调模型 API 失败 | 已验证：opencode/codearts 是 bun 编译，原生走 HTTP_PROXY | ✅ 已验证通过 |
 
 ### 中影响项
 
 | # | 改动 | 影响 | 解决方案 | 状态 |
 |---|------|------|----------|------|
-| 5 | cgroup 限额 | opencode + pip/npm install 可能不够 | 默认 0（不限制） | ✅ 已更新方案 |
-| 6 | --cap-drop ALL | terraform mount / npm 全局安装可能失败 | 实施前验证；如影响改为只丢高危 cap | ⏳ 待验证（步骤 0b） |
+| 5 | cgroup 限额 | opencode + pip/npm install 可能不够 | 默认 0=自动取宿主机 50% | ✅ 已更新方案 |
+| 6 | --cap-drop ALL | terraform mount / npm 全局安装可能失败 | 已验证：pip/npm/node/touch/chmod 全部正常 | ✅ 已验证通过 |
 | 7 | 代理单线程 | 并发 HTTP 请求排队 | ThreadingTCPServer | ✅ 已更新方案 |
 
 ### 低影响项（无需额外处理）
@@ -1351,7 +1355,7 @@ SANDBOX_CREDENTIAL_ENV_VARS = [v.strip() for v in os.environ.get("SANDBOX_CREDEN
 | 改动 | 影响 | 原因 |
 |------|------|------|
 | --unshare-pid | 无 | _kill_stale_engine 在主进程执行，不在沙箱内 |
-| --disable-userns | 无 | Agent 不创建嵌套 namespace |
+| --disable-userns | N/A | bwrap 0.4.1 不支持此选项，已去掉 |
 | GIT_SSH_COMMAND=/bin/false | 无 | grape git 走 HTTPS（repogit.py clone_url_for） |
 | --symlink /dev/null /etc/shadow | 无 | Agent 不读 shadow |
 | 沙箱内桥接进程 | 低 | 需要 python3 在沙箱内（已有 /usr ro-bind），额外 ~10MB 内存 |
