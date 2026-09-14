@@ -20,10 +20,11 @@ _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")
 
 
 def _done_issues() -> list[tuple[str, str]]:
+    """返回到达终态（stage='done'）的 (repo_key, issue_id) 列表。Phase C3：读 issue 单表。"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, issue_id FROM issue_state WHERE stage='done'")
-        return c.fetchall()
+        rows = c.execute("SELECT repo_key, issue_number FROM issue WHERE stage='done'").fetchall()
+        return [(r[0], f"#{r[1]}") for r in rows]
 
 
 def _active_issue_sessions() -> set[tuple[str, str, str]]:

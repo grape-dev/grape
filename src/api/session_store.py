@@ -42,28 +42,10 @@ def is_agent_enabled(repo_key: str, agent_type: str) -> bool:
 def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     """读 Issue 当前阶段。无记录返回 None。
 
-    Phase B2.5（双读一致）：`issue_state` 为权威阶段机（停写前不改变语义），
-    缺失时回退收编后的 `issue` 单表（按 issue_number，卡片行已回填/双写）。
-    两表由 set_* 双写保持一致。
+    Phase C3：`issue` 单表为权威（已收编 + 停写 issue_state），直接读 issue 卡片行；
+    `issue_state` 仅作停写过渡期的兜底（存量未清理前的兼容）。
     """
-    # 1. issue_state（权威；过渡期与收编后均正确）
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?",
-                      (repo_key, issue_id))
-            row = c.fetchone()
-            if row:
-                return {"id": row[0], "stage": row[1], "owner_agent": row[2],
-                        "a2a_seq": row[3], "updated_at": row[4], "assignee": row[5] or "",
-                        "scene_id": row[6] or "",
-                        "scene_user_id": row[7] or 0,
-                        "parent_issue_id": row[8] or "",
-                        "is_subtask_mode": row[9] or 0,
-                        "allow_scene_override": row[10] or 0}
-    except Exception:
-        pass
-    # 2. issue 单表兜底（无 issue_state，但已有卡片行的收编数据）
+    # 1. issue 单表（权威）
     _num = None
     try:
         _num = int(str(issue_id or "").lstrip("#"))
@@ -89,6 +71,23 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
                         "allow_scene_override": row[9] or 0}
         except Exception:
             pass
+    # 2. issue_state 兜底（过渡期兼容）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?",
+                      (repo_key, issue_id))
+            row = c.fetchone()
+            if row:
+                return {"id": row[0], "stage": row[1], "owner_agent": row[2],
+                        "a2a_seq": row[3], "updated_at": row[4], "assignee": row[5] or "",
+                        "scene_id": row[6] or "",
+                        "scene_user_id": row[7] or 0,
+                        "parent_issue_id": row[8] or "",
+                        "is_subtask_mode": row[9] or 0,
+                        "allow_scene_override": row[10] or 0}
+    except Exception:
+        pass
     return None
 
 
@@ -137,41 +136,23 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                     a2a_seq: int | None = None, assignee: str = ""):
     """写入/更新 Issue 阶段（幂等 upsert，兼容 SQLite/MySQL）。assignee 为 Issue 责任人（GitCode 用户名）。
 
-    原实现 INSERT OR REPLACE ... VALUES ((SELECT id FROM issue_state ...)) 在
-    MySQL 下报 1093（自引用子查询），改为先查后改/插。
-    新建记录时从 managed_repos.dev_scene 带入 scene_id（确保场景引擎配置生效）。
+    Phase C3：**只写 `issue` 单表**（权威），不再写 issue_state（已由 B2 收编 + 孤儿清理后数据对齐）。
+    建档由 `_sync_issue_fields` 的 ensure_row 保证（无卡片行建最小行）。
     """
     _init_scene = ""
     with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
-        row = c.fetchone()
-        if row:
-            c.execute(
-                "UPDATE issue_state SET stage=?, owner_agent=?, assignee=?, a2a_seq=?, updated_at=datetime('now') WHERE id=?",
-                (stage, owner_agent, assignee, a2a_seq, row[0]),
-            )
-        else:
-            # 新建：从 managed_repos.dev_scene 带入 scene_id
-            try:
-                from src.user.db import get_repo_scene
-                _init_scene = get_repo_scene(repo_key) or ""
-            except Exception:
-                pass
-            c.execute(
-                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, scene_id, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-                (repo_key, issue_id, stage, owner_agent, assignee, a2a_seq, _init_scene),
-            )
-        db.commit()
-    # Phase B2.5/C3：双写 stage 到 issue 单表（无卡片行则建档最小行，为停写 issue_state 铺路）
+        try:
+            from src.user.db import get_repo_scene
+            _init_scene = get_repo_scene(repo_key) or ""
+        except Exception:
+            pass
+    # Phase C3：写 issue 单表（无卡片行则建档最小行）
     _sync_issue_fields(repo_key, issue_id, {
         "stage": stage, "owner_agent": owner_agent, "assignee": assignee or "",
         "a2a_seq": a2a_seq,
     }, ensure_row=True, assignee=assignee)
     from src.config import log
-    _scene_log = _init_scene if not row else '(existing)'
-    log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee} scene={_scene_log}")
+    log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee} scene={_init_scene}")
 
     # Issue #85: stage 推进时同步 task.status（不覆盖 awaiting_input/completed/cancelled）
     _STAGE_TO_TASK_STATUS = {
@@ -231,21 +212,7 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
 
 
 def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int = 0):
-    """写入 Issue 级开发场景（VOD 判定后调用，幂等）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
-        row = c.fetchone()
-        if row:
-            c.execute("UPDATE issue_state SET scene_id=?, scene_user_id=? WHERE id=?", (scene_id or "", scene_user_id, row[0]))
-        else:
-            # 无记录时插入一行（stage 默认 vod），后续 set_issue_stage 会 UPDATE
-            c.execute(
-                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, scene_id, scene_user_id, updated_at) "
-                "VALUES (?, ?, 'vod', 'vod', ?, ?, datetime('now'))",
-                (repo_key, issue_id, scene_id or "", scene_user_id),
-            )
-        db.commit()
+    """写入 Issue 级开发场景（VOD 判定后调用，幂等）。Phase C3：仅写 issue 单表。"""
     _sync_issue_fields(repo_key, issue_id, {"scene_id": scene_id or "", "scene_user_id": scene_user_id},
                        ensure_row=True)
     from src.config import log
@@ -253,53 +220,34 @@ def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: 
 
 
 def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
-    """设置 Issue 是否允许 VOD 覆盖场景（allow_scene_override），幂等 upsert。"""
+    """设置 Issue 是否允许 VOD 覆盖场景（allow_scene_override）。Phase C3：仅写 issue 单表。"""
     val = 1 if allowed else 0
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
-        row = c.fetchone()
-        if row:
-            c.execute("UPDATE issue_state SET allow_scene_override=? WHERE id=?", (val, row[0]))
-        else:
-            c.execute(
-                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, allow_scene_override, updated_at) "
-                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
-                (repo_key, issue_id, val))
-        db.commit()
     _sync_issue_fields(repo_key, issue_id, {"allow_scene_override": val}, ensure_row=True)
     log.info(f"SceneOverride: repo={repo_key} issue={issue_id} allowed={val}")
 
 
 def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
-    """读取 Issue 是否允许 VOD 覆盖场景。默认 False。"""
+    """读取 Issue 是否允许 VOD 覆盖场景。默认 False。Phase C3：读 issue 单表。"""
+    _num = None
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?",
-                (repo_key, issue_id))
-            row = c.fetchone()
-            return bool(row[0]) if row and row[0] else False
+        _num = int(str(issue_id or "").lstrip("#"))
     except Exception:
-        return False
+        _num = None
+    if _num:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT allow_scene_override FROM issue WHERE repo_key=? AND issue_number=?",
+                          (repo_key, _num))
+                row = c.fetchone()
+                return bool(row[0]) if row and row[0] else False
+        except Exception:
+            return False
+    return False
 
 
 def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):
-    """标记 Issue 为子任务（设置 parent_issue_id）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
-        row = c.fetchone()
-        if row:
-            c.execute("UPDATE issue_state SET parent_issue_id=? WHERE id=?", (parent_issue_id or "", row[0]))
-        else:
-            c.execute(
-                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, parent_issue_id, updated_at) "
-                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
-                (repo_key, issue_id, parent_issue_id or ""),
-            )
-        db.commit()
+    """标记 Issue 为子任务（设置 parent_issue_id）。Phase C3：仅写 issue 单表。"""
     _sync_issue_fields(repo_key, issue_id, {"parent_issue_id": parent_issue_id or ""}, ensure_row=True)
     from src.config import log
     log.info(f"ParentIssue: repo={repo_key} issue={issue_id} parent={parent_issue_id}")
@@ -312,21 +260,8 @@ def get_parent_issue(repo_key: str, issue_id: str) -> str:
 
 
 def set_subtask_mode(repo_key: str, issue_id: str, enabled: bool = True):
-    """标记 Issue 为多任务模式（父任务）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM issue_state WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
-        row = c.fetchone()
-        val = 1 if enabled else 0
-        if row:
-            c.execute("UPDATE issue_state SET is_subtask_mode=? WHERE id=?", (val, row[0]))
-        else:
-            c.execute(
-                "INSERT INTO issue_state (repo_key, issue_id, stage, owner_agent, is_subtask_mode, updated_at) "
-                "VALUES (?, ?, 'vod', 'vod', ?, datetime('now'))",
-                (repo_key, issue_id, val),
-            )
-        db.commit()
+    """标记 Issue 为多任务模式（父任务）。Phase C3：仅写 issue 单表。"""
+    val = 1 if enabled else 0
     _sync_issue_fields(repo_key, issue_id, {"is_subtask_mode": val}, ensure_row=True)
     from src.config import log
     log.info(f"SubtaskMode: repo={repo_key} issue={issue_id} enabled={enabled}")
@@ -344,15 +279,18 @@ def is_subtask_mode_enabled(repo_key: str, issue_id: str) -> bool:
 
 
 def get_subtask_issues(repo_key: str, parent_issue_id: str) -> list[dict]:
-    """查询父任务的所有子任务 issue_state 记录。"""
+    """查询父任务的所有子任务（issue 单表）。返回 issue_id/stage/owner_agent。"""
+    _pid = parent_issue_id or ""
+    if _pid and not str(_pid).startswith("#"):
+        _pid = "#" + str(_pid)
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT issue_id, stage, owner_agent FROM issue_state "
-            "WHERE repo_key=? AND parent_issue_id=? ORDER BY issue_id",
-            (repo_key, parent_issue_id),
+            "SELECT issue_number, stage, owner_agent FROM issue "
+            "WHERE repo_key=? AND parent_issue_id=? ORDER BY issue_number",
+            (repo_key, _pid),
         )
-        return [{"issue_id": r[0], "stage": r[1], "owner_agent": r[2]} for r in c.fetchall()]
+        return [{"issue_id": "#" + str(r[0]), "stage": r[1], "owner_agent": r[2]} for r in c.fetchall()]
 
 
 def get_or_create_agent_session(repo_key: str, agent_type: str,

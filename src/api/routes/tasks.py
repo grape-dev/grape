@@ -1537,22 +1537,28 @@ def _require_repo_access(user: dict, repo_key: str):
 
 
 def _batch_fetch_issue_state(keys: list) -> dict:
-    """批量查 issue_state 的 stage/scene_id，返回 {(repo_key, issue_id): {"stage":..,"scene_id":..}}（防 N+1）。"""
+    """批量查 issue 单表的 stage/scene_id，返回 {(repo_key, issue_id): {"stage":..,"scene_id":..}}（防 N+1）。
+
+    Phase C3：读 issue 卡片行（keys 中 issue_id 为 '#N'，转 issue_number）。
+    """
     out: dict = {}
     if not keys:
         return out
     for i in range(0, len(keys), 200):
         _chunk = keys[i:i + 200]
-        _ors = " OR ".join(["(repo_key=? AND issue_id=?)"] * len(_chunk))
-        _flat = [v for k in _chunk for v in k]
+        _ors = " OR ".join(["(repo_key=? AND issue_number=?)"] * len(_chunk))
+        _flat = []
+        for _k in _chunk:
+            _n = str(_k[1]).lstrip("#")
+            _flat.extend([_k[0], int(_n) if _n.isdigit() else -1])
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT repo_key, issue_id, stage, scene_id FROM issue_state WHERE " + _ors, _flat)
+                c.execute("SELECT repo_key, issue_number, stage, scene_id FROM issue WHERE " + _ors, _flat)
                 for row in c.fetchall():
-                    out[(row[0], row[1])] = {"stage": row[2] or "", "scene_id": row[3] or ""}
+                    out[(row[0], f"#{row[1]}")] = {"stage": row[2] or "", "scene_id": row[3] or ""}
         except Exception as e:
-            log.warning(f"batch issue_state fetch failed: {e}")
+            log.warning(f"batch issue fetch failed: {e}")
     return out
 
 

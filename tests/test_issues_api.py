@@ -56,13 +56,12 @@ def teardown_module():
 
 
 def _mk_issue_state(number, stage="qa", owner="qa", scene="default", assignee="grape_bot"):
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO issue_state (repo_key, issue_id, stage, owner_agent, assignee, scene_id, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-            (REPO_KEY, f"#{number}", stage, owner, assignee, scene))
-        db.commit()
+    """Phase C3：经 set_issue_stage 写（issue 单表权威；同时建 issue 卡片行）。"""
+    from src.api.session_store import set_issue_stage, set_issue_scene
+    iid = f"#{number}"
+    set_issue_stage(REPO_KEY, iid, stage, owner, assignee=assignee)
+    if scene:
+        set_issue_scene(REPO_KEY, iid, scene, 0)
 
 
 def _mk_event(number, ev_type="issue_opened", agent="vod", status="completed"):
@@ -78,12 +77,18 @@ def _mk_event(number, ev_type="issue_opened", agent="vod", status="completed"):
 
 
 def _mk_task(number, status="processing"):
+    """确保 issue 卡片行存在并按需更新 status（不清零 stage 等收编字段）。"""
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT OR REPLACE INTO issue (user_id, assignee, repo_key, issue_number, title, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (_uid["id"], "grape_bot", REPO_KEY, number, f"Task #{number}", status))
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, status) "
+            "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS "
+            "(SELECT 1 FROM issue WHERE repo_key=? AND issue_number=?)",
+            (_uid["id"], "grape_bot", REPO_KEY, number, f"Task #{number}", status,
+             REPO_KEY, number))
+        c.execute(
+            "UPDATE issue SET status=? WHERE repo_key=? AND issue_number=?",
+            (status, REPO_KEY, number))
         db.commit()
 
 

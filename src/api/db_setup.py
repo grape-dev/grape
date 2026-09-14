@@ -707,7 +707,7 @@ _NEW_TABLES = [
     ("task_messages", _TASK_MESSAGES_DDL),
     ("agent_type_runtime_pool", _AGENT_TYPE_RUNTIME_POOL_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
-    ("issue_state", _ISSUE_STATE_DDL),
+    # issue_state 已停用（Phase C5：字段收编进 issue 单表，见 issues-api-execution-plan.md）
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
     ("events", _EVENTS_TABLE_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
@@ -2652,32 +2652,21 @@ def _migrate_tables():
         log.info("Added last_scene column to user_accounts")
     except Exception as e:
         log.warning(f"Add last_scene column failed: {e}")
-    # ===== VOD auto-scene: issue_state.scene_id (vod-auto-scene-detection-design.md §3.1) =====
+    # ===== multi-task mode: issue_state 已停用（C5），仅补 issue/chat_messages 列 =====
     try:
         with db_lock:
             c = db.cursor()
-            _ensure_column(c, "issue_state", "scene_id", "TEXT DEFAULT ''")
-            db.commit()
-        log.info("Added scene_id column to issue_state")
-    except Exception as e:
-        log.warning(f"Add issue_state.scene_id column failed: {e}")
-    # ===== multi-task mode: issue_state.parent_issue_id + is_subtask_mode =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "issue_state", "parent_issue_id", "TEXT DEFAULT ''")
-            _ensure_column(c, "issue_state", "is_subtask_mode", "INTEGER DEFAULT 0")
             _ensure_column(c, "issue", "parent_issue_number", "INTEGER DEFAULT 0")
             _ensure_column(c, "issue", "is_subtask_mode", "INTEGER DEFAULT 0")
             _ensure_column(c, "chat_messages", "task_id", "TEXT")
             _ensure_column(c, "chat_messages", "generate_status", "INTEGER DEFAULT NULL")
             db.commit()
-        log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + issue + task_id/generate_status to chat_messages")
+        log.info("Added parent_issue_number/is_subtask_mode to issue + task_id/generate_status to chat_messages")
     except Exception as e:
         log.warning(f"Add multi-task columns failed: {e}")
     # ===== Phase B2: issue 收编 issue_state 字段（新增列 + 存量数据回填）=====
     # 目标：issue 单表承载 stage/status 全量，为 C 阶段弃用 issue_state 做准备。
-    # 幂等：列已存在则跳过；回填按 issue_state 为权威对齐（两表一致，重复执行结果不变）。
+    # 幂等：列已存在则跳过；C5 后 issue_state 已 DROP，回填自动跳过。
     try:
         with db_lock:
             c = db.cursor()
@@ -2693,15 +2682,23 @@ def _migrate_tables():
             _ensure_column(c, "issue", "parent_issue_id", "TEXT DEFAULT ''")
             _ensure_column(c, "issue", "updated_at", "TEXT DEFAULT ''")
             db.commit()
-        # 存量回填：从 issue_state 并入 issue（按 issue_id == "#{issue_number}"）
+    except Exception as e:
+        log.warning(f"Phase B2 issue 收编字段补列失败: {e}")
+    # 存量回填：从 issue_state 并入 issue（按 issue_id == "#{issue_number}"；C5 DROP 后跳过）
+    try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "UPDATE issue SET "
-                "stage = COALESCE((SELECT s.stage FROM issue_state s "
-                "                    WHERE s.repo_key=issue.repo_key "
-                "                      AND s.issue_id='#'||issue.issue_number), 'vod'), "
-                "owner_agent = COALESCE((SELECT s.owner_agent FROM issue_state s "
+            _has_issue_state = bool(c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'").fetchone())
+        if _has_issue_state:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "UPDATE issue SET "
+                    "stage = COALESCE((SELECT s.stage FROM issue_state s "
+                    "                    WHERE s.repo_key=issue.repo_key "
+                    "                      AND s.issue_id='#'||issue.issue_number), 'vod'), "
+                    "owner_agent = COALESCE((SELECT s.owner_agent FROM issue_state s "
                 "                    WHERE s.repo_key=issue.repo_key "
                 "                      AND s.issue_id='#'||issue.issue_number), 'vod'), "
                 "scene_id = COALESCE((SELECT s.scene_id FROM issue_state s "
@@ -2742,24 +2739,6 @@ def _migrate_tables():
         log.info("Added task_id/generate_status columns to event_thread")
     except Exception as e:
         log.warning(f"Add event_thread task_id/generate_status columns failed: {e}")
-    # ===== Scene Center: issue_state.scene_user_id =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "issue_state", "scene_user_id", "INTEGER DEFAULT 0")
-            db.commit()
-        log.info("Added scene_user_id column to issue_state")
-    except Exception as e:
-        log.warning(f"Add issue_state.scene_user_id column failed: {e}")
-    # ===== VOD scene override switch: issue_state.allow_scene_override =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "issue_state", "allow_scene_override", "INTEGER DEFAULT 0")
-            db.commit()
-        log.info("Added allow_scene_override column to issue_state")
-    except Exception as e:
-        log.warning(f"Add issue_state.allow_scene_override column failed: {e}")
     # ===== Scene Center: agent_tasks.pool_engine_ids + 官方场景种子导入 =====
     try:
         with db_lock:
@@ -2794,6 +2773,42 @@ def _migrate_tables():
     except Exception as e:
         log.warning(f"Add tasks.created_by column failed: {e}")
     # ===== Scene scope downgrade 已在 _migrate_scene_table_to_repo_model 中处理（Issue-39 方案 B）=====
+    # ===== Phase C5: DROP issue_state（字段已收编进 issue 单表，见 issues-api-execution-plan.md）=====
+    # 安全条件：不存在「issue_state 有、issue 无」的孤儿；且两边 stage 全部一致。否则跳过并告警。
+    # 当前仅 SQLite 自动执行（生产为 SQLite）；MySQL 手动执行（CAST 语法差异，避免迁移期报错）。
+    try:
+        from src.mysql_compat import get_db_backend
+        if get_db_backend() == "mysql":
+            log.info("Phase C5: MySQL 请手动执行 DROP issue_state（数据核对后）")
+        else:
+            with db_lock:
+                c = db.cursor()
+                _tables = [r[0] for r in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'").fetchall()]
+                if not _tables:
+                    _is_dropped = True
+                else:
+                    _orphan = c.execute(
+                        "SELECT COUNT(*) FROM issue_state s WHERE NOT EXISTS ("
+                        "SELECT 1 FROM issue i WHERE i.repo_key=s.repo_key "
+                        "AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER))"
+                    ).fetchone()[0]
+                    _mismatch = c.execute(
+                        "SELECT COUNT(*) FROM issue_state s JOIN issue i "
+                        "ON i.repo_key=s.repo_key AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER) "
+                        "WHERE COALESCE(i.stage,'')<>COALESCE(s.stage,'')"
+                    ).fetchone()[0]
+                    if _orphan == 0 and _mismatch == 0:
+                        c.execute("DROP TABLE issue_state")
+                        db.commit()
+                        _is_dropped = True
+                    else:
+                        _is_dropped = False
+                        log.warning(f"Phase C5: skip drop issue_state (orphan={_orphan}, mismatch={_mismatch})")
+            if _is_dropped:
+                log.info("Phase C5: issue_state dropped（字段已收编进 issue 单表）")
+    except Exception as e:
+        log.warning(f"Phase C5 DROP issue_state failed: {e}")
 
 
 def _rebuild_scene_market_unique():
