@@ -716,7 +716,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             except Exception:
                 pass
             return {"status": "ok", "seq": 0, "agent": agent_name}
-        # Plugin 模式 + engine_id=0：仅 queue_remote 走广播；auto/direct 走本机 direct
+        # Plugin 模式 + engine_id=0：非 direct 模式均走广播（queue_remote + auto）；仅 direct 走本机 direct
         from src.api.event_pipeline import is_plugin_mode as _is_plugin
         from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
         if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:

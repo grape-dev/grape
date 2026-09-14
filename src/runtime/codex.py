@@ -50,7 +50,7 @@ class CodexRuntime(AgentRuntime):
         --sandbox workspace-write: 允许写工作区（对齐 opencode 自动执行模式）
         session_id 暂不启用——codex resume 与 opencode --session 形态不同，首期不做。
         """
-        args = ["exec", "--json", "--sandbox", "workspace-write"]
+        args = ["exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check"]
         if prompt:
             args.append(prompt)
         return args
