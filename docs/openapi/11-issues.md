@@ -148,3 +148,22 @@ Issue 对象字段：
 | `issue_summary` | string | 一句话摘要 |
 
 > 优先读 event.json 档案；无档案时降级由 `events` 重构。
+
+---
+
+## 错误返回（全端点通用）
+
+> 格式与全量状态码契约见 `README.md`「错误响应统一格式」；`detail.message` 英文。
+
+| 码 | message（英文） | 场景 |
+|----|--------------|------|
+| 400 | Bad Request / Invalid parameter | 创建时仓库/标题/描述缺失等参数错误 |
+| 401 | Unauthorized | 未认证 / token 失效 |
+| 403 | Forbidden | 无权限（含 session token 不适用于账户类端点） |
+| 404 | Not Found | Issue #N 不存在 |
+| 409 | Conflict | 创建时同标题 Issue 已存在 |
+| 502 | Bad Gateway | GitCode 创建 Issue 失败 |
+
+```json
+{"detail": {"code": 404, "message": "Not Found"}}
+```

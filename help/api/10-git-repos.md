@@ -288,13 +288,15 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ## 通用错误（全接口一致）
 
-| 码 | 含义 | body |
+> `detail.message` 英文；格式见 `README.md`「错误响应统一格式」。
+
+| 码 | 含义（message 英文） | body |
 |----|------|------|
-| 401 | 未认证（缺失/无效 API Key） | `{"detail":{"code":401,"message":"401 Unauthorized"}}` |
-| 402/403 | 无权限（写操作/白名单外 path/未知 provider） | `{"detail":{"code":403,"message":"..."}}` |
-| 404 | 资源不存在/无权 | `{"detail":{"code":404,"message":"..."}}` |
-| 400 | 参数缺失/校验失败 | `{"detail":{"code":400,"message":"..."}}` |
-| 502 | 平台 token 解析失败 | `{"detail":{"code":502,"message":"Git 仓库 token 解析失败"}}` |
-| 429 | 平台限流（400/min，4000/hour） | 透传 |
+| 401 | Unauthorized（缺失/无效 API Key） | `{"detail":{"code":401,"message":"Not logged in"}}` |
+| 403 | Forbidden（写操作/白名单外 path/未知 provider） | `{"detail":{"code":403,"message":"Forbidden"}}` |
+| 404 | Not Found（资源不存在/无权） | `{"detail":{"code":404,"message":"Not Found"}}` |
+| 400 | Bad Request（参数缺失/校验失败） | `{"detail":{"code":400,"message":"Invalid parameter"}}` |
+| 502 | Bad Gateway（平台 token 解析失败） | `{"detail":{"code":502,"message":"Git repository token resolve failed"}}` |
+| 429 | Too Many Requests（平台限流 400/min，4000/hour） | 透传 |
 
 > 技能迁移后：`gitcode-api-reference.md` 中 `api.gitcode.com/api/v5` → `{{SERVER_URL}}/api/git-repo/...`；认证 `$BOT_GITCODE_TOKEN` → `$GRAPE_API_TOKEN`。
