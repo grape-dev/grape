@@ -68,6 +68,12 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "", sandbox_ctx=None) -> list[
         if p and os.path.isdir(p):
             opts += ["--ro-bind", p, p]
 
+    # /etc 安全子集（ro-bind-try — 不存在时跳过，借鉴 isolate 的 safeEtcMounts）
+    from src.config import BWRAP_RO_ETC_SAFE
+    for p in BWRAP_RO_ETC_SAFE:
+        if os.path.exists(p):
+            opts += ["--ro-bind-try", p, p]
+
     # 引擎运行时（ro）——common + 按 backend_name
     _ro = [os.path.expanduser(x) for x in BWRAP_RO_ENGINE_COMMON]
     _ro += [os.path.expanduser(x) for x in BWRAP_RO_ENGINE.get(backend_name, ())]
@@ -112,16 +118,6 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "", sandbox_ctx=None) -> list[
         # 沙箱内桥接脚本（ro-bind）
         if sandbox_ctx.bridge_script_path and os.path.isfile(sandbox_ctx.bridge_script_path):
             opts += ["--ro-bind", sandbox_ctx.bridge_script_path, sandbox_ctx.bridge_script_path]
-
-        # CA 证书
-        if os.path.isdir("/etc/ssl/certs"):
-            opts += ["--ro-bind", "/etc/ssl/certs", "/etc/ssl/certs"]
-        if os.path.isdir("/etc/pki"):
-            opts += ["--ro-bind", "/etc/pki", "/etc/pki"]
-
-        # 遮蔽敏感文件（--symlink 要求目标不存在，用 --ro-bind /dev/null 替代）
-        if os.path.exists("/etc/shadow"):
-            opts += ["--ro-bind", "/dev/null", "/etc/shadow"]
 
         # 代理 env 变量
         from src.agent.proxy import generate_proxy_envs

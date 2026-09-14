@@ -216,11 +216,10 @@ class TestAuditHashChain(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             path = f.name
         try:
-            # 清理可能残留的 chain_state
             RotatingAuditLog._chain_state.pop(path, None)
             audit = RotatingAuditLog(path, hmac_key="test-key")
-            audit.write({"ts": "2026-01-01T00:00:00Z", "host": "gitcode.com", "policy": "allowed"})
-            audit.write({"ts": "2026-01-01T00:00:01Z", "host": "evil.com", "policy": "denied"})
+            audit.write_sync({"ts": "2026-01-01T00:00:00Z", "host": "gitcode.com", "policy": "allowed"})
+            audit.write_sync({"ts": "2026-01-01T00:00:01Z", "host": "evil.com", "policy": "denied"})
             ok, msg = audit.verify_chain()
             self.assertTrue(ok, f"chain should be intact: {msg}")
         finally:
@@ -235,7 +234,7 @@ class TestAuditHashChain(unittest.TestCase):
             path = f.name
         try:
             audit = RotatingAuditLog(path, hmac_key="test-key")
-            audit.write({"host": "gitcode.com", "policy": "allowed"})
+            audit.write_sync({"host": "gitcode.com", "policy": "allowed"})
             # 篡改记录
             with open(path) as f:
                 lines = f.readlines()
@@ -258,8 +257,8 @@ class TestAuditHashChain(unittest.TestCase):
             path = f.name
         try:
             audit = RotatingAuditLog(path, hmac_key="test-key")
-            audit.write({"host": "a.com"})
-            audit.write({"host": "b.com"})
+            audit.write_sync({"host": "a.com"})
+            audit.write_sync({"host": "b.com"})
             with open(path) as f:
                 lines = f.readlines()
             r1 = json.loads(lines[0])
@@ -316,6 +315,30 @@ class TestCgroupSlice(unittest.TestCase):
         self.assertEqual(cg._cgroup_version, v)
         if v == 1:
             self.assertEqual(cg._cgroup_version, 1)
+
+    def test_parse_memory_k8s_format(self):
+        """K8s 内存量格式解析。"""
+        from src.agent.cgroup import parse_memory
+        self.assertEqual(parse_memory("256Mi"), 256)
+        self.assertEqual(parse_memory("1Gi"), 1024)
+        self.assertEqual(parse_memory("512M"), 488)  # 512*1000*1000//1024//1024=488
+        self.assertEqual(parse_memory("2048"), 0)    # 纯数字按字节 → 0 MB
+        self.assertEqual(parse_memory("invalid"), 0)
+
+    def test_parse_cpu_k8s_format(self):
+        """K8s CPU 限额格式解析。"""
+        from src.agent.cgroup import parse_cpu
+        self.assertEqual(parse_cpu("1"), 1000)     # 1 核 = 1000 毫核
+        self.assertEqual(parse_cpu("0.5"), 500)
+        self.assertEqual(parse_cpu("500m"), 500)
+        self.assertEqual(parse_cpu("invalid"), 0)
+
+    def test_cgroup_accepts_k8s_format(self):
+        """CgroupSlice 接受 K8s 格式字符串。"""
+        from src.agent.cgroup import CgroupSlice
+        cg = CgroupSlice("test-k8s", mem_limit_mb="2Gi", cpu_quota="500m")
+        self.assertEqual(cg._mem_limit, 2048)
+        self.assertEqual(cg._cpu_quota, 500)
 
 
 if __name__ == "__main__":

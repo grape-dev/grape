@@ -15,10 +15,54 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 
 log = logging.getLogger("devops-bot")
+
+# K8s 资源量后缀（借鉴 isolate 的 ParseMemory/ParseCPU）
+_MEM_SUFFIX = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4,
+               "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4}
+
+
+def parse_memory(s: str) -> int:
+    """解析内存量字符串为字节数。支持 K8s 格式：256Mi / 1Gi / 512M / 1048576。
+
+    返回 MB（向下取整）。无效格式返回 0。
+    """
+    s = s.strip()
+    if s.isdigit():
+        # 纯数字 — 按字节解析
+        return int(s) // (1024 * 1024)
+    for suffix, mult in _MEM_SUFFIX.items():
+        if s.endswith(suffix):
+            num = s[:-len(suffix)].strip()
+            if num.isdigit():
+                return int(num) * mult // (1024 * 1024)
+    # 无后缀的纯数字 — 可能是 MB
+    if s.isdigit():
+        return int(s)
+    log.warning(f"cgroup: invalid memory format '{s}', expected e.g. '256Mi' or '2048'")
+    return 0
+
+
+def parse_cpu(s: str) -> int:
+    """解析 CPU 限额字符串为毫核数（1000 = 1 核）。支持：1 / 0.5 / 500m。
+
+    返回毫核数。无效格式返回 0。
+    """
+    s = s.strip()
+    if s.endswith("m"):
+        num = s[:-1].strip()
+        if num.isdigit():
+            return int(num)
+    try:
+        cores = float(s)
+        return int(cores * 1000)
+    except ValueError:
+        log.warning(f"cgroup: invalid cpu format '{s}', expected e.g. '1' or '500m'")
+        return 0
 
 
 class CgroupError(Exception):
@@ -51,16 +95,17 @@ class CgroupSlice:
     def __init__(
         self,
         task_id: str,
-        mem_limit_mb: int = 0,
-        cpu_quota: int = 0,
+        mem_limit_mb: int | str = 0,
+        cpu_quota: int | str = 0,
         max_pids: int = 0,
     ):
         # 用 md5 hash 保证并发唯一性（sanitize[:12] 会碰撞）
         import hashlib as _hashlib
         unique_id = _hashlib.md5(task_id.encode()).hexdigest()[:16]
         self._name = f"grape-sandbox-{unique_id}"
-        self._mem_limit = mem_limit_mb
-        self._cpu_quota = cpu_quota
+        # 支持 K8s 格式（"2Gi" / "500m"）或纯数字（MB / 毫核）
+        self._mem_limit = parse_memory(str(mem_limit_mb)) if isinstance(mem_limit_mb, str) else mem_limit_mb
+        self._cpu_quota = parse_cpu(str(cpu_quota)) if isinstance(cpu_quota, str) else cpu_quota
         self._max_pids = max_pids
         self._created = False
         self._has_sudo = shutil.which("sudo") is not None
@@ -130,16 +175,23 @@ class CgroupSlice:
             # 2. 创建子组
             self._mkdir(base)
 
-            # 3. memory.max
+            # 3. memory.max（硬上限 — OOM kill）
             if mem_limit > 0:
                 self._write(
                     f"{base}/memory.max",
                     str(mem_limit * 1024 * 1024),
                 )
+                # memory.high（90% 软上限 — 内核回收内存但不杀进程，借鉴 m9m）
+                high_bytes = mem_limit * 1024 * 1024 * 90 // 100
+                try:
+                    self._write(f"{base}/memory.high", str(high_bytes))
+                except Exception as e:
+                    log.warning(f"cgroup v2: memory.high failed: {e}")
 
             # 4. cpu.max（格式："$MAX $PERIOD"，如 "50000 100000" = 50%）
+            # cpu_quota 是毫核数（1000 = 1 核），转换为微秒：quota_us = 毫核 * 100
             if self._cpu_quota > 0:
-                quota_us = self._cpu_quota * 1000
+                quota_us = self._cpu_quota * 100
                 self._write(
                     f"{base}/cpu.max",
                     f"{quota_us} 100000",
@@ -192,13 +244,24 @@ class CgroupSlice:
                     "/sys/fs/cgroup/memory/" + self._name + "/memory.limit_in_bytes",
                     str(mem_limit * 1024 * 1024),
                 )
+                # memory.soft_limit_in_bytes（90% 软上限 — 内核回收内存但不杀进程）
+                soft_bytes = mem_limit * 1024 * 1024 * 90 // 100
+                try:
+                    self._write(
+                        "/sys/fs/cgroup/memory/" + self._name + "/memory.soft_limit_in_bytes",
+                        str(soft_bytes),
+                    )
+                except Exception as e:
+                    log.warning(f"cgroup v1: memory.soft_limit failed: {e}")
 
             # cpu 子组
             self._mkdir("/sys/fs/cgroup/cpu,cpuacct/" + self._name)
             if self._cpu_quota > 0:
+                # cpu_quota 是毫核数（1000 = 1 核），v1: cfs_quota_us = 毫核 * 100
+                quota_us = self._cpu_quota * 100
                 self._write(
                     "/sys/fs/cgroup/cpu,cpuacct/" + self._name + "/cpu.cfs_quota_us",
-                    str(self._cpu_quota * 1000),
+                    str(quota_us),
                 )
                 self._write(
                     "/sys/fs/cgroup/cpu,cpuacct/" + self._name + "/cpu.cfs_period_us",
@@ -274,6 +337,53 @@ class CgroupSlice:
 
     def __exit__(self, *args: object) -> None:
         self.destroy()
+
+    # ===== 资源统计（借鉴 m9m GetStats）=====
+
+    def get_stats(self) -> dict:
+        """读取 cgroup 资源使用统计。任务结束后调用。
+
+        v2: cpu.stat / memory.peak
+        v1: cpuacct.usage / memory.max_usage_in_bytes
+        """
+        if not self._created:
+            return {}
+        stats: dict = {}
+        try:
+            if self._cgroup_version == 2:
+                base = f"/sys/fs/cgroup/{self._name}"
+                # CPU 使用时间（微秒）
+                try:
+                    with open(f"{base}/cpu.stat") as f:
+                        for line in f:
+                            if line.startswith("usage_usec"):
+                                stats["cpu_usec"] = int(line.split()[1])
+                except Exception:
+                    pass
+                # 峰值内存（字节）
+                try:
+                    with open(f"{base}/memory.peak") as f:
+                        stats["mem_peak_bytes"] = int(f.read().strip())
+                except Exception:
+                    pass
+            elif self._cgroup_version == 1:
+                cg_mem = f"/sys/fs/cgroup/memory/{self._name}"
+                cg_cpu = f"/sys/fs/cgroup/cpu,cpuacct/{self._name}"
+                # CPU 使用时间（纳秒）
+                try:
+                    with open(f"{cg_cpu}/cpuacct.usage") as f:
+                        stats["cpu_nsec"] = int(f.read().strip())
+                except Exception:
+                    pass
+                # 峰值内存（字节）
+                try:
+                    with open(f"{cg_mem}/memory.max_usage_in_bytes") as f:
+                        stats["mem_peak_bytes"] = int(f.read().strip())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return stats
 
     # ===== 内部方法 =====
 

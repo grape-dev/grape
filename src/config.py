@@ -444,7 +444,23 @@ GRAPE_AGENT_SANDBOX = os.environ.get("GRAPE_AGENT_SANDBOX", "on").lower() in ("1
 # bwrap 白名单（只读）——基础系统：动态库 / CA 证书 / DNS / nsswitch / 基础命令。
 # 注意：/run 必须挂（/etc/resolv.conf 是 symlink → /run/systemd/resolve/stub-resolv.conf，
 # 缺 /run 则沙箱内 DNS 解析失败、出网全 000）。绝对不放行 configs/、data/、WORKSPACE 其他仓库、/root、~/.grape 等敏感/越界路径。
-BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/run")
+# /etc 不整体挂载（含 ssh 密钥/数据库密码/nginx 配置等敏感文件），改为白名单子集（BWRAP_RO_ETC_SAFE）。
+BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/run")
+
+# /etc 安全子集（借鉴 Shadi/isolate 的 safeEtcMounts）— 只挂程序运行必需的文件，
+# 不含 ssh 密钥/shadow/nginx 配置/数据库密码等敏感文件。用 --ro-bind-try（不存在时跳过）。
+BWRAP_RO_ETC_SAFE = (
+    "/etc/ssl",                  # CA 证书（HTTPS 验证）
+    "/etc/ca-certificates",      # CA 证书（Debian/Ubuntu）
+    "/etc/pki",                  # CA 证书（RHEL/CentOS）
+    "/etc/resolv.conf",          # DNS 解析
+    "/etc/hosts",                # 本地 DNS 覆盖
+    "/etc/nsswitch.conf",        # 名称解析顺序
+    "/etc/localtime",            # 时区
+    "/etc/ld.so.cache",          # 动态链接器缓存
+    "/etc/ld.so.conf",           # 动态链接器配置
+    "/etc/ld.so.conf.d",         # 动态链接器配置目录
+)
 
 # bwrap 白名单（只读）——引擎运行时，按后端名展开；二进制 + 配置 + 运行时（~ 由 sandbox 模块展开）。
 # 三引擎白名单不同（§7 兼容性清单），分别覆盖；不存在目录自动跳过。

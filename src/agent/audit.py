@@ -17,13 +17,83 @@ import hmac
 import json
 import logging
 import os
+import queue
 import threading
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("devops-bot")
 
 _MAX_BYTES = 100 * 1024 * 1024  # 100 MB
 _MAX_ROTATED = 5
+_lock = threading.Lock()  # 哈希链全局锁
+
+
+class _AsyncWriter:
+    """异步磁盘写入器（借鉴 m9m 的 buffered channel）。
+
+    哈希链计算同步执行（保证链连续性），磁盘 I/O 异步（不阻塞代理请求）。
+    每个 (path, line) 放入 Queue，后台线程串行写入。
+    """
+
+    def __init__(self):
+        self._q: queue.Queue[Any] = queue.Queue(maxsize=10000)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def put(self, path: str, line: str) -> None:
+        try:
+            self._q.put_nowait((path, line))
+        except queue.Full:
+            # 队列满 — 直接同步写（降级，不丢数据）
+            with open(path, "a") as f:
+                f.write(line)
+
+    def flush(self) -> None:
+        """等待队列中所有写入完成。"""
+        sentinel = object()
+        self._q.put(sentinel)
+        # 等待 sentinel 被处理（简单轮询）
+        while not self._q.empty():
+            import time as _t
+            _t.sleep(0.01)
+
+    def _run(self) -> None:
+        while True:
+            item = self._q.get()
+            if item is None or item is sentinel:
+                # flush sentinel — 继续处理后续
+                if item is sentinel:
+                    self._q.task_done()
+                continue
+            path, line = item
+            try:
+                with _lock:
+                    # 轮转检查 + 写入
+                    current = os.path.getsize(path) if os.path.exists(path) else 0
+                    if current > _MAX_BYTES:
+                        _rotate(path)
+                    with open(path, "a") as f:
+                        f.write(line)
+            except Exception as e:
+                log.warning(f"audit async write failed: {e}")
+            finally:
+                self._q.task_done()
+
+
+def _rotate(path: str) -> None:
+    """轮转：audit.jsonl → .1 → .2 → ... → 删除最老的。"""
+    for i in range(_MAX_ROTATED - 1, 0, -1):
+        old = f"{path}.{i}"
+        new = f"{path}.{i + 1}"
+        if os.path.exists(old):
+            os.rename(old, new)
+    if os.path.exists(path):
+        os.rename(path, f"{path}.1")
+    log.info(f"audit: rotated {path}")
+
+
+_async_writer = _AsyncWriter()
 
 
 class RotatingAuditLog:
@@ -91,16 +161,31 @@ class RotatingAuditLog:
 
         record 应包含业务字段（ts/task_id/method/host/path/policy/reason 等）。
         本方法自动追加 prev_hash + record_hash。
+        哈希链计算同步执行（保证链连续性），磁盘写入异步（Queue + 后台线程，借鉴 m9m）。
         """
-        with self._lock:
+        line = self._build_line(record)
+        # 异步写入磁盘 — 不阻塞代理请求
+        _async_writer.put(self._path, line)
+
+    def write_sync(self, record: dict) -> None:
+        """同步写入（测试用，确保磁盘落盘后再验证）。"""
+        line = self._build_line(record)
+        self._append(line)
+
+    def _build_line(self, record: dict) -> str:
+        """计算哈希链并返回 JSONL 行（同步，线程安全）。"""
+        with _lock:
             prev_hash = self._chain_state.get(self._path, "")
             payload = dict(record)
             payload["prev_hash"] = prev_hash
             record_hash = self._compute_hash(payload)
             payload["record_hash"] = record_hash
-            line = json.dumps(payload, ensure_ascii=False) + "\n"
-            self._append(line)
             self._chain_state[self._path] = record_hash
+        return json.dumps(payload, ensure_ascii=False) + "\n"
+
+    def flush(self) -> None:
+        """等待异步队列中的所有写入完成。"""
+        _async_writer.flush()
 
     def _compute_hash(self, payload: dict) -> str:
         """HMAC-SHA256。"""
@@ -108,23 +193,12 @@ class RotatingAuditLog:
         return hmac.new(self._hmac_key, data, hashlib.sha256).hexdigest()
 
     def _append(self, line: str) -> None:
-        """追加写入 + 轮转检查。"""
+        """追加写入 + 轮转检查（同步，write_sync 用）。"""
         current = os.path.getsize(self._path) if os.path.exists(self._path) else 0
         if current > _MAX_BYTES:
-            self._rotate()
+            _rotate(self._path)
         with open(self._path, "a") as f:
             f.write(line)
-
-    def _rotate(self) -> None:
-        """轮转：audit.jsonl → .1 → .2 → ... → 删除最老的。"""
-        for i in range(_MAX_ROTATED - 1, 0, -1):
-            old = f"{self._path}.{i}"
-            new = f"{self._path}.{i + 1}"
-            if os.path.exists(old):
-                os.rename(old, new)
-        if os.path.exists(self._path):
-            os.rename(self._path, f"{self._path}.1")
-        log.info(f"audit: rotated {self._path}")
 
     def verify_chain(self) -> tuple[bool, str]:
         """验证哈希链完整性。
