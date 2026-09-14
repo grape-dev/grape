@@ -130,10 +130,12 @@ class RotatingAuditLog:
         """验证哈希链完整性。
 
         返回 (ok, message)。ok=False 时 message 描述第一条断链记录。
+        第一条记录的 prev_hash 可能为空（新文件）或非空（轮转后继承 .1 文件的链）。
+        从第一条记录开始验证链的连续性（prev_hash 链接是否正确）。
         """
         if not os.path.exists(self._path):
             return True, "no log file"
-        prev_hash = ""
+        prev_hash = None  # None = 第一条记录，接受任意 prev_hash
         with open(self._path) as f:
             for i, line in enumerate(f, 1):
                 line = line.strip()
@@ -145,7 +147,7 @@ class RotatingAuditLog:
                     return False, f"line {i}: invalid JSON"
                 stored_prev = record.get("prev_hash", "")
                 stored_hash = record.get("record_hash", "")
-                if stored_prev != prev_hash:
+                if prev_hash is not None and stored_prev != prev_hash:
                     return False, (
                         f"line {i}: prev_hash mismatch "
                         f"(expected {prev_hash[:12]}..., got {stored_prev[:12]}...)"

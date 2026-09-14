@@ -343,32 +343,25 @@ def prepare_sandbox(task_id: str, cwd: str, backend_name: str = "") -> SandboxCo
 
 # ===== 白名单 DB 查询 + 5 分钟缓存 =====
 
-_whitelist_cache: list[str] | None = None
-_whitelist_cache_ts: float = 0
+_whitelist_cache: dict[tuple[str, str], list[str]] = {}
+_whitelist_cache_ts: dict[tuple[str, str], float] = {}
 _whitelist_cache_lock = __import__("threading").Lock()
 _WHITELIST_CACHE_TTL = 300  # 5 分钟
 
 
 def _get_whitelist_from_db(backend_name: str = "", repo_key: str = "") -> list[str]:
-    """从 DB 查询白名单（5 分钟缓存）。
-
-    查询条件：enabled=1 AND (
-        scope='global' OR
-        (scope='engine' AND scope_value=backend_name) OR
-        (scope='repo' AND scope_value=repo_key)
-    )
-
-    DB 不可用或表不存在时降级到 SANDBOX_WHITELIST_FALLBACK 环境变量。
-    """
+    """从 DB 查询白名单（5 分钟缓存，按 backend_name + repo_key 区分）。"""
     global _whitelist_cache, _whitelist_cache_ts
     import time
 
+    cache_key = (backend_name, repo_key)
+
     with _whitelist_cache_lock:
         now = time.monotonic()
-        if _whitelist_cache is not None and (now - _whitelist_cache_ts) < _WHITELIST_CACHE_TTL:
-            # 缓存命中 — 但仍需加入动态白名单（127.0.0.1 + GRAPE_SERVER_URL）
+        cached = _whitelist_cache.get(cache_key)
+        if cached is not None and (now - _whitelist_cache_ts.get(cache_key, 0)) < _WHITELIST_CACHE_TTL:
             from src.agent.proxy import get_dynamic_whitelist
-            return get_dynamic_whitelist(_whitelist_cache)
+            return get_dynamic_whitelist(cached)
 
     # 查 DB
     domains: list[str] = []
@@ -400,8 +393,8 @@ def _get_whitelist_from_db(backend_name: str = "", repo_key: str = "") -> list[s
 
     # 更新缓存
     with _whitelist_cache_lock:
-        _whitelist_cache = domains
-        _whitelist_cache_ts = time.monotonic()
+        _whitelist_cache[cache_key] = domains
+        _whitelist_cache_ts[cache_key] = time.monotonic()
 
     # 加入动态白名单
     from src.agent.proxy import get_dynamic_whitelist
@@ -410,10 +403,9 @@ def _get_whitelist_from_db(backend_name: str = "", repo_key: str = "") -> list[s
 
 def invalidate_whitelist_cache() -> None:
     """手动失效白名单缓存（API 增删白名单后调用）。"""
-    global _whitelist_cache, _whitelist_cache_ts
     with _whitelist_cache_lock:
-        _whitelist_cache = None
-        _whitelist_cache_ts = 0
+        _whitelist_cache.clear()
+        _whitelist_cache_ts.clear()
 
 
 def cleanup_sandbox(ctx: SandboxContext | None):

@@ -216,6 +216,8 @@ class TestAuditHashChain(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             path = f.name
         try:
+            # 清理可能残留的 chain_state
+            RotatingAuditLog._chain_state.pop(path, None)
             audit = RotatingAuditLog(path, hmac_key="test-key")
             audit.write({"ts": "2026-01-01T00:00:00Z", "host": "gitcode.com", "policy": "allowed"})
             audit.write({"ts": "2026-01-01T00:00:01Z", "host": "evil.com", "policy": "denied"})

@@ -377,7 +377,7 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(data)
 
     def _check_request(self, host: str, port: int) -> dict:
-        """三级检查：白名单 → DNS 地址校验（loopback 例外）。"""
+        """三级检查：白名单 → DNS 地址校验（loopback 例外 + 端口限制）。"""
         # 1. 白名单
         for pattern in self._whitelist_inst:
             if match_domain(host, pattern):
@@ -385,9 +385,16 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
         else:
             return {"allowed": False, "reason": "domain not in whitelist"}
 
-        # 2. DNS 地址校验 — loopback 例外（127.0.0.1 / localhost 已在白名单中，是预期目标）
+        # 2. loopback 端口限制 — 只允许 grape API 端口，阻止 SSH/MySQL/Redis 等
         host_base = host.split(":")[0]
-        if host_base not in ("127.0.0.1", "localhost", "::1"):
+        if host_base in ("127.0.0.1", "localhost", "::1"):
+            from src.config import log as _log
+            import os as _os
+            _grape_port = int(_os.environ.get("GRAPE_SERVER_PORT", "3000"))
+            if port != _grape_port:
+                return {"allowed": False, "reason": f"loopback port {port} denied (only {_grape_port} allowed)"}
+        else:
+            # 3. DNS 地址校验 — 非 loopback 才做
             ok, addr_reason = check_resolved_address(host, port)
             if not ok:
                 return {"allowed": False, "reason": f"DNS address denied: {addr_reason}"}
