@@ -3,7 +3,7 @@
 > Issue：https://gitcode.com/grape-dev/grape/issues/139
 > 父 Issue：#64 支持任务执行沙箱隔离
 > 分支：`feat/issue-139-sandbox-network-isolation`（基于 `weekly-03`）
-> 日期：2026-09-14（v11 — codex worker 实测验证 + /opt/node 修复 + get_stats 接入）
+> 日期：2026-09-14（v12 — 默认 on + bwrap skip 守卫 + codearts snap-access 确认）
 
 ---
 
@@ -1381,6 +1381,9 @@ DB 表 sandbox_whitelist（有数据）
 | 20 | cgroup get_stats 接入审计 | 自检遗漏 | executor.py cleanup 前调 get_stats()，写 resource_stats 事件到审计日志（CPU/内存峰值 + OOM 标记） |
 | 21 | /opt/node 挂载 | codex worker 实测 | BWRAP_RO_SYSTEM_OPT = ('/opt/node',)，--ro-bind-try，解决 worker 上 node 符号链接断裂。不存在时跳过，不影响 opencode/codearts/hermes |
 | 22 | codex worker 实测验证 | 新加坡 worker | codex v0.153.4 + Node v26.8.1 + bwrap v0.9.0 + cgroup v2。API 调用走代理，白名单放行 opengw，拒绝 github.com/chatgpt.com |
+| 23 | GRAPE_SANDBOX_NET 默认 on | 第七轮审查 | 与 GRAPE_AGENT_SANDBOX 一致，默认开启网络隔离。回滚设 off |
+| 24 | bwrap skip 守卫 | 第七轮审查 | 测试在无 bwrap 的 CI 环境跳过而非报 TypeError |
+| 25 | codearts snap-access 确认 | 第七轮审查 | codearts.py L83 OPENCODE_DISABLE_MODELS_FETCH=1 阻止 snap-access 请求，非阻断性 |
 
 ### 专家审查注释（v9 新增）
 
@@ -1452,7 +1455,7 @@ DB 表 sandbox_whitelist（有数据）
 **验证中发现的兼容性问题**：
 - bwrap 0.4.1 **不支持 --disable-userns**（`Unknown option --disable-userns`）。从方案中去掉此项。
 - Unix socket 文件必须用 `--bind`（不是 `--ro-bind`），且路径不能在被 `--tmpfs` 覆盖的 /tmp 下。建议放在 `{WORKSPACE_DIR}` 或 home 目录下。
-- codearts 尝试连 `snap-access.cn-north-4.myhuaweicloud.com:443`（华为云 xCenter），不在白名单中。需确认是否必须，如是则加入白名单或确保 OPENCODE_DISABLE_MODELS_FETCH=1 生效。
+- codearts 尝试连 `snap-access.cn-north-4.myhuaweicloud.com:443`（华为云 xCenter）。**已确认非阻断性**：codearts.py L83 `env.setdefault("OPENCODE_DISABLE_MODELS_FETCH", "1")` 会阻止此请求。该变量通过 `_proc_env → bwrap --setenv` 继承到沙箱内。设计文档 0a 验证时连了 snap-access 是沙箱开发前的验证（当时未设此变量）。当前代码已确保此变量始终为 "1"。
 - codearts 需要可写的 `.local/state/codeartsdoer` 和 `.cache/codeartsdoer` 目录（bwrap --bind 而非 --ro-bind）。
 - hermes 需要 grape 的 venv 路径（`/home/yangaiwu/grape/.venv`）在沙箱内可见。
 | 1 | detect.py — 环境预检 + 敏感 env 扫描 | deepagents detect.py |
