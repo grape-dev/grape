@@ -595,59 +595,42 @@ function renderSkillDetail(data) {
 
   const at = data.agent_type || '';
   const meta = _AGENT_META[at] || {};
-  const tagClass = data.scope === 'official' ? 'tg-c' : data.scope === 'repo' ? 'tg-i' : 'tg-d';
+  const grad = _FEAT_GRADIENT[at] || {g1:'#3168e0', g2:'#2556c2'};
   const isUserDetail = data.scope === 'user';
-  const featuredBadge = (data.is_featured && !isUserDetail) ? `<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟 ${I18N.t('skills.featured')||'精选'}</span>` : '';
   const scenesArr = (data.scenes || []).map(sc => sc.display_name || sc.name || sc);
-  const showScenes = data.scope === 'official';
-  const SCENE_PREVIEW = 3;
-  let scenesHtml = '—';
-  if (showScenes && scenesArr.length) {
-    if (scenesArr.length <= SCENE_PREVIEW) {
-      scenesHtml = scenesArr.map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('');
-    } else {
-      const preview = scenesArr.slice(0, SCENE_PREVIEW).map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('');
-      const rest = scenesArr.slice(SCENE_PREVIEW).map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('');
-      scenesHtml = `${preview}<a onclick="(function(e){e.preventDefault();var r=document.getElementById('sceneRest');r.style.display='inline';var m=document.getElementById('sceneMore');m.style.display='none';})(event)" id="sceneMore" style="font-size:10px;color:var(--a);cursor:pointer;margin:2px">(+${scenesArr.length - SCENE_PREVIEW})</a><span id="sceneRest" style="display:none">${rest}</span>`;
-    }
-  }
+  const scenesStr = scenesArr.length > 0 ? scenesArr.join('、') : '—';
+  const tagsArr = data.tags || [];
+  const tagsStr = tagsArr.length > 0 ? tagsArr.join('、') : '—';
   const likeCount = data.like_count || 0;
   const likedIcon = data.liked_by_me ? '❤️' : '🤍';
-  const content = (data.content || '').replace(/`/g, '\\`').replace(/\${/g, '\\${');
+  const rawContent = data.content || '';
+  const content = rawContent.replace(/`/g, '\\`').replace(/\${/g, '\\${');
+  const versionMatch = rawContent.match(/^---[\s\S]*?^version:\s*(.+?)$/m);
+  const version = versionMatch ? versionMatch[1].trim() : '—';
+  const descMatch = rawContent.match(/^---[\s\S]*?^description:\s*\|?\s*\n([\s\S]*?)^\w/m);
+  const fnDesc = descMatch ? descMatch[1].trim() : (data.description || '—');
 
   el.innerHTML = `
-    <button class="bt bt-o bt-s" onclick="_backFromSkillDetail()" style="margin-bottom:12px">← ${I18N.t('common.back')||'返回'}</button>
-    <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
-      <div class="cd" style="padding:16px 20px;overflow-y:auto">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px">
-          <div style="display:flex;align-items:center;gap:8px;min-width:0">
-            <span style="font-size:22px">${meta.icon||'◈'}</span>
-            <div>
-              <div style="display:flex;align-items:center;gap:6px">
-                <h3 style="font-size:15px;font-weight:600">${data.display_name || data.name}</h3>
-                ${featuredBadge}
-              </div>
-              <span class="tg ${tagClass}" style="font-size:9px">${(meta.label||at)+' Agent'} · ${_scopeName(data.scope)}</span>
-            </div>
-          </div>
-          <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
-            ${isUserDetail ? '' : `<button class="bt bt-o bt-s" onclick="toggleSkillLike(${data.id},this)" style="display:flex;align-items:center;gap:4px">${likedIcon} <span id="detailLikeCount">${likeCount}</span></button>`}
-            ${(data.is_obs || data.zip_url) ? `<button class="bt bt-o bt-s" onclick="downloadSkillZip('${data.id}')">${I18N.t('skills.download_skill')||'下载技能包'}</button>` : ''}
-          </div>
+    <button class="det-back" onclick="_backFromSkillDetail()">← ${I18N.t('common.back')||'返回'}</button>
+    <div class="det">
+      <div class="det-head">
+        <span class="det-ico" style="--fg1:${grad.g1};--fg2:${grad.g2}">${meta.icon || '◈'}</span>
+        <h1 class="det-name">${data.display_name || data.name}</h1>
+        <span class="agent-badge">${meta.label || at}</span>
+        <div class="det-actions">
+          ${isUserDetail ? '' : `<button class="det-like ${data.liked_by_me?'liked':''}" onclick="toggleSkillLike(${data.id},this)">${likedIcon} <span id="detailLikeCount">${likeCount}</span></button>`}
+          ${(data.is_obs || data.zip_url) ? `<button class="det-dl" onclick="downloadSkillZip('${data.id}')">${I18N.t('skills.download_skill')||'下载技能包'}</button>` : ''}
         </div>
-        <div style="font-size:12px;color:var(--t2);margin-bottom:14px;line-height:1.5">${data.description || ''}</div>
-        <h3 style="font-size:13px;font-weight:600;margin-bottom:6px">SKILL.md</h3>
-        <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${content || I18N.t('skills.empty.no_detail')||'无详情'}</pre>
       </div>
-      <div class="cd" style="padding:16px 20px;font-size:12px">
-        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">${I18N.t('skills.info_title')||'技能信息'}</h3>
-        <div class="srow"><label>${I18N.t('skills.info_name')||'名称'}</label><span>${data.name}</span></div>
-        <div class="srow"><label>${I18N.t('skills.info_agent_type')||'Agent'}</label><span>${(meta.label||at)+' Agent'}</span></div>
-        <div class="srow"><label>${I18N.t('skills.info_type')||'类型'}</label><span>${_scopeName(data.scope)}</span></div>
-        ${isUserDetail ? '' : `<div class="srow"><label>${I18N.t('skills.info_featured')||'精选'}</label><span>${data.is_featured ? I18N.t('skills.featured')||'是' : '—'}</span></div>`}
-        ${isUserDetail ? '' : `<div class="srow"><label>${I18N.t('skills.info_likes')||'点赞'}</label><span id="detailInfoLikes">${likedIcon} ${likeCount}</span></div>`}
-        ${showScenes ? `<div class="srow"><label>${I18N.t('skills.info_scenes')||'场景'}</label><span class="t2">${scenesHtml}</span></div>` : ''}
-        <div class="srow"><label>${I18N.t('skills.info_description')||'描述'}</label><span class="t2">${data.description || '—'}</span></div>
+      <p class="det-sum">${data.description || ''}</p>
+      <div class="fn-card">
+        <div class="fn-label">${I18N.t('skills.info_function')||'功能说明'}</div>
+        <div class="fn-body">${fnDesc}</div>
+      </div>
+      <div class="info-grid">
+        <div class="info-cell"><div class="il">${I18N.t('skills.info_scenes')||'场景'}</div><div class="iv">${scenesStr}</div></div>
+        <div class="info-cell"><div class="il">${I18N.t('skills.info_tags')||'标签'}</div><div class="iv">${tagsStr}</div></div>
+        <div class="info-cell"><div class="il">${I18N.t('skills.info_version')||'版本'}</div><div class="iv">${version}</div></div>
       </div>
     </div>`;
 }
