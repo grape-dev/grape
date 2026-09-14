@@ -800,11 +800,9 @@ CREATE TABLE IF NOT EXISTS runtime_health_scores (
     consecutive_failures INTEGER NOT NULL DEFAULT 0,   -- 连续失败次数
     failure_rate        REAL NOT NULL DEFAULT 0.0,     -- 失败率 (0-1)
     last_status         TEXT DEFAULT '',               -- 最近一条任务状态
-    status              TEXT DEFAULT '',               -- 引擎在线状态（Issue #135）
-    last_seen_at        TEXT DEFAULT '',               -- 最近心跳时间（Issue #135）
     window_days         INTEGER NOT NULL DEFAULT 7,    -- 滑动窗口天数
     updated_at          TEXT DEFAULT (datetime('now'))
-)"""),]
+)"""""),]
 
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -1962,9 +1960,6 @@ def _migrate_tables():
         "ALTER TABLE scene_category ADD COLUMN slug VARCHAR(64) DEFAULT ''",
         # ===== Issue-89: event_skipped 加 issue_id 列（skipped 事件审计需关联 Issue） =====
         "ALTER TABLE event_skipped ADD COLUMN issue_id TEXT DEFAULT ''",
-        # ===== Issue #135: runtime_health_scores 加 status + last_seen_at 列 =====
-        "ALTER TABLE runtime_health_scores ADD COLUMN status TEXT DEFAULT ''",
-        "ALTER TABLE runtime_health_scores ADD COLUMN last_seen_at TEXT DEFAULT ''",
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
