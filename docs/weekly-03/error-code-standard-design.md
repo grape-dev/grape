@@ -116,13 +116,14 @@ def business_ok_false(code: int, message: str) -> dict:
 
 | 阶段 | 内容 | 产出 |
 |------|------|------|
-| P1 | 新增 `src/api/errors.py`（常量 + api_error 工厂 + business_ok_false） | 错误统一能力 |
-| P2 | `deps.py` 401 报文对齐（读 README 过时格式删除）；路由内部改 `api_error(...)` 替换散落 HTTPException（可选，批量） | 代码统一 |
-| P3 | README 状态码表补全（500/502/503/410/302）+ 删除过时 401 写法 + 明确两套返回体边界 | 契约文档 |
-| P4 | 各 `help/api/*.md` 增补「错误返回」表（模板 §2.5） | 逐端点错误契约 |
+| P1 | 新增 `src/api/errors.py`（常量 + api_error 工厂 + business_ok_false） | 错误统一能力 ✅ |
+| P2 | `deps.py` 401/403/400 报文英文化（Agent 可读）✅；路由内部批量替换可选（余留） | 认证错误英文 |
+| P3 | README 状态码表补全（500/502/503/410/302）+ 删除过时 401 写法 + 明确两套返回体边界 | 契约文档 ✅ |
+| P4 | `help/api/11-issues.md` / `10-git-repos.md` / `00-auth.md` 错误表英文化 ✅；其余文档可续 | 核心文档错误契约 |
 | P5 | `custom_openapi` 注入标准错误 responses schema（可选，增强契约） | OpenAPI 级错误描述 |
 
-> 说明：P2 批量替换为 refractor 收益（降低维护），非强制；P1/P3 是安全基线（不改行为、仅加能力与文档）。
+> 进度（2026-09-14）：P1/P3/P4（核心）/P2-deps 已完成并入生产；
+> 路由内现有中文 message 批量英文化（P2 批量）与 P5 留待后续（风险隔离，不影响契约与 Agent 核心路径）。
 
 ---
 
