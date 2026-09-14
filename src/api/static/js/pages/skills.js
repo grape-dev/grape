@@ -238,7 +238,7 @@ function _renderSkillPage() {
   if (_skillTab === 'official' && _featuredSkills.length > 0) {
     html += `<div class="apple-card">
       <div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_skills')||'精选技能'}</h2></div>
-      <div class="rgrid" id="featured-skills">
+      <div class="rgrid" id="featured-skills" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
         ${_featuredSkills.map(s => _renderSkillCard(s, true)).join('')}
       </div>
     </div>`;
