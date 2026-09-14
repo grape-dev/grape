@@ -1,4 +1,4 @@
-"""机器健康度评估模块（Issue #134 / #133 Spec）。
+"""机器健康度评估模块（Issue #134 / #133 / #135 Spec）。
 
 基于任务中心 DB 的历史执行记录，按滑动窗口（近 7 天）计算 per-machine：
 - 总任务数、失败数、失败率
@@ -6,9 +6,14 @@
 - 健康分（0-100，越高越健康）
 
 健康分 = round(100 * (1 - failure_rate)) - consecutive_failure_penalty
-  - failure_rate = failed / total（total=0 时返回满分 100）
+  - failure_rate = failed / total（total=0 且心跳正常时返回满分 100）
   - consecutive_failure_penalty = min(consecutive_failures * 5, 20)
   - 最终 clamp 到 [0, 100]
+
+Issue #135 心跳因素（优先于失败率计算）：
+  - 引擎最近无心跳（agent_runtimes.last_seen_at 超时或为 NULL）→ 健康分 = 0
+  - 心跳正常 → 按原失败率公式计算
+  - 心跳阈值 _HEARTBEAT_STALE_SECONDS（默认 300s，env HEALTH_HEARTBEAT_STALE_SECONDS 可调）
 
 设计决策：
 - DB 持久化（runtime_health_scores 表）+ 内存缓存（60s TTL）
@@ -31,6 +36,9 @@ _CACHE_TTL = int(os.environ.get("HEALTH_CACHE_TTL", "60"))
 _HEALTH_THRESHOLD = int(os.environ.get("HEALTH_SCORE_THRESHOLD", "30"))
 # 连续失败上限：超过此值直接视为不健康（无需等失败率累积）
 _MAX_CONSECUTIVE_FAILURES = int(os.environ.get("HEALTH_MAX_CONSECUTIVE_FAILURES", "5"))
+# 心跳超时阈值（秒）：last_seen_at 超过此值或为 NULL → 引擎失联，健康分强制 0。
+# 与 engine_select._RUNTIME_STALE_SECONDS / health.py 5min 判定保持一致。
+_HEARTBEAT_STALE_SECONDS = int(os.environ.get("HEALTH_HEARTBEAT_STALE_SECONDS", "300"))
 
 # ===== 内存缓存 =====
 
@@ -130,11 +138,53 @@ def _fetch_task_stats(runtime_id: int) -> dict:
     return result
 
 
+def _fetch_heartbeat(runtime_id: int) -> bool:
+    """查询 agent_runtimes 表的心跳状态（Issue #135）。
+
+    判定逻辑（与 health.py derive_runtime_health 对齐）：
+    - last_seen_at 为 NULL / 引擎从未上线 → False（失联）
+    - last_seen_at 超过 _HEARTBEAT_STALE_SECONDS → False（失联）
+    - 心跳新鲜 → True
+
+    返回 True 表示心跳正常，False 表示失联。
+    """
+    from src.runtime.health import parse_dt
+    try:
+        with _lock():
+            c = _db().cursor()
+            c.execute(
+                "SELECT last_seen_at FROM agent_runtimes WHERE id=?",
+                (runtime_id,))
+            row = c.fetchone()
+        if not row:
+            return False  # 引擎不存在 → 失联
+        last_seen_at = row[0]
+        if not last_seen_at:
+            return False  # NULL / 空 → 从未上线 → 失联
+        ts = parse_dt(last_seen_at)
+        if ts is None:
+            return False  # 解析失败 → 保守判为失联
+        return (time.time() - ts) <= _HEARTBEAT_STALE_SECONDS
+    except Exception as e:
+        log.warning(f"health_scorer: fetch_heartbeat failed for runtime={runtime_id}: {e}")
+        return False
+
+
 def _compute_and_persist(runtime_id: int) -> dict:
-    """计算健康分并持久化到 DB + 更新内存缓存。返回健康度数据 dict。"""
+    """计算健康分并持久化到 DB + 更新内存缓存。返回健康度数据 dict。
+
+    Issue #135: 心跳判定优先于失败率计算。
+    - 引擎失联（last_seen_at 超时 / NULL / 不存在）→ score=0
+    - 心跳正常 → 原失败率公式（total=0 → 100）
+    total/failed 仍保留便于排障。
+    """
     stats = _fetch_task_stats(runtime_id)
-    score = _compute_health_score(
-        stats["total"], stats["failed"], stats["consecutive_failures"])
+    heartbeat_alive = _fetch_heartbeat(runtime_id)
+    if heartbeat_alive:
+        score = _compute_health_score(
+            stats["total"], stats["failed"], stats["consecutive_failures"])
+    else:
+        score = 0  # 失联强制 0，优先于失败率
     data = {
         "runtime_id": runtime_id,
         "health_score": score,
@@ -144,6 +194,7 @@ def _compute_and_persist(runtime_id: int) -> dict:
         "consecutive_failures": stats["consecutive_failures"],
         "failure_rate": round(stats["failed"] / stats["total"], 4) if stats["total"] > 0 else 0.0,
         "last_status": stats["last_status"],
+        "heartbeat_alive": heartbeat_alive,
         "window_days": _WINDOW_DAYS,
         "updated_at": _utcnow().isoformat(),
     }
@@ -186,7 +237,9 @@ def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
     force_refresh=True 时跳过缓存重新计算。
     返回 dict：{runtime_id, health_score, total_tasks, failed_tasks,
                completed_tasks, consecutive_failures, failure_rate,
-               last_status, window_days, updated_at}
+               last_status, heartbeat_alive, window_days, updated_at}
+
+    Issue #135: health_score=0 当且仅当引擎失联（heartbeat_alive=False）。
     """
     if not runtime_id:
         return _empty_score(0)
@@ -289,6 +342,7 @@ def _empty_score(runtime_id: int) -> dict:
         "consecutive_failures": 0,
         "failure_rate": 0.0,
         "last_status": "",
+        "heartbeat_alive": True,  # runtime_id=0（广播）不参与心跳判定
         "window_days": _WINDOW_DAYS,
         "updated_at": _utcnow().isoformat(),
     }

@@ -349,3 +349,145 @@ class TestRecordTaskCompletion:
         health_scorer._cache[666] = {"score": 50, "data": {}, "expires": time.time() + 100}
         health_scorer.record_task_completion(0, "completed")
         assert 666 in health_scorer._cache  # 不受影响
+
+
+# ===== 心跳检查测试（Issue #135）=====
+
+class TestHeartbeatCheck:
+    """测试心跳因素对健康分的影响（Issue #135）。
+
+    覆盖三种场景：
+    - 心跳超时（last_seen_at 超过阈值）→ score=0
+    - 无心跳记录（last_seen_at 为 NULL / 引擎从未上线）→ score=0
+    - 心跳正常 → 按原失败率公式计算
+    """
+
+    def test_heartbeat_timeout_score_zero(self):
+        """心跳超时（last_seen_at 超过 _HEARTBEAT_STALE_SECONDS）→ 健康分=0。"""
+        # mock _fetch_task_stats 返回满分数据（total=0 → 原公式 100）
+        with patch.object(health_scorer, '_fetch_task_stats', return_value={
+                "total": 0, "failed": 0, "completed": 0,
+                "consecutive_failures": 0, "last_status": ""}), \
+             patch.object(health_scorer, '_fetch_heartbeat', return_value=False), \
+             patch.object(health_scorer, '_persist_score'):
+            data = health_scorer._compute_and_persist(910001)
+        assert data["health_score"] == 0
+        assert data["heartbeat_alive"] is False
+
+    def test_no_heartbeat_record_score_zero(self):
+        """无心跳记录（last_seen_at 为 NULL / 引擎从未上线）→ 健康分=0。"""
+        with patch.object(health_scorer, '_fetch_task_stats', return_value={
+                "total": 10, "failed": 0, "completed": 10,
+                "consecutive_failures": 0, "last_status": "completed"}), \
+             patch.object(health_scorer, '_fetch_heartbeat', return_value=False), \
+             patch.object(health_scorer, '_persist_score'):
+            data = health_scorer._compute_and_persist(910002)
+        assert data["health_score"] == 0  # 即使全部成功，失联也强制 0
+        assert data["heartbeat_alive"] is False
+
+    def test_heartbeat_alive_normal_score(self):
+        """心跳正常 → 按原失败率公式计算（total=0 → 100）。"""
+        with patch.object(health_scorer, '_fetch_task_stats', return_value={
+                "total": 0, "failed": 0, "completed": 0,
+                "consecutive_failures": 0, "last_status": ""}), \
+             patch.object(health_scorer, '_fetch_heartbeat', return_value=True), \
+             patch.object(health_scorer, '_persist_score'):
+            data = health_scorer._compute_and_persist(910003)
+        assert data["health_score"] == 100  # total=0 + 心跳正常 → 满分
+        assert data["heartbeat_alive"] is True
+
+    def test_heartbeat_alive_with_failures(self):
+        """心跳正常但有失败 → 按原失败率公式计算（非满分）。"""
+        with patch.object(health_scorer, '_fetch_task_stats', return_value={
+                "total": 10, "failed": 5, "completed": 5,
+                "consecutive_failures": 1, "last_status": "failed"}), \
+             patch.object(health_scorer, '_fetch_heartbeat', return_value=True), \
+             patch.object(health_scorer, '_persist_score'):
+            data = health_scorer._compute_and_persist(910004)
+        assert data["health_score"] == 45  # 100*(1-0.5) - 5 = 45
+        assert data["heartbeat_alive"] is True
+
+    def test_heartbeat_timeout_overrides_good_stats(self):
+        """心跳失联优先于失败率：即使统计数据满分，失联也返回 0。"""
+        with patch.object(health_scorer, '_fetch_task_stats', return_value={
+                "total": 100, "failed": 0, "completed": 100,
+                "consecutive_failures": 0, "last_status": "completed"}), \
+             patch.object(health_scorer, '_fetch_heartbeat', return_value=False), \
+             patch.object(health_scorer, '_persist_score'):
+            data = health_scorer._compute_and_persist(910005)
+        assert data["health_score"] == 0
+        assert data["total_tasks"] == 100  # 统计数据保留便于排障
+        assert data["heartbeat_alive"] is False
+
+    def test_heartbeat_unhealthy_engine_filtered(self):
+        """失联引擎被 filter_healthy 过滤（score=0 < 阈值 30）。"""
+        with patch.object(health_scorer, 'get_health_score') as mock_get:
+            def _mock(rid, force_refresh=False):
+                if rid == 1:
+                    return {"health_score": 0, "consecutive_failures": 0,
+                            "heartbeat_alive": False}
+                return {"health_score": 80, "consecutive_failures": 0,
+                        "heartbeat_alive": True}
+            mock_get.side_effect = _mock
+            result = health_scorer.filter_healthy([1, 2])
+        assert 1 not in result  # 失联 → score=0 < 30 → 被过滤
+        assert 2 in result      # 心跳正常 → score=80 → 保留
+
+    def test_all_lost_heartbeat_fallback(self):
+        """全部失联时 filter_or_fallback 降级取最优（不阻塞派发）。"""
+        with patch.object(health_scorer, 'is_healthy', return_value=False), \
+             patch.object(health_scorer, 'best_fallback', return_value=1):
+            result = health_scorer.filter_or_fallback([1, 2, 3])
+        assert result == [1]  # 降级兜底
+
+    def test_fetch_heartbeat_null_last_seen(self):
+        """_fetch_heartbeat: last_seen_at 为 NULL → False。"""
+        with patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = (None,)
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            result = health_scorer._fetch_heartbeat(910006)
+        assert result is False
+
+    def test_fetch_heartbeat_fresh(self):
+        """_fetch_heartbeat: last_seen_at 新鲜 → True。"""
+        from datetime import datetime, timezone
+        fresh = datetime.now(timezone.utc).isoformat()
+        with patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = (fresh,)
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            result = health_scorer._fetch_heartbeat(910007)
+        assert result is True
+
+    def test_fetch_heartbeat_stale(self):
+        """_fetch_heartbeat: last_seen_at 超时 → False。"""
+        from datetime import datetime, timezone, timedelta
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+        with patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = (stale,)
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            result = health_scorer._fetch_heartbeat(910008)
+        assert result is False
+
+    def test_fetch_heartbeat_engine_not_exist(self):
+        """_fetch_heartbeat: 引擎不存在（fetchone=None）→ False。"""
+        with patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = None
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            result = health_scorer._fetch_heartbeat(910009)
+        assert result is False
