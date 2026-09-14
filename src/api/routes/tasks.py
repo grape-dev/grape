@@ -74,23 +74,24 @@ def _get_feishu_open_id(gitcode_user: str) -> str:
             return ""
 
 
-def _create_task(user_id: int, assignee: str, repo_key: str, issue_number: int,
-                 title: str, task_description: str) -> int | None:
-    """创建 active 任务；同 assignee 同 issue 已有 active 则复用（返回其 id）。"""
+def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue_number: int,
+                               title: str, task_description: str) -> int | None:
+    """为「指定 assignee + Issue」建/复用任务中心卡片（active）；区别于移除的 create，仅服务 notify 分配语义。"""
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id FROM tasks WHERE repo_key=? AND issue_number=? AND assignee=? AND status='active' LIMIT 1",
+            "SELECT id FROM issue WHERE repo_key=? AND issue_number=? AND assignee=? AND status='active' LIMIT 1",
             (repo_key, issue_number, assignee)
         )
         row = c.fetchone()
         if row:
             return row[0]
         c.execute(
-            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number) "
-            "VALUES (?,?,?,?,?,?,'active',?,?)",
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
+            "VALUES (?,?,?,?,?,?,'active',?,?,?)",
             (user_id, assignee, repo_key, issue_number, title, task_description,
-             _get_issue_subtask_mode(repo_key, issue_number), _get_issue_parent(repo_key, issue_number))
+             _get_issue_subtask_mode(repo_key, issue_number), _get_issue_parent(repo_key, issue_number),
+             _get_issue_parent_id(repo_key, issue_number))
         )
         db.commit()
         return c.lastrowid
@@ -170,7 +171,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         # 幂等：同一 issue 任何 assignee 的 active/processing 任务都复用
         # （#15 修复：防止 webhook 回声导致不同 assignee 创建多个任务）
         c.execute(
-            "SELECT id, conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') LIMIT 1",
+            "SELECT id, conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') LIMIT 1",
             (repo_key, issue_number)
         )
         row = c.fetchone()
@@ -178,21 +179,21 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             task_id = row[0]
             linked = row[1]
             if title:
-                c.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
+                c.execute("UPDATE issue SET title=? WHERE id=?", (title, task_id))
             if subtask_mode >= 0:
-                c.execute("UPDATE tasks SET is_subtask_mode=? WHERE id=?", (subtask_mode, task_id))
+                c.execute("UPDATE issue SET is_subtask_mode=? WHERE id=?", (subtask_mode, task_id))
             # 如果传入的 assignee 与现有不同，更新 assignee 并关闭旧 assignee 的任务
             # （#15 修复：复用已有任务时同步 assignee，防止 assignee 与新建 Issue 不匹配）
             _existing_assignee = ""
             try:
-                c.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,))
+                c.execute("SELECT assignee FROM issue WHERE id=?", (task_id,))
                 _r2 = c.fetchone()
                 if _r2:
                     _existing_assignee = _r2[0] or ""
             except Exception:
                 pass
             if target and _existing_assignee and target != _existing_assignee:
-                c.execute("UPDATE tasks SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
+                c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
                 try:
                     _close_other_assignee_tasks(repo_key, issue_number, keep_assignee=target)
                 except Exception:
@@ -206,10 +207,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
             c.execute(
-                "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number) "
-                "VALUES (?,?,?,?,?,?,'active',?,?)",
+                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
-                 _subtask_val, _parent_val)
+                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number))
             )
             db.commit()
             task_id = c.lastrowid
@@ -221,7 +222,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             if conv_id:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("UPDATE tasks SET conversation_id=? WHERE id=?", (conv_id, task_id))
+                    c.execute("UPDATE issue SET conversation_id=? WHERE id=?", (conv_id, task_id))
                     db.commit()
         except Exception as e:
             log.warning(f"ensure_issue_task conversation link failed: {e}")
@@ -252,7 +253,7 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
         if _stage == "done":
             # stage=done 表示开发者已确认 → 直接 completed
             c.execute(
-                "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
+                "UPDATE issue SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
                 (repo_key, issue_number)
             )
@@ -260,7 +261,7 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
             # Issue #85: stage=pending_review → 保持 pending_review，不自动 completed
             # 只将 active 任务推进到 pending_review（processing/awaiting_input 保持原状）
             c.execute(
-                "UPDATE tasks SET status='pending_review' "
+                "UPDATE issue SET status='pending_review' "
                 "WHERE repo_key=? AND issue_number=? AND status='active'",
                 (repo_key, issue_number)
             )
@@ -268,7 +269,7 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
             # 还在 pipeline 流转中且无 agent 运行 → 设为 pending_review 等待开发者确认
             # Issue #85: 无 issue_state 记录（stage 为空）时也走此路径
             c.execute(
-                "UPDATE tasks SET status='pending_review', completed_reason=NULL "
+                "UPDATE issue SET status='pending_review', completed_reason=NULL "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                 (repo_key, issue_number)
             )
@@ -283,7 +284,7 @@ def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee:
     with db_lock:
         c = db.cursor()
         c.execute(
-            "UPDATE tasks SET status='completed', completed_reason='reassigned', completed_at=datetime('now') "
+            "UPDATE issue SET status='completed', completed_reason='reassigned', completed_at=datetime('now') "
             "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') AND assignee<>?",
             (repo_key, issue_number, keep_assignee)
         )
@@ -314,19 +315,19 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
         if _stage == "done":
             # stage=done → 直接 completed
             c.execute(
-                "UPDATE tasks SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
+                "UPDATE issue SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
                 (repo_key, issue_number))
         elif _stage == "pending_review":
             # Issue #85: stage=pending_review → 保持，不自动 completed
             c.execute(
-                "UPDATE tasks SET status='pending_review' "
+                "UPDATE issue SET status='pending_review' "
                 "WHERE repo_key=? AND issue_number=? AND status='active'",
                 (repo_key, issue_number))
         elif not _has_running:
             # 没有 agent 在运行 → 设为 pending_review（Issue #85: 同步 processing 任务）
             c.execute(
-                "UPDATE tasks SET status='pending_review', completed_reason=NULL "
+                "UPDATE issue SET status='pending_review', completed_reason=NULL "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                 (repo_key, issue_number))
             set_issue_stage(repo_key, _issue_id, "pending_review", "bot_takeover")
@@ -350,12 +351,17 @@ def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:
     return 0
 
 
-def _get_issue_parent(repo_key: str, issue_number: int) -> int:
-    """从 issue_state 读取 parent_issue_number"""
+def _get_issue_parent_id(repo_key: str, issue_number: int) -> str:
+    """从 issue_state 读取 parent_issue_id（文本，如 "#20"；空=普通任务）。"""
     from src.api.session_store import get_issue_stage
     issue_id = f"#{issue_number}"
     state = get_issue_stage(repo_key, issue_id) or {}
-    parent = state.get("parent_issue_id", "") or ""
+    return (state.get("parent_issue_id") or "").strip()
+
+
+def _get_issue_parent(repo_key: str, issue_number: int) -> int:
+    """从 issue_state 读取 parent_issue_id 并转为 int（前端兼容 parent_issue_number）。"""
+    parent = _get_issue_parent_id(repo_key, issue_number)
     parent_num = str(parent).replace("#", "").strip()
     return int(parent_num) if parent_num.isdigit() else 0
 
@@ -496,8 +502,8 @@ async def notify_task(body: TaskNotifyBody, request: Request):
     # 换人刷新 + 创建/复用任务
     _close_other_assignee_tasks(body.repo_key, body.issue_number, body.assignee)
     title = _get_issue_title(body.repo_key, body.issue_number)
-    task_id = _create_task(user_id, body.assignee, body.repo_key, body.issue_number,
-                           title, body.task_description)
+    task_id = _ensure_assignee_task_card(user_id, body.assignee, body.repo_key, body.issue_number,
+                                         title, body.task_description)
     if not task_id:
         return {"ok": False, "code": 500, "message": "任务创建失败"}
     log.info(f"Task notify: assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} task_id={task_id}")
@@ -509,7 +515,7 @@ async def notify_task(body: TaskNotifyBody, request: Request):
     if conv_id:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE tasks SET conversation_id=? WHERE id=?", (conv_id, task_id))
+            c.execute("UPDATE issue SET conversation_id=? WHERE id=?", (conv_id, task_id))
             db.commit()
 
     # 后台仅静态通知（不触发 ChatAgent，§十；立即返回）
@@ -562,7 +568,7 @@ async def start_task(task_id: int, user: dict = Depends(get_current_user_or_api_
     """
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT user_id, status FROM tasks WHERE id=?", (task_id,))
+        c.execute("SELECT user_id, status FROM issue WHERE id=?", (task_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
@@ -612,7 +618,7 @@ async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = De
     from src.api.session_store import set_issue_stage, get_issue_stage
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, issue_number, status FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+        c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
                   (task_id, user["id"]))
         row = c.fetchone()
         if not row:
@@ -623,7 +629,7 @@ async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = De
         if _status == 'cancelled':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "已取消任务不可确认完成"})
         c.execute(
-            "UPDATE tasks SET status='completed', completed_reason=?, completed_at=datetime('now') WHERE id=?",
+            "UPDATE issue SET status='completed', completed_reason=?, completed_at=datetime('now') WHERE id=?",
             (body.confirmation, task_id))
         if _issue_num:
             set_issue_stage(_repo_key, f"#{_issue_num}", "done", "user")
@@ -637,7 +643,7 @@ async def cancel_task_api(task_id: int, user: dict = Depends(get_current_user)):
     """开发者取消任务（Issue #51）。任何阶段可取消，取消后 Agent 终止 + 流水线停止。"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT status, repo_key, issue_number FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+        c.execute("SELECT status, repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
                   (task_id, user["id"]))
         row = c.fetchone()
         if not row:
@@ -681,7 +687,7 @@ async def cancel_task_api(task_id: int, user: dict = Depends(get_current_user)):
                 (repo_key, _issue_id))
 
         c.execute(
-            "UPDATE tasks SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
+            "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
             (task_id,))
         db.commit()
     log.info(f"Task #{task_id} cancelled by user (agents={_cancelled_agents})")
@@ -694,7 +700,7 @@ async def resume_task_api(task_id: int, user: dict = Depends(get_current_user)):
     from src.api.session_store import get_issue_stage
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT status, repo_key, issue_number FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+        c.execute("SELECT status, repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
                   (task_id, user["id"]))
         row = c.fetchone()
         if not row:
@@ -703,7 +709,7 @@ async def resume_task_api(task_id: int, user: dict = Depends(get_current_user)):
         if status != 'cancelled':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仅已取消任务可恢复"})
         c.execute(
-            "UPDATE tasks SET status='processing', completed_reason=NULL, completed_at=NULL WHERE id=?",
+            "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL WHERE id=?",
             (task_id,))
         db.commit()
     # 恢复后重新派发到正确的 stage
@@ -769,7 +775,7 @@ def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "is
     with db_lock:
         c = db.cursor()
         c.execute(
-            "UPDATE tasks SET status='completed', completed_reason=?, completed_at=datetime('now') "
+            "UPDATE issue SET status='completed', completed_reason=?, completed_at=datetime('now') "
             "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
             (confirmed_by, repo_key, issue_number))
         affected = c.rowcount
@@ -785,7 +791,7 @@ def cancel_issue_task(repo_key: str, issue_number: int):
     with db_lock:
         c = db.cursor()
         c.execute(
-            "UPDATE tasks SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
+            "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
             "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
             (repo_key, issue_number))
         affected = c.rowcount
@@ -799,7 +805,7 @@ def resume_issue_task(repo_key: str, issue_number: int):
     with db_lock:
         c = db.cursor()
         c.execute(
-            "UPDATE tasks SET status='active', completed_reason=NULL, completed_at=NULL "
+            "UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL "
             "WHERE repo_key=? AND issue_number=? AND status='cancelled'",
             (repo_key, issue_number))
         affected = c.rowcount
@@ -989,15 +995,11 @@ def create_standard_task(repo_key: str, title: str, description: str,
             "message": "任务已创建（Issue 已同步）" if created else "任务已创建（复用已有 Issue）"}
 
 
-@router.post("/create", operation_id="tasks_create", summary="新建任务（同步建 GitCode Issue）")
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
-    - issue 责任人 = 系统 General Settings 的 Account（settings.credentials.gitcode.account，
-      即当前登录用户 gitcode 账号；也可显式传 assignee 覆盖）
-    - 幂等：同仓库同标题的 open issue 存在 → 复用（不重复创建）；
-      同一 issue 的任务 id 不重复（ensure_issue_task 幂等）
-    - 状态迁移：task 支持 active/processing/completed/cancelled（PUT /api/tasks/{id}/status）
+    端点 `POST /api/tasks/create` 已废弃移除（Phase C2，见 issues-api-execution-plan.md）——
+    对外统一入口为 `POST /api/issues/{owner}/{repo}`（issues.py 复用本逻辑）。
     """
     from src.repo_key import to_repo_key, split_owner_repo
     if not body.repo_key or not body.title.strip():
@@ -1144,7 +1146,7 @@ async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = De
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"非法状态: {ns}"})
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT user_id, status FROM tasks WHERE id=?", (task_id,))
+        c.execute("SELECT user_id, status FROM issue WHERE id=?", (task_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
@@ -1154,7 +1156,7 @@ async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = De
         if cur != ns and ns not in _TASK_STATUS_FLOWS.get(cur, ()):
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"不允许从 {cur} 迁移到 {ns}"})
         c.execute(
-            "UPDATE tasks SET status=?, "
+            "UPDATE issue SET status=?, "
             "completed_at=CASE WHEN ? IN ('completed','cancelled') THEN datetime('now') ELSE completed_at END, "
             "completed_reason=CASE WHEN ?='completed' THEN 'manual' WHEN ?='cancelled' THEN 'cancelled' ELSE completed_reason END "
             "WHERE id=?",
@@ -1171,7 +1173,7 @@ def get_task_status(task_id: int, user: dict = Depends(get_current_user_or_api_k
         c = db.cursor()
         c.execute(
             "SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at "
-            "FROM tasks WHERE id=?",
+            "FROM issue WHERE id=?",
             (task_id,),
         )
         row = c.fetchone()
@@ -1259,7 +1261,7 @@ def _get_task_issue_info(task_id: int) -> tuple[str, int, str] | None:
     """从 tasks 表取 repo_key + issue_number + conversation_id（关联 agent_tasks 的键）。"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, issue_number, conversation_id FROM tasks WHERE id=?", (task_id,))
+        c.execute("SELECT repo_key, issue_number, conversation_id FROM issue WHERE id=?", (task_id,))
         row = c.fetchone()
     if not row:
         return None
@@ -1411,7 +1413,7 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
         with db_lock:
             c = db.cursor()
             c.execute(
-                "UPDATE tasks SET status='processing' "
+                "UPDATE issue SET status='processing' "
                 "WHERE repo_key=? AND issue_number=? AND status='awaiting_input'",
                 (repo_key, issue_number))
             db.commit()
@@ -1444,7 +1446,7 @@ async def get_task_pipeline(task_id: int, user: dict = Depends(get_current_user)
 
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, issue_number FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
                   (task_id, user["id"]))
         row = c.fetchone()
         if not row:
@@ -1525,22 +1527,28 @@ def _require_repo_access(user: dict, repo_key: str):
 
 
 def _batch_fetch_issue_state(keys: list) -> dict:
-    """批量查 issue_state 的 stage/scene_id，返回 {(repo_key, issue_id): {"stage":..,"scene_id":..}}（防 N+1）。"""
+    """批量查 issue 单表的 stage/scene_id，返回 {(repo_key, issue_id): {"stage":..,"scene_id":..}}（防 N+1）。
+
+    Phase C3：读 issue 卡片行（keys 中 issue_id 为 '#N'，转 issue_number）。
+    """
     out: dict = {}
     if not keys:
         return out
     for i in range(0, len(keys), 200):
         _chunk = keys[i:i + 200]
-        _ors = " OR ".join(["(repo_key=? AND issue_id=?)"] * len(_chunk))
-        _flat = [v for k in _chunk for v in k]
+        _ors = " OR ".join(["(repo_key=? AND issue_number=?)"] * len(_chunk))
+        _flat = []
+        for _k in _chunk:
+            _n = str(_k[1]).lstrip("#")
+            _flat.extend([_k[0], int(_n) if _n.isdigit() else -1])
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT repo_key, issue_id, stage, scene_id FROM issue_state WHERE " + _ors, _flat)
+                c.execute("SELECT repo_key, issue_number, stage, scene_id FROM issue WHERE " + _ors, _flat)
                 for row in c.fetchall():
-                    out[(row[0], row[1])] = {"stage": row[2] or "", "scene_id": row[3] or ""}
+                    out[(row[0], f"#{row[1]}")] = {"stage": row[2] or "", "scene_id": row[3] or ""}
         except Exception as e:
-            log.warning(f"batch issue_state fetch failed: {e}")
+            log.warning(f"batch issue fetch failed: {e}")
     return out
 
 
@@ -1645,13 +1653,13 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     """
     _select = (
         "SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
-        "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number"
+        "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, parent_issue_id"
         + (", user_id" if include_user_id else "")
     )
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(f"{_select} FROM tasks WHERE {where} ORDER BY {order_by}", params)
+            c.execute(f"{_select} FROM issue WHERE {where} ORDER BY {order_by}", params)
             rows = c.fetchall()
         except Exception as e:
             log.warning(f"Task query failed: {e}")
@@ -1695,6 +1703,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
             "is_subtask_mode": r[11] or 0,
             "parent_issue_number": r[12] or 0,
+            "parent_issue_id": r[13] or "",
             "scene_id": _scene_id,
             "scene_name": _scene_name,
             "scene_source": _scene_source,
@@ -1703,7 +1712,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "agent_statuses": _agent_status_map.get((_rk, _issue_id), []),
         }
         if include_user_id:
-            item["user_id"] = r[13] or 0
+            item["user_id"] = r[14] or 0
         tasks_out.append(item)
     return tasks_out
 

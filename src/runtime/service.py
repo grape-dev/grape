@@ -1681,7 +1681,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                     from src.session_manager import db as _db, db_lock as _dl, add_message as _am
                     with _dl:
                         _c = _db.cursor()
-                        _c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                        _c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
                                    (_repo_key, _issue_num))
                         _row = _c.fetchone()
                     if _row and _row[0]:

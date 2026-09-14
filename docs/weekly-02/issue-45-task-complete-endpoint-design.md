@@ -1,4 +1,4 @@
-# Issue-45 补充设计：任务自报完成（grape CLI `tasks complete`）——替代「无产出判失败」启发
+﻿# Issue-45 补充设计：任务自报完成（grape CLI `tasks complete`）——替代「无产出判失败」启发
 
 > Issue：https://gitcode.com/grape-dev/grape/issues/45
 > 类型：Feature（执行收口）| P1 | 状态：spec-ready（待评审）
@@ -9,7 +9,7 @@
 
 ## 一、背景与问题
 
-事件 #2114 重派后：agent 走完 11 步、`grape` 调 `/api/repos/*` 全部 200，但最终只输出纯文字总结（338 字），
+事件 #2114 重派后：agent 走完 11 步、`grape` 调 `/api/git-repo/*` 全部 200，但最终只输出纯文字总结（338 字），
 未产出结构化 JSON 结果块 → 服务端 `evaluate_agent_output` 判定「无产出」→ `Exec agent: no output, mark failed`
 （`src/api/event_pipeline.py:1995`），任务 `failed / exit 0 / 空 result`，且事件行未刷新 → UI 显示失败。
 

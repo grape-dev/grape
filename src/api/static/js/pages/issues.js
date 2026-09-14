@@ -1,4 +1,4 @@
-// ====== 任务中心（Account ▸ 任务中心）======
+// ====== 需求中心（Account ▸ 需求中心 / Issues Center）======
 // 方案 B：列表工作流风（左列表 + 右详情面板）
 let _tasksAll = [];           // 全部任务缓存
 let _taskSel = null;          // 选中的任务
@@ -486,7 +486,7 @@ function _renderBoard(filtered) {
     // 卡片容器：独立垂直滚动
     html += `<div style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
     if (list.length === 0) {
-      html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无任务'}</div>`;
+      html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无需求'}</div>`;
     } else {
       list.forEach(t => {
         const _ms = _mapStatus(t);
@@ -685,7 +685,7 @@ function _render() {
       <h1>${I18N.t('tasks.page_title')}</h1>
       <div id="deployLinkBar" style="margin-top:4px"></div>
       <div style="display:flex;gap:0;margin-top:8px;border-bottom:0.5px solid var(--b,#e8e8ed)">
-        <button class="tsk-tab${_tasksViewMode==='mine'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('mine')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='mine'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='mine'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='mine'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_mine')||'我的任务'}</button>
+        <button class="tsk-tab${_tasksViewMode==='mine'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('mine')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='mine'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='mine'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='mine'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_mine')||'我的需求'}</button>
         <button class="tsk-tab${_tasksViewMode==='repo_all'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('repo_all')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='repo_all'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='repo_all'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='repo_all'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_repo_all')||'仓库全部'}</button>
       </div>
       <div class="tsk-controls">
@@ -735,7 +735,7 @@ function _render() {
 
   if (_taskFilterPopoverOpen) _applyFilterPopoverState();
 
-  // 加载部署 URL 到任务中心顶部
+  // 加载部署 URL 到需求中心顶部
   _loadDeployLink();
 
   // 建立 id → task 映射供行点击
@@ -814,7 +814,7 @@ function _detailHtml(t) {
   return `
     <!-- 任务详情卡片（统一） -->
     <div style="${_cardStyle}position:relative">
-      <div style="${_cardTitle}">${I18N.t('tasks.detail_title')||'任务详情'}</div>
+      <div style="${_cardTitle}">${I18N.t('tasks.detail_title')||'需求详情'}</div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.status')}</span><b style="${_valueStyle};color:${isDone?'#34c759':isCancelled?'#86868b':isProc?'#3b82f6':'#86868b'}">${tagText}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.task_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
@@ -934,7 +934,7 @@ function openTaskConversation(t) {
   }
 }
 
-// ===== 新建任务（同步建 GitCode Issue + 既有流程建档；责任人 = General Settings Account）=====
+// ===== 新建需求（同步建 GitCode Issue + 既有流程建档；责任人 = General Settings Account）=====
 let _taskCreateModal = null;
 
 function openTaskCreateModal() {
@@ -1012,7 +1012,16 @@ function createTaskSubmit() {
   }
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.create.btn_creating'); }
-  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
+  // C2: /api/tasks/create 已废弃 → 统一走 POST /api/issues/{owner}/{repo}（对外唯一创建入口）
+  var _owner = repo ? (repo.owner || '') : '';
+  var _rname = repo ? (repo.name || '') : '';
+  if (!_owner || !_rname) {
+    var _p = String(repoKey).split('/');
+    _owner = _p[0] || '';
+    _rname = _p[1] || '';
+  }
+  API.post('/issues/' + encodeURIComponent(_owner) + '/' + encodeURIComponent(_rname),
+           {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
     .then(d => {
       const ov = document.getElementById('taskCreateOverlay');
       if (ov) ov.remove();

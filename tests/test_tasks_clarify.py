@@ -45,9 +45,9 @@ def setup_module():
     # 建一个 tasks 表行（手工 issue 10）
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM tasks WHERE repo_key='gitcode:tc_clarify/demo' AND issue_number=10")
+        c.execute("DELETE FROM issue WHERE repo_key='gitcode:tc_clarify/demo' AND issue_number=10")
         c.execute(
-            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, conversation_id) "
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, conversation_id) "
             "VALUES (?,?, 'gitcode:tc_clarify/demo', 10, '澄清测试', '测试澄清', 'active', '')",
             (_uid, "tc_clarify_user"))
         db.commit()

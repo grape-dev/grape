@@ -1,4 +1,6 @@
 """Session 管理：DB 初始化、Session CRUD、飞书绑定、Feishu 用户映射"""
+from __future__ import annotations
+
 import sqlite3, json, threading, os, time, shutil
 from datetime import datetime
 from src.config import log
@@ -597,11 +599,11 @@ def mark_task_processing_by_conversation(conv_id: str):
             return
         conv_user_id, repo_key, _ct, issue_number = row
         repo_key = to_repo_key(repo_key)
-        c.execute("UPDATE tasks SET status='processing' WHERE conversation_id=? AND user_id=? AND status='active'",
+        c.execute("UPDATE issue SET status='processing' WHERE conversation_id=? AND user_id=? AND status='active'",
                   (conv_id, conv_user_id))
         if c.rowcount == 0:
             c.execute(
-                "UPDATE tasks SET status='processing' WHERE repo_key=? AND issue_number=? AND user_id=? AND status='active'",
+                "UPDATE issue SET status='processing' WHERE repo_key=? AND issue_number=? AND user_id=? AND status='active'",
                 (repo_key, issue_number, conv_user_id))
         db.commit()
 

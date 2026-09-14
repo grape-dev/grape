@@ -1,4 +1,4 @@
-# Issue #45 任务执行规划（设计 → 实现 → MR）
+﻿# Issue #45 任务执行规划（设计 → 实现 → MR）
 
 > Issue：https://gitcode.com/grape-dev/grape/issues/45
 > 类型：Feature | P1 | 状态：plan-ready
@@ -83,13 +83,13 @@ F Settings 面板 ──> A（api_tokens 管理）
 | # | 任务 | 文件 | 验收 |
 |---|------|------|------|
 | 3.1 | 新增 `git_repo_api.py`：白名单 14 类资源端点 dispatch（provider 头/query → 复用 `repo_manager` gitcode client），出参/入参对齐 `docs/openapi/10-git-repos.md` | `src/api/git_repo_api.py`（新） | 白名单端点可用；白名单外透传被拒（401/404） |
-| 3.2 | 挂载路由 + provider 判定 + 认证（对外 Depends） | `src/api/main.py` / `src/api/git_repo_api.py` | `/api/repos/{o}/{r}/...` 三通道可调 |
+| 3.2 | 挂载路由 + provider 判定 + 认证（对外 Depends） | `src/api/main.py` / `src/api/git_repo_api.py` | `/api/git-repo/{o}/{r}/...` 三通道可调 |
 | 3.3 | `GET /api/repos/{o}/{r}/git-credential`：短期平台凭据（TTL 600s、优先 bot token、回退调用者 token、可审计）；`GET /api/repos/{o}/{r}/workspace` | `git_repo_api.py` | git-credential 返回 username/password/clone_url/expires_in；CLI 进程内使用 |
 | 3.4 | **收敛现状泄露点（随 F-2 技能迁移同步做，推迟到 M5 同批）**：devops 不再注入 `BOT_GITCODE_TOKEN` env + askpass 废弃。原因：技能仍引用 `$BOT_GITCODE_TOKEN`，单独移除会中断执行 | `src/agent/executor.py`（L209 `_assemble_env`）、`src/runtime/repogit.py`（L168 askpass） | 技能迁移完成后移除 env，`test_executor_token_env.py` 断言 devops 无 GITCODE token |
 
 **退出标准**：`tests/test_git_repo_api.py`（新建）provider 分派、白名单、credential 一次性全通过；devops 任务 env 无 GITCODE token 暴露。
 
-> 3.4 与技能迁移（F-2）有协同：先改技能引用到 `/api/repos`，再移除 env 注入，避免执行中断。
+> 3.4 与技能迁移（F-2）有协同：先改技能引用到 `/api/git-repo`，再移除 env 注入，避免执行中断。
 
 ---
 
@@ -115,7 +115,7 @@ F Settings 面板 ──> A（api_tokens 管理）
 | # | 任务 | 文件 | 验收 |
 |---|------|------|------|
 | 5.1 | Settings「API Tokens」面板：用户级 API Key 列表/创建（明文仅一次）/吊销/重命名；**仅方式 B**，会话认证，`/docs` 不暴露（内部路由） | `src/api/routes/settings.py` + 前端 | 创建→查列表→吊销闭环；无自举 create/revoke 的 public 端点 |
-| 5.2 | 技能迁移：`gitcode-api-reference.md` `api.gitcode.com` → `{{SERVER_URL}}/api/repos/...`、`$BOT_GITCODE_TOKEN` → grape token；逐技能按 `issue-45-skills-api-scan.md` 清单核对 | skills 文档/技能包 | 技能不再直连 gitcode 平台；问答无 `api.gitcode.com` 引用 |
+| 5.2 | 技能迁移：`gitcode-api-reference.md` `api.gitcode.com` → `{{SERVER_URL}}/api/git-repo/...`、`$BOT_GITCODE_TOKEN` → grape token；逐技能按 `issue-45-skills-api-scan.md` 清单核对 | skills 文档/技能包 | 技能不再直连 gitcode 平台；问答无 `api.gitcode.com` 引用 |
 | 5.3 | 全量回归 + 覆盖率：`pytest tests/ -v` + `--cov`（行覆盖 ≥ 70%） | `tests/` | 全绿；覆盖达标 |
 | 5.4 | 文档收口：`docs/openapi/` 按新契约同步；README/安装说明（CLI） | docs | 口径与实现一致 |
 

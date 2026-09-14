@@ -101,11 +101,11 @@ function _loadChatSkillOptions() {
 
 function loadConversations(autoSelect) {
   // Issue #47：首渲染即按目标仓库过滤，避免"先全局后过滤"导致串库闪烁。
-  //  - 任务中心跳转(issue:N:repoKey)：用任务自带仓库过滤（该仓库即目标，正确露出）
+  //  - 需求中心跳转(issue:N:repoKey)：用任务自带仓库过滤（该仓库即目标，正确露出）
   //  - 直连 conv_id：不过滤（定位既有会话）
   //  - 普通进入：按当前仓库过滤
   const repo = app.currentRepo();
-  // 解析 issue:N:repoKey 格式的 _openConvId（Task Center 跳转，会话可能已删除需重建）
+  // 解析 issue:N:repoKey 格式的 _openConvId（Issues Center 跳转，会话可能已删除需重建）
   let _issueParam = null;
   if (_openConvId && _openConvId.startsWith('issue:')) {
     const parts = _openConvId.split(':');
@@ -141,7 +141,7 @@ function loadConversations(autoSelect) {
     // Auto-select: 优先 issue 重建 > 任务指定的 conversation > 第一个
     if (autoSelect && !_currentConvId) {
       if (_issueParam) {
-        // Task Center 跳转：会话可能已删除，调 ensure-issue 重建
+        // Issues Center 跳转：会话可能已删除，调 ensure-issue 重建
         API.post('/chat/conversations/ensure-issue', {repo_key: _issueParam.repo, issue_number: parseInt(_issueParam.num)}).then(r => {
           loadConversations(false);
           if (r.conversation_id) switchConversation(r.conversation_id);

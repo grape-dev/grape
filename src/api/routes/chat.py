@@ -22,7 +22,7 @@ _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import get_current_user, get_current_user_or_api_key, require_no_session_token
 from src.user import db as user_db
 from src.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
@@ -93,7 +93,7 @@ def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")
     return FileResponse(fpath, media_type=_mt, headers={"Cache-Control": "public, max-age=86400"})
 
 @router.get("/conversations", operation_id="chat_conversations", summary="会话列表")
-def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user_or_api_key)):
+def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(require_no_session_token)):
     convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
 
@@ -146,7 +146,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
         from src.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            c.execute("UPDATE tasks SET conversation_id=? WHERE repo_key=? AND issue_number=?",
+            c.execute("UPDATE issue SET conversation_id=? WHERE repo_key=? AND issue_number=?",
                       (conv_id, rk, body.issue_number))
             _db.commit()
     except Exception:
@@ -168,7 +168,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
 # ====== Messages ======
 
 @router.get("/messages/{conv_id}", operation_id="chat_messages", summary="会话消息列表")
-def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user_or_api_key)):
+def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
