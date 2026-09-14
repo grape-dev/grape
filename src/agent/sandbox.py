@@ -375,7 +375,12 @@ def _get_whitelist_from_db(backend_name: str = "", repo_key: str = "") -> list[s
         with db_lock:
             c = db.cursor()
             # 先检查表是否存在
-            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sandbox_whitelist'")
+            # 检查表是否存在（兼容 SQLite 和 MySQL）
+            from src.mysql_compat import get_db_backend
+            if get_db_backend() == "mysql":
+                c.execute("SHOW TABLES LIKE 'sandbox_whitelist'")
+            else:
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sandbox_whitelist'")
             if c.fetchone():
                 c.execute(
                     "SELECT DISTINCT domain FROM sandbox_whitelist "
