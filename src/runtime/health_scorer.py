@@ -19,6 +19,11 @@ Issue #135 心跳因素（优先于失败率计算）：
 - DB 持久化（runtime_health_scores 表）+ 内存缓存（60s TTL）
 - 派发链路作为增强层调用 get_health_scores / filter_healthy / best_fallback
 - 不改变广播协议/任务分发语义/A2A 事件流转
+
+及时性保障（Issue #85）：
+- 即时登记：任务终态时 record_task_completion 立刻重新计算并写入 DB（不等定时刷新）
+- 定时刷新：后台线程每 5 分钟对所有引擎 force_refresh，覆盖离线引擎无任务事件触发的场景
+- 双重机制确保失联引擎的健康分在 5 分钟内从 100 降至 0
 """
 import json
 import os
@@ -349,12 +354,18 @@ def _empty_score(runtime_id: int) -> dict:
 
 
 def record_task_completion(runtime_id: int, status: str):
-    """任务终态后调用，清除该引擎缓存（下次查询时重新计算）。
+    """任务终态后调用，即时计算并持久化健康度到 DB + 刷新缓存。
 
-    不改变广播/分发语义——仅在任务终态后异步刷新缓存。
+    Issue #85: 改为即时模式——任务完成时立刻重新计算健康分并写入
+    runtime_health_scores 表，增强健康度分析的及时性。
+    不改变广播/分发语义——仅在任务终态后异步刷新。
     """
     if runtime_id:
-        invalidate_cache(runtime_id)
+        try:
+            _compute_and_persist(runtime_id)
+        except Exception as e:
+            log.warning(f"health_scorer: record_task_completion failed for runtime={runtime_id}: {e}")
+            invalidate_cache(runtime_id)
 
 
 # ===== 健康度汇总（供 API 查询 / 分析脚本）=====
@@ -373,3 +384,62 @@ def get_all_health_scores(force_refresh: bool = False) -> list[dict]:
         log.warning(f"health_scorer: get_all_health_scores failed: {e}")
         return []
     return [get_health_score(rid, force_refresh=force_refresh) for rid in rids]
+
+
+# ===== Issue #85: 定时刷新调度器 =====
+
+_REFRESH_INTERVAL = int(os.environ.get("HEALTH_REFRESH_INTERVAL", "300"))  # 默认 5 分钟
+_refresh_thread: threading.Thread | None = None
+_refresh_stop = threading.Event()
+
+
+def _refresh_all_loop():
+    """后台循环：定期对所有引擎强制刷新健康分并持久化到 DB。
+
+    覆盖场景：
+    - 引擎离线后无任务事件 → record_task_completion 不会被触发，需定时刷新
+    - 引擎心跳超时 → _fetch_heartbeat 判定失联，score 降为 0
+    - 服务重启后缓存清空 → 首次查询走 DB 旧值，定时刷新纠正
+    """
+    log.info(f"health_scorer: refresh loop started (interval={_REFRESH_INTERVAL}s)")
+    while not _refresh_stop.is_set():
+        if _refresh_stop.wait(_REFRESH_INTERVAL):
+            break  # stop 信号
+        try:
+            with _lock():
+                c = _db().cursor()
+                c.execute("SELECT id FROM agent_runtimes ORDER BY id")
+                rids = [r[0] for r in c.fetchall()]
+            stale = 0
+            for rid in rids:
+                try:
+                    old = _cache.get(rid, {}).get("data", {}).get("health_score")
+                    data = _compute_and_persist(rid)
+                    if old is not None and data["health_score"] != old:
+                        log.info(f"health_scorer: refresh rid={rid} score {old} -> {data['health_score']}")
+                    if data["health_score"] == 0 and data["heartbeat_alive"] is False:
+                        stale += 1
+                except Exception as e:
+                    log.warning(f"health_scorer: refresh failed for rid={rid}: {e}")
+            if stale:
+                log.info(f"health_scorer: refresh loop done, {stale}/{len(rids)} engine(s) offline")
+        except Exception as e:
+            log.warning(f"health_scorer: refresh loop error: {e}")
+    log.info("health_scorer: refresh loop stopped")
+
+
+def start_health_refresh_scheduler():
+    """启动后台定时刷新线程（幂等，重复调用不创建多个线程）。"""
+    global _refresh_thread
+    if _refresh_thread and _refresh_thread.is_alive():
+        return
+    _refresh_stop.clear()
+    _refresh_thread = threading.Thread(target=_refresh_all_loop, daemon=True)
+    _refresh_thread.start()
+
+
+def stop_health_refresh_scheduler():
+    """停止定时刷新线程（服务关闭时调用）。"""
+    _refresh_stop.set()
+    if _refresh_thread:
+        _refresh_thread.join(timeout=5)

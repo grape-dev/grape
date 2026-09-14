@@ -332,17 +332,20 @@ class TestResourceStackHealth:
 class TestRecordTaskCompletion:
     """测试任务终态后的缓存刷新。"""
 
-    def test_record_completion_invalidates_cache(self):
-        """record_task_completion 清除缓存。"""
-        health_scorer._cache[888] = {"score": 50, "data": {}, "expires": time.time() + 100}
+    def test_record_completion_refreshes_cache(self):
+        """record_task_completion 即时重算并刷新缓存（Issue #85 即时模式）。"""
+        health_scorer._cache[888] = {"score": 50, "data": {"health_score": 50}, "expires": time.time() + 100}
         health_scorer.record_task_completion(888, "completed")
-        assert 888 not in health_scorer._cache
+        # 缓存应被刷新为新值，而非清空
+        assert 888 in health_scorer._cache
+        assert health_scorer._cache[888]["data"]["health_score"] == 0  # 引擎不存在→失联→0
 
-    def test_record_failure_invalidates_cache(self):
-        """record_task_completion 失败状态也清除缓存。"""
-        health_scorer._cache[777] = {"score": 50, "data": {}, "expires": time.time() + 100}
+    def test_record_failure_refreshes_cache(self):
+        """record_task_completion 失败状态也即时刷新缓存。"""
+        health_scorer._cache[777] = {"score": 50, "data": {"health_score": 50}, "expires": time.time() + 100}
         health_scorer.record_task_completion(777, "failed")
-        assert 777 not in health_scorer._cache
+        assert 777 in health_scorer._cache
+        assert health_scorer._cache[777]["data"]["health_score"] == 0  # 引擎不存在→失联→0
 
     def test_record_zero_runtime_noop(self):
         """runtime_id=0 时不清缓存（广播任务无特定引擎）。"""
