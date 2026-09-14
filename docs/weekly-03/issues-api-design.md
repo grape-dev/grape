@@ -60,7 +60,7 @@ _STAGE_TO_TASK_STATUS = {
 UPDATE issue SET status=? WHERE repo_key=? AND issue_number=? AND status NOT IN ('completed','cancelled','awaiting_input')
 ```
 
-**前端展示映射**（`tasks.js _mapStatusL`）：
+**前端展示映射**（`issues.js _mapStatusL`）：
 
 | 任务中心显示 | 判定逻辑 | 底层 status / stage |
 |-------------|----------|---------------------|

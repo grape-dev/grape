@@ -117,3 +117,15 @@
 - tasks.js fallback 同步（view_mine/empty/detail_title）+ 新建需求注释
 - 缓存版本号提升：`I18N.init('12')→('13')`、`tasks.js?v=84→85`
 - 验证：JSON 可解析、无「任务」用户可见残留（除 task_id）、node --check 通过
+
+## 八·续二 页面文件重命名 `tasks.js` → `issues.js`（2026-09-14）
+
+> 违背 §七 原有「不推荐」判断——改为采用，理由：页面已更名「需求中心（Issues Center）」，文件名叫
+> `tasks.js` 与语义脱节；且实际影响面仅 index.html 一处 `<script>` 引用（view key `tasks` 与函数名
+> `loadTasks` 等与文件名解耦，不受影响）。
+
+- `git mv src/api/static/js/pages/tasks.js → issues.js`
+- `index.html` script 引用改 `issues.js?v=86`（升版本号强制浏览器换新文件，避免旧 tasks.js 缓存残留）
+- `MAINTAINER` 归属行同步
+- 当前设计文档（issues-api-design/execution-plan）的 `tasks.js` 引用更新为 `issues.js`；历史设计文档保留原名（历史语义）
+- **不改 view key `tasks` / 函数名**（避免与 issues view/API 混淆，见 §四）

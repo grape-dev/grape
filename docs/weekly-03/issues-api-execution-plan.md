@@ -136,7 +136,7 @@
 **C 已完成**：
 - **C1（已完成）**：`issues.py._issue_stage_map` **issue 单表权威 + issue_state 兜底**（C3 停写后数据落 issue 表，读不再依赖 issue_state）。
 - **C2（已完成）**：`POST /api/tasks/create` **端点已移除**（`tasks.create_task_via_issue` 去路由装饰器，函数保留供 issues.py 复用）；
-  前端 `tasks.js` 已迁移至 `POST /api/issues/{owner}/{repo}`；`test_tasks_create`/`test_issue_89` 调用改走 issues 端点；
+  前端 `issues.js` 已迁移至 `POST /api/issues/{owner}/{repo}`；`test_tasks_create`/`test_issue_89` 调用改走 issues 端点；
   `test_openapi.EXPECTED_PUBLIC` 移除 `tasks_create`。对外唯一创建入口 = `/api/issues`。
 - **C4（已完成）**：`docs/openapi/01-tasks.md` 与 `help/api/01-tasks.md` 同步废弃说明（`test_help_directory` 一致性恢复）；
   新增 `help/api/11-issues.md`（docs/openapi + help/api 双份，覆盖 5 端点 + 概念澄清）+ `README.md` 目录 + `tests/test_help_directory.py EXPECTED_API_FILES`（13→14）；
