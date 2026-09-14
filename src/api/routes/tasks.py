@@ -74,9 +74,9 @@ def _get_feishu_open_id(gitcode_user: str) -> str:
             return ""
 
 
-def _create_task(user_id: int, assignee: str, repo_key: str, issue_number: int,
-                 title: str, task_description: str) -> int | None:
-    """创建 active 任务；同 assignee 同 issue 已有 active 则复用（返回其 id）。"""
+def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue_number: int,
+                               title: str, task_description: str) -> int | None:
+    """为「指定 assignee + Issue」建/复用任务中心卡片（active）；区别于移除的 create，仅服务 notify 分配语义。"""
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -502,8 +502,8 @@ async def notify_task(body: TaskNotifyBody, request: Request):
     # 换人刷新 + 创建/复用任务
     _close_other_assignee_tasks(body.repo_key, body.issue_number, body.assignee)
     title = _get_issue_title(body.repo_key, body.issue_number)
-    task_id = _create_task(user_id, body.assignee, body.repo_key, body.issue_number,
-                           title, body.task_description)
+    task_id = _ensure_assignee_task_card(user_id, body.assignee, body.repo_key, body.issue_number,
+                                         title, body.task_description)
     if not task_id:
         return {"ok": False, "code": 500, "message": "任务创建失败"}
     log.info(f"Task notify: assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} task_id={task_id}")
