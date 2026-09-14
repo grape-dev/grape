@@ -219,6 +219,14 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
     _audit_log: RotatingAuditLog | None = None
     _leaked_tokens: list[tuple[str, str]] = []  # (token_name, token_value)
 
+    def setup(self):
+        """每个连接调用 — 把类变量拷贝到实例变量，避免并发共享。"""
+        super().setup()
+        self._task_id_inst = self._task_id
+        self._whitelist_inst = list(self._whitelist)
+        self._audit_log_inst = self._audit_log
+        self._leaked_tokens_inst = list(self._leaked_tokens)
+
     def do_CONNECT(self):
         host, port = self._parse_target(self.path)
         start = time.monotonic()
@@ -347,14 +355,14 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
         line = self._read_line(upstream)
         self.wfile.write(line.encode("utf-8"))
 
-        # 读取 headers
+        # 读取 headers 直到空行（含空行本身，不再额外调 end_headers）
         while True:
             line = self._read_line(upstream)
             self.wfile.write(line.encode("utf-8"))
             if line in ("\r\n", "\n", ""):
                 break
 
-        self.end_headers()
+        self.wfile.flush()
 
         # 转发 body
         while True:
@@ -364,31 +372,33 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(data)
 
     @staticmethod
-    def _read_line(sock: socket.socket) -> str:
-        """逐行读取（直到 \\r\\n）。"""
-        line = b""
-        while True:
-            char = sock.recv(1)
-            if not char:
-                break
-            line += char
-            if line.endswith(b"\n"):
-                break
+    def _read_line(sock: socket.socket, max_len: int = 8192) -> str:
+        """逐行读取（直到 \\r\\n），带缓冲。"""
+        # 用文件描述符的 buffered reader 避免逐字节 recv
+        if not hasattr(sock, "_grape_rbuf"):
+            import io
+            sock._grape_rbuf = sock.makefile("rb")
+        f = sock._grape_rbuf
+        line = f.readline()
+        if not line:
+            return ""
         return line.decode("utf-8", errors="replace")
 
     def _check_request(self, host: str, port: int) -> dict:
-        """三级检查：白名单 → DNS 地址校验 → 凭据泄露检测。"""
+        """三级检查：白名单 → DNS 地址校验（loopback 例外）。"""
         # 1. 白名单
-        for pattern in self._whitelist:
+        for pattern in self._whitelist_inst:
             if match_domain(host, pattern):
                 break
         else:
             return {"allowed": False, "reason": "domain not in whitelist"}
 
-        # 2. DNS 地址校验
-        ok, addr_reason = check_resolved_address(host, port)
-        if not ok:
-            return {"allowed": False, "reason": f"DNS address denied: {addr_reason}"}
+        # 2. DNS 地址校验 — loopback 例外（127.0.0.1 / localhost 已在白名单中，是预期目标）
+        host_base = host.split(":")[0]
+        if host_base not in ("127.0.0.1", "localhost", "::1"):
+            ok, addr_reason = check_resolved_address(host, port)
+            if not ok:
+                return {"allowed": False, "reason": f"DNS address denied: {addr_reason}"}
 
         return {"allowed": True, "reason": "whitelist match"}
 
@@ -419,7 +429,7 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
         """写 JSONL 审计记录。"""
         record = {
             "ts": datetime.now(timezone.utc).isoformat(),
-            "task_id": self._task_id,
+            "task_id": self._task_id_inst,
             "method": method,
             "host": host,
             "path": sanitize_path(path),
@@ -429,7 +439,7 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
             "latency_ms": round((time.monotonic() - start) * 1000),
         }
         # 凭据泄露检测
-        for name, value in self._leaked_tokens:
+        for name, value in self._leaked_tokens_inst:
             if value and value in path:
                 record["credential_leak"] = True
                 record["leaked_token"] = name
@@ -438,9 +448,9 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
                     f"token {name} found in request to {host}"
                 )
                 break
-        if self._audit_log:
+        if self._audit_log_inst:
             try:
-                self._audit_log.write(record)
+                self._audit_log_inst.write(record)
             except Exception as e:
                 log.warning(f"audit write failed: {e}")
 

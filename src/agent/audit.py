@@ -36,6 +36,32 @@ class RotatingAuditLog:
         self._path = path
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._hmac_key = self._resolve_key(path, hmac_key)
+        # Issue #139 fix: 初始化时读磁盘最后一条记录的 record_hash，避免重启后链断裂
+        self._init_chain_state_from_disk()
+
+    def _init_chain_state_from_disk(self):
+        """从磁盘日志最后一条记录读取 record_hash，恢复哈希链状态。
+
+        进程重启后 _chain_state 为空 → 第一条记录 prev_hash=''
+        但磁盘上最后一条记录的 record_hash 不为空 → verify_chain() 报 mismatch。
+        本方法在初始化时读磁盘最后一条记录，恢复链状态。
+        """
+        if not os.path.exists(self._path):
+            return
+        try:
+            with open(self._path) as f:
+                last_hash = ""
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    last_hash = record.get("record_hash", "")
+                if last_hash:
+                    with RotatingAuditLog._lock:
+                        self._chain_state[self._path] = last_hash
+        except Exception as e:
+            log.warning(f"audit: failed to restore chain state from disk: {e}")
 
     @staticmethod
     def _resolve_key(path: str, explicit_key: str) -> bytes:

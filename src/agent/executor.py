@@ -417,7 +417,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         return
 
     # 单次进程执行：返回 (full_text, new_session_id, exit_code, stderr, error_events)
+    _sandbox_ctx = None  # Issue #139: 提到 stream_agent 层，供异常路径清理
     def _run_once(use_session_id: str):
+        nonlocal _sandbox_ctx
         # codearts 方案E2: 每次执行启动独立的 codearts serve
         # serve 信息存在局部变量 _serve_port/_serve_proc 中，不写到单例 backend 上
         # build_args 从 backend._serve_port 读取（同一 _run_once 内设置，串行无并发问题）
@@ -505,7 +507,6 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
         # Issue #139：网络隔离模式 — prepare_sandbox 创建代理/cgroup/socket
         _cmd = [agent_cmd] + args
-        _sandbox_ctx = None
         try:
             from src.config import GRAPE_SANDBOX_NET
             if GRAPE_SANDBOX_NET:
@@ -528,7 +529,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 if _sandbox_ctx and _sandbox_ctx.net_enabled:
                     # 网络隔离模式：bwrap 命令改为启动脚本（桥接 + trap + Agent）
                     from src.agent.sandbox import _build_in_sandbox_script
-                    agent_full = " ".join(_cmd)
+                    import shlex as _shlex
+                    agent_full = " ".join(_shlex.quote(arg) for arg in _cmd)
                     script = _build_in_sandbox_script(agent_full, _sandbox_ctx.bridge_script_path)
                     _cmd = _wrap + ["/bin/sh", "-c", script]
                 else:
@@ -816,12 +818,25 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     run_gen = _run_once(session_id)
     done = None
     _forwarded_done = False
-    for evt_type, data in run_gen:
-        if evt_type == "done":
-            done = data
-        else:
-            yield (evt_type, data)
+    try:
+        for evt_type, data in run_gen:
+            if evt_type == "done":
+                done = data
+            else:
+                yield (evt_type, data)
+    except Exception:
+        # Issue #139 fix: 异常路径也清理沙箱资源
+        if _sandbox_ctx:
+            from src.agent.sandbox import cleanup_sandbox
+            unregister_sandbox(_sandbox_ctx)
+            cleanup_sandbox(_sandbox_ctx)
+        raise
     if done is None:
+        # Issue #139 fix: generator 被关闭但没 yield done — 清理沙箱
+        if _sandbox_ctx:
+            from src.agent.sandbox import cleanup_sandbox
+            unregister_sandbox(_sandbox_ctx)
+            cleanup_sandbox(_sandbox_ctx)
         return
 
     _stderr = (done.get("stderr") or "").lower()

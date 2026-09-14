@@ -56,7 +56,9 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "", sandbox_ctx=None) -> list[
         opts = [bwrap, "--die-with-parent", "--new-session",
                 "--cap-drop", "ALL",  # 丢弃所有 capabilities
                 "--unshare-net",      # 完全隔离网络
-                "--unshare-pid", "--proc", "/proc"]  # PID 隔离
+                "--unshare-pid", "--proc", "/proc",  # PID 隔离
+                "--unshare-ipc",      # IPC 隔离（信号量/共享内存侧信道）
+                "--unshare-uts"]      # UTS 隔离（主机名）
     else:
         # ===== 原有模式（--share-net）=====
         opts = [bwrap, "--die-with-parent", "--unshare-all", "--share-net"]
@@ -199,7 +201,12 @@ def _build_in_sandbox_script(agent_cmd: str, bridge_script_path: str) -> str:
     """
     script = (
         f"python3 {bridge_script_path} &\n"
-        "sleep 0.5\n"  # 等桥接启动
+        # 轮询等待桥接端口就绪（最多 5 秒）
+        "for i in 1 2 3 4 5 6 7 8 9 10; do\n"
+        "  python3 -c \"import socket; s=socket.socket(); s.settimeout(0.5); "
+        "s.connect(('127.0.0.1',3128)); s.close()\" 2>/dev/null && break\n"
+        "  sleep 0.5\n"
+        "done\n"
         "trap 'kill %1 2>/dev/null' EXIT\n"
         f"exec {agent_cmd}"
     )
@@ -220,19 +227,19 @@ class SandboxContext:
         self._audit_log = None   # type: ignore[type-arg]
 
     def cleanup(self):
-        """清理所有沙箱资源。幂等。"""
-        if self._cgroup:
-            try:
-                self._cgroup.destroy(force=True)
-            except Exception:
-                pass
-            self._cgroup = None
+        """清理所有沙箱资源。幂等。先停代理再销毁 cgroup。"""
         if self._proxy:
             try:
                 self._proxy.stop()
             except Exception:
                 pass
             self._proxy = None
+        if self._cgroup:
+            try:
+                self._cgroup.destroy(force=True)
+            except Exception:
+                pass
+            self._cgroup = None
         if self.bridge_script_path and os.path.exists(self.bridge_script_path):
             try:
                 os.unlink(self.bridge_script_path)

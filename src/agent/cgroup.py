@@ -42,7 +42,10 @@ class CgroupSlice:
         cpu_quota: int = 0,
         max_pids: int = 0,
     ):
-        self._name = f"grape-sandbox-{task_id[:12]}"
+        # sanitize task_id — 只允许字母数字和连字符，防止 shell 注入
+        import re as _re
+        safe_id = _re.sub(r"[^a-zA-Z0-9_-]", "", task_id)[:12]
+        self._name = f"grape-sandbox-{safe_id}"
         self._mem_limit = mem_limit_mb
         self._cpu_quota = cpu_quota
         self._max_pids = max_pids
