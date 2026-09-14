@@ -9,6 +9,7 @@
     "qa": "QA Agent",
     "sre": "SRE Agent",
     "chat": "Chat Agent",
+    "im_channel": "IM渠道",
     "settings": "通用设置",
     "skills": "DevOps 技能",
     "knowledge": "项目知识库",

@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS skill (
     created_by VARCHAR(64) DEFAULT '',
     updated_by VARCHAR(64) DEFAULT '',
     is_active INTEGER DEFAULT 1,
+    sub_scene TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (skill_name, scope, owner_id)
@@ -803,7 +804,23 @@ CREATE TABLE IF NOT EXISTS runtime_health_scores (
     last_status         TEXT DEFAULT '',               -- 最近一条任务状态
     window_days         INTEGER NOT NULL DEFAULT 7,    -- 滑动窗口天数
     updated_at          TEXT DEFAULT (datetime('now'))
-)"""""),]
+)"""""),
+    # ===== Issue #139: sandbox whitelist =====
+    ("sandbox_whitelist", """CREATE TABLE IF NOT EXISTS sandbox_whitelist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'global',
+    scope_value TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (domain, scope, scope_value),
+    CHECK (scope = 'global' OR scope_value != '')
+    )"""),
+    ("idx_whitelist_scope", "CREATE INDEX IF NOT EXISTS idx_whitelist_scope ON sandbox_whitelist(scope, scope_value, enabled)"),
+    ("idx_whitelist_domain", "CREATE INDEX IF NOT EXISTS idx_whitelist_domain ON sandbox_whitelist(domain, enabled)"),
+]
 
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -975,9 +992,10 @@ def _seed_from_json():
                             description = info.get("description", "")
                             agent_type = info.get("agent_type", "")
                             skill_path = info.get("path", skill_name)
+                            sub_scene = info.get("sub_scene", "")
                             c.execute(
-                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
-                                (skill_name, display_name, description, agent_type, skill_path)
+                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene) VALUES (?,?,?,?,?,'official','',?)",
+                                (skill_name, display_name, description, agent_type, skill_path, sub_scene)
                             )
                             log.info(f"Seeded missing official skill: {skill_name}")
                     db.commit()
@@ -1047,6 +1065,36 @@ def _seed_event_action_filter():
         db.commit()
 
 
+def _seed_sandbox_whitelist():
+    """Issue #139: 初始化沙箱白名单到 DB 表（幂等）。
+
+    把 SANDBOX_WHITELIST_FALLBACK 的默认域名写入 sandbox_whitelist 表，
+    scope='global', enabled=1。已有记录跳过（UNIQUE 约束）。
+    """
+    try:
+        from src.config import SANDBOX_WHITELIST_FALLBACK
+    except ImportError:
+        return
+    with db_lock:
+        c = db.cursor()
+        # 检查表是否已有数据
+        c.execute("SELECT COUNT(*) FROM sandbox_whitelist")
+        if c.fetchone()[0] > 0:
+            return  # 已有数据，不重复 seed
+        for domain in SANDBOX_WHITELIST_FALLBACK:
+            try:
+                c.execute(
+                    "INSERT OR IGNORE INTO sandbox_whitelist "
+                    "(domain, scope, scope_value, enabled, description, created_at, updated_at) "
+                    "VALUES (?, 'global', '', 1, 'seed default', datetime('now'), datetime('now'))",
+                    (domain,)
+                )
+            except Exception:
+                pass
+        db.commit()
+        log.info(f"sandbox_whitelist seeded {len(SANDBOX_WHITELIST_FALLBACK)} domains")
+
+
 def _insert_seed_data(table: str, data: dict):
     """将 JSON 数据插入对应表"""
     with db_lock:
@@ -1088,9 +1136,10 @@ def _insert_seed_data(table: str, data: dict):
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
                 skill_path = info.get("path", skill_name)
+                sub_scene = info.get("sub_scene", "")
                 c.execute(
-                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
-                    (skill_name, display_name, description, agent_type, skill_path)
+                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene) VALUES (?,?,?,?,?,'official','',?)",
+                    (skill_name, display_name, description, agent_type, skill_path, sub_scene)
                 )
 
         elif table == "agent_registry":
@@ -1345,6 +1394,7 @@ def init_database():
                 _create_indexes()
                 _seed_from_json()
                 _seed_event_action_filter()
+                _seed_sandbox_whitelist()
                 _sync_official_skills()
                 _align_agent_enable()
                 _cleanup_stale_meta()
@@ -1376,6 +1426,7 @@ def init_database():
         _create_indexes()
         _seed_from_json()
         _seed_event_action_filter()
+        _seed_sandbox_whitelist()
         _sync_official_skills()
         _align_agent_enable()
         _cleanup_stale_meta()
@@ -1608,6 +1659,7 @@ def _sync_official_skills():
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
                 skill_path = info.get("path", skill_name)
+                sub_scene = info.get("sub_scene", "")
                 existed = c.execute(
                     "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'",
                     (skill_name,)
@@ -1621,19 +1673,19 @@ def _sync_official_skills():
                     ).fetchone()
                     if _fp:
                         c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_name)
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, sub_scene, skill_name)
                         )
                     else:
                         c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_path, skill_name)
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, skill_path, sub_scene, skill_name)
                         )
                     updated += 1
                 else:
                     c.execute(
-                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash) VALUES (?,?,?,?,?,'official','',?)",
-                        (skill_name, display_name, description, agent_type, skill_path, "")
+                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene) VALUES (?,?,?,?,?,'official','',?,?)",
+                        (skill_name, display_name, description, agent_type, skill_path, "", sub_scene)
                     )
                     added += 1
             db.commit()
@@ -1663,7 +1715,7 @@ def _cleanup_old_latency_logs():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM api_latency_log WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)")
+            c.execute("DELETE FROM api_latency_log WHERE created_at < datetime('now', '-7 days')")
             deleted = c.rowcount
             db.commit()
         if deleted:
@@ -1995,6 +2047,7 @@ def _migrate_tables():
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
+        "ALTER TABLE skill ADD COLUMN sub_scene TEXT DEFAULT ''",
         # ===== Issue-11: devops_pipeline_scene 加 market_scene_id（单向关联） =====
         "ALTER TABLE devops_pipeline_scene ADD COLUMN market_scene_id INTEGER DEFAULT NULL",
         # ===== Issue-11: scene_skill_ref 加 skill_id =====

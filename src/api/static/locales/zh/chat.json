@@ -69,6 +69,9 @@
   "thinking": "思考中...",
   "querying": "查询中",
   "backend": "后端",
+  "engine_skill_title": "模型与技能",
+  "engine_skill_desc": "配置 Chat Agent 的执行引擎和技能",
+  "engine_label": "执行引擎",
   "placeholder": "问我任何问题...",
   "send": "发送",
   "upload_image": "上传图片",
@@ -78,5 +81,17 @@
   "image_too_large": "图片大小不能超过5MB",
   "image_max_reached": "最多只能上传{{max}}张图片",
   "image_max_exceeded": "超过最大数量限制，只添加了部分图片（最多{{max}}张）",
-  "image_attached": "已附加图片: {{name}}，输入文字或直接发送"
+  "image_attached": "已附加图片: {{name}}，输入文字或直接发送",
+  "im_channel": {
+    "title": "IM 渠道配置",
+    "subtitle": "配置即时通讯平台接入 Chat Agent",
+    "provider": "选择平台",
+    "config": "配置",
+    "connected": "已接入",
+    "not_connected": "未接入",
+    "coming_soon": "暂未开放",
+    "active_status": "运行中",
+    "help_title": "说明",
+    "help_desc": "配置 IM 平台的 App ID 和 App Secret，用于 Chat Agent 通过飞书/企业微信/钉钉接收消息和回复。也可使用扫码配置快速接入飞书。"
+  }
 }

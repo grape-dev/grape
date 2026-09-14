@@ -26,6 +26,10 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
     检查维度：在线 + healthy + probe_status + 有 tag 能力 + scope 匹配 + 并发槽。
     返回 True = 池里有能干的引擎，不应清空 pool_engine_ids。
     返回 False = 池里全不可达，应清空 pool_engine_ids 放行。
+
+    Issue #134 扩展：健康分维度不在此函数判定——健康分低但物理可达的引擎
+    仍然算 reachable（不清空 pool），claim_by_tag 中的健康分检查会阻止它们认领。
+    防饿死由 _check_stale_queued_tasks 超时降级处理。
     """
     from src.repo_key import from_repo_key
     _repo_norm = (from_repo_key(repo_key) or "").strip()
@@ -81,7 +85,30 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                     _max = _br[1] or 1
                     if _busy >= _max:
                         continue  # 已满载
-                # 全部通过：有能干的引擎
+                # 全部通过：有能干的引擎（物理可达）
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _check_pool_has_healthy(engine_ids: list) -> bool:
+    """检查 pool_engine_ids 中是否有健康分达标的引擎（Issue #134 扩展）。
+
+    与 _check_pool_engines_reachable 的区别：
+    - reachable 只看物理可达性（在线/能力/scope/槽位），不看健康分
+    - has_healthy 看健康分，用于防饿死降级判定
+
+    返回 True = 池中有健康引擎，低分引擎应被 claim_by_tag 挡住
+    返回 False = 池中全不健康，应触发超时降级（_check_stale_queued_tasks）
+    """
+    try:
+        from src.runtime.health_scorer import is_healthy as _is_engine_healthy
+    except Exception:
+        return True  # 模块异常时不影响现有逻辑
+    for eid in engine_ids:
+        try:
+            if _is_engine_healthy(eid):
                 return True
         except Exception:
             continue
@@ -1223,6 +1250,17 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 if len(_tried_ids) >= _max_tries:
                     return None  # 防止无限循环
 
+            # === 健康分检查（Plugin 模式增强层，Issue #134 扩展）===
+            # 引擎健康分过低或连续失败过多时拒绝认领，避免低质量引擎抢任务后失败
+            try:
+                from src.runtime.health_scorer import is_healthy as _is_engine_healthy
+                if not _is_engine_healthy(runtime_id):
+                    from src.runtime.instances import runtime_instance_name as _rin2
+                    log.info(f"claim_by_tag: engine {runtime_id}({_rin2(runtime_id)}) unhealthy (low score/consecutive failures), skip claiming task {task_id}")
+                    return None
+            except Exception as _he:
+                log.warning(f"claim_by_tag: health check failed: {_he}, skip check")
+
             # 标记 dispatched
             c.execute(
                 "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
@@ -2072,5 +2110,57 @@ def reap_stale_runtimes() -> dict:
                 db.rollback()
             except Exception:
                 pass
-            return {"reaped": 0, "error": str(e)}
-    return {"reaped": len(reaped), "details": reaped}
+
+    # Issue #134 扩展：queued 任务超时降级——防饿死机制
+    # 当所有候选引擎健康分过低时，任务会一直 queued 没人认领。
+    # 超过 _STALE_QUEUED_THRESHOLD 秒后清空 pool_engine_ids 放行，让任意在线引擎认领。
+    try:
+        _check_stale_queued_tasks()
+    except Exception as _sqe:
+        log.warning(f"reap_stale_runtimes: _check_stale_queued_tasks failed: {_sqe}")
+
+    return {"reaped": reaped}
+
+
+_STALE_QUEUED_THRESHOLD = int(os.environ.get("HEALTH_STALE_QUEUED_THRESHOLD", "120"))
+
+
+def _check_stale_queued_tasks():
+    """定期检查 queued 超时的任务，降级清空 pool_engine_ids 放行。
+
+    当任务 queued 超过 _STALE_QUEUED_THRESHOLD（默认 120 秒）且 pool_engine_ids 非空时，
+    可能是因为所有候选引擎健康分过低导致无人认领。
+    此时清空 pool_engine_ids，让任意在线引擎认领（包括低健康分的，至少能尝试执行）。
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_STALE_QUEUED_THRESHOLD)).isoformat()
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 查询超时的 queued 任务（带 pool_engine_ids 限定）
+            c.execute(
+                "SELECT id, pool_engine_ids FROM agent_tasks "
+                "WHERE status='queued' AND pool_engine_ids!='' AND pool_engine_ids IS NOT NULL "
+                "AND created_at <= ?",
+                (cutoff,))
+            stale_tasks = c.fetchall()
+            if not stale_tasks:
+                return
+            import json as _json
+            cleared = 0
+            for tid, peids in stale_tasks:
+                # 先检查 pool 中是否有健康引擎——有则不清空（健康引擎可能马上认领）
+                try:
+                    _engine_ids = _json.loads(peids) if peids else []
+                except Exception:
+                    _engine_ids = []
+                if _engine_ids and _check_pool_has_healthy(_engine_ids):
+                    continue  # 池中有健康引擎，不降级
+                # 池中全不健康 → 清空 pool_engine_ids 放行
+                c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (tid,))
+                cleared += 1
+            if cleared:
+                db.commit()
+                log.info(f"_check_stale_queued_tasks: cleared pool_engine_ids for {cleared} tasks "
+                         f"(no healthy engine claimed within {_STALE_QUEUED_THRESHOLD}s)")
+    except Exception as e:
+        log.warning(f"_check_stale_queued_tasks failed: {e}")

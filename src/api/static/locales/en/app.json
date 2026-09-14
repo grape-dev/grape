@@ -9,6 +9,7 @@
     "qa": "QA Agent",
     "sre": "SRE Agent",
     "chat": "Chat Agent",
+    "im_channel": "IM Channel",
     "settings": "General Settings",
     "skills": "DevOps Skills",
     "knowledge": "Project Knowledge",

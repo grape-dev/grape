@@ -135,6 +135,15 @@ function _healthBadge(h, suffix) {
   return `<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:${st.color};background:${st.bg};padding:3px 10px;border-radius:999px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:${st.color}"></span>${_healthLabel(h)}${suffix ? ' · ' + suffix : ''}</span>`;
 }
 
+function _healthScoreBadge(rt) {
+  const s = rt.health_score;
+  if (s === null || s === undefined) return '';
+  const c = s === 0 ? 'var(--r)' : s < 50 ? 'var(--y)' : 'var(--g)';
+  const hb = rt.health_heartbeat_alive === false ? ' · 失联' : '';
+  const cf = rt.health_consecutive_failures > 0 ? ` <span class="ts t3" style="font-size:10px">连续失败${rt.health_consecutive_failures}</span>` : '';
+  return `<span style="color:${c};font-weight:600">${s}</span>${cf}${hb ? `<span class="ts t3" style="font-size:10px">${hb}</span>` : ''}`;
+}
+
 function _scopeBar(sc, n, localN, healthSummary, collapsed) {
   const _SCOPE_BORDER = { global: '#3168e0', repo: '#8b5cf6', user: '#1ca44c' };
   const arrow = collapsed ? '▸' : '▾';
@@ -309,6 +318,7 @@ function renderEngines(data, devices) {
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.skills_label')}</span> ${I18N.t('runtimes.label.skills_count', {count: (rt.local_skills || []).length})}</div>
           <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.scene')}</span> ${_sceneTagSummary(rt.scene_tags)}</div>
           <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">健康分</span> ${_healthScoreBadge(rt) || '—'}</div>
         </div>
       </div>`;
     });
@@ -841,6 +851,7 @@ function openEngineDetail(runtimeId) {
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.scope_label')}</span> ${_scopeLabel(rt.scope)}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.installed')}</span> ${rt.installed ? I18N.t('runtimes.label.yes') : I18N.t('runtimes.label.no')}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">健康分</span> ${_healthScoreBadge(rt) || '—'}</div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">

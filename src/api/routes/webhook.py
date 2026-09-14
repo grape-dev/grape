@@ -538,14 +538,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 if agent_name == "done" or (_expected_next == "done" and agent_name not in (_stage_order or [])):
                     _stage = "pending_review"
                     log.info(f"A2A: last node completed → pending_review issue=#{issue_number} (awaiting user review)")
-                elif _expected_next and agent_name != _expected_next and agent_name in (_stage_order or []):
-                    # 跳步保护：A2A 目标不是 pipeline next → 自动修正为 next
-                    log.warning(f"A2A: skip-stage guard — issue=#{issue_number} "
-                                f"current={_current_stage} expected_next={_expected_next} but got={agent_name}, "
-                                f"correcting to {_expected_next}")
-                    _stage = _expected_next
-                    agent_name = _expected_next
                 else:
+                    # 不做跳步修正——agent 有权 A2A 到任意目标 agent（含回滚），
+                    # pipeline 顺序由 skill 逻辑保证，A2A 层不干预。
                     _stage = agent_name if agent_name in ("vod", "issue", "coding", "qa", "sre", "pending_review", "done") else "issue"
                 set_issue_stage(repo_key, f"#{issue_number}", _stage, agent_name, a2a_seq=None)
                 log.info(f"A2A: issue_state updated issue=#{issue_number} stage={_stage} owner={agent_name}")
