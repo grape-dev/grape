@@ -128,7 +128,7 @@ class TestWorkerAutoUpgrade:
              patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4,
-                _test_active={"busy-session"})))
+                _test_active_tasks={"busy-tid": "busy-session"})))
             m_upgrade.assert_not_awaited()
 
     def test_empty_latest_version_skips_upgrade(self):
@@ -196,6 +196,28 @@ class TestWorkerAutoUpgrade:
             return await ra._perform_upgrade("http://invalid-server:99999", "rta_test")
         result = asyncio.run(_run())
         assert result is False
+
+    def test_perform_upgrade_missing_params_returns_false(self):
+        """_perform_upgrade server 或 token 为空时返回 False，不发起网络请求。"""
+        async def _run():
+            r1 = await ra._perform_upgrade("", "rta_test")
+            r2 = await ra._perform_upgrade("http://server", "")
+            return r1, r2
+        r1, r2 = asyncio.run(_run())
+        assert r1 is False
+        assert r2 is False
+
+    def test_perform_upgrade_success_returns_true(self):
+        """_perform_upgrade install-worker.sh rc=0 时返回 True（等待重启）。"""
+        async def _run():
+            with patch("asyncio.to_thread", new=AsyncMock(side_effect=[
+                MagicMock(returncode=0, stderr=""),  # curl download
+                MagicMock(returncode=0, stderr=""),  # bash install-worker.sh
+            ])), patch("tempfile.mkstemp", return_value=(999, "/tmp/fake_upgrade_test.sh")), \
+                 patch("os.close"), patch("os.unlink"), patch("os.path.exists", return_value=False):
+                return await ra._perform_upgrade("http://server", "rta_test")
+        result = asyncio.run(_run())
+        assert result is True
 
     def test_heartbeat_none_skips_version_check(self):
         """心跳失败（None）时不执行版本对比。"""

@@ -1268,7 +1268,7 @@ async def _reregister(client, installed, device_name, cli_version: str = "") -> 
 
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
                     engine_by_rid: dict | None = None, installed=None, device_name="",
-                    _test_execute=None, _test_active=None):
+                    _test_execute=None, _test_active=None, _test_active_tasks=None):
     """主循环：claim → 执行 → 回报，含心跳 + 自动重连自修复。
 
     自修复机制（三层防护，见 worker 自修复重连设计）：
@@ -1278,7 +1278,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     3. 网络中断恢复：连接错误计入心跳失败，触发重注册
     """
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
-    active_tasks = {}        # tid → sid 映射（task_id 去重 + sid 看门狗反查）
+    active_tasks = _test_active_tasks if _test_active_tasks is not None else {}  # tid → sid 映射（task_id 去重 + sid 看门狗反查）
     active_task_objs = {}    # tid → task dict（sid 看门狗杀进程需要 task 的 cwd/backend 信息）
     _requeue_cooldown = {}   # sid → 上次 requeue 时间戳，60s 冷却防 claim→requeue 空转死循环
     _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
@@ -1298,6 +1298,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     upgrade_target_version = ""
     upgrade_fail_count = 0
     last_upgrade_attempt = 0.0
+    _local_ver_cached = ""
     UPGRADE_BACKOFF_BASE = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_BASE", "60"))
     UPGRADE_BACKOFF_MAX = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_MAX", "1800"))
 
@@ -1508,14 +1509,17 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             # ---- 版本对比 + 自动升级 ----
             if ok is not None and ok.get("status") == "ok":
                 _latest = ok.get("latest_version", "")
-                if _latest and _latest != _read_local_worker_version():
+                if not _local_ver_cached:
+                    _local_ver_cached = _read_local_worker_version()
+                _local_ver = _local_ver_cached
+                if _latest and _latest != _local_ver:
                     if not pending_upgrade:
-                        log.info(f"Version mismatch: local={_read_local_worker_version()} "
+                        log.info(f"Version mismatch: local={_local_ver} "
                                  f"server={_latest}, will upgrade when idle")
                     pending_upgrade = True
                     upgrade_target_version = _latest
                 else:
-                    if pending_upgrade and _latest and _latest == _read_local_worker_version():
+                    if pending_upgrade and _latest and _latest == _local_ver:
                         pending_upgrade = False
                         log.info("Version now matches, clearing pending_upgrade")
 
@@ -1577,9 +1581,18 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
 
 def _read_local_worker_version() -> str:
-    """读取本机 Worker 安装包版本（/etc/grape/worker.version，安装脚本写入）。"""
+    """读取本机 Worker 安装包版本（install-worker.sh 写入）。
+
+    路径与 install-worker.sh 的 VERSION_FILE 保持一致：
+    - root 模式（uid=0 或 RUNTIME_ROOT_MODE=1）：/etc/grape/worker.version
+    - 非 root 模式：$HOME/.grape/worker.version
+    """
+    if os.environ.get("RUNTIME_ROOT_MODE") == "1" or os.geteuid() == 0:
+        version_path = "/etc/grape/worker.version"
+    else:
+        version_path = os.path.join(os.path.expanduser("~"), ".grape", "worker.version")
     try:
-        with open("/etc/grape/worker.version", "r", encoding="utf-8") as f:
+        with open(version_path, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
         return ""
@@ -1593,14 +1606,18 @@ async def _perform_upgrade(server: str, token: str) -> bool:
 
     流程：
     1. 从服务端 GET /api/runtime/install 下载 install-worker.sh
-    2. 在线程中执行 bash install-worker.sh --token <token> --server <server> --dir <install_dir>
+    2. 在线程中执行 bash install-worker.sh（token 通过环境变量传递，避免命令行暴露）
     3. install-worker.sh 幂等：下载包→解压→建 venv→写配置→重启 worker
-    4. 如果 subprocess.run 返回（未被杀），说明安装失败
+    4. 如果 subprocess.run 返回（未被杀），检查 returncode 判断成功/失败
     """
     import subprocess, tempfile
+    if not server or not token:
+        log.error("Auto-upgrade: missing server or token, skipping upgrade")
+        return False
     install_script_url = f"{server.rstrip('/')}/api/runtime/install"
-    tmp_script = tempfile.mktemp(suffix=".sh")
+    fd, tmp_script = tempfile.mkstemp(suffix=".sh")
     try:
+        os.close(fd)
         r = await asyncio.to_thread(
             subprocess.run,
             ["curl", "-fsSL", "--connect-timeout", "15", install_script_url, "-o", tmp_script],
@@ -1609,17 +1626,21 @@ async def _perform_upgrade(server: str, token: str) -> bool:
         if r.returncode != 0:
             log.error(f"Auto-upgrade: download install-worker.sh failed: {r.stderr[-300:]}")
             return False
-        _install_dir = os.path.dirname(os.path.abspath(__file__))
-        for _ in range(2):
-            _install_dir = os.path.dirname(_install_dir)
+        _install_dir = os.environ.get("RUNTIME_INSTALL_DIR", "")
+        if not _install_dir:
+            _install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         log.info(f"Auto-upgrade: running install-worker.sh (dir={_install_dir})")
+        _upgrade_env = dict(os.environ)
+        _upgrade_env["TOKEN"] = token
         result = await asyncio.to_thread(
             subprocess.run,
-            ["bash", tmp_script, "--", "--token", token, "--server", server, "--dir", _install_dir],
-            capture_output=True, text=True, timeout=600
+            ["bash", tmp_script, "--", "--server", server, "--dir", _install_dir],
+            capture_output=True, text=True, timeout=600, env=_upgrade_env
         )
-        log.error(f"Auto-upgrade: install-worker.sh returned rc={result.returncode} "
-                  f"(worker not restarted): stderr={result.stderr[-500:]}")
+        if result.returncode == 0:
+            log.info(f"Auto-upgrade: install-worker.sh succeeded (rc=0), waiting for restart")
+            return True
+        log.error(f"Auto-upgrade: install-worker.sh failed rc={result.returncode}: stderr={result.stderr[-500:]}")
         return False
     except subprocess.TimeoutExpired:
         log.error("Auto-upgrade: install-worker.sh timed out (600s)")
@@ -1629,7 +1650,7 @@ async def _perform_upgrade(server: str, token: str) -> bool:
         return False
     finally:
         try:
-            if os.path.isfile(tmp_script):
+            if os.path.exists(tmp_script):
                 os.unlink(tmp_script)
         except Exception:
             pass
