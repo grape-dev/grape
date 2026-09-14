@@ -108,6 +108,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     engine_instance = ""
     engine_device = ""
     engine_ip = ""
+    runtime_id = 0
     try:
         from src.runtime.instances import instance_name
         runtime_id = 0
@@ -155,6 +156,24 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     result["engine_instance"] = engine_instance
     result["engine_device"] = engine_device
     result["engine_ip"] = engine_ip
+
+    # 引擎健康分（Issue #134 展示增强）
+    engine_health = {"score": None, "total_tasks": 0, "failed_tasks": 0,
+                     "consecutive_failures": 0, "heartbeat_alive": None}
+    if runtime_id:
+        try:
+            from src.runtime.health_scorer import get_health_score
+            hd = get_health_score(runtime_id)
+            engine_health = {
+                "score": hd.get("health_score"),
+                "total_tasks": hd.get("total_tasks", 0),
+                "failed_tasks": hd.get("failed_tasks", 0),
+                "consecutive_failures": hd.get("consecutive_failures", 0),
+                "heartbeat_alive": hd.get("heartbeat_alive"),
+            }
+        except Exception:
+            pass
+    result["engine_health"] = engine_health
 
     # 关联任务（重派按钮展示/判定用，见 event-redispatch-design.md §4.1.1）
     task_info = {"task_id": "", "task_status": "", "runtime_id": 0,
