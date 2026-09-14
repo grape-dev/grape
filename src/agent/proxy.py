@@ -396,6 +396,9 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
                 _grape_port = _parsed.port or (443 if _parsed.scheme == "https" else 3000)
             except Exception:
                 _grape_port = 3000
+            # 端口范围校验 — 防止误配导致低端口（SSH/MySQL/Redis）被允许
+            if _grape_port < 3000 or _grape_port > 9999:
+                _grape_port = 3000  # 降级到默认端口
             if port != _grape_port:
                 return {"allowed": False, "reason": f"loopback port {port} denied (only {_grape_port} allowed)"}
         else:

@@ -55,13 +55,18 @@ def check_sudo() -> CheckResult:
 
 
 def check_cgroup() -> CheckResult:
+    """检测 cgroup 可用性（v2 优先，v1 降级）。"""
+    # v2: unified hierarchy
+    if os.path.exists("/sys/fs/cgroup/cgroup.controllers"):
+        return CheckResult("cgroup", True, "cgroup v2 unified available")
+    # v1: legacy subsystems
     for subsys in ("memory", "cpu,cpuacct"):
         path = f"/sys/fs/cgroup/{subsys}"
         if not os.path.isdir(path):
             return CheckResult(
                 "cgroup", False,
                 f"cgroup v1 {subsys} not mounted at {path}. "
-                "Resource limits will be disabled (degraded).",
+                f"Resource limits will be disabled (degraded).",
             )
     return CheckResult("cgroup", True, "cgroup v1 memory+cpu available")
 

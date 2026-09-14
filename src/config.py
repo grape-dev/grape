@@ -500,19 +500,7 @@ BWRAP_RW_ENGINE = {
 # 网络隔离开关（默认 off，灰度开启）
 GRAPE_SANDBOX_NET = os.environ.get("GRAPE_SANDBOX_NET", "off").lower() in ("1", "true", "on", "yes")
 
-# 白名单域名（逗号分隔，支持通配符 *.example.com）
-SANDBOX_WHITELIST = [
-    d.strip() for d in os.environ.get(
-        "GRAPE_SANDBOX_WHITELIST",
-        "gitcode.com,api.gitcode.com,raw.gitcode.com,"
-        "github.com,api.github.com,"
-        "opengw.clouddeveloper.club,api.deepseek.com,"
-        "api.modelarts-maas.com,"
-        "registry.npmmirror.com,"
-        "pypi.tuna.tsinghua.edu.cn,"
-        "obs.cn-north-4.myhuaweicloud.com"
-    ).split(",") if d.strip()
-]
+# 沙箱白名单 — 环境变量作为 DB 不可用时的降级默认值
 
 # cgroup 限额（0 = 不限制；memory 0 = 自动取宿主机 50%）
 GRAPE_SANDBOX_MEM_LIMIT_MB = int(os.environ.get("GRAPE_SANDBOX_MEM_LIMIT_MB", "0"))
