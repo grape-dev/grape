@@ -1628,13 +1628,14 @@ async def _perform_upgrade(server: str, token: str) -> bool:
             return False
         _install_dir = os.environ.get("RUNTIME_INSTALL_DIR", "")
         if not _install_dir:
-            _install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _install_dir = os.path.dirname(os.path.dirname(_here))
         log.info(f"Auto-upgrade: running install-worker.sh (dir={_install_dir})")
         _upgrade_env = dict(os.environ)
         _upgrade_env["TOKEN"] = token
         result = await asyncio.to_thread(
             subprocess.run,
-            ["bash", tmp_script, "--", "--server", server, "--dir", _install_dir],
+            ["bash", tmp_script, "--server", server, "--dir", _install_dir],
             capture_output=True, text=True, timeout=600, env=_upgrade_env
         )
         if result.returncode == 0:

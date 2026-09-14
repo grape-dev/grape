@@ -219,6 +219,18 @@ class TestWorkerAutoUpgrade:
         result = asyncio.run(_run())
         assert result is True
 
+    def test_perform_upgrade_install_failure_returns_false(self):
+        """_perform_upgrade install-worker.sh rc!=0 时返回 False。"""
+        async def _run():
+            with patch("asyncio.to_thread", new=AsyncMock(side_effect=[
+                MagicMock(returncode=0, stderr=""),  # curl download
+                MagicMock(returncode=1, stderr="install error"),  # bash install-worker.sh
+            ])), patch("tempfile.mkstemp", return_value=(999, "/tmp/fake_upgrade_test.sh")), \
+                 patch("os.close"), patch("os.unlink"), patch("os.path.exists", return_value=False):
+                return await ra._perform_upgrade("http://server", "rta_test")
+        result = asyncio.run(_run())
+        assert result is False
+
     def test_heartbeat_none_skips_version_check(self):
         """心跳失败（None）时不执行版本对比。"""
         client = AsyncMock()
@@ -229,7 +241,46 @@ class TestWorkerAutoUpgrade:
         client.reset_session = AsyncMock()
         with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion"), \
              patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
-             patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])):
+              patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4)))
             m_upgrade.assert_not_awaited()
+
+
+class TestReadLocalWorkerVersion:
+    """_read_local_worker_version 路径选择测试（与 install-worker.sh 一致）。"""
+
+    def test_root_reads_etc_grape(self):
+        """root 模式读取 /etc/grape/worker.version。"""
+        with patch("src.runtime.agent.os.geteuid", return_value=0), \
+             patch("builtins.open", create=True) as m_open:
+            m_open.return_value.__enter__.return_value.read.return_value = "git-root-ver\n"
+            result = ra._read_local_worker_version()
+            assert "etc/grape/worker.version" in m_open.call_args[0][0]
+            assert result == "git-root-ver"
+
+    def test_non_root_reads_home_grape(self):
+        """非 root 模式读取 $HOME/.grape/worker.version。"""
+        with patch("src.runtime.agent.os.geteuid", return_value=1000), \
+             patch("src.runtime.agent.os.path.expanduser", return_value="/home/testuser"), \
+             patch("builtins.open", create=True) as m_open:
+            m_open.return_value.__enter__.return_value.read.return_value = "git-user-ver\n"
+            result = ra._read_local_worker_version()
+            assert ".grape/worker.version" in m_open.call_args[0][0]
+            assert result == "git-user-ver"
+
+    def test_root_mode_env_override(self):
+        """RUNTIME_ROOT_MODE=1 时读取 /etc/grape/worker.version（即使非 root）。"""
+        with patch.dict("os.environ", {"RUNTIME_ROOT_MODE": "1"}), \
+             patch("src.runtime.agent.os.geteuid", return_value=1000), \
+             patch("builtins.open", create=True) as m_open:
+            m_open.return_value.__enter__.return_value.read.return_value = "git-root-ver\n"
+            result = ra._read_local_worker_version()
+            assert "etc/grape/worker.version" in m_open.call_args[0][0]
+            assert result == "git-root-ver"
+
+    def test_missing_file_returns_empty(self):
+        """版本文件不存在时返回空字符串。"""
+        with patch("builtins.open", side_effect=FileNotFoundError):
+            result = ra._read_local_worker_version()
+            assert result == ""
