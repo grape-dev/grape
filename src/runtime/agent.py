@@ -1669,10 +1669,24 @@ def main():
         # 注册成功后立即执行一轮引擎探测（线程池，不阻塞事件循环），
         # 确保第一次心跳上报时 probe_results 非空，使服务端及时纠正 healthy（ok→升级 / fail→降级）。
         await asyncio.to_thread(_worker_probe_once)
+
+        # sweeper：worker 端定期清理本地磁盘残留（worktree/node_modules/tmp）。
+        # 服务端的 sweep_loop 只扫服务端磁盘，远端 worker 的残留无人清理 → 撑满磁盘。
+        # worker 启动时也跑一轮 sweep_once（清上次崩溃残留），然后每 15min 循环。
+        _worker_sweep_task = None
+        try:
+            from src.runtime.cleanup import sweep_loop
+            _worker_sweep_task = asyncio.create_task(sweep_loop())
+            log.info("Worker sweeper loop started")
+        except Exception as e:
+            log.warning(f"Worker sweeper loop start failed: {e}")
+
         try:
             await _run_loop(client, ids, poll, heartbeat, max_concurrent, engine_by_rid,
                             installed=installed, device_name=device)
         finally:
+            if _worker_sweep_task and not _worker_sweep_task.done():
+                _worker_sweep_task.cancel()
             await client.close()
 
     asyncio.run(_amain())

@@ -301,29 +301,42 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
 def sweep_once() -> int:
     cleaned = 0
     try:
-        # 兜底回收卡 running 僵尸事件（入队/执行失败未更新终态的历史遗留）
+        # worker 端本地 SQLite 可能无 events/issue_state 表，
+        # 统一检测一次，跳过所有 DB 依赖的清理（事件回收/issue worktree 清理）
+        _has_db_tables = True
         try:
-            cleaned += sweep_stuck_events_once()
-        except Exception as e:
-            log.warning(f"sweeper stuck-event sweep failed: {e}")
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'")
+                _has_db_tables = c.fetchone() is not None
+        except Exception:
+            _has_db_tables = False
+
+        # 兜底回收卡 running 僵尸事件（入队/执行失败未更新终态的历史遗留）
+        if _has_db_tables:
+            try:
+                cleaned += sweep_stuck_events_once()
+            except Exception as e:
+                log.warning(f"sweeper stuck-event sweep failed: {e}")
         from src.repo_key import split_owner_repo
         from src.runtime import repogit
-        active = _active_issue_sessions()
-        for repo_key, issue_id in _done_issues():
-            num = str(issue_id or "").lstrip("#")
-            if not num or num == "0":
-                continue
-            for agent_type in _GIT_AGENTS:
-                if (repo_key, agent_type, num) in active:
+        if _has_db_tables:
+            active = _active_issue_sessions()
+            for repo_key, issue_id in _done_issues():
+                num = str(issue_id or "").lstrip("#")
+                if not num or num == "0":
                     continue
-                issue_dir = repogit.issue_dir_for(repo_key, agent_type, num)
-                if not os.path.isdir(issue_dir):
-                    continue
-                try:
-                    repogit.cleanup_issue_worktree(repo_key, agent_type, num)
-                    cleaned += 1
-                except Exception as e:
-                    log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
+                for agent_type in _GIT_AGENTS:
+                    if (repo_key, agent_type, num) in active:
+                        continue
+                    issue_dir = repogit.issue_dir_for(repo_key, agent_type, num)
+                    if not os.path.isdir(issue_dir):
+                        continue
+                    try:
+                        repogit.cleanup_issue_worktree(repo_key, agent_type, num)
+                        cleaned += 1
+                    except Exception as e:
+                        log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
         # 僵尸兜底
         ttl = _ZOMBIE_TTL_DAYS * 86400
         for p in _zombie_issue_dirs(ttl):
