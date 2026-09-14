@@ -74,6 +74,15 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "", sandbox_ctx=None) -> list[
         if os.path.exists(p):
             opts += ["--ro-bind-try", p, p]
 
+    # /opt/node 等额外系统路径（ro-bind-try — worker 上 node 符号链接目标）
+    try:
+        from src.config import BWRAP_RO_SYSTEM_OPT
+        for p in BWRAP_RO_SYSTEM_OPT:
+            if p and os.path.exists(p):
+                opts += ["--ro-bind-try", p, p]
+    except ImportError:
+        pass
+
     # 引擎运行时（ro）——common + 按 backend_name
     _ro = [os.path.expanduser(x) for x in BWRAP_RO_ENGINE_COMMON]
     _ro += [os.path.expanduser(x) for x in BWRAP_RO_ENGINE.get(backend_name, ())]

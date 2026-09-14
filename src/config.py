@@ -445,7 +445,9 @@ GRAPE_AGENT_SANDBOX = os.environ.get("GRAPE_AGENT_SANDBOX", "on").lower() in ("1
 # 注意：/run 必须挂（/etc/resolv.conf 是 symlink → /run/systemd/resolve/stub-resolv.conf，
 # 缺 /run 则沙箱内 DNS 解析失败、出网全 000）。绝对不放行 configs/、data/、WORKSPACE 其他仓库、/root、~/.grape 等敏感/越界路径。
 # /etc 不整体挂载（含 ssh 密钥/数据库密码/nginx 配置等敏感文件），改为白名单子集（BWRAP_RO_ETC_SAFE）。
+# /opt 不整体挂载（含 grape/grape-admin 等敏感目录），只挂 /opt/node（worker 上 node 符号链接目标）。
 BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/run")
+BWRAP_RO_SYSTEM_OPT = ("/opt/node",)  # Node.js 符号链接目标（ro-bind-try，不存在时跳过）
 
 # /etc 安全子集（借鉴 Shadi/isolate 的 safeEtcMounts）— 只挂程序运行必需的文件，
 # 不含 ssh 密钥/shadow/nginx 配置/数据库密码等敏感文件。用 --ro-bind-try（不存在时跳过）。
