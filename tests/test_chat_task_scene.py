@@ -84,7 +84,7 @@ def test_build_task_chat_prompt_no_conv_defaults():
 def _clean_tasks():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM tasks")
+        c.execute("DELETE FROM issue")
         db.commit()
 
 
@@ -92,7 +92,7 @@ def _insert_task(repo_key, issue_number, description, conv_id="", user_id=1):
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (?,?,?,?,?,?,?, 'active')",
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (?,?,?,?,?,?,?, 'active')",
             (user_id, "alice", repo_key, issue_number, f"Issue #{issue_number}", description, conv_id))
         db.commit()
 

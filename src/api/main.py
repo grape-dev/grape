@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency
+from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues
 
 
 bot_manager = None
@@ -498,7 +498,7 @@ async def request_id_and_log_middleware(request: Request, call_next):
 
 app.include_router(auth.router)
 app.include_router(repos.router)
-# Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；与 repos.py 无路径冲突）
+# Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；prefix=/api/git-repo，与 grape 托管 repos.py 区分）
 from src.api.git_repo_api import router as git_repo_router
 app.include_router(git_repo_router)
 app.include_router(dashboard.router)
@@ -513,6 +513,7 @@ app.include_router(webhook.router)
 app.include_router(scenes.router)
 app.include_router(templates.router)
 app.include_router(tasks.router)
+app.include_router(issues.router)
 app.include_router(runtime.router)
 app.include_router(feishu_onboard.router)
 app.include_router(feishu_card.router)

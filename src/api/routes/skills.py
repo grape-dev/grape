@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import get_current_user, get_current_user_or_api_key, require_no_session_token
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
@@ -71,7 +71,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("", operation_id="skills_list", summary="技能列表")
-def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "", scope: str = "",
+def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
@@ -419,7 +419,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_current_use
 
 
 @router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="技能详情（含 SKILL.md）")
-def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_or_api_key),
+def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
                                  repo: str = ""):
     """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
 

@@ -511,7 +511,7 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
         if _ck_issue_num.isdigit():
             with _ck_lock:
                 _ck_c = _ck_db.cursor()
-                _ck_c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
+                _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
                               (repo_key, int(_ck_issue_num)))
                 if _ck_c.fetchone():
                     return ""
@@ -2402,7 +2402,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 with db_lock:
                     _c = db.cursor()
                     _c.execute(
-                        "UPDATE tasks SET status='awaiting_input' "
+                        "UPDATE issue SET status='awaiting_input' "
                         "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                         (repo_key, int(_issue_num)))
                     db.commit()
@@ -2485,7 +2485,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _rk = to_repo_key(repo_key)
                 with _dl:
                     _c = _db.cursor()
-                    _c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                    _c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
                                (_rk, _issue_num))
                     _row = _c.fetchone()
                 if _row and _row[0]:
@@ -2505,7 +2505,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 with _dl:
                     _c = _db.cursor()
                     _c.execute(
-                        "UPDATE tasks SET status='completed', completed_reason='agent_completed', "
+                        "UPDATE issue SET status='completed', completed_reason='agent_completed', "
                         "completed_at=datetime('now') "
                         "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','cancelled')",
                         (_rk, _issue_num))
@@ -2673,7 +2673,7 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
     try:
         with _dl:
             c = _db.cursor()
-            c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+            c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
                       (rk, issue_number))
             row = c.fetchone()
         if not row or not row[0]:

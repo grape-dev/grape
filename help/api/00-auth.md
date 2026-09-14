@@ -42,9 +42,9 @@ GET /api/...?access_token=<api_key>
 
 ## 响应结构约定
 
-- 通用错误：
+- 通用错误（`detail.message` 英文，Agent 可读；格式见 `README.md`）：
   ```json
-  {"detail": {"code": 401, "message": "401 Unauthorized"}}
+  {"detail": {"code": 401, "message": "Not logged in"}}
   ```
 - 多数接口成功返回 JSON 对象/数组；删除类返回 `204`。
 

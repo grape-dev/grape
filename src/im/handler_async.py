@@ -346,7 +346,7 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             await _send_card_reply(ctx, api, msg_id, _NO_REPO_CARD)
             return ""
         c = db.cursor()
-        c.execute("SELECT id, issue_number, title, status FROM tasks WHERE user_id=? AND repo_key=? ORDER BY id DESC LIMIT 20",
+        c.execute("SELECT id, issue_number, title, status FROM issue WHERE user_id=? AND repo_key=? ORDER BY id DESC LIMIT 20",
                   (uid, bound))
         tasks = c.fetchall()
         if not tasks:
@@ -607,7 +607,7 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
             tid, issue_number, title, status = items[idx]
             cid = ""
             c = db.cursor()
-            row = c.execute("SELECT conversation_id FROM tasks WHERE id=?", (tid,)).fetchone()
+            row = c.execute("SELECT conversation_id FROM issue WHERE id=?", (tid,)).fetchone()
             if row and row[0]:
                 cid = row[0]
             if not cid:

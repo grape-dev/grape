@@ -26,7 +26,7 @@ def _clean():
 def _mk_task(issue_number, status="active", user_id=1, conv_id="", repo="gitcode:owner/repo"):
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, status, conversation_id) VALUES (?,?,?,?,?,?)",
+        c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, conversation_id) VALUES (?,?,?,?,?,?)",
                   (user_id, "alice", repo, issue_number, status, conv_id))
         db.commit()
         return c.lastrowid
@@ -34,7 +34,7 @@ def _mk_task(issue_number, status="active", user_id=1, conv_id="", repo="gitcode
 
 def _task_status(tid):
     with db_lock:
-        row = db.cursor().execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+        row = db.cursor().execute("SELECT status FROM issue WHERE id=?", (tid,)).fetchone()
         return row[0] if row else None
 
 
