@@ -422,7 +422,7 @@
 .det-back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:600;color:var(--a);background:var(--c);border:1px solid var(--b);border-radius:999px;padding:6px 14px;cursor:pointer;margin-bottom:20px;transition:border-color .16s ease,color .16s ease,background .16s ease,transform 80ms ease}
 .det-back:hover{border-color:var(--a);color:var(--a);background:rgba(49,104,224,.06)}
 .det-back:active{transform:scale(.97)}
-.det{max-width:840px}
+.det{max-width:840px;margin:0 auto}
 .det-head{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:10px}
 .det-ico{width:44px;height:44px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff;border-radius:10px;background:linear-gradient(145deg,var(--fg1,var(--a)),var(--fg2,var(--ah)));box-shadow:0 2px 6px rgba(0,0,0,.12)}
 .det-name{font-size:28px;font-weight:700;letter-spacing:-.02em;line-height:1.2;color:var(--t)}
@@ -435,7 +435,7 @@
 .det-dl{display:inline-flex;align-items:center;gap:7px;font-size:14px;font-weight:600;color:#fff;background:var(--a);border:1px solid var(--a);border-radius:9px;padding:8px 18px;cursor:pointer;white-space:nowrap;transition:filter .16s ease,transform 80ms ease}
 .det-dl:hover{filter:brightness(1.07)}
 .det-dl:active{transform:scale(.97)}
-.det-sum{font-size:15px;color:var(--t2);line-height:1.75;margin-bottom:32px;max-width:60ch}
+.det-sum{font-size:15px;color:var(--t2);line-height:1.75;margin-bottom:32px}
 .fn-card{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:24px;margin-bottom:14px}
 .fn-label{font-size:11.5px;font-weight:600;color:var(--t3);letter-spacing:.1em;margin-bottom:12px}
 .fn-body{font-size:14.5px;line-height:1.9;color:var(--t)}
@@ -444,7 +444,7 @@
 @media(max-width:760px){.info-grid{grid-template-columns:1fr}}
 .info-cell{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:16px 18px}
 .info-cell .il{font-size:12px;color:var(--t3);margin-bottom:7px;letter-spacing:.04em}
-.info-cell .iv{font-size:15px;font-weight:600;color:var(--t)}
+.info-cell .iv{font-size:15px;color:var(--t)}
 [data-theme="apple"] .srow input {
   border-radius: 10px;
   border: 1px solid var(--b);
