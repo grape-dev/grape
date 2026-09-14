@@ -34,22 +34,22 @@ def get_current_user(authorization: str = Header(None)) -> dict:
     任何实例都能验证（集群会话共享）。
     """
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "未登录"})
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Not logged in"})
     token = authorization.replace("Bearer ", "").strip()
     # JWT access token 验证——签名+过期
     from src.api.jwt_utils import verify_access_token
     payload = verify_access_token(token)
     if not payload:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "会话过期"})
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session expired"})
     uid = int(payload.get("sub", 0))
     username = payload.get("username", "")
     token_ver = int(payload.get("ver", 0))
     if not uid:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "用户不存在"})
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "User not found"})
     # token_version 校验——改密码/logout 后 +1，旧 token 失效
     db_ver = user_db.get_token_version(uid)
     if token_ver != db_ver:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "会话已失效"})
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session revoked"})
     # 记录活跃状态——O(1)，不阻塞
     mark_user_active(uid)
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_USER}
@@ -80,12 +80,12 @@ def get_current_user_or_api_key(request: Request) -> dict:
     from src.api.auth_token import SESSION_TOKEN_PREFIX, API_KEY_PREFIX, verify_session_token, verify_api_token
     token = _extract_api_token(request)
     if not token:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "未登录"})
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Not logged in"})
 
     if token.startswith(SESSION_TOKEN_PREFIX):
         info = verify_session_token(token)
         if not info:
-            raise HTTPException(status_code=401, detail={"code": 401, "message": "会话 token 无效或已失效"})
+            raise HTTPException(status_code=401, detail={"code": 401, "message": "Invalid or expired session token"})
         return {
             "id": info["user_id"],
             "username": "",
@@ -100,7 +100,7 @@ def get_current_user_or_api_key(request: Request) -> dict:
     if token.startswith(API_KEY_PREFIX):
         info = verify_api_token(token)
         if not info:
-            raise HTTPException(status_code=401, detail={"code": 401, "message": "API Key 无效或已吊销"})
+            raise HTTPException(status_code=401, detail={"code": 401, "message": "Invalid or revoked API Key"})
         uid = info["user_id"]
         acc = user_db.get_user(uid) or {}
         mark_user_active(uid)
@@ -141,7 +141,7 @@ def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) 
     """
     if user.get("auth_type") == "session_token":
         raise HTTPException(status_code=403, detail={"code": 403,
-                                                     "message": "该接口不支持会话 token（agent 凭据不能用于账户/平台管理）"})
+                                                     "message": "Session token not allowed on this endpoint (account/platform management)"})
     return user
 
 
@@ -218,7 +218,7 @@ def require_devops_token(user: dict = Depends(get_current_user)) -> dict:
     repos = user_db.get_managed_repos(user["id"])
     has_bot = any(r.get("bot_gitcode_token", "") for r in repos)
     if not has_bot:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "DevOps Bot Token 未配置，请在 GitCode Repo 页面中配置"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "DevOps Bot Token not configured, please configure it in GitCode Repo page"})
     return user
 
 
@@ -235,7 +235,7 @@ def check_repo_access(user: dict, repo_key: str) -> None:
         return  # 作用域已限定
     uid = user.get("id", 0)
     if not uid or not repo_key:
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库"})
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "No permission to access this repository"})
     from src.repo_key import to_repo_key
     rk = to_repo_key(repo_key)
     # 构建候选 repo_key 列表：原始 + 跨平台前缀（gitcode:↔github:）
@@ -245,4 +245,4 @@ def check_repo_access(user: dict, repo_key: str) -> None:
     for r in repos:
         if r["repo_key"] in candidates:
             return  # 用户有权访问
-    raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库"})
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "No permission to access this repository"})
