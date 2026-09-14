@@ -1,6 +1,15 @@
 let _agentCfgVisible = false;
 let _skillScope = 'official';
 
+// Issue #127: 事件历史搜索 + 分页状态
+let _agentEvtPage = 1;
+let _agentEvtPageSize = 10;
+let _agentEvtKeyword = '';
+let _agentEvtTotal = 0;
+let _agentEvtSearchTimer = null;
+let _currentAgentName = '';
+let _currentAgentRepo = null;
+
 function _switchSkillScope(scope) {
   _skillScope = scope;
   loadCfgOptions();
@@ -187,16 +196,66 @@ function _agentTypeDesc(type, meta) {
   return tVal !== tKey ? tVal : (meta.description || '');
 }
 
-function renderAgent(name, data) {
-  const el = document.getElementById('pageContent');
-  if (!el) return;
-  const meta = _AGENT_TYPES[name] || {display_name:name,icon:'?',color:'var(--t2)',bg:'var(--bg)',description:''};
-  const m = data.metrics || {};
-  const es = m.event_stats || {};
-  const events = data.recent_events || [];
-  const highlightId = data.highlight_issue_id || '';
-  const _normIss = s => String(s || '').replace(/^#/, '');
-  const evtHtml = events.length > 0 ? `
+// Issue #127: 事件历史搜索 + 分页
+function _agentEvtSearchInput(val) {
+  _agentEvtKeyword = (val || '').trim();
+  _agentEvtPage = 1;
+  if (_agentEvtSearchTimer) clearTimeout(_agentEvtSearchTimer);
+  _agentEvtSearchTimer = setTimeout(_reloadAgentEvents, 350);
+}
+
+function _agentEvtSearchKeydown(ev) {
+  if (ev && ev.key === 'Enter') {
+    if (_agentEvtSearchTimer) clearTimeout(_agentEvtSearchTimer);
+    _agentEvtKeyword = (ev.target.value || '').trim();
+    _agentEvtPage = 1;
+    _reloadAgentEvents();
+  }
+}
+
+function _agentEvtPageSizeChange(sel) {
+  _agentEvtPageSize = parseInt(sel.value) || 10;
+  _agentEvtPage = 1;
+  _reloadAgentEvents();
+}
+
+function _agentEvtPrevPage() {
+  if (_agentEvtPage <= 1) return;
+  _agentEvtPage--;
+  _reloadAgentEvents();
+}
+
+function _agentEvtNextPage() {
+  var totalPages = Math.max(1, Math.ceil(_agentEvtTotal / _agentEvtPageSize));
+  if (_agentEvtPage >= totalPages) return;
+  _agentEvtPage++;
+  _reloadAgentEvents();
+}
+
+function _reloadAgentEvents() {
+  if (!_currentAgentName || !_currentAgentRepo) return;
+  var repo = _currentAgentRepo;
+  var qs = '?page=' + _agentEvtPage + '&page_size=' + _agentEvtPageSize;
+  if (_agentEvtKeyword) qs += '&keyword=' + encodeURIComponent(_agentEvtKeyword);
+  // 保留 issue_number 高亮（从 URL state 传入时）
+  try {
+    var st = window.history.state;
+    if (st && st.param) qs += '&issue_number=' + encodeURIComponent(st.param);
+  } catch {}
+  API.get('/agents/' + _currentAgentName + '/' + repo.owner + '/' + repo.name + qs).then(function(d) {
+    if (window._currentView !== _currentAgentName) return;
+    _renderAgentEvents(d);
+  }).catch(function() {});
+}
+
+function _renderAgentEvents(d) {
+  var events = d.recent_events || [];
+  _agentEvtTotal = d.events_total || 0;
+  var totalPages = Math.max(1, Math.ceil(_agentEvtTotal / _agentEvtPageSize));
+  var highlightId = d.highlight_issue_id || '';
+  var _normIss = function(s) { return String(s || '').replace(/^#/, ''); };
+
+  var evtHtml = events.length > 0 ? `
     <table style="width:100%;font-size:12px;table-layout:fixed">
       <thead><tr>
         <th style="width:60px;text-align:left;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event_table_seq')}</th>
@@ -209,25 +268,78 @@ function renderAgent(name, data) {
         <th style="width:70px;text-align:right;padding:6px 10px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px">${I18N.t('agents.event.table_status')}</th>
       </tr></thead>
       <tbody>
-        ${events.map(ev => {
-          const _issNum = String(ev.issue_id || '').replace(/^#/, '');
-          const _issLink = (_issNum && ev.repo_key)
-            ? `<a href="${_vcsUrl(ev.repo_key, '/issues/' + _issNum)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">${ev.issue_id}</a>`
-            : ev.issue_id || '—';
-          const _isHl = highlightId && _normIss(ev.issue_id) === _normIss(highlightId);
-          return `<tr class="pipe-row${_isHl ? ' highlight-flash' : ''}" onclick="_agentRowClick('${highlightId}', ${ev.seq})" style="cursor:pointer">
-          <td style="padding:8px 10px;font-size:11px;font-weight:600;color:var(--t2)">#${ev.seq || '?'}</td>
-          <td style="padding:8px 10px;white-space:nowrap;font-size:10px;color:var(--t3)">${fmtLocalTime(ev.created_at).substring(5,16) || '--:--'}</td>
-          <td style="padding:8px 10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${ev.summary || ev.title || ev.event_type}</td>
-          <td style="padding:8px 10px;font-size:11px">${_issLink}</td>
-          <td style="padding:8px 10px;font-size:10px;color:var(--t2)">${ev.actor ? '@'+ev.actor : '—'}</td>
-          <td style="padding:8px 10px;text-align:center;font-size:10px;color:var(--t3)">${ev.duration ? ev.duration + 's' : '—'}</td>
-          <td style="padding:8px 10px;font-size:10px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${ev.backend || '—'}</td>
-          <td style="padding:8px 10px;text-align:right"><span class="ts ${ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty'}" style="font-size:10px;font-weight:600">${I18N.t('common.status.' + ev.status) !== ('common.status.' + ev.status) ? I18N.t('common.status.' + ev.status) : ev.status}</span></td>
-        </tr>`;
+        ${events.map(function(ev) {
+          var _issNum = String(ev.issue_id || '').replace(/^#/, '');
+          var _issLink = (_issNum && ev.repo_key)
+            ? '<a href="' + _vcsUrl(ev.repo_key, '/issues/' + _issNum) + '" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">' + (ev.issue_id || '') + '</a>'
+            : (ev.issue_id || '—');
+          var _isHl = highlightId && _normIss(ev.issue_id) === _normIss(highlightId);
+          return '<tr class="pipe-row' + (_isHl ? ' highlight-flash' : '') + '" onclick="_agentRowClick(\'' + highlightId + '\', ' + ev.seq + ')" style="cursor:pointer">' +
+            '<td style="padding:8px 10px;font-size:11px;font-weight:600;color:var(--t2)">#' + (ev.seq || '?') + '</td>' +
+            '<td style="padding:8px 10px;white-space:nowrap;font-size:10px;color:var(--t3)">' + (fmtLocalTime(ev.created_at).substring(5,16) || '--:--') + '</td>' +
+            '<td style="padding:8px 10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">' + (ev.summary || ev.title || ev.event_type) + '</td>' +
+            '<td style="padding:8px 10px;font-size:11px">' + _issLink + '</td>' +
+            '<td style="padding:8px 10px;font-size:10px;color:var(--t2)">' + (ev.actor ? '@' + ev.actor : '—') + '</td>' +
+            '<td style="padding:8px 10px;text-align:center;font-size:10px;color:var(--t3)">' + (ev.duration ? ev.duration + 's' : '—') + '</td>' +
+            '<td style="padding:8px 10px;font-size:10px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (ev.backend || '—') + '</td>' +
+            '<td style="padding:8px 10px;text-align:right"><span class="ts ' + (ev.status === 'failed' ? 'tr' : ev.status === 'completed' ? 'tgx' : 'ty') + '" style="font-size:10px;font-weight:600">' + (I18N.t('common.status.' + ev.status) !== ('common.status.' + ev.status) ? I18N.t('common.status.' + ev.status) : ev.status) + '</span></td>' +
+          '</tr>';
         }).join('')}
       </tbody>
-    </table>` : '<div class="tx t2" style="padding:12px 0">' + I18N.t('agents.event.none') + '</div>';
+    </table>` : '<div class="tx t2" style="padding:12px 0">' + (_agentEvtKeyword ? I18N.t('agents.event.search_no_result') : I18N.t('agents.event.none')) + '</div>';
+
+  var evtBody = document.getElementById('agentEvtBody');
+  if (evtBody) evtBody.innerHTML = evtHtml;
+
+  // 更新分页区域
+  _renderAgentEvtPager(totalPages);
+
+  // Issue #108: 滚动定位到第一个高亮事件行
+  if (highlightId) {
+    var _firstHl = evtBody ? evtBody.querySelector('.highlight-flash') : null;
+    if (_firstHl) {
+      setTimeout(function() { _firstHl.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 120);
+    }
+  }
+}
+
+function _renderAgentEvtPager(totalPages) {
+  var pagerEl = document.getElementById('agentEvtPager');
+  if (!pagerEl) return;
+  var prevDis = _agentEvtPage <= 1 ? 'disabled style="opacity:.4;cursor:not-allowed"' : '';
+  var nextDis = _agentEvtPage >= totalPages ? 'disabled style="opacity:.4;cursor:not-allowed"' : '';
+  var pageSelectHtml = [10, 20, 50].map(function(n) {
+    var sel = n === _agentEvtPageSize ? 'selected' : '';
+    return '<option value="' + n + '" ' + sel + '>' + n + '</option>';
+  }).join('');
+  pagerEl.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;flex-wrap:wrap">' +
+      '<span class="ts t3">' + I18N.t('agents.event.page_info', {total: _agentEvtTotal, page: _agentEvtPage, pages: totalPages}) + '</span>' +
+      '<div style="display:flex;align-items:center;gap:8px">' +
+        '<select onchange="_agentEvtPageSizeChange(this)" style="padding:4px 8px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--bg);outline:none">' + pageSelectHtml + '</select>' +
+        '<span class="ts t3" style="font-size:11px">' + I18N.t('agents.event.rows_per_page') + '</span>' +
+        '<button class="bt bt-o bt-s" ' + prevDis + ' onclick="_agentEvtPrevPage()">' + I18N.t('agents.event.prev_page') + '</button>' +
+        '<span class="ts t3">' + _agentEvtPage + ' / ' + totalPages + '</span>' +
+        '<button class="bt bt-o bt-s" ' + nextDis + ' onclick="_agentEvtNextPage()">' + I18N.t('agents.event.next_page') + '</button>' +
+      '</div>' +
+    '</div>';
+}
+
+function renderAgent(name, data) {
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+  const meta = _AGENT_TYPES[name] || {display_name:name,icon:'?',color:'var(--t2)',bg:'var(--bg)',description:''};
+  const m = data.metrics || {};
+  const es = m.event_stats || {};
+
+  // Issue #127: 保存当前 Agent 上下文（供事件搜索/分页重载使用）
+  _currentAgentName = name;
+  _currentAgentRepo = app.currentRepo();
+  // 首次加载时重置分页状态（从 URL issue_number 跳转时保持 page=1）
+  _agentEvtPage = data.events_page || 1;
+  _agentEvtPageSize = data.events_page_size || 10;
+  _agentEvtKeyword = '';
+  _agentEvtTotal = data.events_total || 0;
 
   const ef = es.completed || 0;
   const er = es.running || 0;
@@ -253,16 +365,17 @@ function renderAgent(name, data) {
   <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${ef}</div><div class="l">${I18N.t('agents.event.completed')}</div></div>
   <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${er}</div><div class="l">${I18N.t('agents.event.running')}</div></div>
 </div>
-<div class="cd"><div class="cd-h"><h2>${I18N.t('agents.event.history_title')}</h2><span class="ts t3">${I18N.t('agents.event.recent_n', {n: events.length})}</span></div>${evtHtml}</div>`;
+<div class="cd"><div class="cd-h"><h2>${I18N.t('agents.event.history_title')}</h2><span class="ts t3">${I18N.t('agents.event.page_info', {total: _agentEvtTotal, page: _agentEvtPage, pages: Math.max(1, Math.ceil(_agentEvtTotal / _agentEvtPageSize))})}</span></div>
+  <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
+    <input type="text" id="agentEvtSearch" placeholder="${I18N.t('agents.event.search_placeholder')}" value="${_agentEvtKeyword}" onkeyup="_agentEvtSearchInput(this.value)" onkeydown="_agentEvtSearchKeydown(event)" onchange="_agentEvtSearchInput(this.value)" style="flex:1;padding:7px 12px;border:1px solid var(--b);border-radius:8px;font-size:12px;background:var(--bg);outline:none;transition:border-color .2s" onfocus="this.style.borderColor='var(--a)'" onblur="this.style.borderColor='var(--b)'">
+  </div>
+  <div id="agentEvtBody"></div>
+  <div id="agentEvtPager"></div>
+</div>`;
 
   el.innerHTML = html;
-  // Issue #108: 滚动定位到第一个高亮事件行
-  if (highlightId) {
-    const _firstHl = el.querySelector('.highlight-flash');
-    if (_firstHl) {
-      setTimeout(function() { _firstHl.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 120);
-    }
-  }
+  // Issue #127: 渲染事件表格 + 分页控件（包含高亮滚动逻辑）
+  _renderAgentEvents(data);
   // 根据已配置 skill 的 scope 设置初始页签（避免回显时看不到已配置的 skill）
   _skillScope = (data.skill_scope === 'repo') ? 'repo' : (data.skill_scope === 'user') ? 'user' : 'official';
   const scopeSel = document.querySelector('.cfg-skill-scope');

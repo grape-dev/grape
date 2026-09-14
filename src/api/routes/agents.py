@@ -1,6 +1,6 @@
 """Agent 路由：详情、配置、类型元数据"""
 import json
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token
@@ -99,6 +99,9 @@ def list_agent_types():
 
 @router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Agent 会话配置查看")
 def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
+                     keyword: str = Query("", description="事件关键词搜索（seq/issue_id/event_type/title/summary/actor）"),
+                     page: int = Query(1, ge=1, description="页码，从 1 开始"),
+                     page_size: int = Query(10, ge=1, le=100, description="每页条数"),
                      user: dict = Depends(get_current_user_or_api_key)):
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
@@ -134,6 +137,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     session_data = {}
     event_stats = {"pending": 0, "running": 0, "completed": 0, "failed": 0}
     recent_events = []
+    events_total = 0
     vod_bot_connected = False
     vod_conversations = []
 
@@ -204,10 +208,26 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         except Exception:
             pass
 
+        # Issue #127: 事件历史支持 keyword 搜索 + 分页（替换硬编码 LIMIT 10）
+        _evt_where = [f"repo_key IN ({_rk_placeholders})", "agent_type=?"]
+        _evt_params = list(_repo_keys) + [name]
+        if keyword:
+            _kw = f"%{keyword}%"
+            _evt_where.append("(CAST(seq AS TEXT) LIKE ? OR issue_id LIKE ? OR event_type LIKE ? OR title LIKE ? OR summary LIKE ? OR actor LIKE ?)")
+            _evt_params += [_kw, _kw, _kw, _kw, _kw, _kw]
+        _evt_where_sql = " AND ".join(_evt_where)
+
         try:
+            c.execute(f"SELECT COUNT(*) FROM events WHERE {_evt_where_sql}", _evt_params)
+            events_total = c.fetchone()[0]
+        except Exception:
+            events_total = 0
+
+        try:
+            _offset = (page - 1) * page_size
             c.execute(
-                "SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id, repo_key FROM events WHERE repo_key IN ({}) AND agent_type=? ORDER BY seq DESC LIMIT 10".format(_rk_placeholders),
-                (*_repo_keys, name)
+                f"SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id, repo_key FROM events WHERE {_evt_where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                _evt_params + [page_size, _offset]
             )
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "title": r[2] or r[1], "actor": r[3] or "",
@@ -278,6 +298,9 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             "event_stats": event_stats,
         },
         "recent_events": recent_events,
+        "events_total": events_total,
+        "events_page": page,
+        "events_page_size": page_size,
         "highlight_issue_id": highlight_issue_id,
         "im": {
             "im_app_id": session_data.get("im_app_id", ""),
@@ -312,6 +335,8 @@ def clean_agent_session(name: str, owner: str, repo: str,
 
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -331,6 +356,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
 
     app_secret = ""
     from src.user.db import get_bot_token_by_repo

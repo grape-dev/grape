@@ -604,10 +604,10 @@ class TaskConfirmBody(BaseModel):
 async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = Depends(get_current_user)):
     """开发者确认任务完成（Issue #51）。
 
-    将 task status → done，issue_state stage → done，
+    将 task status → completed，issue_state stage → done，
     completed_reason → 'user_confirmed' / 'issue_comment' / 'chat_agent'。
-    仅 pending_review 阶段可确认；已 done 幂等跳过。
-    Issue #85: 收紧校验——只允许 pending_review 和 done 阶段确认，不再允许 sre 阶段绕过。
+    Issue #131: 移除 stage 强制校验——任意阶段均可确认完成；
+    已 completed/done 幂等跳过；cancelled 拒绝确认。
     """
     from src.api.session_store import set_issue_stage, get_issue_stage
     with db_lock:
@@ -620,14 +620,8 @@ async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = De
         _repo_key, _issue_num, _status = row[0], row[1], row[2]
         if _status == 'completed' or _status == 'done':
             return {"ok": True, "already_done": True}
-        # 获取 stage 判断是否可确认
-        _st = None
-        if _issue_num:
-            _st = get_issue_stage(_repo_key, f"#{_issue_num}")
-        _stage = (_st.get("stage") if _st else "") or ""
-        # Issue #85: 只允许 pending_review 和 done 阶段确认
-        if _stage not in ("pending_review", "done"):
-            raise HTTPException(status_code=400, detail={"code": 400, "message": f"任务尚未到待审核阶段，当前阶段：{_stage}"})
+        if _status == 'cancelled':
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "已取消任务不可确认完成"})
         c.execute(
             "UPDATE tasks SET status='completed', completed_reason=?, completed_at=datetime('now') WHERE id=?",
             (body.confirmation, task_id))
@@ -1571,6 +1565,77 @@ def _batch_running_agent_tasks(keys: list) -> set:
     return out
 
 
+def _batch_fetch_agent_statuses(keys: list) -> dict:
+    """批量查各 Agent 节点最新事件状态（Issue #126: 与菜单流水线数据源一致）。
+
+    从 events 表查每个 (repo_key, issue_id) 下各 agent_type 的最新事件 status，
+    与 pipeline.py 的 _get_issue_pipeline 使用相同的 AGENT_ORDER + STAGE_STATUS_MAP 逻辑。
+
+    Returns:
+        {(repo_key, issue_id): [{agent, label, status, status_num, latest_seq, latest_title}, ...]}
+    """
+    from src.api.routes.pipeline import AGENT_ORDER, AGENT_LABELS, STAGE_STATUS_MAP
+
+    out: dict = {}
+    if not keys:
+        return out
+
+    # 批量查询 events（分 chunk 防 SQL 过长）
+    _all_rows = []
+    for i in range(0, len(keys), 200):
+        _chunk = keys[i:i + 200]
+        _ors = " OR ".join(["(repo_key=? AND issue_id=?)"] * len(_chunk))
+        _flat = [v for k in _chunk for v in k]
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT repo_key, issue_id, agent_type, status, seq, title "
+                    "FROM events WHERE " + _ors + " ORDER BY seq ASC",
+                    _flat
+                )
+                _all_rows.extend(c.fetchall())
+        except Exception as e:
+            log.warning(f"batch agent_statuses fetch failed: {e}")
+
+    # 按 (repo_key, issue_id) 分组
+    _events_by_key: dict = {}
+    for row in _all_rows:
+        _key = (row[0], row[1])
+        _events_by_key.setdefault(_key, []).append(row)
+
+    # 为每个 key 构建 per-agent 状态列表
+    for key in keys:
+        _issue_events = _events_by_key.get(key, [])
+        _statuses = []
+        for i, agent in enumerate(AGENT_ORDER):
+            # row: (repo_key, issue_id, agent_type, status, seq, title)
+            _agent_events = [e for e in _issue_events if e[2] == agent]
+            if not _agent_events:
+                _statuses.append({
+                    "agent": agent,
+                    "label": AGENT_LABELS[i],
+                    "status": "pending",
+                    "status_num": 0,
+                    "latest_seq": None,
+                    "latest_title": "",
+                })
+            else:
+                _latest = _agent_events[-1]  # seq ASC → 最后一条即最新
+                _status = _latest[3] or "pending"
+                _statuses.append({
+                    "agent": agent,
+                    "label": AGENT_LABELS[i],
+                    "status": _status,
+                    "status_num": STAGE_STATUS_MAP.get(_status, 0),
+                    "latest_seq": _latest[4],
+                    "latest_title": _latest[5] or "",
+                })
+        out[key] = _statuses
+
+    return out
+
+
 def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool = False) -> list[dict]:
     """查询 tasks 并富化（scene / stage / is_running）为对外 dict（my_tasks / repo_all_tasks 共享）。
 
@@ -1600,6 +1665,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     _keys = [(to_repo_key(from_repo_key(r[2])), f"#{r[3]}") for r in rows]
     _stage_map = _batch_fetch_issue_state(_keys)
     _running = _batch_running_agent_tasks(_keys)
+    _agent_status_map = _batch_fetch_agent_statuses(_keys)
 
     tasks_out = []
     for idx, r in enumerate(rows):
@@ -1634,6 +1700,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "scene_source": _scene_source,
             "stage": _stage,
             "is_running": _has_running_agent,
+            "agent_statuses": _agent_status_map.get((_rk, _issue_id), []),
         }
         if include_user_id:
             item["user_id"] = r[13] or 0
