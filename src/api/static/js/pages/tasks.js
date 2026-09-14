@@ -826,7 +826,148 @@ function _detailHtml(t) {
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.created_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
       ${t.completed_at ? `<div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.completed_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
       ${t.task_description ? `<div style="${_rowStyle};border-bottom:none;flex-direction:column;align-items:flex-start"><span style="${_labelStyle};margin-bottom:4px">${I18N.t('tasks.detail.no_description')}</span><div style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.5;white-space:pre-wrap;width:100%">${t.task_description}</div></div>` : ''}
+    </div>
+    <div style="${_cardStyle}">
+      <div style="${_cardTitle}">附件</div>
+      <div id="_taskAttachmentsList" style="min-height:30px"><div style="font-size:12px;color:var(--t3,#86868b)">加载中...</div></div>
+      <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+        <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          上传附件
+          <input type="file" style="display:none" onchange="_onTaskAttachSelect(this,${t.id})">
+        </label>
+      </div>
     </div>`;
+  // 异步加载附件列表
+  _loadTaskAttachments(t.id);
+}
+
+function _loadTaskAttachments(taskId) {
+  API.get('/tasks/' + taskId + '/attachments').then(function(data) {
+    var list = document.getElementById('_taskAttachmentsList');
+    if (!list) return;
+    var atts = data.attachments || [];
+    if (atts.length === 0) {
+      list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">暂无附件</div>';
+      return;
+    }
+    list.innerHTML = atts.map(function(a) {
+      var del = '<button onclick="_deleteTaskAttach(' + taskId + ',\'' + a.filename + '\')" style="margin-left:6px;font-size:11px;color:#ff3b30;background:none;border:none;cursor:pointer;padding:2px 4px">删除</button>';
+      if (a.is_image) {
+        return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
+          + '<img src="' + a.url + '" style="width:32px;height:32px;object-fit:cover;border-radius:6px;margin-right:8px">'
+          + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
+          + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
+          + del + '</div>';
+      }
+      return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
+        + '<span style="margin-right:8px">📎</span>'
+        + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
+        + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
+        + del + '</div>';
+    }).join('');
+  }).catch(function() {
+    var list = document.getElementById('_taskAttachmentsList');
+    if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">加载失败</div>';
+  });
+}
+
+function _formatSize(bytes) {
+  if (bytes < 1024) return bytes + 'B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + 'KB';
+  return (bytes/1024/1024).toFixed(1) + 'MB';
+}
+
+function _onTaskAttachSelect(fileInput, taskId) {
+  if (!fileInput.files || !fileInput.files[0]) return;
+  var formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  var list = document.getElementById('_taskAttachmentsList');
+  if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">上传中...</div>';
+  fetch('/api/tasks/' + taskId + '/attachments', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+    body: formData
+  }).then(function(r) { return r.json(); }).then(function() {
+    _loadTaskAttachments(taskId);
+  }).catch(function(e) {
+    if (list) list.innerHTML = '<div style="font-size:12px;color:#ff3b30">上传失败: ' + e.message + '</div>';
+    _loadTaskAttachments(taskId);
+  });
+  fileInput.value = '';
+}
+
+function _deleteTaskAttach(taskId, filename) {
+  if (!confirm('确认删除附件？')) return;
+  fetch('/api/tasks/attachments/' + filename + '?task_id=' + taskId, {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
+  }).then(function(r) { return r.json(); }).then(function() {
+    _loadTaskAttachments(taskId);
+  }).catch(function(e) {
+    alert('删除失败: ' + e.message);
+  });
+}
+
+// ===== 创建弹窗附件上传 =====
+let _createAttachments = [];
+
+function _onCreateAttachSelect(fileInput) {
+  if (!fileInput.files || !fileInput.files[0]) return;
+  var repo = app.currentRepo();
+  var repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
+  var file = fileInput.files[0];
+  var formData = new FormData();
+  formData.append('file', file);
+  var container = document.getElementById('tcCreateAttachments');
+  var loading = document.createElement('div');
+  loading.style.cssText = 'font-size:11px;color:#888;padding:4px 8px;background:rgba(0,113,227,.06);border-radius:6px';
+  loading.textContent = '上传中...';
+  container.appendChild(loading);
+  fetch('/api/tasks/attachments/pre-upload?repo_key=' + encodeURIComponent(repoKey), {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+    body: formData
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    loading.remove();
+    if (d.error) { alert('上传失败: ' + d.error); return; }
+    _createAttachments.push({filename: d.filename, safe_name: d.safe_name, size: d.size, url: d.url});
+    _renderCreateAttachments();
+  }).catch(function(e) {
+    loading.remove();
+    alert('上传失败: ' + e.message);
+  });
+  fileInput.value = '';
+}
+
+function _renderCreateAttachments() {
+  var container = document.getElementById('tcCreateAttachments');
+  if (!container) return;
+  if (_createAttachments.length === 0) { container.innerHTML = ''; return; }
+  container.innerHTML = _createAttachments.map(function(a, i) {
+    return '<div style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;background:rgba(0,113,227,.06);border-radius:6px;font-size:11px">'
+      + '<span>📎 ' + a.filename + '</span>'
+      + '<span style="color:#888">' + _formatSize(a.size) + '</span>'
+      + '<button onclick="_removeCreateAttach(' + i + ')" style="margin-left:2px;color:#ff3b30;background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px">✕</button>'
+      + '</div>';
+  }).join('');
+}
+
+function _removeCreateAttach(idx) {
+  var a = _createAttachments[idx];
+  if (!a) return;
+  var repo = app.currentRepo();
+  var repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
+  fetch('/api/tasks/attachments/pre-upload/' + a.safe_name + '?repo_key=' + encodeURIComponent(repoKey), {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
+  }).then(function() {
+    _createAttachments.splice(idx, 1);
+    _renderCreateAttachments();
+  }).catch(function() {
+    _createAttachments.splice(idx, 1);
+    _renderCreateAttachments();
+  });
 }
 
 function _renderTaskActionsInline(t) {
@@ -941,6 +1082,7 @@ function openTaskCreateModal() {
   const repo = app.currentRepo();
   const defaultRepo = repo ? repo.fullName : '';
   if (_taskCreateModal) _taskCreateModal.remove();
+  _createAttachments = [];
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
   // 异步加载可用场景列表
@@ -962,6 +1104,15 @@ function openTaskCreateModal() {
         <select id="tcCreateScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
       </label>
       <div style="font-size:11px;color:#888">${I18N.t('tasks.create.assignee_hint')}</div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333">
+        <span style="font-size:12px">附件 <span style="font-size:11px;color:#888">（可选，创建 Issue 时同步附加）</span></span>
+        <div id="tcCreateAttachments" style="display:flex;flex-wrap:wrap;gap:6px;min-height:30px"></div>
+        <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3;width:fit-content" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          添加附件
+          <input type="file" style="display:none" onchange="_onCreateAttachSelect(this)">
+        </label>
+      </div>
       <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">

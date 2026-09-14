@@ -486,6 +486,87 @@ def _build_output_contract() -> str:
 """
 
 
+# 附件文件扩展名分类
+_ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_id=0):
+    """统一附件注入入口。按 agent_type 分级，从 OBS/文件系统扫描附件。
+
+    所有 agent_type 都走此函数，内部按角色决定注入内容：
+    - vod:     图片+文件 URL + 完整处理指引（调 analyze-image / curl 下载）
+    - issue:   只注入文件名清单（无 URL、无下载指引）
+    - coding:  非图片附件的文件名 + URL + 简短下载指引
+    - qa/sre:  不注入
+    """
+    if agent_type not in ("vod", "issue", "coding"):
+        return
+
+    if not repo_key or not issue_id:
+        return
+
+    from src.repo_key import split_owner_repo
+    try:
+        _owner, _rname = split_owner_repo(repo_key)
+    except Exception:
+        return
+    if not _owner or not _rname:
+        return
+
+    _issue_num = str(issue_id).lstrip("#")
+    if not _issue_num.isdigit():
+        return
+
+    # 通过 tasks._attach_list 获取附件列表（自动适配 OBS/本地）
+    from src.api.routes.tasks import _attach_list
+    _attachments = _attach_list(_owner, _rname, _issue_num)
+    if not _attachments:
+        return
+
+    _images = [a for a in _attachments if a.get("is_image")]
+    _files = [a for a in _attachments if not a.get("is_image")]
+
+    # --- VOD：强制读取所有附件 ---
+    if agent_type == "vod":
+        _lines = []
+        for a in _images:
+            _lines.append(f"- 图片 {a['filename']}: {a['url']}")
+        for a in _files:
+            _lines.append(f"- 文件 {a['filename']}: {a['url']}")
+        _server_url = _resolve_server_url(runtime_id)
+        parts.append(
+            "\n## 用户附件\n"
+            "Issue 包含以下用户上传附件，必须全部读取以理解用户需求：\n"
+            + "\n".join(_lines) + "\n"
+            f"- 图片：用 bash 工具执行 curl {_server_url}/api/analyze-image?url=<图片URL>，"
+            "返回 JSON 中 description 字段为图片内容描述。\n"
+            "- 文本/代码/文档：用 bash 工具 curl 下载到当前工作目录，然后用 read tool 读取内容。\n"
+            "- 图片分析完成后，在 A2A 交办的 context 中写明图片描述结果，供下游 Agent 参考。\n"
+        )
+
+    # --- Issue：只注入文件名清单 ---
+    elif agent_type == "issue":
+        _names = [a["filename"] for a in _files] + [a["filename"] for a in _images]
+        if _names:
+            parts.append(
+                "\n## 用户附件\n"
+                f"用户上传了以下附件：{', '.join(_names)}\n"
+                "图片附件已由 VOD Agent 分析，描述见前序 Agent 摘要。"
+                "非图片附件可在 A2A 交办 coding 时说明需参考的文件名。\n"
+            )
+
+    # --- Coding：非图片附件文件名 + URL + 强制读取指引 ---
+    elif agent_type == "coding":
+        if _files:
+            _lines = [f"- {a['filename']}: {a['url']}" for a in _files]
+            parts.append(
+                "\n## 用户附件\n"
+                "以下用户上传的附件必须全部 curl 下载到当前工作目录并用 read tool 读取内容，"
+                "作为实现需求的参考依据：\n"
+                + "\n".join(_lines) + "\n"
+                "图片附件已由 VOD Agent 分析，描述见前序 Agent 摘要。\n"
+            )
+
+
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
                  agent_type=""):
     number = extract_event_number(evt['payload'])
@@ -502,7 +583,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     elif isinstance(payload.get("object_attributes"), dict):
         issue_data = payload["object_attributes"]
     title = json.dumps(issue_data.get("title", ""), ensure_ascii=False)
-    body = json.dumps(issue_data.get("body", issue_data.get("description", "")), ensure_ascii=False)[:500]
+    body = json.dumps(issue_data.get("body", issue_data.get("description", "")), ensure_ascii=False)[:4000]
     parts = []
     evt_type = evt.get("type", "event")
 
@@ -552,6 +633,9 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             parts.append(f"Title: {title}")
         if body != '""':
             parts.append(f"Body: {body}")
+
+    # 附件注入：按 agent_type 分级（统一走文件系统扫描，不再从 body 正则匹配）
+    _inject_attachments_by_role(parts, _rk, evt.get("issue_id", "") or str(number or ""), agent_type, runtime_id)
 
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
@@ -651,7 +735,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
 然后调用 A2A API：
 
-  curl -X POST {SERVER_URL}/api/a2a \\
+  curl -X POST {{SERVER_URL}}/api/a2a \\
     -H "Authorization: Bearer $""" + _bot_token_env + """\" \\
     -H "Content-Type: application/json" \\
     -d '{
@@ -1114,7 +1198,7 @@ def build_scene_recommender_prompt(evt, repo_key: str) -> str:
     elif isinstance(payload.get("object_attributes"), dict):
         issue_data = payload["object_attributes"]
     title = issue_data.get("title", "")
-    body = issue_data.get("body", issue_data.get("description", ""))[:1000]
+    body = issue_data.get("body", issue_data.get("description", ""))[:4000]
 
     parts = []
 

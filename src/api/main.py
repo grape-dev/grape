@@ -525,10 +525,19 @@ app.include_router(latency.router)
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
 app.openapi = lambda: custom_openapi(app)
+# Issue 附件静态服务（Task Center 上传的文件）
+# 注意：必须在 /static 之前 mount，否则 /static 会拦截 /static/issue_attachments 请求
+# 路径与 tasks.py _attach_base_dir 对齐（基于 WORKSPACE_DIR）
+from src.config import WORKSPACE_DIR as _WS_DIR
+_ISSUE_ATTACH_DIR = os.path.join(_WS_DIR, "..", "data", "issue_attachments")
+os.makedirs(_ISSUE_ATTACH_DIR, exist_ok=True)
+app.mount("/static/issue_attachments", StaticFiles(directory=_ISSUE_ATTACH_DIR), name="issue_attachments")
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+if os.path.isdir(STATIC_DIR):
     # Prevent browser from caching stale JS/CSS (version bump in ?v= is the primary cache-buster,
     # but this header ensures even without ?v= change the browser revalidates)
     from starlette.middleware.base import BaseHTTPMiddleware
