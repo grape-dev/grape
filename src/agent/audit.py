@@ -41,6 +41,8 @@ class _AsyncWriter:
     丢失少量记录可接受。Queue 满时降级为同步写（不丢数据）。
     """
 
+    _FLUSH_SENTINEL = object()  # flush 标记（类级别，避免作用域问题）
+
     def __init__(self):
         self._q: queue.Queue[Any] = queue.Queue(maxsize=10000)
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -56,34 +58,32 @@ class _AsyncWriter:
 
     def flush(self) -> None:
         """等待队列中所有写入完成。"""
-        sentinel = object()
-        self._q.put(sentinel)
+        self._q.put(self._FLUSH_SENTINEL)
         # 等待 sentinel 被处理（简单轮询）
-        while not self._q.empty():
-            import time as _t
+        import time as _t
+        deadline = _t.monotonic() + 5  # 最多等 5 秒
+        while not self._q.empty() and _t.monotonic() < deadline:
             _t.sleep(0.01)
 
     def _run(self) -> None:
         while True:
             item = self._q.get()
-            if item is None or item is sentinel:
-                # flush sentinel — 继续处理后续
-                if item is sentinel:
-                    self._q.task_done()
-                continue
-            path, line = item
-            try:
-                with _lock:
-                    # 轮转检查 + 写入
-                    current = os.path.getsize(path) if os.path.exists(path) else 0
-                    if current > _MAX_BYTES:
-                        _rotate(path)
-                    with open(path, "a") as f:
-                        f.write(line)
-            except Exception as e:
-                log.warning(f"audit async write failed: {e}")
-            finally:
+            if item is self._FLUSH_SENTINEL:
                 self._q.task_done()
+                continue
+            if isinstance(item, tuple):
+                path, line = item
+                try:
+                    with _lock:
+                        current = os.path.getsize(path) if os.path.exists(path) else 0
+                        if current > _MAX_BYTES:
+                            _rotate(path)
+                        with open(path, "a") as f:
+                            f.write(line)
+                except Exception as e:
+                    log.warning(f"audit async write failed: {e}")
+                finally:
+                    self._q.task_done()
 
 
 def _rotate(path: str) -> None:
