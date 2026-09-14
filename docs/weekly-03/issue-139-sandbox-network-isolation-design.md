@@ -3,7 +3,7 @@
 > Issue：https://gitcode.com/grape-dev/grape/issues/139
 > 父 Issue：#64 支持任务执行沙箱隔离
 > 分支：`feat/issue-139-sandbox-network-isolation`（基于 `weekly-03`）
-> 日期：2026-09-14（v8 — 借鉴 isolate/m9m 优化 + 并发修复 + 标识符可读性）
+> 日期：2026-09-14（v9 — 三轮审查修复 + 专家注释 + 低级别修复）
 
 ---
 
@@ -1368,6 +1368,20 @@ DB 表 sandbox_whitelist（有数据）
 | 8 | grape 端口动态解析 | 用户反馈 | 从 GRAPE_SERVER_URL 解析端口，不硬编码 3000 |
 | 9 | per-instance handler 子类 | 并发审查 | type() 创建独立 handler 类，避免类变量并发覆盖 |
 | 10 | 白名单 DB 表 + 5 分钟缓存 | 用户要求 | sandbox_whitelist 表 scope(global/repo/engine) + 按 (backend_name, repo_key) 缓存 |
+| 11 | detect.py cgroup v2 检测 | 第三轮审查 | check_cgroup() 从 v1 硬编码改为 v2 优先（cgroup.controllers）+ v1 降级 |
+| 12 | loopback 端口范围校验 | 第三轮审查 | GRAPE_SERVER_URL 解析端口限制 3000-9999，误配时降级到 3000 |
+| 13 | config.py 重复定义清理 | 第三轮审查 | 删除 SANDBOX_WHITELIST 旧定义（被 FALLBACK 覆盖，冗余） |
+
+### 专家审查注释（v9 新增）
+
+以下局限性已在代码注释中标注，完整方案留给后续 Issue：
+
+| # | 局限性 | 当前状态 | 完整方案 |
+|---|--------|---------|---------|
+| A | memory.high 单独设置只延迟 OOM | memory.max 硬上限仍有效 | 监控 memory.events high 计数器 + 接入 systemd-oomd |
+| B | 审计异步崩溃丢数据 | Queue 满降级同步写 | Transactional Outbox Pattern（DB outbox 表 + worker） |
+| C | cgroup 时序竞态（bwrap --info-fd） | 未使用 --info-fd，无竞态 | 如引入需加原子锁串行化 namespace 初始化 |
+| D | /etc/resolv.conf WSL 符号链接 | grape 部署 Linux 非 WSL | cross-mount repair（--tmpfs 占位 + --ro-bind 真实目标） |
 
 ### 后续 Issue（不在 #139 范围内）
 
