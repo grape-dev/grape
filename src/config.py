@@ -554,7 +554,7 @@ SANDBOX_WHITELIST_FALLBACK = [
         "gitcode.com,api.gitcode.com,raw.gitcode.com,"
         "github.com,api.github.com,"
         "opengw.clouddeveloper.club,api.deepseek.com,"
-        "api.modelarts-maas.com,"
+        "api.modelarts-maas.com,api.openai.com,"
         "registry.npmmirror.com,"
         "pypi.tuna.tsinghua.edu.cn,"
         "obs.cn-north-4.myhuaweicloud.com"

@@ -298,6 +298,9 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                 else:
                     for k, v in cfg.items():
                         env[k.upper()] = str(v)
+                    # provider=openai: api_key → OPENAI_API_KEY（codex 读此变量）
+                    if provider == "openai" and cfg.get("api_key"):
+                        env["OPENAI_API_KEY"] = str(cfg["api_key"])
         except Exception as e:
             log.warning(f"Failed to inject user credentials: {e}")
 
