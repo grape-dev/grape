@@ -4,7 +4,7 @@
 > 同时澄清 Issue / Event / Task 三个易混淆概念（含 "task complete 实为 event complete"）。
 > 目标仓库：grape 主仓库（`src/api/routes/` + `help/api/` OpenAPI 契约）
 > 状态：**已实施（A/B/C 全阶段完成，2026-09-14，生产已上线）**
-> 实施计划：`docs/weekly-02/issues-api-execution-plan.md`
+> 实施计划：`docs/weekly-03/issues-api-execution-plan.md`
 > 日期：2026-09-11（2026-09-14 刷新：对齐当前实现；`tasks`→`issue` 收编、`issue_state` DROP、`tasks/create` 移除）
 
 ---

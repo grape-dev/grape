@@ -1,6 +1,6 @@
 # Issues 对外接口实施执行计划
 
-> 关联设计：`docs/weekly-02/issues-api-design.md`
+> 关联设计：`docs/weekly-03/issues-api-design.md`
 > 目标：新增 `/api/issues` 对外接口，澄清 Issue/Event/Task 概念，并迁移 `tasks/create`
 > 分支：`weekly-02-lyz`
 > 状态：**已完成（A/B/C 全阶段，2026-09-14）**
