@@ -90,6 +90,7 @@ async def sync_official_skills_to_obs() -> dict:
             description = info.get("description", "")
             agent_type = info.get("agent_type", "")
             skill_path_val = info.get("path", skill_name)
+            sub_scene = info.get("sub_scene", "")
             existed = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'", (skill_name,)).fetchone()[0]
             if existed:
                 _fp = c.execute(
@@ -98,18 +99,18 @@ async def sync_official_skills_to_obs() -> dict:
                 ).fetchone()
                 if _fp:
                     c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, skill_name)
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, sub_scene, skill_name)
                     )
                 else:
                     c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, skill_path_val, skill_name)
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, skill_path_val, sub_scene, skill_name)
                     )
             else:
                 c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash) VALUES (?,?,?,?,?,'official','',?)",
-                    (skill_name, display_name, description, agent_type, skill_path_val, "")
+                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene) VALUES (?,?,?,?,?,'official','',?,?)",
+                    (skill_name, display_name, description, agent_type, skill_path_val, "", sub_scene)
                 )
         _db.commit()
 

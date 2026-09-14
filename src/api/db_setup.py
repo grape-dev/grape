@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS skill (
     created_by VARCHAR(64) DEFAULT '',
     updated_by VARCHAR(64) DEFAULT '',
     is_active INTEGER DEFAULT 1,
+    sub_scene TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (skill_name, scope, owner_id)
@@ -990,9 +991,10 @@ def _seed_from_json():
                             description = info.get("description", "")
                             agent_type = info.get("agent_type", "")
                             skill_path = info.get("path", skill_name)
+                            sub_scene = info.get("sub_scene", "")
                             c.execute(
-                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
-                                (skill_name, display_name, description, agent_type, skill_path)
+                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene) VALUES (?,?,?,?,?,'official','',?)",
+                                (skill_name, display_name, description, agent_type, skill_path, sub_scene)
                             )
                             log.info(f"Seeded missing official skill: {skill_name}")
                     db.commit()
@@ -1133,9 +1135,10 @@ def _insert_seed_data(table: str, data: dict):
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
                 skill_path = info.get("path", skill_name)
+                sub_scene = info.get("sub_scene", "")
                 c.execute(
-                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
-                    (skill_name, display_name, description, agent_type, skill_path)
+                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene) VALUES (?,?,?,?,?,'official','',?)",
+                    (skill_name, display_name, description, agent_type, skill_path, sub_scene)
                 )
 
         elif table == "agent_registry":
@@ -1653,6 +1656,7 @@ def _sync_official_skills():
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
                 skill_path = info.get("path", skill_name)
+                sub_scene = info.get("sub_scene", "")
                 existed = c.execute(
                     "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'",
                     (skill_name,)
@@ -1666,19 +1670,19 @@ def _sync_official_skills():
                     ).fetchone()
                     if _fp:
                         c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_name)
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, sub_scene, skill_name)
                         )
                     else:
                         c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_path, skill_name)
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, skill_path, sub_scene, skill_name)
                         )
                     updated += 1
                 else:
                     c.execute(
-                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash) VALUES (?,?,?,?,?,'official','',?)",
-                        (skill_name, display_name, description, agent_type, skill_path, "")
+                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene) VALUES (?,?,?,?,?,'official','',?,?)",
+                        (skill_name, display_name, description, agent_type, skill_path, "", sub_scene)
                     )
                     added += 1
             db.commit()
@@ -1995,6 +1999,7 @@ def _migrate_tables():
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
+        "ALTER TABLE skill ADD COLUMN sub_scene TEXT DEFAULT ''",
         # ===== Issue-11: devops_pipeline_scene 加 market_scene_id（单向关联） =====
         "ALTER TABLE devops_pipeline_scene ADD COLUMN market_scene_id INTEGER DEFAULT NULL",
         # ===== Issue-11: scene_skill_ref 加 skill_id =====
