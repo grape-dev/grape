@@ -1,17 +1,7 @@
-# TODO
+# TODO: Issue #135
 
-- [ ] T1: 创建 help/usage/ 9 markdown 文件
-  - [ ] overview.md
-  - [ ] quickstart.md
-  - [ ] agents.md
-  - [ ] pipeline.md
-  - [ ] skills.md
-  - [ ] runtimes.md
-  - [ ] monitoring.md
-  - [ ] knowledge-base.md
-  - [ ] faq.md
-- [ ] T2: 复制 docs/openapi/ 13 文件到 help/api/
-- [ ] T3: help.html 添加迁移注释
-- [ ] T4: 编写并运行测试用例
-- [ ] T5: 自审查
-- [ ] T6: 创建 PR（目标 weekly-02）+ Issue 评论 + A2A QA
+- [x] Task 1: 新增 `_fetch_heartbeat()` 函数 + 心跳阈值常量
+- [x] Task 2: 在 `_compute_and_persist()` 集成心跳检查
+- [x] Task 3: `_empty_score()` 和返回数据加入 `last_seen_at` / `status` 字段
+- [x] Task 4: 新增心跳相关测试用例（超时/无心跳/正常/非online状态）
+- [x] Task 5: 确保现有测试全部通过
