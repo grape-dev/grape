@@ -499,8 +499,8 @@ BWRAP_RW_ENGINE = {
 
 # ====== Agent 沙箱网络隔离（Issue #139）======
 
-# 网络隔离开关（默认 off，灰度开启）
-GRAPE_SANDBOX_NET = os.environ.get("GRAPE_SANDBOX_NET", "off").lower() in ("1", "true", "on", "yes")
+# 网络隔离开关（默认 on，与 GRAPE_AGENT_SANDBOX 一致；回滚设 GRAPE_SANDBOX_NET=off）
+GRAPE_SANDBOX_NET = os.environ.get("GRAPE_SANDBOX_NET", "on").lower() in ("1", "true", "on", "yes")
 
 # 沙箱白名单 — 环境变量作为 DB 不可用时的降级默认值
 

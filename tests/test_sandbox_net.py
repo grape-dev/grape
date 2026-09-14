@@ -709,15 +709,15 @@ class TestSandboxEnabled(unittest.TestCase):
     """sandbox_enabled / _bwrap_bin。"""
 
     def test_sandbox_enabled_default_off(self):
-        """GRAPE_SANDBOX_NET 默认 off（网络隔离开关）。"""
+        """GRAPE_SANDBOX_NET 默认 on（与 GRAPE_AGENT_SANDBOX 一致）。"""
         import os
         old = os.environ.get("GRAPE_SANDBOX_NET", "")
         try:
-            os.environ["GRAPE_SANDBOX_NET"] = "off"
+            os.environ.pop("GRAPE_SANDBOX_NET", None)
             import importlib
             import src.config as _cfg
             importlib.reload(_cfg)
-            self.assertFalse(_cfg.GRAPE_SANDBOX_NET)
+            self.assertTrue(_cfg.GRAPE_SANDBOX_NET)
         finally:
             if old:
                 os.environ["GRAPE_SANDBOX_NET"] = old

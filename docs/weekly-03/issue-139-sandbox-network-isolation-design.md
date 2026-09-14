@@ -1264,7 +1264,7 @@ SANDBOX_WHITELIST = SANDBOX_WHITELIST_FALLBACK  # 兼容
 
 | 开关 | 环境变量 | 默认 | 关闭后 |
 |------|----------|------|--------|
-| 网络隔离 | GRAPE_SANDBOX_NET | off | 回退 --share-net |
+| 网络隔离 | GRAPE_SANDBOX_NET | on | 回退 --share-net（设 off 关闭） |
 | 文件系统隔离 | GRAPE_AGENT_SANDBOX | on | 回退无 bwrap |
 | 内存限额 | GRAPE_SANDBOX_MEM_LIMIT_MB | 0（不限制） | 设具体值启用 |
 | CPU 限额 | GRAPE_SANDBOX_CPU_QUOTA | 0 | 保持 0 |
@@ -1417,7 +1417,7 @@ DB 表 sandbox_whitelist（有数据）
 | 6 | 审计日志 | policy + reason + prev_hash + record_hash + latency_ms + status_code |
 | 7 | 哈希链验证 | verify_chain() 通过 |
 | 8 | 审计轮转 | 100MB 后轮转，保留 5 个 |
-| 9 | GRAPE_SANDBOX_NET=off | 回退 --share-net |
+| 9 | GRAPE_SANDBOX_NET=off | 回退 --share-net（默认 on，手动关闭回滚） |
 | 10 | 无 sudo | cgroup 降级，Agent 可运行 |
 | 11 | git clone/push | 通过代理正常 |
 | 12 | 任务结束 | cgroup + socket + 代理 + 桥接全部清理 |
