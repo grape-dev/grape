@@ -388,7 +388,14 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
         # 2. loopback 端口限制 — 只允许 grape API 端口，阻止 SSH/MySQL/Redis 等
         host_base = host.split(":")[0]
         if host_base in ("127.0.0.1", "localhost", "::1"):
-            _grape_port = int(os.environ.get("GRAPE_SERVER_PORT", "3000"))
+            # 从 GRAPE_SERVER_URL 解析端口（与 runtime/agent.py 一致）
+            _server_url = os.environ.get("GRAPE_SERVER_URL", "http://localhost:3000")
+            try:
+                from urllib.parse import urlparse
+                _parsed = urlparse(_server_url)
+                _grape_port = _parsed.port or (443 if _parsed.scheme == "https" else 3000)
+            except Exception:
+                _grape_port = 3000
             if port != _grape_port:
                 return {"allowed": False, "reason": f"loopback port {port} denied (only {_grape_port} allowed)"}
         else:
