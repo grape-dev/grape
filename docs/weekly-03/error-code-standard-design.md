@@ -41,16 +41,16 @@
 {
   "detail": {
     "code": 404,
-    "message": "资源不存在",
-    "internal": ""        // 可选：内部错误码/追踪信息，不对外暴露敏感信息
+    "message": "Resource not found",
+    "internal": ""        // optional: internal code / trace, not exposed to clients
   }
 }
 ```
 
 约定：
 - `detail.code`：**默认等于 HTTP 状态码**；业务需要细分时使用 **4 位业务子码**（如 `40401` = 资源不存在细分 1）。
-- `detail.message`：人类可读中文（对外）。
-- 401 统一为 `{"code":401,"message":"未登录|会话 token 无效|API Key 无效或已吊销"…}`，**废除 README 旧的 `{"message":"401 Unauthorized"}`**。
+- **`detail.message`：一律英文**（**主要供 Agent 读取**，Agent 据此判断与处理，不做本地化展示）；客户端如需展示可在前端 i18n 映射。
+- 401 统一为 `{"code":401,"message":"Not logged in | Invalid session token | Invalid or revoked API key"…}`，**废除 README 旧的 `{"message":"401 Unauthorized"}`**。
 
 ### 2.2 CLI/上传类业务返回（非 HTTPException）
 
@@ -60,22 +60,22 @@
 
 ### 2.3 状态码字典（全面）
 
-| 码 | 含义 | 典型来源 |
+| 码 | 含义（message 英文） | 典型来源 |
 |----|------|----------|
-| 200 | 成功 | 读取/修改 |
-| 201 | 创建成功 | POST 资源 |
-| 204 | 删除成功（无体） | DELETE |
-| 302 | 重定向（OAuth 回调） | login 回调 |
-| 400 | 参数缺失/校验失败/业务非法 | Query/Body 校验、状态非法迁移 |
-| 401 | 未认证 | 缺 token / 会话失效 / API Key 失效 |
-| 403 | 无权限 | session 型端点禁 tk_、token 作用域不符、白名单外 |
-| 404 | 资源不存在 | issue/seq/task 不存在 |
-| 409 | 冲突 | 同标题已存在、重复提交 |
-| 410 | 已废弃（端点移除） | tasks/create 等已下线 |
-| 429 | 请求过频 | 限流 |
-| 500 | 服务内部错误 | 建档失败等 |
-| 502 | 上游失败（平台/GitCode/GitHub） | GitCode API 调用失败、平台 token 解析失败 |
-| 503 | 服务不可用 | 引擎不可用等 |
+| 200 | Success | 读取/修改 |
+| 201 | Created | POST 资源 |
+| 204 | No Content | DELETE |
+| 302 | Found (OAuth redirect) | login 回调 |
+| 400 | Bad Request / Invalid parameter | Query/Body 校验、状态非法迁移 |
+| 401 | Unauthorized | 缺 token / 会话失效 / API Key 失效 |
+| 403 | Forbidden | session 型端点禁 tk_、token 作用域不符、白名单外 |
+| 404 | Not Found / Resource not found | issue/seq/task 不存在 |
+| 409 | Conflict | 同标题已存在、重复提交 |
+| 410 | Gone (endpoint removed) | tasks/create 等已下线 |
+| 429 | Too Many Requests | 限流 |
+| 500 | Internal Server Error | 建档失败等 |
+| 502 | Bad Gateway (upstream platform failed) | GitCode API 调用失败、平台 token 解析失败 |
+| 503 | Service Unavailable | 引擎不可用等 |
 
 ### 2.4 错误码枚举实现（建议）
 
@@ -104,11 +104,11 @@ def business_ok_false(code: int, message: str) -> dict:
 
 每个接口文档统一增加「错误返回」小节（示例）：
 
-| 码 | 说明 | 失败场景 |
+| 码 | 说明（英文 message） | 失败场景 |
 |----|------|----------|
-| 400 | 参数缺失/校验失败 | title 缺 / 非法状态迁移 |
-| 403 | 无权限 / 会话 token 不适用 | 账户管理端点用 tk_ |
-| 404 | 资源不存在 | issue #N 不存在 |
+| 400 | Bad Request / Invalid parameter | title 缺 / 非法状态迁移 |
+| 403 | Forbidden (session token not allowed) | 账户管理端点用 tk_ |
+| 404 | Not Found | issue #N 不存在 |
 
 ---
 
@@ -130,9 +130,9 @@ def business_ok_false(code: int, message: str) -> dict:
 
 1. **`detail.code` 默认 = HTTP 状态码**；需要细分用 **4 位子码**（`40xxx` 业务语义段）。
 2. **HTTP 错误用 `HTTPException(detail={"code","message"})`**；**CLI 业务失败用 `{"ok":false,...}`**，两者边界 =「HTTP 层错误 vs 业务层返回」。
-3. **对外 message 中文可读**，敏感信息（token/内网地址/堆栈）不外泄（internal 字段或日志）。
+3. **`detail.message` 一律英文**（**Agent 可读，Agent 据此解析与决策**）；前端如需展示中文由前端 i18n 映射；敏感信息（token/内网地址/堆栈）不外泄（internal 字段或日志）。
 4. **契约先行**：README 为权威错误码字典，逐端点文档引用它，杜绝叙述性重复漂移。
-5. **向后兼容**：不改变现有 200/400/4xx 行为；仅规范结构与文档。
+5. **向后兼容**：不改变现有 200/400/4xx 行为；仅规范结构与 message 语言。
 
 ---
 
@@ -140,10 +140,10 @@ def business_ok_false(code: int, message: str) -> dict:
 
 | 项 | 影响 |
 |----|------|
-| 代码 | `errors.py` 新增；可选批量替换 HTTPException 工厂（行为不变） |
-| 文档 | README 状态码表 + 401 修正；13 个 help/api/*.md 增错误表 |
+| 代码 | `errors.py` 新增；可选批量替换 HTTPException 工厂（行为不变）；**现有中文 message 逐步英文化（Agent 可读）** |
+| 文档 | README 状态码表 + 401 修正；13 个 help/api/*.md 增错误表（英文 message） |
 | 测试 | 新增 `test_errors.py`（格式断言）+ 既有回归 |
-| CLI | 错误返回体保持兼容（ok:false 结构不变），仅规范 code 口径 |
+| 前端/CLI | 任意语言渲染由前端 i18n / CLI 自行映射；Agent 读取英文 message |
 
 ---
 
@@ -151,5 +151,5 @@ def business_ok_false(code: int, message: str) -> dict:
 
 1. `pytest tests/test_errors.py`（新增）：断言代表端点 401/403/404 返回体为 `{"detail":{"code","message"}}`。
 2. 抽样扫描 `src/api/routes/*.py`：`detail` 键含 `code`+`message` 比例 → ≥99%（旧散落除外）。
-3. help/api 文档错误表与代码 state 一致（人工抽查 tasks/issues/git-repo）。
+3. help/api 文档错误表（英文 message）与代码 state 一致（人工抽查 tasks/issues/git-repo）。
 4. 全量回归。
