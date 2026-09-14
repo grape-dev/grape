@@ -3,7 +3,7 @@
 > Issue：https://gitcode.com/grape-dev/grape/issues/139
 > 父 Issue：#64 支持任务执行沙箱隔离
 > 分支：`feat/issue-139-sandbox-network-isolation`（基于 `weekly-03`）
-> 日期：2026-09-14（v7 — 白名单 DB 表 + 5 分钟缓存）
+> 日期：2026-09-14（v8 — 借鉴 isolate/m9m 优化 + 并发修复 + 标识符可读性）
 
 ---
 
@@ -1354,16 +1354,30 @@ DB 表 sandbox_whitelist（有数据）
 
 ## 九、后续增强
 
+### v8 新增（借鉴 isolate + m9m）
+
+| # | 改进 | 来源 | 说明 |
+|---|------|------|------|
+| 1 | /etc 白名单式挂载 | isolate safeEtcMounts | --ro-bind-try 安全子集（ssl/ca-certificates/pki/resolv.conf/hosts/nsswitch.conf/localtime/ld.so.*），不含 ssh 密钥/shadow/nginx/数据库密码 |
+| 2 | memory.high 90% 软上限 | m9m CgroupManager | v2: memory.high = 90% of max；v1: memory.soft_limit_in_bytes = 90% |
+| 3 | 审计异步写入 | m9m buffered channel | _AsyncWriter: Queue(10000) + daemon 线程，哈希链同步，磁盘 I/O 异步 |
+| 4 | cgroup 资源统计 | m9m GetStats | get_stats() 读 cpu.stat/memory.peak（v2）或 cpuacct.usage/memory.max_usage_in_bytes（v1） |
+| 5 | K8s 资源量格式 | isolate ParseMemory/ParseCPU | parse_memory("256Mi")→256MB, parse_cpu("500m")→500 毫核 |
+| 6 | 标识符可读性 | 外部审查 | {safe_task_id[:16]}-{sha256[:8]}，socket 和 cgroup 用同一格式 |
+| 7 | cgroup v2-first + v1 降级 | m9m + 用户要求 | _detect_cgroup_version() 检测 v2/v1，v2 用 memory.max/cpu.max/pids.max |
+| 8 | grape 端口动态解析 | 用户反馈 | 从 GRAPE_SERVER_URL 解析端口，不硬编码 3000 |
+| 9 | per-instance handler 子类 | 并发审查 | type() 创建独立 handler 类，避免类变量并发覆盖 |
+| 10 | 白名单 DB 表 + 5 分钟缓存 | 用户要求 | sandbox_whitelist 表 scope(global/repo/engine) + 按 (backend_name, repo_key) 缓存 |
+
+### 后续 Issue（不在 #139 范围内）
+
 | 增强 | 来源 | 说明 |
 |------|------|------|
+| 凭据加密存储 + 代理层注入 | m9m CredentialStore | AES-256 + scrypt，phantom token 模式 |
+| 隔离等级枚举 | m9m IsolationLevel | 5 级，Issue #145 SandboxProvider |
+| 审计事件类型分类 | m9m AuditEvent | 30+ 事件类型 + 严重级别 + 保留期 |
+| 白名单管理 API | — | GET/POST/DELETE/PATCH /api/sandbox/whitelist |
 | seccomp BPF | Anthropic | 阻止 socket(AF_UNIX)，需 C 二进制 |
-| 代理认证 token | Anthropic | proxyAuthToken，纵深防御 |
-| TLS 终止代理 | Anthropic | MITM HTTPS，按需启用 |
-| 审计 HMAC key 轮转 | agent-bom | 多 key 列表，零停机轮转 |
-| Prometheus 指标 | agent-bom | blocked_total 指标 |
-| symlink 攻击防护 | Anthropic | findSymlinkInPath |
-| --unshare-user --uid | deepagents | 非 root 运行（需测试 worktree 权限） |
-| --clearenv | deepagents | 完全清空 env（破坏性大，需评估） |
 
 ---
 
