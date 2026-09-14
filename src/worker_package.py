@@ -98,7 +98,7 @@ def _ensure_grape_cli_wheel(whl_dir: str) -> str:
 
 
 def _manifest_version() -> str:
-    """按 manifest 各文件 (size, mtime) 计算内容指纹（代码变更即变化，git 无关）。"""
+    """按 manifest 各文件内容 sha256 计算指纹（代码变更即变化，git 无关，多 master 一致）。"""
     h = hashlib.sha256()
     for item in MANIFEST:
         path = os.path.join(ROOT, item)
@@ -109,15 +109,19 @@ def _manifest_version() -> str:
                     fp = os.path.join(root, f)
                     if fp.endswith(".pyc"):
                         continue
-                    st = os.stat(fp)
                     h.update(fp.encode("utf-8"))
-                    h.update(str(st.st_size).encode())
-                    h.update(str(st.st_mtime).encode())
+                    try:
+                        with open(fp, "rb") as fh:
+                            h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))
+                    except Exception:
+                        h.update(b"unreadable")
         elif os.path.isfile(path):
-            st = os.stat(path)
             h.update(path.encode("utf-8"))
-            h.update(str(st.st_size).encode())
-            h.update(str(st.st_mtime).encode())
+            try:
+                with open(path, "rb") as fh:
+                    h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))
+            except Exception:
+                h.update(b"unreadable")
     return h.hexdigest()[:16]
 
 
