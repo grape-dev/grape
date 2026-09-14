@@ -1446,8 +1446,20 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         elif _result is None:
                             await client.fail(_tid, f"task timed out after {task_timeout}s")
                         elif isinstance(_result, dict) and "exit_code" in _result:
-                            await client.complete(_tid, _result.get("text", ""), _result.get("exit_code", 0),
-                                                  session_id=_result.get("oc_session_id", ""), work_dir=t.get("cwd") or ".")
+                            _exit = _result.get("exit_code", 0)
+                            _text = _result.get("text", "")
+                            _errs = _result.get("errors") or []
+                            # exit_code=0 + 有文本 → 成功（含中间 error 告警）
+                            # exit_code=0 + 无文本 + 有 error → 失败（引擎吞错如 IAM 报错）
+                            # exit_code!=0 + 无文本 → 失败（崩溃/超时/启动失败）
+                            # exit_code!=0 + 有文本 → 交服务端 complete_task 判断（有结构化输出覆盖逻辑）
+                            if _exit == 0 and not _text and _errs:
+                                await client.fail(_tid, f"engine errors: {'; '.join(_errs[:3])}")
+                            elif _exit != 0 and not _text:
+                                await client.fail(_tid, f"engine exit_code={_exit}, errors: {'; '.join(_errs[:3])}")
+                            else:
+                                await client.complete(_tid, _text, _exit,
+                                                      session_id=_result.get("oc_session_id", ""), work_dir=t.get("cwd") or ".")
                         else:
                             await client.fail(_tid, "no done event")
                     except Exception as _ce:
