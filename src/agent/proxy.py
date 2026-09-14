@@ -598,20 +598,25 @@ class SandboxProxy:
 
     def start(self) -> dict:
         """启动代理 + 桥接。返回 {proxy_port, socket_path}。"""
-        # Unix socket 路径：放 home 目录下（不能在 /tmp，会被 tmpfs 覆盖）
-        import re as _re
+        # Unix socket 路径：用 md5 hash 保证并发唯一性（sanitize[:12] 会碰撞）
+        import hashlib as _hashlib
         home = os.path.expanduser("~")
-        safe_id = _re.sub(r"[^a-zA-Z0-9_-]", "", self._task_id)[:12]
+        unique_id = _hashlib.md5(self._task_id.encode()).hexdigest()[:16]
         self._socket_path = os.path.join(
-            home, f".grape-sandbox-{safe_id}.sock"
+            home, f".grape-sandbox-{unique_id}.sock"
         )
 
-        # 注入 handler 类变量
-        handler = WhitelistProxyHandler
-        handler._task_id = self._task_id
-        handler._whitelist = self._whitelist
-        handler._audit_log = self._audit_log
-        handler._leaked_tokens = self._leaked_tokens
+        # 创建 per-instance handler 子类（避免类变量被并发 SandboxProxy 覆盖）
+        handler = type(
+            f"Handler_{unique_id[:8]}",
+            (WhitelistProxyHandler,),
+            {
+                "_task_id": self._task_id,
+                "_whitelist": self._whitelist,
+                "_audit_log": self._audit_log,
+                "_leaked_tokens": self._leaked_tokens,
+            },
+        )
 
         # 代理服务器（ThreadingTCPServer 支持并发）
         self._server = socketserver.ThreadingTCPServer(
