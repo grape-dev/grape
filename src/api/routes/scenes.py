@@ -1455,14 +1455,30 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                 skill_id = resolve_skill_id(skill, repo_key=repo_key, user_id=user.get("id", ""))
 
                 runtime_id = 0
-                try:
-                    _cur = c.execute(
-                        "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                        (repo_key, agent_type)).fetchone()
-                    if _cur and _cur[0]:
-                        runtime_id = _cur[0]
-                except Exception:
-                    runtime_id = 0
+                # 优先使用场景 node 配置的 engine_runtime_ids
+                node_engine_ids = node.get("engine_runtime_ids") or []
+                if node_engine_ids:
+                    # 验证配置的引擎是否在线可用，选第一个可用的
+                    for eid in node_engine_ids:
+                        try:
+                            _row = c.execute(
+                                "SELECT status, healthy FROM agent_runtimes WHERE id=?",
+                                (eid,)).fetchone()
+                            if _row and _row[0] == "online" and _row[1] == 1:
+                                runtime_id = eid
+                                break
+                        except Exception:
+                            pass
+                # 场景未配置引擎或配置的引擎都不可用 → fallback
+                if not runtime_id:
+                    try:
+                        _cur = c.execute(
+                            "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                            (repo_key, agent_type)).fetchone()
+                        if _cur and _cur[0]:
+                            runtime_id = _cur[0]
+                    except Exception:
+                        runtime_id = 0
                 if not runtime_id:
                     from src.runtime.engine_select import resolve_default_engine
                     _rid = resolve_default_engine(repo_key, agent_type) or 0
