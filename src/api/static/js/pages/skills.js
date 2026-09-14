@@ -234,19 +234,14 @@ function _renderSkillPage() {
     <a class="${_skillTab==='user'?'ac':''}" onclick="_switchSkillTab('user')">${_scopeName('user')}</a>
   </div></div>`;
 
-  // 精选技能（仅 official，独立加载，不受搜索影响）
+  // 精选技能（仅 official，独立加载，不受搜索影响）— 网格布局撑满一行
   if (_skillTab === 'official' && _featuredSkills.length > 0) {
     html += `<div class="apple-card">
       <div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_skills')||'精选技能'}</h2></div>
-      <div class="scn-scroll-wrap">
-        <div id="featured-skills" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-skills')">
-          ${_featuredSkills.map(s => _renderSkillCard(s, true)).join('')}
-        </div>
-        <button class="scn-scroll-btn scn-scroll-prev" id="featured-skills-prev" onclick="document.getElementById('featured-skills').scrollBy({left:-314,behavior:'smooth'})">◀</button>
-        <button class="scn-scroll-btn scn-scroll-next" id="featured-skills-next" onclick="document.getElementById('featured-skills').scrollBy({left:314,behavior:'smooth'})">▶</button>
+      <div class="rgrid" id="featured-skills">
+        ${_featuredSkills.map(s => _renderSkillCard(s, true)).join('')}
       </div>
     </div>`;
-    setTimeout(() => _updateScrollBtns('featured-skills'), 100);
   }
 
   // 全部技能
@@ -481,9 +476,8 @@ function _renderSkillCard(s, fixedWidth) {
   const likeIcon = s.liked_by_me ? '❤️' : '🤍';
   const likeCount = s.like_count || 0;
   const featuredBadge = (s.is_featured && !isUserSkill) ? '<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟</span>' : '';
-  const widthStyle = fixedWidth ? 'style="flex-shrink:0;width:300px"' : '';
 
-  // 精选区只显示查看按钮，不显示删除/转换
+  // 精选区只显示查看按钮，不显示删除/转换（fixedWidth 仅控制按钮差异，不再控制宽度）
   const actionBtns = fixedWidth ? '' : (() => {
     let btns = '';
     if (s.scope !== 'official') {
@@ -497,7 +491,7 @@ function _renderSkillCard(s, fixedWidth) {
 
   // 华为云技能包特殊处理
   if (s.name === 'huawei-cloud') {
-    return `<div class="rc" ${widthStyle} onclick="app.nav('skill','${s.id}')">
+    return `<div class="rc" onclick="app.nav('skill','${s.id}')">
       <div class="rh">
         <span style="font-size:20px">📁</span>
         <span class="tg ${tagClass}" style="font-size:9px">${meta.label||at}</span>
@@ -510,7 +504,7 @@ function _renderSkillCard(s, fixedWidth) {
     </div>`;
   }
 
-  return `<div class="rc skill-card" ${widthStyle} data-name="${s.name}" data-agent="${at}" onclick="app.nav('skill','${s.id}')">
+  return `<div class="rc skill-card" data-name="${s.name}" data-agent="${at}" onclick="app.nav('skill','${s.id}')">
     <div class="rh">
       <span style="font-size:14px">${meta.icon||''}</span>
       <span class="tg ${tagClass}" style="font-size:9px">${meta.label||at}</span>
