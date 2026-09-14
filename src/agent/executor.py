@@ -22,6 +22,23 @@ import threading as _threading
 _active_procs: set[subprocess.Popen] = set()
 _active_procs_lock = _threading.Lock()
 
+# 沙箱资源注册表（Issue #139）：供 terminate_active_agents 清理
+_active_sandboxes: list = []
+_active_sandboxes_lock = _threading.Lock()
+
+
+def register_sandbox(sb_ctx):
+    """注册沙箱上下文，供 terminate_active_agents 清理。"""
+    with _active_sandboxes_lock:
+        _active_sandboxes.append(sb_ctx)
+
+
+def unregister_sandbox(sb_ctx):
+    """注销沙箱上下文（任务正常结束后调用）。"""
+    with _active_sandboxes_lock:
+        if sb_ctx in _active_sandboxes:
+            _active_sandboxes.remove(sb_ctx)
+
 
 def _track_proc(proc: subprocess.Popen):
     with _active_procs_lock:
@@ -34,11 +51,22 @@ def _untrack_proc(proc: subprocess.Popen):
 
 
 def terminate_active_agents(grace_seconds: int = 5):
-    """服务停机时终止所有运行中的 agent 子进程（opencode 等）。
+    """服务停机时终止所有运行中的 agent 子进程 + 清理沙箱资源。
 
     子进程被杀 → stdout 管道 EOF → executor 线程的 reader/主循环 break → 线程结束，
     uvicorn `shutdown_default_executor()` 不再等待 → 服务快速退出，避免 stop-sigterm 超时。
     """
+    # 先清理沙箱资源（cgroup + socket + 代理进程）
+    with _active_sandboxes_lock:
+        sandboxes = list(_active_sandboxes)
+        _active_sandboxes.clear()
+    for sb in sandboxes:
+        try:
+            sb.cleanup()
+        except Exception:
+            pass
+
+    # 再杀 Agent 进程
     with _active_procs_lock:
         procs = list(_active_procs)
         _active_procs.clear()
@@ -475,13 +503,40 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             log.info(f"{label}hermes HERMES_HOME isolated: {_iso_home} (state.db=:memory: via .pth)")
 
         # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
+        # Issue #139：网络隔离模式 — prepare_sandbox 创建代理/cgroup/socket
         _cmd = [agent_cmd] + args
+        _sandbox_ctx = None
         try:
+            from src.config import GRAPE_SANDBOX_NET
+            if GRAPE_SANDBOX_NET:
+                from src.agent.sandbox import prepare_sandbox
+                _sandbox_ctx = prepare_sandbox(
+                    task_id=use_session_id or f"task-{os.getpid()}",
+                    cwd=cwd,
+                    backend_name=backend.name,
+                )
+                if _sandbox_ctx:
+                    register_sandbox(_sandbox_ctx)
+                    log.info(
+                        f"{label}{backend.name} sandbox net isolated "
+                        f"(socket={_sandbox_ctx.socket_path})"
+                    )
+
             from src.agent.sandbox import build_bwrap_cmd
-            _wrap = build_bwrap_cmd(cwd, backend_name=backend.name)
+            _wrap = build_bwrap_cmd(cwd, backend_name=backend.name, sandbox_ctx=_sandbox_ctx)
             if _wrap:
-                _cmd = _wrap + _cmd
-                log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
+                if _sandbox_ctx and _sandbox_ctx.net_enabled:
+                    # 网络隔离模式：bwrap 命令改为启动脚本（桥接 + trap + Agent）
+                    from src.agent.sandbox import _build_in_sandbox_script
+                    agent_full = " ".join(_cmd)
+                    script = _build_in_sandbox_script(agent_full, _sandbox_ctx.bridge_script_path)
+                    _cmd = _wrap + ["/bin/sh", "-c", script]
+                else:
+                    _cmd = _wrap + _cmd
+                if _sandbox_ctx:
+                    log.info(f"{label}{backend.name} sandboxed via bwrap+net (cwd={cwd})")
+                else:
+                    log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
         except Exception as _bw_e:
             log.warning(f"{label}{backend.name} bwrap wrap failed, running unsandboxed: {_bw_e}")
 
@@ -492,6 +547,13 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
         )
         _track_proc(proc)
+
+        # Issue #139：Agent 进程启动后，把 PID 写入 cgroup
+        if _sandbox_ctx and _sandbox_ctx._cgroup and _sandbox_ctx._cgroup.created:
+            try:
+                _sandbox_ctx._cgroup.attach_pid(proc.pid)
+            except Exception as _cg_e:
+                log.warning(f"{label}cgroup attach pid failed: {_cg_e}")
         if backend.prompt_via_stdin:
             proc.stdin.write(prompt.encode("utf-8"))
             proc.stdin.close()
@@ -726,6 +788,17 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 _shutil.rmtree(_iso_home, ignore_errors=True)
             except Exception:
                 pass
+
+        # Issue #139：OOM 检测 + 沙箱资源清理
+        _exit_code = proc.returncode if proc.returncode is not None else -1
+        if _exit_code == 137:
+            log.error(f"{label}{backend.name} OOM killed (cgroup memory limit)")
+        if _sandbox_ctx:
+            from src.agent.sandbox import cleanup_sandbox
+            from src.agent.executor import unregister_sandbox
+            cleanup_sandbox(_sandbox_ctx)
+            unregister_sandbox(_sandbox_ctx)
+            _sandbox_ctx = None
 
         yield ("done", {
             "exit_code": proc.returncode, "text": _redact(full_text, _tokens),

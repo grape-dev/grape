@@ -473,3 +473,38 @@ BWRAP_RW_ENGINE = {
     # codex: 运行时写 ~/.codex（sqlite/sessions/logs/history）+ ~/.cache（缓存）
     "codex": ("~/.codex", "~/.cache"),
 }
+
+
+# ====== Agent 沙箱网络隔离（Issue #139）======
+
+# 网络隔离开关（默认 off，灰度开启）
+GRAPE_SANDBOX_NET = os.environ.get("GRAPE_SANDBOX_NET", "off").lower() in ("1", "true", "on", "yes")
+
+# 白名单域名（逗号分隔，支持通配符 *.example.com）
+SANDBOX_WHITELIST = [
+    d.strip() for d in os.environ.get(
+        "GRAPE_SANDBOX_WHITELIST",
+        "gitcode.com,api.gitcode.com,raw.gitcode.com,"
+        "github.com,api.github.com,"
+        "opengw.clouddeveloper.club,api.deepseek.com,"
+        "api.modelarts-maas.com,"
+        "registry.npmmirror.com,"
+        "pypi.tuna.tsinghua.edu.cn,"
+        "obs.cn-north-4.myhuaweicloud.com"
+    ).split(",") if d.strip()
+]
+
+# cgroup 限额（0 = 不限制；memory 0 = 自动取宿主机 50%）
+GRAPE_SANDBOX_MEM_LIMIT_MB = int(os.environ.get("GRAPE_SANDBOX_MEM_LIMIT_MB", "0"))
+GRAPE_SANDBOX_CPU_QUOTA = int(os.environ.get("GRAPE_SANDBOX_CPU_QUOTA", "0"))
+GRAPE_SANDBOX_MAX_PIDS = int(os.environ.get("GRAPE_SANDBOX_MAX_PIDS", "0"))
+
+# 审计日志路径（空 = 默认 {WORKSPACE_DIR}/logs/sandbox-audit.jsonl）
+SANDBOX_AUDIT_LOG = os.environ.get("SANDBOX_AUDIT_LOG", "")
+SANDBOX_AUDIT_HMAC_KEY = os.environ.get("SANDBOX_AUDIT_HMAC_KEY", "")
+
+# 凭据遮蔽清单（逗号分隔的 env 变量名；P0 默认空 — 不遮蔽任何凭据）
+SANDBOX_CREDENTIAL_ENV_VARS = [
+    v.strip() for v in os.environ.get("SANDBOX_CREDENTIAL_ENV_VARS", "").split(",")
+    if v.strip()
+]

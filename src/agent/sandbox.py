@@ -32,11 +32,12 @@ def _bwrap_bin() -> str:
     return shutil.which("bwrap") or ""
 
 
-def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
+def build_bwrap_cmd(cwd: str, backend_name: str = "", sandbox_ctx=None) -> list[str] | None:
     """构造 bwrap 包装命令前缀；返回 None 表示不包装（关 / 缺 bwrap / cwd 无效）。
 
     返回 [bwrap, ...opts, "--"] 前缀，调用方 append 原命令 argv（Popen 时用）。
     backend_name 用于选择引擎专用白名单（opencode/codearts/hermes）。
+    sandbox_ctx 有值时启用网络隔离模式（Issue #139）。
     """
     if not sandbox_enabled():
         return None
@@ -50,7 +51,15 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
         BWRAP_RO_SYSTEM, BWRAP_RO_ENGINE_COMMON, BWRAP_RO_ENGINE, BWRAP_RW_ENGINE,
     )
 
-    opts = [bwrap, "--die-with-parent", "--unshare-all", "--share-net"]
+    if sandbox_ctx and sandbox_ctx.net_enabled:
+        # ===== 网络隔离模式（Issue #139）=====
+        opts = [bwrap, "--die-with-parent", "--new-session",
+                "--cap-drop", "ALL",  # 丢弃所有 capabilities
+                "--unshare-net",      # 完全隔离网络
+                "--unshare-pid", "--proc", "/proc"]  # PID 隔离
+    else:
+        # ===== 原有模式（--share-net）=====
+        opts = [bwrap, "--die-with-parent", "--unshare-all", "--share-net"]
 
     # 基础系统（ro）
     for p in BWRAP_RO_SYSTEM:
@@ -81,7 +90,7 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
         opts += ["--bind", _overlay, _overlay]
 
     # /proc /dev
-    opts += ["--proc", "/proc", "--dev", "/dev"]
+    opts += ["--proc", "/proc", "--dev", "/dev"] if not (sandbox_ctx and sandbox_ctx.net_enabled) else ["--dev", "/dev"]
 
     # git worktree bare mirror（codebase/）：coding/qa/sre 的 .git 是指向
     # {...}/codebase/worktrees/{agent_type} 的指针文件，git commit/push 要读写
@@ -93,12 +102,241 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
         if os.path.isdir(_codebase):
             opts += ["--bind", _codebase, _codebase]
 
+    # ===== 网络隔离模式额外参数 =====
+    if sandbox_ctx and sandbox_ctx.net_enabled:
+        # Unix socket 挂入沙箱（--bind，不是 ro-bind，socket 需要读写）
+        opts += ["--bind", sandbox_ctx.socket_path, sandbox_ctx.socket_path]
+
+        # 沙箱内桥接脚本（ro-bind）
+        if sandbox_ctx.bridge_script_path and os.path.isfile(sandbox_ctx.bridge_script_path):
+            opts += ["--ro-bind", sandbox_ctx.bridge_script_path, sandbox_ctx.bridge_script_path]
+
+        # CA 证书
+        if os.path.isdir("/etc/ssl/certs"):
+            opts += ["--ro-bind", "/etc/ssl/certs", "/etc/ssl/certs"]
+        if os.path.isdir("/etc/pki"):
+            opts += ["--ro-bind", "/etc/pki", "/etc/pki"]
+
+        # 遮蔽敏感文件（--symlink 要求目标不存在，用 --ro-bind /dev/null 替代）
+        if os.path.exists("/etc/shadow"):
+            opts += ["--ro-bind", "/dev/null", "/etc/shadow"]
+
+        # 代理 env 变量
+        from src.agent.proxy import generate_proxy_envs
+        for key, value in generate_proxy_envs(3128):
+            opts += ["--setenv", key, value]
+
+        # GRAPESOCK — 沙箱内桥接读
+        opts += ["--setenv", "GRAPESOCK", sandbox_ctx.socket_path]
+
+        # 凭据遮蔽（P0 默认空列表 — 见 config.py SANDBOX_CREDENTIAL_ENV_VARS）
+        from src.config import SANDBOX_CREDENTIAL_ENV_VARS
+        for var in SANDBOX_CREDENTIAL_ENV_VARS:
+            if var:
+                opts += ["--unsetenv", var]
+
     # 工位 cwd（rw + chdir，保持 /proc/{pid}/cwd 不变）
     opts += ["--bind", cwd, cwd]
     opts += ["--chdir", cwd]
 
-    # hermes 需要写 /tmp 下临时 overlay？ACP 只写 /tmp/hermes-acp-homes/{hash}（已 bind）。
-    # 其余引擎的 /tmp 临时文件落沙箱 tmpfs，任务结束丢弃（更干净）。
-
     opts.append("--")
     return opts
+
+
+# ===== 网络隔离：prepare / cleanup / SandboxContext / 沙箱内脚本 =====
+
+def _write_bridge_script(socket_path: str) -> str:
+    """把沙箱内桥接 Python 脚本写到宿主侧临时文件，返回路径。
+
+    调用方需把返回的路径 ro-bind 进沙箱（build_bwrap_cmd 中处理）。
+    避免在沙箱内用 heredoc / python3 -c 的引号嵌套问题。
+    """
+    import tempfile
+    bridge_code = f'''import socketserver, socket, threading, sys
+SOCK = {socket_path!r}
+class H(socketserver.BaseRequestHandler):
+    def handle(self):
+        try:
+            u = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            u.connect(SOCK)
+        except Exception as e:
+            sys.stderr.write('bridge error: ' + str(e) + chr(10))
+            return
+        def p(s, d):
+            try:
+                while True:
+                    b = s.recv(65536)
+                    if not b:
+                        break
+                    d.sendall(b)
+            except:
+                pass
+            finally:
+                try:
+                    d.shutdown(socket.SHUT_WR)
+                except:
+                    pass
+        t = threading.Thread(target=p, args=(self.request, u), daemon=True)
+        t.start()
+        p(u, self.request)
+        t.join()
+socketserver.ThreadingTCPServer(('127.0.0.1', 3128), H).serve_forever()
+'''
+    # 写到 home 目录（不能在 /tmp，会被 bwrap tmpfs 覆盖）
+    home = os.path.expanduser("~")
+    fd, path = tempfile.mkstemp(
+        suffix=".py", prefix=".grape-bridge-", dir=home
+    )
+    with os.fdopen(fd, "w") as f:
+        f.write(bridge_code)
+    return path
+
+
+def _build_in_sandbox_script(agent_cmd: str, bridge_script_path: str) -> str:
+    """生成沙箱内启动脚本：桥接 + trap + Agent。
+
+    bridge_script_path 是 _write_bridge_script 返回的路径（已 ro-bind 进沙箱）。
+    """
+    script = (
+        f"python3 {bridge_script_path} &\n"
+        "sleep 0.5\n"  # 等桥接启动
+        "trap 'kill %1 2>/dev/null' EXIT\n"
+        f"exec {agent_cmd}"
+    )
+    return script
+
+
+class SandboxContext:
+    """沙箱资源上下文 — 持有代理/cgroup/socket 的引用，供 executor 管理。"""
+
+    def __init__(self, task_id: str, net_enabled: bool):
+        self.task_id = task_id
+        self.net_enabled = net_enabled
+        self.socket_path: str = ""
+        self.proxy_port: int = 0
+        self.bridge_script_path: str = ""  # 沙箱内桥接脚本路径（ro-bind 进沙箱）
+        self._proxy = None       # type: ignore[type-arg]
+        self._cgroup = None      # type: ignore[type-arg]
+        self._audit_log = None   # type: ignore[type-arg]
+
+    def cleanup(self):
+        """清理所有沙箱资源。幂等。"""
+        if self._cgroup:
+            try:
+                self._cgroup.destroy(force=True)
+            except Exception:
+                pass
+            self._cgroup = None
+        if self._proxy:
+            try:
+                self._proxy.stop()
+            except Exception:
+                pass
+            self._proxy = None
+        if self.bridge_script_path and os.path.exists(self.bridge_script_path):
+            try:
+                os.unlink(self.bridge_script_path)
+            except Exception:
+                pass
+            self.bridge_script_path = ""
+
+
+def prepare_sandbox(task_id: str, cwd: str, backend_name: str = "") -> SandboxContext | None:
+    """准备沙箱资源：环境预检 → cgroup → 代理 → 返回 SandboxContext。
+
+    返回 None = 网络隔离不可用（降级到原有 --share-net 模式）。
+    """
+    from src.config import log
+
+    # 1. 环境预检
+    from src.agent.detect import detect_sandbox_env
+    from src.config import SANDBOX_CREDENTIAL_ENV_VARS
+    can_proceed, results, env_warnings = detect_sandbox_env(SANDBOX_CREDENTIAL_ENV_VARS)
+
+    if not can_proceed:
+        hard_fails = [r for r in results if not r.passed]
+        log.warning(
+            f"sandbox net: hard failure, falling back to --share-net: "
+            f"{[r.name for r in hard_fails]}"
+        )
+        return None
+
+    # 软失败告警
+    for r in results:
+        if not r.passed:
+            log.info(f"sandbox net: degraded — {r.name}: {r.reason}")
+
+    # 敏感 env 告警
+    for var in env_warnings:
+        log.warning(
+            f"sandbox net: sensitive env var '{var}' not masked "
+            f"(consider adding to SANDBOX_CREDENTIAL_ENV_VARS)"
+        )
+
+    ctx = SandboxContext(task_id, net_enabled=True)
+
+    # 2. cgroup
+    from src.config import (
+        GRAPE_SANDBOX_MEM_LIMIT_MB,
+        GRAPE_SANDBOX_CPU_QUOTA,
+        GRAPE_SANDBOX_MAX_PIDS,
+    )
+    from src.agent.cgroup import CgroupSlice
+    ctx._cgroup = CgroupSlice(
+        task_id,
+        mem_limit_mb=GRAPE_SANDBOX_MEM_LIMIT_MB,
+        cpu_quota=GRAPE_SANDBOX_CPU_QUOTA,
+        max_pids=GRAPE_SANDBOX_MAX_PIDS,
+    )
+    ctx._cgroup.create()
+
+    # 3. 审计日志
+    from src.config import SANDBOX_AUDIT_LOG, SANDBOX_AUDIT_HMAC_KEY
+    audit_path = SANDBOX_AUDIT_LOG
+    if not audit_path:
+        # 默认放 workspace logs 目录
+        from src.config import CHAT_CWD_BASE
+        audit_path = os.path.join(
+            os.path.dirname(CHAT_CWD_BASE) if CHAT_CWD_BASE else os.path.expanduser("~"),
+            "logs", "sandbox-audit.jsonl",
+        )
+    from src.agent.audit import RotatingAuditLog
+    ctx._audit_log = RotatingAuditLog(audit_path, SANDBOX_AUDIT_HMAC_KEY)
+
+    # 4. 代理 + 桥接
+    from src.config import SANDBOX_WHITELIST
+    from src.agent.proxy import SandboxProxy, get_dynamic_whitelist
+    whitelist = get_dynamic_whitelist(SANDBOX_WHITELIST)
+
+    # 凭据泄露检测：读取被注入的 token 值
+    leaked_tokens = []
+    for var in ("BOT_GITCODE_TOKEN", "USER_GITCODE_TOKEN", "BOT_TOKEN", "BOT_GITHUB_TOKEN"):
+        val = os.environ.get(var, "")
+        if val:
+            leaked_tokens.append((var, val))
+
+    ctx._proxy = SandboxProxy(
+        task_id=task_id,
+        whitelist=whitelist,
+        audit_log=ctx._audit_log,
+        leaked_tokens=leaked_tokens,
+    )
+    info = ctx._proxy.start()
+    ctx.socket_path = info["socket_path"]
+    ctx.proxy_port = info["proxy_port"]
+
+    # 4.5 沙箱内桥接脚本（写到宿主侧文件，ro-bind 进沙箱）
+    ctx.bridge_script_path = _write_bridge_script(ctx.socket_path)
+
+    log.info(
+        f"sandbox prepared: task={task_id} "
+        f"socket={ctx.socket_path} proxy_port={ctx.proxy_port} "
+        f"cgroup={ctx._cgroup.created}"
+    )
+    return ctx
+
+
+def cleanup_sandbox(ctx: SandboxContext | None):
+    """清理沙箱资源（prepare_sandbox 的配对）。"""
+    if ctx:
+        ctx.cleanup()
