@@ -1662,7 +1662,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     from src.repo_key import to_repo_key, from_repo_key
     from src.api.pipeline_config import get_pipeline_config
 
-    _keys = [(to_repo_key(from_repo_key(r[2])), f"#{r[3]}") for r in rows]
+    _keys = [(r[2] or "", f"#{r[3]}") for r in rows]
     _stage_map = _batch_fetch_issue_state(_keys)
     _running = _batch_running_agent_tasks(_keys)
     _agent_status_map = _batch_fetch_agent_statuses(_keys)

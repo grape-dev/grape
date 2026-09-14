@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -438,6 +438,9 @@ function loadAgentTypes() {
       renderChat(param || null);
       // 切换回 Chat 页面时恢复活跃查询（不中断）
       if (typeof resumeChatTask === 'function') setTimeout(resumeChatTask, 500);
+    } else if (view === 'im-channel') {
+      title.textContent = I18N.t('app.nav.im_channel');
+      renderImChannel();
     } else if (view === 'tasks') {
       title.textContent = I18N.t('app.current_project');
       renderTasks();
@@ -654,7 +657,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '16');
+      localStorage.setItem('app_cache_ver', '18');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -681,13 +684,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '16') {
+    if (localStorage.getItem('app_cache_ver') !== '18') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '16');
+      localStorage.setItem('app_cache_ver', '18');
     }
 
     const token = localStorage.getItem('token');

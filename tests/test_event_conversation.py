@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
+os.environ.setdefault("GRAPE_PIPELINE_MODE", "legacy")  # 测试用 legacy 模式，避免 plugin 广播导致无 worker claim
 
 from fastapi.testclient import TestClient
 from src.api.main import app
@@ -41,6 +42,8 @@ def setup_module():
         c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token) VALUES (?,?,?,?,?,?)",
                   (_REPO_KEY, "org", "test", "org/test", 1, _BOT_TOKEN))
         db.commit()
+    # 建立 user_repos 归属关系（check_repo_access 要求 JWT 用户关联仓库）
+    user_db.mark_user_repo_join(_uid["id"], _REPO_KEY, is_join=True, is_admin=True)
 
 
 def teardown_module():
@@ -604,15 +607,15 @@ class TestRedispatchOnboarding:
         from src.user.db import set_meta_value
         set_meta_value(f"redispatch:{seq}", "")
 
-        # 断言：重派 onboarding 事件 → 调用 onboarding.retry_onboarding_target(repo, owner, explore)
+        # 断言：重派 onboarding 事件 → 调用 onboarding.retry_onboarding_task(repo, owner, explore)
         calls = []
-        with patch("src.api.onboarding.retry_onboarding_target", side_effect=lambda *a, **k: calls.append((a, k)) or {"ok": True, "seq": 9009}):
+        with patch("src.api.onboarding.retry_onboarding_task", side_effect=lambda *a, **k: calls.append((a, k)) or {"ok": True, "seq": 9009}):
             r = client.post(f"/api/events/{seq}/redispatch", headers=_headers)
         assert r.status_code == 200, r.text
-        assert calls, "重派 onboarding 事件应调用 retry_onboarding_target"
+        assert calls, "重派 onboarding 事件应调用 retry_onboarding_task"
         repo_arg, target_arg = calls[0][0][0], calls[0][0][2]
         assert repo_arg == _REPO_KEY, "应透传完整 repo_key（含平台前缀，非空 repository）"
-        assert target_arg == "explore"
+        assert target_arg == "dev"
         assert r.json().get("event_seq") == 9009
 
         # 原事件保持 failed（历史记录），不因重派被置回 running 假象
