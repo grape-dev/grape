@@ -108,11 +108,9 @@ class CgroupSlice:
                         f"cgroup v2: auto memory limit = {mem_limit}MB (50% of host)"
                     )
 
-            # 创建子组（v2 中 mkdir 自动启用 controller）
-            self._mkdir(base)
-
-            # 启用 controller（v2 需要显式启用）
-            # 写入父 cgroup 的 cgroup.subtree_control
+            # 1. 先启用 controller（v2 "no internal process" 约束：
+            #    根 cgroup 已有进程时不能在其 subtree_control 启用新 controller，
+            #    必须在 mkdir 子组之前写 subtree_control）
             controllers = []
             if mem_limit > 0:
                 controllers.append("+memory")
@@ -129,14 +127,17 @@ class CgroupSlice:
                 except Exception as e:
                     log.warning(f"cgroup v2: enable controllers failed: {e}")
 
-            # memory.max
+            # 2. 创建子组
+            self._mkdir(base)
+
+            # 3. memory.max
             if mem_limit > 0:
                 self._write(
                     f"{base}/memory.max",
                     str(mem_limit * 1024 * 1024),
                 )
 
-            # cpu.max（格式："$MAX $PERIOD"，如 "50000 100000" = 50%）
+            # 4. cpu.max（格式："$MAX $PERIOD"，如 "50000 100000" = 50%）
             if self._cpu_quota > 0:
                 quota_us = self._cpu_quota * 1000
                 self._write(
@@ -144,7 +145,7 @@ class CgroupSlice:
                     f"{quota_us} 100000",
                 )
 
-            # pids.max
+            # 5. pids.max
             if self._max_pids > 0:
                 self._write(f"{base}/pids.max", str(self._max_pids))
 

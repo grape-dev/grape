@@ -252,7 +252,7 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         # CONNECT 200 — 直接写字节，不用 send_response（避免加 Date/Server header）
-        self.connection.sendall(b"HTTP/1.0 200 Connection Established\r\n\r\n")
+        self.connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         self._audit(
             "CONNECT", host, self.path,
             {"allowed": True, "reason": "whitelist match"}, start, 200,
@@ -388,9 +388,7 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
         # 2. loopback 端口限制 — 只允许 grape API 端口，阻止 SSH/MySQL/Redis 等
         host_base = host.split(":")[0]
         if host_base in ("127.0.0.1", "localhost", "::1"):
-            from src.config import log as _log
-            import os as _os
-            _grape_port = int(_os.environ.get("GRAPE_SERVER_PORT", "3000"))
+            _grape_port = int(os.environ.get("GRAPE_SERVER_PORT", "3000"))
             if port != _grape_port:
                 return {"allowed": False, "reason": f"loopback port {port} denied (only {_grape_port} allowed)"}
         else:

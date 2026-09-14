@@ -91,8 +91,8 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "", sandbox_ctx=None) -> list[
         os.makedirs(_overlay, exist_ok=True)
         opts += ["--bind", _overlay, _overlay]
 
-    # /proc /dev
-    opts += ["--proc", "/proc", "--dev", "/dev"] if not (sandbox_ctx and sandbox_ctx.net_enabled) else ["--dev", "/dev"]
+    # /proc /dev — 两种模式都挂载（--unshare-net 不影响 --proc）
+    opts += ["--proc", "/proc", "--dev", "/dev"]
 
     # git worktree bare mirror（codebase/）：coding/qa/sre 的 .git 是指向
     # {...}/codebase/worktrees/{agent_type} 的指针文件，git commit/push 要读写
