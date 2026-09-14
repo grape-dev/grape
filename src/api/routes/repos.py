@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
-from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token
+from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token, require_no_session_token
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
@@ -184,7 +184,7 @@ def _probe_stale_repos(api_token: str, user_id: int):
 
 
 @router.get("/member", operation_id="repos_member", summary="我可操作的仓库列表")
-def list_member_repos(user: dict = Depends(get_current_user_or_api_key)):
+def list_member_repos(user: dict = Depends(require_no_session_token)):
     """获取用户可操作仓库列表：优先从 user_repos 缓存读取；缓存为空或超过 TTL 时自动从 GitCode 拉取刷新
 
     加载前先检查托管仓库在 GitCode 上是否还存在（GitCode 删仓库不发 webhook，
@@ -727,7 +727,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
 
 
 @router.get("/managed", operation_id="repos_managed", summary="托管仓库列表")
-def list_managed_repos(user: dict = Depends(get_current_user_or_api_key)):
+def list_managed_repos(user: dict = Depends(require_no_session_token)):
     repos = user_db.get_managed_repos(user["id"])
     return {"repos": [{
         "repo_key": r["repo_key"],
@@ -813,7 +813,7 @@ def set_deploy_url(body: DeployUrlBody, user: dict = Depends(get_current_user)):
 
 
 @router.get("/deploy-url/{owner}/{repo_name}", operation_id="repos_deploy_url", summary="获取仓库部署 URL")
-def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(get_current_user_or_api_key)):
+def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(require_no_session_token)):
     """获取仓库的部署访问 URL"""
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock

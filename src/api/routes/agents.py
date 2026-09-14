@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token
+from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token, require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 
@@ -102,7 +102,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                      keyword: str = Query("", description="事件关键词搜索（seq/issue_id/event_type/title/summary/actor）"),
                      page: int = Query(1, ge=1, description="页码，从 1 开始"),
                      page_size: int = Query(10, ge=1, le=100, description="每页条数"),
-                     user: dict = Depends(get_current_user_or_api_key)):
+                     user: dict = Depends(require_no_session_token)):
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 

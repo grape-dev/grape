@@ -132,6 +132,19 @@ def get_user_or_none(request: Request) -> dict | None:
         return None
 
 
+def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) -> dict:
+    """账户/平台管理端点鉴权：session_token（tk_）→ 403；API Key / JWT 维持现状放行。
+
+    Phase token-scope（docs/weekly-03/token-scope-classification-design.md）：
+    防止 agent 会话凭据（tk_）用于账户/平台管理操作；`grape_` API Key 与 Web JWT 不受影响。
+    经 Depends 复用 get_current_user_or_api_key（override 可注入，测试友好）。
+    """
+    if user.get("auth_type") == "session_token":
+        raise HTTPException(status_code=403, detail={"code": 403,
+                                                     "message": "该接口不支持会话 token（agent 凭据不能用于账户/平台管理）"})
+    return user
+
+
 def get_user_token(username: str) -> str:
     """获取用户的个人 GitCode API Token（Chat Agent 使用）"""
     acc = user_db.get_user_account(username) or {}

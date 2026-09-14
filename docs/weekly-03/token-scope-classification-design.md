@@ -92,11 +92,14 @@
 | `GET /api/auth/profile` | profile | or_api_key | **session→403** |
 | `GET /api/chat/conversations|messages` | chat_conversations/messages | or_api_key | **session→403** |
 | `GET /api/repos/member|managed|deploy-url` | repos_member/managed/deploy_url | or_api_key | **session→403** |
-| `GET /api/scenes` | scenes_list | or_api_key | **session→403** |
 | `GET /api/skills|skills/by-id` | skills_list/detail | or_api_key | **session→403** |
 
+> ❗ **`/api/scenes`（list）不在 D 类**：VOD 技能（`skills/vod/vod/references/grape-cli-reference.md`）
+> 用 `$GRAPE_SESSION_TOKEN` 调 `grape api GET /api/scenes`（通用兜底），若将 scenes 归 D 类（session→403）
+> 会**破坏 VOD 技能**。故 scenes 维持现状（session/API Key/JWT 均放行）。
+>
 > **D 类说明**：账户/平台管理属用户身份范畴，**agent 会话 token（tk_）不得用于此类管理端点** → 本次对
-> session_token 返回 403；`grape_`（API Key）与 JWT（Web 页面：仓库/场景/技能）**维持现状放行**。
+> session_token 返回 403；`grape_`（API Key）与 JWT（Web 页面：仓库管理/技能）**维持现状放行**。
 
 ---
 
@@ -185,16 +188,17 @@ def require_no_session_token(request: Request) -> dict:
 
 | # | 用例 | 准备 | 断言 |
 |---|------|------|------|
-| T1 | `test_d_scenes_session_403` | auth_type=session_token 调 `GET /api/scenes` | 403，msg 含「会话 token」 |
-| T2 | `test_d_scenes_api_key_200` | auth_type=api_key 调 `GET /api/scenes` | 200 |
-| T3 | `test_d_scenes_jwt_200` | auth_type=jwt 调 `GET /api/scenes` | 200（JWT 不受影响） |
-| T4 | `test_d_skills_session_403` | auth_type=session_token 调 `GET /api/skills` | 403 |
-| T5 | `test_d_skills_api_key_200` | auth_type=api_key 调 `GET /api/skills` | 200 |
-| T6 | `test_d_repos_managed_session_403` | auth_type=session_token 调 `GET /api/repos/managed` | 403 |
-| T7 | `test_d_repos_managed_api_key_200` | auth_type=api_key 调 `GET /api/repos/managed` | 200 |
-| T8 | `test_d_profile_jwt_200` | auth_type=jwt 调 `GET /api/auth/profile` | 200 |
+| T1 | `test_d_skills_session_403` | auth_type=session_token 调 `GET /api/skills` | 403，msg 含「会话 token」 |
+| T2 | `test_d_skills_api_key_200` | auth_type=api_key 调 `GET /api/skills` | 200 |
+| T3 | `test_d_skills_jwt_200` | auth_type=jwt 调 `GET /api/skills` | 200（JWT 不受影响） |
+| T4 | `test_d_repos_managed_session_403` | auth_type=session_token 调 `GET /api/repos/managed` | 403 |
+| T5 | `test_d_repos_managed_api_key_200` | auth_type=api_key 调 `GET /api/repos/managed` | 200 |
+| T6 | `test_d_profile_session_403` | auth_type=session_token 调 `GET /api/auth/profile` | 403 |
+| T7 | `test_d_profile_jwt_200` | auth_type=jwt 调 `GET /api/auth/profile` | 200 |
+| T8 | `test_d_agents_session_403` | auth_type=session_token 调 `GET /api/agents/{name}/o/r` | 403 |
 | T9 | `test_d_chat_conversations_session_403` | auth_type=session_token 调 `GET /api/chat/conversations` | 403 |
 | T10 | `test_d_chat_conversations_api_key_200` | auth_type=api_key 调 `GET /api/chat/conversations` | 200 |
+| T10a | `test_scenes_session_200_kept` | auth_type=session_token 调 `GET /api/scenes` | **200（scenes 不归 D 类，VOD 技能用 session 调）** |
 
 ### 非 D 类端点不回归（维持三通道）
 
