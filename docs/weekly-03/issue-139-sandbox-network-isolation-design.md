@@ -3,7 +3,7 @@
 > Issue：https://gitcode.com/grape-dev/grape/issues/139
 > 父 Issue：#64 支持任务执行沙箱隔离
 > 分支：`feat/issue-139-sandbox-network-isolation`（基于 `weekly-03`）
-> 日期：2026-09-14（v6 — 实施前验证完成，修正 bwrap 兼容性问题）
+> 日期：2026-09-14（v7 — 白名单 DB 表 + 5 分钟缓存）
 
 ---
 
@@ -1186,8 +1186,9 @@ def build_bwrap_cmd(cwd, backend_name="", sandbox_ctx=None):
 | 5 | `src/agent/sandbox.py` | build_bwrap_cmd 改造（--unshare-net + --cap-drop ALL + --disable-userns + --bind socket + CA + --symlink shadow + --unsetenv + --unshare-pid + prepare/cleanup） | 修改 |
 | 6 | `src/agent/executor.py` | prepare/cleanup + OOM 检测 + terminate_active_agents + register_sandbox | 修改 |
 | 7 | `src/runtime/agent.py` | Worker 端同步 | 修改 |
-| 8 | `src/config.py` | 白名单 + cgroup 限额 + 审计路径 + HMAC key + 凭据清单 | 修改 |
-| 9 | `tests/test_sandbox_net.py` | 验收用例 1-20 | 新增 |
+| 8 | `src/config.py` | 白名单配置 + cgroup 限额 + 审计路径 + HMAC key + 凭据清单 + DB 降级 | 修改 |
+| 9 | `src/api/db_setup.py` | sandbox_whitelist 表 DDL + 索引（v7 新增） | 修改 |
+| 10 | `tests/test_sandbox_net.py` | 验收用例 1-28 | 新增 |
 
 ---
 
@@ -1225,6 +1226,21 @@ SANDBOX_AUDIT_HMAC_KEY = os.environ.get("SANDBOX_AUDIT_HMAC_KEY", "")
 
 SANDBOX_CREDENTIAL_ENV_VARS = [v.strip() for v in os.environ.get("SANDBOX_CREDENTIAL_ENV_VARS", "").split(",") if v.strip()]
 # P0 默认空 — 不遮蔽任何凭据。后续 skill 迁移到 grape API 后恢复。
+
+# 白名单 DB 表 + 5 分钟缓存（v7 新增）
+# 生产环境通过 DB 表 sandbox_whitelist 管理白名单，支持动态增删无需重启。
+# 环境变量 SANDBOX_WHITELIST_FALLBACK 仅用于首次启动 / DB 不可用时降级。
+SANDBOX_WHITELIST_FALLBACK = [
+    d.strip() for d in os.environ.get("GRAPE_SANDBOX_WHITELIST",
+        "gitcode.com,api.gitcode.com,raw.gitcode.com,"
+        "github.com,api.github.com,"
+        "opengw.clouddeveloper.club,api.deepseek.com,"
+        "api.modelarts-maas.com,"
+        "registry.npmmirror.com,"
+        "pypi.tuna.tsinghua.edu.cn,"
+        "obs.cn-north-4.myhuaweicloud.com"
+    ).split(",") if d.strip()]
+SANDBOX_WHITELIST = SANDBOX_WHITELIST_FALLBACK  # 兼容
 ```
 
 ---
@@ -1256,7 +1272,87 @@ SANDBOX_CREDENTIAL_ENV_VARS = [v.strip() for v in os.environ.get("SANDBOX_CREDEN
 
 ---
 
-## 八、后续增强
+## 八、白名单 DB 表 + 5 分钟缓存（v7 新增）
+
+### 8.1 表结构
+
+```sql
+CREATE TABLE IF NOT EXISTS sandbox_whitelist (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain      TEXT NOT NULL,                        -- 域名或通配符（如 *.gitcode.com）
+    scope       TEXT NOT NULL DEFAULT 'global',       -- global / repo / engine
+    scope_value TEXT NOT NULL DEFAULT '',             -- scope=repo 时为 owner/repo；engine 时为引擎名
+    enabled     INTEGER NOT NULL DEFAULT 1,           -- 1=启用 0=禁用
+    description TEXT NOT NULL DEFAULT '',             -- 说明（为什么加这个域名）
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (domain, scope, scope_value),              -- 同域名可跨 scope，但同 scope+value 不可重复
+    CHECK (scope = 'global' OR scope_value != '')    -- scope=repo/engine 时 scope_value 不能为空
+);
+CREATE INDEX IF NOT EXISTS idx_whitelist_scope ON sandbox_whitelist(scope, scope_value, enabled);
+CREATE INDEX IF NOT EXISTS idx_whitelist_domain ON sandbox_whitelist(domain, enabled);
+```
+
+### 8.2 scope 设计
+
+| scope | 含义 | scope_value | 场景 |
+|-------|------|-------------|------|
+| global | 所有 Agent 任务都放行 | 空 | gitcode.com / 模型 API / pip / npm |
+| repo | 特定仓库的 Agent 才放行 | owner/repo | 某仓库需要连特定私有 API |
+| engine | 特定引擎才放行 | opencode/hermes/codearts/codex | codearts 需要 snap-access.cn-north-4 |
+
+### 8.3 查询 + 缓存
+
+```python
+# src/agent/sandbox.py
+
+_whitelist_cache: list[str] | None = None
+_whitelist_cache_ts: float = 0
+_whitelist_cache_lock = threading.Lock()
+_WHITELIST_CACHE_TTL = 300  # 5 分钟
+
+def _get_whitelist_from_db(backend_name: str = "", repo_key: str = "") -> list[str]:
+    """从 DB 查询白名单（5 分钟缓存）。
+
+    查询条件：enabled=1 AND (
+        scope='global' OR
+        (scope='engine' AND scope_value=backend_name) OR
+        (scope='repo' AND scope_value=repo_key)
+    )
+
+    DB 不可用或表不存在时降级到 SANDBOX_WHITELIST_FALLBACK 环境变量。
+    """
+    # 1. 检查缓存（5 分钟 TTL）
+    # 2. 缓存未命中 → 查 DB
+    # 3. DB 无数据/不可用 → 降级到环境变量
+    # 4. 更新缓存
+    # 5. 加入动态白名单（127.0.0.1 + GRAPE_SERVER_URL）
+
+def invalidate_whitelist_cache():
+    """手动失效缓存（API 增删白名单后调用）。"""
+```
+
+### 8.4 降级链
+
+```
+DB 表 sandbox_whitelist（有数据）
+  ↓ DB 不可用 / 表不存在 / 无数据
+环境变量 SANDBOX_WHITELIST_FALLBACK
+  ↓ 环境变量未设
+硬编码默认值（config.py 中的 12 个域名）
+```
+
+### 8.5 API 端点（后续实现）
+
+通过 grape API 增删白名单（进 OpenAPI 契约，CLI 可操作）：
+- `GET /api/sandbox/whitelist` — 列表
+- `POST /api/sandbox/whitelist` — 新增（调用后 invalidate_whitelist_cache）
+- `DELETE /api/sandbox/whitelist/{id}` — 删除（调用后 invalidate_whitelist_cache）
+- `PATCH /api/sandbox/whitelist/{id}` — 启用/禁用（调用后 invalidate_whitelist_cache）
+
+---
+
+## 九、后续增强
 
 | 增强 | 来源 | 说明 |
 |------|------|------|
@@ -1271,7 +1367,7 @@ SANDBOX_CREDENTIAL_ENV_VARS = [v.strip() for v in os.environ.get("SANDBOX_CREDEN
 
 ---
 
-## 九、验收标准
+## 十、验收标准
 
 | # | 场景 | 预期 |
 |---|------|------|
@@ -1306,7 +1402,7 @@ SANDBOX_CREDENTIAL_ENV_VARS = [v.strip() for v in os.environ.get("SANDBOX_CREDEN
 
 ---
 
-## 十、实施步骤
+## 十一、实施步骤
 
 | 步骤 | 内容 | 参考 |
 |------|------|------|
@@ -1334,7 +1430,7 @@ SANDBOX_CREDENTIAL_ENV_VARS = [v.strip() for v in os.environ.get("SANDBOX_CREDEN
 
 ---
 
-## 十一、功能影响分析
+## 十二、功能影响分析
 
 ### 阻断性问题（实施前必须解决）
 
