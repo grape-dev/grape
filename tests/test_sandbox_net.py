@@ -291,17 +291,31 @@ class TestDetectEnv(unittest.TestCase):
 
 
 class TestCgroupSlice(unittest.TestCase):
-    """cgroup 降级。"""
+    """cgroup v2 优先 + v1 降级。"""
 
     def test_no_sudo_degrades(self):
+        """sudo 不可用时降级。"""
         from src.agent.cgroup import CgroupSlice
-        # 在无 sudo 的环境模拟（monkeypatch）
-        cg = CgroupSlice("test-task", mem_limit_mb=512)
-        # 如果有 sudo，create 应该成功；如果没有，应该返回 False
-        result = cg.create()
-        # 不断言 True/False — 取决于环境
-        self.assertIsInstance(result, bool)
-        cg.destroy(force=True)
+        import unittest.mock as mock
+        with mock.patch("shutil.which", return_value=None):
+            cg = CgroupSlice("test-task", mem_limit_mb=512)
+            ok = cg.create()
+            self.assertFalse(ok)
+
+    def test_detect_cgroup_version(self):
+        """版本检测返回 0/1/2。"""
+        from src.agent.cgroup import _detect_cgroup_version
+        v = _detect_cgroup_version()
+        self.assertIn(v, (0, 1, 2))
+
+    def test_v1_fallback_when_v2_unavailable(self):
+        """本机 v1 — 确认 cgroup_version=1 走 v1 降级路径。"""
+        from src.agent.cgroup import CgroupSlice, _detect_cgroup_version
+        v = _detect_cgroup_version()
+        cg = CgroupSlice("test-v1", mem_limit_mb=0)
+        self.assertEqual(cg._cgroup_version, v)
+        if v == 1:
+            self.assertEqual(cg._cgroup_version, 1)
 
 
 if __name__ == "__main__":

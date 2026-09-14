@@ -1,9 +1,11 @@
-"""CgroupSlice — cgroup v1 子组管理（Issue #139）。
+"""CgroupSlice — cgroup v2 优先 + v1 降级（Issue #139）。
 
-设计参考：deepagents-sandbox/cgroup.py
+设计参考：deepagents-sandbox/cgroup.py + Linux cgroup v2 docs
 
 特性：
-- cgroup v1（memory + cpu + pids 子系统独立挂载）
+- cgroup v2 优先（unified 层级 /sys/fs/cgroup/），v2 不可用时降级到 v1
+- v2 路径：/sys/fs/cgroup/grape-sandbox-xxx/memory.max / cpu.max / pids.max
+- v1 路径：/sys/fs/cgroup/memory/grape-sandbox-xxx/memory.limit_in_bytes 等
 - 降级策略：不可用时 warn + 跳过，不拒绝启动
 - context manager 生命周期（__enter__/__exit__）
 - 内存限额默认 0 = 自动取宿主机 50%（宽松硬上限）
@@ -23,8 +25,19 @@ class CgroupError(Exception):
     pass
 
 
+def _detect_cgroup_version() -> int:
+    """检测 cgroup 版本。返回 2（v2 unified）或 1（v1 legacy）。"""
+    # v2: /sys/fs/cgroup/cgroup.controllers 存在
+    if os.path.exists("/sys/fs/cgroup/cgroup.controllers"):
+        return 2
+    # v1: /sys/fs/cgroup/memory/ 存在
+    if os.path.isdir("/sys/fs/cgroup/memory"):
+        return 1
+    return 0  # 不可用
+
+
 class CgroupSlice:
-    """cgroup v1 子组管理（memory + cpu + pids）。
+    """cgroup v2/v1 子组管理（memory + cpu + pids）。
 
     用法：
         with CgroupSlice(task_id, mem_limit_mb=0) as cg:
@@ -51,6 +64,7 @@ class CgroupSlice:
         self._max_pids = max_pids
         self._created = False
         self._has_sudo = shutil.which("sudo") is not None
+        self._cgroup_version = _detect_cgroup_version()
 
     @property
     def name(self) -> str:
@@ -67,14 +81,107 @@ class CgroupSlice:
                 "cgroup: sudo not available, resource limits disabled (degraded)"
             )
             return False
+
+        if self._cgroup_version == 2:
+            return self._create_v2()
+        elif self._cgroup_version == 1:
+            return self._create_v1()
+        else:
+            log.warning(
+                "cgroup: neither v2 nor v1 detected, resource limits disabled"
+            )
+            return False
+
+    # ===== cgroup v2 =====
+
+    def _create_v2(self) -> bool:
+        """cgroup v2 unified 层级创建子组。"""
         try:
+            base = f"/sys/fs/cgroup/{self._name}"
+
             # 内存限额：0 = 自动取宿主机 50%
             mem_limit = self._mem_limit
             if mem_limit == 0:
                 mem_limit = self._auto_mem_limit()
                 if mem_limit > 0:
                     log.info(
-                        f"cgroup: auto memory limit = {mem_limit}MB (50% of host)"
+                        f"cgroup v2: auto memory limit = {mem_limit}MB (50% of host)"
+                    )
+
+            # 创建子组（v2 中 mkdir 自动启用 controller）
+            self._mkdir(base)
+
+            # 启用 controller（v2 需要显式启用）
+            # 写入父 cgroup 的 cgroup.subtree_control
+            controllers = []
+            if mem_limit > 0:
+                controllers.append("+memory")
+            if self._cpu_quota > 0:
+                controllers.append("+cpu")
+            if self._max_pids > 0:
+                controllers.append("+pids")
+            if controllers:
+                try:
+                    self._write(
+                        "/sys/fs/cgroup/cgroup.subtree_control",
+                        " ".join(controllers),
+                    )
+                except Exception as e:
+                    log.warning(f"cgroup v2: enable controllers failed: {e}")
+
+            # memory.max
+            if mem_limit > 0:
+                self._write(
+                    f"{base}/memory.max",
+                    str(mem_limit * 1024 * 1024),
+                )
+
+            # cpu.max（格式："$MAX $PERIOD"，如 "50000 100000" = 50%）
+            if self._cpu_quota > 0:
+                quota_us = self._cpu_quota * 1000
+                self._write(
+                    f"{base}/cpu.max",
+                    f"{quota_us} 100000",
+                )
+
+            # pids.max
+            if self._max_pids > 0:
+                self._write(f"{base}/pids.max", str(self._max_pids))
+
+            self._created = True
+            log.info(f"cgroup v2: slice created at {base}")
+            return True
+        except Exception as e:
+            log.warning(f"cgroup v2: create failed, resource limits disabled: {e}")
+            self.destroy(force=True)
+            return False
+
+    def _attach_pid_v2(self, pid: int) -> None:
+        """v2: 写 PID 到 cgroup.procs。"""
+        path = f"/sys/fs/cgroup/{self._name}/cgroup.procs"
+        if os.path.exists(path):
+            self._write(path, str(pid))
+
+    def _destroy_v2(self) -> None:
+        """v2: 删除子组目录。"""
+        path = f"/sys/fs/cgroup/{self._name}"
+        if os.path.isdir(path):
+            try:
+                self._sudo("rmdir", path)
+            except Exception:
+                pass
+
+    # ===== cgroup v1（降级）=====
+
+    def _create_v1(self) -> bool:
+        """cgroup v1 各子系统独立创建子组（降级路径）。"""
+        try:
+            mem_limit = self._mem_limit
+            if mem_limit == 0:
+                mem_limit = self._auto_mem_limit()
+                if mem_limit > 0:
+                    log.info(
+                        f"cgroup v1: auto memory limit = {mem_limit}MB (50% of host)"
                     )
 
             # memory 子组
@@ -106,16 +213,15 @@ class CgroupSlice:
                 )
 
             self._created = True
+            log.info(f"cgroup v1: slice created (memory+cpu{'+pids' if self._max_pids > 0 else ''})")
             return True
         except Exception as e:
-            log.warning(f"cgroup: create failed, resource limits disabled: {e}")
+            log.warning(f"cgroup v1: create failed, resource limits disabled: {e}")
             self.destroy(force=True)
             return False
 
-    def attach_pid(self, pid: int) -> None:
-        """将 Agent 子进程 PID 写入 cgroup。"""
-        if not self._created:
-            return
+    def _attach_pid_v1(self, pid: int) -> None:
+        """v1: 写 PID 到各子系统的 tasks 文件。"""
         for subsys, has_dir in [
             ("memory", True),
             ("cpu,cpuacct", True),
@@ -128,12 +234,10 @@ class CgroupSlice:
                 try:
                     self._write(path, str(pid))
                 except Exception as e:
-                    log.warning(f"cgroup: attach pid {pid} to {subsys} failed: {e}")
+                    log.warning(f"cgroup v1: attach pid {pid} to {subsys} failed: {e}")
 
-    def destroy(self, *, force: bool = False) -> None:
-        """销毁 cgroup 子组。force=True 时忽略进程残留。"""
-        if not self._created and not force:
-            return
+    def _destroy_v1(self) -> None:
+        """v1: 删除各子系统子组目录。"""
         for subsys in ("memory", "cpu,cpuacct", "pids"):
             path = f"/sys/fs/cgroup/{subsys}/{self._name}"
             if os.path.isdir(path):
@@ -141,6 +245,26 @@ class CgroupSlice:
                     self._sudo("rmdir", path)
                 except Exception:
                     pass
+
+    # ===== 公共方法 =====
+
+    def attach_pid(self, pid: int) -> None:
+        """将 Agent 子进程 PID 写入 cgroup。"""
+        if not self._created:
+            return
+        if self._cgroup_version == 2:
+            self._attach_pid_v2(pid)
+        else:
+            self._attach_pid_v1(pid)
+
+    def destroy(self, *, force: bool = False) -> None:
+        """销毁 cgroup 子组。force=True 时忽略进程残留。"""
+        if not self._created and not force:
+            return
+        if self._cgroup_version == 2:
+            self._destroy_v2()
+        else:
+            self._destroy_v1()
         self._created = False
 
     def __enter__(self) -> "CgroupSlice":
