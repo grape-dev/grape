@@ -517,7 +517,10 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
         return
 
     # 通过 tasks._attach_list 获取附件列表（自动适配 OBS/本地）
-    from src.api.routes.tasks import _attach_list
+    try:
+        from src.api.routes.tasks import _attach_list
+    except ImportError:
+        return
     _attachments = _attach_list(_owner, _rname, _issue_num)
     if not _attachments:
         return
