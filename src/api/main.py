@@ -230,6 +230,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Reap stale runtimes loop start failed: {e}")
 
+    # Issue #85：引擎健康度定时刷新——每 5 分钟对所有引擎 force_refresh，
+    # 覆盖离线引擎无任务事件触发的场景（失联引擎不会产生任务完成事件）
+    try:
+        from src.runtime.health_scorer import start_health_refresh_scheduler
+        start_health_refresh_scheduler()
+    except Exception as e:
+        log.warning(f"Health refresh scheduler start failed: {e}")
+
     # 用户活跃状态追踪：每 30 秒批量更新 last_active_at
     _active_tracker_task = None
     try:
@@ -294,6 +302,12 @@ async def lifespan(app: FastAPI):
     try:
         from src.storage.scene_sync import stop_scene_sync_scheduler
         await stop_scene_sync_scheduler()
+    except Exception:
+        pass
+    # Issue #85：健康度定时刷新线程优雅关闭
+    try:
+        from src.runtime.health_scorer import stop_health_refresh_scheduler
+        stop_health_refresh_scheduler()
     except Exception:
         pass
     # 终止运行中的 agent 子进程（opencode），使 executor 线程尽快结束，
