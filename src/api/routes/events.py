@@ -184,8 +184,9 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
 def terminate_event(seq: int, user: dict = Depends(get_current_user)):
     """强行终止正在运行的事件任务。
 
-    - 有关联 task_id（worker 模式）→ 调 fail_task（更新 task+event 状态为 failed）
-    - 无 task_id（direct 模式）→ 调 cancel_direct_task
+    - worker 模式（runtime_id 绑定远端 worker）→ cancel_task（task 状态=cancelled）
+      worker 心跳 15s 内匹配 WHERE status=cancelled → _kill_stale_engine 杀引擎进程
+    - direct 模式（本机引擎）→ fail_task（task 状态=failed）+ cancel_direct_task 杀子进程
     - 事件状态回写 failed
     """
     from src.session_manager import db, db_lock
@@ -216,15 +217,49 @@ def terminate_event(seq: int, user: dict = Depends(get_current_user)):
         pass
 
     cancelled = False
-    # 1) 有关联 task_id → 走 fail_task（同时更新 task 和 event 状态为 failed）+ 杀进程
+    # 1) 有关联 task_id → 根据 execution mode 分流：
+    #    worker 模式 → cancel_task（标记 cancelled，worker 心跳匹配后立即杀引擎）
+    #    direct 模式 → fail_task（标记 failed，cancel_direct_task 杀本地子进程）
     if task_id:
         try:
-            from src.runtime.service import fail_task
-            fail_task(task_id, "用户手动终止")
-            cancelled = True
-            log.info(f"Event terminate: seq={seq} task={task_id} failed via fail_task")
+            from src.runtime.service import (
+                get_task, cancel_task, fail_task,
+                runtime_execution_kind, EXEC_MODE_REMOTE,
+            )
+            _task = get_task(task_id)
+            _is_worker = (
+                _task
+                and runtime_execution_kind(_task.get("runtime_id") or 0) == EXEC_MODE_REMOTE
+            )
+            if _is_worker:
+                cancel_task(task_id)
+                # 事件档案/状态收尾（cancel_task 只更新 task 状态，事件侧需手动补）
+                if _task.get("event_seq"):
+                    try:
+                        from datetime import datetime, timezone
+                        from src.api.event_store import update_event_complete
+                        from src.api.event_archive import finalize_event_archive
+                        finalize_event_archive(
+                            _task.get("repo_key", ""), _task["event_seq"], "failed",
+                            exit_code=-1,
+                            tokens=[_task.get("repo_gitcode_token") or ""],
+                            issue_num_hint=_task.get("issue_id") or "",
+                        )
+                        update_event_complete(
+                            _task["event_seq"], "failed", exit_code=-1,
+                            completed_at=datetime.now(timezone.utc).isoformat(),
+                            result="用户手动终止",
+                        )
+                    except Exception as e:
+                        log.warning(f"Event terminate: worker cancel event finalize failed: {e}")
+                cancelled = True
+                log.info(f"Event terminate: seq={seq} task={task_id} cancelled via cancel_task (worker mode)")
+            else:
+                fail_task(task_id, "用户手动终止")
+                cancelled = True
+                log.info(f"Event terminate: seq={seq} task={task_id} failed via fail_task (direct mode)")
         except Exception as e:
-            log.warning(f"Event terminate: fail_task failed: {e}")
+            log.warning(f"Event terminate: task cancel/fail failed: {e}")
 
     # 2) direct 模式 → cancel_direct_task（无论有无 task_id 都尝试，兜底）
     #    同时取消 worker 模式的 future（direct 模式杀本地子进程）
@@ -237,7 +272,7 @@ def terminate_event(seq: int, user: dict = Depends(get_current_user)):
     except Exception as e:
         log.warning(f"Event terminate: cancel_direct_task failed: {e}")
 
-    # 3) 事件状态回写 failed（兜底，fail_task 已处理但再确认一次）
+    # 3) 事件状态回写 failed（兜底，fail_task/cancel_task 已处理但再确认一次）
     try:
         update_event_status(seq, "failed")
     except Exception as e:
