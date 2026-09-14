@@ -860,13 +860,25 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         log.warning(f"{label}{backend.name} session {session_id[:20]}... invalid/not-found (exit={done.get('exit_code')} empty-out), retrying without session")
         run_gen2 = _run_once("")
         done2 = None
-        for evt_type, data in run_gen2:
-            if evt_type == "done":
-                done2 = data
-            else:
-                yield (evt_type, data)
-        if done2 is not None:
-            done = done2
+        try:
+            for evt_type, data in run_gen2:
+                if evt_type == "done":
+                    done2 = data
+                else:
+                    yield (evt_type, data)
+        except Exception:
+            if _sandbox_ctx:
+                from src.agent.sandbox import cleanup_sandbox
+                unregister_sandbox(_sandbox_ctx)
+                cleanup_sandbox(_sandbox_ctx)
+            raise
+        if done2 is None:
+            if _sandbox_ctx:
+                from src.agent.sandbox import cleanup_sandbox
+                unregister_sandbox(_sandbox_ctx)
+                cleanup_sandbox(_sandbox_ctx)
+            return  # 二次重跑也没结果，不 yield done
+        done = done2
     yield ("done", done)
 
 

@@ -251,8 +251,8 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(502, f"Failed to connect to {host}: {e}")
             return
 
-        self.send_response(200, "Connection Established")
-        self.end_headers()
+        # CONNECT 200 — 直接写字节，不用 send_response（避免加 Date/Server header）
+        self.connection.sendall(b"HTTP/1.0 200 Connection Established\r\n\r\n")
         self._audit(
             "CONNECT", host, self.path,
             {"allowed": True, "reason": "whitelist match"}, start, 200,
@@ -351,38 +351,28 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _forward_response(self, upstream: socket.socket):
         """从上游读取 HTTP 响应并转发给客户端。"""
-        # 读取状态行
-        line = self._read_line(upstream)
-        self.wfile.write(line.encode("utf-8"))
+        # 用 makefile 缓冲读取（避免逐字节 recv），但 body 也从 buffer 读
+        if not hasattr(upstream, "_grape_rbuf"):
+            upstream._grape_rbuf = upstream.makefile("rb")
+        f = upstream._grape_rbuf
 
-        # 读取 headers 直到空行（含空行本身，不再额外调 end_headers）
+        # 读取状态行 + headers 直到空行
         while True:
-            line = self._read_line(upstream)
-            self.wfile.write(line.encode("utf-8"))
-            if line in ("\r\n", "\n", ""):
+            line = f.readline()
+            if not line:
+                break
+            self.wfile.write(line)
+            if line in (b"\r\n", b"\n"):
                 break
 
         self.wfile.flush()
 
-        # 转发 body
+        # 转发 body — 从同一个 buffer 读，避免 makefile 缓冲的数据丢失
         while True:
-            data = upstream.recv(65536)
+            data = f.read(65536)
             if not data:
                 break
             self.wfile.write(data)
-
-    @staticmethod
-    def _read_line(sock: socket.socket, max_len: int = 8192) -> str:
-        """逐行读取（直到 \\r\\n），带缓冲。"""
-        # 用文件描述符的 buffered reader 避免逐字节 recv
-        if not hasattr(sock, "_grape_rbuf"):
-            import io
-            sock._grape_rbuf = sock.makefile("rb")
-        f = sock._grape_rbuf
-        line = f.readline()
-        if not line:
-            return ""
-        return line.decode("utf-8", errors="replace")
 
     def _check_request(self, host: str, port: int) -> dict:
         """三级检查：白名单 → DNS 地址校验（loopback 例外）。"""
