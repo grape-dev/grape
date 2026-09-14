@@ -3,7 +3,7 @@
 > Issue：https://gitcode.com/grape-dev/grape/issues/139
 > 父 Issue：#64 支持任务执行沙箱隔离
 > 分支：`feat/issue-139-sandbox-network-isolation`（基于 `weekly-03`）
-> 日期：2026-09-14（v9 — 三轮审查修复 + 专家注释 + 低级别修复）
+> 日期：2026-09-14（v10 — 白名单 DB seed + codex 兼容性 + M-9 内联修复）
 
 ---
 
@@ -83,6 +83,7 @@ opts = [bwrap, "--die-with-parent", "--unshare-all", "--share-net"]
 | 模型 API | opengw.clouddeveloper.club | hermes/opencode 主模型 | ~/.hermes/config.yaml |
 | 模型 API | api.deepseek.com | deepseek 模型 | ~/.hermes/config.yaml |
 | 模型 API | api.modelarts-maas.com | 华为云 ModelArts | configs/ |
+| 模型 API | api.openai.com | OpenAI API（codex 默认端点） | codex CLI |
 | 包管理 | registry.npmmirror.com | npm registry | ~/.npmrc |
 | 包管理 | pypi.tuna.tsinghua.edu.cn | pip 源 | worker_package.py |
 | 对象存储 | obs.cn-north-4.myhuaweicloud.com | OBS | storage/obs.py |
@@ -1371,6 +1372,12 @@ DB 表 sandbox_whitelist（有数据）
 | 11 | detect.py cgroup v2 检测 | 第三轮审查 | check_cgroup() 从 v1 硬编码改为 v2 优先（cgroup.controllers）+ v1 降级 |
 | 12 | loopback 端口范围校验 | 第三轮审查 | GRAPE_SERVER_URL 解析端口限制 3000-9999，误配时降级到 3000 |
 | 13 | config.py 重复定义清理 | 第三轮审查 | 删除 SANDBOX_WHITELIST 旧定义（被 FALLBACK 覆盖，冗余） |
+| 14 | 白名单 DB seed 初始化 | 用户反馈 | init_database 调用 _seed_sandbox_whitelist()，把 FALLBACK 默认域名写入 DB 表（scope=global, enabled=1），幂等 |
+| 15 | codex API 端点加入白名单 | codex 兼容性审查 | SANDBOX_WHITELIST_FALLBACK 加入 api.openai.com（codex 默认 API 端点） |
+| 16 | codex 凭据 key 映射 | codex 兼容性审查 | _assemble_env else 分支对 provider=openai 做 api_key → OPENAI_API_KEY 映射 |
+| 17 | K8s env 解析内联实现 | 第四轮审查 | config.py 内联 _parse_mem_env/_parse_cpu_env，不 import cgroup（避免循环导入） |
+| 18 | 审计 _AsyncWriter sentinel 修复 | 第四轮审查 | _FLUSH_SENTINEL 改为类变量，避免 _run 线程 NameError 崩溃 |
+| 19 | 审计双锁统一 | 第四轮审查 | 删除 RotatingAuditLog._lock（类级），统一用模块级 _lock |
 
 ### 专家审查注释（v9 新增）
 
