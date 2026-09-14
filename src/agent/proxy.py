@@ -258,6 +258,8 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
             {"allowed": True, "reason": "whitelist match"}, start, 200,
         )
         self._tunnel(self.connection, upstream)
+        # CONNECT 隧道结束后关闭连接 — 不再处理后续 HTTP 请求
+        self.close_connection = True
 
     def do_GET(self):
         self._proxy_http("GET")
@@ -585,9 +587,11 @@ class SandboxProxy:
     def start(self) -> dict:
         """启动代理 + 桥接。返回 {proxy_port, socket_path}。"""
         # Unix socket 路径：放 home 目录下（不能在 /tmp，会被 tmpfs 覆盖）
+        import re as _re
         home = os.path.expanduser("~")
+        safe_id = _re.sub(r"[^a-zA-Z0-9_-]", "", self._task_id)[:12]
         self._socket_path = os.path.join(
-            home, f".grape-sandbox-{self._task_id[:12]}.sock"
+            home, f".grape-sandbox-{safe_id}.sock"
         )
 
         # 注入 handler 类变量

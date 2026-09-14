@@ -169,13 +169,15 @@ class CgroupSlice:
             pass
         return 0
 
-    def _sudo(self, *args: str) -> None:
+    def _sudo(self, *args: str, input: bytes | None = None) -> None:
         subprocess.run(
-            ["sudo", *args], check=True, capture_output=True, timeout=10
+            ["sudo", *args], check=True, capture_output=True, timeout=10,
+            input=input,
         )
 
     def _mkdir(self, path: str) -> None:
         self._sudo("mkdir", "-p", path)
 
     def _write(self, path: str, value: str) -> None:
-        self._sudo("bash", "-c", f"echo {value} > {path}")
+        """安全写入 cgroup 文件 — 用 tee 代替 bash -c echo，避免 shell 注入。"""
+        self._sudo("tee", path, input=value.encode())
