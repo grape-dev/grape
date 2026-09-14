@@ -79,6 +79,16 @@ function _getSkillTags(skillName) {
   return _SKILL_TAG_MAP[skillName] || [];
 }
 
+// 精选技能卡片渐变色（按 agent_type）
+const _FEAT_GRADIENT = {
+  vod:    {g1:'#8FA9C4', g2:'#53688A'},
+  issue:  {g1:'#A99C7C', g2:'#75684A'},
+  coding: {g1:'#7EA48C', g2:'#4B7359'},
+  qa:     {g1:'#A49AC0', g2:'#72638F'},
+  sre:    {g1:'#C3917E', g2:'#97503D'},
+  chat:   {g1:'#45B8B8', g2:'#0A7A7A'},
+};
+
 // _AGENT_META 定义在 scene-market.js 中，这里直接复用
 
 function _scopeName(scope) {
@@ -234,12 +244,12 @@ function _renderSkillPage() {
     <a class="${_skillTab==='user'?'ac':''}" onclick="_switchSkillTab('user')">${_scopeName('user')}</a>
   </div></div>`;
 
-  // 精选技能（仅 official，独立加载，不受搜索影响）— 网格布局撑满一行
+  // 精选技能（仅 official，独立加载，不受搜索影响）— 渐变广告卡网格
   if (_skillTab === 'official' && _featuredSkills.length > 0) {
     html += `<div class="apple-card">
       <div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_skills')||'精选技能'}</h2></div>
-      <div class="rgrid" id="featured-skills" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
-        ${_featuredSkills.map(s => _renderSkillCard(s, true)).join('')}
+      <div class="feat-row" id="featured-skills">
+        ${_featuredSkills.map(s => _renderFeaturedSkillCard(s)).join('')}
       </div>
     </div>`;
   }
@@ -457,6 +467,30 @@ function _renderAgentSkills() {
     return;
   }
   container.innerHTML = `<div class="rgrid">${skills.map(s => _renderSkillCard(s)).join('')}</div>`;
+}
+
+// ── 渲染精选技能卡片（渐变广告卡风格，对齐 new.html 原型）──
+function _renderFeaturedSkillCard(s) {
+  const at = s.agent_type || '';
+  const meta = _AGENT_META[at] || {};
+  const grad = _FEAT_GRADIENT[at] || {g1:'#3168e0', g2:'#2556c2'};
+  const scenesArr = (s.scenes || []).map(sc => sc.display_name || sc.name || sc);
+  const scenesStr = scenesArr.length > 0
+    ? (scenesArr.length <= 2
+        ? scenesArr.join(' · ')
+        : `${scenesArr.slice(0, 2).join(' · ')}(+${scenesArr.length - 2})`)
+    : '';
+  const sceneCount = s.scene_count || scenesArr.length || 0;
+  const repoCount = s.repo_count || 0;
+  const desc = (s.description || '').replace(/"/g, '&quot;');
+  return `<div class="feat-card" style="--fg1:${grad.g1};--fg2:${grad.g2}" onclick="app.nav('skill','${s.id}')">
+    <span class="feat-badge">★</span>
+    <div class="feat-ico">${meta.icon || '◈'}</div>
+    <div class="feat-name">${s.display_name || s.name}<span class="feat-agent">${meta.label || at}</span></div>
+    <div class="feat-desc">${desc}</div>
+    <div class="feat-scenes">${scenesStr || ''}</div>
+    <div class="feat-scenes" style="margin-top:auto;padding-top:8px">${sceneCount} 场景在用 · ${repoCount} 仓库在用</div>
+  </div>`;
 }
 
 // ── 渲染技能卡片（精选和列表共用）──
