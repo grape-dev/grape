@@ -13,12 +13,19 @@ def _evt(issue_id="#5", title="登录超时"):
 
 @pytest.fixture(autouse=True)
 def _clean_archive():
-    # 每个用例前清理测试档案目录
-    base = os.path.join(WORKSPACE_DIR, "test/repo")
+    # 每个用例前清理测试档案目录（含 provider 隔离路径）
+    from src.repo_key import workspace_repo_dir
     import shutil
-    shutil.rmtree(base, ignore_errors=True)
+    for rk in ("test/repo", "gitcode:test/repo"):
+        base = workspace_repo_dir(rk)
+        shutil.rmtree(base, ignore_errors=True)
+    # 兼容旧无 provider 路径
+    shutil.rmtree(os.path.join(WORKSPACE_DIR, "test", "repo"), ignore_errors=True)
     yield
-    shutil.rmtree(base, ignore_errors=True)
+    for rk in ("test/repo", "gitcode:test/repo"):
+        base = workspace_repo_dir(rk)
+        shutil.rmtree(base, ignore_errors=True)
+    shutil.rmtree(os.path.join(WORKSPACE_DIR, "test", "repo"), ignore_errors=True)
 
 
 class TestInit:
@@ -140,7 +147,8 @@ class TestLegacyPrefixedCompat:
     def test_load_falls_back_to_legacy_prefix_dir(self):
         legacy = ea._legacy_base_dir("gitcode:test/repo")
         import shutil
-        shutil.rmtree(os.path.join(WORKSPACE_DIR, "test/repo"), ignore_errors=True)
+        from src.repo_key import workspace_repo_dir
+        shutil.rmtree(workspace_repo_dir("gitcode:test/repo"), ignore_errors=True)
         shutil.rmtree(os.path.dirname(legacy), ignore_errors=True)
         os.makedirs(os.path.join(legacy, "5"), exist_ok=True)
         with open(os.path.join(legacy, "5", "event.json"), "w", encoding="utf-8") as f:
@@ -152,7 +160,8 @@ class TestLegacyPrefixedCompat:
     def test_locate_by_seq_finds_legacy(self):
         legacy = ea._legacy_base_dir("gitcode:test/repo")
         import shutil
-        shutil.rmtree(os.path.join(WORKSPACE_DIR, "test/repo"), ignore_errors=True)
+        from src.repo_key import workspace_repo_dir
+        shutil.rmtree(workspace_repo_dir("gitcode:test/repo"), ignore_errors=True)
         shutil.rmtree(os.path.dirname(legacy), ignore_errors=True)
         ea.init_event_json("gitcode:test/repo", 77, _evt(), "issue")
         # 把新路径档案移回旧带前缀目录，模拟历史数据

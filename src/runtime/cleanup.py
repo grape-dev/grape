@@ -63,32 +63,52 @@ def _zombie_issue_dirs(ttl: float) -> list[str]:
         if now - mtime > ttl:
             out.append(p)
 
-    try:
-        owners = os.listdir(config.WORKSPACE_DIR) if os.path.isdir(config.WORKSPACE_DIR) else []
-        for owner in owners:
-            owner_dir = os.path.join(config.WORKSPACE_DIR, owner)
-            if not os.path.isdir(owner_dir):
-                continue
-            for rname in os.listdir(owner_dir):
-                repo_dir = os.path.join(owner_dir, rname)
-                if not os.path.isdir(repo_dir):
+    def _scan_repo_dir(repo_dir: str):
+        """扫描单个 repo 目录下的 issue workdir（兼容新旧结构）。"""
+        if not os.path.isdir(repo_dir):
+            return
+        # 新结构：{repo}/issues/{n}/{agent}/
+        issues_root = os.path.join(repo_dir, "issues")
+        if os.path.isdir(issues_root):
+            for num in os.listdir(issues_root):
+                issue_dir = os.path.join(issues_root, num)
+                if not os.path.isdir(issue_dir):
                     continue
-                # 新结构：{repo}/issues/{n}/{agent}/
-                issues_root = os.path.join(repo_dir, "issues")
-                if os.path.isdir(issues_root):
-                    for num in os.listdir(issues_root):
-                        issue_dir = os.path.join(issues_root, num)
-                        if not os.path.isdir(issue_dir):
-                            continue
-                        for agent in _GIT_AGENTS:
-                            _check(os.path.join(issue_dir, agent))
-                # 过渡期旧结构：{repo}/{agent}/issues/{n}/（仅兜底，新代码不写入）
                 for agent in _GIT_AGENTS:
-                    issues = os.path.join(repo_dir, agent, "issues")
-                    if not os.path.isdir(issues):
-                        continue
-                    for num in os.listdir(issues):
-                        _check(os.path.join(issues, num))
+                    _check(os.path.join(issue_dir, agent))
+        # 过渡期旧结构：{repo}/{agent}/issues/{n}/（仅兜底，新代码不写入）
+        for agent in _GIT_AGENTS:
+            issues = os.path.join(repo_dir, agent, "issues")
+            if not os.path.isdir(issues):
+                continue
+            for num in os.listdir(issues):
+                _check(os.path.join(issues, num))
+
+    try:
+        # 遍历 WORKSPACE_DIR 下所有目录，找到含 issues/ 的 repo 目录
+        # 新结构：{WORKSPACE_DIR}/{provider}/{owner}/{repo}/issues/
+        # 旧结构：{WORKSPACE_DIR}/{owner}/{repo}/issues/
+        _ws = config.WORKSPACE_DIR
+        if not os.path.isdir(_ws):
+            return out
+        for entry1 in os.listdir(_ws):
+            d1 = os.path.join(_ws, entry1)
+            if not os.path.isdir(d1):
+                continue
+            # 检查 d1 是否为 provider 目录（新结构）或 owner 目录（旧结构）
+            # provider 目录下是 owner 层；owner 目录下是 repo 层
+            for entry2 in os.listdir(d1):
+                d2 = os.path.join(d1, entry2)
+                if not os.path.isdir(d2):
+                    continue
+                # 检查 d2 是否直接含 issues（旧结构：d2=repo_dir）
+                if os.path.isdir(os.path.join(d2, "issues")):
+                    _scan_repo_dir(d2)
+                # 新结构：d2 是 owner 目录，下面还有 repo 层
+                for entry3 in os.listdir(d2):
+                    d3 = os.path.join(d2, entry3)
+                    if os.path.isdir(d3) and os.path.isdir(os.path.join(d3, "issues")):
+                        _scan_repo_dir(d3)
     except Exception as e:
         log.warning(f"sweeper zombie scan failed: {e}")
     return out
@@ -186,15 +206,28 @@ def _stale_session_dirs(ttl: float) -> list[str]:
         log.warning(f"sweeper feishu dir scan failed: {e}")
 
     # --- vod 目录 ---
+    # 结构：vod/{provider}/{owner_repo}/ 或旧 vod/{owner_repo}/
     try:
         vod_base = os.path.join(config.WORKSPACE_DIR, "vod")
         if os.path.isdir(vod_base):
-            for repo_dir in os.listdir(vod_base):
-                _check_dir(os.path.join(vod_base, repo_dir))
+            for entry in os.listdir(vod_base):
+                entry_path = os.path.join(vod_base, entry)
+                if not os.path.isdir(entry_path):
+                    continue
+                # 新结构：provider 目录下有子目录
+                has_subdirs = any(os.path.isdir(os.path.join(entry_path, d))
+                                  for d in os.listdir(entry_path))
+                if has_subdirs:
+                    for repo_dir in os.listdir(entry_path):
+                        _check_dir(os.path.join(entry_path, repo_dir))
+                else:
+                    # 旧结构：直接是 repo 目录
+                    _check_dir(entry_path)
     except Exception as e:
         log.warning(f"sweeper vod dir scan failed: {e}")
 
     # --- history 目录 ---
+    # 结构：history/{account}/{provider}/{owner_repo}/ 或旧 history/{account}/{owner_repo}/
     try:
         hist_base = os.path.join(config.WORKSPACE_DIR, "history")
         if os.path.isdir(hist_base):
@@ -202,8 +235,19 @@ def _stale_session_dirs(ttl: float) -> list[str]:
                 account_path = os.path.join(hist_base, account_dir)
                 if not os.path.isdir(account_path):
                     continue
-                for repo_dir in os.listdir(account_path):
-                    _check_dir(os.path.join(account_path, repo_dir))
+                for entry in os.listdir(account_path):
+                    entry_path = os.path.join(account_path, entry)
+                    if not os.path.isdir(entry_path):
+                        continue
+                    # 新结构：provider 目录下有子目录
+                    has_subdirs = any(os.path.isdir(os.path.join(entry_path, d))
+                                      for d in os.listdir(entry_path))
+                    if has_subdirs:
+                        for repo_dir in os.listdir(entry_path):
+                            _check_dir(os.path.join(entry_path, repo_dir))
+                    else:
+                        # 旧结构：直接是 repo 目录
+                        _check_dir(entry_path)
     except Exception as e:
         log.warning(f"sweeper history dir scan failed: {e}")
 

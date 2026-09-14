@@ -180,7 +180,8 @@ def get_repo_info(owner: str, repo: str, user: dict = Depends(get_current_user_o
 @router.get("/{owner}/{repo}/workspace", operation_id="gitrepo_workspace", summary="仓库工作区路径（CLI 本地 git 用）")
 def get_repo_workspace(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                        p: str = Depends(_provider)):
-    ws = os.path.join(WORKSPACE_DIR, owner, repo)
+    from src.repo_key import workspace_repo_dir, to_repo_key
+    ws = workspace_repo_dir(to_repo_key(f"{owner}/{repo}", p))
     _gh = "github.com" if p == "github" else "gitcode.com"
     return {"workspace": ws, "clone_url": f"https://{_gh}/{owner}/{repo}.git"}
 

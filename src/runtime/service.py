@@ -349,7 +349,8 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
             # 继续走下面的本地逻辑
 
         # 本地模式（和 dev 一致）
-        pi = os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
+        from src.repo_key import workspace_repo_dir
+        pi = os.path.join(workspace_repo_dir(repo_key), "project-info")
         if not os.path.isdir(pi):
             return {}, {}
         files = {}
@@ -426,7 +427,8 @@ def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
                 return files, meta
 
         # 本地模式
-        pi = os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
+        from src.repo_key import workspace_repo_dir
+        pi = os.path.join(workspace_repo_dir(repo_key), "project-info")
         if not os.path.isdir(pi):
             return {}, {}
         files = {}

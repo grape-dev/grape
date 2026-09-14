@@ -1116,11 +1116,10 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             log.info(f"Chat prompt with image desc injected ({len(prompt)} chars total)")
         log.info(f"Chat prompt ({len(prompt)} chars, repo={repository}, engine={_engine_name}, has_session={has_valid_session})")
 
-        # 与 Web Chat 严格一致：同一 conv_id 同一目录 WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}
+        # 与 Web Chat 严格一致：同一 conv_id 同一目录 WORKSPACE_DIR/{provider}/{owner}/{repo}/chat/{uid}/{conv_id}
         # （web-chat-no-response-cwd-fix.md §4；去掉原 feishu/ 段与 sess 尾巴）
-        from src.repo_key import parse_repo_key
-        _, _owner, _repo = parse_repo_key(repo_key or "")
-        wsd = os.path.join(WORKSPACE_DIR, _owner or "__none__", _repo or "__none__",
+        from src.repo_key import workspace_repo_dir
+        wsd = os.path.join(workspace_repo_dir(repo_key or ""),
                            "chat", str(user_id or 0), conv_id or "")
         os.makedirs(wsd, exist_ok=True)
 
