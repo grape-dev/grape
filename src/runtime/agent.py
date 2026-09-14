@@ -1293,6 +1293,14 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     last_reregister = asyncio.get_running_loop().time()
     engine_by_rid = engine_by_rid or {}
 
+    # 自动升级状态
+    pending_upgrade = False
+    upgrade_target_version = ""
+    upgrade_fail_count = 0
+    last_upgrade_attempt = 0.0
+    UPGRADE_BACKOFF_BASE = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_BASE", "60"))
+    UPGRADE_BACKOFF_MAX = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_MAX", "1800"))
+
     while True:
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
@@ -1497,6 +1505,39 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
                     await asyncio.sleep(backoff)
 
+            # ---- 版本对比 + 自动升级 ----
+            if ok is not None and ok.get("status") == "ok":
+                _latest = ok.get("latest_version", "")
+                if _latest and _latest != _read_local_worker_version():
+                    if not pending_upgrade:
+                        log.info(f"Version mismatch: local={_read_local_worker_version()} "
+                                 f"server={_latest}, will upgrade when idle")
+                    pending_upgrade = True
+                    upgrade_target_version = _latest
+                else:
+                    if pending_upgrade and _latest and _latest == _read_local_worker_version():
+                        pending_upgrade = False
+                        log.info("Version now matches, clearing pending_upgrade")
+
+        # ---- 升级执行（待升级 && 无活跃任务 && 退避已过）----
+        if pending_upgrade and not active_tasks:
+            _now = asyncio.get_running_loop().time()
+            _backoff = min(UPGRADE_BACKOFF_BASE * (2 ** upgrade_fail_count), UPGRADE_BACKOFF_MAX)
+            if _now - last_upgrade_attempt >= _backoff:
+                last_upgrade_attempt = _now
+                log.info(f"Starting auto-upgrade to {upgrade_target_version} "
+                         f"(attempt {upgrade_fail_count + 1})")
+                _upgrade_ok = await _perform_upgrade(
+                    os.environ.get("RUNTIME_SERVER_URL", ""),
+                    os.environ.get("RUNTIME_TOKEN", "")
+                )
+                if not _upgrade_ok:
+                    upgrade_fail_count += 1
+                    pending_upgrade = False
+                    _next = min(UPGRADE_BACKOFF_BASE * (2 ** upgrade_fail_count), UPGRADE_BACKOFF_MAX)
+                    log.warning(f"Auto-upgrade failed (count={upgrade_fail_count}), "
+                                f"will retry in {_next:.0f}s")
+
         # ---- sid 看门狗：清理幽灵 sid ----
         # active_tasks 里的任务如果已在服务端终态（failed/cancelled/completed/not_found），
         # 说明 _wrap 的 finally 没执行（opencode 进程 hang 住），sid 泄漏在 active_sessions。
@@ -1542,6 +1583,56 @@ def _read_local_worker_version() -> str:
             return f.read().strip()
     except Exception:
         return ""
+
+
+async def _perform_upgrade(server: str, token: str) -> bool:
+    """下载并执行 install-worker.sh 升级 worker。
+
+    成功时 worker 被 install-worker.sh 重启（本进程被杀，不会返回）。
+    失败时返回 False，worker 继续运行当前版本。
+
+    流程：
+    1. 从服务端 GET /api/runtime/install 下载 install-worker.sh
+    2. 在线程中执行 bash install-worker.sh --token <token> --server <server> --dir <install_dir>
+    3. install-worker.sh 幂等：下载包→解压→建 venv→写配置→重启 worker
+    4. 如果 subprocess.run 返回（未被杀），说明安装失败
+    """
+    import subprocess, tempfile
+    install_script_url = f"{server.rstrip('/')}/api/runtime/install"
+    tmp_script = tempfile.mktemp(suffix=".sh")
+    try:
+        r = await asyncio.to_thread(
+            subprocess.run,
+            ["curl", "-fsSL", "--connect-timeout", "15", install_script_url, "-o", tmp_script],
+            capture_output=True, text=True, timeout=30
+        )
+        if r.returncode != 0:
+            log.error(f"Auto-upgrade: download install-worker.sh failed: {r.stderr[-300:]}")
+            return False
+        _install_dir = os.path.dirname(os.path.abspath(__file__))
+        for _ in range(2):
+            _install_dir = os.path.dirname(_install_dir)
+        log.info(f"Auto-upgrade: running install-worker.sh (dir={_install_dir})")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", tmp_script, "--", "--token", token, "--server", server, "--dir", _install_dir],
+            capture_output=True, text=True, timeout=600
+        )
+        log.error(f"Auto-upgrade: install-worker.sh returned rc={result.returncode} "
+                  f"(worker not restarted): stderr={result.stderr[-500:]}")
+        return False
+    except subprocess.TimeoutExpired:
+        log.error("Auto-upgrade: install-worker.sh timed out (600s)")
+        return False
+    except Exception as e:
+        log.error(f"Auto-upgrade failed: {e}")
+        return False
+    finally:
+        try:
+            if os.path.isfile(tmp_script):
+                os.unlink(tmp_script)
+        except Exception:
+            pass
 
 
 def _check_opencode_api_keys():
