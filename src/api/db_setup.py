@@ -802,7 +802,23 @@ CREATE TABLE IF NOT EXISTS runtime_health_scores (
     last_status         TEXT DEFAULT '',               -- 最近一条任务状态
     window_days         INTEGER NOT NULL DEFAULT 7,    -- 滑动窗口天数
     updated_at          TEXT DEFAULT (datetime('now'))
-)"""""),]
+)"""""),
+    # ===== Issue #139: sandbox whitelist =====
+    ("sandbox_whitelist", """CREATE TABLE IF NOT EXISTS sandbox_whitelist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'global',
+    scope_value TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (domain, scope, scope_value),
+    CHECK (scope = 'global' OR scope_value != '')
+    )"""),
+    ("idx_whitelist_scope", "CREATE INDEX IF NOT EXISTS idx_whitelist_scope ON sandbox_whitelist(scope, scope_value, enabled)"),
+    ("idx_whitelist_domain", "CREATE INDEX IF NOT EXISTS idx_whitelist_domain ON sandbox_whitelist(domain, enabled)"),
+]
 
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")

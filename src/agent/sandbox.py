@@ -294,7 +294,6 @@ def prepare_sandbox(task_id: str, cwd: str, backend_name: str = "") -> SandboxCo
     from src.config import SANDBOX_AUDIT_LOG, SANDBOX_AUDIT_HMAC_KEY
     audit_path = SANDBOX_AUDIT_LOG
     if not audit_path:
-        # 默认放 workspace logs 目录
         from src.config import CHAT_CWD_BASE
         audit_path = os.path.join(
             os.path.dirname(CHAT_CWD_BASE) if CHAT_CWD_BASE else os.path.expanduser("~"),
@@ -303,10 +302,9 @@ def prepare_sandbox(task_id: str, cwd: str, backend_name: str = "") -> SandboxCo
     from src.agent.audit import RotatingAuditLog
     ctx._audit_log = RotatingAuditLog(audit_path, SANDBOX_AUDIT_HMAC_KEY)
 
-    # 4. 代理 + 桥接
-    from src.config import SANDBOX_WHITELIST
+    # 4. 代理 + 桥接 — 白名单从 DB 查询（5 分钟缓存，DB 不可用降级到环境变量）
     from src.agent.proxy import SandboxProxy, get_dynamic_whitelist
-    whitelist = get_dynamic_whitelist(SANDBOX_WHITELIST)
+    whitelist = _get_whitelist_from_db(backend_name)
 
     # 凭据泄露检测：读取被注入的 token 值
     leaked_tokens = []
@@ -334,6 +332,81 @@ def prepare_sandbox(task_id: str, cwd: str, backend_name: str = "") -> SandboxCo
         f"cgroup={ctx._cgroup.created}"
     )
     return ctx
+
+
+# ===== 白名单 DB 查询 + 5 分钟缓存 =====
+
+_whitelist_cache: list[str] | None = None
+_whitelist_cache_ts: float = 0
+_whitelist_cache_lock = __import__("threading").Lock()
+_WHITELIST_CACHE_TTL = 300  # 5 分钟
+
+
+def _get_whitelist_from_db(backend_name: str = "", repo_key: str = "") -> list[str]:
+    """从 DB 查询白名单（5 分钟缓存）。
+
+    查询条件：enabled=1 AND (
+        scope='global' OR
+        (scope='engine' AND scope_value=backend_name) OR
+        (scope='repo' AND scope_value=repo_key)
+    )
+
+    DB 不可用或表不存在时降级到 SANDBOX_WHITELIST_FALLBACK 环境变量。
+    """
+    global _whitelist_cache, _whitelist_cache_ts
+    import time
+
+    with _whitelist_cache_lock:
+        now = time.monotonic()
+        if _whitelist_cache is not None and (now - _whitelist_cache_ts) < _WHITELIST_CACHE_TTL:
+            # 缓存命中 — 但仍需加入动态白名单（127.0.0.1 + GRAPE_SERVER_URL）
+            from src.agent.proxy import get_dynamic_whitelist
+            return get_dynamic_whitelist(_whitelist_cache)
+
+    # 查 DB
+    domains: list[str] = []
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            # 先检查表是否存在
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sandbox_whitelist'")
+            if c.fetchone():
+                c.execute(
+                    "SELECT DISTINCT domain FROM sandbox_whitelist "
+                    "WHERE enabled=1 AND ("
+                    "  scope='global' OR "
+                    "  (scope='engine' AND scope_value=?) OR "
+                    "  (scope='repo' AND scope_value=?)"
+                    ")",
+                    (backend_name, repo_key),
+                )
+                domains = [r[0] for r in c.fetchall()]
+    except Exception as e:
+        from src.config import log
+        log.warning(f"sandbox whitelist: DB query failed, using fallback: {e}")
+
+    if not domains:
+        # DB 无数据或不可用 — 降级到环境变量
+        from src.config import SANDBOX_WHITELIST_FALLBACK
+        domains = list(SANDBOX_WHITELIST_FALLBACK)
+
+    # 更新缓存
+    with _whitelist_cache_lock:
+        _whitelist_cache = domains
+        _whitelist_cache_ts = time.monotonic()
+
+    # 加入动态白名单
+    from src.agent.proxy import get_dynamic_whitelist
+    return get_dynamic_whitelist(domains)
+
+
+def invalidate_whitelist_cache() -> None:
+    """手动失效白名单缓存（API 增删白名单后调用）。"""
+    global _whitelist_cache, _whitelist_cache_ts
+    with _whitelist_cache_lock:
+        _whitelist_cache = None
+        _whitelist_cache_ts = 0
 
 
 def cleanup_sandbox(ctx: SandboxContext | None):

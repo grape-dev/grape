@@ -508,3 +508,22 @@ SANDBOX_CREDENTIAL_ENV_VARS = [
     v.strip() for v in os.environ.get("SANDBOX_CREDENTIAL_ENV_VARS", "").split(",")
     if v.strip()
 ]
+
+# 沙箱白名单 — 环境变量作为 DB 不可用时的降级默认值
+# 生产环境通过 DB 表 sandbox_whitelist 管理（见 src/api/db_setup.py）
+# 环境变量仅用于首次启动 / DB 不可用时降级
+SANDBOX_WHITELIST_FALLBACK = [
+    d.strip() for d in os.environ.get(
+        "GRAPE_SANDBOX_WHITELIST",
+        "gitcode.com,api.gitcode.com,raw.gitcode.com,"
+        "github.com,api.github.com,"
+        "opengw.clouddeveloper.club,api.deepseek.com,"
+        "api.modelarts-maas.com,"
+        "registry.npmmirror.com,"
+        "pypi.tuna.tsinghua.edu.cn,"
+        "obs.cn-north-4.myhuaweicloud.com"
+    ).split(",") if d.strip()
+]
+
+# 兼容：保留 SANDBOX_WHITELIST 名称供现有代码引用（= FALLBACK）
+SANDBOX_WHITELIST = SANDBOX_WHITELIST_FALLBACK
