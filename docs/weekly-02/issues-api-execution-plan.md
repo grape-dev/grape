@@ -131,31 +131,27 @@
 | C4 | 文档 | `help/api/11-issues.md` + `README.md` 目录 + `EXPECTED_API_FILES` + 01-tasks 迁移说明 | 契约/文档一致 | C1 |
 | C5 | 迁移验收 | `issue_state` 数据核对后 `DROP`（保留备份）；全量回归 | 任务中心建/改/催/完成/取消 + pipeline 各阶段正常 | C3/C4 |
 
-#### Phase C 实施记录（2026-09-12，部分完成）
+#### Phase C 实施记录（2026-09-12 起，C1/C3/C5 已于 2026-09-14 完成）
 
 **C 已完成**：
-- **C1**：`issues.py._issue_stage_map` 双表聚合——`issue_state`（权威阶段）优先 + `issue` 卡片兜底（无 issue_state 记录但已有卡片行的 issue 也能列出）
+- **C1（已完成）**：`issues.py._issue_stage_map` **issue 单表权威 + issue_state 兜底**（C3 停写后数据落 issue 表，读不再依赖 issue_state）。
 - **C2（部分）**：文档 `01-tasks.md`（docs/openapi + help/api 两处）标注 `POST /api/tasks/create` 已废弃并指向 `POST /api/issues/{owner}/{repo}`；
   前端 `tasks.js createTaskSubmit` 已从 `/tasks/create` 迁移至 `/api/issues/{owner}/{repo}`（body 保留 repo_key/title/description/scene_id）。
   **后端端点暂保留**（未移除）：避免既有调用方（含 CLI/Agent）断裂，待 C5 统一清理。
 - **C4（已完成）**：`docs/openapi/01-tasks.md` 与 `help/api/01-tasks.md` 同步废弃说明（`test_help_directory` 一致性恢复）；
   新增 `help/api/11-issues.md`（docs/openapi + help/api 双份，覆盖 5 端点 + 概念澄清）+ `README.md` 目录 + `tests/test_help_directory.py EXPECTED_API_FILES`（13→14）；
   顺带补齐 `tests/test_openapi.py EXPECTED_PUBLIC` 契约清单（issues 5 端点 + gitrepo_tree/contents_root + tasks_repo_all，基线遗留缺失）
+- **C3（已完成，2026-09-14）**：issue_state **停写** + **读切 issue 权威**。
+  - 前置：`_sync_issue_fields` 支持 `ensure_row` 建档最小行（issue 无卡片行自动建档，幂等）；
+    生产 2026-09-14 清理 46 条孤儿（issue_state 无对应 issue 的行，已备份），两表 stage 完全对齐。
+  - 写停：`session_store` 5 个 set_*（stage/scene/override/parent/subtask）**只写 issue 单表**，不再写 issue_state。
+  - 读切：`get_issue_stage / get_scene_override_flag / get_subtask_issues`、`issues._issue_stage_map`、
+    `tasks._batch_fetch_issue_state`、`cleanup._done_issues` 全部改读 issue 单表；issue_state 仅兜底。
+- **C5（已完成，2026-09-14）**：`db_setup` **移除 issue_state 建表** + 迁移块 `Phase C5` 条件 DROP：
+  仅当「无孤儿 + stage 全对齐」才 DROP（否则告警保留）；SQLite 自动执行，MySQL 手动。本地验证 DROP 正确、issue 数据保留。
 
-**C 未完成（留待后续专项）**：
-- **C3 前置（已完成，2026-09-13）**：`_sync_issue_fields` 支持 `ensure_row` 建档最小行——
-  `set_issue_stage/set_issue_scene/set_scene_override_flag/set_parent_issue/set_subtask_mode` 在
-  issue 无卡片行时自动建档（user_id=0/status=active，幂等），解决「pipeline 3.1 建档早于
-  `ensure_issue_task` → issue 无行」的停写前置问题。端到端验证全过。
-- **C1（单表读）不单独切**：`issues.py._issue_stage_map` 保持双表聚合（issue_state 权威 + issue 兜底）。
-  若强制切为 issue 单表权威，会破坏 `test_issues_api`（测试直插 issue_state 绕过双写，见坑 4）。
-  **真单表读依赖 C3 停写后数据全落 issue 表**。
-- **C3（issue_state 停写）继续待专项**：新增建档兜底后已具备停写条件，但**停写须同时切读**——
-  `get_issue_stage / get_scene_override_flag / get_subtask_issues / cleanup.py:25 / event_pipeline / routing / tasks.py / pipeline.py`
-  等多处直接读 issue_state。切读会破坏直插 issue_state 的测试契约（坑 4），需先改测试为经 `set_*` 写数据。
-  这是一次性大改造，建议专项排期 + 生产双写观察后再执行。
-- **C5（DROP issue_state）**：依赖 C3 停写稳定 + 数据核对（备份后 DROP），上线生产验证后再做。
-- **C2（后端端点移除）**：`POST /api/tasks/create` 保留（避免 CLI/Agent 断裂），待 C5 统一清理。
+**C 遗留**：
+- **C2 后端端点移除**：`POST /api/tasks/create` 端点保留（待确认 CLI/Agent 后统一清理）。
 
 ---
 
