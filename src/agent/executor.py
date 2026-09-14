@@ -794,11 +794,28 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             except Exception:
                 pass
 
-        # Issue #139：OOM 检测 + 沙箱资源清理
+        # Issue #139：OOM 检测 + 资源统计 + 沙箱资源清理
         _exit_code = proc.returncode if proc.returncode is not None else -1
         if _exit_code == 137:
             log.error(f"{label}{backend.name} OOM killed (cgroup memory limit)")
         if _sandbox_ctx:
+            # 读取 cgroup 资源使用统计（CPU/内存峰值），写入审计日志
+            if _sandbox_ctx._cgroup and _sandbox_ctx._cgroup.created:
+                try:
+                    stats = _sandbox_ctx._cgroup.get_stats()
+                    if stats and _sandbox_ctx._audit_log:
+                        _sandbox_ctx._audit_log.write({
+                            "ts": __import__("datetime").datetime.now(
+                                __import__("datetime").timezone.utc
+                            ).isoformat(),
+                            "task_id": _sandbox_ctx.task_id,
+                            "event": "resource_stats",
+                            "exit_code": _exit_code,
+                            "oom": _exit_code == 137,
+                            **stats,
+                        })
+                except Exception as _stats_e:
+                    log.warning(f"{label}cgroup get_stats failed: {_stats_e}")
             from src.agent.sandbox import cleanup_sandbox
             from src.agent.executor import unregister_sandbox
             cleanup_sandbox(_sandbox_ctx)
