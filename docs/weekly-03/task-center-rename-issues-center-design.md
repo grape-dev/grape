@@ -105,3 +105,15 @@
 - 缓存版本号提升：`I18N.init('11')→('12')`（JSON 加载）、`tasks.js?v=83→84`、`app.js?v=71→72`、`chat.js?v=33→34`
 - 保持不改：view key `tasks`、`/api/tasks/*` 接口、`app.nav.tasks` JSON key、页面文件/路由
 - 验证：JSON 可解析且文案正确；node --check 三个 JS 通过；test_help_directory 45 passed
+
+## 八·续 页面内「任务→需求」对齐（2026-09-14）
+
+- `view_mine`：我的任务 → **我的需求**（en My Tasks → My Requirements）
+- `create` 块：`btn_new/modal_title` + 新建任务 → **+ 新建需求**；`title/desc_placeholder`、`btn_create`、`err_*` 全部「任务→需求」
+  （en New Task → **New Requirement**）
+- 页面内用户可见统一「需求」：`detail_title`、`confirm_done/cancel_task/resume_task`、toast、`empty.*`、`search_placeholder`、
+  `multi_task_badge/single_task_badge/parent_task`、`task_mode`、`filter_options.created_by_me`、`no_description`
+  （zh: 任务→需求；en: Task→Requirement；**保留 `task_id`「任务编号/Task ID」技术词**）
+- tasks.js fallback 同步（view_mine/empty/detail_title）+ 新建需求注释
+- 缓存版本号提升：`I18N.init('12')→('13')`、`tasks.js?v=84→85`
+- 验证：JSON 可解析、无「任务」用户可见残留（除 task_id）、node --check 通过
