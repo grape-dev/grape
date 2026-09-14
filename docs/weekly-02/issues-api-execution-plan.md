@@ -3,7 +3,7 @@
 > 关联设计：`docs/weekly-02/issues-api-design.md`
 > 目标：新增 `/api/issues` 对外接口，澄清 Issue/Event/Task 概念，并迁移 `tasks/create`
 > 分支：`weekly-02-lyz`
-> 状态：**实施计划（执行中：B2/C 部分完成）**
+> 状态：**已完成（A/B/C 全阶段，2026-09-14）**
 > 日期：2026-09-11
 
 ---
@@ -131,13 +131,13 @@
 | C4 | 文档 | `help/api/11-issues.md` + `README.md` 目录 + `EXPECTED_API_FILES` + 01-tasks 迁移说明 | 契约/文档一致 | C1 |
 | C5 | 迁移验收 | `issue_state` 数据核对后 `DROP`（保留备份）；全量回归 | 任务中心建/改/催/完成/取消 + pipeline 各阶段正常 | C3/C4 |
 
-#### Phase C 实施记录（2026-09-12 起，C1/C3/C5 已于 2026-09-14 完成）
+#### Phase C 实施记录（2026-09-12 起，全阶段已于 2026-09-14 完成）
 
 **C 已完成**：
 - **C1（已完成）**：`issues.py._issue_stage_map` **issue 单表权威 + issue_state 兜底**（C3 停写后数据落 issue 表，读不再依赖 issue_state）。
-- **C2（部分）**：文档 `01-tasks.md`（docs/openapi + help/api 两处）标注 `POST /api/tasks/create` 已废弃并指向 `POST /api/issues/{owner}/{repo}`；
-  前端 `tasks.js createTaskSubmit` 已从 `/tasks/create` 迁移至 `/api/issues/{owner}/{repo}`（body 保留 repo_key/title/description/scene_id）。
-  **后端端点暂保留**（未移除）：避免既有调用方（含 CLI/Agent）断裂，待 C5 统一清理。
+- **C2（已完成）**：`POST /api/tasks/create` **端点已移除**（`tasks.create_task_via_issue` 去路由装饰器，函数保留供 issues.py 复用）；
+  前端 `tasks.js` 已迁移至 `POST /api/issues/{owner}/{repo}`；`test_tasks_create`/`test_issue_89` 调用改走 issues 端点；
+  `test_openapi.EXPECTED_PUBLIC` 移除 `tasks_create`。对外唯一创建入口 = `/api/issues`。
 - **C4（已完成）**：`docs/openapi/01-tasks.md` 与 `help/api/01-tasks.md` 同步废弃说明（`test_help_directory` 一致性恢复）；
   新增 `help/api/11-issues.md`（docs/openapi + help/api 双份，覆盖 5 端点 + 概念澄清）+ `README.md` 目录 + `tests/test_help_directory.py EXPECTED_API_FILES`（13→14）；
   顺带补齐 `tests/test_openapi.py EXPECTED_PUBLIC` 契约清单（issues 5 端点 + gitrepo_tree/contents_root + tasks_repo_all，基线遗留缺失）
@@ -150,8 +150,7 @@
 - **C5（已完成，2026-09-14）**：`db_setup` **移除 issue_state 建表** + 迁移块 `Phase C5` 条件 DROP：
   仅当「无孤儿 + stage 全对齐」才 DROP（否则告警保留）；SQLite 自动执行，MySQL 手动。本地验证 DROP 正确、issue 数据保留。
 
-**C 遗留**：
-- **C2 后端端点移除**：`POST /api/tasks/create` 端点保留（待确认 CLI/Agent 后统一清理）。
+**C 遗留**：无（A/B/C 全阶段完成）。
 
 ---
 
@@ -199,3 +198,5 @@ A1 → A2/A3/A4 → A5 → A6 ──┐
 | M1（A 完成） | `/api/issues` 5 端点可用，文档 11-issues.md 产出，含概念澄清表 |
 | M2（B 完成） | `issue` 表 + 字段收编 + 消费方改读，任务中心回归绿 |
 | M3（C 完成） | tasks/create 废弃、issue_state 停写/drop、单表接口统一，全量回归绿 |
+
+**✅ M1/M2/M3 全部达成（2026-09-14）**：`/api/issues` 5 端点 + 单表权威 + `issue_state` DROP + `tasks/create` 移除。
