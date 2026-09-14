@@ -163,6 +163,70 @@ def require_no_session_token(request: Request) -> dict:
 
 ---
 
+## 六·A 测试用例设计
+
+> 测试对象：`deps.require_no_session_token`（D 类端点）对三类认证的拦截行为。
+> 基础设施沿用 `tests/test_auth_routes.py` / `test_auth_token.py` 既有模式：
+> `TestClient(app)` + `dependency_overrides` 注入 user（auth_type 区分）+ `_jwt_access_token` / session token 签发。
+> 建议新增 `tests/test_token_scope_guard.py`。
+
+### 基线「三类认证用户」构造
+
+| 用例 | auth_type | 构造方式 | 期望 |
+|------|-----------|----------|------|
+| session_token | `session_token` | `issue_session_token(...)` 签发，`Authorization: Bearer tk_xxx` | 通过真实 token → user dict auth_type=session_token |
+| api_key | `api_key` | `generate_api_token(...)` 签发，`Authorization: Bearer grape_xxx` | auth_type=api_key |
+| jwt | `jwt` | `_jwt_access_token(...)`（Web 登录） | auth_type=jwt |
+
+> 也可用 `dependency_overrides[get_current_user_or_api_key]` 直接注入不同 `auth_type` 的 user dict，
+> 聚焦守卫逻辑（更简单、免平台 mock）。
+
+### D 类端点守卫（核心）
+
+| # | 用例 | 准备 | 断言 |
+|---|------|------|------|
+| T1 | `test_d_scenes_session_403` | auth_type=session_token 调 `GET /api/scenes` | 403，msg 含「会话 token」 |
+| T2 | `test_d_scenes_api_key_200` | auth_type=api_key 调 `GET /api/scenes` | 200 |
+| T3 | `test_d_scenes_jwt_200` | auth_type=jwt 调 `GET /api/scenes` | 200（JWT 不受影响） |
+| T4 | `test_d_skills_session_403` | auth_type=session_token 调 `GET /api/skills` | 403 |
+| T5 | `test_d_skills_api_key_200` | auth_type=api_key 调 `GET /api/skills` | 200 |
+| T6 | `test_d_repos_managed_session_403` | auth_type=session_token 调 `GET /api/repos/managed` | 403 |
+| T7 | `test_d_repos_managed_api_key_200` | auth_type=api_key 调 `GET /api/repos/managed` | 200 |
+| T8 | `test_d_profile_jwt_200` | auth_type=jwt 调 `GET /api/auth/profile` | 200 |
+| T9 | `test_d_chat_conversations_session_403` | auth_type=session_token 调 `GET /api/chat/conversations` | 403 |
+| T10 | `test_d_chat_conversations_api_key_200` | auth_type=api_key 调 `GET /api/chat/conversations` | 200 |
+
+### 非 D 类端点不回归（维持三通道）
+
+| # | 用例 | 准备 | 断言 |
+|---|------|------|------|
+| T11 | `test_a_tasks_mine_session_200` | auth_type=session_token 调 `GET /api/tasks/mine` | 200（A 类维持现状） |
+| T12 | `test_a_tasks_mine_api_key_200` | auth_type=api_key 调 `GET /api/tasks/mine` | 200（**API Key 维持现状**） |
+| T13 | `test_a_tasks_mine_jwt_200` | auth_type=jwt 调 `GET /api/tasks/mine` | 200（Web「我的需求」不损） |
+| T14 | `test_b_issues_list_session_200` | auth_type=session_token 调 `GET /api/issues/o/r` | 200（B 类双兼容） |
+| T15 | `test_b_issues_list_jwt_200` | auth_type=jwt 调 `GET /api/issues/o/r` | 200 |
+| T16 | `test_b_knowledge_list_api_key_200` | auth_type=api_key 调 `GET /api/knowledge` | 200 |
+| T17 | `test_c_gitrepo_session_only` | auth_type=session_token 调 `GET /api/git-repo/o/r/branches` | 200（C 类现状仅 session） |
+| T18 | `test_c_gitrepo_api_key_403` | auth_type=api_key 调 `GET /api/git-repo/o/r/branches` | 403（现状 `_repo_token` 拦截，不扩大） |
+
+### 守卫单元测试（`require_no_session_token` 直接测）
+
+| # | 用例 | 断言 |
+|---|------|------|
+| T19 | `test_guard_rejects_session` | user(auth_type=session_token) → 抛 403 |
+| T20 | `test_guard_passes_api_key` | user(auth_type=api_key) → 返回 user |
+| T21 | `test_guard_passes_jwt` | user(auth_type=jwt) → 返回 user |
+
+### 必跑命令
+
+```bash
+python -m pytest tests/test_token_scope_guard.py -v          # 新增守卫测试
+python -m pytest tests/test_auth_routes.py tests/test_auth_token.py -q  # 认证回归
+python -m pytest tests/test_openapi.py -q                   # 契约不回归
+```
+
+---
+
 ## 七、待确认项
 
 - [ ] agent 技能是否有走 D 类端点（skills/scenes/repos/profile）的 session 调用（需改用 API Key/JWT）
