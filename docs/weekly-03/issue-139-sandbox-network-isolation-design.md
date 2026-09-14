@@ -3,7 +3,7 @@
 > Issue：https://gitcode.com/grape-dev/grape/issues/139
 > 父 Issue：#64 支持任务执行沙箱隔离
 > 分支：`feat/issue-139-sandbox-network-isolation`（基于 `weekly-03`）
-> 日期：2026-09-14（v10 — 白名单 DB seed + codex 兼容性 + M-9 内联修复）
+> 日期：2026-09-14（v11 — codex worker 实测验证 + /opt/node 修复 + get_stats 接入）
 
 ---
 
@@ -1378,6 +1378,9 @@ DB 表 sandbox_whitelist（有数据）
 | 17 | K8s env 解析内联实现 | 第四轮审查 | config.py 内联 _parse_mem_env/_parse_cpu_env，不 import cgroup（避免循环导入） |
 | 18 | 审计 _AsyncWriter sentinel 修复 | 第四轮审查 | _FLUSH_SENTINEL 改为类变量，避免 _run 线程 NameError 崩溃 |
 | 19 | 审计双锁统一 | 第四轮审查 | 删除 RotatingAuditLog._lock（类级），统一用模块级 _lock |
+| 20 | cgroup get_stats 接入审计 | 自检遗漏 | executor.py cleanup 前调 get_stats()，写 resource_stats 事件到审计日志（CPU/内存峰值 + OOM 标记） |
+| 21 | /opt/node 挂载 | codex worker 实测 | BWRAP_RO_SYSTEM_OPT = ('/opt/node',)，--ro-bind-try，解决 worker 上 node 符号链接断裂。不存在时跳过，不影响 opencode/codearts/hermes |
+| 22 | codex worker 实测验证 | 新加坡 worker | codex v0.153.4 + Node v26.8.1 + bwrap v0.9.0 + cgroup v2。API 调用走代理，白名单放行 opengw，拒绝 github.com/chatgpt.com |
 
 ### 专家审查注释（v9 新增）
 
@@ -1442,7 +1445,7 @@ DB 表 sandbox_whitelist（有数据）
 | 步骤 | 内容 | 参考 |
 |------|------|------|
 | 0 | **实施前验证（已完成）** | — |
-| 0a | ✅ 验证通过：四个引擎全部走 HTTP_PROXY。opencode（bun）3 个 CONNECT → 模型回复 "hello"。codearts（bun）4 个 CONNECT（含 snap-access.cn-north-4.myhuaweicloud.com）。hermes（Python httpx）5 个 CONNECT → 模型回复 "hello"。codex 环境未安装，待远程 Worker 验证（底层 Node.js，预计走 HTTP_PROXY） | 不需要 global-agent |
+| 0a | ✅ 验证通过：四个引擎全部走 HTTP_PROXY。opencode（bun）3 个 CONNECT → 模型回复 "hello"。codearts（bun）4 个 CONNECT（含 snap-access.cn-north-4.myhuaweicloud.com）。hermes（Python httpx）5 个 CONNECT → 模型回复 "hello"。codex（Node.js v26.8.1）在新加坡 worker（124.243.190.182）实测：API 调走代理，白名单放行 opengw.clouddeveloper.club，拒绝 github.com/chatgpt.com。codex 返回 "Hello! How can I help you today?" | 不需要 global-agent |
 | 0b | ✅ 验证通过：--cap-drop ALL 不影响 pip install / npm / node / touch / chmod。whoami=id=yangaiwu（非 root，正常用户） | 保留 --cap-drop ALL |
 | 0c | ✅ 验证通过：bwrap --unshare-net 后 lo（127.0.0.1）可用。沙箱内 Python ThreadingTCPServer bind 127.0.0.1:3128 成功，三个引擎都连上了代理 | 确定沙箱内桥接可行 |
 
