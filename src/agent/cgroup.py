@@ -99,10 +99,12 @@ class CgroupSlice:
         cpu_quota: int | str = 0,
         max_pids: int = 0,
     ):
-        # 用 md5 hash 保证并发唯一性（sanitize[:12] 会碰撞）
+        # 标识符：可读前缀 + sha256 后缀（与 proxy.py socket 文件名一致，便于排查）
+        import re as _re
         import hashlib as _hashlib
-        unique_id = _hashlib.md5(task_id.encode()).hexdigest()[:16]
-        self._name = f"grape-sandbox-{unique_id}"
+        _safe_prefix = _re.sub(r"[^a-zA-Z0-9_-]", "", task_id)[:16]
+        _hash_suffix = _hashlib.sha256(task_id.encode()).hexdigest()[:8]
+        self._name = f"grape-sandbox-{_safe_prefix}-{_hash_suffix}"
         # 支持 K8s 格式（"2Gi" / "500m"）或纯数字（MB / 毫核）
         self._mem_limit = parse_memory(str(mem_limit_mb)) if isinstance(mem_limit_mb, str) else mem_limit_mb
         self._cpu_quota = parse_cpu(str(cpu_quota)) if isinstance(cpu_quota, str) else cpu_quota

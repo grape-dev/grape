@@ -598,17 +598,20 @@ class SandboxProxy:
 
     def start(self) -> dict:
         """启动代理 + 桥接。返回 {proxy_port, socket_path}。"""
-        # Unix socket 路径：用 md5 hash 保证并发唯一性（sanitize[:12] 会碰撞）
+        # 标识符：可读前缀 + hash 后缀，既保证可追溯性又保证唯一性
+        import re as _re
         import hashlib as _hashlib
         home = os.path.expanduser("~")
-        unique_id = _hashlib.md5(self._task_id.encode()).hexdigest()[:16]
+        _safe_prefix = _re.sub(r"[^a-zA-Z0-9_-]", "", self._task_id)[:16]
+        _hash_suffix = _hashlib.sha256(self._task_id.encode()).hexdigest()[:8]
+        _unique_id = f"{_safe_prefix}-{_hash_suffix}"
         self._socket_path = os.path.join(
-            home, f".grape-sandbox-{unique_id}.sock"
+            home, f".grape-sandbox-{_unique_id}.sock"
         )
 
         # 创建 per-instance handler 子类（避免类变量被并发 SandboxProxy 覆盖）
         handler = type(
-            f"Handler_{unique_id[:8]}",
+            f"Handler_{_hash_suffix}",
             (WhitelistProxyHandler,),
             {
                 "_task_id": self._task_id,
