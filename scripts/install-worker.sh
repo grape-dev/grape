@@ -21,7 +21,7 @@
 set -euo pipefail
 
 # ===== 参数解析 =====
-TOKEN=""
+TOKEN="${TOKEN:-}"
 SERVER=""
 DEVICE=""
 INSTALL_DIR=""
