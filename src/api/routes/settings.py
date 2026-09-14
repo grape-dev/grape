@@ -10,6 +10,25 @@ from src.api.time_utils import normalize_event_time
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
+def _resolve_repo_key(owner_repo: str) -> str:
+    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(owner_repo)
+    if ":" in owner_repo:
+        return rk
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            c = _db.cursor()
+            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+                            (f"gitcode:{owner_repo}", f"github:{owner_repo}")).fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return rk
+
+
 # ====== Credentials ======
 
 @router.get("/credentials")
@@ -20,6 +39,10 @@ def get_credentials(user: dict = Depends(get_current_user), repo_key: str = ""):
             "api_token_exists": bool(acc.get("gitcode_api_token")),
             "account": user["username"],
             "auto_filled": True,
+        },
+        "github": {
+            "token_exists": bool(acc.get("github_api_token")),
+            "login": acc.get("github_login", ""),
         },
         "huawei_cloud": {
             "ak_exists": bool(acc.get("huawei_cloud_ak")),
@@ -39,6 +62,7 @@ class UpdateCredentials(BaseModel):
     huawei_cloud_sk: str = ""
     codearts_ak: str = ""
     codearts_sk: str = ""
+    github_token: str = ""
     repo_key: str = ""
 
 
@@ -72,8 +96,92 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(get_current
         acc["CODEARTS_CLI_AK"] = body.codearts_ak.strip()
     if body.codearts_sk and not _is_placeholder(body.codearts_sk):
         acc["CODEARTS_CLI_SK"] = body.codearts_sk.strip()
+    if body.github_token and not _is_placeholder(body.github_token):
+        _gh_tok = body.github_token.strip()
+        acc["github_api_token"] = _gh_tok
+        # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
+        try:
+            import requests as _req
+            _resp = _req.get("https://api.github.com/user",
+                             headers={"Authorization": f"Bearer {_gh_tok}", "Accept": "application/vnd.github+json"},
+                             timeout=10)
+            if _resp.status_code == 200:
+                _gh_user = _resp.json()
+                acc["github_login"] = _gh_user.get("login", "")
+                # 关联到用户表
+                user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
+                log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
+            else:
+                log.warning(f"GitHub token validation failed: {_resp.status_code}")
+        except Exception as _e:
+            log.warning(f"GitHub token validation error: {_e}")
     user_db.save_user_account(user["username"], acc)
     return {"message": "凭据已更新"}
+
+
+# ====== API Keys (Issue #69: grape_ 前缀用户级 key 管理) ======
+
+class CreateApiKeyBody(BaseModel):
+    name: str = ""
+
+
+@router.post("/api-keys")
+def create_api_key(body: CreateApiKeyBody, user: dict = Depends(get_current_user)):
+    """生成 grape_ 前缀 API key——明文仅返回一次，DB 存 SHA-256 hash。
+
+    复用 auth_token.generate_api_token（Issue-45 方式 B 已有后端），
+    补齐 Web UI 管理入口（Issue #69 验收标准）。
+    """
+    from src.api.auth_token import generate_api_token
+
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "Key 名称不能为空"})
+    if len(name) > 64:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "Key 名称不能超过 64 字符"})
+
+    result = generate_api_token(user["id"], name)
+    if not result:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "生成 API Key 失败（同名 key 可能已存在）"})
+
+    log.info(f"API key created: user={user['username']} id={result['id']} name={name}")
+    return {
+        "id": result["id"],
+        "key": result["token"],       # 明文——仅此一次返回
+        "name": name,
+        "message": "API Key 已生成，明文仅展示此次，请立即保存",
+    }
+
+
+@router.get("/api-keys")
+def list_api_keys(user: dict = Depends(get_current_user)):
+    """列出当前用户的所有 API key（不含明文，仅展示名称+状态+时间）。"""
+    from src.api.auth_token import list_api_tokens, API_KEY_PREFIX
+
+    tokens = list_api_tokens(user["id"])
+    return {"keys": [
+        {
+            "id": t["id"],
+            "name": t["name"],
+            "prefix": API_KEY_PREFIX + "••••",
+            "created_at": normalize_event_time(t.get("created_at")),
+            "last_used_at": normalize_event_time(t.get("last_used_at")) if t.get("last_used_at") else None,
+        }
+        for t in tokens
+    ]}
+
+
+@router.delete("/api-keys/{key_id}")
+def revoke_api_key(key_id: int, user: dict = Depends(get_current_user)):
+    """吊销 API key——软删除（revoked=1），立即失效，保审计。"""
+    from src.api.auth_token import revoke_api_token
+
+    ok = revoke_api_token(user["id"], key_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "API Key 不存在或已吊销"})
+
+    log.info(f"API key revoked: user={user['username']} id={key_id}")
+    return {"message": "API Key 已吊销，立即失效"}
 
 
 # ====== Notifications ======
@@ -131,11 +239,10 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_curr
     from src.repo_key import to_repo_key
     bot_token = get_bot_token_by_repo(owner, repo)
     bot_username = "devops-bot"
-    # GitCode name 可能是显示名（≠URL path），按 repo_key 匹配更稳（见 repo_manager.fetch_repos_with_role）
-    target_key = to_repo_key(f"{owner}/{repo}")
+    target_key = _resolve_repo_key(f"{owner}/{repo}")
     repos = user_db.get_managed_repos(user["id"])
     for r in repos:
-        if to_repo_key(f'{r.get("repo_owner", "")}/{r.get("repo_name", "")}') == target_key:
+        if _resolve_repo_key(f'{r.get("repo_owner", "")}/{r.get("repo_name", "")}') == target_key:
             bot_username = r.get("bot_username", "") or "devops-bot"
             break
 
@@ -156,8 +263,7 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                                      user: dict = Depends(get_current_user)):
     # 将 Bot Token / Bot Username 存储到 managed_repos（webhook_token 由托管流程自动维护）
     from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _resolve_repo_key(f"{owner}/{repo}")
     if body.bot_token and not _is_placeholder(body.bot_token):
         update_managed_repo_bot_token(repo_key, body.bot_token.strip())
     if body.bot_username:
@@ -192,6 +298,33 @@ def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_current_user
     if body.gitcode_oauth_redirect_uri:
         set_meta_value("oauth_gitcode_redirect_uri", body.gitcode_oauth_redirect_uri)
     return {"message": "OAuth 配置已更新"}
+
+
+class GitHubOAuthConfig(BaseModel):
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    github_oauth_redirect_uri: str = ""
+
+
+@router.get("/oauth-github")
+def get_github_oauth_config(user: dict = Depends(get_current_user)):
+    from src.user.db import get_meta_value
+    return {
+        "github_oauth_client_id": bool(get_meta_value("oauth_github_client_id")),
+        "github_oauth_redirect_uri": get_meta_value("oauth_github_redirect_uri"),
+    }
+
+
+@router.put("/oauth-github")
+def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(get_current_user)):
+    from src.user.db import set_meta_value
+    if body.github_oauth_client_id:
+        set_meta_value("oauth_github_client_id", body.github_oauth_client_id)
+    if body.github_oauth_client_secret:
+        set_meta_value("oauth_github_client_secret", body.github_oauth_client_secret)
+    if body.github_oauth_redirect_uri:
+        set_meta_value("oauth_github_redirect_uri", body.github_oauth_redirect_uri)
+    return {"message": "GitHub OAuth 配置已更新"}
 
 
 # ====== Agent Runtimes ======
@@ -287,8 +420,8 @@ def get_agent_runtimes(user: dict = Depends(get_current_user)):
         try:
             with db_lock:
                 _tc = db.cursor()
-                _tc.execute("SELECT tag, max_concurrent, priority, enabled FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rt["id"],))
-                rt["tags"] = [{"tag": r[0], "max_concurrent": r[1], "priority": r[2], "enabled": bool(r[3])} for r in _tc.fetchall()]
+                _tc.execute("SELECT tag, priority, enabled FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rt["id"],))
+                rt["tags"] = [{"tag": r[0], "priority": r[1], "enabled": bool(r[2])} for r in _tc.fetchall()]
         except Exception:
             rt["tags"] = []
         visible_runtimes.append(rt)
@@ -349,7 +482,9 @@ def get_agent_runtimes(user: dict = Depends(get_current_user)):
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
-                "agent_tags": rt.get("agent_tags", [])})
+                "agent_tags": rt.get("agent_tags", []),
+                "scene_tags": rt.get("scene_tags", ["default"]),
+                "alias": rt.get("alias", "")})
         else:
             # 本机 hostname 未在 runtime_credentials 中注册 → 创建虚拟本机设备
             _local_dev_key = "__local__"
@@ -368,7 +503,9 @@ def get_agent_runtimes(user: dict = Depends(get_current_user)):
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
-                "agent_tags": rt.get("agent_tags", [])})
+                "agent_tags": rt.get("agent_tags", []),
+                "scene_tags": rt.get("scene_tags", ["default"]),
+                "alias": rt.get("alias", "")})
     # AI Devspace 创建的凭据：worker 尚未上线注册时没有 agent_runtimes 行，
     # 但用户需要在 Workers 列表看到这个待接入设备（凭据已生成，环境正在启动）。
     # 保留没有承载引擎但凭据 active 的设备，health=offline 让用户知道还没接入。
@@ -564,6 +701,39 @@ def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depe
     return {"message": f"凭据已改名为 {name}"}
 
 
+class CredScopeBody(BaseModel):
+    scope: str = "user"
+    repo_key: str = ""
+
+
+@router.put("/runtime-credentials/{cid}/scope")
+def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(get_current_user)):
+    """切换凭据 scope（仓库/个人）。仅 owner 可操作，仅 active 凭据可改。不允许设为 global。"""
+    from src.session_manager import db, db_lock
+    scope = _normalize_scope(body.scope)
+    if scope == "global":
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "不允许设为全局，仅可切换仓库/个人"})
+    repo_key = (body.repo_key or "").strip()
+    if scope == "repo" and not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 scope 需填写 repo_key"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+        _owner, _status = row[0] or "", row[1] or ""
+        if _status != "active":
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改 scope"})
+        _uname = user.get("username") or ""
+        if _owner != _uname:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅凭据 owner 可修改 scope"})
+        c.execute("UPDATE runtime_credentials SET scope=?, repo_key=? WHERE id=?", (scope, repo_key or None, cid))
+        db.commit()
+    log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key}")
+    return {"scope": scope, "repo_key": repo_key}
+
+
 @router.get("/runtime-credentials")
 def list_runtime_credentials(user: dict = Depends(get_current_user)):
     """凭据列表（不含 token_hash / 明文）"""
@@ -649,12 +819,10 @@ def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_
 
 class EngineTagBody(BaseModel):
     tag: str
-    max_concurrent: int = 1
     priority: int = 50
 
 
 class EngineTagUpdateBody(BaseModel):
-    max_concurrent: int = 1
     priority: int = 50
     enabled: int = 1
 
@@ -678,7 +846,7 @@ def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, tag, max_concurrent, priority, enabled, created_at, updated_at "
+                "SELECT id, tag, priority, enabled, created_at, updated_at "
                 "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
                 (rid,)
             )
@@ -686,8 +854,8 @@ def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"tags": [
-        {"id": r[0], "tag": r[1], "max_concurrent": r[2], "priority": r[3],
-         "enabled": bool(r[4]), "created_at": r[5], "updated_at": r[6]}
+        {"id": r[0], "tag": r[1], "priority": r[2],
+         "enabled": bool(r[3]), "created_at": r[4], "updated_at": r[5]}
         for r in rows
     ]}
 
@@ -709,9 +877,9 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_curre
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在"})
             c.execute(
                 "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                "VALUES (?,?,?,?,1,?,?) "
-                "ON DUPLICATE KEY UPDATE max_concurrent=VALUES(max_concurrent), priority=VALUES(priority), updated_at=VALUES(updated_at)",
-                (rid, tag, body.max_concurrent, body.priority, now, now)
+                "VALUES (?,?,1,?,1,?,?) "
+                "ON DUPLICATE KEY UPDATE priority=VALUES(priority), updated_at=VALUES(updated_at)",
+                (rid, tag, body.priority, now, now)
             )
             _sync_agent_tags(rid, c)
             db.commit()
@@ -723,15 +891,15 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_curre
             try:
                 c.execute(
                     "REPLACE INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                    "VALUES (?,?,?,?,1,?,?)",
-                    (rid, tag, body.max_concurrent, body.priority, now, now)
+                    "VALUES (?,?,1,?,1,?,?)",
+                    (rid, tag, body.priority, now, now)
                 )
                 _sync_agent_tags(rid, c)
                 db.commit()
             except Exception as e2:
                 db.rollback()
                 raise HTTPException(status_code=500, detail={"code": 500, "message": str(e2)})
-    log.info(f"Engine tag added: runtime={rid} tag={tag} concurrent={body.max_concurrent} priority={body.priority}")
+    log.info(f"Engine tag added: runtime={rid} tag={tag} priority={body.priority}")
     return {"message": f"标签 {tag} 已添加", "tag": tag}
 
 
@@ -747,9 +915,9 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
         c = db.cursor()
         try:
             c.execute(
-                "UPDATE engine_capabilities SET max_concurrent=?, priority=?, enabled=?, updated_at=? "
+                "UPDATE engine_capabilities SET priority=?, enabled=?, updated_at=? "
                 "WHERE runtime_id=? AND tag=?",
-                (body.max_concurrent, body.priority, body.enabled, now, rid, tag)
+                (body.priority, body.enabled, now, rid, tag)
             )
             if c.rowcount == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})

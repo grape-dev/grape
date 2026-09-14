@@ -16,17 +16,14 @@ let _runtimeTab = 'engines';
 let _runtimeSearch = '';
 let _rtFilterType = '';
 let _rtFilterScope = '';
+let _rtFilterScene = [];
+let _rtFilterTag = [];
 let __runtimeData = null;
 let __runtimeDevices = null;
 let _skillScanDirty = false;  // skills 扫描成功后标记，关闭弹窗时刷新引擎列表
 let _scopeCollapse = { global: false, repo: true, user: true };  // scope 分组折叠状态：global 默认展开，repo/user 默认折叠
 
 function _toggleScope(sc) {
-  // 互斥：展开一个时自动折叠其他
-  if (_scopeCollapse[sc]) {
-    // 当前折叠 → 即将展开 → 先折叠所有其他
-    Object.keys(_scopeCollapse).forEach(k => { if (k !== sc) _scopeCollapse[k] = true; });
-  }
   _scopeCollapse[sc] = !_scopeCollapse[sc];
   renderRuntimes(__runtimeData);
 }
@@ -63,8 +60,10 @@ function _healthTabBar(sc, list) {
   const counts = {};
   _HEALTH_SECTIONS.forEach(sec => { counts[sec.key] = 0; });
   list.forEach(e => { const h = e.health || e.status || 'offline'; if (counts[h] !== undefined) counts[h]++; });
-  const active = _healthTab[sc] || 'online';
+  const active = _healthTab[sc] || 'all';
+  const allCount = list.length;
   return `<div style="display:flex;align-items:center;gap:0;margin:8px 0 12px;border-bottom:1px solid var(--b)">
+    <span onclick="_healthTab['${sc}']='all';renderRuntimes(__runtimeData)" style="display:inline-flex;align-items:center;gap:5px;padding:6px 14px;font-size:12px;font-weight:${active==='all'?'600':'400'};color:${active==='all'?'var(--t1)':'var(--t3)'};cursor:pointer;border-bottom:2px solid ${active==='all'?'var(--t1)':'transparent'};transition:all .15s;user-select:none" onmouseover="if('${active}'!=='all')this.style.color='var(--t2)'" onmouseout="if('${active}'!=='all')this.style.color='var(--t3)'">全部 <span style="font-size:10px;opacity:.7">${allCount}</span></span>
     ${_HEALTH_SECTIONS.map(sec => {
       const n = counts[sec.key] || 0;
       const isActive = active === sec.key;
@@ -113,7 +112,7 @@ function _summaryStatsBar(data, devices) {
   return `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;margin-bottom:10px;font-size:12px;color:var(--t2);background:var(--bg);border-radius:8px">${parts.join('<span style="color:var(--t3)">·</span>')}</div>`;
 }
 
-// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts）
+// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts/codex）
 function _engineWatermark(name) {
   const n = (name || '').toLowerCase();
   if (n.includes('opencode')) {
@@ -124,6 +123,9 @@ function _engineWatermark(name) {
   }
   if (n.includes('codearts')) {
     return `<img src="/static/img/engines/codearts.jpg" style="position:absolute;right:12px;bottom:8px;width:50px;height:50px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
+  }
+  if (n.includes('codex')) {
+    return `<img src="/static/img/engines/codex.png" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
   }
   return '';
 }
@@ -157,6 +159,11 @@ function renderRuntimes(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   __runtimeData = data;
+  // 场景标签缓存未加载时先异步拉取，拿到后再渲染（避免卡片显示原始 name 而非 display_name）
+  if (!__sceneTagsCache) {
+    _loadSceneTagsCache(function() { renderRuntimes(data); });
+    return;
+  }
   // 设置当前用户名供权限判断
   try { window._grapeUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || ''; } catch(e) { window._grapeUsername = ''; }
   const devices = (data.devices && data.devices.length)
@@ -185,6 +192,7 @@ function renderRuntimes(data) {
     if (n.includes('hermes')) return 'hermes';
     if (n.includes('opencode')) return 'opencode';
     if (n.includes('codearts')) return 'codearts';
+    if (n.includes('codex')) return 'codex';
     return '';
   }).filter(Boolean))];
   const _allScopes = ['local','user','repo','global'];
@@ -193,7 +201,11 @@ function renderRuntimes(data) {
     const list = _runtimeTab === 'engines' ? (data.runtimes||[]) : devices;
     return list.some(e => (e.scope || (e.is_local ? 'local' : 'global')) === sc || (sc === 'local' && e.is_local));
   };
-  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b' };
+  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
+  // 收集可用场景和标签（从引擎数据提取）
+  const _allRuntimes = (data.runtimes || []);
+  const _availScenes = [...new Set(_allRuntimes.flatMap(rt => rt.scene_tags || []))].filter(Boolean);
+  const _availTags = [...new Set(_allRuntimes.flatMap(rt => rt.agent_tags || []))].filter(Boolean);
   html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">
     <span style="font-size:11px;color:var(--t3);font-weight:500;margin-right:2px">筛选</span>
     ${_availTypes.map(t => {
@@ -205,7 +217,21 @@ function renderRuntimes(data) {
       const act = _rtFilterScope === s;
       return `<span onclick="_rtToggleScope('${s}')" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0071e3':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0071e3':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px">${_SCOPE_LABELS[s]||s}</span>`;
     }).join('')}
-    ${(_rtFilterType || _rtFilterScope || _runtimeSearch) ? `<span onclick="_rtClearFilters()" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;color:#86868b;font-weight:400" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">✕ 清除</span>` : ''}
+    ${_availScenes.length > 0 && _runtimeTab === 'engines' ? '<span style="width:1px;background:var(--b);margin:2px 4px;height:18px"></span>' : ''}
+    ${_runtimeTab === 'engines' ? `
+    <div style="position:relative;display:inline-block">
+      <span onclick="_toggleFilterDropdown('sceneDropdown')" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${_rtFilterScene.length ? '#10b981' : 'var(--b)'};color:${_rtFilterScene.length?'#fff':'var(--t1)'};background:${_rtFilterScene.length ? '#10b981' : 'var(--c)'};font-weight:500;transition:all .2s;display:inline-flex;align-items:center;gap:4px">${I18N.t('runtimes.label.scene')}${_rtFilterScene.length ? '(' + _rtFilterScene.length + ')' : ''}<span style="font-size:8px;opacity:.6">▼</span></span>
+      <div id="sceneDropdown" style="display:none;position:absolute;top:calc(100% + 4px);left:0;background:var(--c);border:1px solid var(--b);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);z-index:100;padding:4px;min-width:140px">
+        ${_availScenes.map(s => { var c = _SCENE_TAG_COLORS[s]||'#10b981'; var sel = _rtFilterScene.indexOf(s) >= 0; return '<label style="padding:5px 10px;font-size:11px;cursor:pointer;border-radius:4px;display:flex;align-items:center;gap:6px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'\'"><input type="checkbox" onchange="_rtToggleMulti(\'scene\',\'' + s + '\')" ' + (sel?'checked':'') + ' style="width:13px;height:13px;accent-color:' + c + '"><span style="font-size:9px;padding:1px 7px;border-radius:999px;color:#fff;background:' + c + '">' + _sceneDisplayName(s) + '</span></label>'; }).join('')}
+      </div>
+    </div>
+    <div style="position:relative;display:inline-block">
+      <span onclick="_toggleFilterDropdown('tagDropdown')" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${_rtFilterTag.length ? (_RT_TAG_COLORS[_rtFilterTag[0]]||'#999') : 'var(--b)'};color:${_rtFilterTag.length?'#fff':'var(--t1)'};background:${_rtFilterTag.length ? (_RT_TAG_COLORS[_rtFilterTag[0]]||'#999') : 'var(--c)'};font-weight:500;transition:all .2s;display:inline-flex;align-items:center;gap:4px">${I18N.t('runtimes.label.role_tags')}${_rtFilterTag.length ? '(' + _rtFilterTag.length + ')' : ''}<span style="font-size:8px;opacity:.6">▼</span></span>
+      <div id="tagDropdown" style="display:none;position:absolute;top:calc(100% + 4px);left:0;background:var(--c);border:1px solid var(--b);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);z-index:100;padding:4px;min-width:140px">
+        ${_availTags.map(t => { var c = _RT_TAG_COLORS[t]||'#999'; var sel = _rtFilterTag.indexOf(t) >= 0; return '<label style="padding:5px 10px;font-size:11px;cursor:pointer;border-radius:4px;display:flex;align-items:center;gap:6px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'\'"><input type="checkbox" onchange="_rtToggleMulti(\'tag\',\'' + t + '\')" ' + (sel?'checked':'') + ' style="width:13px;height:13px;accent-color:' + c + '"><span style="font-size:9px;padding:1px 7px;border-radius:999px;color:#fff;background:' + c + '">' + _rtTagLabel(t) + '</span></label>'; }).join('')}
+      </div>
+    </div>` : ''}
+    ${(_rtFilterType || _rtFilterScope || _rtFilterScene.length || _rtFilterTag.length || _runtimeSearch) ? `<span onclick="_rtClearFilters()" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;color:#86868b;font-weight:400" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">✕ 清除</span>` : ''}
   </div>`;
   html += _summaryStatsBar(data, devices);
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);
@@ -220,7 +246,7 @@ function renderEngines(data, devices) {
   const q = (_runtimeSearch || '').toLowerCase().trim();
   const filtered = runtimes.filter(rt => {
     if (q) {
-      const hay = [rt.instance_name, rt.name, rt.worker_name, rt.owner, rt.host_name, (rt.tags||[]).join(' '), (rt.local_skills||[]).join(' ')].join(' ').toLowerCase();
+      const hay = [rt.alias, rt.instance_name, rt.name, rt.worker_name, rt.owner, rt.host_name, (rt.tags||[]).join(' '), (rt.local_skills||[]).join(' ')].join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
     }
     if (_rtFilterType) {
@@ -230,6 +256,14 @@ function renderEngines(data, devices) {
     if (_rtFilterScope) {
       const sc = rt.is_local ? 'local' : (rt.scope || 'global');
       if (sc !== _rtFilterScope) return false;
+    }
+    if (_rtFilterScene.length > 0) {
+      const tags = rt.scene_tags || [];
+      if (!_rtFilterScene.some(s => tags.includes(s))) return false;
+    }
+    if (_rtFilterTag.length > 0) {
+      const tags = rt.agent_tags || [];
+      if (!_rtFilterTag.some(t => tags.includes(t) || tags.includes('all'))) return false;
     }
     return true;
   });
@@ -248,8 +282,8 @@ function renderEngines(data, devices) {
     if (collapsed) return;  // 折叠时不渲染卡片网格
     // 健康 Tab 切换栏
     html += _healthTabBar(sc, list);
-    const activeTab = _healthTab[sc] || 'online';
-    const secList = list.filter(rt => (rt.health || rt.status || 'offline') === activeTab);
+    const activeTab = _healthTab[sc] || 'all';
+    const secList = activeTab === 'all' ? list.slice() : list.filter(rt => (rt.health || rt.status || 'offline') === activeTab);
     _sortByName(secList);
     html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px;max-height:440px;overflow-y:auto">`;
     secList.forEach(rt => {
@@ -264,15 +298,16 @@ function renderEngines(data, devices) {
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;min-height:24px">
           ${_healthBadge(rt.health)}
           <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
-            <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rt.instance_name || rt.name}</span>
+            <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rt.alias || rt.instance_name || rt.name}</span>
+            ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${rt.instance_name || rt.name})</span>` : ''}
             <svg onclick="event.stopPropagation();copyText('${(rt.instance_name || rt.name || '').replace(/'/g, "\\'")}');this.style.color='var(--g)';var _t=this;setTimeout(function(){_t.style.color='var(--t3)'},1500)" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;cursor:pointer;transition:color .2s"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             ${localBadge}${hostTag}
           </span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:12px;color:var(--t2);flex:1">
           <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.worker')}</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
-          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'} ${rt.is_local ? `<span style="color:var(--t3);font-size:10px">(${I18N.t('runtimes.scope.global')})</span>` : ''}</div>
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.skills_label')}</span> ${I18N.t('runtimes.label.skills_count', {count: (rt.local_skills || []).length})}</div>
+          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.scene')}</span> ${_sceneTagSummary(rt.scene_tags)}</div>
           <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
         </div>
       </div>`;
@@ -312,13 +347,15 @@ function renderWorkers(data, devices) {
     if (collapsed) return;  // 折叠时不渲染卡片网格
     // 健康 Tab 切换栏
     html += _healthTabBar(sc, list);
-    const activeTab = _healthTab[sc] || 'online';
-    const secList = list.filter(d => (d.health || d.status || 'offline') === activeTab);
+    const activeTab = _healthTab[sc] || 'all';
+    const secList = activeTab === 'all' ? list.slice() : list.filter(d => (d.health || d.status || 'offline') === activeTab);
     _sortByName(secList);
     html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px;max-height:440px;overflow-y:auto">`;
     secList.forEach(d => {
       const _isOwner = d.owner && window._grapeUsername && d.owner === window._grapeUsername;
-      const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.name} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
+      const _canManage = d.credential_id && _isOwner;
+      const _curScope = d.scope || 'global';
+      const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.alias || rt.name} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
       const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
       const _wStatus = d.health || 'offline';
       const _wCardLeftBorder = _wStatus === 'online' ? 'none' : (RUNTIME_COLOR[_wStatus] || 'var(--t3)');
@@ -327,7 +364,8 @@ function renderWorkers(data, devices) {
           ${_healthBadge(d.health, d.credential_id ? relTime(d.last_seen_at) : I18N.t('runtimes.label.local_direct'))}
           <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'}</span>
           <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span>
-          ${d.credential_id && _isOwner ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px;margin-left:auto" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}
+          ${_canManage ? `<button class="bt bt-o" style="font-size:11px;padding:4px 10px;border-radius:4px;margin-left:auto" onclick="openScopeSwitcher(${d.credential_id}, '${_curScope}')">${_scopeLabelShort(_curScope)}</button>` : ''}
+          ${d.credential_id && _isOwner ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:12px;color:var(--t2)">
           <div style="display:flex;gap:16px;flex:1;min-width:0">
@@ -355,6 +393,59 @@ function relTime(iso) {
     if (diff < 3600) return I18N.t('runtimes.time.minutes_ago', {n: Math.round(diff / 60)});
     return I18N.t('runtimes.time.hours_ago', {n: Math.round(diff / 3600)});
   } catch (e) { return iso; }
+}
+
+function _scopeLabelShort(s) {
+  return s === 'global' ? I18N.t('runtimes.scope.global') : s === 'repo' ? I18N.t('runtimes.scope.repo') : s === 'user' ? I18N.t('runtimes.scope.user') : s;
+}
+
+function openScopeSwitcher(cid, currentScope) {
+  var scopes = ['repo', 'user'];
+  var existing = document.getElementById('scopeSwitcherOverlay');
+  if (existing) { existing.remove(); return; }
+  var overlay = document.createElement('div');
+  overlay.id = 'scopeSwitcherOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
+  overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+  var items = scopes.map(function(s) {
+    var active = s === currentScope;
+    return '<label style="display:flex;align-items:center;gap:10px;padding:10px 14px;border:1px solid ' + (active ? '#0071e3' : 'var(--b)') + ';border-radius:8px;cursor:pointer;background:' + (active ? 'rgba(0,113,227,.06)' : 'var(--bg)') + ';margin-bottom:8px">' +
+      '<input type="radio" name="scopeRadio" value="' + s + '" ' + (active ? 'checked' : '') + ' style="accent-color:#0071e3;width:16px;height:16px">' +
+      '<span style="font-size:13px;font-weight:' + (active ? '600' : '400') + ';color:var(--t1)">' + _scopeLabelShort(s) + '</span>' +
+      '</label>';
+  }).join('');
+  overlay.innerHTML = '<div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);width:320px;padding:20px" onclick="event.stopPropagation()">' +
+    '<div style="font-weight:600;font-size:14px;margin-bottom:14px">' + I18N.t('runtimes.label.scope_short') + '</div>' +
+    items +
+    '<div id="scopeRepoKeyWrap" style="display:none;margin-bottom:12px">' +
+      '<input id="scopeRepoKeyInput" placeholder="' + I18N.t('runtimes.label.repo_key_prompt') + '" style="width:100%;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);color:var(--t1);outline:none">' +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px">' +
+      '<button class="bt bt-o" style="font-size:12px;padding:6px 14px;border-radius:6px" onclick="document.getElementById(\'scopeSwitcherOverlay\').remove()">' + I18N.t('runtimes.action.close') + '</button>' +
+      '<button class="bt bt-p" style="font-size:12px;padding:6px 14px;border-radius:6px" id="scopeConfirmBtn">' + I18N.t('common.confirm') + '</button>' +
+    '</div></div>';
+  document.body.appendChild(overlay);
+  function _toggleRepoKey() {
+    var sel = overlay.querySelector('input[name="scopeRadio"]:checked');
+    document.getElementById('scopeRepoKeyWrap').style.display = (sel && sel.value === 'repo') ? 'block' : 'none';
+  }
+  overlay.querySelectorAll('input[name="scopeRadio"]').forEach(function(r) { r.onchange = _toggleRepoKey; });
+  _toggleRepoKey();
+  document.getElementById('scopeConfirmBtn').onclick = function() {
+    var sel = overlay.querySelector('input[name="scopeRadio"]:checked');
+    if (!sel) return;
+    var scope = sel.value;
+    var repoKey = '';
+    if (scope === 'repo') {
+      repoKey = (document.getElementById('scopeRepoKeyInput').value || '').trim();
+      if (!repoKey) { app.showToast(I18N.t('runtimes.toast.scope_repo_required')); return; }
+    }
+    overlay.remove();
+    API.put('/settings/runtime-credentials/' + cid + '/scope', {scope: scope, repo_key: repoKey}).then(function(d) {
+      app.showToast(I18N.t('runtimes.toast.scope_changed', {scope: _scopeLabelShort(d.scope)}));
+      API.get('/settings/agent-runtimes').then(renderRuntimes).catch(function(){});
+    }).catch(function(e) { app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})); });
+  };
 }
 
 // ====== 添加设备侧边栏 ======
@@ -660,16 +751,49 @@ window._rtToggleScope = function(s) {
 window._rtClearFilters = function() {
   _rtFilterType = '';
   _rtFilterScope = '';
+  _rtFilterScene = [];
+  _rtFilterTag = [];
   _runtimeSearch = '';
   renderRuntimes(__runtimeData);
 };
+window._rtToggleMulti = function(kind, val) {
+  if (kind === 'scene') {
+    var i = _rtFilterScene.indexOf(val);
+    if (i >= 0) _rtFilterScene.splice(i, 1); else _rtFilterScene.push(val);
+    renderRuntimes(__runtimeData);
+  } else if (kind === 'tag') {
+    var i = _rtFilterTag.indexOf(val);
+    if (i >= 0) _rtFilterTag.splice(i, 1); else _rtFilterTag.push(val);
+    renderRuntimes(__runtimeData);
+  }
+};
+window._toggleFilterDropdown = function(id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var open = el.style.display !== 'none';
+  // 关闭所有下拉
+  ['sceneDropdown', 'tagDropdown'].forEach(function(d) {
+    var e = document.getElementById(d);
+    if (e) e.style.display = 'none';
+  });
+  el.style.display = open ? 'none' : 'block';
+};
+// 点击外部关闭下拉
+document.addEventListener('click', function(e) {
+  if (!e.target || !e.target.closest || (!e.target.closest('#sceneDropdown') && !e.target.closest('#tagDropdown') && !e.target.matches('[onclick*="_toggleFilterDropdown"]'))) {
+    ['sceneDropdown', 'tagDropdown'].forEach(function(d) {
+      var el = document.getElementById(d);
+      if (el) el.style.display = 'none';
+    });
+  }
+});
 
 function refreshRuntimes() {
   _stopDevspaceAutoRefresh();
   const el = document.getElementById('pageContent');
   if (el) el.innerHTML = `<div class="loading">${I18N.t('runtimes.toast.refreshing')}</div>`;
   API.post('/settings/agent-runtimes/refresh').then(() => {
-    API.get('/settings/agent-runtimes').then(renderRuntimes).catch(() => {});
+    API.get('/settings/agent-runtimes').then(d => { if (window._currentView !== 'runtimes') return; renderRuntimes(d); }).catch(() => {});
     app.showToast(I18N.t('runtimes.toast.refresh_success'));
   }).catch(e => app.showToast(I18N.t('runtimes.toast.refresh_failed', {msg: e.message})));
 }
@@ -702,7 +826,9 @@ function openEngineDetail(runtimeId) {
     <div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);max-width:680px;width:90%;max-height:85vh;overflow:auto;padding:24px" onclick="event.stopPropagation()">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
         ${_healthBadge(rt.health)}
-        <span style="font-weight:700;font-size:18px">${rt.instance_name || rt.name}</span>
+        <span style="font-weight:700;font-size:18px">${rt.alias || rt.instance_name || rt.name}</span>
+        ${rt.alias ? `<span style="font-size:12px;color:var(--t3)">(${rt.instance_name || rt.name})</span>` : ''}
+        <button class="bt bt-o" style="font-size:11px;padding:3px 8px;border-radius:4px" onclick="editRuntimeAlias(${runtimeId})">${I18N.t('runtimes.action.edit_alias')}</button>
         ${rt.is_local ? `<span style="font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px">${I18N.t('runtimes.label.local_direct')}</span>` : ''}
         <button class="bt bt-o" style="margin-left:auto" onclick="closeEngineDetail()">${I18N.t('runtimes.action.close')}</button>
       </div>
@@ -718,10 +844,28 @@ function openEngineDetail(runtimeId) {
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.scene_tags')}</span>
+          <button class="bt bt-p" style="font-size:11px;padding:4px 10px;border-radius:4px" onclick="saveSceneTags(${runtimeId})">${I18N.t('runtimes.action.save')}</button>
+        </div>
+        <div id="sceneTagsContainer" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+        <div id="sceneTagsDesc" style="font-size:11px;color:var(--t3);margin-top:6px"></div>
+      </div>
+      <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
           <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.role_tags')}</span>
           <button class="bt bt-p" style="font-size:11px;padding:4px 10px;border-radius:4px" onclick="saveEngineTags(${runtimeId})">${I18N.t('runtimes.action.save_tags')}</button>
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:4px">${_engineTagCheckboxes(rt.agent_tags || [])}</div>
+        <div id="roleTagsContainer" style="display:flex;flex-wrap:wrap;gap:4px">${_engineTagCheckboxes(rt.agent_tags || [], rt.scene_tags || ['default'])}</div>
+      </div>
+      <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.max_concurrent')}</span>
+          <button class="bt bt-p" style="font-size:11px;padding:4px 10px;border-radius:4px" onclick="saveMaxConcurrent(${runtimeId})">${I18N.t('runtimes.action.save')}</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <input id="maxConcurrentInput" type="number" min="1" max="100" value="${rt.max_concurrent || 20}" style="width:80px;padding:6px 10px;border:1px solid var(--b);border-radius:8px;font-size:14px;background:var(--bg);color:var(--t1);outline:none" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='var(--b)'">
+          <span style="font-size:12px;color:var(--t3)">${I18N.t('runtimes.label.max_concurrent_desc')}</span>
+        </div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
@@ -733,6 +877,19 @@ function openEngineDetail(runtimeId) {
     </div>
   </div>`;
   document.body.insertAdjacentHTML('beforeend', html);
+  // 异步加载场景标签数据并渲染场景 checkbox + 角色标签联动
+  _loadSceneTagsCache(function(scenes) {
+    var stContainer = document.getElementById('sceneTagsContainer');
+    if (stContainer) {
+      stContainer.innerHTML = _renderSceneTagCheckboxes(rt.scene_tags || ['default']);
+      _updateSceneTagsDesc();
+    }
+    // 重新渲染角色标签（带场景约束）
+    var rtContainer = document.getElementById('roleTagsContainer');
+    if (rtContainer) {
+      rtContainer.innerHTML = _engineTagCheckboxes(rt.agent_tags || [], rt.scene_tags || ['default']);
+    }
+  });
 }
 
 function closeEngineDetail(event) {
@@ -831,27 +988,208 @@ function closeSkillDetail(event) {
   if (el) el.remove();
 }
 
+// ===== Engine 场景标签 =====
+const _SCENE_TAG_COLORS = {
+  default:         '#10b981',  // 通用开发 — 翠绿
+  'cloud-native':  '#3b82f6',  // 云原生开发 — 蓝
+  iac:             '#f59e0b',  // IaC开发 — 琥珀
+  'agent-dev':     '#8b5cf6',  // Agent开发 — 紫
+  'skill-dev':     '#ec4899',  // 华为云Skill开发 — 粉
+  'api-skill-dev': '#06b6d4',  // 通用Skill开发 — 青
+  'blog-publish':  '#ef4444',  // 博客发布 — 红
+};
+var __sceneTagsCache = null;  // [{name, display_name, roles:[...]}, ...]
+
+function _loadSceneTagsCache(cb) {
+  if (__sceneTagsCache) { cb(__sceneTagsCache); return; }
+  API.get('/runtime/scene-tags').then(function(d) {
+    __sceneTagsCache = d.scenes || [];
+    cb(__sceneTagsCache);
+  }).catch(function() {
+    __sceneTagsCache = [];
+    cb(__sceneTagsCache);
+  });
+}
+
+function _sceneDisplayName(name) {
+  if (!__sceneTagsCache) return name;
+  var s = __sceneTagsCache.find(function(x) { return x.name === name; });
+  return s ? s.display_name : name;
+}
+
+function _sceneAvailableRoles(sceneTags) {
+  // 合并所有选中场景的可用角色
+  if (!__sceneTagsCache || !sceneTags || sceneTags.length === 0) return ['all','vod','issue','coding','qa','sre'];
+  var roles = [];
+  sceneTags.forEach(function(sn) {
+    var s = __sceneTagsCache.find(function(x) { return x.name === sn; });
+    if (s && s.roles) s.roles.forEach(function(r) { if (roles.indexOf(r) < 0) roles.push(r); });
+  });
+  return roles;
+}
+
+function _renderSceneTagCheckboxes(selectedTags) {
+  if (!__sceneTagsCache) return '<span style="color:var(--t3);font-size:11px">' + I18N.t('runtimes.empty.loading') + '</span>';
+  if (__sceneTagsCache.length === 0) return '<span style="color:var(--t3);font-size:11px">' + I18N.t('runtimes.empty.no_scenes') + '</span>';
+  return __sceneTagsCache.map(function(s) {
+    var checked = (selectedTags || []).indexOf(s.name) >= 0 ? 'checked' : '';
+    var color = _SCENE_TAG_COLORS[s.name] || '#10b981';
+    return '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;padding:2px 6px">' +
+      '<input type="checkbox" id="sceneTagCb_' + s.name + '" value="' + s.name + '" ' + checked +
+      ' onchange="onSceneTagChange()" style="width:14px;height:14px;accent-color:' + color + '">' +
+      '<span style="font-size:10px;padding:2px 8px;border-radius:999px;color:#fff;background:' + color + '">' + s.display_name + '</span>' +
+      '</label>';
+  }).join('');
+}
+
+function _updateSceneTagsDesc() {
+  var desc = document.getElementById('sceneTagsDesc');
+  if (!desc) return;
+  var selected = [];
+  if (__sceneTagsCache) {
+    __sceneTagsCache.forEach(function(s) {
+      var cb = document.getElementById('sceneTagCb_' + s.name);
+      if (cb && cb.checked) selected.push(s);
+    });
+  }
+  if (selected.length === 0) {
+    desc.textContent = I18N.t('runtimes.label.scene_tags_empty');
+    return;
+  }
+  var allRoles = [];
+  selected.forEach(function(s) { (s.roles||[]).forEach(function(r) { if (allRoles.indexOf(r)<0) allRoles.push(r); }); });
+  var roleLabels = allRoles.map(function(r) { return _rtTagLabel(r) || r; }).join(', ');
+  desc.textContent = I18N.t('runtimes.label.scene_tags_roles', {roles: roleLabels});
+}
+
+function onSceneTagChange() {
+  // 更新角色标签区域：只显示选中场景中包含的角色
+  var selectedSceneNames = [];
+  if (__sceneTagsCache) {
+    __sceneTagsCache.forEach(function(s) {
+      var cb = document.getElementById('sceneTagCb_' + s.name);
+      if (cb && cb.checked) selectedSceneNames.push(s.name);
+    });
+  }
+  _updateSceneTagsDesc();
+  // 重新渲染角色标签 checkbox
+  var container = document.getElementById('roleTagsContainer');
+  if (!container) return;
+  // 保留当前已选角色标签
+  var currentTags = [];
+  _RT_TAG_OPTIONS.forEach(function(t) {
+    var cb = document.getElementById('engineTagCb_' + t);
+    if (cb && cb.checked) currentTags.push(t);
+  });
+  container.innerHTML = _engineTagCheckboxes(currentTags, selectedSceneNames);
+}
+
+function saveSceneTags(runtimeId) {
+  var tags = [];
+  if (__sceneTagsCache) {
+    __sceneTagsCache.forEach(function(s) {
+      var cb = document.getElementById('sceneTagCb_' + s.name);
+      if (cb && cb.checked) tags.push(s.name);
+    });
+  }
+  if (tags.length === 0) {
+    app.showToast(I18N.t('runtimes.toast.scene_tags_empty'));
+    return;
+  }
+  API.put('/runtime/runtimes/' + runtimeId + '/scene-tags', {scene_tags: tags}).then(function(d) {
+    var rt = (__runtimeData.runtimes || []).find(function(r) { return r.id === runtimeId; });
+    if (rt) rt.scene_tags = d.scene_tags;
+    if (__runtimeDevices) {
+      for (var i = 0; i < __runtimeDevices.length; i++) {
+        var r = (__runtimeDevices[i].runtimes || []).find(function(x) { return x.id === runtimeId; });
+        if (r) r.scene_tags = d.scene_tags;
+      }
+    }
+    app.showToast(I18N.t('runtimes.toast.scene_tags_saved'));
+    // 重新渲染角色标签区域
+    onSceneTagChange();
+    if (__runtimeData) renderRuntimes(__runtimeData);
+  }).catch(function(e) { app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})); });
+}
+
+// ===== 引擎别名 =====
+function editRuntimeAlias(runtimeId) {
+  var rt = (__runtimeData.runtimes || []).find(function(r) { return r.id === runtimeId; });
+  var current = rt ? (rt.alias || '') : '';
+  var name = prompt(I18N.t('runtimes.label.alias_prompt'), current);
+  if (name === null) return;
+  name = name.trim();
+  API.put('/runtime/runtimes/' + runtimeId + '/alias', {alias: name}).then(function(d) {
+    if (rt) rt.alias = d.alias;
+    if (__runtimeDevices) {
+      for (var i = 0; i < __runtimeDevices.length; i++) {
+        var r = (__runtimeDevices[i].runtimes || []).find(function(x) { return x.id === runtimeId; });
+        if (r) r.alias = d.alias;
+      }
+    }
+    app.showToast(I18N.t('runtimes.toast.alias_saved'));
+    if (__runtimeData) renderRuntimes(__runtimeData);
+    // 更新详情面板标题
+    var titleEl = document.querySelector('#engineDetailOverlay span[style*="font-weight:700"]');
+    if (titleEl) {
+      var parent = titleEl.parentElement;
+      var nextSibling = titleEl.nextSibling;
+      // 重建标题区域
+      titleEl.textContent = d.alias || (rt ? (rt.instance_name || rt.name) : '');
+      // 更新括号显示
+      var parenSpan = parent.querySelector('span[style*="color:var(--t3)"][style*="font-size:12px"]');
+      if (d.alias && rt) {
+        if (!parenSpan) {
+          var ns = document.createElement('span');
+          ns.style.cssText = 'font-size:12px;color:var(--t3)';
+          ns.textContent = '(' + (rt.instance_name || rt.name) + ')';
+          titleEl.insertAdjacentElement('afterend', ns);
+        } else {
+          parenSpan.textContent = '(' + (rt.instance_name || rt.name) + ')';
+        }
+      } else if (parenSpan) {
+        parenSpan.remove();
+      }
+    }
+  }).catch(function(e) { app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})); });
+}
+
 // ===== Engine 角色标签 =====
 const _RT_TAG_COLORS = {all: '#6366f1', vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7', sre: '#f59e0b'};
 function _rtTagLabel(t) { return t === 'all' ? I18N.t('runtimes.tag.all') : ({vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE'})[t] || t; }
 const _RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
 
-function _engineTagCheckboxes(tags) {
-  return _RT_TAG_OPTIONS.map(t => {
-    const checked = tags.includes(t) ? 'checked' : '';
-    const desc = t === 'all' ? I18N.t('runtimes.tag.all_desc') : I18N.t('runtimes.tag.single_desc', {label: _rtTagLabel(t)});
-    return `<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;padding:2px 6px">
-      <input type="checkbox" id="engineTagCb_${t}" value="${t}" ${checked} onchange="onEngineTagChange('${t}')"
-             style="width:14px;height:14px;accent-color:${_RT_TAG_COLORS[t]}">
-      <span style="font-size:10px;padding:2px 8px;border-radius:999px;color:#fff;background:${_RT_TAG_COLORS[t]}">${_rtTagLabel(t)}</span>
-      <span style="color:var(--t3);font-size:11px">${desc}</span>
-    </label>`;
+function _engineTagCheckboxes(tags, sceneTags) {
+  // sceneTags 约束可选角色：只显示选中场景中包含的角色 + all
+  var allowedRoles = _sceneAvailableRoles(sceneTags);
+  var options = sceneTags && sceneTags.length > 0
+    ? _RT_TAG_OPTIONS.filter(function(t) { return t === 'all' || allowedRoles.indexOf(t) >= 0; })
+    : _RT_TAG_OPTIONS;
+  return options.map(function(t) {
+    var checked = tags.includes(t) ? 'checked' : '';
+    var desc = t === 'all' ? I18N.t('runtimes.tag.all_desc') : I18N.t('runtimes.tag.single_desc', {label: _rtTagLabel(t)});
+    var disabled = (sceneTags && sceneTags.length > 0 && t !== 'all' && allowedRoles.indexOf(t) < 0) ? 'disabled style="opacity:.4;cursor:not-allowed"' : '';
+    return '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;padding:2px 6px">' +
+      '<input type="checkbox" id="engineTagCb_' + t + '" value="' + t + '" ' + checked + ' onchange="onEngineTagChange(\'' + t + '\')" ' + disabled +
+      ' style="width:14px;height:14px;accent-color:' + _RT_TAG_COLORS[t] + '">' +
+      '<span style="font-size:10px;padding:2px 8px;border-radius:999px;color:#fff;background:' + _RT_TAG_COLORS[t] + '">' + _rtTagLabel(t) + '</span>' +
+      '<span style="color:var(--t3);font-size:11px">' + desc + '</span>' +
+      '</label>';
   }).join('');
 }
 
 function _engineTagSummary(tags) {
   if (!tags || tags.length === 0) return '<span style="color:var(--t3);font-size:10px">' + I18N.t('runtimes.empty.unassigned') + '</span>';
   return tags.map(t => `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color:#fff;background:${_RT_TAG_COLORS[t]||'#999'};margin:0 2px">${_rtTagLabel(t)||t}</span>`).join('');
+}
+
+function _sceneTagSummary(tags) {
+  if (!tags || tags.length === 0) return '<span style="color:var(--t3);font-size:10px">' + I18N.t('runtimes.empty.unassigned') + '</span>';
+  return tags.map(function(t) {
+    var dn = _sceneDisplayName(t);
+    var color = _SCENE_TAG_COLORS[t] || '#10b981';
+    return '<span style="font-size:10px;padding:1px 6px;border-radius:999px;color:#fff;background:' + color + ';margin:0 2px">' + dn + '</span>';
+  }).join('');
 }
 
 function onEngineTagChange(tag) {
@@ -893,6 +1231,21 @@ function saveEngineTags(runtimeId) {
     app.showToast(I18N.t('runtimes.toast.tags_saved'));
     // 重新渲染列表页（立即生效，无需手动刷新）
     if (__runtimeData) renderRuntimes(__runtimeData);
+  }).catch(e => app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})));
+}
+
+function saveMaxConcurrent(runtimeId) {
+  const input = document.getElementById('maxConcurrentInput');
+  if (!input) return;
+  const val = parseInt(input.value);
+  if (!val || val < 1 || val > 100) {
+    app.showToast(I18N.t('runtimes.toast.max_concurrent_invalid'));
+    return;
+  }
+  API.put('/runtime/runtimes/' + runtimeId + '/max-concurrent', {max_concurrent: val}).then(d => {
+    const rt = (__runtimeData.runtimes || []).find(r => r.id === runtimeId);
+    if (rt) rt.max_concurrent = d.max_concurrent;
+    app.showToast(I18N.t('runtimes.toast.max_concurrent_saved'));
   }).catch(e => app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})));
 }
 

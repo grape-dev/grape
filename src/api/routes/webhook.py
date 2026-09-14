@@ -1,8 +1,10 @@
 """Webhook & A2A 端点 — 集成事件管道"""
 import json, os, time
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from src.config import log
+from src.api.deps import get_user_or_none
 from src.api.event_pipeline import run_pipeline
 
 router = APIRouter(tags=["webhook"])
@@ -61,8 +63,15 @@ async def _on_handoff_dispatch(event):
 
 @router.post("/webhook/gitcode")
 async def gitcode_webhook(request: Request):
-    """接收 GitCode Webhook 事件"""
+    """接收 GitCode Webhook 事件（也兼容误入的 GitHub webhook）。"""
     body = await request.body()
+
+    # GitHub webhook 误入 /webhook/gitcode 时直接处理（不转发，body 已消费）
+    gh_event = request.headers.get("X-GitHub-Event", "")
+    if gh_event:
+        log.info(f"GitCode webhook: GitHub event detected ({gh_event}), processing as GitHub webhook")
+        return await _process_github_webhook(body, request.headers)
+
     token = request.headers.get("X-GitCode-Token", "")
     event_header = request.headers.get("X-Gitcode-Event", "unknown")
 
@@ -118,12 +127,102 @@ async def gitcode_webhook(request: Request):
     return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
 
 
-@router.post("/api/a2a")
-async def a2a_endpoint(request: Request):
-    """Agent-to-Agent 协议端点：仅限内网调用"""
-    body = await request.json()
-    agent_name = body.get("agent", "")
-    payload = body.get("payload", {})
+@router.post("/webhook/github")
+async def github_webhook(request: Request):
+    """接收 GitHub Webhook 事件"""
+    body = await request.body()
+    return await _process_github_webhook(body, request.headers)
+
+
+async def _process_github_webhook(body: bytes, headers) -> dict:
+    """GitHub Webhook 核心处理逻辑（body 已消费，直接传入）。"""
+    event_header = headers.get("X-GitHub-Event", "unknown")
+
+    client_host = ""  # 转发场景下无 client 信息
+    log.info(f"GitHub Webhook: event={event_header}, body_size={len(body)}")
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        log.warning("GitHub Webhook: invalid JSON body")
+        return JSONResponse(status_code=400, content={"code": 400, "message": "invalid body"})
+
+    repo_obj = payload.get("repository", {})
+    repo = repo_obj.get("full_name", "") if isinstance(repo_obj, dict) else ""
+    if not repo:
+        log.warning("GitHub Webhook: could not extract repo from payload")
+        return JSONResponse(status_code=400, content={"code": 400, "message": "missing repository"})
+
+    log.info(f"GitHub Webhook: extracted repo={repo}, event={event_header}")
+
+    from src.user.db import get_webhook_token_by_repo
+    expected = get_webhook_token_by_repo(repo)
+
+    if not expected:
+        log.warning(f"GitHub Webhook rejected: unmanaged repo={repo}")
+        return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
+
+    # GitHub webhook 验证：X-Hub-Signature-256 HMAC
+    import hashlib, hmac
+    signature = headers.get("X-Hub-Signature-256", "")
+    if signature:
+        computed = hmac.new(expected.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(f"sha256={computed}", signature):
+            log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, expected_sha256=sha256={computed[:20]}..., got_sha256={signature[:25]}..., body_size={len(body)}, token_prefix={expected[:10]}...")
+            return JSONResponse(status_code=403, content={"code": 403, "message": "invalid signature"})
+    else:
+        token_header = headers.get("X-GitHub-Token", "")
+        if token_header and token_header != expected:
+            log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo}")
+            return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
+
+    log.info(f"GitHub Webhook: verified, repo={repo}, event={event_header}")
+
+    import asyncio as _aio
+    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(headers),
+                                     account=repo, repo_key_override=f"github:{repo}"))
+    log.info(f"GitHub Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
+    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+
+
+def _authorize_a2a(request: Request, repo_key: str):
+    """A2A 端点仓库级鉴权：bot token 或会话级临时 token（repo 作用域）二选一通过。
+
+    - bot token：仓库级（managed_repos / devops_agent_session），支持远端 worker；
+    - 会话 token（GRAPE_SESSION_TOKEN，M2）：校验 repo_key 匹配——该仓库执行期 agent 凭据。
+    仅当仓库已托管（有 bot token）才严格校验 bot；未托管仓库允许会话 token 或交由后续校验。
+    """
+    _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
+    if not _auth:
+        _auth = request.headers.get("X-Bot-Token", "") or ""
+    if not repo_key:
+        log.warning("A2A: missing repository, reject")
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
+    from src.user.db import get_repo_bot_token_no_global
+    from src.api.auth_token import verify_session_token_for_repo
+    _expected = get_repo_bot_token_no_global(repo_key) or ""
+    _bot_ok = bool(_expected) and _auth == _expected
+    _session_ok = bool(verify_session_token_for_repo(_auth, repo_key))
+    if _bot_ok or _session_ok:
+        log.info(f"A2A: token OK (bot={_bot_ok}, session={_session_ok}) repo={repo_key}")
+        return
+    if not _expected:
+        log.warning(f"A2A: repo not managed (no bot token) & no matching session token, defer to downstream: {repo_key}")
+        return
+    log.warning(f"A2A: unauthorized (token mismatch) for repo={repo_key}")
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid token"})
+
+
+class A2AHandoffBody(BaseModel):
+    agent: str = ""
+    payload: dict = {}
+
+
+@router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Agent 交办（A2A，grape a2a handoff）")
+async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
+    """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
+    agent_name = body.agent or ""
+    payload = body.payload or {}
 
     if not agent_name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing agent field"})
@@ -132,8 +231,6 @@ async def a2a_endpoint(request: Request):
     if not payload.get("issue_number"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing issue_number in payload: 所有 A2A 事件必须关联一个 Issue"})
 
-    # 仓库级 bot token 鉴权（替代纯内网 IP 校验，支持远端 worker）
-    # Agent 调用时带 Authorization: Bearer <BOT_GITCODE_TOKEN>（或 X-Bot-Token header）
     repository = payload.get("repository", "")
     account = payload.get("account", "") or repository
     context = payload.get("context", "")
@@ -141,29 +238,51 @@ async def a2a_endpoint(request: Request):
     pr_number = payload.get("pr_number", "")
 
     from src.repo_key import to_repo_key
-    repo_key = to_repo_key(f"gitcode:{repository}") if repository else ""
+    # 根据 repository 是否带 github: 前缀判断 provider
+    if repository.startswith("github:"):
+        repo_key = repository
+    elif repository.startswith("gitcode:"):
+        repo_key = to_repo_key(repository)
+    else:
+        # 无前缀：检查 managed_repos 确定实际 provider
+        try:
+            from src.session_manager import db as _pdb, db_lock as _pdb_lock
+            with _pdb_lock:
+                _pc = _pdb.cursor()
+                _pc.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)", (f"github:{repository}", f"gitcode:{repository}"))
+                _pr = _pc.fetchone()
+            if _pr:
+                repo_key = _pr[0]
+            else:
+                repo_key = to_repo_key(repository)
+        except Exception:
+            repo_key = to_repo_key(repository)
     log.info(f"A2A: agent={agent_name}, repo={repository}")
+
+    # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
+    if issue_number and repo_key:
+        try:
+            from src.session_manager import db as _ck_db, db_lock as _ck_lock
+            with _ck_lock:
+                _ck_c = _ck_db.cursor()
+                _ck_c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
+                              (repo_key, int(issue_number)))
+                if _ck_c.fetchone():
+                    log.info(f"A2A: rejected — task cancelled, issue=#{issue_number}, agent={agent_name}")
+                    return {"ok": False, "skipped": "task_cancelled"}
+        except Exception as _ck_e:
+            log.warning(f"A2A: cancelled check failed: {_ck_e}")
     seq = 0
 
-    # 鉴权：Bearer token 对比该 repo 的 bot token（Agent 的 BOT_GITCODE_TOKEN）
-    # 复用仓库级 bot token 机制（对齐 webhook 鉴权思路），支持远端 worker 调用。
-    # 仅当仓库已托管（库中有 bot token）时严格校验；未托管仓库放行，交由后续 agent 配置查找处理。
-    _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
-    if not _auth:
-        _auth = request.headers.get("X-Bot-Token", "") or ""
-    if repo_key:
-        from src.user.db import get_repo_bot_token_no_global
-        _expected = get_repo_bot_token_no_global(repo_key) or ""
-        if _expected and _auth == _expected:
-            log.info(f"A2A: bot token OK, agent={agent_name}")
-        elif not _expected:
-            log.warning(f"A2A: repo not managed (no bot token), defer to downstream: {repo_key}")
-        else:
-            log.warning(f"A2A: unauthorized (token mismatch) for repo={repo_key}")
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid bot token"})
+    # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
+    if user and user.get("auth_type") in ("jwt", "api_key"):
+        from src.user.db import get_managed_repos
+        managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
+        if repo_key not in managed:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
     else:
-        log.warning(f"A2A: missing repository, reject")
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
+        # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
+        _authorize_a2a(request, repo_key)
 
     # Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
     from src.api.session_store import is_agent_enabled
@@ -254,7 +373,7 @@ async def a2a_endpoint(request: Request):
                     if _pipe_skill:
                         skill_name = _pipe_skill
                         from src.user.db import resolve_skill_id, get_skill_by_id
-                        _new_sid = resolve_skill_id(_pipe_skill)
+                        _new_sid = resolve_skill_id(_pipe_skill, repo_key=repo_key, user_id=_a2a_issue_uid)
                         if _new_sid:
                             skill_id = _new_sid
                             _sk = get_skill_by_id(_new_sid)
@@ -414,7 +533,20 @@ async def a2a_endpoint(request: Request):
 
             try:
                 from src.api.session_store import set_issue_stage
-                _stage = agent_name if agent_name in ("vod", "issue", "coding", "qa", "sre", "done") else "issue"
+                # Issue #51: 最后节点完成后不再自动 done，改为 pending_review 等待开发者审核
+                _expected_next = _pipeline_next.get(_current_stage, "") if _pipeline_next else ""
+                if agent_name == "done" or (_expected_next == "done" and agent_name not in (_stage_order or [])):
+                    _stage = "pending_review"
+                    log.info(f"A2A: last node completed → pending_review issue=#{issue_number} (awaiting user review)")
+                elif _expected_next and agent_name != _expected_next and agent_name in (_stage_order or []):
+                    # 跳步保护：A2A 目标不是 pipeline next → 自动修正为 next
+                    log.warning(f"A2A: skip-stage guard — issue=#{issue_number} "
+                                f"current={_current_stage} expected_next={_expected_next} but got={agent_name}, "
+                                f"correcting to {_expected_next}")
+                    _stage = _expected_next
+                    agent_name = _expected_next
+                else:
+                    _stage = agent_name if agent_name in ("vod", "issue", "coding", "qa", "sre", "pending_review", "done") else "issue"
                 set_issue_stage(repo_key, f"#{issue_number}", _stage, agent_name, a2a_seq=None)
                 log.info(f"A2A: issue_state updated issue=#{issue_number} stage={_stage} owner={agent_name}")
             except Exception as _e:
@@ -455,23 +587,6 @@ async def a2a_endpoint(request: Request):
                         return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "duplicate_a2a", "existing_seq": _existing[0]})
             except Exception as _de:
                 log.warning(f"A2A: duplicate check failed: {_de}")
-
-        # VOD A2A 交办时携带 recommended_scene → 持久化到 issue_state.scene_id（受 allow_scene_override 开关控制）
-        _recommended_scene = payload.get("recommended_scene", "")
-        if _recommended_scene and issue_number:
-            try:
-                from src.api.session_store import get_scene_override_flag
-                _allow_override = get_scene_override_flag(repo_key, f"#{issue_number}")
-                if _allow_override:
-                    from src.api.session_store import set_issue_scene
-                    from src.runtime.engine_select import _repo_user_id
-                    _scene_uid = _repo_user_id(repo_key)
-                    set_issue_scene(repo_key, f"#{issue_number}", _recommended_scene, scene_user_id=_scene_uid)
-                    log.info(f"A2A: scene_id={_recommended_scene} uid={_scene_uid} set for issue=#{issue_number} (override enabled)")
-                else:
-                    log.info(f"A2A: scene override disabled for issue=#{issue_number}, skip recommended_scene")
-            except Exception as _sce:
-                log.warning(f"A2A: set_issue_scene failed: {_sce}")
 
         # 多任务模式：VOD A2A 交办时携带 is_subtask_mode → 持久化
         _is_subtask_mode = payload.get("is_subtask_mode", False)
@@ -514,9 +629,12 @@ async def a2a_endpoint(request: Request):
             agent_type=agent_name,
             actor="",
             summary=f"A2A: → {agent_name}",
-            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "recommended_scene": _recommended_scene, "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue},
+            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue},
             status="running",
         )
+        if not seq:
+            log.error(f"A2A: append_event returned 0, cannot create event for agent={agent_name}, issue=#{issue_number}")
+            return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A"})
         log.info(f"A2A: event created, seq={seq}")
 
         # Plugin mode: emit agent/handoff event → event bus → pipeline_executor dispatches
@@ -524,7 +642,7 @@ async def a2a_endpoint(request: Request):
         # 但强制 direct 模式不走 event bus，走 legacy direct dispatch
         try:
             from src.api.event_pipeline import is_plugin_mode
-            from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT
+            from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
             if is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
                 import asyncio as _aio
                 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
@@ -584,7 +702,7 @@ async def a2a_endpoint(request: Request):
         # Legacy dispatch (also serves as fallback for plugin mode)
         from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
-        # A2A 交办的场景来自 issue_state（VOD recommended_scene 已持久化）
+        # A2A 交办的场景来自 issue_state（智能推荐完成或用户手动选择已持久化）
         _a2a_scene, _a2a_scene_uid = "default", 0
         if issue_number:
             try:
@@ -603,10 +721,9 @@ async def a2a_endpoint(request: Request):
             except Exception:
                 pass
             return {"status": "ok", "seq": 0, "agent": agent_name}
-        # Plugin 模式 + engine_id=0：无主池任务（广播），多个引擎通过 claim_by_tag 竞争认领
-        # 但强制 direct 模式（DEVOPS_EXECUTION_MODE=direct）不走广播，走本机 direct
+        # Plugin 模式 + engine_id=0：仅 queue_remote 走广播；auto/direct 走本机 direct
         from src.api.event_pipeline import is_plugin_mode as _is_plugin
-        from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT
+        from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
         if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:
             from src.api.event_pipeline import _enqueue_pipeline_task
             _be = backend or "opencode"
@@ -620,25 +737,44 @@ async def a2a_endpoint(request: Request):
             return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "broadcast"}
         # backend 取已注册引擎的类型名（不沿用字面默认，engine-selection-design.md v2）
         _be = engine_name(engine_id) or backend
-        # engine_id=0 且无可用引擎 → 跳过执行，不创建空任务
-        if not engine_id or not _be:
-            log.info(f"A2A: engine_id=0 no engine to execute for {agent_name}, seq={seq}, skip")
+        # engine_id=0：auto/direct 兜底 → 自动选本机在线引擎
+        if not engine_id:
             try:
-                from src.api.event_store import update_event_status
-                update_event_status(seq, "failed")
-            except Exception:
-                pass
-            return {"status": "ok", "seq": 0, "agent": agent_name}
+                from src.session_manager import db as _edb, db_lock as _edl
+                with _edl:
+                    _ec = _edb.cursor()
+                    _ec.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1")
+                    _erow = _ec.fetchone()
+                if _erow:
+                    engine_id = _erow[0]
+                    _be = _erow[1] or _be
+                    log.info(f"A2A: auto-selected local engine id={engine_id} name={_be}, seq={seq}")
+                else:
+                    log.info(f"A2A: engine_id=0 no online engine for {agent_name}, seq={seq}, skip")
+                    try:
+                        from src.api.event_store import update_event_status
+                        update_event_status(seq, "failed")
+                    except Exception:
+                        pass
+                    return {"status": "ok", "seq": 0, "agent": agent_name}
+            except Exception as _ae:
+                log.warning(f"A2A: auto-select engine failed: {_ae}")
+                try:
+                    from src.api.event_store import update_event_status
+                    update_event_status(seq, "failed")
+                except Exception:
+                    pass
+                return {"status": "ok", "seq": 0, "agent": agent_name}
         kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
             from src.api.event_pipeline import start_direct_agent, _create_direct_task
             _issue_id = f"#{issue_number}" if issue_number else ""
             evt["_skill_id"] = skill_id
-            _create_direct_task(repo_key, seq, agent_name, _be,
+            _a2a_task_id = _create_direct_task(repo_key, seq, agent_name, _be,
                                 skill_name or agent_name, skill_path or "",
                                 engine_id, evt, _issue_id, skill_id=skill_id)
             start_direct_agent(_execute_agent, (
-                repo_key, seq, agent_name, _be, skill_name or agent_name, evt, engine_id,
+                repo_key, seq, agent_name, _be, skill_name or agent_name, evt, engine_id, _a2a_task_id,
             ), name=f"a2a-{agent_name}-{seq}")
             log.info(f"A2A: started agent execution for {agent_name} (direct, engine={engine_id})")
         else:

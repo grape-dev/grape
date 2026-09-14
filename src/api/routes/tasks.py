@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_user_token
+from src.api.deps import get_current_user, get_current_user_or_api_key, get_user_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (
@@ -151,9 +151,19 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         owner = split_owner_repo(repo_key)[0] or ""
     except Exception:
         owner = ""
+    # Issue #49: assignee 为空时，优先从 issue_state 读取 assignee，再 fallback 到 owner
+    if not assignee:
+        try:
+            from src.api.session_store import get_issue_stage
+            _st = get_issue_stage(repo_key, f"#{issue_number}")
+            if _st and _st.get("assignee"):
+                assignee = _st["assignee"]
+        except Exception:
+            pass
     target = assignee or owner or ""
     user_id = _get_user_id_by_gitcode(target) if target else 0
     if user_id is None:
+        # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
     with db_lock:
         c = db.cursor()
@@ -219,16 +229,51 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
 
 
 def close_issue_tasks(repo_key: str, issue_number: int) -> int:
-    """webhook 兜底（P5）：Issue closed → 该 issue 所有 active/processing 任务完成。"""
+    """webhook 兜底（P5）：Issue closed → 该 issue 所有 active/processing 任务进入 pending_review。
+
+    Issue #51 修订：不再直接 completed，而是先设为 pending_review 等待开发者审核。
+    只有 stage 已经是 done/pending_review 时才直接关闭。
+    """
     from src.repo_key import to_repo_key
+    from src.api.session_store import get_issue_stage, set_issue_stage
     repo_key = to_repo_key(repo_key)
+    _issue_id = f"#{issue_number}"
+    _stage_info = get_issue_stage(repo_key, _issue_id)
+    _stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
+
     with db_lock:
         c = db.cursor()
+        # 检查是否有 agent 正在 running
         c.execute(
-            "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-            (repo_key, issue_number)
-        )
+            "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running') LIMIT 1",
+            (repo_key, _issue_id))
+        _has_running = c.fetchone() is not None
+
+        if _stage == "done":
+            # stage=done 表示开发者已确认 → 直接 completed
+            c.execute(
+                "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
+                (repo_key, issue_number)
+            )
+        elif _stage == "pending_review":
+            # Issue #85: stage=pending_review → 保持 pending_review，不自动 completed
+            # 只将 active 任务推进到 pending_review（processing/awaiting_input 保持原状）
+            c.execute(
+                "UPDATE tasks SET status='pending_review' "
+                "WHERE repo_key=? AND issue_number=? AND status='active'",
+                (repo_key, issue_number)
+            )
+        elif not _has_running:
+            # 还在 pipeline 流转中且无 agent 运行 → 设为 pending_review 等待开发者确认
+            # Issue #85: 无 issue_state 记录（stage 为空）时也走此路径
+            c.execute(
+                "UPDATE tasks SET status='pending_review', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+                (repo_key, issue_number)
+            )
+            set_issue_stage(repo_key, _issue_id, "pending_review", "issue_closed")
+        # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         db.commit()
         return c.rowcount
 
@@ -247,17 +292,45 @@ def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee:
 
 
 def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
-    """bot 接管：将同 issue 所有 active/processing 任务置 completed（bot_takeover）。
+    """bot 接管：将同 issue active 任务置 processing（Issue #51：不再直接 completed）。
 
-    见 task-lifecycle-design.md §2.3：issue agent 将 assignee 刷为 grape_bot 表示自己接管，
-    用户任务无需再处理，全部关闭。不建 bot 任务。
+    见 task-lifecycle-design.md §2.3：issue agent 将 assignee 刷为 grape_bot 表示自己接管。
+    Issue #51 修订：不再直接关闭，改为走 pending_review 流程。
+    如果有 agent 正在 running，不修改 stage（等 agent 完成后再判定）。
     """
+    from src.api.session_store import get_issue_stage, set_issue_stage
+    _issue_id = f"#{issue_number}"
+    _stage_info = get_issue_stage(repo_key, _issue_id)
+    _stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
+
+    # 检查是否有 agent 正在 running
     with db_lock:
         c = db.cursor()
         c.execute(
-            "UPDATE tasks SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-            (repo_key, issue_number))
+            "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running') LIMIT 1",
+            (repo_key, _issue_id))
+        _has_running = c.fetchone() is not None
+
+        if _stage == "done":
+            # stage=done → 直接 completed
+            c.execute(
+                "UPDATE tasks SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
+                (repo_key, issue_number))
+        elif _stage == "pending_review":
+            # Issue #85: stage=pending_review → 保持，不自动 completed
+            c.execute(
+                "UPDATE tasks SET status='pending_review' "
+                "WHERE repo_key=? AND issue_number=? AND status='active'",
+                (repo_key, issue_number))
+        elif not _has_running:
+            # 没有 agent 在运行 → 设为 pending_review（Issue #85: 同步 processing 任务）
+            c.execute(
+                "UPDATE tasks SET status='pending_review', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+                (repo_key, issue_number))
+            set_issue_stage(repo_key, _issue_id, "pending_review", "bot_takeover")
+        # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         db.commit()
         return c.rowcount
 
@@ -480,8 +553,8 @@ def _resolve_user_chat_bot(bm, user_id: int):
     return None
 
 
-@router.post("/{task_id}/start")
-async def start_task(task_id: int, user: dict = Depends(get_current_user)):
+@router.post("/{task_id}/start", operation_id="tasks_start", summary="打开任务会话")
+async def start_task(task_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """打开任务会话（"去对话"）——不再翻转状态。
 
     task-status-processing-trigger-fix.md §3.3：状态变更以"任务会话收到真实用户消息"为准
@@ -511,17 +584,251 @@ class TaskStatusBody(BaseModel):
     status: str = ""
 
 
-# 任务状态迁移规则（任务中心新建任务支持的状态流）
+# 任务状态迁移规则（Issue #85: 增加 awaiting_input + pending_review）
 _TASK_STATUS_FLOWS = {
-    "active": ("processing", "cancelled"),
-    "processing": ("completed", "cancelled", "active"),
+    "active": ("processing", "awaiting_input", "cancelled"),
+    "processing": ("awaiting_input", "pending_review", "completed", "cancelled", "active"),
+    "awaiting_input": ("processing", "cancelled"),
+    "pending_review": ("completed", "cancelled"),
     "completed": (),
     "cancelled": ("active",),
 }
 
 
-def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str) -> int | None:
+# Issue #51: 任务确认完成 / 取消 / 恢复
+class TaskConfirmBody(BaseModel):
+    confirmation: str = "user_confirmed"
+
+
+@router.post("/{task_id}/confirm-done")
+async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = Depends(get_current_user)):
+    """开发者确认任务完成（Issue #51）。
+
+    将 task status → completed，issue_state stage → done，
+    completed_reason → 'user_confirmed' / 'issue_comment' / 'chat_agent'。
+    Issue #131: 移除 stage 强制校验——任意阶段均可确认完成；
+    已 completed/done 幂等跳过；cancelled 拒绝确认。
+    """
+    from src.api.session_store import set_issue_stage, get_issue_stage
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number, status FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+                  (task_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        _repo_key, _issue_num, _status = row[0], row[1], row[2]
+        if _status == 'completed' or _status == 'done':
+            return {"ok": True, "already_done": True}
+        if _status == 'cancelled':
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "已取消任务不可确认完成"})
+        c.execute(
+            "UPDATE tasks SET status='completed', completed_reason=?, completed_at=datetime('now') WHERE id=?",
+            (body.confirmation, task_id))
+        if _issue_num:
+            set_issue_stage(_repo_key, f"#{_issue_num}", "done", "user")
+        db.commit()
+    log.info(f"Task #{task_id} confirmed done by {body.confirmation}")
+    return {"ok": True, "task_id": task_id, "status": "completed", "stage": "done"}
+
+
+@router.post("/{task_id}/cancel")
+async def cancel_task_api(task_id: int, user: dict = Depends(get_current_user)):
+    """开发者取消任务（Issue #51）。任何阶段可取消，取消后 Agent 终止 + 流水线停止。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status, repo_key, issue_number FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+                  (task_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        status, repo_key, issue_number = row[0], row[1], row[2]
+        if status == 'cancelled':
+            return {"ok": True, "already_cancelled": True}
+        if status == 'completed':
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "已完成任务不可取消"})
+
+        # 终止所有运行中 agent_tasks（用 repo_key + issue_number 查）
+        _issue_id = f"#{issue_number}" if issue_number else ""
+        _cancelled_agents = 0
+        if _issue_id:
+            c.execute(
+                "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+                (repo_key, _issue_id))
+            _agent_rows = c.fetchall()
+            for _at_id, _at_seq in _agent_rows:
+                try:
+                    from src.runtime.service import cancel_task as _cancel_agent
+                    _cancel_agent(_at_id)
+                except Exception:
+                    pass
+                try:
+                    if _at_seq:
+                        from src.api.event_pipeline import cancel_direct_task
+                        cancel_direct_task(_at_seq)
+                except Exception:
+                    pass
+                try:
+                    if _at_seq:
+                        from src.api.event_store import update_event_status
+                        update_event_status(_at_seq, "cancelled")
+                except Exception:
+                    pass
+                _cancelled_agents += 1
+            # 更新 agent_tasks 状态
+            c.execute(
+                "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+                (repo_key, _issue_id))
+
+        c.execute(
+            "UPDATE tasks SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
+            (task_id,))
+        db.commit()
+    log.info(f"Task #{task_id} cancelled by user (agents={_cancelled_agents})")
+    return {"ok": True, "task_id": task_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
+
+
+@router.post("/{task_id}/resume")
+async def resume_task_api(task_id: int, user: dict = Depends(get_current_user)):
+    """开发者恢复已取消的任务（Issue #51）。回到取消前 stage 继续流转。"""
+    from src.api.session_store import get_issue_stage
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status, repo_key, issue_number FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+                  (task_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        status, repo_key, issue_number = row[0], row[1], row[2]
+        if status != 'cancelled':
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仅已取消任务可恢复"})
+        c.execute(
+            "UPDATE tasks SET status='processing', completed_reason=NULL, completed_at=NULL WHERE id=?",
+            (task_id,))
+        db.commit()
+    # 恢复后重新派发到正确的 stage
+    # 不直接用 issue_state.stage（可能已被 A2A 改到下游），而是查最后一个 completed 的 event
+    _issue_id = f"#{issue_number}" if issue_number else ""
+    if _issue_id:
+        from src.api.event_store import get_events
+        _events = get_events(repo_key, issue_id=_issue_id, limit=50)
+        # 找最后一个 completed 的 agent_type
+        _last_completed_agent = ""
+        for _e in reversed(_events):
+            if _e.get("status") == "completed" and _e.get("agent_type"):
+                _last_completed_agent = _e["agent_type"]
+                break
+        # 查 pipeline 中下一个节点
+        from src.api.pipeline_config import get_pipeline_config
+        from src.api.session_store import get_issue_scene
+        _scene_id = get_issue_scene(repo_key, _issue_id) or "default"
+        _pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
+        _nodes = (_pipe_cfg or {}).get("nodes", [])
+        _resume_stage = ""
+        if _last_completed_agent:
+            # 找 last_completed 的 next
+            for _n in _nodes:
+                if _n.get("id") == _last_completed_agent:
+                    _resume_stage = _n.get("next", "")
+                    break
+        if not _resume_stage:
+            # 没有 completed event 或没有 next → 从第一个节点开始
+            _resume_stage = _nodes[0].get("id", "vod") if _nodes else "vod"
+        # 更新 issue_state.stage 到恢复点
+        if _resume_stage and _resume_stage not in ("done", ""):
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(repo_key, _issue_id, _resume_stage, "resume")
+            # 通过 A2A 重新派发
+            try:
+                import urllib.request, json as _json
+                from src.prompt_builder import _resolve_server_url
+                _a2a_url = _resolve_server_url() + "/api/a2a"
+                _a2a_payload = _json.dumps({
+                    "agent": _resume_stage,
+                    "payload": {
+                        "repository": repo_key.replace("gitcode:", ""),
+                        "issue_number": issue_number,
+                        "context": f"resume from cancelled, last_completed={_last_completed_agent}, next={_resume_stage}",
+                    }
+                }).encode()
+                _req = urllib.request.Request(
+                    _a2a_url,
+                    data=_a2a_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                urllib.request.urlopen(_req, timeout=5)
+                log.info(f"Task #{task_id} resumed → re-dispatched to stage={_resume_stage} (last_completed={_last_completed_agent})")
+            except Exception as _e:
+                log.warning(f"Task #{task_id} resume re-dispatch failed: {_e}")
+    log.info(f"Task #{task_id} resumed by user")
+    return {"ok": True, "task_id": task_id, "status": "processing"}
+
+
+def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "issue_comment"):
+    """Issue 评论确认完成 → 关闭该 issue 所有 active 任务 + stage=done"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE tasks SET status='completed', completed_reason=?, completed_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+            (confirmed_by, repo_key, issue_number))
+        affected = c.rowcount
+        db.commit()
+    from src.api.session_store import set_issue_stage
+    set_issue_stage(repo_key, f"#{issue_number}", "done", "user")
+    log.info(f"Issue #{issue_number} confirmed done by {confirmed_by} ({affected} tasks closed)")
+    return affected
+
+
+def cancel_issue_task(repo_key: str, issue_number: int):
+    """Issue 评论取消任务"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE tasks SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+            (repo_key, issue_number))
+        affected = c.rowcount
+        db.commit()
+    log.info(f"Issue #{issue_number} cancelled ({affected} tasks)")
+    return affected
+
+
+def resume_issue_task(repo_key: str, issue_number: int):
+    """Issue 评论恢复任务"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE tasks SET status='active', completed_reason=NULL, completed_at=NULL "
+            "WHERE repo_key=? AND issue_number=? AND status='cancelled'",
+            (repo_key, issue_number))
+        affected = c.rowcount
+        db.commit()
+    log.info(f"Issue #{issue_number} resumed ({affected} tasks)")
+    return affected
+
+
+def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
+                             provider: str = "gitcode") -> int | None:
     """幂等查找：同仓库已存在同名 open Issue → 返回其 number（避免重复建 issue）。"""
+    if provider == "github":
+        from src.user.repo_manager import _github_req
+        try:
+            data = _github_req("GET",
+                               f"https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=50",
+                               api_token)
+        except Exception:
+            return None
+        items = data if isinstance(data, list) else []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if str(it.get("title") or "").strip() == title.strip():
+                n = it.get("number")
+                if n:
+                    return int(n)
+        return None
+    # GitCode
     from src.user.repo_manager import _req
     try:
         data = _req("GET",
@@ -575,6 +882,56 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
         raise RuntimeError(f"GitCode API POST issues failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
     except _uerr.URLError as e:
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+
+
+def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
+                       body_text: str = "", assignee: str = "") -> dict:
+    """创建 GitHub Issue（POST /repos/{owner}/{repo}/issues，JSON body + Bearer token）。"""
+    from src.user.repo_manager import _github_req
+    body = {"title": title}
+    if body_text:
+        body["body"] = body_text
+    if assignee:
+        body["assignees"] = [assignee]
+    return _github_req("POST", f"https://api.github.com/repos/{owner}/{repo}/issues", api_token, body)
+
+
+def _is_gitcode_401(err: Exception) -> bool:
+    """判断异常是否为 GitCode API 401 Bad credentials（Issue #52）。"""
+    msg = str(err)
+    return "401" in msg or "Bad credentials" in msg
+
+
+def _gitcode_api_with_refresh(user: dict, api_call_fn, *args, **kwargs):
+    """包装 GitCode API 调用——401 时自动刷新 OAuth token 并重试一次（Issue #52）。
+
+    user: 当前登录用户 dict（含 id, username）
+    api_call_fn: 实际调 GitCode API 的函数，第一个位置参数是 token
+    *args, **kwargs: 传给 api_call_fn 的其余参数（owner, repo, title 等）
+
+    返回 api_call_fn 的结果，或抛 HTTPException（刷新失败时）。
+    """
+    from src.api.deps import get_user_token, try_refresh_gitcode_token
+
+    username = user["username"]
+    user_id = user["id"]
+    token = get_user_token(username)
+
+    try:
+        return api_call_fn(token, *args, **kwargs)
+    except RuntimeError as e:
+        if not _is_gitcode_401(e):
+            raise  # 非 401 错误不处理
+        # 401 → 尝试刷新 token
+        new_token = try_refresh_gitcode_token(user_id)
+        if not new_token:
+            raise HTTPException(status_code=401, detail={
+                "code": 401,
+                "message": "GitCode 授权已过期，请重新登录授权",
+                "action": "reauth_required"
+            })
+        # 刷新成功 → 重试一次
+        return api_call_fn(new_token, *args, **kwargs)
 
 
 def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
@@ -632,8 +989,8 @@ def create_standard_task(repo_key: str, title: str, description: str,
             "message": "任务已创建（Issue 已同步）" if created else "任务已创建（复用已有 Issue）"}
 
 
-@router.post("/create")
-async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user)):
+@router.post("/create", operation_id="tasks_create", summary="新建任务（同步建 GitCode Issue）")
+async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
     - issue 责任人 = 系统 General Settings 的 Account（settings.credentials.gitcode.account，
@@ -649,20 +1006,37 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         raise HTTPException(status_code=400, detail={"code": 400, "message": "任务描述必填"})
     repo_key = to_repo_key(body.repo_key)
     owner, rname = split_owner_repo(repo_key)
-    api_token = get_user_token(user["username"])
-    if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
-    assignee = (body.assignee or "").strip() or user["username"]  # General Settings Account：登录用户 gitcode 账号
+    # provider 分流：github: → GitHub API，gitcode: → GitCode API
+    _is_github = repo_key.startswith("github:")
+    if _is_github:
+        from src.user.db import get_user_github_token
+        api_token = get_user_github_token(user["id"]) or ""
+        if not api_token:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "GitHub API Token 未配置"})
+    else:
+        from src.api.deps import get_user_token_with_refresh
+        api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+        if not api_token:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+    assignee = (body.assignee or "").strip() or user["username"]
     # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
-    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip())
+    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
+                                          provider="github" if _is_github else "gitcode")
     created = False
     if issue_num is not None:
         raise HTTPException(status_code=409, detail={"code": 409,
                                                      "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
                                                      "issue_number": issue_num})
     if issue_num is None:
-        resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
-                                   (body.description or "").strip(), assignee=assignee)
+        if _is_github:
+            resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
+                                      (body.description or "").strip(), assignee=assignee)
+        else:
+            # Issue #52: 401 时自动刷新 OAuth token 并重试
+            resp = _gitcode_api_with_refresh(
+                user, _post_gitcode_issue, owner, rname, body.title.strip(),
+                (body.description or "").strip(), assignee=assignee
+            )
         n = None
         if isinstance(resp, dict):
             n = resp.get("number") or resp.get("iid") or resp.get("id")
@@ -671,7 +1045,18 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                                          "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
         issue_num = int(n)
         created = True
-    # 2) 自动检测多任务模式：根据场景的 issue skill 是否为 issue-multitask
+    # 2) 场景选择：用户选了具体场景 → 写入 scene_id（issue_opened 读到有值则跳过推荐）
+    #    选智能推荐（vod-auto）或留空 → 不写 scene_id → issue_opened 走智能推荐
+    try:
+        if body.scene_id and body.scene_id != "vod-auto":
+            from src.api.session_store import set_issue_scene
+            from src.runtime.engine_select import _repo_user_id
+            scene_uid = _repo_user_id(repo_key, issue_creator=user["username"]) or 0
+            set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
+    except Exception as _e:
+        from src.config import log
+        log.warning(f"create_task: set_issue_scene failed: {_e}")
+    # 3) 自动检测多任务模式：根据场景的 issue skill 是否为 issue-multitask
     _auto_subtask_mode = 0
     if body.scene_id and body.scene_id != "vod-auto":
         try:
@@ -688,30 +1073,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             from src.config import log as _log
             _log.warning(f"Auto multi-task detection failed: {_e}")
 
-    # 3) 按既有流程幂等建档（同 issue 任务 id 复用）
+    # 4) 按既有流程幂等建档（同 issue 任务 id 复用）
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee,
                                 subtask_mode=_auto_subtask_mode)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
-    # 4) 场景选择 + VOD 覆盖开关
-    #    - 不选场景（默认） → 打开开关，用 dev_scene 默认，VOD 可覆盖
-    #    - 选具体场景 → 关闭开关，写入用户选择的 scene_id
-    try:
-        from src.api.session_store import set_scene_override_flag
-        if body.scene_id and body.scene_id != "vod-auto":
-            # 用户指定场景：关闭开关，写入 scene_id
-            set_scene_override_flag(repo_key, f"#{issue_num}", False)
-            from src.api.session_store import set_issue_scene
-            # 方案 B：场景只与仓库关联，uid 用仓库归属用户
-            from src.runtime.engine_select import _repo_user_id
-            scene_uid = _repo_user_id(repo_key) or 0
-            set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
-        else:
-            # 不选场景（含 vod-auto）：打开开关，用 dev_scene 默认，VOD 可覆盖
-            set_scene_override_flag(repo_key, f"#{issue_num}", True)
-    except Exception as _e:
-        from src.config import log
-        log.warning(f"create_task: scene override/scene_id failed: {_e}")
     # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记
     if _auto_subtask_mode:
         try:
@@ -722,18 +1088,54 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.warning(f"create_task: set_subtask_mode failed: {_e}")
         try:
             _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 自动判断是否拆分为子任务执行。"
-            _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
+            # Issue #52: 401 时自动刷新 token 重试
+            _gitcode_api_with_refresh(user, _patch_issue_body, owner, rname, issue_num, (body.description or "") + _marker)
+        except HTTPException:
+            raise  # reauth_required 需要传递给前端
         except Exception as _e:
             from src.config import log
             log.warning(f"create_task: patch issue body for multi-task-mode failed: {_e}")
+
+    # Issue #89: 同步触发 pipeline 事件，不依赖 webhook（webhook 异步可能丢事件）
+    # 新建 Issue 时直接创建 issue_opened 事件 → VOD Agent 处理
+    # 复用已有 Issue 时创建 a2a_event 事件 → issue Agent 处理
+    if created:
+        try:
+            from src.config import log as _log
+            from src.api.session_store import set_issue_stage
+            # 初始化 issue_state（vod 阶段）
+            set_issue_stage(repo_key, f"#{issue_num}", "vod", "vod", assignee=assignee or "")
+            # 同步触发 pipeline（不依赖 webhook，task_center 创建的事件直接入队）
+            # run_pipeline 内部会调 append_event 存事件 + 路由 + 入队
+            import json as _pipe_json
+            _pipe_payload = _pipe_json.dumps({
+                "action": "opened",
+                "issue": {"number": int(issue_num), "title": body.title.strip(),
+                          "user": {"login": assignee or user["username"]}},
+                "repository": {"full_name": f"{owner}/{rname}"},
+                "sender": {"login": assignee or user["username"]},
+            }).encode()
+            _pipe_headers = {"Content-Type": "application/json"}
+            if _is_github:
+                _pipe_headers["X-GitHub-Event"] = "issues"
+            else:
+                _pipe_headers["X-Gitcode-Event"] = "issue_opened"
+            from src.api.event_pipeline import run_pipeline
+            _pipe_result = run_pipeline(_pipe_payload, _pipe_headers,
+                                        account=repo_key, repo_key_override=repo_key)
+            _log.info(f"create_task: triggered pipeline for #{issue_num}, seq={_pipe_result.get('seq', 0)}")
+        except Exception as _e:
+            from src.config import log as _log
+            _log.warning(f"create_task: sync pipeline trigger failed: {_e}")
+
     return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
             "assignee": assignee, "is_subtask_mode": _auto_subtask_mode,
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 
 
-@router.put("/{task_id}/status")
-async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user)):
-    """任务状态迁移（active → processing → completed / cancelled；cancelled → active 可恢复）。
+@router.put("/{task_id}/status", operation_id="tasks_status", summary="更新任务状态")
+async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = Depends(get_current_user_or_api_key)):
+    """任务状态迁移（Issue #85: active → processing → awaiting_input → pending_review → completed / cancelled）。
 
     终端状态 completed 不可改；同一任务只能单向流转（按 _TASK_STATUS_FLOWS 校验）。
     """
@@ -760,6 +1162,93 @@ async def change_task_status(task_id: int, body: TaskStatusBody, user: dict = De
         )
         db.commit()
     return {"ok": True, "task_id": task_id, "status": ns}
+
+
+@router.get("/{task_id}/status", operation_id="tasks_status_get", summary="查询任务状态（轮询 wait 用）")
+def get_task_status(task_id: int, user: dict = Depends(get_current_user_or_api_key)):
+    """返回任务当前状态（含 repo/issue 上下文），供 CLI `grape tasks wait` 轮询至终态。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at "
+            "FROM tasks WHERE id=?",
+            (task_id,),
+        )
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    return {
+        "id": row[0], "status": row[1], "repo_key": row[2], "issue_number": row[3],
+        "title": row[4], "completed_reason": row[5] or "", "completed_at": row[6],
+    }
+
+
+class TaskSelfCompleteBody(BaseModel):
+    task_id: str = ""
+    result_text: str = ""
+    next_step: str = ""
+    # 结构化产出（可选）：服务端据此组装结构化 result_text，供下游事件对话/结构化解析识别
+    actions: list = []
+    conclusion: str = ""
+    artifacts: list = []
+    issue_summary: str = ""
+
+
+@router.post("/complete", operation_id="tasks_complete", summary="任务自报完成（grape CLI tasks complete）")
+def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_current_user_or_api_key)):
+    """Agent 动作收尾后显式自报完成（issue-45-task-complete-endpoint-design.md）。
+
+    - 会话 token（tk_）：任务 id 由 session_key 自动定位（M2 以 task_id 签发），校验 repo 作用域。
+    - JWT / API Key（用户级）：body.task_id 必填，校验任务 repo 在该用户托管仓库内。
+    - 终态幂等：completed/failed/cancelled 不再覆盖（返回现状）。
+    - 完成后任务 + 事件置为成功，不经过 evaluate_agent_output 启发。
+    """
+    from src.runtime.service import complete_task
+    from src.user import db as _user_db
+
+    if user.get("auth_type") == "session_token":
+        task_id = user.get("session_key") or ""
+    elif body.task_id:
+        task_id = str(body.task_id).strip()
+    else:
+        task_id = ""
+    if not task_id:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "缺少 task_id（会话 token 自动定位或 body.task_id 必填）"})
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, repo_key, status FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    _repo, _status = row[1], row[2]
+
+    if user.get("auth_type") == "session_token":
+        if user.get("session_key") != task_id or user.get("repo_key") != _repo:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权完成该任务（作用域不匹配）"})
+    else:
+        managed = {r.get("repo_key") for r in _user_db.get_managed_repos(user.get("id") or 0)}
+        if _repo not in managed:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权完成该任务（非本人托管仓库）"})
+
+    if _status in ("completed", "failed", "cancelled"):
+        return {"ok": True, "task_id": task_id, "status": _status, "already": True}
+
+    result_text = (body.result_text or "").strip() or f"任务自报完成{(' / ' + body.next_step) if body.next_step else ''}"
+    # 结构化产出（可选）：有 actions/conclusion/artifacts/issue_summary 时组装为结构化 JSON 文本，
+    # 使 complete_task 的 structured output 解析（actions+conclusion）能识别，供事件对话/下游读取。
+    if body.conclusion or body.actions or body.artifacts or body.issue_summary:
+        import json as _json
+        _sd = {
+            "actions": body.actions or [],
+            "conclusion": body.conclusion or result_text,
+            "artifacts": body.artifacts or [],
+            "next_step": body.next_step,
+            "issue_summary": body.issue_summary or result_text,
+        }
+        result_text = _json.dumps(_sd, ensure_ascii=False)
+    complete_task(task_id, result_text, 0)
+    return {"ok": True, "task_id": task_id, "status": "completed"}
 
 
 class TaskClarifyBody(BaseModel):
@@ -829,8 +1318,9 @@ async def get_task_clarifications(task_id: int, user: dict = Depends(get_current
     if conv_id:
         from src.session_manager import get_messages
         conv_messages = get_messages(conv_id, limit=30)
+    _issue_host = "github.com" if repo_key.startswith("github:") else "gitcode.com"
     return {"messages": messages, "conversation_id": conv_id,
-            "issue_url": f"https://gitcode.com/{repo_key}/issues/{issue_number}"}
+            "issue_url": f"https://{_issue_host}/{repo_key}/issues/{issue_number}"}
 
 
 @router.post("/{task_id}/clarify")
@@ -848,30 +1338,65 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
     if not info:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
     repo_key, issue_number, conv_id = info
-    api_token = get_user_token(user["username"])
-    if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+    # provider 分流：github: → GitHub API，gitcode: → GitCode API
+    _is_github = repo_key.startswith("github:")
+    if _is_github:
+        from src.user.db import get_user_github_token
+        api_token = get_user_github_token(user["id"]) or ""
+        if not api_token:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "GitHub API Token 未配置"})
+    else:
+        from src.api.deps import get_user_token_with_refresh
+        api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+        if not api_token:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
 
-    # 1) 发 GitCode Issue 评论（form + access_token，同 _post_gitcode_issue 的实测结论）
+    # 1) 发 Issue 评论
     from src.repo_key import split_owner_repo
-    import urllib.parse as _up
-    import urllib.request as _ur
-    import urllib.error as _uerr
     owner, rname = split_owner_repo(repo_key)
     comment_body = f"💬 **开发者澄清**\n\n{msg}"
-    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/issues/{issue_number}/comments?access_token={api_token}"
-    req = _ur.Request(url, data=_up.urlencode({"body": comment_body}).encode(),
-                      headers={"Content-Type": "application/x-www-form-urlencoded",
-                               "Accept": "application/json"}, method="POST")
-    try:
-        with _ur.urlopen(req, timeout=30) as resp:
-            resp.read()
-        log.info(f"Task clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
-    except _uerr.HTTPError as e:
-        raise HTTPException(status_code=502, detail={"code": 502,
-                                                     "message": f"GitCode 评论失败({e.code}): {e.read().decode(errors='replace')[:200]}"})
-    except _uerr.URLError as e:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"无法连接 GitCode: {e.reason}"})
+
+    if _is_github:
+        # GitHub: POST /repos/{owner}/{repo}/issues/{num}/comments, JSON body + Bearer token
+        from src.user.repo_manager import _github_req
+        try:
+            _github_req("POST", f"https://api.github.com/repos/{owner}/{rname}/issues/{issue_number}/comments",
+                        api_token, {"body": comment_body})
+            log.info(f"Task clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502,
+                                                         "message": f"GitHub 评论失败: {str(e)[:200]}"})
+    else:
+        # GitCode: form + access_token
+        def _post_comment(token: str, _owner=owner, _rname=rname, _issue_num=issue_number, _body=comment_body):
+            import urllib.parse as _up
+            import urllib.request as _ur
+            import urllib.error as _uerr
+            url = f"https://api.gitcode.com/api/v5/repos/{_owner}/{_rname}/issues/{_issue_num}/comments?access_token={token}"
+            req = _ur.Request(url, data=_up.urlencode({"body": _body}).encode(),
+                              headers={"Content-Type": "application/x-www-form-urlencoded",
+                                       "Accept": "application/json"}, method="POST")
+            try:
+                with _ur.urlopen(req, timeout=30) as resp:
+                    resp.read()
+            except _uerr.HTTPError as e:
+                raise RuntimeError(f"GitCode comment failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
+            except _uerr.URLError as e:
+                raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+
+        try:
+            _gitcode_api_with_refresh(user, _post_comment)
+            log.info(f"Task clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            if _is_gitcode_401(e):
+                raise HTTPException(status_code=401, detail={
+                    "code": 401, "message": "GitCode 授权已过期，请重新登录授权",
+                    "action": "reauth_required"
+                })
+            raise HTTPException(status_code=502, detail={"code": 502,
+                                                         "message": f"GitCode 评论失败: {str(e)[:200]}"})
 
     # 2) 写入任务会话（如有 conv_id）
     if conv_id:
@@ -881,88 +1406,279 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
         except Exception as e:
             log.warning(f"Task clarify: write conversation message failed: {e}")
 
+    # Issue #85: 开发者回复澄清后 → task.status 从 awaiting_input 恢复为 processing
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE tasks SET status='processing' "
+                "WHERE repo_key=? AND issue_number=? AND status='awaiting_input'",
+                (repo_key, issue_number))
+            db.commit()
+            if c.rowcount > 0:
+                log.info(f"Task clarify: awaiting_input → processing for {repo_key}/#{issue_number}")
+    except Exception as e:
+        log.warning(f"Task clarify: restore processing failed: {e}")
+
     return {"ok": True, "message": "澄清已发送到 Issue 并同步到任务会话"}
 
 
 @router.post("/close")
 async def close_tasks(body: TaskCloseBody, request: Request):
-    """issue agent 关闭 Issue 后调用：该 issue 全部 active 任务 → completed（issue_closed）"""
+    """issue agent 关闭 Issue 后调用：复用 close_issue_tasks（Issue #51：走 pending_review 流程）"""
     from src.repo_key import to_repo_key
     if not body.repo_key or not body.issue_number:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key / issue_number 必填"})
     body.repo_key = to_repo_key(body.repo_key)
     _require_bot_token(request, body.repo_key)
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "UPDATE tasks SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-            (body.repo_key, body.issue_number)
-        )
-        db.commit()
-        closed = c.rowcount
+    closed = close_issue_tasks(body.repo_key, body.issue_number)
     return {"ok": True, "closed": closed}
 
 
-@router.get("/mine")
-async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
-                   repo_key: str = Query("", description="按仓库过滤"),
-                   sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
-                   mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
-                   user: dict = Depends(get_current_user)):
-    """任务中心：当前登录用户的待处理/已完成任务（可按 repo 过滤 / 按时间排序）。
+@router.get("/{task_id}/pipeline")
+async def get_task_pipeline(task_id: int, user: dict = Depends(get_current_user)):
+    """获取任务关联的流水线信息和事件历史（Issue #51 详情页展示）"""
+    from src.api.event_store import get_events
+    from src.api.pipeline_config import get_pipeline_config
+    from src.api.session_store import get_issue_stage, get_issue_scene
 
-    sort_order: desc（默认，最新在前）/ asc（最早在前）
-    mode: default（状态优先 active→processing→completed，组内按时间）/ time（纯时间序）
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number FROM tasks WHERE id=? AND (user_id=? OR user_id=0)",
+                  (task_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+        repo_key, issue_number = row[0], row[1]
+
+    issue_id = f"#{issue_number}" if issue_number else ""
+    _scene_id = get_issue_scene(repo_key, issue_id) or "default"
+    _stage_info = get_issue_stage(repo_key, issue_id) if issue_id else None
+    _current_stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
+
+    # 流水线配置
+    pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
+    nodes = (pipe_cfg or {}).get("nodes", [])
+
+    # 标记每个节点状态
+    _stage_order = [n.get("id", "") for n in nodes]
+    _cur_idx = _stage_order.index(_current_stage) if _current_stage in _stage_order else -1
+    for i, n in enumerate(nodes):
+        nid = n.get("id", "")
+        if _current_stage == "done" or _current_stage == "pending_review":
+            n["node_status"] = "completed"
+        elif i < _cur_idx:
+            n["node_status"] = "completed"
+        elif i == _cur_idx:
+            n["node_status"] = "current"
+        else:
+            n["node_status"] = "pending"
+
+    # 事件历史
+    events = []
+    if issue_id:
+        events = get_events(repo_key, issue_id=issue_id, limit=30)
+
+    # 为每个节点关联最新事件（含 seq，供前端点击跳转事件详情）
+    _events_by_agent = {}
+    for e in events:
+        _at = e.get("agent_type", "")
+        if _at and _at not in _events_by_agent:
+            _events_by_agent[_at] = e
+    for n in nodes:
+        _nid = n.get("id", "")
+        n["latest_event"] = _events_by_agent.get(_nid, None)
+
+    return {
+        "scene_id": _scene_id,
+        "scene_name": (pipe_cfg or {}).get("name", _scene_id),
+        "current_stage": _current_stage,
+        "nodes": nodes,
+        "events": events,
+    }
+
+def _build_assignee_filter(assignees: str, clauses: list, params: list):
+    """将逗号分隔的 assignees 转成 SQL 过滤（单值 =? / 多值 IN），就地追加到 clauses/params。"""
+    _list = [a.strip() for a in (assignees or "").split(",") if a.strip()]
+    if len(_list) == 1:
+        clauses.append("assignee=?")
+        params.append(_list[0])
+    elif len(_list) > 1:
+        clauses.append(f"assignee IN ({','.join('?' * len(_list))})")
+        params.extend(_list)
+
+
+def _require_repo_access(user: dict, repo_key: str):
+    """校验调用方可访问指定仓库（防 IDOR，Issue #113 审查修复）。
+
+    - 用户级（JWT / API Key）：repo_key 必须在该用户托管仓库（get_managed_repos）内
+    - 会话 token（tk_）：repo_key 必须匹配 token 作用域（session_key 对应仓库）
     """
-    from src.repo_key import to_repo_key, from_repo_key
-    if repo_key:
-        repo_key = to_repo_key(repo_key)
-    clauses = ["(user_id=? OR user_id=0)"]
-    params = [user["id"]]
-    if status:
-        clauses.append("status=?")
-        params.append(status)
-    if repo_key:
-        clauses.append("repo_key=?")
-        params.append(repo_key)
-    where = " AND ".join(clauses)
-    # 排序：白名单已由 FastAPI pattern 约束（desc/asc/default/time），此处直接拼（防注入）
-    _order_dir = "DESC" if sort_order == "desc" else "ASC"
-    _order_by = f"created_at {_order_dir}"
-    if mode == "default":
-        # 状态优先：active → processing → completed，组内按时间
-        _order_by = f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 ELSE 2 END, created_at {_order_dir}"
+    if user.get("auth_type") == "session_token":
+        if user.get("repo_key") != repo_key:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库任务（作用域不匹配）"})
+        return
+    from src.user import db as _user_db
+    _managed = {r.get("repo_key") for r in _user_db.get_managed_repos(user.get("id") or 0)}
+    if repo_key not in _managed:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库任务"})
+
+
+def _batch_fetch_issue_state(keys: list) -> dict:
+    """批量查 issue_state 的 stage/scene_id，返回 {(repo_key, issue_id): {"stage":..,"scene_id":..}}（防 N+1）。"""
+    out: dict = {}
+    if not keys:
+        return out
+    for i in range(0, len(keys), 200):
+        _chunk = keys[i:i + 200]
+        _ors = " OR ".join(["(repo_key=? AND issue_id=?)"] * len(_chunk))
+        _flat = [v for k in _chunk for v in k]
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT repo_key, issue_id, stage, scene_id FROM issue_state WHERE " + _ors, _flat)
+                for row in c.fetchall():
+                    out[(row[0], row[1])] = {"stage": row[2] or "", "scene_id": row[3] or ""}
+        except Exception as e:
+            log.warning(f"batch issue_state fetch failed: {e}")
+    return out
+
+
+def _batch_running_agent_tasks(keys: list) -> set:
+    """批量查运行中的 agent_tasks，返回 {(repo_key, issue_id)}（防 N+1，Issue #85 雷达动画依据）。"""
+    out: set = set()
+    if not keys:
+        return out
+    for i in range(0, len(keys), 200):
+        _chunk = keys[i:i + 200]
+        _ors = " OR ".join(["(repo_key=? AND issue_id=?)"] * len(_chunk))
+        _flat = [v for k in _chunk for v in k]
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT repo_key, issue_id FROM agent_tasks "
+                    "WHERE status IN ('queued','dispatched','running') AND (" + _ors + ")", _flat)
+                out.update((row[0], row[1]) for row in c.fetchall())
+        except Exception as e:
+            log.warning(f"batch agent_tasks fetch failed: {e}")
+    return out
+
+
+def _batch_fetch_agent_statuses(keys: list) -> dict:
+    """批量查各 Agent 节点最新事件状态（Issue #126: 与菜单流水线数据源一致）。
+
+    从 events 表查每个 (repo_key, issue_id) 下各 agent_type 的最新事件 status，
+    与 pipeline.py 的 _get_issue_pipeline 使用相同的 AGENT_ORDER + STAGE_STATUS_MAP 逻辑。
+
+    Returns:
+        {(repo_key, issue_id): [{agent, label, status, status_num, latest_seq, latest_title}, ...]}
+    """
+    from src.api.routes.pipeline import AGENT_ORDER, AGENT_LABELS, STAGE_STATUS_MAP
+
+    out: dict = {}
+    if not keys:
+        return out
+
+    # 批量查询 events（分 chunk 防 SQL 过长）
+    _all_rows = []
+    for i in range(0, len(keys), 200):
+        _chunk = keys[i:i + 200]
+        _ors = " OR ".join(["(repo_key=? AND issue_id=?)"] * len(_chunk))
+        _flat = [v for k in _chunk for v in k]
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT repo_key, issue_id, agent_type, status, seq, title "
+                    "FROM events WHERE " + _ors + " ORDER BY seq ASC",
+                    _flat
+                )
+                _all_rows.extend(c.fetchall())
+        except Exception as e:
+            log.warning(f"batch agent_statuses fetch failed: {e}")
+
+    # 按 (repo_key, issue_id) 分组
+    _events_by_key: dict = {}
+    for row in _all_rows:
+        _key = (row[0], row[1])
+        _events_by_key.setdefault(_key, []).append(row)
+
+    # 为每个 key 构建 per-agent 状态列表
+    for key in keys:
+        _issue_events = _events_by_key.get(key, [])
+        _statuses = []
+        for i, agent in enumerate(AGENT_ORDER):
+            # row: (repo_key, issue_id, agent_type, status, seq, title)
+            _agent_events = [e for e in _issue_events if e[2] == agent]
+            if not _agent_events:
+                _statuses.append({
+                    "agent": agent,
+                    "label": AGENT_LABELS[i],
+                    "status": "pending",
+                    "status_num": 0,
+                    "latest_seq": None,
+                    "latest_title": "",
+                })
+            else:
+                _latest = _agent_events[-1]  # seq ASC → 最后一条即最新
+                _status = _latest[3] or "pending"
+                _statuses.append({
+                    "agent": agent,
+                    "label": AGENT_LABELS[i],
+                    "status": _status,
+                    "status_num": STAGE_STATUS_MAP.get(_status, 0),
+                    "latest_seq": _latest[4],
+                    "latest_title": _latest[5] or "",
+                })
+        out[key] = _statuses
+
+    return out
+
+
+def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool = False) -> list[dict]:
+    """查询 tasks 并富化（scene / stage / is_running）为对外 dict（my_tasks / repo_all_tasks 共享）。
+
+    - where / params / order_by 由调用方构造（列与排序方向经白名单，值参数化，防注入）
+    - include_user_id: 结果是否包含 user_id（repo_all 需要）
+    - issue_state / agent_tasks 均批量查询，避免逐任务 N+1
+    """
+    _select = (
+        "SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
+        "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number"
+        + (", user_id" if include_user_id else "")
+    )
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                f"SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
-                f"status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number "
-                f"FROM tasks WHERE {where} "
-                f"ORDER BY {_order_by}",
-                params
-            )
+            c.execute(f"{_select} FROM tasks WHERE {where} ORDER BY {order_by}", params)
             rows = c.fetchall()
-        except Exception:
+        except Exception as e:
+            log.warning(f"Task query failed: {e}")
             rows = []
-    # 查 issue_state 中的 scene_id（按 repo_key + issue_number 批量查询）
-    from src.api.session_store import get_issue_scene
+    if not rows:
+        return []
+
+    from src.repo_key import to_repo_key, from_repo_key
     from src.api.pipeline_config import get_pipeline_config
-    from src.api.session_store import get_issue_stage
+
+    _keys = [(to_repo_key(from_repo_key(r[2])), f"#{r[3]}") for r in rows]
+    _stage_map = _batch_fetch_issue_state(_keys)
+    _running = _batch_running_agent_tasks(_keys)
+    _agent_status_map = _batch_fetch_agent_statuses(_keys)
+
     tasks_out = []
-    for r in rows:
-        _rk = to_repo_key(from_repo_key(r[2]))
-        _issue_id = f"#{r[3]}"
-        # 区分场景来源：issue_state.scene_id（VOD 识别）vs 仓库默认场景
-        _st = get_issue_stage(_rk, _issue_id)
+    for idx, r in enumerate(rows):
+        _rk, _issue_id = _keys[idx]
+        _st = _stage_map.get((_rk, _issue_id))
         _issue_scene_id = (_st.get("scene_id") or "") if _st else ""
+        _stage = (_st.get("stage") or "") if _st else ""
         if _issue_scene_id:
             _scene_id = _issue_scene_id
             _scene_source = "vod"  # VOD 识别
         else:
-            # 回退到仓库默认场景
-            _scene_id = (get_issue_scene(_rk, _issue_id) or ("default", 0))[0]
+            # 无 Issue 级场景 → 仓库默认场景（原 get_issue_scene 在 scene_id 为空时返回空串，等价）
+            _scene_id = ""
             _scene_source = "repo_default"
         _scene_name = ""
         try:
@@ -971,7 +1687,8 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
                 _scene_name = _cfg.get("name", _scene_id)
         except Exception:
             pass
-        tasks_out.append({
+        _has_running_agent = bool(r[3]) and _stage in ("vod", "issue", "coding", "qa", "sre") and ((_rk, _issue_id) in _running)
+        item = {
             "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
             "title": r[4] or "", "task_description": r[5] or "",
             "conversation_id": r[6] or "", "status": r[7],
@@ -981,5 +1698,93 @@ async def my_tasks(status: str = Query("", pattern="^(active|completed|)?$"),
             "scene_id": _scene_id,
             "scene_name": _scene_name,
             "scene_source": _scene_source,
-        })
+            "stage": _stage,
+            "is_running": _has_running_agent,
+            "agent_statuses": _agent_status_map.get((_rk, _issue_id), []),
+        }
+        if include_user_id:
+            item["user_id"] = r[13] or 0
+        tasks_out.append(item)
+    return tasks_out
+
+
+@router.get("/mine", operation_id="tasks_mine", summary="我的任务列表")
+async def my_tasks(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|)?$"),
+                   repo_key: str = Query("", description="按仓库过滤"),
+                   sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
+                   mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
+                   created_by_me: str = Query("", description="仅我创建的任务"),
+                   assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                   user: dict = Depends(get_current_user_or_api_key)):
+    """任务中心：当前登录用户的待处理/已完成任务（可按 repo / 创建人过滤 / 按时间排序）。
+
+    sort_order: desc（默认，最新在前）/ asc（最早在前）
+    mode: default（状态优先 active→processing→completed，组内按时间）/ time（纯时间序）
+    created_by_me: 'true' 时仅返回当前用户创建的任务（user_id 匹配，排除 user_id=0）
+    assignees: 按创建人筛选（assignee 字段精确匹配）
+    """
+    from src.repo_key import to_repo_key
+    if repo_key:
+        repo_key = to_repo_key(repo_key)
+    if created_by_me and created_by_me.lower() == "true":
+        # 仅我创建的任务：严格匹配 user_id
+        clauses = ["user_id=?"]
+        params = [user["id"]]
+    else:
+        # 我的任务：只返回当前用户创建的任务（不包含 user_id=0 的未注册用户任务）
+        clauses = ["user_id=?"]
+        params = [user["id"]]
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    if repo_key:
+        clauses.append("repo_key=?")
+        params.append(repo_key)
+    _build_assignee_filter(assignees, clauses, params)
+    where = " AND ".join(clauses)
+    # 排序：白名单已由 FastAPI pattern 约束（desc/asc/default/time），此处直接拼（防注入）
+    _order_dir = "DESC" if sort_order == "desc" else "ASC"
+    _order_by = f"created_at {_order_dir}"
+    if mode == "default":
+        # 状态优先：active → processing → completed，组内按时间
+        _order_by = f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 ELSE 2 END, created_at {_order_dir}"
+    tasks_out = _query_tasks(where, params, _order_by, include_user_id=False)
     return {"tasks": tasks_out, "sort_order": sort_order, "mode": mode}
+
+
+@router.get("/repo/{owner}/{repo}", operation_id="tasks_repo_all", summary="仓库全部任务列表")
+async def repo_all_tasks(owner: str,
+                         repo: str,
+                         status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
+                         sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
+                         mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
+                         assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                         user: dict = Depends(get_current_user_or_api_key)):
+    """任务中心「仓库全部」视图：返回该仓库下所有任务（不限 user_id），含 assignee 信息。
+
+    - 按 owner/repo 路径参数定位仓库（to_repo_key 归一化）
+    - 先校验调用方可访问该仓库（get_managed_repos 成员校验，防 IDOR）
+    - status 可选筛选（active/processing/awaiting_input/pending_review/completed/cancelled）
+    - assignees 可选筛选（逗号分隔的创建人列表）
+    - sort_order / mode 与 /mine 一致
+    - 返回格式与 /mine 相同（额外含 user_id）
+    """
+    from src.repo_key import to_repo_key, from_repo_key
+    repo_key = to_repo_key(f"{owner}/{repo}")
+    _require_repo_access(user, repo_key)
+    clauses = ["repo_key=?"]
+    params: list = [repo_key]
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    _build_assignee_filter(assignees, clauses, params)
+    where = " AND ".join(clauses)
+    _order_dir = "DESC" if sort_order == "desc" else "ASC"
+    _order_by = f"created_at {_order_dir}"
+    if mode == "default":
+        _order_by = (f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 "
+                     f"WHEN status='awaiting_input' THEN 2 WHEN status='pending_review' THEN 3 "
+                     f"ELSE 4 END, created_at {_order_dir}")
+    tasks_out = _query_tasks(where, params, _order_by, include_user_id=True)
+    return {"tasks": tasks_out, "sort_order": sort_order, "mode": mode,
+            "repo_key": from_repo_key(repo_key)}

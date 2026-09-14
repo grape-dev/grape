@@ -22,6 +22,17 @@
       ],
       "onboarding": "repo-onboarding"
     },
+    "cloud-native-cli": {
+      "name": "云原生开发CLI版",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "vod-cli", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "issue-cli", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "coding-cli", "mode": "emit", "next": "qa", "handoff": "a2a"},
+        {"id": "qa", "tag": "qa", "skill": "qa-cli", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "sre", "tag": "sre", "skill": "deploy-cli", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
+    },
     "iac": {
       "name": "IaC开发",
       "nodes": [
@@ -73,6 +84,17 @@
         {"id": "issue", "tag": "issue", "skill": "blog-issue", "mode": "emit", "next": "coding", "handoff": "a2a"},
         {"id": "coding", "tag": "coding", "skill": "ai-blog-generation", "mode": "emit", "next": "sre", "handoff": "a2a", "skip": ["qa"]},
         {"id": "sre", "tag": "sre", "skill": "blog-publish", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
+    },
+    "hello-demo": {
+      "name": "Hello Demo",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "issue", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "implementation", "mode": "emit", "next": "qa", "handoff": "a2a"},
+        {"id": "qa", "tag": "qa", "skill": "pr", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "sre", "tag": "sre", "skill": "cloud-deploy", "mode": "emit", "next": "done", "handoff": "complete"}
       ],
       "onboarding": "repo-onboarding"
     }

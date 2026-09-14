@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     password_hash TEXT NOT NULL DEFAULT '',
     gitcode_id TEXT DEFAULT '',
     gitcode_api_token TEXT DEFAULT '',
+    github_id TEXT DEFAULT '',
+    github_api_token TEXT DEFAULT '',
+    github_login TEXT DEFAULT '',
     nickname TEXT DEFAULT '',
     feishu_app_id TEXT DEFAULT '',
     feishu_app_secret TEXT DEFAULT '',
@@ -264,12 +267,44 @@ def link_gitcode_user(user_id: int, gitcode_id: str, access_token: str, refresh_
                       (user_id, "gitcode_oauth", json.dumps({
                           "gitcode_id": gitcode_id,
                           "access_token": access_token,
-                          "refresh_token": refresh_token
+                          "refresh_token": refresh_token,
+                          "fetched_at": int(time.time())
                       })))
             db.commit()
             return True
     except Exception as e:
         log.warning(f"Link GitCode user failed: {e}")
+        return False
+
+
+def get_user_by_github_id(github_id: str) -> dict | None:
+    """通过 GitHub 用户 ID 查找本地用户"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE github_id=?", (github_id,))
+        row = c.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
+
+
+def link_github_user(user_id: int, github_id: str, access_token: str, refresh_token: str = "") -> bool:
+    """绑定本地用户与 GitHub 用户，存储 access_token 到 user_credentials"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE user_accounts SET github_id=? WHERE id=?", (github_id, user_id))
+            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
+                      (user_id, "github_oauth", json.dumps({
+                          "github_id": github_id,
+                          "access_token": access_token,
+                          "refresh_token": refresh_token,
+                          "fetched_at": int(time.time())
+                      })))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"Link GitHub user failed: {e}")
         return False
 
 
@@ -304,7 +339,7 @@ def get_credentials(user_id: int) -> list[dict]:
     """获取用户凭据（从 user_accounts 表读取）"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT * FROM user_accounts WHERE id=?", (user_id,))
+        c.execute(f"SELECT {','.join(USER_ACCOUNT_FIELDS)} FROM user_accounts WHERE id=?", (user_id,))
         row = c.fetchone()
     if not row:
         return []
@@ -312,6 +347,8 @@ def get_credentials(user_id: int) -> list[dict]:
     result = []
     if d.get("gitcode_api_token"):
         result.append({"provider": "gitcode", "config": {"token": d["gitcode_api_token"]}})
+    if d.get("github_api_token"):
+        result.append({"provider": "github", "config": {"token": d["github_api_token"]}})
     if d.get("feishu_app_id") or d.get("feishu_app_secret"):
         cfg = {}
         if d.get("feishu_app_id"): cfg["app_id"] = d["feishu_app_id"]
@@ -586,6 +623,12 @@ def init_db():
             db.execute("ALTER TABLE user_accounts ADD COLUMN last_active_at TEXT DEFAULT NULL")
         except Exception:
             pass
+        # 兼容旧列迁移（幂等）：github_id / github_api_token（GitHub OAuth 登录）
+        for col in ["github_id", "github_api_token"]:
+            try:
+                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
+            except Exception:
+                pass
         # 兼容旧列迁移（幂等）：华为云 IAM 列（存量库升级；CREATE TABLE 只影响新库）
         for col in ["hw_iam_domain", "hw_iam_user", "hw_iam_password", "hw_iam_account_type"]:
             try:
@@ -595,6 +638,17 @@ def init_db():
         db.execute(_CREDENTIALS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
+        # 兼容旧列迁移（幂等）：managed_repos 新增 github 列
+        for col in ["bot_github_token", "github_webhook_token"]:
+            try:
+                db.execute(f"ALTER TABLE managed_repos ADD COLUMN {col} TEXT DEFAULT ''")
+            except Exception:
+                pass
+        # 兼容旧列迁移（幂等）：login_whitelist 新增 github_username 列
+        try:
+            db.execute("ALTER TABLE login_whitelist ADD COLUMN github_username TEXT DEFAULT ''")
+        except Exception:
+            pass
         # repo_key 统一整改迁移（managed_repos 去 user_id + user_repos 加前缀/is_join）
         _migrate_repo_key_tables()
         # 从旧表迁移数据（幂等）
@@ -816,10 +870,20 @@ def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str =
         return False
 
 
-def resolve_skill_id(skill_name: str, owner_id: str = "") -> int:
-    """按 skill_name 匹配 skill 表拿主键 id（official 优先，其次 user/repo 匹配 owner）"""
+def resolve_skill_id(skill_name: str, owner_id: str = "",
+                     repo_key: str = "", user_id: str | int = "") -> int:
+    """按 skill_name 匹配 skill 表拿主键 id。
+
+    查询顺序：official → repo scope（按 repo_key）→ user scope（按 user_id）。
+    owner_id 参数兼容旧调用（非空时等价于 repo_key=owner_id）。
+    """
     if not skill_name:
         return 0
+    # 兼容旧调用：owner_id 非空时作为 repo_key 回退
+    if owner_id and not repo_key:
+        repo_key = owner_id
+    if user_id:
+        user_id = str(user_id)
     try:
         with db_lock:
             c = db.cursor()
@@ -827,8 +891,13 @@ def resolve_skill_id(skill_name: str, owner_id: str = "") -> int:
             row = c.fetchone()
             if row:
                 return row[0]
-            if owner_id:
-                c.execute("SELECT id FROM skill WHERE skill_name=? AND (scope='user' OR scope='repo') AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, owner_id))
+            if repo_key:
+                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, repo_key))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+            if user_id:
+                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, user_id))
                 row = c.fetchone()
                 if row:
                     return row[0]
@@ -1007,7 +1076,8 @@ def get_skill_md(user_id: int, skill_name: str) -> str | None:
 
 def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id: int = 0,
                      bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
-                     bot_username: str = "", dev_scene: str = "") -> bool:
+                     bot_username: str = "", dev_scene: str = "",
+                     github_webhook_token: str = "", bot_github_token: str = "") -> bool:
     """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。"""
     from src.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
@@ -1015,9 +1085,21 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
-                (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username))
+            # 先尝试含 bot_github_token 的完整插入
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token))
+            except Exception:
+                # 列不存在时降级（兼容未迁移的库）
+                try:
+                    c.execute(
+                        "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token))
+                except Exception:
+                    c.execute(
+                        "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username))
             db.commit()
             return True
     except Exception as e:
@@ -1277,6 +1359,55 @@ def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
     return ""
 
 
+def get_github_token(repo_key: str = "") -> str:
+    """统一获取 GitHub API Token（对应 get_gitcode_token 的 GitHub 版）。
+
+    - repo_key 非空 → bot token：managed_repos.bot_github_token → 仓库 owner 的 user_accounts.github_api_token → 全局
+    - 无 repo_key → 空（用户级 token 走 get_user_github_token）
+    """
+    from src.repo_key import to_repo_key, parse_repo_key
+    repo_key = to_repo_key(repo_key, provider="github")
+    if not repo_key:
+        return ""
+    # 仅处理 GitHub 仓库
+    provider, _, _ = parse_repo_key(repo_key)
+    if provider != "github":
+        return ""
+    # 1. managed_repos.bot_github_token（仓库级配置）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT bot_github_token FROM managed_repos WHERE repo_key=? AND bot_github_token!='' LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if row and row[0]:
+                return row[0]
+    except Exception as e:
+        log.warning(f"get_github_token: query managed_repos failed: {e}")
+    # 2. 仓库 owner 的 user_accounts.github_api_token（OAuth 登录时自动获取）
+    try:
+        from src.repo_key import parse_repo_key
+        _prov, owner, _name = parse_repo_key(repo_key)
+        if owner:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT github_api_token FROM user_accounts WHERE username=? AND github_api_token!='' LIMIT 1", (owner,))
+                row = c.fetchone()
+                if row and row[0]:
+                    return row[0]
+    except Exception as e:
+        log.warning(f"get_github_token: query user_accounts failed: {e}")
+    # 3. 全局 github_api_token（configs/global-bot-token.json）
+    try:
+        import json, os
+        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "global-bot-token.json")
+        if os.path.exists(_gbt_path):
+            with open(_gbt_path, "r", encoding="utf-8") as f:
+                return json.load(f).get("github_bot_token", "") or ""
+    except Exception as e:
+        log.warning(f"get_github_token: load global token failed: {e}")
+    return ""
+
+
 def get_agent_bot_token(repo_key: str) -> str:
     """获取 Agent 执行的 GitCode Bot Token（兼容包装，统一走 get_gitcode_token）"""
     return get_gitcode_token(repo_key=repo_key)
@@ -1296,14 +1427,117 @@ def get_user_gitcode_token(user_id: int) -> str:
     return ""
 
 
+def get_user_github_token(user_id: int) -> str:
+    """获取用户的 GitHub API token（user_accounts.github_api_token）"""
+    if not user_id or user_id <= 0:
+        return ""
+    try:
+        creds = get_credentials(user_id)
+        for c in creds:
+            if c.get("provider") == "github":
+                return c.get("config", {}).get("token", "") or ""
+    except Exception as e:
+        log.warning(f"get_user_github_token failed for user={user_id}: {e}")
+    return ""
+
+
+def _get_username_by_id(user_id: int) -> str:
+    """根据 user_id 查 username。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT username FROM user_accounts WHERE id=?", (user_id,))
+        row = c.fetchone()
+    return row[0] if row else ""
+
+
+def refresh_gitcode_oauth_token(user_id: int) -> str | None:
+    """用 refresh_token 刷新 GitCode OAuth access_token（Issue #52）。
+
+    读取 user_credentials (provider=gitcode_oauth) 中存储的 refresh_token，
+    调用 GitCode OAuth token endpoint 刷新 access_token。
+
+    成功时更新两处存储：
+    - user_credentials.config_json.access_token（OAuth 凭据原始存储）
+    - user_accounts.gitcode_api_token（API 调用实际读取的字段）
+
+    返回新的 access_token，失败返回 None。
+    """
+    import urllib.request, urllib.parse, json as _json
+
+    # 1. 读取存储的 refresh_token
+    cred = get_credential(user_id, "gitcode_oauth")
+    if not cred or not cred.get("refresh_token"):
+        log.warning(f"refresh_gitcode_oauth: no refresh_token for user={user_id}")
+        return None
+
+    rt = cred["refresh_token"]
+    client_id = get_meta_value("oauth_gitcode_client_id")
+    client_secret = get_meta_value("oauth_gitcode_client_secret")
+    if not client_id or not client_secret:
+        log.warning("refresh_gitcode_oauth: OAuth client_id/secret not configured")
+        return None
+
+    # 2. 调 GitCode OAuth refresh endpoint
+    try:
+        req = urllib.request.Request(
+            "https://gitcode.com/oauth/token",
+            data=urllib.parse.urlencode({
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            }).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST"
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        token_data = _json.loads(resp.read())
+    except Exception as e:
+        log.warning(f"refresh_gitcode_oauth: refresh failed for user={user_id}: {e}")
+        return None
+
+    new_access = token_data.get("access_token", "")
+    new_refresh = token_data.get("refresh_token", "")
+    if not new_access:
+        log.warning(f"refresh_gitcode_oauth: no access_token in response for user={user_id}")
+        return None
+
+    # 3. 更新存储（access_token + refresh_token 如果返回了新的）
+    new_cred = dict(cred)
+    new_cred["access_token"] = new_access
+    if new_refresh:
+        new_cred["refresh_token"] = new_refresh
+    new_cred["fetched_at"] = int(time.time())
+    set_credential(user_id, "gitcode_oauth", new_cred)
+
+    # 同步更新 user_accounts.gitcode_api_token（API 调用实际读取的字段）
+    username = _get_username_by_id(user_id)
+    if username:
+        acc = get_user_account(username) or {}
+        acc["gitcode_api_token"] = new_access
+        save_user_account(username, acc)
+
+    log.info(f"refresh_gitcode_oauth: success for user={user_id}")
+    return new_access
+
+
 def get_webhook_token_by_repo(full_name: str) -> str:
-    """根据 full_name（owner/repo）查找 repo 的预期 webhook token"""
+    """根据 full_name（owner/repo）查找 repo 的预期 webhook token（按 provider 分流）。"""
     from src.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT gitcode_webhook_token FROM managed_repos WHERE repo_key=? LIMIT 1", (to_repo_key(full_name),))
+        # 同时查 gitcode: 和 github: 前缀
+        gc_key = to_repo_key(full_name)  # 默认 gitcode:
+        gh_key = to_repo_key(full_name, provider="github")
+        c.execute(
+            "SELECT gitcode_webhook_token, github_webhook_token FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+            (gc_key, gh_key)
+        )
         row = c.fetchone()
-        return row[0] if row else ""
+        if not row:
+            return ""
+        # 优先返回非空的 token（GitHub 仓库有 github_webhook_token，GitCode 有 gitcode_webhook_token）
+        return row[1] or row[0] or ""
 
 
 def remove_managed_repo(repo_key: str) -> dict | None:
@@ -1340,6 +1574,7 @@ def get_all_managed_repos() -> list[dict]:
 USER_ACCOUNT_FIELDS = [
     "id", "username", "password_hash", "gitcode_id",
     "gitcode_api_token",
+    "github_id", "github_api_token", "github_login",
     "nickname",
     "feishu_app_id", "feishu_app_secret",
     "huawei_cloud_ak", "huawei_cloud_sk",
@@ -1523,6 +1758,9 @@ def migrate_accounts_from_json():
             ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
             ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
             ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
+            ("github_oauth_client_id", "oauth_github_client_id"),
+            ("github_oauth_client_secret", "oauth_github_client_secret"),
+            ("github_oauth_redirect_uri", "oauth_github_redirect_uri"),
         ]
         loaded = []
         with db_lock:
@@ -1588,7 +1826,8 @@ def save_user_repos(user_id: int, repos: list[dict]):
         c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
         for r in repos:
             full_name = r.get("full_name", "") or r.get("repo_key", "")
-            repo_key = to_repo_key(full_name)
+            # 优先使用 repos 中已有的 repo_key（含 provider 前缀），否则用 full_name 生成
+            repo_key = r.get("repo_key", "") or to_repo_key(full_name)
             is_join = 1 if repo_key in joined_keys else 0
             c.execute(
                 "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -1688,16 +1927,23 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                 _ls_json = json.dumps(a.get("local_skills", []), ensure_ascii=False)
                 _detail = a.get("local_skills_detail")
                 _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
-                # 仅操作本机未绑定凭据的行（credential_id=0）；凭据绑定行由边端 register 独占管理
-                c.execute("SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 AND host_name=?", (name, scope, owner_id, host_name))
+                # 匹配已有本机直连行：优先 host_name 精确匹配，其次 host_name 为空/NULL 的遗留孤儿行（claim 它）
+                # 防止 host_name 字段引入后旧行（host_name=''）匹配不上 → 新建重复行 → 前端显示两个 opencode-cred0
+                c.execute(
+                    "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 "
+                    "AND (host_name=? OR host_name='' OR host_name IS NULL) "
+                    "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
+                    (name, scope, owner_id, host_name, host_name))
                 row = c.fetchone()
                 if row:
                     c.execute(
-                        "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), local_skills=?, skill_scan_result=? WHERE id=?",
+                        "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, "
+                        "pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), "
+                        "local_skills=?, skill_scan_result=?, host_name=? WHERE id=?",
                         (a.get("display_name", name),
                          1 if a.get("installed") else 0, a.get("cli_path", ""),
                          a.get("version", ""), 1 if a.get("healthy") else 0,
-                         a.get("pip_package", ""), _ls_json, _detail_json, row[0])
+                         a.get("pip_package", ""), _ls_json, _detail_json, host_name, row[0])
                     )
                 else:
                     # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
@@ -1721,6 +1967,13 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             if current_names:
                 placeholders = ",".join("?" for _ in current_names)
                 c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
+            # 去重：同 name+scope+owner_id+cred=0 的重复行只保留 id 最小的一条
+            # （upsert 已 claim 旧行并写入 host_name，此处清理未被 claim 的重复行）
+            c.execute(
+                "DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
+                "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
+                "GROUP BY lower(name), scope, owner_id)"
+            )
             db.commit()
         except Exception as e:
             log.warning(f"save_agent_runtimes failed (lock timeout or error): {e}")
@@ -1744,9 +1997,9 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     with db_lock:
         c = db.cursor()
         if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name FROM agent_runtimes ORDER BY name")
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes ORDER BY name")
         else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return [
             {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
              "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
@@ -1755,7 +2008,10 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
              "local_skills": json.loads(r[14] or "[]") if r[14] else [],
              "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
              "agent_tags": json.loads(r[16]) if r[16] else [],
-             "host_name": r[17] or ""}
+             "host_name": r[17] or "",
+             "max_concurrent": r[18] or 20,
+             "scene_tags": json.loads(r[19]) if r[19] else ["default"],
+             "alias": r[20] or ""}
             for r in c.fetchall()
         ]
 
@@ -1821,7 +2077,7 @@ def is_known_engine_name(name: str) -> bool:
     if not name:
         return False
     # 静态白名单（避免 lazy import 循环引用导致 always False）
-    _KNOWN = {"opencode", "codearts", "hermes", "cursor"}
+    _KNOWN = {"opencode", "codearts", "hermes", "codex", "cursor"}
     if name in _KNOWN:
         return True
     try:
@@ -1929,22 +2185,26 @@ def get_scene_category(category_id: int) -> dict | None:
     """按 id 查场景分类"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, icon FROM scene_category WHERE id=?", (category_id,))
+        c.execute("SELECT id, name, slug, icon FROM scene_category WHERE id=?", (category_id,))
         row = c.fetchone()
     if not row:
         return None
-    return {"id": row[0], "name": row[1], "icon": row[2] or ""}
+    return {"id": row[0], "name": row[1], "slug": row[2] or "", "icon": row[3] or ""}
 
 
 def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
                       featured_only: int = 0, limit: int = 0,
-                      page: int = 1, page_size: int = 20) -> tuple[list[dict], int]:
-    """查询场景市场列表（is_active=1），支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页。
+                      page: int = 1, page_size: int = 20,
+                      scope: str = "", repo_key: str = "",
+                      user_id: int = 0) -> tuple[list[dict], int]:
+    """查询场景市场列表（is_active=1），支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页 + scope 过滤。
 
-    sort: latest（按 created_at 降序）/ hot（按 like_count 降序）。
+    sort: latest（按 updated_at 降序）/ hot（按 like_count 降序）。
     featured_only: 1=只查精选场景，0=全部。
     limit: >0 限制返回条数（精选场景用，不分页）。
     page/page_size: 分页参数（limit=0 时生效），page 从 1 开始。
+    scope: official / repo，空=全部。
+      scope='repo': 查当前仓库下所有用户的仓库场景（scope='repo' AND repo_key=?）
     返回 (rows, total)。
     """
     where = ["is_active=1"]
@@ -1957,8 +2217,14 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
         params.append(category_id)
     if featured_only:
         where.append("is_featured=1")
+    if scope:
+        where.append("scope=?")
+        params.append(scope)
+        if scope == "repo" and repo_key:
+            where.append("repo_key=?")
+            params.append(repo_key)
     where_sql = " AND ".join(where)
-    order_by = "created_at DESC" if sort != "hot" else "like_count DESC"
+    order_by = "updated_at DESC" if sort != "hot" else "like_count DESC"
 
     with db_lock:
         c = db.cursor()
@@ -1976,7 +2242,7 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
         c.execute(
             f"SELECT id, name, display_name, version, description, market_description, "
             f"icon, obs_icon_key, category_id, is_featured, like_count, source, recommended_template, "
-            f"nodes_json, onboarding, created_at "
+            f"nodes_json, onboarding, created_at, scope "
             f"FROM scene_market WHERE {where_sql} ORDER BY {order_by}{limit_sql}",
             params,
         )
@@ -1992,6 +2258,7 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
             "source": r[11] or "official", "recommended_template": r[12] or "",
             "nodes_json": r[13] or "[]", "onboarding": r[14] or "repo-onboarding",
             "created_at": str(r[15] or ""),
+            "scope": r[16] or "official",
         })
     return result, total
 
@@ -2003,7 +2270,8 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
         c.execute(
             "SELECT id, name, display_name, version, description, market_description, "
             "icon, obs_icon_key, category_id, is_featured, like_count, source, source_user_id, "
-            "recommended_template, nodes_json, onboarding, is_active, created_at, updated_at "
+            "recommended_template, nodes_json, onboarding, is_active, created_at, updated_at, "
+            "scope, repo_key "
             "FROM scene_market WHERE id=?",
             (market_id,),
         )
@@ -2020,7 +2288,294 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
         "recommended_template": row[13] or "", "nodes_json": row[14] or "[]",
         "onboarding": row[15] or "repo-onboarding", "is_active": row[16],
         "created_at": str(row[17] or ""), "updated_at": str(row[18] or ""),
+        "scope": row[19] or "official", "repo_key": row[20] or "",
     }
+
+
+# ====== Scene Market CRUD（用户自定义场景，Issue-54）======
+
+def create_scene_market(name: str, display_name: str = "", description: str = "",
+                        scope: str = "repo", repo_key: str = "", source_user_id: int = 0,
+                        nodes_json: str = "[]", icon: str = "", obs_icon_key: str = "",
+                        category_id: int = 1, recommended_template: str = "",
+                        onboarding: str = "repo-onboarding", created_by: str = "",
+                        market_description: str = "") -> int:
+    """创建用户自定义场景（写入 scene_market 表）。返回新记录 id。
+
+    UNIQUE (name, scope, source_user_id, repo_key) 约束冲突时抛 IntegrityError。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO scene_market "
+            "(name, display_name, version, description, market_description, icon, obs_icon_key, "
+            "category_id, is_featured, like_count, source, source_user_id, recommended_template, "
+            "nodes_json, onboarding, tags, author, content_hash, is_active, scope, repo_key, "
+            "created_by, updated_by, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,0,0,'user',?,?,?,?, '','', '', 1, ?,?, ?,?, datetime('now'),datetime('now'))",
+            (name, display_name or name, "1.0.0", description, market_description or description,
+             icon, obs_icon_key, category_id, source_user_id,
+             recommended_template, nodes_json, onboarding,
+             scope, repo_key, created_by, created_by),
+        )
+        db.commit()
+        return c.lastrowid
+
+
+def update_scene_market(market_id: int, name: str = "", display_name: str = "",
+                        description: str = "", nodes_json: str = "",
+                        icon: str = "", obs_icon_key: str = "",
+                        category_id: int = 0, recommended_template: str = "",
+                        updated_by: str = "") -> bool:
+    """更新用户自定义场景（scope != 'official'）。返回是否更新成功。
+
+    版本号自动管理：只有内容真正变更才 patch+1，无变更不涨。
+    版本号仅代表编辑轮次，不是标准语义化版本。
+    """
+    with db_lock:
+        c = db.cursor()
+        # 读取旧数据做内容比对
+        c.execute(
+            "SELECT name, display_name, description, market_description, nodes_json, "
+            "icon, obs_icon_key, category_id, recommended_template, version "
+            "FROM scene_market WHERE id=? AND scope!='official'",
+            [market_id],
+        )
+        row = c.fetchone()
+        if not row:
+            return False
+
+        old_name, old_display, old_desc, old_mkt_desc, old_nodes, old_icon, old_obs_key, old_cat, old_tpl, old_version = row
+
+        # 比对变更
+        changed = False
+        sets = []
+        params: list = []
+        if name and name != old_name:
+            sets.append("name=?"); params.append(name); changed = True
+        if display_name and display_name != old_display:
+            sets.append("display_name=?"); params.append(display_name); changed = True
+        if description != old_desc:
+            sets.append("description=?"); sets.append("market_description=?")
+            params.append(description); params.append(description); changed = True
+        if nodes_json and nodes_json != old_nodes:
+            sets.append("nodes_json=?"); params.append(nodes_json); changed = True
+        if icon and icon != old_icon:
+            sets.append("icon=?"); params.append(icon); changed = True
+        if obs_icon_key and obs_icon_key != old_obs_key:
+            sets.append("obs_icon_key=?"); params.append(obs_icon_key); changed = True
+        if category_id and category_id != old_cat:
+            sets.append("category_id=?"); params.append(category_id); changed = True
+        if recommended_template and recommended_template != old_tpl:
+            sets.append("recommended_template=?"); params.append(recommended_template); changed = True
+
+        if not changed:
+            return True  # 无变更，不升级版本
+
+        # patch+1
+        parts = (old_version or "1.0.0").split(".")
+        if len(parts) == 3:
+            try:
+                parts[2] = str(int(parts[2]) + 1)
+                new_version = ".".join(parts)
+            except ValueError:
+                new_version = "1.0.0"
+        else:
+            new_version = "1.0.0"
+
+        sets.append("version=?")
+        params.append(new_version)
+        if updated_by:
+            sets.append("updated_by=?"); params.append(updated_by)
+        sets.append("updated_at=datetime('now')")
+        params.append(market_id)
+
+        try:
+            c.execute(
+                f"UPDATE scene_market SET {', '.join(sets)} WHERE id=? AND scope!='official'",
+                params,
+            )
+            db.commit()
+            return c.rowcount > 0
+        except Exception as e:
+            if "UNIQUE" in str(e).upper() or "DUPLICATE" in str(e).upper():
+                raise ValueError(f"场景标识已存在")
+            raise
+
+
+def delete_scene_market(market_id: int) -> bool:
+    """硬删除用户自定义场景（scope != 'official'）。
+    场景市场无回收站需求，删除即销毁，name 立即释放。
+    级联清理 scene_skill_ref 和 scene_likes 关联记录。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
+        c.execute("DELETE FROM scene_likes WHERE scene_id=?", (market_id,))
+        c.execute(
+            "DELETE FROM scene_market WHERE id=? AND scope!='official'",
+            (market_id,),
+        )
+        db.commit()
+        return c.rowcount > 0
+
+
+def check_scene_name_exists(name: str, scope: str, repo_key: str = "",
+                            source_user_id: int = 0, exclude_id: int = 0) -> bool:
+    """检查场景标识是否重复。
+    - 不能和 official 场景重名（所有 scope 都检查 official）
+    - repo 场景：同仓库下 name 唯一，不同仓库可以同名
+    """
+    with db_lock:
+        c = db.cursor()
+        # 1. 先查 official scope（任何 scope 都不能和 official 重名）
+        sql1 = "SELECT 1 FROM scene_market WHERE name=? AND scope='official' AND is_active=1"
+        params1: list = [name]
+        if exclude_id:
+            sql1 += " AND id!=?"
+            params1.append(exclude_id)
+        sql1 += " LIMIT 1"
+        c.execute(sql1, params1)
+        if c.fetchone():
+            return True
+        # 2. 再查当前仓库（repo 按 repo_key 唯一）
+        if scope == "official":
+            return False  # official 已经查过了
+        if not repo_key:
+            return False
+        sql2 = ("SELECT 1 FROM scene_market WHERE name=? AND repo_key=? AND is_active=1")
+        params2: list = [name, repo_key]
+        if exclude_id:
+            sql2 += " AND id!=?"
+            params2.append(exclude_id)
+        sql2 += " LIMIT 1"
+        c.execute(sql2, params2)
+        return c.fetchone() is not None
+
+
+# ====== Uploaded Files CRUD（Issue-54 图标上传）======
+
+def insert_uploaded_file(file_key: str, original_name: str = "", file_size: int = 0,
+                         mime_type: str = "", file_type: str = "scene_icon",
+                         created_by: str = "") -> int:
+    """插入临时上传文件记录（scope='temp'）。返回新记录 id。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO uploaded_files "
+            "(file_key, original_name, file_size, mime_type, file_type, scope, "
+            "ref_table, ref_id, is_active, created_by, created_at, updated_at) "
+            "VALUES (?,?,?,?,?, 'temp', '', 0, 1, ?, datetime('now'),datetime('now'))",
+            (file_key, original_name, file_size, mime_type, file_type, created_by),
+        )
+        db.commit()
+        return c.lastrowid
+
+
+def commit_uploaded_file(file_id: int, ref_table: str, ref_id: int) -> bool:
+    """将临时文件标记为已提交（scope='committed'）。返回是否成功。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE uploaded_files SET scope='committed', ref_table=?, ref_id=?, "
+            "updated_at=datetime('now') WHERE id=? AND scope='temp'",
+            (ref_table, ref_id, file_id),
+        )
+        db.commit()
+        return c.rowcount > 0
+
+
+def get_uploaded_file(file_id: int) -> dict | None:
+    """按 id 查上传文件记录。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, file_key, original_name, file_size, mime_type, file_type, "
+            "scope, ref_table, ref_id, is_active, created_by, created_at "
+            "FROM uploaded_files WHERE id=?",
+            (file_id,),
+        )
+        row = c.fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0], "file_key": row[1], "original_name": row[2] or "",
+        "file_size": row[3], "mime_type": row[4] or "", "file_type": row[5] or "",
+        "scope": row[6] or "temp", "ref_table": row[7] or "", "ref_id": row[8],
+        "is_active": row[9], "created_by": row[10] or "",
+        "created_at": str(row[11] or ""),
+    }
+
+
+def get_uploaded_files_by_ref(ref_table: str, ref_id: int) -> list[dict]:
+    """按关联表+ID 查已提交的文件列表。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, file_key, original_name, file_size, mime_type, file_type, "
+            "scope, ref_table, ref_id, is_active, created_by, created_at "
+            "FROM uploaded_files WHERE ref_table=? AND ref_id=? AND is_active=1",
+            (ref_table, ref_id),
+        )
+        rows = c.fetchall()
+    return [
+        {
+            "id": r[0], "file_key": r[1], "original_name": r[2] or "",
+            "file_size": r[3], "mime_type": r[4] or "", "file_type": r[5] or "",
+            "scope": r[6] or "temp", "ref_table": r[7] or "", "ref_id": r[8],
+            "is_active": r[9], "created_by": r[10] or "",
+            "created_at": str(r[11] or ""),
+        }
+        for r in rows
+    ]
+
+
+def delete_uploaded_file(file_id: int) -> str:
+    """软删除上传文件记录，返回 file_key（供调用方删物理文件）。空串=未找到。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT file_key FROM uploaded_files WHERE id=? AND is_active=1",
+            (file_id,),
+        )
+        row = c.fetchone()
+        if not row:
+            return ""
+        c.execute(
+            "UPDATE uploaded_files SET is_active=0, updated_at=datetime('now') WHERE id=?",
+            (file_id,),
+        )
+        db.commit()
+        return row[0] or ""
+
+
+def list_temp_uploaded_files_before(hours: int = 24) -> list[dict]:
+    """查超过指定小时数的临时文件（供定时清理用）。"""
+    from src.mysql_compat import get_db_backend
+    is_mysql = get_db_backend() == "mysql"
+    time_expr = f"DATE_SUB(NOW(), INTERVAL {int(hours)} HOUR)" if is_mysql else f"datetime('now', '-{int(hours)} hours')"
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, file_key, file_type FROM uploaded_files "
+            "WHERE scope='temp' AND is_active=1 "
+            f"AND created_at < {time_expr}",
+        )
+        rows = c.fetchall()
+    return [{"id": r[0], "file_key": r[1], "file_type": r[2] or ""} for r in rows]
+
+
+def hard_delete_uploaded_file(file_id: int) -> str:
+    """硬删除上传文件记录（清理时用），返回 file_key。空串=未找到。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT file_key FROM uploaded_files WHERE id=?", (file_id,))
+        row = c.fetchone()
+        if not row:
+            return ""
+        c.execute("DELETE FROM uploaded_files WHERE id=?", (file_id,))
+        db.commit()
+        return row[0] or ""
 
 
 # ====== Scene Likes CRUD（场景点赞）======

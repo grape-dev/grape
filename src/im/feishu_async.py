@@ -163,7 +163,7 @@ def _fetch_gitcode_collaborators(owner: str, repo: str, api_token: str) -> list:
     page = 1
     while True:
         req = urllib.request.Request(
-            f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/collaborators?per_page=100&page={page}",
+            f"https://gitcode.com/api/v5/repos/{owner}/{repo}/collaborators?per_page=100&page={page}",
             headers={"Authorization": f"Bearer {api_token}"},
         )
         data = json.loads(urllib.request.urlopen(req, timeout=10).read())
@@ -373,6 +373,36 @@ class FeishuAsync:
         except Exception as e:
             log.warning(f"[{ctx.name}] download image error: {e}")
             return b""
+
+    async def download_file(self, ctx: BotContext, file_key: str, message_id: str = "", file_type: str = "file") -> bytes:
+        """Download file (video/audio/file) from Feishu API. Returns raw bytes.
+
+        Uses the message resources API: GET /im/v1/messages/{msg_id}/resources/{file_key}?type={file_type}
+        For videos, type=video; for generic files, type=file.
+        """
+        token = await self._ensure_token(ctx)
+        if not token:
+            return b""
+        session = await self._get_session()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        if message_id and message_id.startswith("om_"):
+            url = f"{FEISHU_BASE}/im/v1/messages/{message_id}/resources/{file_key}?type={file_type}"
+            try:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        log.info(f"[{ctx.name}] downloaded {file_type} via resources API: {len(data)} bytes")
+                        return data
+                    else:
+                        body_text = await resp.text()
+                        log.warning(f"[{ctx.name}] download {file_type} failed: HTTP {resp.status} - {body_text[:200]}")
+            except Exception as e:
+                log.warning(f"[{ctx.name}] download {file_type} error: {e}")
+        else:
+            log.warning(f"[{ctx.name}] download {file_type}: no valid message_id for resources API")
+
+        return b""
 
     async def send_card_to_chat(self, ctx: BotContext, chat_id: str, text: str,
                                     title: str = "DevOps Bot", template: str = "blue",
@@ -873,6 +903,7 @@ def _parse_event(event_data: dict) -> dict | None:
 
     text = ""
     image_key = ""
+    file_key = ""
     if msg_type == "text":
         try:
             text = json.loads(msg_content).get("text", "")
@@ -909,6 +940,26 @@ def _parse_event(event_data: dict) -> dict | None:
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
 
+    elif msg_type == "media":
+        # 视频/文件消息：提取 file_key，后续由 handler 下载并理解
+        try:
+            media_data = json.loads(msg_content)
+            file_key = media_data.get("file_key", "")
+            if file_key:
+                text = "[视频]"
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+
+    elif msg_type == "file":
+        # 文件消息：提取 file_key
+        try:
+            file_data = json.loads(msg_content)
+            file_key = file_data.get("file_key", "")
+            if file_key:
+                text = "[文件]"
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+
     text = re.sub(r'@_?\w+\s*', '', text).strip()
 
     sender_id = ""
@@ -928,6 +979,7 @@ def _parse_event(event_data: dict) -> dict | None:
         "message_id": message.get("message_id", ""),
         "message_type": msg_type,
         "image_key": image_key if msg_type == "image" else "",
+        "file_key": file_key if msg_type in ("media", "file") else "",
     }
 
 

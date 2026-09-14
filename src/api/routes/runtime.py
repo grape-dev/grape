@@ -67,6 +67,7 @@ class HeartbeatBody(BaseModel):
     disk_percent: float = 0.0
     tmp_percent: float = 0.0
     load_avg: str = ""
+    spec: str = ""
     log_lines: list[LogLineBody] = []
     probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 
@@ -170,8 +171,20 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                      1 if rt.get("healthy", True) else 0, 1, "online",
                      datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version))
                 rid = c.lastrowid
-            # 不再自动写入默认 "all" 标签——新引擎默认无标签，由用户在控制台手动配置。
-            # 空标签引擎不参与任务分发（claim_by_tag 的 SQL 查 engine_capabilities 表，无行即不匹配）。
+            # 自动写入默认 "all" 标签——新引擎默认可认领任意角色任务。
+            # 若已有 capabilities 行则跳过（用户手动配置过标签的不覆盖）。
+            # tags_user_set=1 时也跳过（用户已手动清空/设过标签，心跳不再自动补 'all'）
+            c.execute("SELECT tags_user_set FROM agent_runtimes WHERE id=?", (rid,))
+            _ts_row = c.fetchone()
+            _user_set = (_ts_row[0] if _ts_row else 0) or 0
+            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
+            if not c.fetchone() and not _user_set:
+                from datetime import datetime as _dt, timezone as _tz
+                _now_ec = _dt.now(_tz.utc).isoformat()
+                c.execute(
+                    "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?, 'all', 1, 50, 1, ?, ?)",
+                    (rid, _now_ec, _now_ec))
             registered.append({"id": rid, "name": name})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
@@ -208,8 +221,13 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
     cancelled_tasks = []
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
-                  (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, credential_id))
+        # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
+        if body.spec:
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=?, spec=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, body.spec, credential_id))
+        else:
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
@@ -316,6 +334,34 @@ def event_bus_debug(user: dict = Depends(get_current_user)):
     }
 
 
+# ===== Issue #134: 机器健康度查询 API =====
+
+@router.get("/admin/machine-health")
+def machine_health_overview(user: dict = Depends(get_current_user)):
+    """获取所有引擎的机器健康度概览（供前端/运维查看）。
+
+    返回 [{runtime_id, name, health_score, total_tasks, failed_tasks,
+           consecutive_failures, failure_rate, ...}]
+    """
+    from src.runtime.health_scorer import get_all_health_scores
+    from src.runtime.instances import runtime_instance_name
+    scores = get_all_health_scores()
+    # 补充引擎名
+    for s in scores:
+        s["engine_name"] = runtime_instance_name(s.get("runtime_id", 0))
+    return {"engines": scores}
+
+
+@router.get("/admin/machine-health/{runtime_id}")
+def machine_health_detail(runtime_id: int, user: dict = Depends(get_current_user)):
+    """获取单个引擎的健康度详情。"""
+    from src.runtime.health_scorer import get_health_score
+    from src.runtime.instances import runtime_instance_name
+    data = get_health_score(runtime_id, force_refresh=True)
+    data["engine_name"] = runtime_instance_name(runtime_id)
+    return data
+
+
 @router.post("/admin/batch-recover")
 def batch_recover_stale_tasks_api(user: dict = Depends(get_current_user)):
     """Manually trigger batch stale task recovery (Phase 5)."""
@@ -347,16 +393,18 @@ def _attach_skill_obs(task: dict) -> None:
             return
         from src.user.db import resolve_skill_id, get_skill_object_key, get_skill_by_id
         _skill_id = task.get("skill_id") or 0
+        _task_repo = task.get("repo_key") or ""
+        _task_uid = task.get("user_id") or ""
         if _skill_id:
             _sk = get_skill_by_id(_skill_id)
             if _sk:
                 _okey = _sk.get("file_path") or ""
             else:
                 # stale skill_id → 回退按名字解析
-                _sid = resolve_skill_id(skill)
+                _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
                 _okey = get_skill_object_key(_sid) if _sid else ""
         else:
-            _sid = resolve_skill_id(skill)
+            _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
             _okey = get_skill_object_key(_sid) if _sid else ""
         if not _okey:
             return
@@ -489,15 +537,17 @@ def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_require_c
         from src.user.db import resolve_skill_id, get_skill_object_key, get_skill_by_id
         from src.storage import get_skill_zip_bytes
         _skill_id = task.get("skill_id") or 0
+        _task_repo = task.get("repo_key") or ""
+        _task_uid = task.get("user_id") or ""
         if _skill_id:
             _sk = get_skill_by_id(_skill_id)
             if _sk:
                 _okey = _sk.get("file_path") or ""
             else:
-                _sid = resolve_skill_id(skill)
+                _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
                 _okey = get_skill_object_key(_sid) if _sid else ""
         else:
-            _sid = resolve_skill_id(skill)
+            _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
             _okey = get_skill_object_key(_sid) if _sid else ""
         if not _okey:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "skill not on OBS"})
@@ -660,9 +710,11 @@ def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
         clauses.append("status=?")
         params.append(status)
     if repo:
-        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
-        clauses.append("repo_key=?")
-        params.append(repo_key)
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        repo_key = f"gitcode:{_base}"
+        _rk_list = [f"gitcode:{_base}", f"github:{_base}"]
+        clauses.append(f"repo_key IN ({','.join('?' * len(_rk_list))})")
+        params.extend(_rk_list)
     with db_lock:
         c = db.cursor()
         c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at, issue_id, event_seq FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
@@ -691,9 +743,10 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user
     repo_clause = ""
     params: list = []
     if repo:
-        repo_key = f"gitcode:{repo}" if not repo.startswith("gitcode:") else repo
-        repo_clause = " AND repo_key=?"
-        params.append(repo_key)
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        _rk_list = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_clause = f" AND repo_key IN ({','.join('?' * len(_rk_list))})"
+        params.extend(_rk_list)
 
     with db_lock:
         c = db.cursor()
@@ -747,7 +800,7 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user
             sessions.append({
                 "id": sid,
                 "agent_type": agent_type,
-                "repo_key": repo_key_raw.replace("gitcode:", ""),
+                "repo_key": repo_key_raw.split(":", 1)[1] if ":" in repo_key_raw else repo_key_raw,
                 "status": "running" if current else "idle",
                 "skill": r[4] or "",
                 "created_at": normalize_event_time(r[5]),
@@ -1078,8 +1131,127 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_curre
                 )
             except Exception:
                 pass
+        # 标记用户已手动设过标签，心跳注册不再自动补 'all'
+        c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=?", (runtime_id,))
         # 再回写 agent_tags（派生缓存，保持与 engine_capabilities 一致）
         _sync_agent_tags(runtime_id, c)
         db.commit()
     log.info(f"Runtime tags set: rid={runtime_id} tags={tags} (engine_capabilities → agent_tags synced)")
     return {"tags": tags}
+
+
+class MaxConcurrentBody(BaseModel):
+    max_concurrent: int = 20
+
+
+@router.put("/runtimes/{runtime_id}/max-concurrent")
+def set_runtime_max_concurrent(runtime_id: int, body: MaxConcurrentBody,
+                                user: dict = Depends(get_current_user)):
+    """设置引擎级最大并发数（方案一：并发纯引擎级，标签只做路由）。"""
+    from src.session_manager import db, db_lock
+    if body.max_concurrent < 1 or body.max_concurrent > 100:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "max_concurrent 必须在 1-100 之间"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        c.execute("UPDATE agent_runtimes SET max_concurrent=? WHERE id=?", (body.max_concurrent, runtime_id))
+        db.commit()
+    log.info(f"Runtime max_concurrent set: rid={runtime_id} max_concurrent={body.max_concurrent}")
+    return {"max_concurrent": body.max_concurrent}
+
+
+# ===== 场景标签 =====
+
+@router.get("/scene-tags")
+def list_scene_tags(user: dict = Depends(get_current_user)):
+    """返回场景市场所有场景及其可用角色标签（供前端场景选择器使用）。
+
+    返回格式：[{name, display_name, roles: ["vod","issue","coding","qa","sre"]}, ...]
+    """
+    from src.user.db import list_scene_market
+    scenes, _ = list_scene_market(limit=0)
+    result = []
+    for s in scenes:
+        nodes = json.loads(s.get("nodes_json") or "[]") if isinstance(s.get("nodes_json"), str) else (s.get("nodes_json") or [])
+        roles = []
+        for n in nodes:
+            if isinstance(n, dict) and n.get("tag") and n["tag"] not in roles:
+                roles.append(n["tag"])
+        result.append({
+            "name": s["name"],
+            "display_name": s.get("display_name") or s["name"],
+            "roles": roles,
+        })
+    return {"scenes": result}
+
+
+@router.get("/runtimes/{runtime_id}/scene-tags")
+def get_runtime_scene_tags(runtime_id: int, user: dict = Depends(get_current_user)):
+    """返回引擎的场景标签列表。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT scene_tags FROM agent_runtimes WHERE id=?", (runtime_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+    tags = json.loads(row[0]) if row[0] else ["default"]
+    return {"scene_tags": tags}
+
+
+class SceneTagsBody(BaseModel):
+    scene_tags: list[str] = ["default"]
+
+
+@router.put("/runtimes/{runtime_id}/scene-tags")
+def set_runtime_scene_tags(runtime_id: int, body: SceneTagsBody,
+                            user: dict = Depends(get_current_user)):
+    """设置引擎的场景标签。
+
+    场景标签是元数据，约束可选角色标签范围。
+    保存时不修改角色标签——前端根据场景的可用角色自动过滤角色标签 checkbox。
+    """
+    tags = body.scene_tags or ["default"]
+    # 去重保序
+    seen = set()
+    deduped = []
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            deduped.append(t)
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        c.execute("UPDATE agent_runtimes SET scene_tags=? WHERE id=?", (json.dumps(deduped, ensure_ascii=False), runtime_id))
+        db.commit()
+    log.info(f"Runtime scene_tags set: rid={runtime_id} scene_tags={deduped}")
+    return {"scene_tags": deduped}
+
+
+# ===== 引擎别名 =====
+
+class AliasBody(BaseModel):
+    alias: str = ""
+
+
+@router.put("/runtimes/{runtime_id}/alias")
+def set_runtime_alias(runtime_id: int, body: AliasBody,
+                       user: dict = Depends(get_current_user)):
+    """设置引擎别名。空字符串表示清除别名。"""
+    alias = (body.alias or "").strip()
+    if len(alias) > 64:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "alias 最长 64 字符"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        c.execute("UPDATE agent_runtimes SET alias=? WHERE id=?", (alias, runtime_id))
+        db.commit()
+    log.info(f"Runtime alias set: rid={runtime_id} alias={alias!r}")
+    return {"alias": alias}
+
+

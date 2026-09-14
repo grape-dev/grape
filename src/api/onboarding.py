@@ -155,14 +155,16 @@ def _load_completed_tasks(repo_key: str, tasks: list) -> list:
     return [t.get("type", "") for t in tasks if t.get("type") and _task_done(repo_key, t["type"])]
 
 
-def _load_onboarding_template(repo_key: str, scene_id: str = "") -> list:
+def _load_onboarding_template(repo_key: str, scene_id: str = "", template_id: str = "") -> list:
     """读取 onboarding 任务模板，返回任务定义列表。
 
-    解析规则：
+    解析规则（按优先级）：
     1. 仓库根目录 `onboarding-tasks.json`（若存在）优先；支持 `{"tasks": [...]}` 简写
        或 `{"default": {...}, "<scene_id>": {...}}` 结构（scene_id 键命中则优先，否则用 default）。
-    2. 无仓库自定义 → `configs/onboarding-templates.json`，同样 scene_id 优先、default 兜底。
-    3. 返回任务定义列表；空列表 / 缺文件 → 返回 []（调用方跳过，不报错）。
+    2. 模板源目录 `examples/{template_id}/onboarding-tasks.json`（模板创建时远端仓库尚未克隆到本地，
+       repo root 必然为空，此路经从服务器本地 examples/ 读取，确保模板专属 onboarding 即时生效）。
+    3. 无仓库自定义 → `configs/onboarding-templates.json`，同样 scene_id 优先、default 兜底。
+    4. 返回任务定义列表；空列表 / 缺文件 → 返回 []（调用方跳过，不报错）。
 
     任务项合法化：缺 title/description 时从 `_DEFAULT_TITLES` 派生兜底，忽略非法项。
     """
@@ -223,7 +225,27 @@ def _load_onboarding_template(repo_key: str, scene_id: str = "") -> list:
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] repo custom template check failed: {e}")
 
-    # 2. 配置默认模板
+    # 2. 模板源目录 examples/{template_id}/onboarding-tasks.json
+    #    模板创建时 push_template_to_repo 用临时目录推完即清理，本地 repo root 尚无文件；
+    #    从服务器本地 examples/ 读取模板专属 onboarding（与 push 时用的同一份文件）。
+    if template_id:
+        try:
+            from src.config import EXAMPLE_DIR
+            _p = os.path.join(EXAMPLE_DIR, template_id, "onboarding-tasks.json")
+            if os.path.isfile(_p):
+                try:
+                    with open(_p, encoding="utf-8") as f:
+                        data = json.load(f)
+                    tasks = _normalize(_extract(data))
+                    if tasks:
+                        log.info(f"[Onboarding|repo:{repo_key}] use template source: {_p}")
+                        return tasks
+                except Exception as e:
+                    log.warning(f"[Onboarding|repo:{repo_key}] template source parse failed ({_p}): {e}")
+        except Exception as e:
+            log.warning(f"[Onboarding|repo:{repo_key}] template source check failed: {e}")
+
+    # 3. 配置默认模板
     try:
         _path = os.path.join(CONFIG_DIR, "onboarding-templates.json")
         with open(_path, encoding="utf-8") as f:
@@ -234,17 +256,18 @@ def _load_onboarding_template(repo_key: str, scene_id: str = "") -> list:
         return []
 
 
-def _create_onboarding_tasks(repo_key: str, owner: str):
+def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     """按模板任务列表创建 onboarding 标准任务（真实 Issue 先创建 → ensure_issue_task 建档）。
 
     - 任务集合由模板决定（默认：体验部署 + 二次开发）
+    - template_id 传入时优先从 examples/{template_id}/onboarding-tasks.json 读取模板专属任务
     - 创建层幂等：create_standard_task 内按 title 查重，不重复建 Issue
     - 完成层自愈：仅创建 `onboarded_task:{repo}:{type}` 未完成的任务；全部成功后置位总闸
     - 全部任务同步创建（同请求内完成），每个任务仅 1 条任务上下文消息
     """
     from src.user.db import get_gitcode_token
     from src.api.routes.tasks import create_standard_task
-    task_defs = _load_onboarding_template(repo_key)
+    task_defs = _load_onboarding_template(repo_key, template_id=template_id)
     if not task_defs:
         log.info(f"[Onboarding|repo:{repo_key}] 无 onboarding 任务模板，跳过")
         return
@@ -276,14 +299,15 @@ def _create_onboarding_tasks(repo_key: str, owner: str):
         log.info(f"[Onboarding|repo:{repo_key}] 全部 {ok_count} 个 onboarding 任务就绪")
 
 
-def trigger_onboarding(repo_key: str, owner: str):
+def trigger_onboarding(repo_key: str, owner: str, template_id: str = ""):
     """模板一键创建完成后调用：触发引导（按模板任务列表创建，任务级幂等自愈）。
 
     仅在 templates.create_from_template 中调用（手动托管 /repos/host 不调用）。
     场景信息不再用于选技能（模拟事件机制已移除），任务集完全由模板决定。
+    template_id 传入时优先从 examples/{template_id}/onboarding-tasks.json 读取模板专属任务。
     """
     try:
-        _create_onboarding_tasks(repo_key, owner)
+        _create_onboarding_tasks(repo_key, owner, template_id=template_id)
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] trigger failed: {e}")
 

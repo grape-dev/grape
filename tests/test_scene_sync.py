@@ -8,14 +8,15 @@
 - _check_skills_exist() skill 引用预检
 - _parse_version() 版本号比较
 - _refresh_cat_cache() category 缓存刷新
-- _api_list_dir / _api_get_file API 调用
-- _download_dir_recursive 递归下载
+- _download_repo_zip ZIP 下载+解压
 - sync_official_scenes 核心同步流程（mock）
 """
+import io
 import json
 import os
 import sys
 import tempfile
+import zipfile
 
 import pytest
 
@@ -31,9 +32,7 @@ from src.storage.scene_sync import (
     _check_skills_exist,
     _parse_version,
     _refresh_cat_cache,
-    _api_list_dir,
-    _api_get_file,
-    _download_dir_recursive,
+    _download_repo_zip,
     sync_official_scenes,
     _cat_cache,
     _VALID_TAGS,
@@ -65,7 +64,7 @@ class TestLoadConfig:
             os.environ.pop(k, None)
         url, branch, interval = _load_config()
         assert "gitcode.com" in url
-        assert branch == "dev"
+        assert branch == "main"
         assert interval == 1800.0
 
     def test_env_overrides(self):
@@ -301,7 +300,7 @@ class TestRefreshCatCache:
             _cat_cache.update(old)
 
 
-# ===== _api_list_dir / _api_get_file (mock httpx) =====
+# ===== _download_repo_zip (mock httpx) =====
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -312,121 +311,86 @@ def _run_async(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-class TestApiListDir:
-    def test_returns_list(self):
-        """API 返回目录列表"""
+def _make_zip_bytes(top_dir="grape-skills-dev", scenes=None):
+    """构造一个模拟 grape-skills 仓库的 ZIP 包 bytes。"""
+    if scenes is None:
+        scenes = {
+            "default": {"scene.json": '{"name":"default","nodes":[]}', "README.md": "# Default"},
+        }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for scene_name, files in scenes.items():
+            for fname, content in files.items():
+                zf.writestr(f"{top_dir}/scenes/{scene_name}/{fname}", content)
+    return buf.getvalue()
+
+
+class TestDownloadRepoZip:
+    def test_download_and_extract(self):
+        """mock httpx 返回 ZIP bytes，验证解压后目录结构正确"""
+        async def _run():
+            zip_data = _make_zip_bytes()
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.content = zip_data
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            result = await _download_repo_zip(mock_client, "fake_token")
+            assert os.path.isdir(result)
+            scenes_dir = os.path.join(result, "scenes")
+            assert os.path.isdir(scenes_dir)
+            assert os.path.isdir(os.path.join(scenes_dir, "default"))
+            assert os.path.exists(os.path.join(scenes_dir, "default", "scene.json"))
+            # 清理临时目录
+            import shutil
+            shutil.rmtree(os.path.dirname(result), ignore_errors=True)
+        _run_async(_run())
+
+    def test_auth_header(self):
+        """验证请求头包含 Authorization: Bearer {token}"""
+        async def _run():
+            zip_data = _make_zip_bytes()
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.content = zip_data
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            await _download_repo_zip(mock_client, "fake_token")
+            # 检查 get 调用参数
+            call_args = mock_client.get.call_args
+            headers = call_args.kwargs.get("headers", {})
+            assert headers.get("Authorization") == "Bearer fake_token"
+            # 清理
+            import shutil
+            # _download_repo_zip 内部创建了临时目录，通过 mock_resp 无法拿到路径
+            # 这里只验证请求头，不清理（tempfile 会被系统清理）
+        _run_async(_run())
+
+    def test_empty_response_raises(self):
+        """空响应抛异常"""
         async def _run():
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
-            mock_resp.json = MagicMock(return_value=[
-                {"type": "dir", "name": "default", "path": "scenes/default"},
-                {"type": "file", "name": "scene.json", "path": "scenes/default/scene.json"},
-            ])
+            mock_resp.content = b""
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_resp)
-            result = await _api_list_dir(mock_client, "scenes", "fake_token")
-            assert len(result) == 2
-            assert result[0]["name"] == "default"
+            with pytest.raises((ValueError, Exception)):
+                await _download_repo_zip(mock_client, "fake_token")
         _run_async(_run())
 
-    def test_raises_on_error(self):
-        """API 返回非 200 时 raise"""
+    def test_no_token_no_auth_header(self):
+        """无 token 时不带 Authorization 头"""
         async def _run():
-            mock_resp = MagicMock()
-            mock_resp.raise_for_status = MagicMock(side_effect=Exception("HTTP 500"))
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_resp)
-            with pytest.raises(Exception):
-                await _api_list_dir(mock_client, "scenes", "fake_token")
-        _run_async(_run())
-
-
-class TestApiGetFile:
-    def test_base64_decode(self):
-        """base64 编码的文件正确解码"""
-        async def _run():
-            import base64 as _b64
-            content = b'{"name":"test"}'
-            encoded = _b64.b64encode(content).decode()
+            zip_data = _make_zip_bytes()
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
-            mock_resp.json = MagicMock(return_value={
-                "encoding": "base64",
-                "content": encoded,
-            })
+            mock_resp.content = zip_data
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_resp)
-            result = await _api_get_file(mock_client, "scenes/test/scene.json", "fake_token")
-            assert result == content
-        _run_async(_run())
-
-    def test_plain_text(self):
-        """非 base64 编码的文件按 utf-8 返回"""
-        async def _run():
-            mock_resp = MagicMock()
-            mock_resp.raise_for_status = MagicMock()
-            mock_resp.json = MagicMock(return_value={
-                "encoding": "",
-                "content": "plain text content",
-            })
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_resp)
-            result = await _api_get_file(mock_client, "scenes/test/README.md", "fake_token")
-            assert result == b"plain text content"
-        _run_async(_run())
-
-
-class TestDownloadDirRecursive:
-    def test_downloads_files(self):
-        """根目录只下载 scene.json / README.md / icon.*"""
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmp:
-                entries = [
-                    {"type": "file", "name": "scene.json", "path": "scenes/test/scene.json"},
-                    {"type": "file", "name": "README.md", "path": "scenes/test/README.md"},
-                    {"type": "file", "name": "ignore.txt", "path": "scenes/test/ignore.txt"},
-                ]
-                mock_client = AsyncMock()
-                with patch("src.storage.scene_sync._api_list_dir", new=AsyncMock(return_value=entries)):
-                    with patch("src.storage.scene_sync._api_get_file", new=AsyncMock(return_value=b"content")):
-                        await _download_dir_recursive(mock_client, "scenes/test", tmp, "fake_token")
-                assert os.path.exists(os.path.join(tmp, "scene.json"))
-                assert os.path.exists(os.path.join(tmp, "README.md"))
-                assert not os.path.exists(os.path.join(tmp, "ignore.txt"))
-        _run_async(_run())
-
-    def test_downloads_references(self):
-        """references 子目录全部下载"""
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmp:
-                entries = [
-                    {"type": "dir", "name": "references", "path": "scenes/test/references"},
-                ]
-                ref_entries = [
-                    {"type": "file", "name": "doc1.md", "path": "scenes/test/references/doc1.md"},
-                    {"type": "file", "name": "doc2.md", "path": "scenes/test/references/doc2.md"},
-                ]
-                mock_client = AsyncMock()
-                call_count = [0]
-                async def mock_list_dir(client, path, token):
-                    result = entries if call_count[0] == 0 else ref_entries
-                    call_count[0] += 1
-                    return result
-                with patch("src.storage.scene_sync._api_list_dir", new=mock_list_dir):
-                    with patch("src.storage.scene_sync._api_get_file", new=AsyncMock(return_value=b"ref content")):
-                        await _download_dir_recursive(mock_client, "scenes/test", tmp, "fake_token")
-                assert os.path.exists(os.path.join(tmp, "references", "doc1.md"))
-                assert os.path.exists(os.path.join(tmp, "references", "doc2.md"))
-        _run_async(_run())
-
-    def test_depth_limit(self):
-        """超过 5 层深度跳过"""
-        async def _run():
-            mock_client = AsyncMock()
-            with patch("src.storage.scene_sync._api_list_dir", new=AsyncMock()) as mock_list:
-                with tempfile.TemporaryDirectory() as tmp:
-                    await _download_dir_recursive(mock_client, "scenes/test", tmp, "fake_token", depth=6)
-                    mock_list.assert_not_called()
+            await _download_repo_zip(mock_client, "")
+            call_args = mock_client.get.call_args
+            headers = call_args.kwargs.get("headers", {})
+            assert "Authorization" not in headers
         _run_async(_run())
 
 
@@ -441,65 +405,34 @@ class TestSyncOfficialScenes:
                 assert result is None
         _run_async(_run())
 
-    def test_api_list_failure_skips(self):
-        """API 列目录失败时跳过"""
+    def test_zip_download_failure_skips(self):
+        """ZIP 下载失败时跳过同步，不执行下架"""
         async def _run():
             with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
-                with patch("src.storage.scene_sync._api_list_dir", new=AsyncMock(side_effect=Exception("API error"))):
+                with patch("src.storage.scene_sync._download_repo_zip", new=AsyncMock(side_effect=Exception("download error"))):
                     result = await sync_official_scenes()
                     assert result is None
         _run_async(_run())
 
-    def test_no_scene_dirs_skips(self):
-        """scenes/ 目录为空时跳过"""
+    def test_no_scenes_dir_skips(self):
+        """ZIP 内没有 scenes/ 目录时跳过"""
         async def _run():
+            # 构造不含 scenes/ 的 ZIP
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("grape-skills-dev/README.md", "# README")
+            zip_data = buf.getvalue()
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.content = zip_data
             with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
-                with patch("src.storage.scene_sync._api_list_dir", new=AsyncMock(return_value=[])):
+                with patch("src.storage.scene_sync._download_repo_zip", new=AsyncMock(return_value="/tmp/fake_nonexistent")):
                     result = await sync_official_scenes()
                     assert result is None
-        _run_async(_run())
-
-    def test_only_template_dirs_skips(self):
-        """只有 _template 和 third-party 目录时跳过"""
-        async def _run():
-            entries = [
-                {"type": "dir", "name": "_template", "path": "scenes/_template"},
-                {"type": "dir", "name": "third-party", "path": "scenes/third-party"},
-            ]
-            with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
-                with patch("src.storage.scene_sync._api_list_dir", new=AsyncMock(return_value=entries)):
-                    result = await sync_official_scenes()
-                    assert result is None
-        _run_async(_run())
-
-    def test_download_failure_continues(self):
-        """单个场景下载失败不中断整体"""
-        async def _run():
-            entries = [
-                {"type": "dir", "name": "scene_a", "path": "scenes/scene_a"},
-                {"type": "dir", "name": "scene_b", "path": "scenes/scene_b"},
-            ]
-            call_count = [0]
-            async def mock_list_dir(client, path, token):
-                if path == "scenes":
-                    return entries
-                call_count[0] += 1
-                if call_count[0] == 1:
-                    raise Exception("download failed")
-                return []
-            with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
-                with patch("src.storage.scene_sync._api_list_dir", new=mock_list_dir):
-                    with patch("src.storage.scene_sync._refresh_cat_cache"):
-                        with patch.dict("src.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
-                            # mock DB 操作避免污染测试 DB
-                            with patch("src.storage.scene_sync.db_lock"):
-                                with patch("src.storage.scene_sync.db"):
-                                    result = await sync_official_scenes()
-                                    assert result is None or result is not None
         _run_async(_run())
 
     def test_full_sync_new_scene(self):
-        """完整同步流程：mock 下载 + mock DB，验证入库逻辑不报异常"""
+        """完整同步流程：mock ZIP 下载 + mock DB，验证入库逻辑不报异常"""
         async def _run():
             import json as _json
             scene_data = {
@@ -518,13 +451,20 @@ class TestSyncOfficialScenes:
                 ],
             }
 
-            # mock _download_dir_recursive：把 scene.json 和 README.md 写到临时目录
-            async def mock_download(client, api_path, local_path, token, **kw):
-                os.makedirs(local_path, exist_ok=True)
-                with open(os.path.join(local_path, "scene.json"), "w") as f:
-                    _json.dump(scene_data, f)
-                with open(os.path.join(local_path, "README.md"), "w") as f:
-                    f.write("# Test Scene")
+            # 构造含 scene.json + README.md 的 ZIP
+            zip_data = _make_zip_bytes(scenes={
+                "test_scene": {
+                    "scene.json": _json.dumps(scene_data),
+                    "README.md": "# Test Scene",
+                },
+            })
+
+            # mock _download_repo_zip：解压 ZIP 到临时目录并返回路径
+            async def mock_download_zip(client, token):
+                tmp = tempfile.mkdtemp(prefix="test_sync_")
+                with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+                    zf.extractall(tmp)
+                return os.path.join(tmp, "grape-skills-dev")
 
             # mock DB：fetchone 返回 (0,)（COUNT=0），fetchall 返回空
             mock_cursor = MagicMock()
@@ -534,16 +474,13 @@ class TestSyncOfficialScenes:
             mock_db.cursor = MagicMock(return_value=mock_cursor)
             mock_db.commit = MagicMock()
 
-            entries = [{"type": "dir", "name": "test_scene", "path": "scenes/test_scene"}]
-
             with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
-                with patch("src.storage.scene_sync._api_list_dir", new=AsyncMock(return_value=entries)):
-                    with patch("src.storage.scene_sync._download_dir_recursive", new=mock_download):
-                        with patch("src.storage.scene_sync._refresh_cat_cache"):
-                            with patch.dict("src.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
-                                with patch("src.storage.scene_sync._check_skills_exist", return_value=[]):
-                                    with patch("src.storage.scene_sync.db_lock"):
-                                        with patch("src.storage.scene_sync.db", mock_db):
-                                            result = await sync_official_scenes()
-                                            assert result is None or result is not None
+                with patch("src.storage.scene_sync._download_repo_zip", new=mock_download_zip):
+                    with patch("src.storage.scene_sync._refresh_cat_cache"):
+                        with patch.dict("src.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
+                            with patch("src.storage.scene_sync._check_skills_exist", return_value=[]):
+                                with patch("src.storage.scene_sync.db_lock"):
+                                    with patch("src.storage.scene_sync.db", mock_db):
+                                        result = await sync_official_scenes()
+                                        assert result is None or result is not None
         _run_async(_run())

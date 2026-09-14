@@ -22,7 +22,7 @@ _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.user import db as user_db
 from src.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
@@ -41,6 +41,7 @@ class ChatMessage(BaseModel):
     repo_key: str = ""
     conversation_id: str = ""
     image_data: str = ""  # JSON array of base64 strings, or single base64 string
+    video_data: str = ""  # base64 encoded video data
 
 
 class FeedbackBody(BaseModel):
@@ -91,8 +92,8 @@ def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")
     _mt = "image/jpeg" if fpath.lower().endswith((".jpg", ".jpeg")) else "image/png"
     return FileResponse(fpath, media_type=_mt, headers={"Cache-Control": "public, max-age=86400"})
 
-@router.get("/conversations")
-def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user)):
+@router.get("/conversations", operation_id="chat_conversations", summary="会话列表")
+def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user_or_api_key)):
     convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
 
@@ -166,8 +167,8 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
 
 # ====== Messages ======
 
-@router.get("/messages/{conv_id}")
-def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user)):
+@router.get("/messages/{conv_id}", operation_id="chat_messages", summary="会话消息列表")
+def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user_or_api_key)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
@@ -445,11 +446,39 @@ def _understand_image(image_data: str) -> str:
         return f"用户上传了图片，但分析出错: {e}"
 
 
+def _understand_video(video_data: str) -> str:
+    """Analyze video from base64 data and return description for prompt injection."""
+    if not video_data:
+        return ""
+    try:
+        import importlib.util as _ilu
+        import os as _os
+        _spec = _ilu.spec_from_file_location("image_understanding",
+            _os.path.join(_os.path.dirname(__file__), "..", "..", "agent", "image_understanding.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+
+        raw = video_data
+        if raw.startswith("data:"):
+            raw = raw.split(",", 1)[-1]
+        import base64 as _b64
+        desc = _mod.understand_video_from_bytes(_b64.b64decode(raw))
+        if desc:
+            log.info(f"Web Chat: video understood, {len(desc)} chars")
+            return desc
+        return "用户上传了一个视频，但未能提取有效信息。"
+    except Exception as e:
+        log.warning(f"Web Chat: video understanding failed: {e}")
+        return f"用户上传了视频，但分析出错: {e}"
+
+
 @router.post("/send")
 async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
-    user_token = acc.get("gitcode_api_token", "")
+    # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)
@@ -463,6 +492,39 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
         conv = get_conversation(conv_id)
 
     add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)))
+
+    # Issue #51: Chat Agent 指令检测（任务完成/取消任务/恢复任务）
+    _msg_stripped = body.message.strip()
+    if conv_id and conv and conv.get("conv_type") == "task" and conv.get("issue_number"):
+        _task_issue_num = conv["issue_number"]
+        _task_repo_key = conv.get("repo_key", "")
+        import logging as _log_mod
+        _chat_log = _log_mod.getLogger("devops-bot")
+        if _msg_stripped in ["任务完成", "完成任务", "/done", "确认完成"]:
+            try:
+                from src.api.routes.tasks import confirm_issue_done
+                confirm_issue_done(_task_repo_key, _task_issue_num, confirmed_by="chat_agent")
+                add_message(conv_id, "assistant", "✅ 任务已确认完成")
+                return {"conversation_id": conv_id, "reply": "✅ 任务已确认完成", "task_command": "done"}
+            except Exception as _e:
+                _chat_log.warning(f"Chat command confirm_done failed: {_e}")
+        elif _msg_stripped in ["取消任务", "/cancel"]:
+            try:
+                from src.api.routes.tasks import cancel_issue_task
+                cancel_issue_task(_task_repo_key, _task_issue_num)
+                add_message(conv_id, "assistant", "任务已取消")
+                return {"conversation_id": conv_id, "reply": "任务已取消", "task_command": "cancel"}
+            except Exception as _e:
+                _chat_log.warning(f"Chat command cancel failed: {_e}")
+        elif _msg_stripped in ["恢复任务", "/resume"]:
+            try:
+                from src.api.routes.tasks import resume_issue_task
+                resume_issue_task(_task_repo_key, _task_issue_num)
+                add_message(conv_id, "assistant", "任务已恢复")
+                return {"conversation_id": conv_id, "reply": "任务已恢复", "task_command": "resume"}
+            except Exception as _e:
+                _chat_log.warning(f"Chat command resume failed: {_e}")
+
     # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
     mark_task_processing_by_conversation(conv_id)
 
@@ -496,6 +558,10 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     if body.image_data:
         prompt += "\n\n" + _understand_image(body.image_data)
 
+    # 视频理解注入
+    if body.video_data:
+        prompt += "\n\n" + _understand_video(body.video_data)
+
     # 无任何引擎（未配置本机直连/远端）→ 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
     if not backend_name:
         _warn = "⚠️ 无可用引擎（未配置本机直连或远端引擎）"
@@ -507,7 +573,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
     if kind != EXEC_MODE_DIRECT:
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
-        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data)
+        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data, body.video_data)
 
     from src.runtime.executor import stream_chat_agent
     loop = asyncio.get_event_loop()
@@ -573,7 +639,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 async def send_message_stream(body: ChatMessage, user: dict = Depends(get_current_user)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
-    user_token = acc.get("gitcode_api_token", "")
+    # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)
@@ -622,6 +690,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     # 图片理解注入
     if body.image_data:
         prompt += "\n\n" + _understand_image(body.image_data)
+
+    # 视频理解注入
+    if body.video_data:
+        prompt += "\n\n" + _understand_video(body.video_data)
 
     # 无引擎 → 明确不可用，绝不隐式跑 opencode（engine-selection-design.md v2）
     if not backend_name:
@@ -704,7 +776,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     runtime_session_id=runtime_session_id,
                     event_type="chat",
                     account=user.get("username") or "", user_id=user["id"],
-                    repo_gitcode_token=gitcode_token,
+                    user_gitcode_token=gitcode_token,
                     env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
                 )
                 log.info(f"Chat stream enqueued: task={tid} user={user['id']} conv={conv_id}")
@@ -891,7 +963,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
     )
 
 
-def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token, image_data=""):
+def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token, image_data="", video_data=""):
     """M2 D5：chat 入队 + 轮询任务状态（打字机效果降级，见 implementation-plan §三）。
 
     返回 {task_id, reply(占位), conversation_id}；前端轮询 GET /api/runtime/tasks/{id}/status。
@@ -949,6 +1021,9 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     # 图片理解注入
     if image_data:
         prompt += "\n\n" + _understand_image(image_data)
+    # 视频理解注入
+    if video_data:
+        prompt += "\n\n" + _understand_video(video_data)
     tid = enqueue_task(
         agent_session_id=session.get("id") or "",
         runtime_id=runtime_id,
@@ -1047,14 +1122,18 @@ def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
     chat_skills = []
     from src.repo_key import to_repo_key
-    repo_key = to_repo_key(repo) if repo else ""
+    # 跨平台：查 DB 确定 repo_key 实际前缀
+    _rk_candidates = []
+    if repo:
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        _rk_candidates = [f"gitcode:{_base}", f"github:{_base}"]
     with db_lock:
         c = db.cursor()
         try:
-            if repo_key:
+            if _rk_candidates:
                 c.execute(
-                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?)) ORDER BY scope, skill_name",
-                    (str(user["id"]), repo_key)
+                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id IN ({}))) ORDER BY scope, skill_name".format(",".join("?" * len(_rk_candidates))),
+                    [str(user["id"])] + _rk_candidates
                 )
             else:
                 c.execute(
@@ -1261,7 +1340,9 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
 
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
-    user_token = acc.get("gitcode_api_token", "")
+    # Issue #52: 用带预刷新的 token 获取
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)
@@ -1310,6 +1391,10 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
     if body.image_data:
         prompt += "\n\n" + _understand_image(body.image_data)
 
+    # 视频理解不在 submit 同步执行（耗时 30-60s 会导致前端 timeout），
+    # 改为在 agent_fn 内部执行，通过 SSE 推送"正在分析视频"步骤
+    _video_data = body.video_data
+
     # 无引擎 → 直接返回错误
     if not backend_name:
         _reply = "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎"
@@ -1357,9 +1442,20 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
             _final_text = ""
             _new_sid = ""
             _last_error = ""
+            # 视频理解在 agent_fn 内部异步执行（避免 submit 同步阻塞导致前端 timeout）
+            if _video_data:
+                yield ("step_start", "正在分析视频，可能需要 30-60 秒...")
+                _vdesc = _understand_video(_video_data)
+                if _vdesc:
+                    prompt_with_video = prompt + "\n\n" + _vdesc
+                else:
+                    prompt_with_video = prompt
+                yield ("step_finish", "视频分析完成")
+            else:
+                prompt_with_video = prompt
             try:
                 for evt_type, data in stream_chat_agent(
-                    prompt=prompt, cwd=cwd, session_id=runtime_session_id,
+                    prompt=prompt_with_video, cwd=cwd, session_id=runtime_session_id,
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token,
                     agent_name="Chat Agent",
@@ -1607,7 +1703,9 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     import time as _t, uuid as _uuid
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
-    user_token = acc.get("gitcode_api_token", "")
+    # Issue #52: 用带预刷新的 token 获取
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)
@@ -1647,6 +1745,10 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     # 图片理解注入
     if body.image_data:
         prompt += "\n\n" + _understand_image(body.image_data)
+
+    # 视频理解注入
+    if body.video_data:
+        prompt += "\n\n" + _understand_video(body.video_data)
 
     rid = cfg.get("runtime_id") or 0
     if not rid:

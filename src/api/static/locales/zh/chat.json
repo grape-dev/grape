@@ -72,6 +72,8 @@
   "placeholder": "问我任何问题...",
   "send": "发送",
   "upload_image": "上传图片",
+  "upload_video": "上传视频",
+  "video_tooltip": "支持 MP4/MOV/WebM 等常见格式，文件不超过 50MB；视频时长超过 2 分钟时，将截取前 2 分钟的关键帧进行分析",
   "remove_image": "移除图片",
   "image_too_large": "图片大小不能超过5MB",
   "image_max_reached": "最多只能上传{{max}}张图片",

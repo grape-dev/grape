@@ -20,6 +20,74 @@ EXEC_MODE_REMOTE = "queue_remote"
 _DEFAULT_MODE = EXEC_MODE_AUTO
 
 
+def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = "", task_user_id: int = 0) -> bool:
+    """检查 pool_engine_ids 中的引擎是否有任何一个能真正认领该 tag 的任务。
+
+    检查维度：在线 + healthy + probe_status + 有 tag 能力 + scope 匹配 + 并发槽。
+    返回 True = 池里有能干的引擎，不应清空 pool_engine_ids。
+    返回 False = 池里全不可达，应清空 pool_engine_ids 放行。
+    """
+    from src.repo_key import from_repo_key
+    _repo_norm = (from_repo_key(repo_key) or "").strip()
+    for eid in engine_ids:
+        try:
+            with db_lock:
+                c = db.cursor()
+                # 引擎在线 + healthy + probe 正常？
+                c.execute("SELECT status, healthy, probe_status FROM agent_runtimes WHERE id=?", (eid,))
+                r = c.fetchone()
+                if not r or (r[0] or "") != "online":
+                    continue
+                _healthy = r[1] if r[1] is not None else 0
+                _probe = r[2] or ""
+                if _healthy != 1:
+                    continue
+                if _probe not in ("ok", "pending", ""):
+                    continue
+                # 有 tag 能力？
+                c.execute(
+                    "SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
+                    "AND (tag=? OR tag='all') LIMIT 1", (eid, tag))
+                if not c.fetchone():
+                    continue
+                # scope 匹配？
+                c.execute(
+                    "SELECT rc.scope, rc.owner_id, rc.owner_name FROM agent_runtimes r "
+                    "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id WHERE r.id=?", (eid,))
+                sr = c.fetchone()
+                if sr:
+                    _scope = sr[0] or "global"
+                    _owner = sr[1] or ""
+                    _owner_name = sr[2] or ""
+                    if _scope == "repo" and _owner:
+                        _owner_norm = (from_repo_key(_owner) or "").strip()
+                        if _repo_norm and _owner_norm != _repo_norm:
+                            continue  # repo scope 但仓库不匹配
+                    elif _scope == "user" and task_user_id > 0 and _owner_name:
+                        # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
+                        try:
+                            c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1", (_owner_name,))
+                            _ur = c.fetchone()
+                            _engine_uid = _ur[0] if _ur else 0
+                            if _engine_uid != task_user_id:
+                                continue  # user scope 但用户不匹配
+                        except Exception:
+                            pass
+                # 并发槽可用？
+                c.execute("SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?", (eid,))
+                _br = c.fetchone()
+                if _br:
+                    _busy = _br[0] or 0
+                    _max = _br[1] or 1
+                    if _busy >= _max:
+                        continue  # 已满载
+                # 全部通过：有能干的引擎
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def get_execution_mode() -> str:
     """返回当前执行模式：env 优先，其次 meta 表。"""
     _m = os.environ.get("DEVOPS_EXECUTION_MODE", "")
@@ -128,6 +196,7 @@ _TASK_COLUMNS = (
     "id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, "
     "skill_id, "
     "prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, "
+    "user_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
     "status, exit_code, result_text, errors, stderr, "
@@ -222,7 +291,7 @@ def _collect_server_env(user_id, account):
     return env
 
 
-_PROJECT_INFO_FILES = ("project-graph.md", "project-capabilities.md")
+_PROJECT_INFO_FILES = ("project-graph.md", "project-capabilities.md", ".metadata.json")
 
 
 def load_project_info(repo_key: str) -> tuple[dict, dict]:
@@ -308,9 +377,129 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
         return {}, {}
 
 
+def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
+    """Issue #95：和 load_project_info 同逻辑，但 files 值改为 {content, obs_key}。
+
+    供 collect_knowledge_files → generate_file_urls 用，不暴露给前端。
+    load_project_info 本身不变（repos.py / prompt_builder.py 不受影响）。
+    """
+    if not repo_key:
+        return {}, {}
+    try:
+        from src.config import WORKSPACE_DIR
+        from src.repo_key import split_owner_repo
+        owner, rname = split_owner_repo(repo_key)
+
+        try:
+            from src.storage import get_storage
+            _storage = get_storage()
+        except Exception:
+            _storage = None
+        if _storage is not None:
+            files = {}
+            from src.session_manager import db, db_lock
+            with db_lock:
+                rows = db.cursor().execute(
+                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+                    "ORDER BY id DESC",
+                    (repo_key,)
+                ).fetchall()
+            for fp, ok in rows:
+                if fp and ok:
+                    fname = os.path.basename(fp)
+                    if fname in _PROJECT_INFO_FILES or fname == ".metadata.json":
+                        try:
+                            data = _storage.read_bytes(ok)
+                            if data:
+                                files[fname] = {"content": data.decode("utf-8", errors="replace"), "obs_key": ok}
+                        except Exception:
+                            continue
+            if files:
+                meta = {}
+                if ".metadata.json" in files:
+                    try:
+                        meta = json.loads(files[".metadata.json"]["content"])
+                    except Exception:
+                        meta = {}
+                files[".metadata.json"] = {"content": json.dumps(meta, ensure_ascii=False), "obs_key": ""}
+                return files, meta
+
+        # 本地模式
+        pi = os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
+        if not os.path.isdir(pi):
+            return {}, {}
+        files = {}
+        for rel in _PROJECT_INFO_FILES:
+            p = os.path.join(pi, rel)
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        files[rel] = {"content": f.read(), "obs_key": ""}
+                except Exception:
+                    pass
+        meta = {}
+        mp = os.path.join(pi, ".metadata.json")
+        if os.path.isfile(mp):
+            try:
+                with open(mp, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                meta = {}
+        if files:
+            files[".metadata.json"] = {"content": json.dumps(meta, ensure_ascii=False), "obs_key": ""}
+        return files, meta
+    except Exception as e:
+        log.warning(f"load_project_info_with_obs failed for {repo_key}: {e}")
+        return {}, {}
+
+
+def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str = "",
+                            scene_id: str = "") -> dict:
+    """Issue #95：统一过滤知识文件，返回三批 {rel: {content, obs_key}}。
+
+    三源不交叉：
+    - load_project_info_with_obs → baseline (source='system')
+    - member_files_pi → member (source='manual')
+    - agent_knowledge_files → agent (source='agent')
+
+    enqueue_task 和 direct 物化都调此函数，过滤逻辑只写一遍。
+    返回 {"project_info": {rel: {content, obs_key}}, "meta": dict, "knowledge": {rel: {content, obs_key}}}
+    """
+    from src.api.session_store import get_issue_scene
+    from src.api.knowledge import member_files_pi, agent_knowledge_files
+
+    _scene_id = scene_id
+    if not _scene_id and issue_id:
+        try:
+            _scene_id, _ = get_issue_scene(repo_key, issue_id)
+        except Exception:
+            _scene_id = ""
+    _inum = _issue_num(issue_id)
+
+    # 1. baseline
+    _pif, _pim = load_project_info_with_obs(repo_key)
+
+    # 2. member（并入 baseline）
+    try:
+        for rel, meta in member_files_pi(repo_key, agent_type, _inum, _scene_id or "").items():
+            _pif.setdefault(rel, meta)
+    except Exception:
+        pass
+
+    # 3. agent 知识（独立）
+    _know = {}
+    try:
+        _know = agent_knowledge_files(repo_key, agent_type=agent_type, issue_num=_inum, scene_id=_scene_id or "")
+    except Exception:
+        pass
+
+    return {"project_info": _pif, "meta": _pim, "knowledge": _know}
+
+
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
-                 repo_gitcode_token="", env_extra=None,
+                 repo_gitcode_token="", user_gitcode_token="", env_extra=None,
                  event_seq=None, issue_id="", repo_key="", agent_type="",
                  skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
@@ -346,12 +535,12 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                     _okey = _sk.get("file_path") or ""
                 else:
                     # ② skill_id 失效（skill 被删除/停用）→ 回退按名字解析
-                    _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
+                    _sid = resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or resolve_skill_id(skill)
                     _path = get_skill_path(_sid) if _sid else (skill_path or "")
                     _okey = get_skill_object_key(_sid) if _sid else ""
             else:
                 # ③ 无 skill_id → 走老逻辑（向后兼容）
-                _sid = resolve_skill_id(skill, owner_id=account) or resolve_skill_id(skill)
+                _sid = resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or resolve_skill_id(skill)
                 _path = get_skill_path(_sid) if _sid else (skill_path or "")
                 _okey = get_skill_object_key(_sid) if _sid else ""
             # 本地目录存在 → 打包（official 技能 + 少数有磁盘目录的 user/repo 技能）
@@ -365,49 +554,66 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                     skill_files = _skill_files_from_zip(_zip, skill)
         except Exception as e:
             log.warning(f"enqueue: skill pack failed for {skill}: {e}")
-    # project-info 随任务（服务端权威，多 VM 共享，见 multi-issue-isolation-design.md §2.4）
-    if project_info_files is None:
-        _pif, _pim = load_project_info(repo_key)
-        # 项目级成员上传文档（全 Agent 共享，key 相对 project-info 目录，物化到 .project-info/member/，
-        # 见 knowledge-board-design.md §6.7 方案 A）
+    # Issue #95：统一调 collect_knowledge_files 过滤知识文件（三源不交叉，过滤只做一次）
+    _collected = None
+    if project_info_files is None or knowledge_files is None:
         try:
-            from src.api.knowledge import member_files_pi
-            for rel, content in member_files_pi(repo_key).items():
-                _pif.setdefault(rel, content)
-        except Exception:
-            pass
-        # Agent 专属成员上传文档定向并入（仅当前任务 agent_type，key 相对 project-info 目录，
-        # 物化到 .project-info/agent/{agent_type}/，见 knowledge-board-design.md §六）
-        try:
-            from src.api.knowledge import agent_files
-            for rel, content in agent_files(repo_key, agent_type).items():
-                _pif.setdefault(rel, content)
-        except Exception:
-            pass
-        project_info_files = _pif
-        project_info_meta = _pim
-    # 共享知识快照（仅任务作用域：issue/issue_agent/project 三级，随任务交付远端 worker）
-    if knowledge_files is None:
-        try:
-            from src.api.knowledge import knowledge_files as _know_files
-            knowledge_files = _know_files(repo_key, agent_type=agent_type, issue_num=_issue_num(issue_id))
+            _collected = collect_knowledge_files(repo_key, agent_type=agent_type, issue_id=issue_id)
+            if project_info_files is None:
+                project_info_files = {rel: v["content"] for rel, v in _collected["project_info"].items()}
+                project_info_meta = _collected["meta"]
+            if knowledge_files is None:
+                knowledge_files = {rel: v["content"] for rel, v in _collected["knowledge"].items()}
         except Exception as e:
-            log.warning(f"enqueue: knowledge pack failed for {repo_key}: {e}")
-            knowledge_files = {}
-    # 生成 file_urls（url + storage_key，见 knowledge-obs-design §八：字段分开存 + 三级降级）
-    # storage 为 None（本地模式）时 file_urls 为空 dict，worker 用 content 兜底
+            log.warning(f"enqueue: collect_knowledge_files failed for {repo_key}: {e}")
+            if project_info_files is None:
+                project_info_files = {}
+                project_info_meta = {}
+            if knowledge_files is None:
+                knowledge_files = {}
+            _collected = {"project_info": {}, "knowledge": {}}
+    # 生成 file_urls（基于已过滤结果，不查 DB；storage 为 None 时 file_urls 为空 dict，worker 用 content 兜底）
     try:
         from src.storage import get_storage
         _storage = get_storage()
     except Exception:
         _storage = None
-    _inum = _issue_num(issue_id)
-    _file_urls = _storage.generate_file_urls(repo_key, agent_type, _inum) if _storage else {}
-    project_info_file_urls = _file_urls
-    knowledge_file_urls = _file_urls
+    if _storage:
+        # 复用 _collected（只在上面已调用过时复用；调用方传了内容时重新调一次取 obs_key）
+        if _collected is None:
+            try:
+                _collected = collect_knowledge_files(repo_key, agent_type=agent_type, issue_id=issue_id)
+            except Exception:
+                _collected = {"project_info": {}, "knowledge": {}}
+        _all_filtered = {}
+        _all_filtered.update(_collected.get("project_info") or {})
+        _all_filtered.update(_collected.get("knowledge") or {})
+        _file_urls = _storage.generate_file_urls(_all_filtered) if _all_filtered else {}
+    else:
+        _file_urls = {}
+    # 分离 URL：project_info_file_urls = baseline + member，knowledge_file_urls = agent
+    project_info_file_urls = {k: v for k, v in _file_urls.items()
+                              if k.startswith("member/") or k in _PROJECT_INFO_FILES}
+    knowledge_file_urls = {k: v for k, v in _file_urls.items()
+                           if not k.startswith("member/") and k not in _PROJECT_INFO_FILES}
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
+    # Issue-45 M2：签发会话级临时 token 注入 GRAPE_SESSION_TOKEN（存在即有效，删除即失效）。
+    # session_key=task_id（精确失效、不误伤并发同类会话）；chat 任务绑定 USER_ID 用户身份，
+    # devops 事件任务无用户概念（user_id=0，仓库身份）。
+    if repo_key and agent_type:
+        try:
+            from src.api.auth_token import issue_session_token
+            _tk_uid = user_id or 0
+            _usr = env.get("USER_ID") or ""
+            if str(_usr).isdigit():
+                _tk_uid = int(str(_usr))
+            env["GRAPE_SESSION_TOKEN"] = issue_session_token(
+                session_key=task_id, repo_key=repo_key,
+                agent_type=agent_type, user_id=_tk_uid)
+        except Exception as e:
+            log.warning(f"enqueue: session token issue failed for {task_id}: {e}")
     _server_url = server_url or ""
     if not _server_url:
         try:
@@ -424,6 +630,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
              agent_type or "", skill or "", skill_id or 0,
              prompt, cwd or "", runtime_session_id or "",
              event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
+             user_gitcode_token or "",
              json.dumps(env), json.dumps(skill_files), _server_url,
              issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
              json.dumps(knowledge_files),
@@ -697,17 +904,24 @@ def claim(runtime_id) -> dict | None:
                     try:
                         _allowed = _json.loads(_pe_row[0])
                         if _allowed and runtime_id not in _allowed:
-                            # 检查 pool_engine_ids 中的 id 是否全部 offline
-                            # 如果全部 offline，清空 pool_engine_ids 让 task 可被任意引擎认领
-                            _all_offline = True
-                            for _eid in _allowed:
-                                c.execute("SELECT status FROM agent_runtimes WHERE id=?", (_eid,))
-                                _e_row = c.fetchone()
-                                if _e_row and (_e_row[0] or "") == "online":
-                                    _all_offline = False
-                                    break
-                            if _all_offline:
-                                log.info(f"pool_engine_ids {_allowed} all offline, clearing for task {task_id}")
+                            # 兜底：检查 pool_engine_ids 中的引擎是否全部不可达
+                            # 不可达 = 离线 / 无对应 tag 能力 / scope 不匹配
+                            # 全部不可达时清空 pool_engine_ids，让 task 可被任意引擎认领
+                            _task_tag = ""
+                            _task_repo = ""
+                            _task_uid = 0
+                            try:
+                                c.execute("SELECT pool_tag, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
+                                _trow = c.fetchone()
+                                if _trow:
+                                    _task_tag = _trow[0] or ""
+                                    _task_repo = _trow[1] or ""
+                                    _task_uid = _trow[2] or 0
+                            except Exception:
+                                pass
+                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo, task_user_id=_task_uid)
+                            if not _has_capable:
+                                log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
                                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
                                 db.commit()
                                 break  # 清空后当前 task 可认领
@@ -861,16 +1075,15 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             owner_id = row[2] or ""
             owner_name = row[3] or ""
 
-            # 2. 并发槽检查
+            # 2. 引擎级并发槽检查（方案一：标签只做路由，并发纯引擎级）
+            # 废弃 engine_capabilities.max_concurrent，统一走 agent_runtimes.max_concurrent
             c.execute(
-                "SELECT ec.max_concurrent, "
-                "(SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')) "
-                "FROM engine_capabilities ec WHERE ec.runtime_id=? AND ec.enabled=1 AND (ec.tag=? OR ec.tag='all')",
-                (runtime_id, runtime_id, tag)
+                "SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?",
+                (runtime_id,)
             )
-            cap_row = c.fetchone()
-            if cap_row and cap_row[1] >= cap_row[0]:
-                return None  # 已满载
+            rt_row = c.fetchone()
+            if rt_row and rt_row[0] >= rt_row[1]:
+                return None  # 引擎已满载
 
             # 3. 构建任务查询（加 scope 过滤）
             # tag="all" → 匹配任意 pool_tag（广播）；其他 tag → 精确匹配 pool_tag
@@ -937,17 +1150,24 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     try:
                         _allowed = _json.loads(_pe_row[0])
                         if _allowed and runtime_id not in _allowed:
-                            # 检查 pool_engine_ids 中的 id 是否全部 offline
-                            # 如果全部 offline，清空 pool_engine_ids 让 task 可被任意引擎认领
-                            _all_offline = True
-                            for _eid in _allowed:
-                                c.execute("SELECT status FROM agent_runtimes WHERE id=?", (_eid,))
-                                _e_row = c.fetchone()
-                                if _e_row and (_e_row[0] or "") == "online":
-                                    _all_offline = False
-                                    break
-                            if _all_offline:
-                                log.info(f"pool_engine_ids {_allowed} all offline, clearing for task {task_id}")
+                            # 兜底：检查 pool_engine_ids 中的引擎是否全部不可达
+                            # 不可达 = 离线 / 无对应 tag 能力 / scope 不匹配
+                            # 全部不可达时清空 pool_engine_ids，让 task 可被任意引擎认领
+                            _task_tag = ""
+                            _task_repo = ""
+                            _task_uid = 0
+                            try:
+                                c.execute("SELECT pool_tag, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
+                                _trow = c.fetchone()
+                                if _trow:
+                                    _task_tag = _trow[0] or ""
+                                    _task_repo = _trow[1] or ""
+                                    _task_uid = _trow[2] or 0
+                            except Exception:
+                                pass
+                            _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo, task_user_id=_task_uid)
+                            if not _has_capable:
+                                log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
                                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
                                 db.commit()
                                 break  # 清空后当前 task 可认领
@@ -1065,6 +1285,19 @@ def update_task_status(task_id, status, **kw):
                 "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
                 (row[1],))
         db.commit()
+    # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
+    if status in ("completed", "failed", "cancelled"):
+        try:
+            from src.api.auth_token import revoke_session_token
+            revoke_session_token(task_id)
+        except Exception as e:
+            log.warning(f"update_task_status: revoke session token failed for {task_id}: {e}")
+        # Issue #134：任务终态后刷新健康度缓存（增强层，不改派发/广播语义）
+        try:
+            from src.runtime.health_scorer import record_task_completion
+            record_task_completion(row[1], status)
+        except Exception:
+            pass
 
 
 def cancel_task(task_id):
@@ -1299,40 +1532,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                 log.info(f"Task {task_id}: business failure detected "
                          f"(agent={task.get('agent_type')}), overriding exit_code to 1")
 
-            # 完成度校验：exit_code=0 但无结构化产出 → LLM 提前 end_turn
-            # coding/qa/sre/issue agent 正常完成应有 actions/conclusion/issue_summary JSON 块
-            # 没有则说明 LLM 提前 end_turn，未执行完任务
-            _agent_type = task.get("agent_type") or ""
-            if exit_code == 0 and not output and _agent_type in ("coding", "qa", "sre", "issue"):
-                _attempts = (task.get("attempts") or 0)
-                if _attempts < 49:
-                    log.warning(
-                        f"Task {task_id}: premature end_turn (no structured output, "
-                        f"agent={_agent_type}, attempt={_attempts+1}/50), requeueing")
-                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 结束但无结构化产出，疑似 LLM 提前 end_turn，自动重试"
-                    update_task_status(task_id, "queued", started_at=None,
-                                       result_text=result_text,
-                                       usage_json=json.dumps(usage or {}))
-                    # 释放槽位 + attempts+1
-                    with db_lock:
-                        c2 = db.cursor()
-                        c2.execute("UPDATE agent_tasks SET attempts=attempts+1, "
-                                   "runtime_id=0, started_at=NULL, status='queued' "
-                                   "WHERE id=?", (task_id,))
-                        if task.get("runtime_id"):
-                            c2.execute(
-                                "UPDATE agent_runtimes SET busy_slots = CASE "
-                                "WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END "
-                                "WHERE id=?", (task.get("runtime_id"),))
-                        db.commit()
-                    log.info(f"Task {task_id}: requeued for retry (attempt={_attempts+1})")
-                    return
-                else:
-                    log.warning(
-                        f"Task {task_id}: premature end_turn, max retries exceeded "
-                        f"(attempt={_attempts}/50), marking failed")
-                    exit_code = 1
-                    result_text = (result_text or "") + "\n[PREMATURE_END_TURN] agent 多次结束但无结构化产出，已达最大重试次数(50)"
+            # exit_code=0 但无结构化产出 → 接受 hermes 的 end_turn 结果，直接 completed
+            # （旧逻辑会 requeue 最多49次，导致重复评论污染；现改为不重试）
 
             status = "completed" if exit_code == 0 else "failed"
             duration = None
@@ -1353,6 +1554,29 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                                   duration=duration,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=_conclusion or (result_text or "")[:200])
+            # Issue #51: 最后节点完成后 → 设 stage=pending_review 等待开发者审核
+            # 统一处理：检查 agent 是否是 pipeline 最后节点（非 done 的 next=done）
+            if status == "completed" and task.get("issue_id"):
+                try:
+                    _ag = task.get("agent_type") or ""
+                    _rk = task.get("repo_key") or ""
+                    _iid = task.get("issue_id") or ""
+                    if _ag and _rk and _iid:
+                        from src.api.session_store import get_issue_stage, get_issue_scene, set_issue_stage
+                        from src.api.pipeline_config import get_pipeline_config
+                        _st = get_issue_stage(_rk, _iid)
+                        _cur_stage = (_st or {}).get("stage", "") if _st else ""
+                        if _cur_stage == _ag:  # 当前 stage 就是完成的 agent → 检查是否最后节点
+                            _scene_id = get_issue_scene(_rk, _iid) or "default"
+                            _pipe_cfg = get_pipeline_config(_scene_id, repo_key=_rk)
+                            _nodes = (_pipe_cfg or {}).get("nodes", [])
+                            for _n in _nodes:
+                                if _n.get("id") == _ag and _n.get("next") == "done":
+                                    set_issue_stage(_rk, _iid, "pending_review", _ag)
+                                    log.info(f"Last node {_ag} completed → pending_review issue={_iid}")
+                                    break
+                except Exception as _e:
+                    log.warning(f"complete_task: pending_review check failed: {_e}")
         except Exception as e:
             log.warning(f"complete_task finalize failed: {e}")
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
@@ -1432,6 +1656,12 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                     _sync_issue_comments_to_conversation(_repo_key, _issue_num, _token, _agent_type, _repo)
                 except Exception as _se:
                     log.warning(f"complete_task sync issue comments failed: {_se}")
+            # 5. VOD 智能推荐完成 → redispatch（remote worker 模式下 _execute_agent 不执行，此处补触发）
+            if _agent_type == "vod" and _result_text and _issue_id:
+                try:
+                    _handle_vod_recommend_complete(_repo_key, _issue_id, _result_text, task_id, task, _token)
+                except Exception as _se:
+                    log.warning(f"complete_task vod recommend handler failed: {_se}")
         except Exception as _pe:
             log.warning(f"complete_task post-completion hooks failed: {_pe}")
     # 可观察性埋点：任务到达终态
@@ -1463,6 +1693,89 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                           task_id=task_id, payload={"exit_code": exit_code}))
     except Exception:
         pass
+
+
+def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: str,
+                                   task_id: str, task: dict, repo_gitcode_token: str = ""):
+    """VOD 智能推荐完成处理：解析 scene_id → 持久化 → 重派 VOD。
+
+    remote worker 模式下 _execute_agent 不执行，此函数在 complete_task 中补触发，
+    与 _execute_agent_inner 中的逻辑等价（event_pipeline.py L2261-2310）。
+    """
+    import re as _re
+    # 查 task prompt 判断是否为智能推荐任务
+    _task_prompt = ""
+    try:
+        from src.session_manager import db as _rdb, db_lock as _rdb_lock
+        with _rdb_lock:
+            c = _rdb.cursor()
+            c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
+            _trow = c.fetchone()
+            _task_prompt = _trow[0] if _trow else ""
+    except Exception:
+        pass
+    if not (_task_prompt and "智能推荐器" in _task_prompt and "{{SKILL_DIR}}" not in _task_prompt):
+        return  # 不是智能推荐任务，跳过
+
+    _rec_scene = ""
+    try:
+        from src.api.event_store import parse_agent_output_json
+        _scene_out = parse_agent_output_json(result_text) or {}
+        _rec_scene = _scene_out.get("scene_id", "") or ""
+    except Exception:
+        pass
+    if not _rec_scene:
+        _m_rec = _re.search(r'"scene_id"\s*:\s*"([^"]*)"', result_text)
+        _rec_scene = _m_rec.group(1) if _m_rec else ""
+
+    if not _rec_scene:
+        log.info(f"VOD recommend: no scene_id for {issue_id}, pipeline terminated")
+        return
+
+    from src.api.session_store import set_issue_scene
+    from src.runtime.engine_select import _repo_user_id
+    _vod_issue_creator = ""
+    try:
+        from src.session_manager import db as _evdb, db_lock as _evdb_lock
+        with _evdb_lock:
+            _ec = _evdb.cursor()
+            _ec.execute(
+                "SELECT actor FROM events WHERE repo_key=? AND issue_id=? AND actor!='' "
+                "ORDER BY seq ASC LIMIT 1",
+                (repo_key, issue_id))
+            _erow = _ec.fetchone()
+            if _erow:
+                _vod_issue_creator = _erow[0] or ""
+    except Exception:
+        pass
+    _vod_uid = _repo_user_id(repo_key, issue_creator=_vod_issue_creator)
+    set_issue_scene(repo_key, issue_id, _rec_scene, scene_user_id=_vod_uid)
+    log.info(f"VOD recommend: scene_id={_rec_scene} set for {issue_id}")
+
+    from src.api.pipeline_config import get_first_node, get_pipeline_config
+    _vod_node = get_first_node(_rec_scene)
+    if not _vod_node:
+        _pcfg = get_pipeline_config(_rec_scene, repo_key=repo_key)
+        _nodes = (_pcfg or {}).get("nodes", [])
+        if _nodes:
+            _vod_node = _nodes[0]
+    if not _vod_node:
+        log.warning(f"VOD recommend: no vod node for scene={_rec_scene}, skip redispatch")
+        return
+
+    _vod_skill = _vod_node.get("skill", "vod")
+    log.info(f"VOD recommend: redispatch VOD with skill={_vod_skill} for {issue_id}")
+
+    # 构建 evt 给 _redispatch_vod_after_recommend（prompt_builder 需要 payload 字段）
+    _issue_num = str(issue_id).lstrip("#")
+    _evt = {
+        "repository": task.get("account") or "",
+        "issue_id": issue_id,
+        "payload": {"issue_number": _issue_num, "issue": {"number": int(_issue_num) if _issue_num.isdigit() else _issue_num}},
+    }
+    _runtime_id = task.get("runtime_id") or 0
+    from src.api.event_pipeline import _redispatch_vod_after_recommend
+    _redispatch_vod_after_recommend(repo_key, issue_id, _vod_skill, _evt, _runtime_id, repo_gitcode_token)
 
 
 def fail_task(task_id, error, exit_code=-1):

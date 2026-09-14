@@ -54,9 +54,15 @@ class TestStageRoutingHelper:
         assert _resolve_issue_stage_agent(RK, "pull_request_opened", PR_PAYLOAD, "coding") == "issue"
 
     def test_pr_stage_coding_to_coding(self):
-        # L7：stage=coding 时 PR → coding
+        # L7：stage=coding 时 PR opened → coding（首次提交路由到 coding）
         ss.set_issue_stage(RK, "#5", "coding", "coding")
-        assert _resolve_issue_stage_agent(RK, "pull_request_updated", PR_PAYLOAD, "issue") == "coding"
+        assert _resolve_issue_stage_agent(RK, "pull_request_opened", PR_PAYLOAD, "issue") == "coding"
+
+    def test_pr_updated_stage_coding_to_qa(self):
+        # Issue #46 修复：stage=coding 时 PR updated → qa（QA↔coding 回流闭环）
+        # weekly-02 表驱动：pull_request_updated + coding 恒路由到 qa 复审
+        ss.set_issue_stage(RK, "#5", "coding", "coding")
+        assert _resolve_issue_stage_agent(RK, "pull_request_updated", PR_PAYLOAD, "issue") == "qa"
 
     def test_pr_stage_qa_to_qa(self):
         # L5：stage=qa 时 PR → qa（未合入持续接单）
@@ -71,6 +77,21 @@ class TestStageRoutingHelper:
         ss.set_issue_stage(RK, "#5", "done", "done")
         assert _resolve_issue_stage_agent(RK, "issue_comment", ISSUE_PAYLOAD, "issue") == ""
         assert _resolve_issue_stage_agent(RK, "pull_request_updated", PR_PAYLOAD, "qa") == ""
+
+    # Issue #51: pending_review 阶段测试
+    def test_pending_review_no_dispatch(self):
+        # TC-29: pending_review 阶段所有事件不分发
+        ss.set_issue_stage(RK, "#5", "pending_review", "sre")
+        assert _resolve_issue_stage_agent(RK, "issue_comment", ISSUE_PAYLOAD, "issue") == ""
+        assert _resolve_issue_stage_agent(RK, "pull_request_updated", PR_PAYLOAD, "qa") == ""
+        assert _resolve_issue_stage_agent(RK, "issue_updated", ISSUE_PAYLOAD, "issue") == ""
+
+    def test_pr_stage_pending_review_empty(self):
+        # TC-31: PR updated + pending_review → 空
+        ss.set_issue_stage(RK, "#5", "pending_review", "sre")
+        assert _resolve_issue_stage_agent(RK, "pull_request_updated", PR_PAYLOAD, "issue") == ""
+        assert _resolve_issue_stage_agent(RK, "pull_request_opened", PR_PAYLOAD, "issue") == ""
+        assert _resolve_issue_stage_agent(RK, "pull_request_merged", PR_PAYLOAD, "issue") == ""
 
 
 class TestRunPipelineStage:

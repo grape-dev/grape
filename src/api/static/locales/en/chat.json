@@ -72,6 +72,8 @@
   "placeholder": "Ask me anything...",
   "send": "Send",
   "upload_image": "Upload Image",
+  "upload_video": "Upload Video",
+  "video_tooltip": "Supports MP4/MOV/WebM etc. Max 50MB. Videos longer than 2 minutes will be analyzed using keyframes from the first 2 minutes only",
   "remove_image": "Remove Image",
   "image_too_large": "Image size must not exceed 5MB",
   "image_max_reached": "Maximum {{max}} images allowed",

@@ -17,7 +17,67 @@ let _allSkills = [];         // 全部技能缓存
 let _featuredSkills = [];    // 精选技能（独立加载，不受搜索影响）
 let _agentGroups = {};       // {agent_type: [skills]}
 let _agentList = [];         // ['vod','issue','coding','qa','sre','chat']
-let _activeAgentIdx = -1;    // -1=全部, 0+=第N个agent
+let _activeAgentIdx = -1;    // -1=无选中(显示全部), 0+=第N个agent
+let _activeTagFilter = 'all';  // 当前标签筛选 id
+
+// 技能标签分类定义（二级筛选）
+const _SKILL_TAG_FILTERS = [
+  {id: 'all',              label: '全部'},
+  {id: 'ai-coding',        label: 'AI辅助编码与评审'},
+  {id: 'env-scaffold',     label: '环境与脚手架'},
+  {id: 'auto-test',        label: '自动化测试'},
+  {id: 'quality-security', label: '代码质量与安全'},
+  {id: 'app-publish',      label: '应用发布'},
+  {id: 'feedback-loop',    label: '反馈闭环'},
+  {id: 'ci',               label: '持续集成CI'},
+  {id: 'observability',    label: '可观测性'},
+  {id: 'log-diagnosis',    label: '日志与诊断'},
+  {id: 'im',               label: 'IM'},
+];
+
+// 技能名称 → 标签映射
+const _SKILL_TAG_MAP = {
+  'implementation':          ['ai-coding'],
+  'skill-creator':           ['ai-coding'],
+  'rest-api-skill-creator':  ['ai-coding'],
+  'iac-coding':              ['ai-coding', 'env-scaffold'],
+  'wan-video-generation':    ['ai-coding'],
+  'qwen-image-generation':   ['ai-coding'],
+  'ai-blog-generation':      ['ai-coding'],
+  'skill-issue':             ['ai-coding'],
+  'repo-onboarding':         ['env-scaffold'],
+  'iac-issue':               ['env-scaffold'],
+  'iac-vod':                 ['env-scaffold'],
+  'iac-sre':                 ['env-scaffold'],
+  'runtime-install':         ['env-scaffold'],
+  'os-disk-list':            ['env-scaffold'],
+  'skill-tester':            ['auto-test'],
+  'rest-api-skill-tester':   ['auto-test'],
+  'qa':                      ['auto-test', 'quality-security'],
+  'iac-qa':                  ['auto-test', 'env-scaffold'],
+  'pr':                      ['quality-security'],
+  'skill-pr':                ['quality-security'],
+  'impact-analysis':         ['quality-security'],
+  'cloud-deploy':            ['app-publish'],
+  'skill-publish':           ['app-publish'],
+  'blog-publish':            ['app-publish'],
+  'blog-manager':            ['app-publish'],
+  'huawei-cloud':            ['app-publish'],
+  'vod':                     ['feedback-loop'],
+  'blog-vod':                ['feedback-loop'],
+  'event-dialogue':          ['feedback-loop'],
+  'blog-issue':              ['feedback-loop'],
+  'build-debug':             ['ci'],
+  'changelog-gen':           ['ci'],
+  'incident-triage':         ['observability', 'log-diagnosis'],
+  'deploy-guard':            ['observability'],
+  'im-notify':               ['im'],
+  'chat':                    ['im'],
+};
+
+function _getSkillTags(skillName) {
+  return _SKILL_TAG_MAP[skillName] || [];
+}
 
 // _AGENT_META 定义在 scene-market.js 中，这里直接复用
 
@@ -31,7 +91,7 @@ function _scopeName(scope) {
 }
 
 function _skillsContainer() {
-  return document.getElementById('marketTabContent') || document.getElementById('pageContent');
+  return document.getElementById('skillsTabContent') || document.getElementById('pageContent');
 }
 
 // 技能详情返回：根据来源决定返回目标（不 push history，避免历史栈膨胀）
@@ -42,6 +102,7 @@ function _backFromSkillDetail() {
     return;
   }
   if (from.view === 'scene-detail' && from.param) {
+    window._currentView = 'scene-detail';
     renderSceneDetail(from.param);
     // replaceState 更新当前历史记录为场景详情状态，
     // 否则 history.state 仍停留在技能详情，下次进入技能时来源判断错误
@@ -65,9 +126,10 @@ function _backFromSubSkill(pkgId) {
   });
 }
 
-// 从技能详情返回技能列表（复用 _renderMarketTab 重建统一布局）
+// 从技能详情返回技能列表（渲染完整页面含一级 Tab 栏）
 function _backToSkillList() {
-  _renderMarketTab('skills');
+  window._currentView = 'skills:' + _skillTab;
+  renderSkills();
 }
 
 function _currentRepo() {
@@ -79,8 +141,20 @@ function _currentRepo() {
 
 // ── 渲染技能市场主页 ──
 function renderSkills() {
-  const el = _skillsContainer();
+  const el = document.getElementById('pageContent');
   if (!el) return;
+
+  // 渲染一级 Tab 栏（场景 / 技能）+ 子容器
+  el.innerHTML = `<div style="margin-bottom:20px;background:var(--c);border-radius:14px;padding:20px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.06)">
+    <div class="seg-bar" style="margin-top:0">
+      <a onclick="app.nav('scene-market')">🏪 ${I18N.t('skills.scenes_tab')||'场景'}</a>
+      <a class="ac">⚙ ${I18N.t('skills.skills_tab')||'技能'}</a>
+    </div>
+    <div style="padding:14px 0 0;font-size:11px;color:var(--t3);line-height:1.6">
+      <b style="color:var(--a)">${I18N.t('skills.scenes_tab')||'场景'}</b> ${I18N.t('skills.market_intro_scene')||'是多个技能按开发流程组合的开发模式'} · <b style="color:var(--a)">${I18N.t('skills.skills_tab')||'技能'}</b> ${I18N.t('skills.market_intro_skill')||'是单个 Agent 的能力包'}
+    </div>
+  </div>
+  <div id="skillsTabContent"></div>`;
 
   // 预填搜索词（从场景详情跳转过来）
   let searchInit = '';
@@ -89,17 +163,14 @@ function renderSkills() {
     window._skillMarketSearchInit = null;
   }
 
-  // official 页签：并行加载精选技能（独立请求，最多5条）+ 全部技能
+  // official 页签：并行加载精选技能 + 全部技能
   if (_skillTab === 'official') {
-    Promise.all([
-      API.post('/skills/sync-official', {}).catch(() => ({})),
-      API.get('/skills/featured')
-    ]).then(([_, featData]) => {
+    _loadSkills(searchInit);
+    API.get('/skills/featured').then(featData => {
       _featuredSkills = featData.skills || [];
-      _loadSkills(searchInit);
+      _renderSkillPage();
     }).catch(() => {
       _featuredSkills = [];
-      _loadSkills(searchInit);
     });
   } else {
     _loadSkills(searchInit);
@@ -125,10 +196,18 @@ function _reloadSkills(searchInit) {
   params.push('page=' + _skillPage);
   params.push('page_size=' + _skillPageSize);
   const qs = params.length ? '?' + params.join('&') : '';
+  // 局部刷新：已有 all-skills 容器时只显示 spinner
+  var existingGrid = document.getElementById('all-skills');
+  if (existingGrid) existingGrid.innerHTML = '<div class="scn-loading"><span class="scn-spinner"></span></div>';
   API.get('/skills' + qs).then(d => {
+    if (window._currentView !== 'skills' && window._currentView !== 'skills:' + _skillTab) return;  // stale guard
     _allSkills = d.skills || [];
     _skillTotal = d.total || _allSkills.length;
-    _renderSkillPage();
+    if (existingGrid) {
+      _renderSkillGrid();
+    } else {
+      _renderSkillPage();
+    }
     if (searchInit) {
       setTimeout(() => {
         const input = document.getElementById('skillSearchInput');
@@ -136,6 +215,8 @@ function _reloadSkills(searchInit) {
       }, 100);
     }
   }).catch(e => {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'skills' && window._currentView !== 'skills:' + _skillTab) return;  // stale guard
     el.innerHTML = '<div class="error">' + (I18N.t('common.load_failed')||'加载失败') + ': ' + (e.message||'') + '</div>';
   });
 }
@@ -172,16 +253,16 @@ function _renderSkillPage() {
   html += `<div class="apple-card">`;
   // 标题行 + 搜索 + 查找 + 排序 + 上传
   const scoped = _allSkills.filter(s => s.scope === _skillTab);
-  html += `<div class="cd-h apple-search" style="justify-content:flex-start">
+  html += `<div class="cd-h apple-search" style="justify-content:space-between">
     <h2>${I18N.t('skills.all_skills')||'全部技能'} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${_skillTotal}</span></h2>
-    <input id="skillSearchInput" placeholder="${I18N.t('skills.skill_search_placeholder')||'搜索技能名称或描述'}" value="${_skillSearchQ}" onkeyup="if(event.key==='Enter'){_skillSearchQ=this.value;_skillPage=1;_reloadSkills()}">
-    <button class="bt bt-o bt-s" onclick="_skillSearchQ=document.getElementById('skillSearchInput').value;_skillPage=1;_reloadSkills()">${I18N.t('skills.find_skill')||'查找技能'}</button>
-    <button class="bt ${_skillSort==='latest'?'bt-tg':'bt-o'} bt-s" id="sort-latest" onclick="_switchSort('latest')">${I18N.t('skills.sort_latest')||'最新'}</button>
-    <button class="bt ${_skillSort==='hot'?'bt-tg':'bt-o'} bt-s" id="sort-hot" onclick="_switchSort('hot')">${I18N.t('skills.sort_hot')||'最热'}</button>`;
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <button class="bt ${_skillSort==='latest'?'bt-tg':'bt-o'} bt-s" id="sort-latest" onclick="_switchSort('latest')">${I18N.t('skills.sort_latest')||'最新'}</button>${_skillTab === 'user' ? '' : `<button class="bt ${_skillSort==='hot'?'bt-tg':'bt-o'} bt-s" id="sort-hot" onclick="_switchSort('hot')">${I18N.t('skills.sort_hot')||'最热'}</button>`}
+      <input id="skillSearchInput" placeholder="${I18N.t('skills.skill_search_placeholder')||'搜索技能名称或描述'}" value="${_skillSearchQ}" onkeyup="if(event.key==='Enter'){_skillSearchQ=this.value;_skillPage=1;_reloadSkills()}">
+      <button class="bt bt-o bt-s" onclick="_skillSearchQ=document.getElementById('skillSearchInput').value;_skillPage=1;_reloadSkills()">${I18N.t('skills.find_skill')||'查找技能'}</button>`;
   if (_skillTab === 'repo' || _skillTab === 'user') {
     html += `<button class="bt bt-p bt-s" onclick="showSkillUpload()" style="color:#fff;background:var(--g);border-color:var(--g)">${I18N.t('skills.action.add_skill')||'上传技能'}</button>`;
   }
-  html += `</div>`;
+  html += `</div></div>`;
 
   // 仓库技能需当前仓库
   if (_skillTab === 'repo' && !_currentRepo()) {
@@ -200,25 +281,34 @@ function _renderSkillPage() {
     return;
   }
 
-  html += `<div class="stabs" id="agent-tabs" style="margin-top:10px">`;
-  // "全部" tab
-  html += `<a class="ac" onclick="_switchAgentTab(-1)">${I18N.t('skills.all_agents')||'全部'} <span class="c" style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:1px 6px;border-radius:8px;margin-left:2px">${scoped.length}</span></a>`;
+  // 左右分栏：左侧 Agent 筛选栏 + 右侧（标签筛选行 + 技能卡片网格）
+  html += `<div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-top:10px">`;
+  // 左侧 Agent 筛选栏（竖向排列，无"全部"）
+  html += `<div id="agent-tabs" style="width:160px;flex-shrink:0;display:flex;flex-direction:column;gap:2px">`;
   _agentList.forEach((at, i) => {
     const meta = _AGENT_META[at] || {};
     const count = (_agentGroups[at] || []).length;
     const countBadge = count > 0 ? ` <span class="c" style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:1px 6px;border-radius:8px;margin-left:2px">${count}</span>` : '';
-    html += `<a onclick="_switchAgentTab(${i})">${meta.icon?`<span style="margin-right:4px">${meta.icon}</span>`:''}${(meta.label||at)+' Agent'}${countBadge}</a>`;
+    const isOn = _activeAgentIdx === i;
+    html += `<a class="skill-agent-item${isOn?' ac':''}" onclick="_switchAgentTab(${i})" style="padding:10px 14px;font-size:12px;font-weight:${isOn?'600':'500'};color:${isOn?'var(--a)':'var(--t2)'};cursor:pointer;border-radius:8px;transition:all .15s;display:flex;align-items:center;gap:4px;white-space:nowrap;background:${isOn?'rgba(49,104,224,0.08)':'transparent'}">${meta.icon?`<span style="margin-right:2px">${meta.icon}</span>`:''}${(meta.label||at)+' Agent'}${countBadge}</a>`;
   });
   html += `</div>`;
-
+  // 右侧：标签筛选行 + 技能列表 + 分页器
+  html += `<div style="flex:1;min-width:280px">`;
+  // 标签筛选行（横向排列，二级筛选）
+  html += `<div id="tag-filters" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">`;
+  _SKILL_TAG_FILTERS.forEach(function(t) {
+    var isOn = _activeTagFilter === t.id;
+    html += `<a class="skill-tag-filter${isOn?' ac':''}" onclick="_switchTagFilter('${t.id}')" style="padding:5px 12px;font-size:11px;color:${isOn?'var(--a)':'var(--t2)'};border:1px solid ${isOn?'var(--a)':'var(--b)'};background:${isOn?'rgba(49,104,224,0.06)':'var(--c)'};cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap">${t.label}</a>`;
+  });
+  html += `</div>`;
   // 技能列表
   html += `<div id="all-skills"></div>`;
-
   // 分页器（始终显示，只有1页时按钮disabled但选择器可用）
   const totalPages = Math.max(1, Math.ceil(_skillTotal / _skillPageSize));
   const prevDisabled = _skillPage <= 1 ? ' disabled' : '';
   const nextDisabled = _skillPage >= totalPages ? ' disabled' : '';
-  html += `<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;padding:12px 0">
+  html += `<div id="skill-pager" style="display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;padding:12px 0">
     <button class="bt bt-o bt-s${prevDisabled}" ${prevDisabled ? 'disabled' : ''} onclick="_skillPage=${Math.max(1,_skillPage-1)};_reloadSkills()">‹</button>
     <span style="font-size:12px;color:var(--t2)">${_skillPage} / ${totalPages} (${_skillTotal}${I18N.t('skills.items_count_suffix')||'条'})</span>
     <button class="bt bt-o bt-s${nextDisabled}" ${nextDisabled ? 'disabled' : ''} onclick="_skillPage=${Math.min(totalPages,_skillPage+1)};_reloadSkills()">›</button>
@@ -228,12 +318,57 @@ function _renderSkillPage() {
       <option value="100" ${_skillPageSize===100?'selected':''}>100${I18N.t('skills.per_page_suffix')||'/页'}</option>
     </select>
   </div>`;
-  html += `</div>`;
+  html += `</div></div></div>`;
 
   el.innerHTML = html;
 
   // 渲染全部技能
   _activeAgentIdx = -1;
+  _activeTagFilter = 'all';
+  _renderAgentSkills();
+}
+
+// 局部刷新：只更新技能列表 + 分页器 + 计数 + Agent tab + 排序按钮（不重建搜索栏/排序栏）
+function _renderSkillGrid() {
+  const scoped = _allSkills.filter(s => s.scope === _skillTab);
+  _buildAgentGroups(scoped);
+
+  // 更新计数
+  var countEl = document.querySelector('#skillsTabContent .apple-card .cd-h h2 span');
+  if (countEl) countEl.textContent = _skillTotal;
+
+  // 更新 Agent sidebar（无"全部"tab，直接从 index 0 开始）
+  _renderAgentSidebar();
+
+  // 更新标签筛选
+  _renderTagFilters();
+
+  // 更新排序按钮高亮
+  var sortLatest = document.getElementById('sort-latest');
+  var sortHot = document.getElementById('sort-hot');
+  if (sortLatest) { sortLatest.className = 'bt ' + (_skillSort==='latest'?'bt-tg':'bt-o') + ' bt-s'; }
+  if (sortHot) { sortHot.className = 'bt ' + (_skillSort==='hot'?'bt-tg':'bt-o') + ' bt-s'; }
+
+  // 更新分页器
+  var pager = document.getElementById('skill-pager');
+  if (pager) {
+    var totalPages = Math.max(1, Math.ceil(_skillTotal / _skillPageSize));
+    var prevDisabled = _skillPage <= 1 ? ' disabled' : '';
+    var nextDisabled = _skillPage >= totalPages ? ' disabled' : '';
+    pager.innerHTML =
+      '<button class="bt bt-o bt-s' + prevDisabled + '" ' + (prevDisabled ? 'disabled' : '') + ' onclick="_skillPage=' + Math.max(1,_skillPage-1) + ';_reloadSkills()">‹</button>' +
+      '<span style="font-size:12px;color:var(--t2)">' + _skillPage + ' / ' + totalPages + ' (' + _skillTotal + (I18N.t('skills.items_count_suffix')||'条') + ')</span>' +
+      '<button class="bt bt-o bt-s' + nextDisabled + '" ' + (nextDisabled ? 'disabled' : '') + ' onclick="_skillPage=' + Math.min(totalPages,_skillPage+1) + ';_reloadSkills()">›</button>' +
+      '<select onchange="_skillPageSize=parseInt(this.value);_skillPage=1;_reloadSkills()" style="padding:4px 8px;border:1px solid var(--b);border-radius:var(--rd);font-size:11px;background:var(--c);color:var(--t);outline:none">' +
+      '<option value="20" ' + (_skillPageSize===20?'selected':'') + '>20' + (I18N.t('skills.per_page_suffix')||'/页') + '</option>' +
+      '<option value="50" ' + (_skillPageSize===50?'selected':'') + '>50' + (I18N.t('skills.per_page_suffix')||'/页') + '</option>' +
+      '<option value="100" ' + (_skillPageSize===100?'selected':'') + '>100' + (I18N.t('skills.per_page_suffix')||'/页') + '</option>' +
+      '</select>';
+  }
+
+  // 重置筛选状态并渲染技能列表
+  _activeAgentIdx = -1;
+  _activeTagFilter = 'all';
   _renderAgentSkills();
 }
 
@@ -253,22 +388,59 @@ function _buildAgentGroups(scoped) {
 function _switchSkillTab(tab) {
   _skillTab = tab;
   _skillPage = 1;
-  renderSkills();
+  // Issue #63: 页面内 tab 切换——取消旧 tab 请求 + 更新标识
+  if (window._tabAbortController) window._tabAbortController.abort();
+  window._tabAbortController = new AbortController();
+  window._tabSignal = window._tabAbortController.signal;
+  window._currentView = 'skills:' + tab;
+  // 局部刷新：只重建列表区域（_renderSkillPage），不重建顶部 Tab 栏（renderSkills）
+  _renderSkillPage();
+  _reloadSkills();
 }
 
 function _switchAgentTab(idx) {
-  _activeAgentIdx = idx;
+  _activeAgentIdx = (_activeAgentIdx === idx) ? -1 : idx;
+  _activeTagFilter = 'all';
+  _renderAgentSidebar();
+  _renderTagFilters();
   _renderAgentSkills();
-  // 更新 tab 高亮
-  document.querySelectorAll('#agent-tabs a').forEach((a, i) => {
-    a.classList.toggle('ac', i === idx + 1);
-  });
 }
 
 function _switchSort(mode) {
   _skillSort = mode;
   _skillPage = 1;
   _reloadSkills();
+}
+
+function _switchTagFilter(tagId) {
+  _activeTagFilter = tagId;
+  _renderTagFilters();
+  _renderAgentSkills();
+}
+
+function _renderTagFilters() {
+  var container = document.getElementById('tag-filters');
+  if (!container) return;
+  var html = '';
+  _SKILL_TAG_FILTERS.forEach(function(t) {
+    var isOn = _activeTagFilter === t.id;
+    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" onclick="_switchTagFilter(\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap">' + t.label + '</a>';
+  });
+  container.innerHTML = html;
+}
+
+function _renderAgentSidebar() {
+  var container = document.getElementById('agent-tabs');
+  if (!container) return;
+  var html = '';
+  _agentList.forEach(function(at, i) {
+    var meta = _AGENT_META[at] || {};
+    var count = (_agentGroups[at] || []).length;
+    var countBadge = count > 0 ? ' <span class="c" style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:1px 6px;border-radius:8px;margin-left:2px">' + count + '</span>' : '';
+    var isOn = _activeAgentIdx === i;
+    html += '<a class="skill-agent-item' + (isOn?' ac':'') + '" onclick="_switchAgentTab(' + i + ')" style="padding:10px 14px;font-size:12px;font-weight:' + (isOn?'600':'500') + ';color:' + (isOn?'var(--a)':'var(--t2)') + ';cursor:pointer;border-radius:8px;transition:all .15s;display:flex;align-items:center;gap:4px;white-space:nowrap;background:' + (isOn?'rgba(49,104,224,0.08)':'transparent') + '">' + (meta.icon?'<span style="margin-right:2px">' + meta.icon + '</span>':'') + (meta.label||at) + ' Agent' + countBadge + '</a>';
+  });
+  container.innerHTML = html;
 }
 
 function _renderAgentSkills() {
@@ -280,6 +452,10 @@ function _renderAgentSkills() {
   } else {
     const at = _agentList[_activeAgentIdx];
     skills = (_agentGroups[at] || []).filter(s => s.scope === _skillTab);
+  }
+  // 二级标签筛选
+  if (_activeTagFilter !== 'all') {
+    skills = skills.filter(s => _getSkillTags(s.name).indexOf(_activeTagFilter) !== -1);
   }
   if (skills.length === 0) {
     container.innerHTML = `<div class="ts t3" style="padding:20px;text-align:center">${I18N.t('skills.empty.no_skills')||'暂无技能'}</div>`;
@@ -301,9 +477,10 @@ function _renderSkillCard(s, fixedWidth) {
         : `${scenesArr.slice(0, 2).join(' · ')}(+${scenesArr.length - 2})`)
     : '';
   const scenesTitle = scenesArr.join(' · ');
+  const isUserSkill = s.scope === 'user';
   const likeIcon = s.liked_by_me ? '❤️' : '🤍';
   const likeCount = s.like_count || 0;
-  const featuredBadge = s.is_featured ? '<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟</span>' : '';
+  const featuredBadge = (s.is_featured && !isUserSkill) ? '<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟</span>' : '';
   const widthStyle = fixedWidth ? 'style="flex-shrink:0;width:300px"' : '';
 
   // 精选区只显示查看按钮，不显示删除/转换
@@ -344,7 +521,7 @@ function _renderSkillCard(s, fixedWidth) {
     ${scenesStr ? `<div class="ro" style="color:var(--a)" title="${scenesTitle.replace(/"/g,'&quot;')}">${I18N.t('skills.info_scenes')||'所属场景'}：${scenesStr}</div>` : ''}
     ${sceneCount > 0 || (s.repo_count||0) > 0 ? `<div class="ro">${sceneCount} ${I18N.t('skills.scenes_in_use_suffix')||'场景在用'}，${s.repo_count||0} ${I18N.t('skills.repos_in_use')||'仓库在用'}</div>` : ''}
     <div class="rf">
-      <span class="s" style="cursor:pointer" onclick="event.stopPropagation();toggleSkillLike(${s.id},this)">${likeIcon} ${likeCount}</span>
+      ${isUserSkill ? '<span class="s"></span>' : `<span class="s" style="cursor:pointer" onclick="event.stopPropagation();toggleSkillLike(${s.id},this)">${likeIcon} ${likeCount}</span>`}
       <div class="sk-card-btns">
         <button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.id}')">${I18N.t('skills.action.view')||'详情'}</button>
         ${actionBtns}
@@ -391,7 +568,8 @@ function renderSkillDetail(data) {
   const at = data.agent_type || '';
   const meta = _AGENT_META[at] || {};
   const tagClass = data.scope === 'official' ? 'tg-c' : data.scope === 'repo' ? 'tg-i' : 'tg-d';
-  const featuredBadge = data.is_featured ? `<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟 ${I18N.t('skills.featured')||'精选'}</span>` : '';
+  const isUserDetail = data.scope === 'user';
+  const featuredBadge = (data.is_featured && !isUserDetail) ? `<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟 ${I18N.t('skills.featured')||'精选'}</span>` : '';
   const scenesArr = (data.scenes || []).map(sc => sc.display_name || sc.name || sc);
   const showScenes = data.scope === 'official';
   const SCENE_PREVIEW = 3;
@@ -425,7 +603,7 @@ function renderSkillDetail(data) {
             </div>
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
-            <button class="bt bt-o bt-s" onclick="toggleSkillLike(${data.id},this)" style="display:flex;align-items:center;gap:4px">${likedIcon} <span id="detailLikeCount">${likeCount}</span></button>
+            ${isUserDetail ? '' : `<button class="bt bt-o bt-s" onclick="toggleSkillLike(${data.id},this)" style="display:flex;align-items:center;gap:4px">${likedIcon} <span id="detailLikeCount">${likeCount}</span></button>`}
             ${(data.is_obs || data.zip_url) ? `<button class="bt bt-o bt-s" onclick="downloadSkillZip('${data.id}')">${I18N.t('skills.download_skill')||'下载技能包'}</button>` : ''}
           </div>
         </div>
@@ -438,8 +616,8 @@ function renderSkillDetail(data) {
         <div class="srow"><label>${I18N.t('skills.info_name')||'名称'}</label><span>${data.name}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_agent_type')||'Agent'}</label><span>${(meta.label||at)+' Agent'}</span></div>
         <div class="srow"><label>${I18N.t('skills.info_type')||'类型'}</label><span>${_scopeName(data.scope)}</span></div>
-        <div class="srow"><label>${I18N.t('skills.info_featured')||'精选'}</label><span>${data.is_featured ? I18N.t('skills.featured')||'是' : '—'}</span></div>
-        <div class="srow"><label>${I18N.t('skills.info_likes')||'点赞'}</label><span id="detailInfoLikes">${likedIcon} ${likeCount}</span></div>
+        ${isUserDetail ? '' : `<div class="srow"><label>${I18N.t('skills.info_featured')||'精选'}</label><span>${data.is_featured ? I18N.t('skills.featured')||'是' : '—'}</span></div>`}
+        ${isUserDetail ? '' : `<div class="srow"><label>${I18N.t('skills.info_likes')||'点赞'}</label><span id="detailInfoLikes">${likedIcon} ${likeCount}</span></div>`}
         ${showScenes ? `<div class="srow"><label>${I18N.t('skills.info_scenes')||'场景'}</label><span class="t2">${scenesHtml}</span></div>` : ''}
         <div class="srow"><label>${I18N.t('skills.info_description')||'描述'}</label><span class="t2">${data.description || '—'}</span></div>
       </div>
@@ -534,18 +712,55 @@ function doSkillUpload() {
     renderSkills();
   }).catch(e => {
     _setSkillUploadProgress(0, true);
-    if (app && app.showToast) app.showToast(I18N.t('skills.toast.upload_failed',{msg:e.message})||'上传失败');
+    // 优先展示后端返回的具体校验错误（errors 数组）
+    let msg = e.message || (I18N.t('skills.toast.upload_failed')||'上传失败');
+    if (e.errors && Array.isArray(e.errors) && e.errors.length > 0) {
+      msg = e.errors.join('；');
+    }
+    if (app && app.showToast) app.showToast(msg);
   });
 }
 
 function deleteSkill(skillId, scope) {
-  if (!confirm(I18N.t('skills.confirm.delete_skill',{name:''})||'确认删除？')) return;
-  API.del('/skills/by-id/' + encodeURIComponent(skillId)).then(r => {
-    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.deleted')||'已删除');
-    renderSkills();
-  }).catch(e => {
-    if (app && app.showToast) app.showToast(I18N.t('skills.toast.delete_failed',{msg:e.message})||'删除失败');
-  });
+  // 移除已有弹窗
+  var existing = document.getElementById('deleteSkillModal');
+  if (existing) { existing.remove(); return; }
+
+  var modal = document.createElement('div');
+  modal.id = 'deleteSkillModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+
+  modal.innerHTML = `
+    <div style="background:rgba(255,255,255,0.98);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.15);width:360px;max-width:90vw;overflow:hidden">
+      <div style="padding:24px 24px 20px;text-align:center">
+        <div style="width:48px;height:48px;border-radius:50%;background:rgba(255,59,48,0.1);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:22px">🗑</div>
+        <h3 style="font-size:16px;font-weight:600;color:#1d1d1f;margin-bottom:6px">${I18N.t('skills.confirm.delete_skill',{name:''})||'确认删除此技能？'}</h3>
+        <div style="font-size:12px;color:#86868b">${I18N.t('skills.delete_skill_tip')||'删除后不可恢复，技能数据将被永久移除'}</div>
+      </div>
+      <div style="padding:0 24px 20px;display:flex;gap:10px">
+        <button onclick="document.getElementById('deleteSkillModal').remove()" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">${I18N.t('skills.action.cancel')||'取消'}</button>
+        <button id="deleteSkillConfirmBtn" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#ff3b30;color:#fff;cursor:pointer">${I18N.t('skills.confirm_delete')||'确认删除'}</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+  document.getElementById('deleteSkillConfirmBtn').onclick = function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = I18N.t('skills.deleting') || '删除中...';
+    API.del('/skills/by-id/' + encodeURIComponent(skillId)).then(r => {
+      modal.remove();
+      if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.deleted')||'已删除');
+      renderSkills();
+    }).catch(e => {
+      btn.disabled = false;
+      btn.textContent = I18N.t('skills.confirm_delete')||'确认删除';
+      if (app && app.showToast) app.showToast(I18N.t('skills.toast.delete_failed',{msg:e.message})||'删除失败');
+    });
+  };
 }
 
 function convertSkill(skillName) {
@@ -554,13 +769,45 @@ function convertSkill(skillName) {
     if (app && app.showToast) app.showToast(I18N.t('skills.toast.select_repo_first')||'请先选择仓库');
     return;
   }
-  if (!confirm(I18N.t('skills.confirm.convert_skill',{name:skillName,repo:repo})||'确认转换？')) return;
-  API.post('/skills/convert', {skill_name: skillName, repo}).then(r => {
-    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.convert_success')||'转换成功');
-    renderSkills();
-  }).catch(e => {
-    if (app && app.showToast) app.showToast(I18N.t('skills.toast.convert_failed',{msg:e.message})||'转换失败');
-  });
+  // 移除已有弹窗
+  var existing = document.getElementById('convertSkillModal');
+  if (existing) { existing.remove(); return; }
+
+  var modal = document.createElement('div');
+  modal.id = 'convertSkillModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+
+  modal.innerHTML = `
+    <div style="background:rgba(255,255,255,0.98);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.15);width:360px;max-width:90vw;overflow:hidden">
+      <div style="padding:24px 24px 20px;text-align:center">
+        <div style="width:48px;height:48px;border-radius:50%;background:rgba(0,113,227,0.1);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:22px">🔄</div>
+        <h3 style="font-size:16px;font-weight:600;color:#1d1d1f;margin-bottom:6px">${I18N.t('skills.confirm.convert_skill',{name:skillName,repo:repo})||'确认转换？'}</h3>
+        <div style="font-size:12px;color:#86868b">${I18N.t('skills.convert_skill_tip')||'将个人技能转换为此仓库的仓库技能'}</div>
+      </div>
+      <div style="padding:0 24px 20px;display:flex;gap:10px">
+        <button onclick="document.getElementById('convertSkillModal').remove()" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">${I18N.t('skills.action.cancel')||'取消'}</button>
+        <button id="convertSkillConfirmBtn" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#0071e3;color:#fff;cursor:pointer">${I18N.t('skills.confirm_convert')||'确认转换'}</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+  document.getElementById('convertSkillConfirmBtn').onclick = function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = I18N.t('skills.converting') || '转换中...';
+    API.post('/skills/convert', {skill_name: skillName, repo}).then(r => {
+      modal.remove();
+      if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.convert_success')||'转换成功');
+      renderSkills();
+    }).catch(e => {
+      btn.disabled = false;
+      btn.textContent = I18N.t('skills.confirm_convert')||'确认转换';
+      if (app && app.showToast) app.showToast(I18N.t('skills.toast.convert_failed',{msg:e.message})||'转换失败');
+    });
+  };
 }
 
 function downloadSkillZip(id) {
@@ -619,6 +866,7 @@ function loadSubSkillDetail(pkgId, subName) {
   if (!el) return;
   el.innerHTML = '<div class="loading">'+(I18N.t('skills.loading')||'加载中...')+'</div>';
   API.get('/skills/package-sub/'+pkgId+'/'+subName).then(function(data) {
+    if (window._currentView !== 'skill' && window._currentView !== 'skills') return;  // stale guard
     var safeContent = (data.content||'').replace(/`/g,'\\`').replace(/\${/g,'\\${');
     el.innerHTML = `
       <button class="bt bt-o bt-s" onclick="_backFromSubSkill(${pkgId})" style="margin-bottom:12px">← ${I18N.t('skills.huawei.back')||'返回'}</button>
@@ -636,6 +884,8 @@ function loadSubSkillDetail(pkgId, subName) {
         </div>
       </div>`;
   }).catch(function(e) {
+    if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+    if (window._currentView !== 'skills') return;  // stale guard
     el.innerHTML = '<div class="error">'+(I18N.t('common.load_failed')||'加载失败')+': '+(e.message||'')+'</div>';
   });
 }

@@ -81,7 +81,13 @@ function loadAgentTypes() {
     } catch (e) { cachedRepos = null; }
 
     if (cachedRepos && !forceRefresh) {
-      renderReposFromData(cachedRepos);
+      // Issue #82: cachedRepos 路径也需 _currentView 守卫，与 API 回调路径一致——
+      // 用户已进入某页面时不应覆盖布局 DOM，只更新侧边栏下拉
+      if (window._currentView && window._currentView !== '') {
+        initSidebarRepos();
+      } else {
+        renderReposFromData(cachedRepos);
+      }
     }
 
     API.get('/repos/member').then(d => {
@@ -94,19 +100,20 @@ function loadAgentTypes() {
         // 后台刷新后若数据变化，轻量更新侧边栏
         initSidebarRepos();
       } else {
-        renderReposFromData(repos);
+        // Issue #63: 异步回调里调 renderReposFromData 会操作布局 DOM
+        // 如果 nav 已经执行了（_currentView 已设），说明用户已进入某页面，
+        // 不应覆盖——只更新缓存，不渲染
+        if (window._currentView && window._currentView !== '') {
+          initSidebarRepos();
+        } else {
+          renderReposFromData(repos);
+        }
       }
-    }).catch(() => {
+    }).catch(e => {
       if (cachedRepos) return; // 有缓存时静默，避免覆盖已渲染内容
-      console.error("[loadRepos] FAILED");
-      $('sidebar').style.display = 'none';
-      $('tb').style.display = 'none';
-      $('mainView').style.display = 'flex';
-      $('mainView').style.position = 'fixed';
-      $('mainView').style.inset = '0';
-      $('mainView').style.zIndex = '100';
-      const el = $('pageContent');
-      if (el) el.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + I18N.t('app.repo.load_failed') + '</div></div>';
+      // Issue #63: loadRepos 失败时不隐藏侧边栏、不覆盖 pageContent
+      // 无缓存时侧边栏保持默认状态，用户切 tab 时 nav() 会重新加载页面内容
+      console.error('[loadRepos] FAILED:', e.name, e.message);
     });
   }
 
@@ -137,9 +144,11 @@ function loadAgentTypes() {
     $('mainView').style.zIndex = '';
     $('pageTitle').textContent = I18N.t('app.current_project');
 
-    if (!current || !managedRepos.some(r => r.full_name === current.fullName)) {
+    // Issue #82: 仅在完全无选中仓库时才默认选第一个；
+    // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
+    if (!current) {
       const r = managedRepos[0];
-      if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name}));
+      if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
       else localStorage.removeItem('currentRepo');
     }
     nav('dash');
@@ -149,6 +158,8 @@ function loadAgentTypes() {
     // Lightweight version for after repo selection - just populate sidebar dropdown
     API.get('/repos/managed').then(d => {
       const repos = d.repos || [];
+      window._managedRepoMap = {};
+      repos.forEach(r => { window._managedRepoMap[r.full_name] = r.repo_key || ''; });
       const sel = $('repoSelect');
       const current = currentRepo();
       sel.innerHTML = repos.map(r =>
@@ -177,7 +188,11 @@ function loadAgentTypes() {
       return;
     }
     const parts = val.split('/');
-    localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1]}));
+    const _rk = (window._managedRepoMap && window._managedRepoMap[val]) || '';
+    localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
+    // 同步侧边栏下拉选中项
+    const sel = $('repoSelect');
+    if (sel) sel.value = val;
     nav('dash');
   }
 
@@ -187,6 +202,7 @@ function loadAgentTypes() {
     _pushHistory('repos', null);
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     localStorage.setItem('sidebarTab', 'projects');
+    window._currentView = 'repos';
 
     // 叠加轻量 loading 遮罩，不改动当前 DOM 布局
     let ov = document.getElementById('gotoReposOverlay');
@@ -199,6 +215,7 @@ function loadAgentTypes() {
     }
 
     API.get('/repos/member').then(d => {
+      if (window._currentView !== 'repos') return;  // stale guard
       // 数据就绪，一次性切换 UI
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
@@ -211,6 +228,7 @@ function loadAgentTypes() {
       $('pageTitle').textContent = I18N.t('app.current_project');
       renderRepoSelection(d.repos || []);
     }).catch(e => {
+      if (window._currentView !== 'repos') return;  // stale guard
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
       $('tb').style.display = 'none';
@@ -226,23 +244,63 @@ function loadAgentTypes() {
   }
 
   let _refreshTimer = null;
-  let _currentView = '';
   let _currentParam = null;
   let _hiddenSince = 0;
   // 页面从后台回到前台时，若隐藏超过 30 秒才刷新（避免短时间切换标签页频繁刷新）
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'hidden') {
       _hiddenSince = Date.now();
-    } else if (document.visibilityState === 'visible' && _currentView && _hiddenSince) {
+    } else if (document.visibilityState === 'visible' && window._currentView && _hiddenSince) {
+      // Issue #86: Tab 切回前台——重设定时器（后台 setTimeout 被浏览器节流可能没触发）
+      API.scheduleProactiveRefresh();
       if (Date.now() - _hiddenSince > 60000) {
-        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(_currentView, _currentParam); }, 300);
+        var _v = window._currentView || '';
+        var _baseView = _v.split(':')[0];
+        setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(_baseView, window._currentParam); }, 300);
       }
       _hiddenSince = 0;
     }
   });
+  // ── Sidebar 分组折叠（Issue #66）──
+  // 可折叠分组标题带 class="grp-tog" + data-key（localStorage 键）。
+  // 默认收起（HTML 中预置 collapsed）；initGroupCollapse() 读取 localStorage
+  // 同步真实状态；toggleGroup() 点击切换并写回。收起时 .grp-items 子项隐藏。
+  function _readCollapsed(key) {
+    // 默认 true（收起）；localStorage 存 '0'/'1'
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? true : v === '1';
+    } catch (e) { return true; }
+  }
+  function initGroupCollapse() {
+    document.querySelectorAll('.grp-tog[data-key]').forEach(tog => {
+      const key = tog.getAttribute('data-key');
+      const collapsed = _readCollapsed(key);
+      tog.classList.toggle('collapsed', collapsed);
+      const items = tog.nextElementSibling;
+      if (items && items.classList.contains('grp-items')) {
+        items.classList.toggle('hid', collapsed);
+      }
+    });
+  }
+  function toggleGroup(tog) {
+    const key = tog.getAttribute('data-key');
+    const collapsed = !tog.classList.contains('collapsed');
+    tog.classList.toggle('collapsed', collapsed);
+    const items = tog.nextElementSibling;
+    if (items && items.classList.contains('grp-items')) {
+      items.classList.toggle('hid', collapsed);
+    }
+    try { localStorage.setItem(key, collapsed ? '1' : '0'); } catch (e) {}
+  }
+
   function nav(view, param) {
+    // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
+    if (view === 'knowledge' && window._currentView === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
+      return;
+    }
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -261,8 +319,7 @@ function loadAgentTypes() {
       window._skillDetailFrom = (_prev && _prev.view) ? {view: _prev.view, param: _prev.param || null} : null;
     }
 
-    _currentView = view;
-    _currentParam = param;
+    window._currentParam = param;
     _pushHistory(view, param);
 
     document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('act'));
@@ -278,20 +335,64 @@ function loadAgentTypes() {
       if (param && o.includes("'" + param + "'")) a.classList.add('act');
       else if (!param && o === "nav('" + view + "')") a.classList.add('act');
     });
+    // 导航到折叠分组内的项时自动展开该分组（Issue #66）
+    const _actNav = document.querySelector('.sb-nav a.act');
+    if (_actNav) {
+      const _items = _actNav.closest('.grp-items');
+      if (_items && _items.classList.contains('hid')) {
+        const _tog = _items.previousElementSibling;
+        if (_tog && _tog.classList.contains('grp-tog') && _tog.classList.contains('collapsed')) {
+          toggleGroup(_tog);
+        }
+      }
+    }
 
     const title = $('pageTitle');
     const repoTitle = $('repoTitle');
     const pc = $('pageContent');
-    pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
+
+    // Issue #67: 离开 knowledge 页面时先卸载 Vue 应用（必须在 innerHTML 替换之前）
+    if (view !== 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
+      try { _knowledgeVueApp.unmount(); } catch(e) {}
+      _knowledgeVueApp = null;
+    }
+
+    // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不覆盖 DOM（避免 Vue 虚拟 DOM 不一致）
+    if (!(view === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp)) {
+      pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
+    }
 
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    // Issue #63: 切 tab 时主动取消旧请求 + 设全局 signal + 停定时轮询
+    if (window._navAbortController) window._navAbortController.abort();
+    window._navAbortController = new AbortController();
+    window._navSignal = window._navAbortController.signal;
+    window._tabSignal = null;  // 重置 tab signal
+    window._currentView = view;
+    // 离开 repos 全屏页时恢复 sidebar/tb/mainView 默认布局
+    if (view !== 'repos') {
+      var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
+      var tb = $('tb'); if (tb) tb.style.display = 'flex';
+      var mv = $('mainView'); if (mv) { mv.style.position = ''; mv.style.inset = ''; mv.style.zIndex = ''; }
+    }
     // 离开任务中心时停止场景识别轮询
     if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
+    // 离开 observability 时停止定时轮询
+    if (view !== 'observability' && typeof stopObsAuto === 'function') stopObsAuto();
+    // 离开 chat 时停止飞书接入轮询
+    if (view !== 'chat' && typeof _stopOnboardPoll === 'function') _stopOnboardPoll();
     // 离开场景中心时清除编辑标志（防止 _dashboardEditing 泄漏导致重新进入时卡在加载中）
-    if (view !== 'dash') window._dashboardEditing = false;
+    window._dashboardEditing = false;
 
     if (repo) {
-      repoTitle.innerHTML = `<a href="https://gitcode.com/${repo.fullName || (repo.owner + '/' + repo.name)}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="在 GitCode 打开 ${repo.fullName}">${repo.fullName} ↗</a>`;
+      var _rk = repo.repoKey || repo.repo_key || '';
+      var _fn = repo.fullName || (repo.owner + '/' + repo.name);
+      var _isGithub = _rk.indexOf('github:') === 0;
+      var _repoLink = _isGithub ? 'https://github.com/' + _fn : 'https://gitcode.com/' + _fn;
+      var _logo = _isGithub
+        ? '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>'
+        : '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+      repoTitle.innerHTML = `${_logo}<a href="${_repoLink}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="打开 ${_fn}">${repo.fullName} ↗</a>`;
     } else {
       repoTitle.textContent = '';
     }
@@ -304,6 +405,7 @@ function loadAgentTypes() {
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
       ]).then(([dashData, scenesData]) => {
+        if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;
         dashData._scenes = scenesData.scenes || [];
@@ -311,6 +413,8 @@ function loadAgentTypes() {
         dashData._name = repo.name;
         renderDashboard(dashData);
       }).catch(e => {
+        if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
+        if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中出错只 toast 不覆盖 UI；非编辑中清 loading 显示错误
         if (window._dashboardEditing) { app.showToast && app.showToast('刷新失败: ' + e.message); return; }
         pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
@@ -319,13 +423,14 @@ function loadAgentTypes() {
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
-      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(renderPipeline).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
-      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name).then(d => renderAgent(view, d)).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
+      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'event') {
       title.textContent = I18N.t('app.current_project');
-      API.get('/events/detail/' + param).then(renderEventDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/events/detail/' + param).then(d => { if (window._currentView !== 'event') return; renderEventDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'event') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
       // 切换回事件详情时恢复活跃对话查询
       if (typeof resumeConvTask === 'function') setTimeout(resumeConvTask, 500);
     } else if (view === 'chat') {
@@ -344,7 +449,9 @@ function loadAgentTypes() {
       renderSkills();
     } else if (view === 'knowledge') {
       title.textContent = I18N.t('app.current_project');
-      renderKnowledge();
+      if (typeof _knowledgeVueApp === 'undefined' || !_knowledgeVueApp) {
+        renderKnowledge();
+      }
     } else if (view === 'runtimes') {
       title.textContent = I18N.t('app.current_project');
       if (typeof renderRuntimes !== 'function') {
@@ -352,28 +459,31 @@ function loadAgentTypes() {
         window.location.reload();
         return;
       }
-      API.get('/settings/agent-runtimes').then(renderRuntimes).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/settings/agent-runtimes').then(d => { if (window._currentView !== 'runtimes') return; renderRuntimes(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'runtimes') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'observability') {
       title.textContent = I18N.t('app.current_project');
       if (typeof renderObservability === 'function') renderObservability();
     } else if (view === 'repos') {
       title.textContent = I18N.t('app.current_project');
-      loadRepos();
+      goToRepos();
     } else if (view === 'skill') {
       title.textContent = I18N.t('app.current_project');
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
-      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(d => { if (window._currentView !== 'skill') return; renderSkillDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'skill') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'skill-sub') {
       // 技能包子技能详情（如 "38/huawei-ecs"）
       title.textContent = I18N.t('app.current_project');
-      API.get('/skills/package-sub/' + param).then(renderSkillDetail).catch(e => pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>');
+      API.get('/skills/package-sub/' + param).then(d => { if (window._currentView !== 'skill-sub') return; renderSkillDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'skill-sub') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'scene-market') {
       title.textContent = I18N.t('app.current_project');
       renderSceneMarket();
     } else if (view === 'scene-detail') {
       title.textContent = I18N.t('app.current_project');
       renderSceneDetail(param);
+    } else if (view === 'scene-detail-local') {
+      title.textContent = I18N.t('app.current_project');
+      renderSceneDetailLocal(param);
     }
   }
 
@@ -390,7 +500,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail'];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local'];
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {
@@ -425,6 +535,9 @@ function loadAgentTypes() {
   function oauthLogin() {
     API.get('/auth/login/gitcode').then(d => { if (d.redirect_url) window.location.href = d.redirect_url; }).catch(e => showToast(I18N.t('app.login.oauth_not_configured')));
   }
+  function oauthLoginGithub() {
+    API.get('/auth/login/github').then(d => { if (d.redirect_url) window.location.href = d.redirect_url; }).catch(e => showToast(I18N.t('app.login.oauth_not_configured')));
+  }
 
   let pwdVisible = false;
   function togglePwdLogin() {
@@ -442,15 +555,19 @@ function loadAgentTypes() {
       localStorage.setItem('token', d.token);
       // refresh_token 在 HttpOnly cookie 里——不需要存 localStorage
       localStorage.setItem('user', JSON.stringify(d.user));
+      API.scheduleProactiveRefresh();  // Issue #86: 启动主动刷新定时器
       showApp();
     }).catch(e => showToast(I18N.t('app.login.failed') + ': ' + e.message));
   }
 
   function logout() {
     API.post('/auth/logout', {}).catch(() => {});
-    // 保留 currentRepo（记录上次选择的仓库），下次登录恢复；只清登录态
+    // 清除所有用户相关缓存——防止切换账号后看到上一个用户的仓库/事件
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    localStorage.removeItem('currentRepo');
+    localStorage.removeItem(REPO_CACHE_KEY);
+    API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
     // refresh_token cookie 由服务端 logout 清除
     showLogin();
   }
@@ -461,6 +578,36 @@ function loadAgentTypes() {
     t.textContent = msg;
     document.body.appendChild(t);
     setTimeout(() => t.remove(), duration || 3000);
+  }
+
+  // ── 通用确认对话框（Issue #125: 替换原生 confirm）──
+  // 复用 .create-repo-overlay + .confirm-modal CSS，居中显示，防滚动
+  function showConfirm(message, onConfirm, opts) {
+    closeConfirm();
+    var o = opts || {};
+    var danger = !!o.danger;
+    var confirmText = o.confirmText || (I18N.t('common.confirm') || '确认');
+    var cancelText = o.cancelText || (I18N.t('common.cancel') || '取消');
+    var overlay = document.createElement('div');
+    overlay.id = 'grapeConfirmOverlay';
+    overlay.className = 'create-repo-overlay';
+    overlay.innerHTML = '<div class="confirm-modal">' +
+      '<div class="confirm-modal-msg">' + message + '</div>' +
+      '<div class="confirm-modal-actions">' +
+        '<button class="cr-btn cr-btn-ghost" id="grapeConfirmCancel">' + cancelText + '</button>' +
+        '<button class="cr-btn ' + (danger ? 'cr-btn-danger' : 'cr-btn-primary') + '" id="grapeConfirmOk">' + confirmText + '</button>' +
+      '</div>' +
+    '</div>';
+    document.body.appendChild(overlay);
+    document.body.style.overflow = 'hidden';
+    function _close() { overlay.remove(); document.body.style.overflow = ''; }
+    overlay.onclick = function(e) { if (e.target === overlay) _close(); };
+    document.getElementById('grapeConfirmOk').onclick = function() { _close(); if (onConfirm) onConfirm(); };
+    document.getElementById('grapeConfirmCancel').onclick = _close;
+  }
+  function closeConfirm() {
+    var ex = document.getElementById('grapeConfirmOverlay');
+    if (ex) { ex.remove(); document.body.style.overflow = ''; }
   }
 
   // ── 帮助抽屉 ──
@@ -490,12 +637,27 @@ function loadAgentTypes() {
       currentRepo: localStorage.getItem('currentRepo'),
       url: window.location.href
     }));
+    // 同步可折叠分组的持久化状态（Issue #66）
+    initGroupCollapse();
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
+    // Check for OAuth error in URL (e.g. github.com timeout)
+    const oauthError = p.get('oauth_error');
+    if (oauthError) {
+      showToast(decodeURIComponent(oauthError), 6000);
+      if (window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+    }
+
+    // Check for OAuth token in URL first
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '9');
+      localStorage.setItem('app_cache_ver', '15');
+      // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
+      localStorage.removeItem(REPO_CACHE_KEY);
+      localStorage.removeItem('currentRepo');
       if (p.get('first_login') === '1') {
         localStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
@@ -508,6 +670,7 @@ function loadAgentTypes() {
         $('pageTitle').textContent = I18N.t('app.current_project');
       }
       showApp();
+      API.scheduleProactiveRefresh();  // Issue #86: OAuth 登录后启动定时器
       // Remove token from URL without reload (preserve language prefix)
       if (window.history.replaceState) {
         const lang = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
@@ -518,20 +681,19 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '9') {
-      const oldRepo = localStorage.getItem('currentRepo');
+    if (localStorage.getItem('app_cache_ver') !== '15') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      if (oldRepo) localStorage.setItem('currentRepo', oldRepo);
-      localStorage.setItem('app_cache_ver', '9');
+      localStorage.setItem('app_cache_ver', '15');
     }
 
     const token = localStorage.getItem('token');
     if (token) {
       showApp();
+      API.scheduleProactiveRefresh();  // Issue #86: 页面恢复时启动定时器
       // Handle hash-based navigation (e.g., #runtimes, #settings) on page load
       const hash = window.location.hash;
       if (hash && hash.length > 1) {
@@ -582,7 +744,33 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode};
+  return {nav, search, oauthLogin, oauthLoginGithub, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
 })();
+
+/** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
+function _vcsUrl(repoKey, path) {
+  var rk = repoKey || '';
+  var host = rk.indexOf('github:') === 0 ? 'https://github.com' : 'https://gitcode.com';
+  var parts = rk.split(':');
+  var repoPath = parts.length > 1 ? parts[1] : rk;
+  return host + '/' + repoPath + (path || '');
+}
 document.addEventListener('DOMContentLoaded', () => app.init());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });
+
+// Issue #67: 全局苹果风格确认 modal（knowledge.js / skills.js 共用）
+function _showAppleConfirm(message, onConfirm, onCancel) {
+  var modal = document.createElement('div');
+  modal.id = 'appleConfirmModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = '<div class="cd" style="width:360px;padding:24px;border-radius:14px;text-align:center">' +
+    '<p style="font-size:14px;color:var(--t);margin-bottom:20px;line-height:1.5">' + message + '</p>' +
+    '<div style="display:flex;gap:10px">' +
+    '<button id="appleConfirmCancel" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">' + (I18N.t('common.cancel') || '取消') + '</button>' +
+    '<button id="appleConfirmOk" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#ff3b30;color:#fff;cursor:pointer">' + (I18N.t('common.confirm') || '确认') + '</button>' +
+    '</div></div>';
+  document.body.appendChild(modal);
+  modal.onclick = function(e) { if (e.target === modal) { modal.remove(); if (onCancel) onCancel(); } };
+  document.getElementById('appleConfirmOk').onclick = function() { modal.remove(); if (onConfirm) onConfirm(); };
+  document.getElementById('appleConfirmCancel').onclick = function() { modal.remove(); if (onCancel) onCancel(); };
+}

@@ -1,9 +1,9 @@
 """Project Templates 路由：模板列表获取与一键创建"""
-import json, os, re, asyncio
+import json, os, re, asyncio, base64
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.api.deps import get_current_user, get_user_token
-from src.config import log, CONFIG_DIR
+from src.config import log, CONFIG_DIR, EXAMPLE_DIR
 from src.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
 
 router = APIRouter(prefix="/api/project-templates", tags=["project-templates"])
@@ -61,71 +61,83 @@ def list_templates(user: dict = Depends(get_current_user)):
     return {"categories": data.get("categories", [])}
 
 
-@router.get("/top1000")
-def list_top1000_templates(
-    platform: str = "all",
-    page: int = 0,
-    size: int = 20,
-    sort_by: str = "stars",
-    keyword: str = "",
-    user: dict = Depends(get_current_user),
-):
-    """Returns featured project templates (from DB featured_templates table, supports pagination + search + sorting)"""
-    import logging
-    _log = logging.getLogger(__name__)
-    from src.session_manager import db, db_lock
-    try:
-        offset = page * size
-        where_clauses = []
-        params = []
-        if platform and platform != "all" and platform != "undefined":
-            where_clauses.append("platform = ?")
-            params.append(platform)
-        if keyword:
-            where_clauses.append("(repo_full_name LIKE ? OR description LIKE ? OR repo_name LIKE ?)")
-            params.extend([f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"])
-        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-        sort_col = "stars" if sort_by == "stars" else "forks" if sort_by == "forks" else "stars"
-        with db_lock:
-            c = db.cursor()
-            c.execute(f"SELECT COUNT(*) FROM featured_templates{where_sql}", params)
-            total = c.fetchone()[0]
-            c.execute(
-                f"SELECT platform, repo_full_name, repo_name, description, language, "
-                f"stars, forks, topics, html_url, clone_url, category, recommend_reason, fetched_at "
-                f"FROM featured_templates{where_sql} "
-                f"ORDER BY {sort_col} DESC LIMIT ? OFFSET ?",
-                params + [size, offset]
-            )
-            rows = c.fetchall()
-        import json as _json
-        templates = []
-        for r in rows:
-            topics = []
+@router.get("/{template_id}/readme")
+def get_template_readme(template_id: str, user: dict = Depends(get_current_user)):
+    """获取模板 README 内容（本地优先，git 来源从 GitCode/GitHub API 拉取）"""
+    ctx = _find_template(template_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"模板 '{template_id}' 不存在"})
+    tpl = ctx["template"]
+
+    # 1. 本地模板：直接读 examples/{id}/README.md
+    if tpl.get("source") == "local":
+        readme_path = os.path.join(EXAMPLE_DIR, template_id, "README.md")
+        if os.path.exists(readme_path):
             try:
-                topics = _json.loads(r[7]) if r[7] else []
-            except Exception:
-                pass
-            templates.append({
-                "id": f"{r[0]}-{r[1].replace('/', '-')}",
-                "name": r[2],
-                "description": (r[3] or "")[:120],
-                "recommend_reason": r[11] or "",
-                "icon": "📦",
-                "source": "git",
-                "source_repo": r[1],
-                "source_platform": r[0],
-                "clone_url": r[9],
-                "html_url": r[8] or "",
-                "default_repo_name": r[2].lower()[:30],
-                "tags": topics[:5] or ([r[4]] if r[4] else []),
-                "scene_id": "default",
-                "stats": {"show": True, "stars": r[5], "language": r[4], "platform": r[0]},
-            })
-        return {"templates": templates, "total": total, "page": page, "size": size}
+                with open(readme_path, "r", encoding="utf-8") as f:
+                    return {"content": f.read(), "source": "local"}
+            except Exception as e:
+                log.warning(f"read local readme failed: {e}")
+        return {"content": "", "source": "local"}
+
+    # 2. git 来源：从 GitCode/GitHub API 拉取
+    source_repo = tpl.get("source_repo", "")
+    source_platform = tpl.get("source_platform", "gitcode")
+    if not source_repo:
+        return {"content": "", "source": "git"}
+
+    try:
+        import requests
+        if source_platform == "github":
+            url = f"https://api.github.com/repos/{source_repo}/readme"
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            github_token = os.environ.get("GITHUB_TOKEN", "")
+            if github_token:
+                headers["Authorization"] = f"token {github_token}"
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
+                return {"content": content, "source": "github"}
+        else:
+            url = f"https://api.gitcode.com/api/v5/repos/{source_repo}/contents/README.md"
+            gitcode_pat = os.environ.get("GITCODE_PAT", "")
+            headers = {}
+            if gitcode_pat:
+                headers["PRIVATE-TOKEN"] = gitcode_pat
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
+                return {"content": content, "source": "gitcode"}
+            # 尝试小写 readme.md
+            url2 = f"https://api.gitcode.com/api/v5/repos/{source_repo}/contents/readme.md"
+            r2 = requests.get(url2, headers=headers, timeout=10)
+            if r2.status_code == 200:
+                content = base64.b64decode(r2.json().get("content", "")).decode("utf-8")
+                return {"content": content, "source": "gitcode"}
     except Exception as e:
-        _log.warning(f"list_top1000_templates: featured_templates table may not exist or query failed: {e}. Run scripts/sync_featured_templates.py to populate.")
-        return {"templates": [], "total": 0, "page": page, "size": size}
+        log.warning(f"fetch readme for {template_id} failed: {e}")
+
+    return {"content": "", "source": "git"}
+
+
+@router.get("/{template_id}/preview")
+def get_template_preview(template_id: str, user: dict = Depends(get_current_user)):
+    """获取模板预览图 HTML（本地模板读取 examples/{id}/preview.html）"""
+    ctx = _find_template(template_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"模板 '{template_id}' 不存在"})
+    tpl = ctx["template"]
+
+    if tpl.get("source") == "local":
+        preview_path = os.path.join(EXAMPLE_DIR, template_id, "preview.html")
+        if os.path.exists(preview_path):
+            try:
+                with open(preview_path, "r", encoding="utf-8") as f:
+                    return {"content": f.read(), "source": "local"}
+            except Exception as e:
+                log.warning(f"read local preview failed: {e}")
+
+    return {"content": "", "source": "none"}
 
 
 class CreateTemplateRequest(BaseModel):
@@ -142,9 +154,11 @@ async def create_from_template(body: CreateTemplateRequest,
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"模板 '{body.template_id}' 不存在"})
     tpl = ctx["template"]
 
-    api_token = get_user_token(user["username"])
+    # 按 provider 分流：优先 GitHub token，降级 GitCode
+    from src.api.routes.repos import _get_user_provider_and_token
+    provider, api_token = _get_user_provider_and_token(user["username"])
     if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
     repo_name = (body.repo_name or tpl.get("default_repo_name", tpl.get("id", ""))).strip()
     if not _REPO_NAME_RE.match(repo_name):
@@ -154,22 +168,30 @@ async def create_from_template(body: CreateTemplateRequest,
     #    继续走 push + 托管流程（空仓库可复用；非空仓库 push 冲突时再报错）
     repo_created = False
     try:
-        gitcode_login = get_user_gitcode_login(api_token)
-        if not gitcode_login:
-            raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
-        create_repo(api_token, repo_name, description=tpl.get("description", ""))
+        if provider == "github":
+            from src.user.repo_manager import get_user_github_login, create_github_repo
+            owner_login = get_user_github_login(api_token)
+            if not owner_login:
+                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前 GitHub 用户身份"})
+            create_github_repo(api_token, repo_name, description=tpl.get("description", ""))
+        else:
+            gitcode_login = get_user_gitcode_login(api_token)
+            if not gitcode_login:
+                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
+            owner_login = gitcode_login
+            create_repo(api_token, repo_name, description=tpl.get("description", ""))
         repo_created = True
     except HTTPException:
         raise
     except Exception as e:
         msg = str(e)
-        # GitCode 同名仓库冲突：HTTP 409/422 + "already exists"/"same name"/"已存在"
+        # 同名仓库冲突：HTTP 409/422 + "already exists"/"same name"/"已存在"
         if any(k in msg for k in ("409", "422", "already exists", "same name", "已存在", "已经存在")):
             repo_created = False  # 仓库已存在，尝试复用
         else:
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {msg}"})
 
-    full_name = f"{gitcode_login}/{repo_name}"
+    full_name = f"{owner_login}/{repo_name}"
 
     # 2. 写入模板代码（放到 executor 避免阻塞 event loop）
     try:
@@ -177,12 +199,12 @@ async def create_from_template(body: CreateTemplateRequest,
         import asyncio, functools
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None,
-            functools.partial(push_template_to_repo, tpl, gitcode_login, repo_name,
-                              api_token, bot_token=bot_token))
+            functools.partial(push_template_to_repo, tpl, owner_login, repo_name,
+                              api_token, bot_token=bot_token, provider=provider))
     except Exception as e:
         log.warning(f"template push failed: {e}")
         if not repo_created:
-            raise HTTPException(status_code=409, detail={"code": 409, "message": f"同名仓库 {gitcode_login}/{repo_name} 已存在且模板代码写入失败（可能是该仓库已有内容）。请更换仓库名，或在仓库管理页对该仓库手动操作。"})
+            raise HTTPException(status_code=409, detail={"code": 409, "message": f"同名仓库 {owner_login}/{repo_name} 已存在且模板代码写入失败（可能是该仓库已有内容）。请更换仓库名，或在仓库管理页对该仓库手动操作。"})
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但模板代码写入失败: {e}"})
 
     # 3. 自动加入托管（复用 /api/repos/host 全链路）
@@ -226,34 +248,28 @@ async def create_from_template(body: CreateTemplateRequest,
             host_warning = f"托管配置失败：{host_warning}"
         else:
             host_warning = "托管配置失败"
-        msg += f"。⚠️ 重要提醒：请到 GitCode 仓库设置 → 成员管理，将机器人账号（{bot_username}）添加为维护者，然后手动托管仓库以完成自动化配置。"
+        msg += f"。⚠️ 重要提醒：请到仓库设置 → 成员管理，将机器人账号（{bot_username}）添加为维护者，然后手动托管仓库以完成自动化配置。"
 
-    # 4. 应用开发场景
-    #    apply_scene 同样是同步函数，用 to_thread 避免阻塞
-    scene_id = tpl.get("scene_id") or ctx.get("scene_id") or "default"
-    try:
-        from src.api.routes.scenes import ApplySceneRequest, apply_scene
-        await asyncio.to_thread(apply_scene, gitcode_login, repo_name, ApplySceneRequest(scene_id=scene_id), user)
-    except Exception as e:
-        log.warning(f"template apply scene failed: {e}")
-
-    # 5. 持久化开发场景 + 异步首次托管引导（仅模板创建触发）
+    # 4. 异步首次托管引导（仅模板创建触发）
+    #    dev_scene 已退役，不再写仓库级场景指针；场景数据由仓库托管时
+    #    apply_default_scene_to_repo 自动复刻，Issue 级场景由用户/智能推荐决定。
     try:
         from src.repo_key import to_repo_key
-        from src.user.db import set_repo_scene
         from src.api.onboarding import trigger_onboarding, cleanup_stale_repo_data
-        repo_key = to_repo_key(full_name)
-        owner = user.get("username", "") or gitcode_login
+        repo_key = to_repo_key(full_name, provider=provider)
+        owner = user.get("username", "") or owner_login
         # 仓库是全新创建时，清理同名旧仓库可能残留的 DB 数据
         # （旧仓库若被用户在 GitCode 网页直接删除、未走解除托管，
         #   events/issue_state/agent_tasks/sessions 等残留，导致新仓库前端界面混乱）
         if repo_created:
             cleanup_stale_repo_data(repo_key)
-        set_repo_scene(repo_key, scene_id)
-        trigger_onboarding(repo_key, owner)
+        trigger_onboarding(repo_key, owner, template_id=body.template_id)
     except Exception as e:
         log.warning(f"template onboarding trigger failed: {e}")
 
-    return {"full_name": full_name, "webhook_id": webhook_id, "scene_id": scene_id,
+    from src.repo_key import to_repo_key as _to_rk
+    return {"full_name": full_name, "webhook_id": webhook_id,
             "host_warning": host_warning,
-            "message": msg}
+            "message": msg,
+            "provider": provider,
+            "repo_key": _to_rk(full_name, provider=provider) if provider else ""}

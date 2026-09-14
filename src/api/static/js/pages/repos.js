@@ -43,7 +43,7 @@ function switchSidebarTab(tab) {
       const hosted = repos.filter(r => r.is_hosted);
       if (hosted.length > 0) {
         const first = hosted[0];
-        selectRepo(first.full_name, first.owner, first.name);
+        selectRepo(first.full_name, first.owner, first.name, first.repo_key);
       } else {
         _renderWorkspaceEmpty();
       }
@@ -194,17 +194,38 @@ function goRepoPage(dir) {
   }
 }
 
+function _repoUrl(r) {
+  var rk = r.repo_key || '';
+  var fn = r.full_name || (r.owner ? r.owner + '/' + r.name : '');
+  if (rk.indexOf('github:') === 0) return 'https://github.com/' + fn;
+  return 'https://gitcode.com/' + fn;
+}
+function _repoPlatform(r) {
+  var rk = r.repo_key || '';
+  if (rk.indexOf('github:') === 0) return 'GitHub';
+  return 'GitCode';
+}
+
+function _repoPlatformIcon(r) {
+  var rk = r.repo_key || '';
+  if (rk.indexOf('github:') === 0)
+    return '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>';
+  return '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+}
+
 function _buildProjectCard(r) {
-  const repoUrl = 'https://gitcode.com/' + (r.full_name || '');
+  const repoUrl = _repoUrl(r);
   const initials = (r.name || '?').substring(0, 2).toUpperCase();
   const statusTxt = r.is_hosted ? I18N.t('repos.card.status_hosted') : I18N.t('repos.card.status_not_joined');
   const statusCls = r.is_hosted ? 'project-card-status-hosted' : 'project-card-status-none';
+  const platformIcon = _repoPlatformIcon(r);
+  const platformName = _repoPlatform(r);
 
   var actionHtml;
   if (r.is_hosted) {
-    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();selectRepo(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">' + I18N.t('repos.card.enter_project') + '→</button>';
+    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();selectRepo(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\',\'' + (r.repo_key || '') + '\')">' + I18N.t('repos.card.enter_project') + '→</button>';
   } else if (r.can_host) {
-    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();hostAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\')">' + I18N.t('repos.card.join_and_host') + '→</button>';
+    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();hostAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\',\'' + (r.repo_key || '') + '\')">' + I18N.t('repos.card.join_and_host') + '→</button>';
   } else {
     actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();hostNoPermission()">' + I18N.t('repos.card.join_and_host') + '→</button>';
   }
@@ -213,7 +234,7 @@ function _buildProjectCard(r) {
     '<span class="project-card-ic">' + initials + '</span>' +
     '<div class="project-card-info">' +
       '<span class="project-card-name" title="' + (r.full_name || '').replace(/"/g, '&quot;') + '">' + (r.name || '') + '</span>' +
-      '<span class="project-card-meta">' + r.owner + ' · ' + r.role + '</span>' +
+      '<span class="project-card-meta">' + platformIcon + ' ' + platformName + ' · ' + r.owner + ' · ' + r.role + '</span>' +
     '</div>' +
     '<span class="project-card-status ' + statusCls + '">' + statusTxt + '</span>' +
     '<div class="project-card-actions">' +
@@ -270,12 +291,15 @@ function renderRepos() {
       managedRepos.forEach(r => {
         const statusClass = r.is_hosted ? 'tg-s' : 'tg-d';
         const statusText = r.is_hosted ? 'Active' : 'Joined';
+        const platformIcon = _repoPlatformIcon(r);
+        const platformName = _repoPlatform(r);
         html += `<div class="repo-item" style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--b)">
-          <span class="tg tg-c" style="font-size:11px;padding:3px 8px;cursor:pointer" onclick="selectRepo('${r.full_name}','${r.owner}','${r.name}')">${r.full_name}</span>
+          ${platformIcon} <span class="ts t3">${platformName}</span>
+          <span class="tg tg-c" style="font-size:11px;padding:3px 8px;cursor:pointer" onclick="selectRepo('${r.full_name}','${r.owner}','${r.name}','${r.repo_key || ''}')">${r.full_name}</span>
           <span class="ts t2">${r.role}</span>
           <span class="ts t3">${r.is_hosted ? 'Webhook OK' : ''} · ★ ${r.name}</span>
           <span class="tg ${statusClass}" style="margin-left:auto">${statusText}</span>
-          <button class="bt bt-o bt-s" onclick="event.stopPropagation();unhostRepo('${r.full_name}')" style="color:var(--r);border-color:var(--r)">${I18N.t('repos.managed.unhost_btn')}</button>
+          <button class="bt bt-o bt-s" onclick="event.stopPropagation();unhostRepo('${r.full_name}',event)" style="color:var(--r);border-color:var(--r)">${I18N.t('repos.managed.unhost_btn')}</button>
         </div>`;
       });
     }
@@ -286,14 +310,14 @@ function renderRepos() {
       html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_available') + '</div>';
     } else {
       html += `<div class="tw"><table>
-        <tr><th>${I18N.t('repos.managed.th_repository')}</th><th>${I18N.t('repos.managed.th_role')}</th><th>${I18N.t('repos.managed.th_description')}</th><th></th></tr>`;
+        <tr><th>${I18N.t('repos.managed.th_repository')}</th><th>Platform</th><th>${I18N.t('repos.managed.th_role')}</th><th>${I18N.t('repos.managed.th_description')}</th><th></th></tr>`;
       availableRepos.forEach(r => {
         const roleTag = r.role === 'Admin' ? `<span class="tg tg-s">${r.role}</span>` :
                         r.role === 'Member' ? `<span class="tg tg-d">${r.role}</span>` : r.role;
         const btnHtml = r.can_host
           ? `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}')">${I18N.t('repos.available_btn.join_and_host')}</button>`
           : `<button class="bt bt-o bt-s" onclick="event.stopPropagation();hostNoPermission()">${I18N.t('repos.available_btn.join_and_host')}</button>`;
-        html += `<tr><td><b>${r.full_name}</b></td><td>${roleTag}</td><td>${r.description || ''}</td><td>${btnHtml}</td></tr>`;
+        html += `<tr><td><b>${r.full_name}</b></td><td>${_repoPlatformIcon(r)} ${_repoPlatform(r)}</td><td>${roleTag}</td><td>${r.description || ''}</td><td>${btnHtml}</td></tr>`;
       });
       html += `</table></div>`;
     }
@@ -331,19 +355,76 @@ function refreshRepos(btn) {
   });
 }
 
-function hostAndSelect(fullName, owner, name) {
+function hostAndSelect(fullName, owner, name, repoKey) {
   API.post('/repos/host', {full_name: fullName}).then(r => {
-    app.showToast(I18N.t('repos.sync.host_success'));
-    app.loadProfile().then(() => selectRepo(fullName, owner, name));
+    // GitHub 仓库托管后检查 bot collaborator 状态
+    if (r.bot_collaborator_needed) {
+      _showBotCollaboratorPrompt(r, fullName, owner, name, repoKey);
+    } else {
+      app.showToast(I18N.t('repos.sync.host_success'));
+      app.loadProfile().then(() => selectRepo(fullName, owner, name, repoKey));
+    }
   }).catch(e => app.showToast(I18N.t('repos.sync.host_failed', {msg: e.message})));
+}
+
+function _showBotCollaboratorPrompt(resp, fullName, owner, name, repoKey) {
+  var botUser = resp.bot_username || '';
+  var status = resp.bot_status || '';
+  var inviteUrl = resp.bot_invite_url || '';
+  var title, message;
+
+  if (status === 'not_configured') {
+    title = I18N.t('repos.bot.title') || 'Bot 未配置';
+    message = I18N.t('repos.bot.not_configured') || 'GitHub Bot 未配置，请联系管理员在 global-bot-token.json 中设置 github_bot_token 和 github_bot_username。仓库已托管，但 Agent 自动操作可能受限。';
+  } else if (status === 'invite_pending') {
+    title = I18N.t('repos.bot.title') || '需要添加 Bot 为维护者';
+    message = (I18N.t('repos.bot.invite_pending') || 'Bot {{bot}} 已被邀请加入仓库，但邀请尚未被接受。\n请前往 GitHub 仓库 Settings → Collaborators 接受邀请，或手动将 {{bot}} 添加为维护者。')
+      .replace(/\{\{bot\}\}/g, botUser);
+  } else if (status === 'add_failed') {
+    title = I18N.t('repos.bot.title') || '需要手动添加 Bot';
+    message = (I18N.t('repos.bot.add_failed') || '自动添加 Bot {{bot}} 为仓库维护者失败。\n请前往 GitHub 仓库 Settings → Collaborators 手动添加 {{bot}} 为维护者（Maintainer）。')
+      .replace(/\{\{bot\}\}/g, botUser);
+  } else if (status === 'insufficient_permission') {
+    title = I18N.t('repos.bot.title') || 'Bot 权限不足';
+    message = (I18N.t('repos.bot.insufficient') || 'Bot {{bot}} 已加入仓库但权限不足。\n请在 GitHub 仓库 Settings → Collaborators 中将 {{bot}} 的权限设为 Maintainer 或 Admin。')
+      .replace(/\{\{bot\}\}/g, botUser);
+  } else {
+    title = I18N.t('repos.bot.title') || '需要添加 Bot 为维护者';
+    message = (I18N.t('repos.bot.default') || '请前往 GitHub 仓库将 Bot {{bot}} 添加为维护者，确保 Agent 可以正常操作仓库。')
+      .replace(/\{\{bot\}\}/g, botUser);
+  }
+
+  if (window._grapeConfirm) {
+    window._grapeConfirm({
+      title: title,
+      message: message,
+      confirmText: I18N.t('repos.bot.go_github') || '前往 GitHub 设置',
+      cancelText: I18N.t('repos.bot.enter_repo') || '先进入仓库',
+      onConfirm: function() {
+        // 只打开 GitHub 设置页，不自动进入仓库
+        // 用户在 GitHub 改完权限后回来重新托管或刷新
+        if (inviteUrl) window.open(inviteUrl, '_blank');
+        app.showToast(I18N.t('repos.bot.come_back') || '在 GitHub 设置完成后，回来重新托管或刷新页面');
+      },
+      onCancel: function() {
+        // 用户选择先进入仓库（bot 权限后续再设置）
+        app.loadProfile().then(() => selectRepo(fullName, owner, name, repoKey));
+      }
+    });
+  } else {
+    // 兜底：alert + 进入仓库
+    alert(title + '\n\n' + message);
+    if (inviteUrl) window.open(inviteUrl, '_blank');
+    app.loadProfile().then(() => selectRepo(fullName, owner, name, repoKey));
+  }
 }
 
 function hostNoPermission() {
   app.showToast(I18N.t('repos.card.no_permission_host'));
 }
 
-function selectRepo(fullName, owner, name) {
-  localStorage.setItem('currentRepo', JSON.stringify({fullName, owner, name}));
+function selectRepo(fullName, owner, name, repoKey) {
+  localStorage.setItem('currentRepo', JSON.stringify({fullName, owner, name, repoKey: repoKey || ''}));
   const sidebar = document.getElementById('sidebar');
   const mainView = document.getElementById('mainView');
   const tb = document.getElementById('tb');
@@ -361,8 +442,23 @@ function selectRepo(fullName, owner, name) {
   app.nav('dash');
 }
 
-function unhostRepo(fullName) {
-  if (!confirm(I18N.t('repos.unhost.confirm', {name: fullName}))) return;
+function unhostRepo(fullName, event) {
+  if (window._grapeConfirm) {
+    _grapeConfirm({
+      title: I18N.t('repos.unhost.confirm_title') || '解除托管',
+      message: I18N.t('repos.unhost.confirm', {name: fullName}),
+      confirmText: I18N.t('repos.unhost.confirm_btn') || '解除托管',
+      danger: true,
+      onConfirm: function() { _doUnhost(fullName); }
+    }, event);
+  } else {
+    app.showConfirm(I18N.t('repos.unhost.confirm', {name: fullName}), function() {
+      _doUnhost(fullName);
+    }, {danger: true, confirmText: I18N.t('repos.unhost.confirm_btn') || '解除托管'});
+  }
+}
+
+function _doUnhost(fullName) {
   API.post('/repos/remove', {full_name: fullName}).then(r => {
     app.showToast(I18N.t('repos.unhost.done'));
     app.loadProfile().then(() => {
@@ -373,6 +469,7 @@ function unhostRepo(fullName) {
       API.get('/repos/managed').then(md => {
         const remaining = md.repos || [];
         if (wasCurrent || remaining.length === 0) {
+          // 当前仓库被解除或已无托管仓库 → 回到仓库选择页
           API.get('/repos/member').then(d => {
             const repos = d.repos || [];
             document.getElementById('sidebar').style.display = 'none';
@@ -386,6 +483,7 @@ function unhostRepo(fullName) {
             renderRepoSelection(repos);
           });
         } else {
+          // 还有其他托管仓库 → 刷新仓库管理页
           document.getElementById('pageTitle').textContent = I18N.t('repos.unhost.select_repo');
           renderRepos();
         }

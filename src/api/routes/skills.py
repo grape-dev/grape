@@ -5,12 +5,31 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, get_current_user_or_api_key
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
 # 解压后总大小上限（zip 炸弹防护，见 obs-skill-storage-design.md §7）
 MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
+
+
+def _resolve_repo_key(repo: str) -> str:
+    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(repo)
+    if ":" in repo:
+        return rk
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            c = _db.cursor()
+            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+                            (f"gitcode:{repo}", f"github:{repo}")).fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return rk
 
 
 def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
@@ -32,8 +51,8 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
     return buf.getvalue()
 
 
-@router.get("")
-def list_skills(user: dict = Depends(get_current_user), repo: str = "", scope: str = "",
+@router.get("", operation_id="skills_list", summary="技能列表")
+def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "", scope: str = "",
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
@@ -48,7 +67,7 @@ def list_skills(user: dict = Depends(get_current_user), repo: str = "", scope: s
                              batch_skill_scenes)
 
     # repo 参数可能是 fullName（xiaowu2119/hello-skill），转成 repo_key（gitcode:xiaowu2119/hello-skill）
-    repo_key = to_repo_key(repo) if repo else ""
+    repo_key = _resolve_repo_key(repo) if repo else ""
 
     # 构建查询条件
     conditions = ["is_active=1"]
@@ -279,66 +298,6 @@ def search_skills(q: str = "", user: dict = Depends(get_current_user)):
     return {"skills": results}
 
 
-@router.post("/sync-official")
-async def sync_official_skills(user: dict = Depends(get_current_user)):
-    """从 configs/skill-description.json 同步官方技能到 skill 表，并触发 OBS 同步。
-
-    1. DB 同步：新增 INSERT + 已有 UPDATE 元信息（display_name/description/agent_type）
-    2. OBS 同步：计算 content_hash，变更的技能打包 zip 上传 OBS
-    返回同步结果。
-    """
-    from src.session_manager import db, db_lock
-
-    config_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs")
-    json_path = os.path.join(config_dir, "skill-description.json")
-    if not os.path.exists(json_path):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "skill-description.json 未找到"})
-
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    added = 0
-    # 1. DB 同步（INSERT/UPDATE 元信息）
-    with db_lock:
-        c = db.cursor()
-        for skill_name, info in data.items():
-            display_name = info.get("name", skill_name)
-            description = info.get("description", "")
-            agent_type = info.get("agent_type", "")
-            skill_path = info.get("path", skill_name)
-            existed = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'", (skill_name,)).fetchone()[0]
-            if existed:
-                _fp = c.execute("SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''", (skill_name,)).fetchone()
-                if _fp:
-                    c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, skill_name)
-                    )
-                else:
-                    c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, skill_path, skill_name)
-                    )
-            else:
-                c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash) VALUES (?,?,?,?,?,'official','',?)",
-                    (skill_name, display_name, description, agent_type, skill_path, "")
-                )
-            if existed == 0:
-                added += 1
-        db.commit()
-
-    # 2. OBS 同步（hash 检测 + 上传）
-    from src.storage.skill_sync import sync_official_skills_to_obs
-    obs_result = await sync_official_skills_to_obs()
-
-    return {
-        "message": f"官方技能同步完成，新增 {added} 个，OBS 同步: +{obs_result['added']} ~{obs_result['updated']} 跳过{obs_result['skipped']}",
-        "added": added,
-        "obs_result": obs_result,
-    }
-
-
 @router.get("/template")
 def download_skill_template():
     """下载技能模板 ZIP（skills/_template 目录打包）。免鉴权（token 通过 query 传递）。"""
@@ -386,7 +345,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_current_use
     """
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key, from_repo_key
-    repo_key = to_repo_key(repo) if repo else ""
+    repo_key = _resolve_repo_key(repo) if repo else ""
     with db_lock:
         c = db.cursor()
         if repo_key:
@@ -439,8 +398,8 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_current_use
                     headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
 
 
-@router.get("/by-id/{skill_id}")
-def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user),
+@router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="技能详情（含 SKILL.md）")
+def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_or_api_key),
                                  repo: str = ""):
     """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
 
@@ -618,7 +577,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
             from src.user.db import upsert_skill_obs
             from src.repo_key import to_repo_key
-            owner = to_repo_key(repo) if scope == "repo" else str(user["id"])
+            owner = _resolve_repo_key(repo) if scope == "repo" else str(user["id"])
             db_scope = "repo" if scope == "repo" else "user"
             try:
                 # 固定 key（v2.4 去版本化）：putObject 同 key 原子覆盖（最后写者胜）；
@@ -642,7 +601,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         # ===== local 分支 =====
         if scope == "repo":
             from src.repo_key import to_repo_key, from_repo_key
-            repo_key = to_repo_key(repo)
+            repo_key = _resolve_repo_key(repo)
             target_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", from_repo_key(repo_key), skill_name)
             os.makedirs(os.path.dirname(target_dir), exist_ok=True)
             if os.path.exists(target_dir):
@@ -771,8 +730,8 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_current_us
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "目标仓库不能为空"})
 
-    from src.repo_key import to_repo_key, from_repo_key
-    repo_key = to_repo_key(repo)
+    from src.repo_key import from_repo_key
+    repo_key = _resolve_repo_key(repo)
 
     # 1. 查原个人技能（须属于当前用户）
     skill_rec = next((s for s in user_db.list_skills(user["id"]) if s["skill_name"] == skill_name), None)

@@ -62,6 +62,8 @@
   "no_task_events": "No task events",
   "task_list": "Task List",
   "task_list_subtitle": "{{count}} issues — click to expand",
+  "search_tasks_placeholder": "Search issue number or title... (type #number to locate)",
+  "no_matching_tasks": "No matching tasks",
   "has_failure": "❌ Has failures",
   "normal": "✓ OK",
   "events_count": "{{count}} events",
@@ -138,5 +140,6 @@
   "col_agent": "Agent",
   "col_skill": "Skill",
   "col_issue_seq": "Issue / Seq",
-  "col_failed_short": "Failed"
+  "col_failed_short": "Failed",
+  "rows_per_page": "Per page"
 }

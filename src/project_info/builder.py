@@ -8,7 +8,7 @@
   * 分析副本:      {WORKSPACE_DIR}/{owner}/{repo}/project-info/codegraph-repo/  （生成器专用，非 bare）
   * 产物:          {WORKSPACE_DIR}/{owner}/{repo}/project-info/
 """
-import json, os, shutil, subprocess, threading
+import json, os, shutil, subprocess, hashlib
 from src.config import log, WORKSPACE_DIR
 from src.repo_key import split_owner_repo
 
@@ -117,31 +117,72 @@ def _write_file(repo_key: str, name: str, content: str):
 def _write_to_obs(repo_key: str, name: str, content: str):
     """写 OBS + 落库 baseline 记录。OBS 写失败时只 log warning（降级到本地）。
 
-    OBS 未启用时：跳过 OBS 上传，但仍写 DB（obs_key 留空），
-    保证 agent_shared_knowledge 表的 content_hash/file_path 与本地文件同步，
-    防止前端读到旧记录（如 codegraph 重新生成后 DB 仍为降级版本）。
+    Issue #95：补 source='system' / name / description / created_by / OBS key 格式统一。
     """
     import hashlib
     try:
         from src.storage import get_storage
+        from src.repo_key import split_owner_repo
         storage = get_storage()
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
         file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)
+        # Issue #95：name 映射为中文展示名
+        _name_map = {
+            _GRAPH_FILE: "项目结构图谱",
+            _CAP_FILE: "项目能力清单",
+            _META_FILE: "项目元数据",
+        }
+        display_name = _name_map.get(name, name)
         storage_key = ""
         if storage:
-            storage_key = f"project-info/{repo_key}/{name}"
+            # Issue #95：OBS key 格式统一为 knowledge/{owner}/{repo}/project-info/{name}
+            owner, rname = split_owner_repo(repo_key)
+            storage_key = f"knowledge/{owner}/{rname}/project-info/{name}"
             storage.save_bytes(storage_key, content.encode("utf-8"))
-        # 无论 OBS 是否启用，都写 DB（obs_key 留空时前端走本地文件读取）
+        # 无论 OBS 是否启用，都写 DB
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "INSERT OR REPLACE INTO agent_shared_knowledge "
-                "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by) "
-                "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'vod')",
-                (repo_key, file_path, storage_key, content_hash)
-            )
+            # Issue #95：先查有没有已存在记录（避免 INSERT OR REPLACE 删旧 id 导致 ref 失效）
+            existing = c.execute(
+                "SELECT id FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope='baseline' AND file_path=?",
+                (repo_key, file_path)
+            ).fetchone()
+            if existing:
+                # 已存在 → UPDATE（保留原 id，ref 不失效）
+                kid = existing[0]
+                c.execute(
+                    "UPDATE agent_shared_knowledge SET "
+                    "status='accepted', obs_key=?, content_hash=?, created_by='system', "
+                    "source='system', name=?, description=? "
+                    "WHERE id=?",
+                    (storage_key, content_hash, display_name,
+                     "codegraph 自动生成的项目基线知识", kid)
+                )
+            else:
+                # 不存在 → INSERT
+                c.execute(
+                    "INSERT INTO agent_shared_knowledge "
+                    "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, name, description) "
+                    "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'system', 'system', ?, ?)",
+                    (repo_key, file_path, storage_key, content_hash, display_name,
+                     "codegraph 自动生成的项目基线知识")
+                )
+                kid = c.lastrowid
             db.commit()
+            # Issue #95：自动创建 ref（baseline → 全局关联，幂等）
+            if kid:
+                try:
+                    c.execute(
+                        "INSERT OR IGNORE INTO scene_knowledge_ref "
+                        "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+                        "VALUES (?, '', '', 0, 1, 'system')",
+                        (kid,)
+                    )
+                    db.commit()
+                except Exception:
+                    pass
     except Exception as e:
         log.warning(f"project-info OBS write failed {repo_key}/{name}: {e}")
 
@@ -241,11 +282,13 @@ def _build_capabilities_md(repo_key: str, meta: dict, tech: str, features: str, 
     )
 
 
-def build_project_info(repo_key: str, token: str = "") -> dict:
+def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew_fn=None) -> dict:
     """生成/更新某 repo 的 project-info，返回 {ok, degraded, reason}。
 
     codegraph 可用 → 分析副本 + codegraph explore 生成（degraded=false）；
     codegraph 不可用 → 降级：仅基于 README + GitCode API 的基础信息（degraded=true）。
+
+    Issue #103：lock_key + renew_fn 支持构建过程中锁续期，防止大仓库 build 超时锁过期。
     """
     owner, rname = split_owner_repo(repo_key)
     meta = _read_meta(repo_key)
@@ -259,7 +302,7 @@ def build_project_info(repo_key: str, token: str = "") -> dict:
         tok = token or get_gitcode_token(repo_key=repo_key) or ""
         if tok:
             req = urllib.request.Request(
-                f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
                 headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
             import json as _json
             commits = _json.load(urllib.request.urlopen(req, timeout=20))
@@ -284,11 +327,36 @@ def build_project_info(repo_key: str, token: str = "") -> dict:
         _write_meta(repo_key, meta)
         return {"ok": False, "degraded": True, "reason": "analysis worktree failed"}
 
-    # codegraph 探索
+    # codegraph 探索（Issue #103：每两步续期锁，防止大仓库 build 超时）
     arch = _codegraph_explore(work, "main entry point application startup", 10)
     modules = _codegraph_explore(work, "module import dependency", 15)
+    if renew_fn and not renew_fn():
+        log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        # 只写本地 meta，不调 _write_meta（避免 _write_to_obs 在无锁状态下写 OBS+DB）
+        meta["degraded"] = True
+        meta["note"] = "build aborted: distributed lock lost"
+        try:
+            p = os.path.join(_pi_dir(repo_key), _META_FILE)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     chains = _codegraph_explore(work, "API routes endpoints handlers", 10)
     files = _codegraph_files(work)
+    if renew_fn and not renew_fn():
+        log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        meta["degraded"] = True
+        meta["note"] = "build aborted: distributed lock lost"
+        try:
+            p = os.path.join(_pi_dir(repo_key), _META_FILE)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     tech = _codegraph_explore(work, "tech stack dependencies", 8)
     features = _codegraph_explore(work, "features capabilities", 8)
     api = _codegraph_explore(work, "API endpoints", 8)
@@ -322,7 +390,7 @@ def should_refresh(repo_key: str) -> bool:
             if tok:
                 owner, rname = split_owner_repo(repo_key)
                 req = urllib.request.Request(
-                    f"https://api.gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                    f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
                     headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
                 commits = _json.load(urllib.request.urlopen(req, timeout=20))
                 if commits and commits[0].get("sha", "") != last_sha:
@@ -341,24 +409,20 @@ def should_refresh(repo_key: str) -> bool:
     return False
 
 
-_lock_guard = threading.Lock()
-_building: set[str] = set()
-
-
 def maybe_refresh_project_info(repo_key: str, token: str = ""):
-    """webhook 触发的后台刷新（不阻塞调用方）。并发防重。"""
+    """webhook 触发的后台刷新（不阻塞调用方）。分布式锁跨实例互斥（Issue #103）。"""
     if not repo_key:
         return
-    with _lock_guard:
-        if repo_key in _building:
-            return
-        _building.add(repo_key)
+    from src.lock import acquire_lock, release_lock, renew_lock
+    lock_key = f"project_info_build:{hashlib.md5(repo_key.encode()).hexdigest()[:16]}"
+    if not acquire_lock(lock_key, ttl=300):
+        log.info(f"project-info: lock contention for {repo_key}, skipped")
+        return
     try:
         if should_refresh(repo_key):
             log.info(f"project-info refresh triggered for {repo_key}")
-            build_project_info(repo_key, token)
+            build_project_info(repo_key, token, lock_key=lock_key, renew_fn=lambda: renew_lock(lock_key, ttl=300))
     except Exception as e:
         log.warning(f"project-info refresh failed {repo_key}: {e}")
     finally:
-        with _lock_guard:
-            _building.discard(repo_key)
+        release_lock(lock_key)

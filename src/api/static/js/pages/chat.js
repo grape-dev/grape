@@ -31,19 +31,10 @@ function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStore
  */
 function linkifyIssueNumbers(text, repoKey) {
   if (!text) return '';
-  // repoKey 可能为空（普通对话无仓库）→ 仅当能解析出 owner/repo 时才链接化
-  let ownerRepo = '';
-  if (repoKey) {
-    // 去掉可能的 gitcode: 前缀
-    const parts = repoKey.replace(/^gitcode:/, '').split('/');
-    if (parts.length === 2 && parts[0] && parts[1]) {
-      ownerRepo = parts[0] + '/' + parts[1];
-    }
-  }
   // 匹配 "Issue #N" 或 "issue #N"（N 为数字）
   return text.replace(/(Issue\s*#(\d+))/gi, (match, full, num) => {
-    if (ownerRepo) {
-      const url = `https://gitcode.com/${ownerRepo}/issues/${num}`;
+    if (repoKey) {
+      const url = _vcsUrl(repoKey, '/issues/' + num);
       return `<a href="${url}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${full}</a>`;
     }
     return match; // 无仓库信息时保持原文
@@ -63,13 +54,15 @@ function renderChat(openConvId) {
         <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
       <div id="chatImgPreview" style="display:none;padding:6px 12px;border-top:1px solid var(--b);flex-wrap:wrap;gap:6px"></div>
-      <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><input id="chatInput" placeholder="${I18N.t('chat.placeholder')}" style="flex:1"><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
+      <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" data-tooltip="${I18N.t('chat.video_tooltip')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><input type="file" accept="video/*" style="display:none" onchange="_onChatVideoSelect(this)"></label><textarea id="chatInput" rows="1" placeholder="${I18N.t('chat.placeholder')}" style="flex:1" oninput="_autoResizeTextarea(this)"></textarea><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
     </div>
     <div class="chat-side" id="chatSide"></div>
   </div>`;
   loadConversations(true);  // auto-select first
   loadSideConfig();
   setupChatStream();
+  // Issue #63: 切回来时如果有进行中的接入任务，恢复轮询
+  if (typeof _onboardTaskId !== 'undefined' && _onboardTaskId) pollOnboardStatus();
 }
 
 let _chatSkillScope = 'official';
@@ -220,7 +213,8 @@ function loadConversations(autoSelect) {
     });
     if (convs.length === 0) {
       html += '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">' + I18N.t('chat.conversation.empty_hint') + '</div>';
-      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
+      var _cb = document.getElementById('chatBody');
+      if (_cb) _cb.innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
     list.innerHTML = html;
     list.querySelectorAll('.conv-item').forEach(item => {
@@ -250,9 +244,12 @@ function newConversation() {
   API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
     _currentConvId = d.conversation_id;
     loadConversations();
-    document.getElementById('chatBody').innerHTML = '';
-    document.getElementById('chatInput').disabled = false;
-    document.querySelector('.chat-in button').disabled = false;
+    var _cb = document.getElementById('chatBody');
+    if (_cb) _cb.innerHTML = '';
+    var _ci = document.getElementById('chatInput');
+    if (_ci) _ci.disabled = false;
+    var _btn = document.querySelector('.chat-in button');
+    if (_btn) _btn.disabled = false;
     const hdr = document.querySelector('.chat-hdr h2');
     if (hdr) hdr.textContent = I18N.t('chat.header.title');
   }).catch(e => app.showToast(I18N.t('chat.conversation.create_failed', {msg: e.message})));
@@ -310,7 +307,8 @@ function _doDeleteConv(convId) {
   API.del('/chat/conversations/' + convId).then(() => {
     if (_currentConvId === convId) {
       _currentConvId = null;
-      document.getElementById('chatBody').innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
+      var _cb = document.getElementById('chatBody');
+      if (_cb) _cb.innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
     loadConversations();
     app.showToast(I18N.t('chat.conversation.deleted'));
@@ -387,9 +385,18 @@ function switchConversation(convId) {
   });
 }
 
+function _autoResizeTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function _resetTextareaHeight(el) {
+  el.style.height = '';
+}
+
 function setupChatStream() {
   const input = document.getElementById('chatInput');
-  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') sendChatStream(); });
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatStream(); } });
 }
 
 const _MAX_IMAGES = 9;
@@ -465,11 +472,65 @@ function _clearAllImages() {
   _renderImgPreview();
 }
 
+const _MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50MB
+let _pendingVideo = null; // {data: dataURL, name: string}
+
+function _renderVideoPreview() {
+  var pv = document.getElementById('chatImgPreview');
+  if (!pv) return;
+  // Remove existing video preview
+  var old = pv.querySelector('[data-video-preview]');
+  if (old) old.remove();
+  if (!_pendingVideo) return;
+  if (pv.style.display === 'none') {
+    pv.style.display = 'flex';
+  }
+  var div = document.createElement('div');
+  div.setAttribute('data-video-preview', '1');
+  div.style.cssText = 'position:relative;display:inline-block';
+  div.innerHTML = '<div style="width:56px;height:56px;border-radius:4px;background:var(--bg);display:flex;align-items:center;justify-content:center;cursor:pointer" title="' + (_pendingVideo.name || 'video') + '"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--t2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg></div><button onclick="_removeChatVideo()" style="position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;border:none;cursor:pointer;font-size:12px;line-height:18px;text-align:center;padding:0">&#10005;</button>';
+  pv.appendChild(div);
+}
+
+function _onChatVideoSelect(fileInput) {
+  var files = fileInput.files;
+  if (!files || files.length === 0) return;
+  var file = files[0];
+  if (file.size > _MAX_VIDEO_SIZE) {
+    app.showToast(I18N.t('chat.image_too_large') + ': ' + (file.name || ''));
+    fileInput.value = '';
+    return;
+  }
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    _pendingVideo = {data: e.target.result, name: file.name || 'video'};
+    _renderVideoPreview();
+    var input = document.getElementById('chatInput');
+    if (input) input.focus();
+  };
+  reader.readAsDataURL(file);
+  fileInput.value = '';
+}
+
+function _removeChatVideo() {
+  _pendingVideo = null;
+  _renderVideoPreview();
+  // Hide preview area if no images either
+  if (_pendingImages.length === 0) {
+    var pv = document.getElementById('chatImgPreview');
+    if (pv) { pv.style.display = 'none'; pv.innerHTML = ''; }
+  }
+}
+
+function _clearVideo() {
+  _pendingVideo = null;
+}
+
 function sendChatStream() {
   const input = document.getElementById('chatInput');
   const body = document.getElementById('chatBody');
   if (!input) return;
-  if (!input.value.trim() && _pendingImages.length === 0) return;
+  if (!input.value.trim() && _pendingImages.length === 0 && !_pendingVideo) return;
   if (!_currentConvId) {
     const repo = app.currentRepo();
     API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
@@ -486,9 +547,12 @@ function sendChatStream() {
 function doSend(input, body) {
   const msg = input.value.trim();
   const imgs = _pendingImages.slice();  // copy array
+  const vid = _pendingVideo ? _pendingVideo.data : '';
   if (!msg && imgs.length === 0) return;
   input.value = '';
+  _resetTextareaHeight(input);
   _clearAllImages();
+  _clearVideo();
   // 显示用户消息（图片直接显示缩略图）
   var displayMsg = msg.replace(/</g,'&lt;');
   var imgHtml = '';
@@ -499,6 +563,9 @@ function doSend(input, body) {
     }
     imgHtml += '</div>';
   }
+  if (vid) {
+    imgHtml += '<div style="margin-top:4px"><div style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:6px;background:var(--bg);color:var(--t2);font-size:12px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>' + (_pendingVideo ? (_pendingVideo.name || 'video') : 'video') + '</div></div>';
+  }
   body.innerHTML += '<div class="msg l">' + displayMsg + imgHtml + '</div>';
   const tid = 't' + Date.now();
   body.innerHTML += '<div class="msg r" id="' + tid + '">'
@@ -507,12 +574,13 @@ function doSend(input, body) {
   body.scrollTop = body.scrollHeight;
 
   const repo = app.currentRepo();
-  // 1. submit → 立即获取 task_id
+  // 1. submit → 立即获取 task_id（视频理解在 agent_fn 内部异步执行，submit 不阻塞）
   API.post('/chat/submit', {
     message: msg || '请帮我分析这些图片',
     repo_key: repo ? repo.fullName : '',
     conversation_id: _currentConvId,
     image_data: imgs.length > 0 ? JSON.stringify(imgs.map(function(i) { return i.data })) : '',
+    video_data: vid || '',
   }).then(r => {
     const convId = r.conversation_id || _currentConvId;
     if (r.status === 'error') {
@@ -773,6 +841,11 @@ function pollOnboardStatus() {
       _onboardTimer = null;
     }
   }, 2000);
+}
+
+// Issue #63: 导出停轮询函数供 app.nav 调用
+function _stopOnboardPoll() {
+  if (_onboardTimer) { clearInterval(_onboardTimer); _onboardTimer = null; }
 }
 
 function renderOnboardStatus(d) {

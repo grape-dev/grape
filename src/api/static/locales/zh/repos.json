@@ -74,7 +74,9 @@
     "host_failed": "托管失败: {{msg}}"
   },
   "unhost": {
-    "confirm": "⚠️ 确定要解除托管 {{name}} 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。",
+    "confirm": "确定要解除托管 {{name}} 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。",
+    "confirm_title": "解除托管",
+    "confirm_btn": "解除托管",
     "done": "已解除托管",
     "failed": "解除托管失败: {{msg}}",
     "select_repo": "选择仓库"
@@ -103,8 +105,19 @@
   },
   "brand_sub": "Agentic DevOps",
   "repositories": "仓库",
-  "sync_from_gitcode": "从 GitCode 同步",
+  "sync_from_gitcode": "同步仓库",
   "hosted": "已托管",
   "no_hosted_project": "暂无已托管项目，请先加入并托管一个项目",
-  "unhosted_title": "未托管仓库"
+  "unhosted_title": "未托管仓库",
+  "bot": {
+    "title": "需要添加 Bot 为维护者",
+    "not_configured": "GitHub Bot 未配置，请联系管理员在 global-bot-token.json 中设置 github_bot_token 和 github_bot_username。仓库已托管，但 Agent 自动操作可能受限。",
+    "invite_pending": "Bot {{bot}} 已被邀请加入仓库，但邀请尚未被接受。\n请前往 GitHub 仓库 Settings → Collaborators 接受邀请，或手动将 {{bot}} 添加为维护者。",
+    "add_failed": "自动添加 Bot {{bot}} 为仓库维护者失败。\n请前往 GitHub 仓库 Settings → Collaborators 手动添加 {{bot}} 为维护者（Maintainer）。",
+    "insufficient": "Bot {{bot}} 已加入仓库但权限不足。\n请在 GitHub 仓库 Settings → Collaborators 中将 {{bot}} 的权限设为 Maintainer 或 Admin。",
+    "default": "请前往 GitHub 仓库将 Bot {{bot}} 添加为维护者，确保 Agent 可以正常操作仓库。",
+    "go_github": "前往 GitHub 设置",
+    "enter_repo": "先进入仓库",
+    "come_back": "在 GitHub 设置完成后，回来重新托管或刷新页面"
+  }
 }

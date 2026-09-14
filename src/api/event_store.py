@@ -64,6 +64,7 @@ def append_event(repo_key: str, event_type: str, title: str = "",
                 or _extract_issue_id_from_text(title)
         if not issue_id:
             issue_id = "#0"
+    _seq = 0
     with db_lock:
         c = db.cursor()
         try:
@@ -73,27 +74,41 @@ def append_event(repo_key: str, event_type: str, title: str = "",
                  json.dumps(payload or {}), status, result)
             )
             db.commit()
-            seq = c.lastrowid
+            _seq = c.lastrowid
+            # 验证行确实写入（防止 WAL 并发写入冲突时 lastrowid 返回旧值）
+            c.execute("SELECT seq FROM events WHERE seq=?", (_seq,))
+            if not c.fetchone():
+                db.rollback()
+                log.warning(f"Event store FAILED: INSERT returned lastrowid={_seq} but row not found (WAL conflict?), repo={repo_key}, type={event_type}")
+                return 0
             payload_keys = list((payload or {}).keys())
-            log.info(f"Event stored: seq={seq}, repo={repo_key}, type={event_type}, "
+            log.info(f"Event stored: seq={_seq}, repo={repo_key}, type={event_type}, "
                      f"agent={agent_type}, issue={issue_id}, actor={actor}, source={source}, "
                      f"status={status}, result={result[:80]}, payload_keys={payload_keys}")
-            return seq
         except Exception as e:
-            log.warning(f"Event store FAILED: seq=0, repo={repo_key}, type={event_type}, "
-                        f"agent={agent_type}, error={e}")
+            log.warning(f"Failed to store event: {e}")
             return 0
+    # WAL checkpoint 在 db_lock 释放后执行（避免阻塞其他需要 db_lock 的操作）
+    try:
+        db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except Exception:
+        pass
+    return _seq
 
 
-def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: str = ""):
-    """写入被跳过/无产出的事件审计记录到 event_skipped 表"""
+def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: str = "",
+                         issue_id: str = ""):
+    """写入被跳过/无产出的事件审计记录到 event_skipped 表
+
+    issue_id（Issue #89）：关联 Issue 编号，便于流水线页面展示「部分任务尚未生成流水线事件」。
+    """
     with db_lock:
         try:
             c = db.cursor()
-            c.execute("INSERT INTO event_skipped (repo_key, event_type, reason, detail) VALUES (?,?,?,?)",
-                      (repo_key, event_type, reason, detail))
+            c.execute("INSERT INTO event_skipped (repo_key, issue_id, event_type, reason, detail) VALUES (?,?,?,?,?)",
+                      (repo_key, issue_id or "", event_type, reason, detail))
             db.commit()
-            log.info(f"Event skipped: repo={repo_key}, type={event_type}, reason={reason}, detail={detail[:80]}")
+            log.info(f"Event skipped: repo={repo_key}, issue={issue_id or ''}, type={event_type}, reason={reason}, detail={detail[:80]}")
         except Exception as e:
             log.warning(f"Event skipped FAILED: {e}")
 
@@ -368,10 +383,25 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
 
 
 def update_event_status(seq: int, status: str):
-    """更新事件状态"""
+    """更新事件状态（含终态保护）。
+
+    幂等保护：已终态（completed/failed/cancelled）的事件不允许被其他终态覆盖。
+    - 已 completed 的事件不允许被 failed 覆盖（防止任务成功后延迟的 failed 信号覆盖结果，
+      Issue #130 seq#5304 场景：任务实际成功但事件被错误标记失败）。
+    - 已 failed 的事件不允许被 completed 覆盖（防止用户终止后残留进程跑完调 complete 把
+      failed 覆盖成 completed，2026-08-24 seq#2488 实例）。
+    - 非终态（running/dispatched）→终态或非终态→非终态的更新不受限制。
+    """
+    _TERMINAL = ("completed", "failed", "cancelled")
     with db_lock:
         try:
             c = db.cursor()
+            if status in _TERMINAL:
+                c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+                row = c.fetchone()
+                if row and row[0] in _TERMINAL and row[0] != status:
+                    log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (terminal state protection)")
+                    return
             c.execute("UPDATE events SET status=? WHERE seq=?", (status, seq))
             db.commit()
         except Exception as e:
@@ -427,6 +457,11 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event complete {seq}: {e}")
+    # WAL checkpoint 在 db_lock 释放后执行
+    try:
+        db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except Exception:
+        pass
 
 
 def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",

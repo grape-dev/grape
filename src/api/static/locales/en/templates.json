@@ -47,11 +47,13 @@
   "host_warning": "⚠️ Important: Go to GitCode repository settings → Member management, add the bot account (grape_bot) as a maintainer, then manually host the repository to complete the automation setup.",
   "cat": {
     "Hello World 新手模板": "Hello World Starter",
-    "Agent 最佳实践": "Agent Best Practices",
-    "Skills 项目模板": "Skills Project Templates",
-    "AI office 项目模板": "AI Office Templates",
+    "通用项目模板": "General Templates",
+    "移动开发项目模板": "Mobile Development Templates",
     "云原生项目模板": "Cloud Native Templates",
-    "IaC 项目模板": "IaC Templates"
+    "IaC项目模板": "IaC Templates",
+    "技能开发项目模板": "Skill Development Templates",
+    "AI应用项目模板": "AI Application Templates",
+    "内容创作项目模板": "Content Creation Templates"
   },
   "gallery_title": "TEMPLATE GALLERY"
 }

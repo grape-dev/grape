@@ -1,10 +1,7 @@
-"""Issue-39 方案 B：场景表迁移测试（旧 scope/user_id 结构 → 仅 repo_key 结构）。
+"""Issue-39 方案 B：场景表结构测试（仅 repo_key 关联模型）。
 
 覆盖：
 - T1 表结构无 scope/user_id 列，唯一约束含 (scene_id, repo_key)
-- T3 存量 user 场景经 user_repos 并入所属仓库
-- T4 存量 repo 场景 scene_id 去 'repo:' 前缀
-- T5 存量 official 记录被清理（不入仓库场景表）
 - apply_default_scene_to_repo 默认场景复刻（T6/T7/T8/T9）
 """
 import os
@@ -40,30 +37,6 @@ def _clean_scene_table():
     yield
 
 
-def _mk_old_table(c):
-    """构造旧结构 devops_pipeline_scene（含 scope/user_id 列）。"""
-    try:
-        c.execute("DROP TABLE IF EXISTS devops_pipeline_scene")
-    except Exception:
-        pass
-    c.execute("""
-CREATE TABLE devops_pipeline_scene (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    scene_id    TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    scope       TEXT DEFAULT 'official',
-    repo_key    TEXT DEFAULT '',
-    user_id     INTEGER DEFAULT 0,
-    nodes_json  TEXT DEFAULT '[]',
-    onboarding  TEXT DEFAULT 'repo-onboarding',
-    is_active   INTEGER DEFAULT 1,
-    created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (scene_id, scope, repo_key, user_id)
-)""")
-
-
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_tables():
     """先 init 全部基础表（含 user_repos / managed_repos），供迁移测试依赖。"""
@@ -92,54 +65,6 @@ def test_dedupe_repo_scene_across_repos():
     from src.api.pipeline_config import get_scenes
     assert len(get_scenes(repo_key="gitcode:a/r")) == 1
     assert len(get_scenes(repo_key="gitcode:b/r")) == 1
-
-
-def test_migrate_user_scene_to_repo():
-    """T3：存量 user 场景经 user_repos 反查 repo_key 并入仓库。"""
-    from src.api import db_setup
-    from src.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        _mk_old_table(c)
-        c.execute("INSERT INTO devops_pipeline_scene (scene_id, name, description, scope, repo_key, user_id, nodes_json) "
-                  "VALUES ('custom-scene', '自定义', '', 'user', '', 42, '[]')")
-        c.execute("INSERT INTO user_repos (user_id, repo_key, owner, name) VALUES (42, 'gitcode:jason/myrepo', 'jason', 'myrepo')")
-        db.commit()
-    db_setup._migrate_scene_table_to_repo_model()
-    from src.api.pipeline_config import get_scenes
-    scenes = get_scenes(repo_key="gitcode:jason/myrepo")
-    assert any(s["id"] == "custom-scene" for s in scenes), f"user scene not migrated to repo: {scenes}"
-
-
-def test_migrate_repo_scene_drop_prefix():
-    """T4：存量 repo 场景 scene_id 去 'repo:' 前缀。"""
-    from src.api import db_setup
-    from src.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        _mk_old_table(c)
-        c.execute("INSERT INTO devops_pipeline_scene (scene_id, name, description, scope, repo_key, user_id, nodes_json) "
-                  "VALUES ('repo:default', '通用开发', '', 'repo', 'gitcode:o/r', 0, '[]')")
-        db.commit()
-    db_setup._migrate_scene_table_to_repo_model()
-    from src.api.pipeline_config import get_scenes
-    scenes = get_scenes(repo_key="gitcode:o/r")
-    assert any(s["id"] == "default" for s in scenes), f"repo: prefix not stripped: {scenes}"
-
-
-def test_migrate_official_scene_removed():
-    """T5：存量 official 记录被清理（不入仓库场景表）。"""
-    from src.api import db_setup
-    from src.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        _mk_old_table(c)
-        c.execute("INSERT INTO devops_pipeline_scene (scene_id, name, description, scope, repo_key, user_id, nodes_json) "
-                  "VALUES ('default', '官方默认', '', 'official', '', 0, '[]')")
-        db.commit()
-    db_setup._migrate_scene_table_to_repo_model()
-    from src.api.pipeline_config import get_scenes
-    assert get_scenes(repo_key="gitcode:any/repo") == [], "official record should be removed"
 
 
 def test_apply_default_scene_from_market():

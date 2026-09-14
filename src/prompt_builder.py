@@ -14,6 +14,31 @@ def _local_port() -> str:
     return os.environ.get("GRAPE_MAIN_PORT", "3000")
 
 
+def _is_github_repo(repo_key: str) -> bool:
+    """判断 repo_key 是否为 GitHub 仓库。"""
+    return bool(repo_key and repo_key.startswith("github:"))
+
+
+def _vcs_api_base(repo_key: str) -> str:
+    """返回 VCS API 基础 URL。"""
+    return "https://api.github.com" if _is_github_repo(repo_key) else "https://gitcode.com/api/v5"
+
+
+def _vcs_token_env(repo_key: str) -> str:
+    """返回 VCS token 环境变量名。"""
+    return "USER_GITHUB_TOKEN" if _is_github_repo(repo_key) else "USER_GITCODE_TOKEN"
+
+
+def _vcs_bot_token_env(repo_key: str) -> str:
+    """返回 VCS bot token 环境变量名。"""
+    return "BOT_GITHUB_TOKEN" if _is_github_repo(repo_key) else "BOT_GITCODE_TOKEN"
+
+
+def _vcs_name(repo_key: str) -> str:
+    """返回 VCS 平台名称。"""
+    return "GitHub" if _is_github_repo(repo_key) else "GitCode"
+
+
 def _resolve_server_url(runtime_id: int = 0) -> str:
     """返回服务端可达地址（A2A/tasks 等对外调用用）。
 
@@ -47,21 +72,18 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     return "http://localhost:8080"
 
 
-def _build_history_file_guide(repo_key: str = "", account: str = "", runtime_id: int = 0) -> str:
-    """已废弃：Chat Agent 历史上下文由引擎 --continue 会话机制承载，
-    DevOps Agent 上下文由事件 payload + A2A context 承载，不再通过文件列表引导 Agent 读取历史。
-    """
-    return ""
-
-
 _PROJECT_INFO_MAX_CHARS = 2500
 
+_CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
 
-def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
+
+def _build_project_info_section(repo_key: str, agent_type: str = "",
+                                issue_num: int = 0, scene_id: str = "") -> str:
     """注入 repo 全局项目知识基线（服务端权威、多 VM 共享，见 multi-issue-isolation-design.md §2.4/§4.2）。
 
     - 内联摘要（截断）+ {{PROJECT_INFO_DIR}} 占位符（worker/本地落地后可用 read tool 读全文）
-    - agent_type 非空 → 追加「本 Agent 专属知识」路径指引（knowledge-board-design.md §六）
+    - Issue #95：member 引导改条件输出（查 ref 表有 source='manual' 关联才输出）
+    - Issue #95：去掉 agent/{type}/ 引导（agent_files 废弃后不再物化到 agent/ 目录）
     - 无基线 → 明确允许降级分析
     """
     try:
@@ -71,11 +93,10 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
         files, meta = {}, {}
     lines = ["\n## 项目知识基线（repo 全局）"]
     if not files:
-        lines.append("[无项目知识基线] 允许降级分析：可基于 README 与 GitCode API 获取基础信息，相关结论标注 [degraded]。")
-        if agent_type:
+        lines.append(f"[无项目知识基线] 允许降级分析：可基于 README 与 {_vcs_name(repo_key)} API 获取基础信息，相关结论标注 [degraded]。")
+        # Issue #95：条件输出 member 引导（不固定输出）
+        if _has_manual_ref(repo_key, agent_type, issue_num, scene_id):
             lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
-            lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
-        _inject_vod_scenes(lines, agent_type, repo_key)
         return "\n".join(lines)
     _meta = meta or {}
     if _meta.get("degraded"):
@@ -92,79 +113,112 @@ def _build_project_info_section(repo_key: str, agent_type: str = "") -> str:
         body = content[:_PROJECT_INFO_MAX_CHARS] + ("\n...(已截断)" if truncated else "")
         lines.append(f"### {label}\n{body}")
     lines.append("> 全文副本已落地：{{PROJECT_INFO_DIR}}/project-graph.md 与 {{PROJECT_INFO_DIR}}/project-capabilities.md，可用 read tool 读取全文。")
-    if agent_type:
+    # Issue #95：条件输出 member 引导（不固定输出，去掉 agent/{type}/ 引导）
+    if _has_manual_ref(repo_key, agent_type, issue_num, scene_id):
         lines.append(f"> 项目级成员知识：{{{{PROJECT_INFO_DIR}}}}/member/，存在则用 read tool 读取并遵循。")
-        lines.append(f"> 本 Agent 专属知识：{{{{PROJECT_INFO_DIR}}}}/agent/{agent_type}/，存在则用 read tool 读取并遵循。")
-    _inject_vod_scenes(lines, agent_type, repo_key)
     return "\n".join(lines)
 
 
-def _inject_vod_scenes(lines: list, agent_type: str, repo_key: str = ""):
-    """VOD 专属：注入该仓库可用开发场景列表（issue-39 方案 B：场景只与仓库关联）。
-
-    - 场景候选 = get_scenes(repo_key)（scope 仅仓库级）
-    - 无「default」场景；仓库无任何场景时 VOD 需输出「未配置场景」终止信号。
-    """
-    if agent_type != "vod":
-        return
+def _has_manual_ref(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> bool:
+    """查 ref 表是否有 source='manual' 的关联记录（Issue #95 条件引导用）。"""
     try:
-        from src.api.pipeline_config import get_scenes, get_pipeline_config
-        scenes = get_scenes(repo_key=repo_key)
-        if not scenes:
-            # 方案 B：仓库无任何配置场景 → VOD 直接终止
-            lines.append("")
-            lines.append("> ⚠️ 该仓库**未配置任何开发场景**：请立即终止处理。")
-            lines.append("> 在最终 JSON 产出块中输出：`{\"terminate\": true, \"reason\": \"未配置场景\"}`。")
-            lines.append("> 不要继续分析需求、不要给出 recommended_scene（没有 default 场景）。")
-            return
-        lines.append("\n## 可用开发场景（该仓库已配置，请根据需求特征从中选择）")
-        lines.append("| scene_id | 名称 | 技能链 | 来源 |")
-        lines.append("|----------|------|--------|------|")
-        for s in scenes:
-            cfg = get_pipeline_config(s["id"], repo_key=repo_key)
-            if cfg:
-                chain = " → ".join(n.get("skill", "") for n in cfg.get("nodes", []))
-                _disp = s.get("display_name") or s.get("name") or s["id"]
-                lines.append(f"| {s['id']} | {_disp} | {chain} | 内置 |")
+        from src.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT COUNT(*) FROM scene_knowledge_ref r "
+                "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+                "WHERE r.enabled = 1 "
+                "AND (r.scene_id = ? OR r.scene_id = '') "
+                "AND (r.agent_type = ? OR r.agent_type = '') "
+                "AND (r.issue_num = ? OR r.issue_num = 0) "
+                "AND k.repo_key = ? "
+                "AND k.source = 'manual' "
+                "AND k.status = 'accepted' "
+                "AND k.archived = 0",
+                (scene_id, agent_type, issue_num, repo_key)
+            ).fetchone()
+        return bool(row and row[0] > 0)
+    except Exception:
+        return False
 
-        # 加载成员上传的自定义场景（project-info/member/ 下的 pipelines-user.json）
-        if repo_key:
+
+_advanced_options_cache: dict = {}  # (repo_key, issue_id) -> (options_str, timestamp)
+
+
+def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
+    """注入场景高级选项指引（仅执行类 agent coding/qa/sre）。
+
+    值不暴露在 prompt 文本里——通过环境变量注入（GRAPE_WORK_BRANCH / GRAPE_CF_N / GRAPE_CF_MAP），
+    prompt 只输出固定指引文本，agent 自行 printenv 读取。
+
+    优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene。
+    60s TTL 内存缓存减少 DB 查询，缓存 key 为 (repo_key, issue_id)。
+    """
+    import time as _time
+    now = _time.time()
+    _cache_key = (repo_key, issue_id)
+    cached = _advanced_options_cache.get(_cache_key)
+    if cached and now - cached[1] < 60:
+        return cached[0]
+    try:
+        from src.session_manager import db, db_lock
+        # 1. 优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene
+        scene_id = ""
+        if issue_id:
             try:
-                from src.api.knowledge import member_files
-                _mf = member_files(repo_key)
-                for rel, content in _mf.items():
-                    if not rel.endswith("pipelines-user.json"):
-                        continue
-                    import json as _json
-                    try:
-                        _user_pipes = _json.loads(content)
-                    except Exception:
-                        continue
-                    _user_scenes = _user_pipes.get("scenes", {})
-                    for sid, scfg in _user_scenes.items():
-                        _name = scfg.get("name", sid)
-                        _nodes = scfg.get("nodes", [])
-                        _chain = " → ".join(n.get("skill", "") for n in _nodes) if _nodes else "—"
-                        lines.append(f"| {sid} | {_name} | {_chain} | 自定义 |")
+                from src.api.session_store import get_issue_scene
+                scene_id, _ = get_issue_scene(repo_key, issue_id)
             except Exception:
-                pass
-
-        lines.append("")
-        lines.append("> 请根据项目知识基线 + 成员上传文档 + 需求特征，判定最匹配的 scene_id。")
-        lines.append("> 成员上传文档（project-info/member/）可能包含自定义场景定义（pipelines-user.json），")
-        lines.append("> 如有自定义场景且与需求匹配，优先推荐自定义场景。")
-        lines.append("⚠️ **必须**在最终 JSON 产出块中额外包含 `recommended_scene` 和 `scene_reason` 两个字段。")
-        lines.append("- `recommended_scene`：**只能填写上表中该仓库的场景 scene_id**，不允许使用其它值。")
-        lines.append("- `scene_reason`：一句话说明选择理由。")
-        lines.append("- **没有 `default` 场景**：禁止输出 `\"default\"`。")
-        lines.append("- 无法确定时 `recommended_scene` 填该仓库当前默认场景，不得省略。")
-        lines.append("- 注意：系统会根据用户设置决定是否采纳你的推荐，未采纳时保持仓库默认场景不变。")
+                scene_id = ""
+        if not scene_id:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+                row = c.fetchone()
+            scene_id = (row[0] if row else "") or ""
+        if not scene_id:
+            return ""
+        # 2. 读 devops_pipeline_scene.advanced_options
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return ""
+        import json as _json
+        opts = _json.loads(row[0]) if row[0] else {}
+        if not opts:
+            return ""
+        # 3. 判断有哪些配置项（决定是否输出指引）
+        wb = opts.get("work_branch", "")
+        fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("key")]
+        has_any = bool(wb) or bool(fields)
+        if not has_any:
+            return ""
+        # 4. 输出固定指引文本（不暴露任何值）
+        lines = ["\n## 场景自定义配置"]
+        lines.append("场景高级选项已注入环境变量。执行前必须读取以下环境变量：")
+        if wb:
+            lines.append("- GRAPE_WORK_BRANCH：工作基线分支（printenv GRAPE_WORK_BRANCH）")
+        if fields:
+            lines.append("- GRAPE_CF_MAP：自定义配置键名映射（printenv GRAPE_CF_MAP），按映射中的变量名读取对应环境变量获取值")
+        lines.append("必须先读取所有配置项再开始工作。")
+        result = "\n".join(lines)
+        _advanced_options_cache[_cache_key] = (result, now)
+        return result
     except Exception as _e:
         from src.config import log as _log
-        _log.warning(f"prompt_builder: inject scenes for VOD failed: {_e}")
+        _log.warning(f"prompt_builder: inject advanced options failed: {_e}")
+        return ""
 
 
-def build_role_definition(skills=None, agent_type="") -> str:
+def build_role_definition(skills=None, agent_type="", repo_key="") -> str:
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    _bot_token_env = _vcs_bot_token_env(repo_key)
     rules = [
         "You are a DevOps operations assistant. Your domain:",
         "- Code review, build diagnosis, deployment guard, incident triage",
@@ -172,9 +226,9 @@ def build_role_definition(skills=None, agent_type="") -> str:
         "- Repository (GitCode/GitHub) API operations",
         "",
         "SECURITY (MUST FOLLOW):",
-        "1. Use ONLY the GitCode token provided in this prompt (BOT_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.",
+        f"1. Use ONLY the {_vcs} token provided in this prompt ({_bot_token_env}). NEVER read, guess, or use any other token from the database, config files, logs, or history.",
         "2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data."
-        "3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs admin/maintainer permission (configure it manually in GitCode). NEVER try other tokens or workarounds.",
+        f"3. If the {_vcs} API returns 403 (no permission): STOP that operation and tell the user the action needs admin/maintainer permission (configure it manually in {_vcs}). NEVER try other tokens or workarounds.",
         "4. NEVER write any token into files, logs, or comments.",
     ]
     if agent_type == "coding":
@@ -182,7 +236,7 @@ def build_role_definition(skills=None, agent_type="") -> str:
     else:
         rules.append("3. Never write code, modify files, or execute git commands")
     rules.append("4. Always reply in Chinese. Never include internal reasoning, process steps, or English analysis in your reply.")
-    rules.append("5. IMAGE EXCEPTION (overrides rule 2): When prompt contains \"## 用户上传的图片分析\" section, the image has already been analyzed by the system. You MUST answer the user's question based on that image analysis. This includes ANY question about the image — UI/UX, design, layout, content, code shown in screenshot, architecture, etc. These are NOT \"non-DevOps topics\". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the image analysis provided.")
+    rules.append("5. MEDIA EXCEPTION (overrides rule 2): When prompt contains \"## 用户上传的图片分析\" or \"## 用户上传的视频分析\" section, the image/video has already been analyzed by the system. You MUST answer the user's question based on that analysis. This includes ANY question about the image/video — UI/UX, design, layout, content, code shown in screenshot, architecture, video content, etc. These are NOT \"non-DevOps topics\". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the analysis provided.")
     return "\n".join(rules)
 
 
@@ -277,8 +331,10 @@ Use Python to save discovered mappings in the bot's sessions.db:
     return "\n".join(lines)
 
 
-def build_chat_role_definition() -> str:
-    return """You are a DevOps operations assistant. Your domain:
+def build_chat_role_definition(repo_key="") -> str:
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    return f"""You are a DevOps operations assistant. Your domain:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
 - Repository (GitCode/GitHub) API operations
@@ -290,12 +346,12 @@ Reply rules:
 2. NOT DevOps topic: politely explain you only handle DevOps
 3. Never write code, modify files, or execute git commands
 4. Always reply in Chinese. Never include internal reasoning or process steps.
-5. IMAGE EXCEPTION (overrides rule 2): When prompt contains "## 用户上传的图片分析" section, the image has already been analyzed by the system. You MUST answer the user's question based on that image analysis. This includes ANY question about the image — UI/UX, design, layout, content, code shown in screenshot, architecture, etc. These are NOT "non-DevOps topics". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the image analysis provided.
+5. MEDIA EXCEPTION (overrides rule 2): When prompt contains "## 用户上传的图片分析" or "## 用户上传的视频分析" section, the image/video has already been analyzed by the system. You MUST answer the user's question based on that analysis. This includes ANY question about the image/video — UI/UX, design, layout, content, code shown in screenshot, architecture, video content, etc. These are NOT "non-DevOps topics". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the analysis provided.
 
 SECURITY (MUST FOLLOW):
-1. Use ONLY the GitCode token provided in this prompt (USER_GITCODE_TOKEN). NEVER read, guess, or use any other token from the database, config files, logs, or history.
+1. Use ONLY the {_vcs} token provided in this prompt ({_token_env}). NEVER read, guess, or use any other token from the database, config files, logs, or history.
 2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.
-3. If the GitCode API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in GitCode). NEVER try other tokens or workarounds.
+3. If the {_vcs} API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in {_vcs}). NEVER try other tokens or workarounds.
 4. NEVER write any token into files, logs, or comments."""
 
 
@@ -320,9 +376,9 @@ You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, 
 3. 不实施 / 不部署 / 不写代码、不执行 git 命令——实现由 pipeline（coding/sre）在回帖后执行。
 
 SECURITY (MUST FOLLOW):
-1. 只使用本 prompt 提供的 GitCode token（USER_GITCODE_TOKEN）。
+1. 只使用本 prompt 提供的 {_vcs} token（{_token_env}）。
 2. 绝不访问 bot 内部 data/、configs/、sessions.db、user_accounts。
-3. GitCode API 403：停止并用政策性话术告知用户需要权限。
+3. {_vcs} API 403：停止并用政策性话术告知用户需要权限。
 4. 绝不把 token 写入文件、日志、评论。
 
 图片分析规则：
@@ -350,11 +406,96 @@ def extract_event_number(payload):
     return None
 
 
+_agent_registry_cache: dict = {}
+_agent_registry_mtime: float = 0.0
+
+
+def _load_agent_registry() -> dict:
+    """加载 A2A 协议配置（mtime 缓存，文件未变时不重复读盘）。"""
+    global _agent_registry_cache, _agent_registry_mtime
+    agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
+    if not os.path.isfile(agents_file):
+        return {}
+    try:
+        mtime = os.path.getmtime(agents_file)
+        if _agent_registry_cache and mtime == _agent_registry_mtime:
+            return _agent_registry_cache
+        with open(agents_file, encoding="utf-8") as f:
+            _agent_registry_cache = json.load(f)
+            _agent_registry_mtime = mtime
+            return _agent_registry_cache
+    except Exception:
+        return _agent_registry_cache or {}
+
+
+def _build_output_contract() -> str:
+    """处理记录输出要求 + 行为约束（所有 DevOps agent 共用，见 agent-runtime-event-full-design.md §8）。
+
+    包含：JSON 契约、任务结束规则、内部思考 vs 对外结论分离、评论内容边界、发布前自检。
+    """
+    return """
+## 处理记录输出要求
+
+完成当前任务后，在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
+
+{
+  "actions": ["做了什么，如 labeled:bug / assigned:@bob / 提交了PR / 发布了审查评论"],
+  "conclusion": "处理结论/分析结果（简要）",
+  "artifacts": ["产生的产物：PR#N / 评论 / 标签 / 部署 / Issue"],
+  "next_step": "下一步建议；如需交办其他 Agent 则说明调用 A2A 的目标",
+  "issue_summary": "Issue 最新聚合结论（覆盖档案 summary；紧凑文本，用 | 分隔）"
+}
+
+注意：
+- 只输出一个 JSON 块，放在答复末尾。
+- JSON 块必须保持纯 JSON 结构，不得与叙述混排，且只能是最终答复末尾唯一的追加内容。
+- 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造。
+- `issue_summary` 应反映截至当前链尾的最新状态，供下游 Agent 快速浏览。
+
+## 任务结束
+
+完成所有业务动作（发评论 / 打标签 / 交办 A2A / 提交 PR 等）后，输出上述最终 JSON 块并**结束任务**。
+不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
+
+⚠️ 思考过程禁止出现在对外输出：任何思考过程叙述（如"让我…""现在我…""Let me…""Now I…"）
+只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 GitCode 评论 body 中。
+最终答复只输出：动作结果结论 + 处理记录 JSON 块。
+
+## 内部思考 vs 对外结论（必须分清）
+
+内部思考（只存在于思考/工具调用过程，绝不进最终答复与评论）：
+  ❌ "让我分析一下这个问题……"   ❌ "现在我理解了代码库……"
+  ❌ "我需要先获取环境变量……"   ❌ "Let me analyze the Issue……"
+  ❌ "Now I have a thorough understanding……"
+
+对外结论（最终答复与评论唯一允许的正文）：
+  ✅ "已定位 #38 泄漏根因：result_text 一鱼两吃导致 JSON 块入评。"
+  ✅ "完成：分类=bug，标签=bug/P1，已 A2A 交办 coding。"
+
+规则：最终答复/评论中的每个句子，都必须能在"给用户看的提交记录"里站得住——只陈述完成的事与结果。
+
+⚠️ 评论内容边界（必须遵守）：发评论时，body 只保留 [角色名 Agent] 前缀 +
+对外结论（做了什么 / 结果 / 下一步 / 必要的原文引用）。
+禁止把思考过程（"让我…""现在…""我需要先…"这类叙述）、
+处理记录 JSON 块（actions/conclusion/...）以及任何 HTML 注释标记
+（如 <!-- xxx -->）写进评论正文。处理记录 JSON 只放在最终答复末尾供系统
+存档，绝不通过评论 API 发送。
+
+⚠️ 发布前自检：把评论 body 当作**对外发布文案**朗读一遍，
+出现任何"我"的思考叙述即为不合格，改写后再发布。
+"""
+
+
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
                  agent_type=""):
     number = extract_event_number(evt['payload'])
     repo = evt['repository']
     payload = evt['payload']
+    _rk = evt.get("repo_key", "")
+    _vcs = _vcs_name(_rk)
+    _token_env = _vcs_token_env(_rk)
+    _bot_token_env = _vcs_bot_token_env(_rk)
+    _api_base = _vcs_api_base(_rk)
     issue_data = {}
     if isinstance(payload.get("issue"), dict):
         issue_data = payload["issue"]
@@ -391,7 +532,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             if any(f"@{u}" in note for u in __import__("src.user.db", fromlist=["get_all_bot_usernames"]).get_all_bot_usernames()):
                 parts.append("(User @mentioned the bot)")
         if number is None:
-            parts.append("\n⚠️ 本评论事件未携带 Issue 编号。你必须先通过 GitCode API 定位该评论落在哪个 Issue：")
+            parts.append(f"\n⚠️ 本评论事件未携带 Issue 编号。你必须先通过 {_vcs} API 定位该评论落在哪个 Issue：")
             parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /repos/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
             parts.append("  用评论内容匹配确认 Issue 编号，然后对用户评论进行回复。")
             parts.append("  注意：即使缺少编号，也必须对用户评论作出回复，不得静默跳过。")
@@ -424,10 +565,36 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     except Exception:
         pass
 
-    repo_key = f"{evt['source']}:{evt['repository']}"
+    # 优先用 evt 里已有的 repo_key（A2A 事件 source='a2a' 会导致拼接错误）
+    repo_key = evt.get("repo_key") or f"{evt['source']}:{evt['repository']}"
     account = evt.get("account") or evt.get("repository", "")
-    parts.append(_build_history_file_guide(repo_key, account, runtime_id))
-    parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else "")))
+    # Issue #95：传 issue_num + scene_id 给 _build_project_info_section（条件输出 member 引导用）
+    _devops_issue_id = evt.get("issue_id", "") or ""
+    _devops_issue_num = 0
+    _devops_scene_id = ""
+    if _devops_issue_id:
+        import re as _re
+        _m = _re.search(r"(\d+)", str(_devops_issue_id))
+        if _m:
+            _devops_issue_num = int(_m.group(1))
+        try:
+            from src.api.session_store import get_issue_scene
+            _devops_scene_id, _ = get_issue_scene(repo_key, _devops_issue_id)
+        except Exception:
+            pass
+    parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else ""),
+                                             issue_num=_devops_issue_num, scene_id=_devops_scene_id or ""))
+
+    # Issue #95：agent 沉淀知识引导——告知 agent 去 .knowledge/ 目录读取
+    # {{KNOWLEDGE_DIR}} 由 worker 物化后替换为真实路径（agent.py:1079 / event_pipeline.py:1685）
+    parts.append("\n## 共享知识\n> 前序 Agent 沉淀的经验已落地：{{KNOWLEDGE_DIR}}/，存在则用 read tool 读取并遵循。")
+
+    # 场景高级选项注入（仅执行类 agent：coding/qa/sre）
+    if agent_type in ("coding", "qa", "sre"):
+        _issue_id_for_scene = evt.get("issue_id", "") or ""
+        _adv = _build_scene_advanced_options(repo_key, _issue_id_for_scene)
+        if _adv:
+            parts.append(_adv)
 
     # 子任务/多任务模式上下文注入
     _issue_id = evt.get("issue_id", "")
@@ -468,16 +635,10 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         repo_key = f"{evt['source']}:{evt['repository']}"
         parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 
-    parts.append(build_role_definition(skills, agent_type=agent_type))
+    parts.append(build_role_definition(skills, agent_type=agent_type, repo_key=_rk))
 
-    # A2A protocol instructions + available agents
-    try:
-        agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
-        if os.path.isfile(agents_file):
-            with open(agents_file, encoding="utf-8") as f:
-                agent_registry = json.load(f)
-    except Exception:
-        agent_registry = {}
+    # A2A protocol instructions + available agents（mtime 缓存，避免每次构建 prompt 读文件）
+    agent_registry = _load_agent_registry()
     if agent_registry:
         parts.append("\n## Agent-to-Agent 协议\n")
         parts.append("当你需要调用其他 Agent 时，从下表中选择最合适的：\n")
@@ -490,16 +651,16 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
 然后调用 A2A API：
 
-  curl -X POST {{SERVER_URL}}/api/a2a \\
-    -H "Authorization: Bearer $BOT_GITCODE_TOKEN" \\
+  curl -X POST {SERVER_URL}/api/a2a \\
+    -H "Authorization: Bearer $""" + _bot_token_env + """\" \\
     -H "Content-Type: application/json" \\
     -d '{
       "agent": "coding",
       "payload": {
-        "repository": "'"$REPO_FULL_NAME"'",
-        "account": "'"$ACCOUNT"'",
-        "issue_number": "'"$ISSUE_NUMBER"'",
-        "pr_number": "'"$PR_NUMBER"'",
+        "repository": '"$REPO_FULL_NAME"',
+        "account": '"$ACCOUNT"',
+        "issue_number": '"$ISSUE_NUMBER"',
+        "pr_number": '"$PR_NUMBER"',
         "context": "当前处理摘要"
       }
     }'
@@ -552,66 +713,17 @@ context 是传给下一个 Agent 的接力说明，应包含：
     if _role_rule:
         parts.append(_role_rule)
 
-    # M1 结构化产出契约（所有 skill 生效，一处维护，见 agent-runtime-event-full-design.md §8）
-    parts.append("""
-## 处理记录输出要求
-
-完成当前任务后，在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
-
-{
-  "actions": ["做了什么，如 labeled:bug / assigned:@bob / 提交了PR / 发布了审查评论"],
-  "conclusion": "处理结论/分析结果（简要）",
-  "artifacts": ["产生的产物：PR#N / 评论 / 标签 / 部署 / Issue"],
-  "next_step": "下一步建议；如需交办其他 Agent 则说明调用 A2A 的目标",
-  "issue_summary": "Issue 最新聚合结论（覆盖档案 summary；紧凑文本，用 | 分隔）"
-}
-
-注意：
-- 只输出一个 JSON 块，放在答复末尾。
-- JSON 块必须保持纯 JSON 结构，不得与叙述混排，且只能是最终答复末尾唯一的追加内容。
-- 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造。
-- `issue_summary` 应反映截至当前链尾的最新状态，供下游 Agent 快速浏览。
-
-## 任务结束
-
-完成所有业务动作（发评论 / 打标签 / 交办 A2A / 提交 PR 等）后，输出上述最终 JSON 块并**结束任务**。
-不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
-
-## 执行纪律
-
-你必须在单个对话轮次内完成全部操作：读取文件 → 分析 → 执行动作
-（发评论/加标签/A2A 交办等）→ 输出处理记录 JSON → 结束。
-
-⚠️ 必须调用工具执行实际动作：发评论用 execute_code 调 GitCode API，
-不要只输出评论内容就 end_turn。
-
-⚠️ 思考过程禁止出现在对外输出：任何思考过程叙述（如"让我…""现在我…""Let me…""Now I…"）
-只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 GitCode 评论 body 中。
-最终答复只输出：动作结果结论 + 处理记录 JSON 块。
-
-## 内部思考 vs 对外结论（必须分清）
-
-内部思考（只存在于思考/工具调用过程，绝不进最终答复与评论）：
-  ❌ "让我分析一下这个问题……"   ❌ "现在我理解了代码库……"
-  ❌ "我需要先获取环境变量……"   ❌ "Let me analyze the Issue……"
-  ❌ "Now I have a thorough understanding……"
-
-对外结论（最终答复与评论唯一允许的正文）：
-  ✅ "已定位 #38 泄漏根因：result_text 一鱼两吃导致 JSON 块入评。"
-  ✅ "完成：分类=bug，标签=bug/P1，已 A2A 交办 coding。"
-
-规则：最终答复/评论中的每个句子，都必须能在"给用户看的提交记录"里站得住——只陈述完成的事与结果。
-
-⚠️ 评论内容边界（必须遵守）：发评论时，body 只保留 [角色名 Agent] 前缀 +
-对外结论（做了什么 / 结果 / 下一步 / 必要的原文引用）。
-禁止把思考过程（"让我…""现在…""我需要先…"这类叙述）、
-处理记录 JSON 块（actions/conclusion/...）以及任何 HTML 注释标记
-（如 <!-- xxx -->）写进评论正文。处理记录 JSON 只放在最终答复末尾供系统
-存档，绝不通过评论 API 发送。
-
-⚠️ 发布前自检：把评论 body 当作**对外发布文案**朗读一遍，
-出现任何"我"的思考叙述即为不合格，改写后再发布。
+    # VCS API 访问说明（告诉 agent 用哪个 API URL 和 token 环境变量）
+    parts.append(f"""
+## {_vcs} API Access
+Your token is available as the {_bot_token_env} environment variable.
+API base URL: {_api_base}
+  curl -s -H "Authorization: Bearer ${_bot_token_env}" \
+    {_api_base}/repos/$REPO_FULL_NAME/issues
+Never print or reveal the token value.
 """)
+
+    parts.append(_build_output_contract())
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
 
@@ -714,16 +826,19 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
                 f"Skill 文件：{{{{SKILL_DIR}}}}/{_sn}/SKILL.md\n"
                 f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令去完成任务（不得跳过读取或凭空猜测）。"
             )
-    # GitCode API 访问说明
-    parts.append("""
-## GitCode API Access
-Your token is available as the USER_GITCODE_TOKEN environment variable.
-  curl -s -H "Authorization: Bearer $USER_GITCODE_TOKEN" \\
-    https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues
+    # VCS API 访问说明
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    _api_base = _vcs_api_base(repo_key)
+    parts.append(f"""
+## {_vcs} API Access
+Your token is available as the {_token_env} environment variable.
+  curl -s -H "Authorization: Bearer ${_token_env}" \\
+    {_api_base}/repos/{{owner}}/{{repo}}/issues
 Never print or reveal the token value.
 """)
     repo_note = f" (in {repo_key})" if repo_key else ""
-    parts.append(f"\nUser{repo_note}: {message}\nAssistant:")
+    parts.append(f"\nUser{repo_note}: {message}{_CHAT_PROMPT_SUFFIX}")
     return "\n".join(parts)
 
 
@@ -822,43 +937,71 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
 
 # ====== Event 对话（event-conversation-design.md）======
 
-def _build_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0) -> str:
-    """共享知识段落：project + issue + issue_agent 三级 accepted 知识 + 成员上传文档合并注入。"""
-    lines = ["### 用户反馈沉淀的共享知识（仅 accepted）"]
+def _build_agent_knowledge_section(repo_key: str, agent_type: str = "", issue_num: int = 0,
+                             scene_id: str = "") -> tuple:
+    """agent 沉淀知识段落：查 ref 表注入 source='agent' 关联知识。
+
+    Issue #95 改动：
+    - 改名 _build_knowledge_section → _build_agent_knowledge_section（语义明确）
+    - SQL 加 source='agent' 过滤——只内联 agent 沉淀知识
+    - 恢复 #67 之前的原始语义（#67 之前调 read_knowledge 只查 project/issue/issue_agent）
+    - 不内联 baseline（load_project_info 已处理）和 member（member_files_pi 已处理）
+    - 返回 (知识段落文本, 注入的知识 ID 列表)
+    """
+    lines = ["### 用户反馈沉淀的共享知识（仅 enabled）"]
     found = False
+    injected_ids = []
+
+    # 1. 查 scene_knowledge_ref 表注入关联知识（source='agent'）
     try:
-        from src.api.knowledge import read_knowledge
-        k = read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num)
+        from src.session_manager import db, db_lock
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT DISTINCT k.id, k.scope, k.source, k.obs_key, k.file_path, k.content_hash "
+                "FROM scene_knowledge_ref r "
+                "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+                "WHERE r.enabled = 1 "
+                "AND (r.scene_id = ? OR r.scene_id = '') "
+                "AND (r.agent_type = ? OR r.agent_type = '') "
+                "AND (r.issue_num = ? OR r.issue_num = 0) "
+                "AND k.repo_key = ? "
+                "AND k.source = 'agent' "
+                "AND k.status = 'accepted' "
+                "AND k.archived = 0",
+                (scene_id, agent_type, issue_num, repo_key)
+            ).fetchall()
+
+        from src.api.knowledge import read_entry_content
+        for kid, scope, source, obs_key, file_path, content_hash in rows:
+            content = read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
+            if content:
+                found = True
+                injected_ids.append(kid)
+                lines.append(f"[{scope} 级] {content}")
     except Exception:
-        k = {}
-    for scope in ("project", "issue", "issue_agent"):
-        content = k.get(scope)
-        if content:
-            found = True
-            lines.append(f"[{scope} 级] {content}")
-    # 成员上传文档摘要（knowledge-board-design.md §2.5：并入对话类 Agent 上下文）
-    try:
-        from src.api.knowledge import member_files
-        mf = member_files(repo_key)
-        if mf:
-            found = True
-            lines.append("[member 级] 项目成员上传文档：")
-            for rel in sorted(mf):
-                body = mf[rel].strip()
-                lines.append(f"- {rel.split('/')[-1]}: {body[:200]}{'…' if len(body) > 200 else ''}")
-    except Exception:
-        pass
+        # 向后兼容：scene_knowledge_ref 表不存在时回退到 scope 三级注入（只查 agent 知识）
+        try:
+            from src.api.knowledge import read_knowledge
+            k = read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num)
+            for scope in ("project", "issue", "issue_agent"):
+                content = k.get(scope)
+                if content:
+                    found = True
+                    lines.append(f"[{scope} 级] {content}")
+        except Exception:
+            pass
+
     if not found:
-        return ""
+        return "", []
     lines.append("后续任务应遵循以上知识，除非用户当前明确推翻。")
-    return "\n".join(lines)
+    return "\n".join(lines), injected_ids
 
 
 def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
-                               agent_type: str = "", issue_num: int = 0) -> str:
+                               agent_type: str = "", issue_num: int = 0) -> tuple:
     """Event 对话专用 prompt：对话 skill 指令 + 事件上下文 + 线程历史 + 共享知识。
 
-    对话 skill 为元技能（skills/event-dialogue/SKILL.md），约束解释/沉淀/流程控制行为。
+    返回 (prompt, injected_ids)——injected_ids 是注入的知识 ID 列表，供调用方记录到事件线程。
     """
     parts = [f"# Event 对话（与 {agent_type or 'agent'} 就事件对话）"]
 
@@ -884,16 +1027,173 @@ def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
         hist = "\n".join(f"[{m.get('role')}] {m.get('content', '')}" for m in thread[-20:])
         parts.append(f"## 对话历史\n{hist}")
 
-    knowledge = _build_knowledge_section(evt.get("repo_key", ""), agent_type=agent_type, issue_num=issue_num)
+    knowledge, _injected_ids = _build_agent_knowledge_section(evt.get("repo_key", ""), agent_type=agent_type, issue_num=issue_num)
     if knowledge:
         parts.append(f"## 共享知识\n{knowledge}")
 
     parts.append(f"## 用户消息\n{user_message}")
     parts.append("请用中文简洁回复；如需沉淀共享知识或流程干预，调用对应端点（POST /api/events/{seq}/knowledge、/flow/reset，带 BOT_GITCODE_TOKEN）。")
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), _injected_ids
 
 
 # Backward-compat aliases (see docs/new-version2/chat-prompt-overview.md for new names)
 build_chat_prompt = build_general_chat_prompt  # deprecated: use build_general_chat_prompt
-build_prompt = build_devops_agent_prompt        # deprecated: use build_devops_agent_prompt
 build_conversation_prompt = build_event_chat_prompt  # deprecated: use build_event_chat_prompt
+
+
+# ===== 智能推荐 Prompt 构建 =====
+
+def _load_scene_recommend_config(repo_key: str) -> dict:
+    """从 managed_repos.scene_recommend_config 读取用户经验规则（结构化数据）。
+
+    返回 {"fallback_scene": "", "rules": [{"scene_id": "", "condition": ""}]}。
+    读取时兜底过滤：规则中 scene_id 不在当前场景列表中的直接丢弃。
+    """
+    try:
+        from src.user.db import get_scene_recommend_config
+        config = get_scene_recommend_config(repo_key)
+        fallback = config.get("fallback_scene", "") or ""
+        rules = config.get("rules", []) or []
+        # 读取时兜底过滤
+        from src.api.pipeline_config import get_scenes
+        valid_ids = {s["id"] for s in get_scenes(repo_key=repo_key)}
+        rules = [r for r in rules if isinstance(r, dict) and r.get("scene_id") in valid_ids]
+        if fallback and fallback not in valid_ids:
+            fallback = ""
+        return {"fallback_scene": fallback, "rules": rules}
+    except Exception:
+        return {"fallback_scene": "", "rules": []}
+
+
+def _sanitize_recommend_config(repo_key: str) -> dict | None:
+    """自检并修复推荐配置：删除指向不存在场景的规则，重置失效的兜底场景。
+
+    在场景删除时主动调用。返回修复后的 config（已写回 DB），或 None（无需修复）。
+    """
+    from src.api.pipeline_config import get_scenes
+    from src.user.db import get_scene_recommend_config, set_scene_recommend_config
+
+    scenes = get_scenes(repo_key=repo_key)
+    valid_ids = {s["id"] for s in scenes}
+    if not valid_ids:
+        return None
+
+    config = get_scene_recommend_config(repo_key)
+    changed = False
+
+    old_rules = config.get("rules") or []
+    new_rules = [r for r in old_rules if isinstance(r, dict) and r.get("scene_id") in valid_ids]
+    if len(new_rules) != len(old_rules):
+        config["rules"] = new_rules
+        changed = True
+
+    fallback = config.get("fallback_scene") or ""
+    if fallback not in valid_ids:
+        config["fallback_scene"] = scenes[0]["id"] if scenes else ""
+        changed = True
+
+    if changed:
+        set_scene_recommend_config(repo_key, config["fallback_scene"], config["rules"])
+        from src.config import log
+        log.info(f"RecommendConfig: auto-sanitized for {repo_key}, "
+                 f"fallback={config['fallback_scene']}, rules={len(config['rules'])}")
+        return config
+    return None
+
+
+def build_scene_recommender_prompt(evt, repo_key: str) -> str:
+    """构建智能推荐专用 prompt（三层结构：系统数据 + 用户经验规则 + 固定指令）。
+
+    用户经验规则从 managed_repos.scene_recommend_config (JSON) 读取，结构化存储，
+    注入时转为自然语言。
+    """
+    payload = evt.get("payload", {})
+    issue_data = {}
+    if isinstance(payload.get("issue"), dict):
+        issue_data = payload["issue"]
+    elif isinstance(payload.get("object_attributes"), dict):
+        issue_data = payload["object_attributes"]
+    title = issue_data.get("title", "")
+    body = issue_data.get("body", issue_data.get("description", ""))[:1000]
+
+    parts = []
+
+    # === 第一层：系统数据（不可改）===
+    parts.append("## 任务信息")
+    parts.append(f"- 标题：{title}")
+    parts.append(f"- 描述：{body}")
+
+    from src.api.pipeline_config import get_scenes, get_pipeline_config
+    scenes = get_scenes(repo_key=repo_key)
+    if not scenes:
+        parts.append("\n## 可用开发场景\n> 该仓库未配置任何开发场景。")
+        parts.append('\n输出：{"scene_id": "", "reason": "未配置场景"}')
+        parts.append("\n## 硬约束\n1. 只输出 JSON，不得有任何前后文字。\n2. 任务立即结束。")
+        return "\n".join(parts)
+
+    parts.append("\n## 可用开发场景（该仓库已配置）")
+    parts.append("| scene_id | 名称 | 描述 | 技能链 |")
+    parts.append("|----------|------|------|--------|")
+    for s in scenes:
+        cfg = get_pipeline_config(s["id"], repo_key=repo_key)
+        chain = " → ".join(n.get("skill", "") for n in cfg.get("nodes", [])) if cfg else "—"
+        disp = s.get("display_name") or s.get("name") or s["id"]
+        desc = s.get("description") or ""
+        parts.append(f"| {s['id']} | {disp} | {desc} | {chain} |")
+
+    # === 第二层：用户经验规则（可改，从 DB 读取结构化数据，注入时转为自然语言）===
+    config = _load_scene_recommend_config(repo_key)
+    parts.append("\n## 用户经验规则")
+    if config.get("fallback_scene"):
+        parts.append(f"兜底场景：{config['fallback_scene']}")
+    else:
+        parts.append("兜底场景：未设置（由系统自动选择最通用的场景）")
+    rules = config.get("rules") or []
+    if rules:
+        parts.append("路由规则：")
+        for i, rule in enumerate(rules, 1):
+            sid = rule.get("scene_id", "")
+            cond = rule.get("condition", "")
+            parts.append(f"{i}. {cond} → 走 {sid} 场景")
+    else:
+        parts.append("路由规则：未设置（纯语义匹配模式）")
+
+    # === 第三层：固定指令（不可改，代码内置）===
+    parts.append("\n## 角色")
+    parts.append("你是智能推荐器。唯一职责：根据任务描述，从上方场景列表中匹配最优场景，返回 scene_id。")
+    parts.append("不执行任何其他操作。")
+
+    parts.append("\n## 匹配优先级（从高到低）")
+    parts.append("1. 用户路由规则：检查任务标题/描述是否命中上方「用户经验规则」中的条件，命中则直接走对应场景")
+    parts.append("2. 语义匹配：任务描述与场景名称/描述的语义相关性")
+    parts.append("3. 用户兜底场景：以上都未命中时，走用户设置的兜底场景")
+    parts.append("4. 系统兜底：用户未设兜底场景时，选择技能链最通用的场景")
+
+    parts.append("\n## 能力边界")
+    parts.append("- 创建/修改/总结 Issue → 禁止")
+    parts.append("- 发送 Issue 评论 → 禁止")
+    parts.append("- A2A 交办 → 禁止")
+    parts.append("- 多轮对话/需求澄清 → 禁止")
+    parts.append("- 读取项目知识基线 → 禁止")
+    parts.append("- 调用 GitCode API → 禁止")
+    parts.append("- 读写文件 → 禁止")
+    parts.append("- 输出 JSON 以外的内容 → 禁止")
+
+    parts.append("\n## 输出格式")
+    parts.append('只输出以下 JSON，不输出任何其他内容（无分析、无解释、无叙述）：')
+    parts.append('')
+    parts.append('{"scene_id": "场景列表中存在的 scene_id", "reason": "一句话选择理由（≤50字）"}')
+    parts.append('')
+    parts.append("边界情况：")
+    parts.append('- 仓库无场景 → {"scene_id": "", "reason": "未配置场景"}')
+    parts.append('- 无法精确匹配 → 走兜底场景，reason 注明"未精确匹配，使用兜底场景"')
+
+    parts.append("\n## 硬约束")
+    parts.append("1. 只输出 JSON：答复中只能有一个 JSON 块，不得有任何前后文字。")
+    parts.append("2. 不调用任何 API：不访问 GitCode、不调用 A2A、不发评论、不查 Issue。")
+    parts.append("3. 不读取任何文件：所有信息已在 prompt 中注入。")
+    parts.append("4. scene_id 必须来自列表：只能填写 prompt 注入的场景列表中存在的 scene_id。")
+    parts.append("5. 用户路由规则优先于你的语义判断：规则命中时必须遵从，不要用语义匹配覆盖。")
+    parts.append("6. 任务立即结束：输出 JSON 后结束，不继续思考、不等待输入。")
+
+    return "\n".join(parts)

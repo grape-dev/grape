@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage
+from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency
 
 
 bot_manager = None
@@ -48,6 +48,24 @@ async def lifespan(app: FastAPI):
                 log.warning("Templates: auto-sync attempted but issues remain, check logs")
         except Exception as e:
             log.warning(f"Templates: startup check failed: {e}")
+
+        # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新（改 md 后重启生效）
+        try:
+            from src.help_page_gen import generate as _generate_help_page
+            _n_help = _generate_help_page()
+            log.info(f"Help: help.html regenerated ({_n_help} sources)")
+        except Exception as e:
+            log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
+
+        # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json（固定下载 URL）
+        try:
+            from src.api.openapi import custom_openapi
+            from src.help_page_gen import write_openapi_contract
+            _schema = custom_openapi(app)
+            _n_paths = write_openapi_contract(_schema)
+            log.info(f"OpenAPI: contract dumped ({_n_paths} paths) -> /static/openapi.json")
+        except Exception as e:
+            log.warning(f"OpenAPI: contract dump failed: {e}")
 
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
@@ -104,6 +122,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Knowledge sync loop start failed: {e}")
 
+    # Issue #103：知识写入队列消费者——后台兜底处理 pending 任务
+    _knowledge_write_task = None
+    try:
+        from src.api.knowledge import knowledge_write_worker
+        _knowledge_write_task = asyncio.create_task(knowledge_write_worker())
+        log.info("Knowledge write worker started")
+    except Exception as e:
+        log.warning(f"Knowledge write worker start failed: {e}")
+
     # 官方技能 OBS 自动同步：定时扫描本地技能变更，上传 OBS（每 30 分钟）
     try:
         from src.storage.skill_sync import start_skill_sync_scheduler
@@ -117,6 +144,32 @@ async def lifespan(app: FastAPI):
         start_scene_sync_scheduler()
     except Exception as e:
         log.warning(f"Scene sync scheduler start failed: {e}")
+
+    # 临时上传文件定时清理：每小时清理超过 24 小时的孤儿文件（Issue-54）
+    try:
+        from src.storage.upload_cleanup import start_upload_cleanup_scheduler
+        start_upload_cleanup_scheduler()
+    except Exception as e:
+        log.warning(f"Upload cleanup scheduler start failed: {e}")
+
+    # Issue #67: 归档知识定时清理——每天清理超过 90 天的归档知识
+    try:
+        from src.api.knowledge import cleanup_archived_knowledge
+        import threading, time as _t
+
+        def _knowledge_cleanup_loop():
+            while True:
+                _t.sleep(86400)  # 24 小时
+                try:
+                    cleanup_archived_knowledge()
+                except Exception as _e:
+                    log.warning(f"Knowledge cleanup failed: {_e}")
+
+        _t2 = threading.Thread(target=_knowledge_cleanup_loop, daemon=True)
+        _t2.start()
+        log.info("Knowledge cleanup scheduler started (daily)")
+    except Exception as e:
+        log.warning(f"Knowledge cleanup scheduler start failed: {e}")
 
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
@@ -177,12 +230,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Reap stale runtimes loop start failed: {e}")
 
+    # Issue #85：引擎健康度定时刷新——每 5 分钟对所有引擎 force_refresh，
+    # 覆盖离线引擎无任务事件触发的场景（失联引擎不会产生任务完成事件）
+    try:
+        from src.runtime.health_scorer import start_health_refresh_scheduler
+        start_health_refresh_scheduler()
+    except Exception as e:
+        log.warning(f"Health refresh scheduler start failed: {e}")
+
     # 用户活跃状态追踪：每 30 秒批量更新 last_active_at
     _active_tracker_task = None
     try:
         async def _active_user_tracker():
             from src.api.deps import get_pending_active
             from src.user import db as user_db
+            _purge_i = 0
             while True:
                 await asyncio.sleep(30)
                 try:
@@ -191,6 +253,15 @@ async def lifespan(app: FastAPI):
                         await asyncio.to_thread(user_db.batch_update_last_active, list(uids))
                 except Exception as e:
                     log.warning(f"Active user tracker flush failed: {e}")
+                # Issue-45 M2：会话级临时 token TTL 兜底清理（每 5 分钟）
+                try:
+                    _purge_i += 1
+                    if _purge_i >= 10:
+                        _purge_i = 0
+                        from src.api.auth_token import purge_expired_session_tokens
+                        await asyncio.to_thread(purge_expired_session_tokens)
+                except Exception as e:
+                    log.warning(f"Session token purge failed: {e}")
 
         _active_tracker_task = asyncio.create_task(_active_user_tracker())
         log.info("Active user tracker started (30s flush)")
@@ -215,6 +286,12 @@ async def lifespan(app: FastAPI):
         _probe_task.cancel()
     if _reap_task:
         _reap_task.cancel()
+    if _knowledge_write_task:
+        _knowledge_write_task.cancel()
+        try:
+            await asyncio.wait_for(_knowledge_write_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
     # 官方技能 OBS 同步：优雅关闭定时任务
     try:
         from src.storage.skill_sync import stop_skill_sync_scheduler
@@ -225,6 +302,12 @@ async def lifespan(app: FastAPI):
     try:
         from src.storage.scene_sync import stop_scene_sync_scheduler
         await stop_scene_sync_scheduler()
+    except Exception:
+        pass
+    # Issue #85：健康度定时刷新线程优雅关闭
+    try:
+        from src.runtime.health_scorer import stop_health_refresh_scheduler
+        stop_health_refresh_scheduler()
     except Exception:
         pass
     # 终止运行中的 agent 子进程（opencode），使 executor 线程尽快结束，
@@ -239,11 +322,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Agentic DevOps API",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
 app.add_middleware(
@@ -395,12 +478,29 @@ async def request_id_and_log_middleware(request: Request, call_next):
                 _log.warning(msg, extra=extra)
             else:
                 _log.info(msg, extra=extra)
+            # 慢请求入库（方案C）
+            from src.config import SLOW_REQUEST_THRESHOLD_MS
+            if duration >= SLOW_REQUEST_THRESHOLD_MS:
+                try:
+                    from src.session_manager import db as _sdb, db_lock as _sdbl
+                    with _sdbl:
+                        _sdb.execute(
+                            "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, 'backend')",
+                            (rid, request.method, redacted_path, status, round(duration), _repo, _uid)
+                        )
+                        _sdb.commit()
+                except Exception:
+                    pass  # 入库失败不影响请求
         request_id_var.reset(token_rid)
         repo_var.reset(token_repo)
         user_var.reset(token_uid)
 
 app.include_router(auth.router)
 app.include_router(repos.router)
+# Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；与 repos.py 无路径冲突）
+from src.api.git_repo_api import router as git_repo_router
+app.include_router(git_repo_router)
 app.include_router(dashboard.router)
 app.include_router(agents.router)
 app.include_router(events.router)
@@ -420,6 +520,11 @@ app.include_router(task_logs.router)
 app.include_router(knowledge.router)
 app.include_router(health.router)
 app.include_router(devstage.router)
+app.include_router(latency.router)
+
+# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
+from src.api.openapi import custom_openapi
+app.openapi = lambda: custom_openapi(app)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -456,13 +561,7 @@ if os.path.isdir(STATIC_DIR):
             raise HTTPException(status_code=404)
         return _spa_response()
 
-    # SPA catch-all：非 API/static 的路径（如 /login）回退到 index.html
-    @app.get("/{path:path}")
-    async def spa_catch_all(path: str):
-        if path.startswith("api/") or path.startswith("static/"):
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404)
-        return _spa_response()
+    # 注意：SPA catch-all (/{path:path}) 延迟到文件末尾注册，避免拦截 /health /healthz 等系统端点
 
 from src.api.db_setup import init_database
 init_database()
@@ -670,7 +769,7 @@ def _check_and_sync_templates() -> bool:
         _result = _sp.run(
             ["bash", _sync_script],
             capture_output=True, text=True, timeout=60,
-            env={**_os.environ, "TEMPLATES_REPO": "https://mm6667:shhnrXxGm1E1SJ-FxKxQ9M2Q@gitcode.com/grape-dev/grape-template.git"}
+            env={**_os.environ, "TEMPLATES_REPO": "https://gitcode.com/grape-dev/grape-template.git"}
         )
         if _result.returncode == 0:
             log.info(f"Templates: auto-sync OK\n{_result.stdout}")

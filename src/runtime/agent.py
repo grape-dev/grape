@@ -47,6 +47,7 @@ _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
+    "codex": ["codex", "exec", "--json", "--sandbox", "workspace-write", "hello"],
     "cursor": ["cursor", "run", "hello"],
 }
 _PROBE_TIMEOUT = 30
@@ -78,7 +79,7 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         if result.returncode == 0:
             # hermes 探测：从输出中提取 session_id 并删除，避免 hello 污染历史会话
             if engine_name == "hermes":
-                _cleanup_hermes_probe_session(result.stdout)
+                _cleanup_hermes_probe_session(result.stdout or "", result.stderr or "")
             return {"status": "ok", "latency": latency, "error": ""}
         else:
             err = (result.stderr or result.stdout or "").strip()[:200]
@@ -93,12 +94,13 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
 
 
-def _cleanup_hermes_probe_session(stdout: str):
-    """从 hermes chat -q -Q 的输出中提取 session_id 并删除，避免 hello 对话污染历史会话。"""
+def _cleanup_hermes_probe_session(stdout: str = "", stderr: str = ""):
+    """从 hermes chat -q -Q 的输出中提取 session_id 并删除，避免 hello 对话污染历史会话。
+    -Q 模式下 session_id 输出到 stderr，格式为行首 'session_id: <timestamp_hex>'。"""
     import re as _re
-    # -Q 模式输出: "session_id: 20260904_170115_9191ce\n..."
-    # 非 -Q 模式输出: "Session:        20260904_165247_4f270b\n..."
-    m = _re.search(r'session[_-]?(?:id)?:\s*(\S+)', stdout, _re.IGNORECASE)
+    combined = (stdout or "") + "\n" + (stderr or "")
+    # 只匹配行首的 session_id: + hermes session ID 格式（YYYYMMDD_HHMMSS_xxxxxx）
+    m = _re.search(r'^session_id:\s*(\d{8}_\d{6}_[a-f0-9]{6})', combined, _re.MULTILINE)
     if not m:
         return
     sid = m.group(1).strip()
@@ -190,7 +192,27 @@ def _collect_worker_metrics() -> dict:
     采集失败的字段保持 0.0 / 空字符串。
     CPU 使用两次调用的差值计算，首次调用返回 0.0（无基准）。
     """
-    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "load_avg": ""}
+    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "load_avg": "", "spec": ""}
+
+    # spec: CPU 核数 + 总内存（如 "4C8G"），首次采集后缓存
+    if not hasattr(_collect_worker_metrics, "_spec"):
+        try:
+            _cpu_count = os.cpu_count() or 1
+            _mem_kb = 0
+            with open("/proc/meminfo") as f:
+                for _line in f:
+                    if _line.startswith("MemTotal:"):
+                        _mem_kb = int(_line.split()[1])
+                        break
+            if _mem_kb > 0:
+                _mem_gb = _mem_kb * 1024 // (1024**3)
+                _mem_label = f"{_mem_gb}G" if _mem_gb >= 1 else f"{_mem_kb // 1024}MB"
+            else:
+                _mem_label = "?"
+            _collect_worker_metrics._spec = f"{_cpu_count}C{_mem_label}"
+        except Exception:
+            _collect_worker_metrics._spec = ""
+    metrics["spec"] = _collect_worker_metrics._spec
 
     # CPU: 读 /proc/stat，用上次缓存值计算差值（无 sleep，非阻塞）
     try:
@@ -381,12 +403,14 @@ def _remap_cwd(path: str) -> str:
 
 
 def _backend_for_engine(engine_name: str | None = "") -> str:
-    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；其余默认 opencode）。"""
+    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；codex-xxx → codex；其余默认 opencode）。"""
     name = (engine_name or "").lower()
     if name.startswith("hermes"):
         return "hermes"
     if name.startswith("codearts"):
         return "codearts"
+    if name.startswith("codex"):
+        return "codex"
     return "opencode"
 
 
@@ -591,6 +615,7 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
     patterns = {
         "hermes": ["hermes acp", "hermes chat", "hermes -z"],
         "codearts": ["codearts run"],
+        "codex": ["codex exec"],
     }.get(backend, ["opencode run"])
     killed_any = False
     for pattern in patterns:
@@ -978,8 +1003,10 @@ async def _execute_task(client, task, engine_name: str = ""):
         from src.runtime import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
+            _wb = env.get("GRAPE_WORK_BRANCH", "")
             _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                                _num, token=task.get("repo_gitcode_token") or "")
+                                                _num, token=task.get("repo_gitcode_token") or "",
+                                                work_branch=_wb)
             if _wt:
                 env["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
@@ -1142,15 +1169,17 @@ async def _execute_task(client, task, engine_name: str = ""):
             _esq_parts.append(f"engine:{engine_name}")
         _esq = "|".join(_esq_parts)
         # chat 任务以用户身份执行（回帖/建 issue 等 GitCode API 操作）——注入用户级 token。
-        # 直接执行路径（send/IM）均传 user_token；唯队列路径曾漏传，导致
-        # USER_GITCODE_TOKEN 为空、agent 回帖 401（2026-08-19 修复）。
+        # 优先从 task payload 的 user_gitcode_token 字段读取（主控端 enqueue 时注入，
+        # 与 repo_gitcode_token 互斥分离）；为空时回退 DB 查询（worker 本地 SQLite/MySQL）。
         user_token = ""
         if (task.get("agent_type") or "") == "chat" or (task.get("event_type") or "") == "chat":
-            try:
-                from src.user.db import get_user_gitcode_token
-                user_token = get_user_gitcode_token(task.get("user_id") or 0) or ""
-            except Exception as e:
-                log.warning(f"chat user token resolve failed: {e}")
+            user_token = task.get("user_gitcode_token") or ""
+            if not user_token:
+                try:
+                    from src.user.db import get_user_gitcode_token
+                    user_token = get_user_gitcode_token(task.get("user_id") or 0) or ""
+                except Exception as e:
+                    log.warning(f"chat user token resolve failed: {e}")
         # 方案 2：线程化迭代 stream_runtime（worker-event-loop-block-rootcause.md §8.5）——
         # 同步生成器的 readline() 阻塞移到后台线程，事件循环持续调度 claim/heartbeat，
         # 根治「长命令静默无输出」期间的事件循环停摆（替代方案 1 的 await sleep(0)）。

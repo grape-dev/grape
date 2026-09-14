@@ -1134,6 +1134,33 @@
   font-size: 11px !important;
   padding: 16px 12px 6px !important;
 }
+/* 可折叠分组标题（Issue #66）：沿用 .grp 视觉，增加点击反馈与箭头 */
+[data-theme="apple"] .sb-nav .grp-tog {
+  font-size: 11px !important;
+  padding: 16px 12px 6px !important;
+  border-radius: 8px;
+  transition: background 0.2s, color 0.2s;
+}
+[data-theme="apple"] .sb-nav .grp-tog:hover {
+  color: var(--t2);
+  background: rgba(0,0,0,0.04);
+}
+[data-theme="apple"] .sb-nav .grp-tog .grp-arrow {
+  font-size: 10px !important;
+}
+/* 折叠子项隐藏 + 箭头旋转（Issue #66 修复：默认主题缺 .grp-items.hid） */
+[data-theme="apple"] .sb-nav .grp-items.hid,
+.sb-nav .grp-items.hid {
+  display: none !important;
+}
+[data-theme="apple"] .grp-tog.collapsed .grp-arrow,
+.grp-tog.collapsed .grp-arrow {
+  transform: rotate(90deg);
+}
+[data-theme="apple"] .grp-tog:not(.collapsed) .grp-arrow,
+.grp-tog:not(.collapsed) .grp-arrow {
+  transform: rotate(180deg);
+}
 
 /* Sidebar select: match nav padding */
 [data-theme="apple"] .sb-sel select {
@@ -1251,6 +1278,7 @@
 [data-theme="apple"] .template-card-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; background: #fafafa !important; }
 [data-theme="apple"] .template-card-item-ic { border-radius: 50% !important; background: #f0f0f0 !important; }
 [data-theme="apple"] .template-card-item-name { font-weight: 600 !important; letter-spacing: -0.01em !important; }
+[data-theme="apple"] .tmpl-platform-tag { font-size: 9px !important; font-weight: 600 !important; padding: 2px 7px !important; border-radius: 4px !important; background: rgba(49,104,224,0.1) !important; color: #3168e0 !important; }
 [data-theme="apple"] .template-card-item-btn { border-radius: 980px !important; font-size: 12px !important; font-weight: 500 !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .template-card-add { border-radius: 10px !important; }
 [data-theme="apple"] .template-card-add:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; }

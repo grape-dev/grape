@@ -74,7 +74,9 @@
     "host_failed": "Host failed: {{msg}}"
   },
   "unhost": {
-    "confirm": "⚠️ Are you sure you want to unhost {{name}}?\n\nAfter unhosting, all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files) will be deleted and cannot be recovered.",
+    "confirm": "Are you sure you want to unhost {{name}}?\n\nAfter unhosting, all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files) will be deleted and cannot be recovered.",
+    "confirm_title": "Unhost Repository",
+    "confirm_btn": "Unhost",
     "done": "Unhosted successfully",
     "failed": "Unhost failed: {{msg}}",
     "select_repo": "Select Repository"
@@ -103,8 +105,19 @@
   },
   "brand_sub": "Agentic DevOps",
   "repositories": "Repositories",
-  "sync_from_gitcode": "Sync from GitCode",
+  "sync_from_gitcode": "Sync Repositories",
   "hosted": "Hosted",
   "no_hosted_project": "No hosted projects, please join and host a project first",
-  "unhosted_title": "Unhosted Repositories"
+  "unhosted_title": "Unhosted Repositories",
+  "bot": {
+    "title": "Bot Collaborator Required",
+    "not_configured": "GitHub Bot is not configured. Please ask the admin to set github_bot_token and github_bot_username in global-bot-token.json. The repository is hosted, but Agent operations may be limited.",
+    "invite_pending": "Bot {{bot}} has been invited to the repository, but the invitation has not been accepted yet.\nPlease go to GitHub repository Settings → Collaborators to accept the invitation, or manually add {{bot}} as a maintainer.",
+    "add_failed": "Failed to automatically add Bot {{bot}} as a repository maintainer.\nPlease go to GitHub repository Settings → Collaborators and manually add {{bot}} as a Maintainer.",
+    "insufficient": "Bot {{bot}} has joined the repository but has insufficient permissions.\nPlease set {{bot}}'s permission to Maintainer or Admin in GitHub repository Settings → Collaborators.",
+    "default": "Please add Bot {{bot}} as a maintainer in the GitHub repository to ensure Agent can operate normally.",
+    "go_github": "Go to GitHub Settings",
+    "enter_repo": "Enter Repository First",
+    "come_back": "After setting up on GitHub, come back to re-host or refresh"
+  }
 }

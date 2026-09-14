@@ -4,6 +4,7 @@ function renderSettings(tab) {
   const current = tab || 'credentials';
   const tabs = [
     {id:'credentials', label:I18N.t('settings.tab.credentials')},
+    {id:'apikeys', label: I18N.getLang() === 'zh' ? 'API Keys' : 'API Keys'},
     {id:'notifications', label:I18N.t('settings.tab.notifications')},
     {id:'appearance', label:I18N.t('settings.tab.appearance')},
   ];
@@ -20,14 +21,16 @@ function renderSettings(tab) {
     const curRepo = app.currentRepo();
     const repoQ = curRepo && curRepo.fullName ? '?repo_key=gitcode:' + encodeURIComponent(curRepo.fullName) : '';
     API.get('/settings/credentials' + repoQ).then(d => {
+      var _sc = document.getElementById('sCredentials');
+      if (!_sc) return;
       // AK/SK 回显真实值需 HTML 转义（防引号破坏属性）
       const _esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
       const _akVal = d.huawei_cloud && d.huawei_cloud.ak_exists ? '********' : '';
       const _skVal = d.huawei_cloud && d.huawei_cloud.sk_exists ? '********' : '';
-      document.getElementById('sCredentials').innerHTML = `
-        <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.gitcode_api_title')}</h3>
-          <div class="srow"><label>${I18N.t('settings.credentials.api_token')}</label><input type="password" value="${d.gitcode && d.gitcode.api_token_exists ? '********' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? '' : `placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"`} style="${d.gitcode && d.gitcode.api_token_exists ? 'background:#f1f5f9' : ''}" ${d.gitcode && d.gitcode.api_token_exists ? 'disabled' : ''}></div>
-          <div class="srow"><label>${I18N.t('settings.credentials.account')}</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account + I18N.t('settings.credentials.gitcode_account_suffix') : '—'}" disabled style="background:#f1f5f9;font-size:10px"></div>
+      _sc.innerHTML = `
+        <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.vcs_api_title')}</h3>
+          <div class="srow"><label>${I18N.t('settings.credentials.api_token')}</label><input type="password" id="githubToken" value="${d.github && d.github.token_exists ? '********' : ''}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"></div>
+          <div class="srow"><label>${I18N.t('settings.credentials.account')}</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account : (d.github && d.github.login ? d.github.login : '—')}" disabled style="background:#f1f5f9;font-size:10px"></div>
         </div>
         <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.huawei_cloud_title')}</h3>
           <div class="srow"><label>${I18N.t('settings.credentials.access_key')}</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.access_key')}"></div>
@@ -36,7 +39,12 @@ function renderSettings(tab) {
           <button class="bt bt-p mt8" onclick="saveCredentials()">${I18N.t('settings.common.save')}</button>
         </div>
 `;
-    }).catch(e => document.getElementById('sCredentials').innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}));
+    }).catch(e => { var _sc = document.getElementById('sCredentials'); if (_sc) _sc.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}); });
+  } else if (current === 'apikeys') {
+    // ===== Issue #69: API Keys 管理面板 =====
+    html += `<div id="sApiKeys"><div class="loading">${I18N.getLang() === 'zh' ? '加载中...' : 'Loading...'}</div></div></div>`;
+    el.innerHTML = html;
+    loadApiKeys();
   } else if (current === 'notifications') {
     html += `<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.notifications.title')}</h3>
       <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> ${I18N.t('settings.notifications.issue_events')}</label>
@@ -137,9 +145,11 @@ function renderSettings(tab) {
     html += `<div id="sAdvanced"><div class="loading">${I18N.t('settings.common.loading')}</div></div></div>`;
     el.innerHTML = html;
     API.get('/settings/pipeline-mode').then(d => {
+      var _sa = document.getElementById('sAdvanced');
+      if (!_sa) return;
       const mode = d.mode || 'legacy';
       const isPlugin = mode === 'plugin';
-      document.getElementById('sAdvanced').innerHTML = `
+      _sa.innerHTML = `
         <div class="cd">
           <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.pipeline.title')}</h3>
           <p class="tx t2" style="margin-bottom:16px;font-size:12px;line-height:1.6">
@@ -156,7 +166,8 @@ function renderSettings(tab) {
           <p style="font-size:11px;color:var(--t3);margin-top:12px">${I18N.t('settings.pipeline.warning')}</p>
         </div>`;
     }).catch(e => {
-      document.getElementById('sAdvanced').innerHTML = I18N.t('settings.common.load_failed', {msg: e.message});
+      var _sa = document.getElementById('sAdvanced');
+      if (_sa) _sa.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message});
     });
   } else if (current === 'gitcode') {
     // GitCode Repo 页面 — 需要已有仓库
@@ -170,7 +181,9 @@ function renderSettings(tab) {
     el.innerHTML = html;
 
     API.get('/settings/gitcode-repo/' + repo.owner + '/' + repo.name).then(d => {
-        document.getElementById('sGitcode').innerHTML = `
+        var _sg = document.getElementById('sGitcode');
+        if (!_sg) return;
+        _sg.innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.devops_bot_title')}</h3>
           <div class="srow"><label>${I18N.t('settings.credentials.bot_token')}</label><input type="password" id="gitcodeBotToken" value="" placeholder="${d.devops_bot_token_exists ? I18N.t('settings.credentials.bot_token_placeholder_configured') : I18N.t('settings.credentials.bot_token_placeholder_empty')}">${d.devops_bot_token_exists ? '<span class="ts" style="color:var(--g);font-size:10px">'+I18N.t('settings.credentials.bot_configured')+'</span>' : ''}</div>
           <div class="srow"><label>${I18N.t('settings.credentials.scope')}</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
@@ -181,7 +194,7 @@ function renderSettings(tab) {
           <p class="tx t2" style="margin-bottom:8px;color:var(--r)">${I18N.t('settings.host.unhost_warning')}</p>
           <button class="bt" style="background:var(--r);color:#fff;border:none;padding:8px 16px" onclick="unhostFromSettings('${repo.fullName}')">${I18N.t('settings.host.unhost_title')}</button>
         </div>`;
-    }).catch(e => document.getElementById('sGitcode').innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}));
+    }).catch(e => { var _sg = document.getElementById('sGitcode'); if (_sg) _sg.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}); });
   } else {
     html += `<div class="ts t2">${current}</div></div>`;
     el.innerHTML = html;
@@ -206,6 +219,11 @@ function saveCredentials() {
   const skVal = sk && sk.value ? sk.value.trim() : '';
   if (akVal && !_isCredPlaceholder(akVal)) body.huawei_cloud_ak = akVal;
   if (skVal && !_isCredPlaceholder(skVal)) body.huawei_cloud_sk = skVal;
+
+  // GitHub Token
+  const ghEl = document.getElementById('githubToken');
+  const ghVal = ghEl && ghEl.value ? ghEl.value.trim() : '';
+  if (ghVal && !_isCredPlaceholder(ghVal) && ghVal !== '********') body.github_token = ghVal;
 
   // v4.3：发布令牌按仓库（项目维度）——带当前仓库
   const cur = app.currentRepo();
@@ -244,43 +262,38 @@ function saveGitcodeRepoConfig() {
 }
 
 function unhostFromSettings(fullName) {
-  if (!confirm(I18N.t('settings.host.confirm_remove', {name: fullName}))) return;
-  API.post('/repos/remove', {full_name: fullName}).then(r => {
-    app.showToast(I18N.t('settings.host.unhost_done'));
-    const cur = app.currentRepo();
-    const wasCurrent = cur && cur.fullName === fullName;
-    if (wasCurrent) {
-      localStorage.removeItem('currentRepo');
-    }
-    app.initSidebarRepos();
-    API.get('/repos/managed').then(md => {
-      const remaining = md.repos || [];
-      if (wasCurrent || remaining.length === 0) {
-        API.get('/repos/member').then(d => {
-          const repos = d.repos || [];
-          document.getElementById('sidebar').style.display = 'none';
-          document.getElementById('tb').style.display = 'none';
-          const mv = document.getElementById('mainView');
-          mv.style.display = 'flex';
-          mv.style.position = 'fixed';
-          mv.style.inset = '0';
-          mv.style.zIndex = '100';
-          document.getElementById('pageTitle').textContent = I18N.t('settings.host.select_repo');
-          renderRepoSelection(repos);
-        });
-      } else {
-        app.nav('dash');
+  app.showConfirm(I18N.t('settings.host.confirm_remove', {name: fullName}), function() {
+    API.post('/repos/remove', {full_name: fullName}).then(r => {
+      app.showToast(I18N.t('settings.host.unhost_done'));
+      const cur = app.currentRepo();
+      const wasCurrent = cur && cur.fullName === fullName;
+      if (wasCurrent) {
+        localStorage.removeItem('currentRepo');
       }
-    });
-  }).catch(e => app.showToast(I18N.t('settings.host.unhost_failed', {msg: e.message})));
-}
-
-function applyScene(owner, repo) {
-  const sceneId = document.getElementById('sceneSelect').value;
-  if (!sceneId) return app.showToast(I18N.t('settings.scene.select_first'));
-  API.post('/scenes/apply/' + owner + '/' + repo, {scene_id: sceneId})
-    .then(r => app.showToast(r.message || I18N.t('settings.scene.applied')))
-    .catch(e => app.showToast(I18N.t('settings.scene.apply_failed', {msg: e.message || e})));
+      app.initSidebarRepos();
+      API.get('/repos/managed').then(md => {
+        const remaining = md.repos || [];
+        if (wasCurrent || remaining.length === 0) {
+          // 当前仓库被解除或已无托管仓库 → 回到仓库选择页
+          API.get('/repos/member').then(d => {
+            const repos = d.repos || [];
+            document.getElementById('sidebar').style.display = 'none';
+            document.getElementById('tb').style.display = 'none';
+            const mv = document.getElementById('mainView');
+            mv.style.display = 'flex';
+            mv.style.position = 'fixed';
+            mv.style.inset = '0';
+            mv.style.zIndex = '100';
+            document.getElementById('pageTitle').textContent = I18N.t('settings.host.select_repo');
+            renderRepoSelection(repos);
+          });
+        } else {
+          // 还有其他托管仓库 → 回到 Dashboard
+          app.nav('dash');
+        }
+      });
+    }).catch(e => app.showToast(I18N.t('settings.host.unhost_failed', {msg: e.message})));
+  }, {danger: true});
 }
 
 // ── Theme switching ──
@@ -313,4 +326,110 @@ function togglePipelineModeSetting() {
     app.showToast(d.message);
     renderSettings('advanced');
   }).catch(e => app.showToast(I18N.t('settings.pipeline.switch_failed', {msg: e.message || I18N.t('settings.pipeline.unknown_error')})));
+}
+
+// ── Issue #69: API Keys 管理 ──
+
+function loadApiKeys() {
+  API.get('/settings/api-keys').then(d => {
+    const keys = d.keys || [];
+    const isZh = I18N.getLang() === 'zh';
+    const container = document.getElementById('sApiKeys');
+    if (!container) return;
+
+    let rowsHtml = '';
+    if (keys.length === 0) {
+      rowsHtml = `<div class="tx t2" style="padding:16px;text-align:center">${isZh ? '暂无 API Key，点击上方按钮生成' : 'No API Keys yet. Create one above.'}</div>`;
+    } else {
+      rowsHtml = keys.map(k => `
+        <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--b)">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:600;color:var(--t)">${_escApi(k.name)}</div>
+            <div style="font-size:11px;color:var(--t3);font-family:monospace;margin-top:2px">${_escApi(k.prefix)}</div>
+            <div style="font-size:10px;color:var(--t3);margin-top:2px">
+              ${isZh ? '创建' : 'Created'}: ${_escApi(k.created_at || '—')}
+              ${k.last_used_at ? ' · ' + (isZh ? '最近使用' : 'Last used') + ': ' + _escApi(k.last_used_at) : ''}
+            </div>
+          </div>
+          <button class="bt" style="font-size:11px;padding:5px 12px;background:var(--r);color:#fff;border:none;border-radius:6px;cursor:pointer"
+            onclick="revokeApiKey(${k.id}, '${_escApi(k.name).replace(/'/g, "\\'")}')">${isZh ? '吊销' : 'Revoke'}</button>
+        </div>
+      `).join('');
+    }
+
+    container.innerHTML = `
+      <div class="cd">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h3 style="font-size:13px;font-weight:600">${isZh ? 'API Keys' : 'API Keys'}</h3>
+          <button class="bt bt-p" style="font-size:12px;padding:7px 16px" onclick="showCreateApiKeyDialog()">${isZh ? '+ 生成新 Key' : '+ Generate Key'}</button>
+        </div>
+        <p class="tx t2" style="font-size:11px;line-height:1.6;margin-bottom:12px">
+          ${isZh
+            ? 'API Key 用于 grape-cli 认证和 CI/自动化场景。前缀 <code>grape_</code>，长效有效，可吊销。明文仅在生成时显示一次，请妥善保存。'
+            : 'API Keys are used for grape-cli authentication and CI/automation. Prefix <code>grape_</code>, long-lived, revocable. Plaintext is shown only once at creation.'}
+        </p>
+        <div id="apiKeyList">${rowsHtml}</div>
+      </div>
+    `;
+  }).catch(e => {
+    const isZh = I18N.getLang() === 'zh';
+    document.getElementById('sApiKeys').innerHTML =
+      `<div class="cd"><p style="color:var(--r);font-size:12px">${isZh ? '加载失败: ' : 'Load failed: '}${e.message}</p></div>`;
+  });
+}
+
+function _escApi(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function showCreateApiKeyDialog() {
+  const isZh = I18N.getLang() === 'zh';
+  const name = prompt(isZh ? '请输入 API Key 名称（如 CI Pipeline）：' : 'Enter API Key name (e.g. CI Pipeline):', '');
+  if (name === null) return;
+  if (!name.trim()) {
+    app.showToast(isZh ? '名称不能为空' : 'Name cannot be empty');
+    return;
+  }
+  API.post('/settings/api-keys', {name: name.trim()}).then(d => {
+    // 明文仅展示一次——弹窗显示完整 key
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999';
+    modal.innerHTML = `
+      <div style="background:var(--c);border-radius:14px;padding:24px;max-width:520px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.15)">
+        <h3 style="font-size:15px;font-weight:600;margin-bottom:8px">${isZh ? 'API Key 已生成' : 'API Key Created'}</h3>
+        <p style="font-size:12px;color:var(--r);margin-bottom:12px">${isZh ? '⚠ 明文仅显示此次，请立即复制保存！' : '⚠ Plaintext shown only once. Copy and save now!'}</p>
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          <input type="text" id="newApiKeyInput" value="${d.key}" readonly
+            style="flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-family:monospace;font-size:12px;background:#f8f9fa">
+          <button class="bt bt-p" style="padding:8px 16px;font-size:12px" onclick="copyApiKeyToClipboard()">${isZh ? '复制' : 'Copy'}</button>
+        </div>
+        <div style="display:flex;justify-content:flex-end">
+          <button class="bt bt-p" style="padding:8px 20px;font-size:12px" onclick="document.querySelector('body > div[style*=fixed]').remove()">${isZh ? '我已保存' : 'Saved'}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    // 选中 key 文本方便复制
+    setTimeout(() => { const inp = document.getElementById('newApiKeyInput'); if (inp) inp.select(); }, 100);
+    loadApiKeys(); // 刷新列表
+  }).catch(e => {
+    app.showToast(I18N.getLang() === 'zh' ? '生成失败: ' + e.message : 'Failed: ' + e.message);
+  });
+}
+
+function copyApiKeyToClipboard() {
+  const inp = document.getElementById('newApiKeyInput');
+  if (!inp) return;
+  inp.select();
+  try { navigator.clipboard.writeText(inp.value); } catch(e) { document.execCommand('copy'); }
+  app.showToast(I18N.getLang() === 'zh' ? '已复制到剪贴板' : 'Copied to clipboard');
+}
+
+function revokeApiKey(id, name) {
+  const isZh = I18N.getLang() === 'zh';
+  if (!confirm(isZh ? `确定吊销 "${name}" 吗？吊销后立即失效，不可恢复。` : `Revoke "${name}"? This is immediate and irreversible.`)) return;
+  API.del('/settings/api-keys/' + id).then(d => {
+    app.showToast(d.message);
+    loadApiKeys();
+  }).catch(e => app.showToast(isZh ? '吊销失败: ' + (e.message || e) : 'Revoke failed: ' + (e.message || e)));
 }

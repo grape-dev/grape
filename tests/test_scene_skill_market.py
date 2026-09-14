@@ -406,3 +406,345 @@ class TestGetSkillDetailExtended:
         assert "like_count" in detail
         assert "liked_by_me" in detail
         assert "scenes" in detail
+
+
+# ===== Scene Market CRUD (Issue #54) =====
+
+class TestSceneMarketCRUD:
+    """场景市场创建/更新/删除/重名检查测试（Issue #54）"""
+
+    def test_create_scene(self):
+        """创建仓库场景"""
+        body = {
+            "name": "test-crud-scene",
+            "display_name": "测试CRUD场景",
+            "description": "测试场景描述",
+            "scope": "repo",
+            "nodes": [{"id": "vod", "tag": "vod", "skill": "", "skill_id": 0, "enabled": True}],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-repo", headers=_headers, json=body)
+        assert resp.status_code in (200, 201)
+        data = resp.json()
+        assert data.get("id") > 0
+        assert data.get("message") == "场景创建成功"
+
+    def test_create_scene_duplicate_name(self):
+        """重复 name 返回 409"""
+        body = {
+            "name": "test-crud-scene",
+            "display_name": "重复场景",
+            "scope": "repo",
+            "nodes": [],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-repo", headers=_headers, json=body)
+        assert resp.status_code == 409
+
+    def test_check_scene_name_exists(self):
+        """检查场景名是否存在"""
+        resp = client.get("/api/scenes/check-name?repo=test/test-repo&name=test-crud-scene&scope=repo", headers=_headers)
+        assert resp.status_code == 200
+        assert resp.json().get("exists") is True
+
+    def test_check_scene_name_available(self):
+        """检查不存在的场景名"""
+        resp = client.get("/api/scenes/check-name?repo=test/test-repo&name=nonexistent-xyz-123&scope=repo", headers=_headers)
+        assert resp.status_code == 200
+        assert resp.json().get("exists") is False
+
+    def test_update_scene(self):
+        """更新场景"""
+        create_body = {
+            "name": "test-crud-update",
+            "display_name": "更新前",
+            "scope": "repo",
+            "nodes": [],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-repo", headers=_headers, json=create_body)
+        scene_id = resp.json().get("id")
+
+        update_body = {
+            "name": "test-crud-update",
+            "display_name": "更新后",
+            "description": "更新后的描述",
+            "scope": "repo",
+            "nodes": [],
+            "category_id": 1,
+        }
+        resp = client.put(f"/api/scenes/market/{scene_id}?repo=test/test-repo", headers=_headers, json=update_body)
+        assert resp.status_code == 200
+        assert resp.json().get("message") == "场景更新成功"
+
+    def test_delete_scene(self):
+        """删除场景"""
+        create_body = {
+            "name": "test-crud-delete",
+            "display_name": "待删除",
+            "scope": "repo",
+            "nodes": [],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-repo", headers=_headers, json=create_body)
+        scene_id = resp.json().get("id")
+
+        resp = client.delete(f"/api/scenes/market/{scene_id}", headers=_headers)
+        assert resp.status_code == 200
+
+        resp = client.get(f"/api/scenes/market/{scene_id}", headers=_headers)
+        assert resp.status_code == 404
+
+    def test_delete_official_scene_forbidden(self):
+        """删除 official 场景被拒绝"""
+        resp = client.get("/api/scenes/market?scope=official&page_size=1", headers=_headers)
+        scenes = resp.json().get("scenes", [])
+        if scenes:
+            scene_id = scenes[0]["id"]
+            resp = client.delete(f"/api/scenes/market/{scene_id}", headers=_headers)
+            assert resp.status_code in (403, 404)
+
+
+# ===== list_skills_for_agent (Issue #54) =====
+
+class TestListSkillsForAgent:
+    """技能选择接口测试（Issue #54）"""
+
+    def test_list_skills_official(self):
+        """列出 official 技能"""
+        resp = client.get("/api/scenes/skills/vod?scope=official&page_size=5", headers=_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "skills" in data
+        assert "total" in data
+
+    def test_list_skills_with_search(self):
+        """搜索技能"""
+        resp = client.get("/api/scenes/skills/vod?q=blog&page_size=5", headers=_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        if data["total"] > 0:
+            assert "display_name" in data["skills"][0]
+
+    def test_list_skills_with_scope_filter(self):
+        """scope 过滤只返回对应范围"""
+        resp = client.get("/api/scenes/skills/vod?scope=official&page_size=20", headers=_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        for sk in data.get("skills", []):
+            assert sk.get("scope") == "official"
+
+    def test_list_skills_pagination(self):
+        """分页参数正确"""
+        resp1 = client.get("/api/scenes/skills/vod?page=1&page_size=2", headers=_headers)
+        assert resp1.status_code == 200
+        d1 = resp1.json()
+        assert len(d1.get("skills", [])) <= 2
+
+        resp2 = client.get("/api/scenes/skills/vod?page=2&page_size=2", headers=_headers)
+        assert resp2.status_code == 200
+        d2 = resp2.json()
+        ids1 = {s["skill_name"] for s in d1.get("skills", [])}
+        ids2 = {s["skill_name"] for s in d2.get("skills", [])}
+        assert not (ids1 & ids2)
+
+
+# ===== scene_skill_ref + skill_deleted (Issue #54) =====
+
+class TestSceneSkillRef:
+    """场景技能引用关系测试（Issue #54）"""
+
+    def test_create_scene_builds_skill_ref(self):
+        """创建场景时自动重建 scene_skill_ref"""
+        from src.session_manager import db, db_lock
+        body = {
+            "name": "test-ref-scene",
+            "display_name": "测试Ref场景",
+            "scope": "repo",
+            "nodes": [{"id": "vod", "tag": "vod", "skill": "blog-vod", "skill_id": 0, "enabled": True}],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-ref", headers=_headers, json=body)
+        scene_id = resp.json().get("id")
+        assert scene_id
+
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT skill_id, skill_name FROM scene_skill_ref WHERE scene_id=?", (scene_id,))
+            rows = c.fetchall()
+        assert len(rows) >= 1
+        assert any(r[1] == "blog-vod" for r in rows)
+        assert all(r[0] > 0 for r in rows if r[1] == "blog-vod")
+
+    def test_update_scene_rebuilds_skill_ref(self):
+        """更新场景时重建 scene_skill_ref"""
+        from src.session_manager import db, db_lock
+        # 先创建
+        create_body = {
+            "name": "test-ref-update",
+            "display_name": "Ref更新前",
+            "scope": "repo",
+            "nodes": [{"id": "vod", "tag": "vod", "skill": "blog-vod", "enabled": True}],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-ref", headers=_headers, json=create_body)
+        scene_id = resp.json().get("id")
+
+        # 更新换技能
+        update_body = {
+            "name": "test-ref-update",
+            "display_name": "Ref更新后",
+            "scope": "repo",
+            "nodes": [{"id": "vod", "tag": "vod", "skill": "iac-vod", "enabled": True}],
+            "category_id": 1,
+        }
+        resp = client.put(f"/api/scenes/market/{scene_id}?repo=test/test-ref", headers=_headers, json=update_body)
+        assert resp.status_code == 200
+
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT skill_name FROM scene_skill_ref WHERE scene_id=?", (scene_id,))
+            rows = c.fetchall()
+        assert any(r[0] == "iac-vod" for r in rows)
+        assert not any(r[0] == "blog-vod" for r in rows)
+
+    def test_detail_skill_deleted_flag(self):
+        """详情页 skill_deleted 标记：引用不存在的 skill 时为 True"""
+        from src.session_manager import db, db_lock
+        # 创建引用不存在 skill 的场景
+        body = {
+            "name": "test-deleted-skill",
+            "display_name": "测试已删除技能",
+            "scope": "repo",
+            "nodes": [{"id": "vod", "tag": "vod", "skill": "nonexistent-skill-xyz", "enabled": True}],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-ref", headers=_headers, json=body)
+        scene_id = resp.json().get("id")
+
+        resp = client.get(f"/api/scenes/market/{scene_id}", headers=_headers)
+        assert resp.status_code == 200
+        skills = resp.json().get("skills", [])
+        assert len(skills) >= 1
+        sk = [s for s in skills if s["name"] == "nonexistent-skill-xyz"][0]
+        assert sk["skill_deleted"] is True
+
+    def test_detail_skill_not_deleted(self):
+        """详情页 skill_deleted 标记：引用存在的 skill 时为 False"""
+        # 创建引用存在 skill 的场景
+        body = {
+            "name": "test-not-deleted",
+            "display_name": "测试存在技能",
+            "scope": "repo",
+            "nodes": [{"id": "vod", "tag": "vod", "skill": "blog-vod", "enabled": True}],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-ref", headers=_headers, json=body)
+        scene_id = resp.json().get("id")
+        resp = client.get(f"/api/scenes/market/{scene_id}", headers=_headers)
+        assert resp.status_code == 200
+        skills = resp.json().get("skills", [])
+        assert len(skills) >= 1
+        sk = [s for s in skills if s["name"] == "blog-vod"][0]
+        assert sk["skill_deleted"] is False
+
+    def test_apply_scene_with_deleted_skill(self):
+        """应用场景时引用已删除的 skill 返回 400"""
+        from src.session_manager import db, db_lock
+        body = {
+            "name": "test-apply-deleted",
+            "display_name": "应用已删除技能场景",
+            "scope": "repo",
+            "nodes": [{"id": "vod", "tag": "vod", "skill": "nonexistent-skill-xyz", "enabled": True}],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-ref", headers=_headers, json=body)
+        scene_id = resp.json().get("id")
+
+        resp = client.post(f"/api/scenes/market/{scene_id}/apply?owner=test&repo=test-ref", headers=_headers)
+        assert resp.status_code == 400
+        assert "已删除" in resp.json().get("detail", {}).get("message", "")
+
+
+# ===== 补充测试 (Issue #54) =====
+
+class TestSceneMarketExtended:
+    """场景市场扩展测试"""
+
+    def test_list_market_sort_latest(self):
+        """排序 latest 按 updated_at DESC"""
+        resp = client.get("/api/scenes/market?scope=official&sort=latest&page_size=5", headers=_headers)
+        assert resp.status_code == 200
+        scenes = resp.json()["scenes"]
+        assert len(scenes) > 0
+
+    def test_list_repo_scenes(self):
+        """仓库场景列表（scope=repo + repo 参数）"""
+        resp = client.get("/api/scenes/market?scope=repo&repo=test/test-ref&page_size=5", headers=_headers)
+        assert resp.status_code == 200
+        assert "scenes" in resp.json()
+        assert "total" in resp.json()
+
+    def test_list_featured_scenes(self):
+        """精选场景加载（featured_only=1）"""
+        resp = client.get("/api/scenes/market?featured_only=1&scope=official&limit=5", headers=_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "scenes" in data
+        for s in data["scenes"]:
+            assert s.get("is_featured")
+
+    def test_delete_cascades_skill_ref(self):
+        """删除场景级联清理 scene_skill_ref"""
+        from src.session_manager import db, db_lock
+        # 创建场景
+        body = {
+            "name": "test-cascade-delete",
+            "display_name": "级联删除测试",
+            "scope": "repo",
+            "nodes": [{"id": "vod", "tag": "vod", "skill": "blog-vod", "enabled": True}],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-ref", headers=_headers, json=body)
+        scene_id = resp.json().get("id")
+
+        # 确认有 scene_skill_ref
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM scene_skill_ref WHERE scene_id=?", (scene_id,))
+            assert c.fetchone()[0] > 0
+
+        # 删除
+        resp = client.delete(f"/api/scenes/market/{scene_id}", headers=_headers)
+        assert resp.status_code == 200
+
+        # 确认 scene_skill_ref 已清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM scene_skill_ref WHERE scene_id=?", (scene_id,))
+            assert c.fetchone()[0] == 0
+
+    def test_apply_scene_success(self):
+        """应用场景成功路径（引用存在的 skill）"""
+        # 先创建
+        body = {
+            "name": "test-apply-success",
+            "display_name": "应用成功测试",
+            "scope": "repo",
+            "nodes": [{"id": "vod", "tag": "vod", "skill": "blog-vod", "enabled": True}],
+            "category_id": 1,
+        }
+        resp = client.post("/api/scenes/market?repo=test/test-apply", headers=_headers, json=body)
+        scene_id = resp.json().get("id")
+
+        # 应用
+        resp = client.post(f"/api/scenes/market/{scene_id}/apply?owner=test&repo=test-apply", headers=_headers)
+        assert resp.status_code == 200
+
+    def test_list_skills_with_repo_param(self):
+        """技能列表带 repo 参数"""
+        resp = client.get("/api/scenes/skills/vod?repo=test/test-ref&page_size=5", headers=_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "skills" in data
+        assert "total" in data

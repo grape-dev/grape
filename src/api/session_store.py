@@ -94,6 +94,26 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     _scene_log = _init_scene if not row else '(existing)'
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee} scene={_scene_log}")
 
+    # Issue #85: stage 推进时同步 task.status（不覆盖 awaiting_input/completed/cancelled）
+    _STAGE_TO_TASK_STATUS = {
+        "vod": "processing", "issue": "processing", "coding": "processing",
+        "qa": "processing", "sre": "processing",
+        "pending_review": "pending_review", "done": "completed",
+    }
+    _task_status = _STAGE_TO_TASK_STATUS.get(stage)
+    if _task_status:
+        try:
+            _issue_num = int(issue_id.lstrip("#"))
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "UPDATE tasks SET status=? "
+                    "WHERE repo_key=? AND issue_number=? AND status NOT IN ('completed','cancelled','awaiting_input')",
+                    (_task_status, repo_key, _issue_num))
+                db.commit()
+        except Exception as _e:
+            log.warning(f"set_issue_stage: sync task.status failed: {_e}")
+
 
 def get_issue_owner(repo_key: str, issue_id: str) -> str:
     """返回 Issue 当前归属 agent（无记录默认 'vod'）。"""
@@ -452,7 +472,7 @@ def ensure_default_agent_sessions(repo_key: str):
         for _at, _sk in _mapping.items():
             try:
                 from src.user.db import resolve_skill_id
-                _skill_id = resolve_skill_id(_sk)
+                _skill_id = resolve_skill_id(_sk, repo_key=repo_key)
                 # 默认引擎：按 专属→全局→本机 选择，写入 session 主引擎；
                 # 无候选则 runtime_id=0（agent 标识"无 engine，不可用"）
                 _rid = resolve_default_engine(repo_key, _at) or 0

@@ -6,12 +6,14 @@ from .base import AgentBackend
 from .opencode import OpencodeBackend
 from .codearts import CodeArtsBackend
 from .hermes import HermesBackend
+from .codex import CodexBackend
 
 
 _BACKENDS = {
     "opencode": OpencodeBackend(),
     "codearts": CodeArtsBackend(),
     "hermes": HermesBackend(),
+    "codex": CodexBackend(),
 }
 
 # 运行中的 agent 子进程注册表：供服务停机时统一终止，避免 uvicorn 优雅停机
@@ -66,6 +68,7 @@ def discover_backends() -> list[dict]:
         "opencode": {"cli": "opencode", "pip": "opencode"},
         "codearts": {"cli": "codearts", "pip": "codearts-cli"},
         "hermes": {"cli": "hermes", "pip": "hermes"},
+        "codex": {"cli": "codex", "pip": "@openai/codex"},
         "cursor": {"cli": "cursor", "pip": "cursor"},
     }
     results = []
@@ -207,7 +210,8 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
 
 
 def _assemble_env(env: dict, *, kind: str, label: str = "",
-                  bot_token: str = "", user_token: str = "", user_id: int = 0) -> None:
+                  bot_token: str = "", user_token: str = "", user_id: int = 0,
+                  repo_key: str = "", username: str = "") -> None:
     """按执行类型组装 GitCode token 与用户云凭据（互斥注入，§十 写操作隔离）。
 
     - kind="chat"：只注入 USER_GITCODE_TOKEN（DB 兜底；无则 log.error，不以 bot token 冒充用户身份）
@@ -231,9 +235,25 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                           f"will NOT impersonate user with bot token; GitCode API 401 for user write ops")
             else:
                 log.warning(f"{label}NO token available for chat agent, GitCode API will 401")
+        # GitHub 用户 token 注入
+        if user_id > 0:
+            try:
+                from src.user.db import get_user_account
+                _acc = get_user_account(username) or {}
+                _gh_tok = _acc.get("github_api_token", "")
+                if _gh_tok:
+                    env["USER_GITHUB_TOKEN"] = _gh_tok
+            except Exception as e:
+                log.warning(f"GitHub user token inject failed: {e}")
     elif bot_token:
         env["BOT_GITCODE_TOKEN"] = bot_token
         log.info(f"{label}devops event task: user token not applicable, using bot token (len={len(bot_token)})")
+        # GitHub bot token 注入（GitHub 仓库托管时存的是用户 GitHub token）
+        if repo_key and repo_key.startswith("github:"):
+            env["BOT_GITHUB_TOKEN"] = bot_token
+            log.info(f"{label}GitHub repo: also injected BOT_GITHUB_TOKEN")
+        # 通用 BOT_TOKEN 别名（skill 文件中 $BOT_TOKEN 引用，适配多 VCS provider）
+        env["BOT_TOKEN"] = bot_token
     # 用户云凭据注入（devops 的 user_id=仓库归属用户，见 event_pipeline _issue_scene_uid）
     if user_id > 0:
         try:

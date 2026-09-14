@@ -98,19 +98,26 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
     """
     db, lock = _db()
     rows = []
+    _has_dn = False
+    _has_ao = False
+    _has_cb = False
+    _has_icon = False
     with lock:
         c = db.cursor()
         try:
             if repo_key:
-                _has_dn = False
-                try:
-                    _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
-                    _has_dn = "display_name" in _cols
-                except Exception:
-                    pass
-                _dn_expr = ", display_name" if _has_dn else ""
+                _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
+                _has_dn = "display_name" in _cols
+                _has_ao = "advanced_options" in _cols
+                _has_cb = "created_by" in _cols
+                _has_icon = "icon" in _cols
+                _extra = ""
+                if _has_dn: _extra += ", display_name"
+                if _has_ao: _extra += ", advanced_options"
+                if _has_cb: _extra += ", created_by"
+                if _has_icon: _extra += ", icon"
                 c.execute(
-                    f"SELECT scene_id, name, description, nodes_json, onboarding{_dn_expr} FROM devops_pipeline_scene "
+                    f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                     "WHERE is_active=1 AND repo_key=? ORDER BY id", (repo_key,))
                 rows.extend(c.fetchall())
         except Exception as e:
@@ -126,10 +133,31 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
             nodes = json.loads(r[3] or "[]") if r[3] else []
         except Exception:
             nodes = []
+        # Parse advanced_options for work_branch
+        work_branch = "main"
+        col_offset = 5  # columns after onboarding (index 4)
+        if _has_dn and len(r) > col_offset:
+            col_offset += 1  # display_name
+        if _has_ao and len(r) > col_offset:
+            try:
+                opts = json.loads(r[col_offset] or "{}")
+                work_branch = opts.get("work_branch", "main") or "main"
+            except Exception:
+                pass
+            col_offset += 1
+        created_by = ""
+        if _has_cb and len(r) > col_offset:
+            created_by = r[col_offset] or ""
+            col_offset += 1
+        icon = ""
+        if _has_icon and len(r) > col_offset:
+            icon = r[col_offset] or ""
         result.append({
             "scene_id": scene_id, "name": r[1], "description": r[2],
-            "display_name": (r[5] if len(r) > 5 else "") or r[1],
+            "display_name": (r[5] if _has_dn and len(r) > 5 else "") or r[1],
             "nodes": nodes, "onboarding": r[4] or "repo-onboarding",
+            "work_branch": work_branch, "created_by": created_by,
+            "icon": icon,
         })
     return result
 
@@ -168,14 +196,17 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
 
 
 def get_scenes(repo_key: str = "") -> list[dict]:
-    """Return scene list [{id, name, display_name, scope}] for this repo (repo-scoped only).
-
-    scope 恒为 'repo'（方案 B：场景只与仓库关联），供前端兼容展示。
-    """
+    """Return scene list [{id, name, display_name, scope, description, work_branch, created_by, icon, nodes, onboarding}] for this repo."""
     db_scenes = _query_scenes_from_db(repo_key=repo_key)
     return [{"id": s["scene_id"], "name": s["name"],
              "display_name": s.get("display_name") or s["name"],
-             "scope": "repo"} for s in db_scenes]
+             "scope": "repo",
+             "description": s.get("description") or "",
+             "work_branch": s.get("work_branch") or "main",
+             "created_by": s.get("created_by") or "",
+             "icon": s.get("icon") or "",
+             "nodes": s.get("nodes") or [],
+             "onboarding": s.get("onboarding") or "repo-onboarding"} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
@@ -269,7 +300,7 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
 
 def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
-                        display_name: str = "") -> int:
+                        display_name: str = "", created_by: str = "", icon: str = "") -> int:
     """Create or reactivate a repo-scoped custom scene in DB. Returns DB id."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -277,18 +308,19 @@ def create_custom_scene(scene_id: str, name: str, description: str,
     now = datetime.now(timezone.utc).isoformat()
     with lock:
         c = db.cursor()
-        # Check if a soft-deleted record exists (is_active=0) — reactivate it
+        # Check if record exists (硬删除后不会有 is_active=0 残留)
         c.execute(
             "SELECT id FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=? LIMIT 1",
             (scene_id, repo_key))
         existing = c.fetchone()
         if existing:
-            # Reactivate soft-deleted record
+            # 已存在 → 更新
             c.execute(
                 "UPDATE devops_pipeline_scene SET name=?, description=?, nodes_json=?, onboarding=?, is_active=1, updated_at=? WHERE id=?",
                 (name, description, nodes_json, onboarding, now, existing[0]))
-            # 更新 display_name（列存在时）
             _try_set_display_name(c, existing[0], display_name or name)
+            _try_set_created_by(c, existing[0], created_by)
+            _try_set_icon(c, existing[0], icon)
             db.commit()
             return existing[0]
         # Insert new record
@@ -296,9 +328,30 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             "INSERT INTO devops_pipeline_scene (scene_id, name, description, repo_key, nodes_json, onboarding, is_active, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,1,?,?)",
             (scene_id, name, description, repo_key, nodes_json, onboarding, now, now))
-        _try_set_display_name(c, c.lastrowid, display_name or name)
+        new_id = c.lastrowid
+        _try_set_display_name(c, new_id, display_name or name)
+        _try_set_created_by(c, new_id, created_by)
+        _try_set_icon(c, new_id, icon)
         db.commit()
-        return c.lastrowid
+        return new_id
+
+
+def _try_set_created_by(c, row_id: int, created_by: str):
+    """幂等写入 created_by（列不存在时忽略）。"""
+    if not created_by:
+        return
+    try:
+        c.execute("UPDATE devops_pipeline_scene SET created_by=? WHERE id=?", (created_by, row_id))
+    except Exception:
+        pass
+
+
+def _try_set_icon(c, row_id: int, icon: str):
+    """幂等写入 icon（列不存在时忽略）。"""
+    try:
+        c.execute("UPDATE devops_pipeline_scene SET icon=? WHERE id=?", (icon, row_id))
+    except Exception:
+        pass
 
 
 def _try_set_display_name(c, row_id: int, display_name: str):
@@ -310,7 +363,8 @@ def _try_set_display_name(c, row_id: int, display_name: str):
 
 
 def update_custom_scene(scene_id: str, repo_key: str,
-                        nodes: list, name: str = "", description: str = ""):
+                        nodes: list, name: str | None = None, description: str | None = None,
+                        icon: str | None = None):
     """Update a repo-scoped custom scene."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -320,12 +374,17 @@ def update_custom_scene(scene_id: str, repo_key: str,
         c = db.cursor()
         sets = ["nodes_json=?", "updated_at=?"]
         params = [nodes_json, now]
-        if name:
+        if name:  # 空字符串不覆盖已有名称
             sets.append("name=?")
             params.append(name)
-        if description:  # 空字符串不覆盖已有描述
+            sets.append("display_name=?")
+            params.append(name)
+        if description is not None:  # None=不更新，空字符串=清空描述
             sets.append("description=?")
             params.append(description)
+        if icon is not None:
+            sets.append("icon=?")
+            params.append(icon)
         params.extend([scene_id, repo_key])
         c.execute(
             f"UPDATE devops_pipeline_scene SET {','.join(sets)} WHERE scene_id=? AND repo_key=? AND is_active=1",
@@ -334,14 +393,21 @@ def update_custom_scene(scene_id: str, repo_key: str,
 
 
 def delete_custom_scene(scene_id: str, repo_key: str):
-    """Soft-delete a repo-scoped custom scene (is_active=0)."""
+    """Hard-delete a repo-scoped custom scene. 精确匹配 scene_id + repo_key，不影响其他仓库。"""
     db, lock = _db()
     with lock:
         c = db.cursor()
         c.execute(
-            "UPDATE devops_pipeline_scene SET is_active=0 WHERE scene_id=? AND repo_key=?",
+            "DELETE FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=?",
             (scene_id, repo_key))
         db.commit()
+
+    # 自检推荐配置：清理指向被删场景的规则/兜底
+    try:
+        from src.prompt_builder import _sanitize_recommend_config
+        _sanitize_recommend_config(repo_key)
+    except Exception:
+        pass
 
 
 def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int = 0):
@@ -354,42 +420,51 @@ def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int = 0):
 
 
 def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
-    """应用默认场景到仓库：从 scene_market(source='official') 复刻默认场景为仓库场景。
+    """应用默认场景到仓库：直接调 apply_market_scene 走场景中心应用逻辑。
 
-    默认场景名读 configs/default-scene.json single config（default_scene_market_name，默认 'default'=通用开发）。
-    配置为 '' 时不自动配置场景（仓库无场景 → VOD 输出「未配置场景」）。
-    幂等：仓库已有同名场景则不重复创建。
+    默认场景名读 configs/default-scene.json（default_scene_market_name，默认 'default'=通用开发）。
+    配置为 '' 时不自动配置场景。
+    幂等：仓库已有同 market_scene_id 的场景则不重复创建。
+
+    与用户从场景中心手动应用走完全相同的逻辑：
+    skill 校验 → 幂等查重 → 创建/更新场景 + 回写 market_scene_id。
+    skill 缺失时抛 HTTPException(400)，托管流程应让异常冒出暴露给前端。
     """
+    from fastapi import HTTPException
+    from src.repo_key import from_repo_key
     default_name = _get_default_scene_market_name()
     if not default_name:
         log.info(f"apply_default_scene_to_repo: default scene disabled ({repo_key})")
         return False
-    official = _load_official_scene_from_market(default_name)
-    if not official:
+
+    # 按 name 查 scene_market 拿 market_id
+    db, lock = _db()
+    with lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id FROM scene_market WHERE name=? AND source='official' AND is_active=1 LIMIT 1",
+            (default_name,),
+        )
+        row = c.fetchone()
+    if not row:
         log.warning(f"apply_default_scene_to_repo: market scene '{default_name}' not found for {repo_key}")
         return False
-    # 检查仓库是否已有该场景
-    existing = _query_scene_by_id(default_name, repo_key=repo_key)
-    if existing:
+    market_id = row[0]
+
+    # 从 repo_key 拆 owner/repo（apply_market_scene 需要这两个参数）
+    full_name = from_repo_key(repo_key)  # "XOcto/repo-name"
+    parts = full_name.split("/", 1)
+    if len(parts) != 2:
+        log.warning(f"apply_default_scene_to_repo: invalid repo_key '{repo_key}'")
         return False
-    try:
-        create_custom_scene(
-            scene_id=default_name, name=official["name"] or default_name,
-            display_name=official.get("display_name") or official["name"] or default_name,
-            description=official.get("description", "") or "",
-            repo_key=repo_key, nodes=official.get("nodes") or [],
-            onboarding=official.get("onboarding", "repo-onboarding"))
-        # 同步写 managed_repos.dev_scene
-        try:
-            from src.user.db import set_repo_scene
-            set_repo_scene(repo_key, default_name)
-        except Exception as _e:
-            log.warning(f"apply_default_scene_to_repo: set dev_scene failed: {_e}")
-        log.info(f"Applied default scene '{default_name}' to {repo_key}")
-        return True
-    except Exception as e:
-        log.warning(f"apply_default_scene_to_repo: create failed: {e}")
-        return False
+    owner, repo_name = parts
+
+    # 调 apply_market_scene，走场景中心完整逻辑
+    # 传入 repo_key 避免 apply_market_scene 内部用 to_repo_key 默认 gitcode: 前缀
+    from src.api.routes.scenes import apply_market_scene
+    result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
+    log.info(f"apply_default_scene_to_repo: applied market scene {market_id} to {repo_key}: {result}")
+    return True
 
 
 def fork_official_scene(scene_id: str, user_id: int = 0, repo_key: str = "") -> bool:

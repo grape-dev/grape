@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Issue #95 - 项目知识注入流程</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #f8f9fa; font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif; padding: 20px; color: #1e1e1e; }
+.container { max-width: 1100px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 40px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+h1 { font-size: 28px; margin-bottom: 8px; text-align: center; }
+h2 { font-size: 20px; margin: 28px 0 14px; padding-left: 12px; border-left: 4px solid #845ef7; }
+.subtitle { text-align: center; color: #6c757d; font-size: 15px; margin-bottom: 36px; }
+.row { display: flex; gap: 24px; justify-content: center; flex-wrap: wrap; }
+.card { border-radius: 10px; padding: 14px 18px; text-align: center; border: 2px solid; min-width: 180px; max-width: 300px; }
+.card-blue { background: #a5d8ff; border-color: #339af0; }
+.card-purple { background: #d0bfff; border-color: #845ef7; }
+.card-green { background: #b2f2bb; border-color: #40c057; }
+.card-teal { background: #c3fae8; border-color: #20c997; }
+.card-yellow { background: #fff3bf; border-color: #fcc419; }
+.card-red { background: #ffc9c9; border-color: #fa5252; }
+.card-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.card-desc { font-size: 13px; color: #343a40; line-height: 1.6; }
+.card-mono { font-family: "SF Mono", "Fira Code", Consolas, monospace; font-size: 12px; color: #343a40; line-height: 1.6; }
+.arrow { text-align: center; font-size: 24px; color: #adb5bd; margin: 6px 0; }
+.note { background: #fff3bf; border-left: 4px solid #fcc419; padding: 10px 14px; border-radius: 6px; font-size: 13px; line-height: 1.7; margin: 10px 0; }
+table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
+th, td { border: 1px solid #dee2e6; padding: 8px 12px; text-align: left; }
+th { background: #e9ecef; font-weight: 700; }
+tr:nth-child(even) { background: #f8f9fa; }
+.code { font-family: "SF Mono", "Fira Code", Consolas, monospace; background: #e9ecef; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.badge-ok { background: #b2f2bb; color: #2b8a3e; }
+.badge-warn { background: #fff3bf; color: #e67700; }
+.badge-del { background: #ffc9c9; color: #c92a2a; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Issue #95 改后：项目知识注入流程</h1>
+<p class="subtitle">三源不交叉 | 过滤只做一次 | content 和 URL 天然一致 | generate_file_urls 不查 DB</p>
+
+<h2>数据源（三源）</h2>
+<div class="row">
+  <div class="card card-blue">
+    <div class="card-title">system (baseline)</div>
+    <div class="card-desc">codegraph 自动生成<br>source='system'<br>scope='baseline'</div>
+  </div>
+  <div class="card card-blue">
+    <div class="card-title">manual (用户上传)</div>
+    <div class="card-desc">知识库页面手动创建<br>source='manual'<br>scope='member'</div>
+  </div>
+  <div class="card card-blue">
+    <div class="card-title">agent (沉淀知识)</div>
+    <div class="card-desc">POST /events/{seq}/knowledge<br>source='agent'<br>scope=project/issue/issue_agent</div>
+  </div>
+</div>
+
+<div class="arrow">↓</div>
+
+<h2>第一步：过滤文件（只做一次，三源不交叉）</h2>
+<div class="row">
+  <div class="card card-purple">
+    <div class="card-title">load_project_info()</div>
+    <div class="card-mono">查 DB scope='baseline'<br>source='system'<br>不走 ref 表（全局基线）</div>
+  </div>
+  <div class="card card-purple">
+    <div class="card-title">member_files_pi()</div>
+    <div class="card-mono">ref 表 source='manual'<br>+ credential 过滤<br>+ key 归一化(agent/→member/)<br><br>签名: repo_key, agent_type,<br>issue_num, scene_id</div>
+  </div>
+  <div class="card card-purple">
+    <div class="card-title">agent_knowledge_files()</div>
+    <div class="card-mono">ref 表 source='agent'<br>+ credential 过滤<br><br>签名: repo_key, agent_type,<br>issue_num, scene_id</div>
+  </div>
+</div>
+
+<div class="note">
+  <strong>scene_knowledge_ref 三维匹配</strong>：scene_id + agent_type + issue_num<br>
+  agent 或场景被匹配就算关联。member 不自动关联——用户手动绑定才注入。
+</div>
+
+<div class="arrow">↓</div>
+
+<h2>返回值: {rel: {content, obs_key}}</h2>
+<div class="row">
+  <div class="card card-teal">
+    <div class="card-title">baseline 文件</div>
+    <div class="card-mono">project-graph.md<br>project-capabilities.md</div>
+  </div>
+  <div class="card card-teal">
+    <div class="card-title">member 文件</div>
+    <div class="card-mono">member/user/xxx.md<br><span style="color:#e67700">老数据 agent/→member/ 归一化</span></div>
+  </div>
+  <div class="card card-teal">
+    <div class="card-title">agent 知识</div>
+    <div class="card-mono">owner/repo/project-info/knowledge.md<br>owner/repo/issues/5/knowledge.md<br>owner/repo/issues/5/coding/knowledge.md</div>
+  </div>
+</div>
+
+<div class="arrow">↓</div>
+<div style="text-align:center; font-size:12px; color:#6c757d;">三批文件合并 → content + obs_key</div>
+
+<h2>第二步：基于已过滤结果生成 URL（不查 DB）</h2>
+<div class="row">
+  <div class="card card-purple" style="max-width:420px;">
+    <div class="card-title">generate_file_urls(filtered_files)</div>
+    <div class="card-desc">接收已过滤结果 {rel: {content, obs_key}}<br>obs_key 非空 → 生成 OBS 预签名 URL<br>obs_key 为空 → url 和 storage_key 留空<br><strong>不再独立查 DB</strong></div>
+  </div>
+</div>
+<div class="note" style="max-width:420px; margin:10px auto; text-align:center;">
+  <strong>本地模式</strong>（storage=None）：file_urls = {}，跳过此步，worker 纯走 content
+</div>
+
+<div class="arrow">↓</div>
+
+<h2>第三步：分配到 task 字段（分离，不共用）</h2>
+<div class="row">
+  <div class="card card-green" style="max-width:380px;">
+    <div class="card-title">project_info_files</div>
+    <div class="card-mono">= baseline + member 的 content<br><br>project_info_file_urls<br>= baseline + member 的 URL</div>
+  </div>
+  <div class="card card-green" style="max-width:380px;">
+    <div class="card-title">agent_knowledge_files</div>
+    <div class="card-mono">= agent 的 content<br><br>knowledge_file_urls<br>= agent 的 URL</div>
+  </div>
+</div>
+
+<div class="note">
+  <strong>task 字段只存 content，不存 obs_key</strong> — obs_key 只用于服务端生成 URL，不需要传给 worker。
+</div>
+
+<div class="arrow">↓</div>
+
+<h2>Worker 端物化</h2>
+<div class="row">
+  <div class="card card-purple" style="max-width:380px;">
+    <div class="card-title">物化到 .project-info/</div>
+    <div class="card-mono">_materialize_files(<br>  proj_files, proj_file_urls)<br><br>降级: ① URL下载 → ② content<br>     → ③ storage_key 直连<br><br>replace {{PROJECT_INFO_DIR}}</div>
+  </div>
+  <div class="card card-purple" style="max-width:380px;">
+    <div class="card-title">物化到 .knowledge/</div>
+    <div class="card-mono">_materialize_files(<br>  know_files, know_file_urls)<br><br>降级: 同上</div>
+  </div>
+</div>
+
+<div class="arrow">↓</div>
+
+<h2>Prompt 构建</h2>
+<div class="row">
+  <div class="card card-purple" style="max-width:380px;">
+    <div class="card-title">_build_project_info_section()<br><span style="font-size:12px;font-weight:400">devops 路径</span></div>
+    <div class="card-mono">内联 baseline 摘要 (2500字)<br>有 manual 关联 → 输出 member 引导<br>没有关联 → 不输出<br>去掉 agent/{type}/ 引导<br>replace {{PROJECT_INFO_DIR}}</div>
+  </div>
+  <div class="card card-yellow" style="max-width:380px;">
+    <div class="card-title">_build_agent_knowledge_section()<br><span style="font-size:12px;font-weight:400">chat 路径</span></div>
+    <div class="card-mono">ref 表 source='agent'<br>只内联 agent 沉淀知识<br>不内联 baseline / member<br><br>devops 不调用（走 worker 物化）</div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="card card-yellow" style="max-width:380px;">
+    <div class="card-title">vod_handler_async</div>
+    <div class="card-mono">调 _build_project_info_section(repo_key, "")<br>baseline 内联 + codegraph 提示<br>删独立 baseline 查询</div>
+  </div>
+</div>
+
+<h2>三源职责划分</h2>
+<table>
+  <thead><tr><th>来源</th><th>source</th><th>注入函数</th><th>物化目录</th><th>task 字段</th><th>prompt 内联</th></tr></thead>
+  <tbody>
+    <tr><td>baseline</td><td>system</td><td>load_project_info</td><td>.project-info/</td><td>project_info_files</td><td>_build_project_info_section</td></tr>
+    <tr><td>用户上传</td><td>manual</td><td>member_files_pi</td><td>.project-info/member/</td><td>project_info_files</td><td>条件引导</td></tr>
+    <tr><td>agent 沉淀</td><td>agent</td><td>agent_knowledge_files()</td><td>.knowledge/</td><td>agent_knowledge_files()</td><td>_build_agent_knowledge_section (chat only)</td></tr>
+  </tbody>
+</table>
+
+<h2>注入路径统一性检查</h2>
+<table>
+  <thead><tr><th>#</th><th>路径</th><th>改前</th><th>改后</th><th>状态</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>agent_knowledge_files() content</td><td>ref 表不过滤 source，缺 credential</td><td>source='agent' + credential</td><td><span class="badge badge-ok">统一</span></td></tr>
+    <tr><td>2</td><td>member_files_pi() content</td><td>全量查 DB</td><td>source='manual' + ref 表 + credential</td><td><span class="badge badge-ok">统一</span></td></tr>
+    <tr><td>3</td><td>load_project_info() content</td><td>全量查 baseline</td><td>不变（全局基线）</td><td><span class="badge badge-warn">设计如此</span></td></tr>
+    <tr><td>4</td><td>_build_agent_knowledge_section() chat</td><td>ref 表不过滤 source</td><td>source='agent'</td><td><span class="badge badge-ok">统一</span></td></tr>
+    <tr><td>5</td><td>_build_project_info_section() devops</td><td>固定引导</td><td>条件输出 + 去掉 agent 引导</td><td><span class="badge badge-ok">统一</span></td></tr>
+    <tr><td>6</td><td>generate_file_urls() URL</td><td>独立全量查 DB</td><td>接收已过滤结果</td><td><span class="badge badge-ok">统一</span></td></tr>
+    <tr><td>7</td><td>project_info_file_urls</td><td>和 knowledge_file_urls 共用</td><td>分离 (baseline + member)</td><td><span class="badge badge-ok">统一</span></td></tr>
+    <tr><td>8</td><td>knowledge_file_urls</td><td>和 project_info_file_urls 共用</td><td>分离 (agent)</td><td><span class="badge badge-ok">统一</span></td></tr>
+    <tr><td>9</td><td>vod_handler_async baseline</td><td>独立查 baseline</td><td>调 _build_project_info_section</td><td><span class="badge badge-ok">统一</span></td></tr>
+    <tr><td>10</td><td>direct 物化 (event_pipeline)</td><td>不传 scene_id</td><td>传 scene_id，删 agent_files</td><td><span class="badge badge-ok">统一</span></td></tr>
+    <tr><td>11</td><td>agent_files()</td><td>全量查 DB</td><td>废弃</td><td><span class="badge badge-del">废弃</span></td></tr>
+  </tbody>
+</table>
+
+<h2>废弃</h2>
+<div class="row">
+  <div class="card card-red" style="max-width:380px;">
+    <div class="card-title">agent_files() 废弃</div>
+    <div class="card-desc">查的是用户上传选了"Agent维度"的文档<br>不是 agent 生成的知识<br>ref 表统一后由 member_files_pi 替代</div>
+  </div>
+  <div class="card card-red" style="max-width:380px;">
+    <div class="card-title">generate_file_urls 查 DB 废弃</div>
+    <div class="card-desc">不再独立全量查 DB<br>改为接收已过滤结果生成 URL<br>过滤只做一次</div>
+  </div>
+</div>
+
+</div>
+</body>
+</html>

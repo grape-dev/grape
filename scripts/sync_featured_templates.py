@@ -20,8 +20,8 @@ CN_KEYWORDS = [
     "containerd", "grafana",
 ]
 
-GITCODE_PAT = os.environ.get("GITCODE_PAT", "yXgZq-rf19PW2cmMoyXF_xbK")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
+GITCODE_PAT = os.environ.get("GITCODE_PAT", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")  # 可选，无则用匿名
 
 
 def _build_reason(item, search_kw):
@@ -241,19 +241,62 @@ def _to_template(r, platform):
     }
 
 
+def _categorize_by_keywords(t):
+    """根据 tags/name/description/reason 关键词将精选模板归类到场景分类。
+
+    返回分类 id：general / mobile / iac / skill-dev / ai / content
+    """
+    import re
+    tags = [x.lower() for x in (t.get("tags") or [])]
+    name = (t.get("name") or "").lower()
+    desc = (t.get("description") or "").lower()
+    reason = (t.get("recommend_reason") or "").lower()
+    all_text = " ".join(tags) + " " + name + " " + desc + " " + reason
+
+    def has_kw(kw):
+        return re.search(r"\b" + re.escape(kw) + r"\b", all_text) is not None
+
+    if has_kw("skill"):
+        return "skill-dev"
+    if any(k in all_text for k in ["harmonyos", "arkts", "flutter"]):
+        return "mobile"
+    if "ai" in tags or any(k in all_text for k in [
+        "agent", "automation", "llm", "gpt", "ai-native", "ai-gateway",
+        "n8n", "machine-learning", "artificial-intelligence",
+        "ai workflow", "ai capabilities", "native ai", "ai-native-development",
+    ]):
+        return "ai"
+    if any(has_kw(k) for k in ["blog", "pdf", "memo", "cheatsheet", "cheatsheets"]):
+        return "content"
+    if "note-taking" in all_text or "pdf-converter" in all_text:
+        return "content"
+    if any(k in all_text for k in [
+        "k8s", "kubernetes", "docker", "terraform", "helm", "cncf", "container",
+        "cloud-native", "cloudnative", "iac", "devops", "ansible", "microservice",
+        "serverless", "istio", "gateway", "golang", "prometheus", "grafana",
+        "argo", "cilium", "etcd", "minio", "cockroach", "vaultwarden", "bitwarden",
+        "helm-charts", "charts", "chart", "containerd", "cni", "ebpf", "bpf",
+        "k3s", "kops", "kuboard", "k9s", "colima", "faas", "gitops",
+        "distributed-database", "distributed-systems", "consensus",
+        "api-gateway", "api-management", "cloud-storage", "amazon-s3", "cloudstorage",
+        "vcluster", "coder", "semaphore", "xpipe", "homelab", "90days",
+        "oh-my-zsh", "cli-app", "self-hosted", "monitor", "monitoring",
+    ]):
+        return "iac"
+    return "general"
+
+
 def update_templates_json(gitcode_items, github_items):
-    """更新 configs/project-templates.json，在 iac 后面新增两个分类。
+    """更新 configs/project-templates.json：按关键词将精选模板分配到场景分类。
+
     去重：同名项目优先保留 GitCode，从 GitHub 中移除重复项。
+    幂等：先移除各分类中已有 source_platform 字段的旧精选模板，再重新分配。
     """
     config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "project-templates.json")
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
     cats = config.get("categories", [])
-    # 移除旧的优选分类
-    cats = [c for c in cats if c.get("id") not in ("gitcode-featured", "github-featured")]
-    # 找到 iac 的位置
-    iac_idx = next((i for i, c in enumerate(cats) if c.get("id") == "iac"), len(cats) - 1)
 
     # 去重：GitCode 优先，GitHub 移除同名项目
     gc_names = set(r["repo_name"] for r in gitcode_items)
@@ -261,34 +304,30 @@ def update_templates_json(gitcode_items, github_items):
     if len(github_items_dedup) < len(github_items):
         print(f"Dedup: removed {len(github_items) - len(github_items_dedup)} GitHub duplicates (kept GitCode)")
 
-    gitcode_cat = {
-        "id": "gitcode-featured",
-        "name": "GitCode 优选项目模板",
-        "icon": "🟢",
-        "description": "GitCode 云原生热门项目，每日自动同步",
-        "scene_id": "default",
-        "platform": "gitcode",
-        "page_size": 12,
-        "templates": [_to_template(r, "gitcode") for r in gitcode_items],
-    }
-    github_cat = {
-        "id": "github-featured",
-        "name": "GitHub 优选项目模板",
-        "icon": "⚫",
-        "description": "GitHub 云原生热门项目，每日自动同步",
-        "scene_id": "default",
-        "platform": "github",
-        "page_size": 12,
-        "templates": [_to_template(r, "github") for r in github_items_dedup],
-    }
+    all_items = [_to_template(r, "gitcode") for r in gitcode_items] + \
+                [_to_template(r, "github") for r in github_items_dedup]
 
-    cats.insert(iac_idx + 1, gitcode_cat)
-    cats.insert(iac_idx + 2, github_cat)
+    # 幂等：移除各分类中已有 source_platform 字段的旧精选模板
+    for cat in cats:
+        if cat.get("id") == "hello-world":
+            continue
+        cat["templates"] = [t for t in (cat.get("templates") or []) if not t.get("source_platform")]
+
+    # 按关键词分类并追加到对应分类
+    cat_map = {c["id"]: c for c in cats}
+    added = {"general": 0, "mobile": 0, "iac": 0, "skill-dev": 0, "ai": 0, "content": 0}
+    for t in all_items:
+        target = _categorize_by_keywords(t)
+        if target in cat_map:
+            cat_map[target]["templates"].append(t)
+            added[target] += 1
+
     config["categories"] = cats
 
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
-    print(f"Updated project-templates.json: +{len(gitcode_items)} gitcode +{len(github_items)} github")
+    parts = [f"{k}+{v}" for k, v in added.items() if v]
+    print(f"Updated project-templates.json: {', '.join(parts)}")
 
 
 if __name__ == "__main__":

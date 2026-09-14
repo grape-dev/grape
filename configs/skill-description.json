@@ -53,6 +53,12 @@
     "path": "qa/qa",
     "description": "pr 技能的平替与增强：PR 全流程审查 + Agent Work Loop 五维工作流审查（任务理解/受控执行/变更验证/可靠交付/经验沉淀）"
   },
+  "impact-analysis": {
+    "name": "PR 影响范围评估",
+    "agent_type": "qa",
+    "path": "qa/impact-analysis",
+    "description": "qa 技能的增强超集：PR 全生命周期审查 + 工作流五维审查 + 影响范围评估（解析 git diff → codegraph 追溯调用链 → 匹配测试用例 → 风险评级），补齐 5 轴审查之外的影响面评估视角"
+  },
   "skill-pr": {
     "name": "技能仓库 PR 审查",
     "agent_type": "qa",
@@ -226,5 +232,41 @@
     "agent_type": "sre",
     "path": "sre/runtime-install",
     "description": "安装、配置和注册 hermes/opencode/codearts 运行时引擎到 Grape 系统，包括自定义 API 端点和模型配置"
+  },
+  "vod-cli": {
+    "name": "开发者声音分析（CLI 版）",
+    "agent_type": "vod",
+    "path": "vod/vod-cli",
+    "description": "开发者声音分析（CLI 版）：构建项目知识基线，从 Issue/飞书收集反馈，多轮引导收敛为清晰需求并建 Issue。全部操作使用 grape CLI 命令"
+  },
+  "coding-cli": {
+    "name": "代码实现（CLI 版）",
+    "agent_type": "coding",
+    "path": "coding/coding-cli",
+    "description": "代码实现与 PR 创建/优化（CLI 版）：被 issue skill 调用执行新开发，或按 PR skill 审查意见优化 PR 代码实现。全部操作使用 grape CLI 命令行（含 grape git）"
+  },
+  "issue-cli": {
+    "name": "Issue 高级运营（CLI 版）",
+    "agent_type": "issue",
+    "path": "issue/issue-cli",
+    "description": "Issue 高级运营（CLI 版）：项目知识基线 → 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发。全部操作使用 grape CLI 命令"
+  },
+  "qa-cli": {
+    "name": "PR 审查与工作流质量审查（CLI 版）",
+    "agent_type": "qa",
+    "path": "qa/qa-cli",
+    "description": "pr 技能的平替与增强（CLI 版）：PR 全流程审查 + Agent Work Loop 五维工作流审查（任务理解/受控执行/变更验证/可靠交付/经验沉淀）。全部操作使用 grape CLI 命令"
+  },
+  "chat-cli": {
+    "name": "对话助手（CLI 版）",
+    "agent_type": "chat",
+    "path": "chat/chat-cli",
+    "description": "IM 对话处理（CLI 版）：场景识别（task/inquiry/implementation-start）+ 能力边界管理。GitCode 操作使用 grape CLI 命令"
+  },
+  "deploy-cli": {
+    "name": "云部署（CLI 版）",
+    "agent_type": "sre",
+    "path": "sre/deploy-cli",
+    "description": "华为云部署（CLI 版）：A2A 直连部署或 PR 合并全流程构建→部署→验证，自动识别构建方式并用 hcloud CLI 部署验证。Grape/GitCode 操作使用 grape CLI"
   }
 }

@@ -140,8 +140,16 @@ def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
 
 # ===== 引擎档位 / 优先级（供 pick_engine 多引擎选择）=====
 
-def _repo_user_id(repo_key: str) -> int:
-    """从 user_repos 表反查 repo_key 对应的 user_id（取第一个 join 的用户）。"""
+def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
+    """从 user_repos 表反查 repo_key 对应的 user_id。
+
+    优先按 issue_creator（GitCode 用户名）查 unified_user_mapping 获取 user_id；
+    issue_creator 为空或查不到时，回退到原逻辑（取第一个 join 的用户）。
+
+    Issue #76 修复：原逻辑按 user_id ASC 取第一条 is_join=1 的记录，
+    对于多用户仓库会返回"最早加入的用户"而非 Issue 创建者，
+    导致 scope=user 引擎无法通过 claim_by_tag 认领任务。
+    """
     if not repo_key:
         return 0
     repo = _norm_repo(repo_key)
@@ -149,7 +157,16 @@ def _repo_user_id(repo_key: str) -> int:
     with lock:
         try:
             c = db.cursor()
-            # repo_key 在 user_repos 里可能带 gitcode: 前缀，用 LIKE 匹配
+            # 优先按 Issue 创建者查 unified_user_mapping（Issue #76 修复）
+            if issue_creator:
+                c.execute(
+                    "SELECT user_id FROM unified_user_mapping "
+                    "WHERE gitcode_user=? AND user_id>0 LIMIT 1",
+                    (issue_creator,))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+            # 回退：repo_key 在 user_repos 里可能带 gitcode: 前缀，用 LIKE 匹配
             c.execute(
                 "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 ORDER BY user_id LIMIT 1",
                 (repo, f"gitcode:{repo}"))
@@ -241,8 +258,42 @@ def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
     return result
 
 
+# ===== 健康度过滤增强层（Issue #134）=====
+# 健康度过滤作为派发链路的增强层插入，不改变广播协议/分发语义/A2A 事件流转。
+# 仅在 pick_engine 的候选机器筛选阶段生效：过滤低健康分引擎，全部不健康时降级兜底。
+
+
+def _filter_by_health(members: list[dict]) -> list[dict]:
+    """健康度过滤增强层：从候选引擎中过滤出健康的。
+
+    健康分 >= HEALTH_SCORE_THRESHOLD（默认 30）且连续失败 < MAX_CONSECUTIVE_FAILURES（默认 5）。
+    全部不健康时返回空列表（调用方降级兜底）。
+    """
+    try:
+        from src.runtime.health_scorer import filter_healthy
+        rids = [m["runtime_id"] for m in members if m.get("runtime_id")]
+        healthy_rids = set(filter_healthy(rids))
+        return [m for m in members if m.get("runtime_id") in healthy_rids]
+    except Exception as e:
+        log.warning(f"_filter_by_health failed, skipping health filter: {e}")
+        return members  # 模块异常时不过滤（不阻塞派发）
+
+
+def _best_health_fallback(members: list[dict]) -> int | None:
+    """全部不健康时的降级兜底：取健康分最高的引擎。"""
+    try:
+        from src.runtime.health_scorer import best_fallback
+        rids = [m["runtime_id"] for m in members if m.get("runtime_id")]
+        return best_fallback(rids)
+    except Exception as e:
+        log.warning(f"_best_health_fallback failed: {e}")
+        # 兜底的兜底：取第一个候选
+        return members[0]["runtime_id"] if members else None
+
+
 def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
-                scene_id: str = "", user_id: int = 0) -> int | None:
+                scene_id: str = "", user_id: int = 0,
+                issue_creator: str = "") -> int | None:
     """从场景 node 的 engine_runtime_ids 选引擎；为空回退会话主引擎（legacy）。
 
     返回 None = engine_unavailable（调用方跳过执行）。
@@ -264,7 +315,7 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     # Legacy 模式：从场景 node 读 engine_runtime_ids
     repo = _norm_repo(repo_key)
     if not user_id:
-        user_id = _repo_user_id(repo_key)
+        user_id = _repo_user_id(repo_key, issue_creator=issue_creator)
     if scene_id:
         try:
             from src.api.pipeline_config import get_scene_engine_ids
@@ -282,9 +333,21 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
                 cand = _apply_filters([m for m in members if _member_scope(m, repo) == scope], cfg)
                 if not cand:
                     continue
+                # Issue #134: 健康度过滤增强层——在候选机器筛选阶段过滤低健康分引擎
+                # 不改变广播协议/分发语义：仅在 pick_engine 选机阶段生效
+                cand = _filter_by_health(cand)
+                if not cand:
+                    continue  # 该档位全不健康，尝试下一档位
                 if cfg.get("rule") == "order":
                     return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
                 return random.choice(cand)["runtime_id"]
+            # 所有档位均无健康引擎 → 降级兜底：取所有候选中健康分最高的
+            all_cand = _apply_filters(members, cfg)
+            if all_cand:
+                _best = _best_health_fallback(all_cand)
+                if _best:
+                    log.info(f"pick_engine: all scopes unhealthy, fallback to best={_best}")
+                    return _best
             return None     # 集合存在但无健康成员 → engine_unavailable
     # engine_runtime_ids 为空 → 回退会话主引擎（legacy）
     if fallback_runtime_id:
@@ -292,7 +355,8 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     return None
 
 
-def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0) -> str:
+def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0,
+                              issue_creator: str = "") -> str:
     """获取限定广播引擎列表，返回 JSON 字符串供 agent_tasks.pool_engine_ids 使用。
 
     只从场景 node 的 engine_runtime_ids 读取。
@@ -300,7 +364,7 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     """
     import json
     if not user_id:
-        user_id = _repo_user_id(repo_key)
+        user_id = _repo_user_id(repo_key, issue_creator=issue_creator)
     if scene_id:
         try:
             from src.api.pipeline_config import get_scene_engine_ids
@@ -365,12 +429,12 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
     """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。
     agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。
     username 非空时，user scope 只返回该用户的个人引擎。
-    repo scope 返回用户加入的所有仓库的仓库级引擎（不只当前仓库）。"""
+    repo scope 只返回当前仓库的仓库级引擎（按 repo_key 过滤 owner_id）。"""
     repo = _norm_repo(repo_key)
     db, lock = _db()
-    # 收集用户加入的仓库列表（用于 repo scope 过滤）
+    # 收集用户加入的仓库列表（用于 repo scope 无 repo_key 时的回退过滤）
     user_repos = set()
-    if username and scope == "repo":
+    if username and scope == "repo" and not repo:
         try:
             from src.session_manager import db as _udb, db_lock as _ulock
             from src.repo_key import from_repo_key
@@ -388,38 +452,55 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
         c = db.cursor()
         try:
             if scope == "repo":
-                c.execute(
-                    "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                    " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
-                    "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
+                # 按当前仓库过滤：owner_id 可能带 gitcode: 前缀也可能不带，两种都匹配
+                if repo:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                        " COALESCE(r.alias,'')"
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' "
+                        "AND (rc.owner_id=? OR rc.owner_id=?) ORDER BY r.id",
+                        (repo, f"gitcode:{repo}"))
+                else:
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                        " COALESCE(r.alias,'')"
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
                 # 本机引擎（credential_id=0）对所有人可见
                 c.execute(
                     "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1) "
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1),"
+                    " COALESCE(alias,'')"
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             elif scope == "user":
                 if username:
                     c.execute(
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                        " COALESCE(r.alias,'')"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' AND rc.owner_name=? ORDER BY r.id", (username,))
                 else:
                     c.execute(
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                        " COALESCE(r.alias,'')"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
             else:
                 c.execute(
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                     " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1) "
+                    " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                    " COALESCE(r.alias,'')"
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='global' AND rc.status='active' ORDER BY r.id")
             rows = c.fetchall()
@@ -431,8 +512,12 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
         if scope == "repo":
             from src.repo_key import from_repo_key
             _repo_owner = from_repo_key(r[9] or "")
-            # 只返回用户加入的仓库的仓库级引擎
-            if username and user_repos and _repo_owner not in user_repos:
+            if repo:
+                # 有 repo_key 时：只返回当前仓库的引擎
+                if _repo_owner != repo:
+                    continue
+            elif username and user_repos and _repo_owner not in user_repos:
+                # 无 repo_key 回退：只返回用户加入的仓库的引擎
                 continue
         # agent_type 标签过滤（r[10] = GROUP_CONCAT(tag) from engine_capabilities, e.g. "all" or "all,coding"）
         if agent_type:
@@ -447,5 +532,6 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
             "owner_id": r[9] or "",
             "scope": scope,
             "tags": [t.strip() for t in (r[10] or "").split(",") if t.strip()],
+            "alias": r[11] or "",
         })
     return out

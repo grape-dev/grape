@@ -1,6 +1,8 @@
 """共享依赖：Token 验证、Token 三层体系、用户信息获取"""
-from fastapi import Header, HTTPException, Depends
+import threading
+from fastapi import Header, HTTPException, Request, Depends
 from src.user import db as user_db
+from src.config import log
 
 TOKEN_TYPE_DEVOPS = "devops_bot"
 TOKEN_TYPE_USER = "user"
@@ -8,6 +10,10 @@ TOKEN_TYPE_WEBHOOK = "webhook"
 
 # 用户活跃状态追踪——内存缓冲，定时批量 flush
 _pending_active: set = set()
+
+# 用户级 GitCode OAuth 刷新锁——同一用户并发 401 时只刷新一次（Issue #52）
+_gitcode_refresh_locks: dict[int, threading.Lock] = {}
+_gitcode_refresh_locks_guard = threading.Lock()
 
 def mark_user_active(uid: int):
     """将用户 id 加入待更新集合——O(1)，不阻塞 API"""
@@ -49,10 +55,140 @@ def get_current_user(authorization: str = Header(None)) -> dict:
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_USER}
 
 
+def _extract_api_token(request) -> str:
+    """三通道取值：Authorization: Bearer / PRIVATE-TOKEN header / ?access_token= query。"""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    private = request.headers.get("PRIVATE-TOKEN") or request.headers.get("private-token")
+    if private:
+        return private.strip()
+    return (request.query_params.get("access_token") or "").strip()
+
+
+def get_current_user_or_api_key(request: Request) -> dict:
+    """对外业务 API 统一认证入口：JWT 会话 / 会话级临时 token（A）/ 用户级 API Key（B）三选一。
+
+    三通道取值（Bearer / PRIVATE-TOKEN / access_token）后按 token 前缀分流：
+    - `tk_`    → 会话级临时 token（session_api_tokens 校验，返回 repo/agent 上下文）→ auth_type=session_token
+    - `grape_` → 用户级长期 API Key（api_tokens 校验，绑定单用户）→ auth_type=api_key
+    - 其他     → JWT access token（复用 get_current_user）→ auth_type=jwt
+
+    返回 dict 与 get_current_user 兼容（含 id/username/token），并附加认证类型与作用域字段，
+    供内部接口按需读取（如 repo_key/agent_type 做仓库级鉴权）。
+    """
+    from src.api.auth_token import SESSION_TOKEN_PREFIX, API_KEY_PREFIX, verify_session_token, verify_api_token
+    token = _extract_api_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "未登录"})
+
+    if token.startswith(SESSION_TOKEN_PREFIX):
+        info = verify_session_token(token)
+        if not info:
+            raise HTTPException(status_code=401, detail={"code": 401, "message": "会话 token 无效或已失效"})
+        return {
+            "id": info["user_id"],
+            "username": "",
+            "token": token,
+            "token_type": "session_token",
+            "auth_type": "session_token",
+            "session_key": info["session_key"],
+            "repo_key": info["repo_key"],
+            "agent_type": info["agent_type"],
+        }
+
+    if token.startswith(API_KEY_PREFIX):
+        info = verify_api_token(token)
+        if not info:
+            raise HTTPException(status_code=401, detail={"code": 401, "message": "API Key 无效或已吊销"})
+        uid = info["user_id"]
+        acc = user_db.get_user(uid) or {}
+        mark_user_active(uid)
+        return {
+            "id": uid,
+            "username": acc.get("username", ""),
+            "token": token,
+            "token_type": API_KEY_PREFIX,
+            "auth_type": "api_key",
+            "api_token_id": info["api_token_id"],
+            "token_name": info["name"],
+        }
+
+    # JWT 会话（仅 Bearer 通道承载）；原流程不变
+    user = get_current_user(authorization=request.headers.get("authorization"))
+    user["auth_type"] = "jwt"
+    return user
+
+
+def get_user_or_none(request: Request) -> dict | None:
+    """A2A 软认证依赖：JWT / 会话 token / API Key 任一通过返回 user，否则 None。
+
+    与 `get_current_user_or_api_key` 区别：不因 token 无效抛 401，而是返回 None，
+    供 A2A 端点先把用户级身份放行、再把 bot-token 等内部鉴权路径交给 `_authorize_a2a`。
+    """
+    try:
+        return get_current_user_or_api_key(request)
+    except HTTPException:
+        return None
+
+
 def get_user_token(username: str) -> str:
     """获取用户的个人 GitCode API Token（Chat Agent 使用）"""
     acc = user_db.get_user_account(username) or {}
     return acc.get("gitcode_api_token", "")
+
+
+def get_user_github_token(username: str) -> str:
+    """获取用户的个人 GitHub API Token"""
+    acc = user_db.get_user_account(username) or {}
+    return acc.get("github_api_token", "")
+
+
+def _get_user_refresh_lock(user_id: int) -> threading.Lock:
+    """获取用户级别的 GitCode OAuth 刷新锁（懒创建，Issue #52）。"""
+    with _gitcode_refresh_locks_guard:
+        if user_id not in _gitcode_refresh_locks:
+            _gitcode_refresh_locks[user_id] = threading.Lock()
+        return _gitcode_refresh_locks[user_id]
+
+
+def try_refresh_gitcode_token(user_id: int) -> str | None:
+    """尝试刷新 GitCode OAuth token（加锁，防并发重复刷新，Issue #52）。
+
+    返回新 token 或 None（刷新失败 / 无 refresh_token）。
+    """
+    lock = _get_user_refresh_lock(user_id)
+    with lock:
+        return user_db.refresh_gitcode_oauth_token(user_id)
+
+
+def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
+    """获取用户 GitCode token，过期时主动预刷新（Issue #52）。
+
+    与 get_user_token 的区别：当 user_id > 0 时，检查 token 年龄，
+    超过 100 分钟（GitCode token 默认 2 小时，留 20 分钟余量）则预刷新。
+    401 时的被动刷新由 _gitcode_api_with_refresh 包装器兜底。
+    """
+    import time as _time
+    acc = user_db.get_user_account(username) or {}
+    token = acc.get("gitcode_api_token", "")
+
+    if token and user_id > 0:
+        # 检查 token 年龄——临近过期则预刷新
+        cred = user_db.get_credential(user_id, "gitcode_oauth")
+        if cred:
+            fetched_at = cred.get("fetched_at", 0)
+            age = int(_time.time()) - fetched_at if fetched_at else 0
+            # 超过 100 分钟（6000 秒）预刷新
+            if age > 6000:
+                new_token = try_refresh_gitcode_token(user_id)
+                return new_token or token
+        return token
+
+    if user_id > 0 and not token:
+        return try_refresh_gitcode_token(user_id) or ""
+
+    return token
 
 
 def get_bot_token(repo_owner: str = "", repo_name: str = "") -> str:
@@ -63,7 +199,7 @@ def get_bot_token(repo_owner: str = "", repo_name: str = "") -> str:
     return ""
 
 
-def require_devops_token(user: dict = Depends(get_current_user)):
+def require_devops_token(user: dict = Depends(get_current_user)) -> dict:
     """确保该端点只能由拥有 Bot Token 配置的管理员访问"""
     # 检查用户是否有任一托管仓库配置了 Bot Token
     repos = user_db.get_managed_repos(user["id"])
@@ -71,3 +207,29 @@ def require_devops_token(user: dict = Depends(get_current_user)):
     if not has_bot:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "DevOps Bot Token 未配置，请在 GitCode Repo 页面中配置"})
     return user
+
+
+def check_repo_access(user: dict, repo_key: str) -> None:
+    """校验当前用户是否有权访问指定仓库（managed_repos 中存在该仓库）。
+    
+    用于 dashboard/events/pipeline/agents 等按 repo_key 查询的接口，防止用户访问他人仓库的数据。
+    session_token / api_key 认证方式跳过校验（已由 token 作用域限定）。
+    同时检查 gitcode: 和 github: 前缀——前端 URL 不含平台前缀，to_repo_key 默认加 gitcode:，
+    但用户可能通过 GitHub OAuth 登录，仓库实际是 github: 前缀。
+    """
+    auth_type = user.get("auth_type", "jwt")
+    if auth_type in ("session_token", "api_key"):
+        return  # 作用域已限定
+    uid = user.get("id", 0)
+    if not uid or not repo_key:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库"})
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(repo_key)
+    # 构建候选 repo_key 列表：原始 + 跨平台前缀（gitcode:↔github:）
+    base = rk.split(":", 1)[1] if ":" in rk else rk
+    candidates = {f"gitcode:{base}", f"github:{base}"}
+    repos = user_db.get_managed_repos(uid)
+    for r in repos:
+        if r["repo_key"] in candidates:
+            return  # 用户有权访问
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库"})
