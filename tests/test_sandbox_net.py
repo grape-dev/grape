@@ -15,6 +15,7 @@
 """
 import json
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -708,6 +709,7 @@ class TestProxyUnixSocketBridge(unittest.TestCase):
 class TestSandboxEnabled(unittest.TestCase):
     """sandbox_enabled / _bwrap_bin。"""
 
+    @unittest.skipUnless(shutil.which("bwrap"), "bwrap not installed")
     def test_sandbox_enabled_default_off(self):
         """GRAPE_SANDBOX_NET 默认 on（与 GRAPE_AGENT_SANDBOX 一致）。"""
         import os
@@ -724,6 +726,7 @@ class TestSandboxEnabled(unittest.TestCase):
             else:
                 os.environ.pop("GRAPE_SANDBOX_NET", None)
 
+    @unittest.skipUnless(shutil.which("bwrap"), "bwrap not installed")
     def test_bwrap_bin(self):
         """_bwrap_bin 返回非空字符串（bwrap 已安装）。"""
         from src.agent.sandbox import _bwrap_bin
@@ -735,6 +738,12 @@ class TestSandboxEnabled(unittest.TestCase):
 class TestBuildBwrapCmd(unittest.TestCase):
     """build_bwrap_cmd 命令构建。"""
 
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("bwrap"):
+            raise unittest.SkipTest("bwrap not installed")
+
+    @unittest.skipUnless(shutil.which("bwrap"), "bwrap not installed")
     def test_build_bwrap_cmd_share_net(self):
         """非网络隔离模式返回 --share-net 命令。"""
         from src.agent.sandbox import build_bwrap_cmd
@@ -1073,6 +1082,11 @@ class TestAuditAsyncIntegration(unittest.TestCase):
 
 class TestSandboxBuildBwrapDetailed(unittest.TestCase):
     """build_bwrap_cmd 详细验证。"""
+
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("bwrap"):
+            raise unittest.SkipTest("bwrap not installed")
 
     def test_bwrap_cmd_has_etc_safe(self):
         """bwrap 命令包含 /etc 安全子集挂载。"""
