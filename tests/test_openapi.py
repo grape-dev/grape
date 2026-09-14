@@ -25,11 +25,11 @@ client = TestClient(app)
 # 预期进契约的对外端点（M1.4/M3 显式 operation_id）
 EXPECTED_PUBLIC = {
     "tasks_mine": ("get", "/api/tasks/mine"),
-    "tasks_create": ("post", "/api/tasks/create"),
     "tasks_start": ("post", "/api/tasks/{task_id}/start"),
     "tasks_status": ("put", "/api/tasks/{task_id}/status"),
     "tasks_status_get": ("get", "/api/tasks/{task_id}/status"),
     "tasks_complete": ("post", "/api/tasks/complete"),
+    # POST /api/tasks/create 已废弃移除（C2）→ 创建走 POST /api/issues/{owner}/{repo}
     "a2a_handoff": ("post", "/api/a2a"),
     # 合并引入的新公开操作（multi-vcs / knowledge detail / profile）
     "get_profile_api_auth_profile_get": ("get", "/api/auth/profile"),

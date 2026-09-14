@@ -1001,15 +1001,11 @@ def create_standard_task(repo_key: str, title: str, description: str,
             "message": "任务已创建（Issue 已同步）" if created else "任务已创建（复用已有 Issue）"}
 
 
-@router.post("/create", operation_id="tasks_create", summary="新建任务（同步建 GitCode Issue）")
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
-    - issue 责任人 = 系统 General Settings 的 Account（settings.credentials.gitcode.account，
-      即当前登录用户 gitcode 账号；也可显式传 assignee 覆盖）
-    - 幂等：同仓库同标题的 open issue 存在 → 复用（不重复创建）；
-      同一 issue 的任务 id 不重复（ensure_issue_task 幂等）
-    - 状态迁移：task 支持 active/processing/completed/cancelled（PUT /api/tasks/{id}/status）
+    端点 `POST /api/tasks/create` 已废弃移除（Phase C2，见 issues-api-execution-plan.md）——
+    对外统一入口为 `POST /api/issues/{owner}/{repo}`（issues.py 复用本逻辑）。
     """
     from src.repo_key import to_repo_key, split_owner_repo
     if not body.repo_key or not body.title.strip():

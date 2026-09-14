@@ -228,10 +228,12 @@ def list_repo_issues(owner: str, repo: str,
     return {"issues": issues, "total": len(issues)}
 
 
-@router.post("/{owner}/{repo}", operation_id="issues_create", summary="创建 Issue（迁移自 /api/tasks/create）")
+@router.post("/{owner}/{repo}", operation_id="issues_create", summary="创建 Issue（对外唯一创建入口）")
 async def create_issue(owner: str, repo: str, body: dict = None,
                        user: dict = Depends(get_current_user_or_api_key)):
-    """创建 Issue：复用 /api/tasks/create 逻辑（ensure_issue_task + GitCode create + 触发 pipeline）。
+    """创建 Issue：复用 create_task_via_issue 逻辑（ensure_issue_task + GitCode create + 触发 pipeline）。
+
+    POST /api/tasks/create 已废弃移除（Phase C2），本端点为对外唯一创建入口。
 
     body: {repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode?}
     repo_key 可选（缺省按 {owner}/{repo} 拼）。返回 {ok, issue_number, task_id, created, ...}
