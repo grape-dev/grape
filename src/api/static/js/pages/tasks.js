@@ -114,12 +114,15 @@ window._switchTasksViewMode = function(mode) {
 };
 
 // 场景识别轮询：有待处理任务且场景未识别时，定期刷新
+// Issue #126: processing 任务也需轮询刷新 per-agent 节点状态
 function _startScenePoll() {
   if (_taskPollTimer) clearInterval(_taskPollTimer);
   _taskPollTimer = setInterval(function() {
-    // 只在有 active/processing 任务且场景未被 VOD 识别时才刷新
+    // 有 active/processing 任务且场景未识别 → 刷新
+    // 或有 processing 任务（节点状态可能变更）→ 刷新
     var needRefresh = _tasksAll.some(function(t) {
-      return (t.status === 'active' || t.status === 'processing') && t.scene_source !== 'vod';
+      return ((t.status === 'active' || t.status === 'processing') && t.scene_source !== 'vod') ||
+             (t.status === 'processing');
     });
     if (needRefresh) {
       loadTasks();
@@ -468,12 +471,12 @@ function _renderBoard(filtered) {
   filtered.forEach(t => { grouped[_mapStatus(t)].push(t); });
 
   // 苹果风格看板：响应式列宽，水平滚动，列独立垂直滚动
-  let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px">';
+  let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px;flex-shrink:0">';
   statusCols.forEach(s => {
     const list = grouped[s];
     const col = statusColors[s];
     const dim = (s === 'cancelled') ? ';opacity:.65' : '';
-    html += `<div style="min-width:240px;max-width:300px;flex:1 1 240px;display:flex;flex-direction:column;background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed)${dim}">`;
+    html += `<div style="min-width:240px;max-width:300px;flex:1 1 240px;flex-shrink:0;display:flex;flex-direction:column;background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);height:100%;overflow:hidden${dim}">`;
     // 列头：颜色圆点 + 名称 + 计数
     html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
       <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
@@ -481,7 +484,7 @@ function _renderBoard(filtered) {
       <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${list.length}</span>
     </div>`;
     // 卡片容器：独立垂直滚动
-    html += `<div style="flex:1;overflow-y:auto;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
+    html += `<div style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
     if (list.length === 0) {
       html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无任务'}</div>`;
     } else {
@@ -494,7 +497,7 @@ function _renderBoard(filtered) {
         const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
         const _cardCls = _isRunning ? ' tsk-card-radar' : '';
         const _cardOverflow = _isRunning ? ';overflow:hidden' : '';
-        html += `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
+        html += `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;flex:0 0 auto;min-height:76px;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
         if (_isRunning) {
           html += `<div class="tsk-radar-sweep" style="background:conic-gradient(from 0deg,transparent 0deg,${_stageColor}14 40deg,transparent 90deg)"></div>`;
         }
@@ -740,6 +743,54 @@ function _render() {
   _tasksAll.forEach(t => { window._tasksById[t.id] = t; });
 }
 
+function _renderAgentStatusCard(t) {
+  // Issue #126: 渲染各 Agent 节点实时状态（与菜单流水线一致，数据源为 events 表各 Agent 最新事件 status）
+  var statuses = t.agent_statuses || [];
+  if (statuses.length === 0) return '';
+  var _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px;margin-bottom:12px';
+  var _cardTitle = 'font-size:12px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-family:-apple-system,BlinkMacSystemFont,sans-serif';
+  // 注入脉冲动画 CSS（仅一次）
+  if (!document.getElementById('_grapeAgentPulseCSS')) {
+    var style = document.createElement('style');
+    style.id = '_grapeAgentPulseCSS';
+    style.textContent = '@keyframes grapeAgentPulse{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(59,130,246,.3)}50%{transform:scale(1.08);box-shadow:0 0 0 5px rgba(59,130,246,0)}}';
+    document.head.appendChild(style);
+  }
+  var _statusMap = {
+    pending: {color: '#86868b', bg: 'rgba(0,0,0,.06)', icon: '○', label: I18N.t('tasks.agent_status.pending')||'待执行'},
+    running: {color: '#3b82f6', bg: '#3b82f6', icon: '●', label: I18N.t('tasks.agent_status.running')||'执行中'},
+    completed: {color: '#34c759', bg: '#34c759', icon: '✓', label: I18N.t('tasks.agent_status.completed')||'已完成'},
+    failed: {color: '#ef4444', bg: '#ef4444', icon: '✕', label: I18N.t('tasks.agent_status.failed')||'失败'},
+    cancelled: {color: '#86868b', bg: 'rgba(0,0,0,.06)', icon: '⊘', label: I18N.t('tasks.agent_status.cancelled')||'已取消'},
+  };
+  var html = '<div style="' + _cardStyle + '">';
+  html += '<div style="' + _cardTitle + '">' + (I18N.t('tasks.agent_status.title')||'Agent 节点状态') + '</div>';
+  // 节点进度条
+  html += '<div style="display:flex;align-items:center;gap:0;padding:10px;background:rgba(0,0,0,.02);border-radius:10px">';
+  statuses.forEach(function(s, i) {
+    var si = _statusMap[s.status] || _statusMap.pending;
+    var isRunning = s.status === 'running';
+    var isCompleted = s.status === 'completed';
+    var isFailed = s.status === 'failed';
+    var pulseStyle = isRunning ? ';animation:grapeAgentPulse 1.2s ease-in-out infinite' : '';
+    // 节点点击：有 latest_seq 则跳转事件详情
+    var seq = s.latest_seq;
+    var clickAttr = (isRunning || isCompleted || isFailed) && seq ? ' onclick="window._jumpToNodeEvent(' + seq + ')" style="cursor:pointer"' : '';
+    html += '<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0"' + clickAttr + '>';
+    html += '<div style="width:24px;height:24px;border-radius:50%;background:' + si.bg + ';display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0' + pulseStyle + '">' + si.icon + '</div>';
+    html += '<span style="font-size:9px;color:' + si.color + ';font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,sans-serif">' + (s.label || s.agent || '') + '</span>';
+    html += '</div>';
+    if (i < statuses.length - 1) {
+      var nextCompleted = (statuses[i+1].status_num >= 2) || isCompleted;
+      var lineCol = isCompleted ? '#34c759' : isFailed ? '#ef4444' : 'rgba(0,0,0,.1)';
+      html += '<div style="height:2px;flex:0 0 14px;background:' + lineCol + ';border-radius:1px;margin-top:-12px"></div>';
+    }
+  });
+  html += '</div>';
+  html += '</div>';
+  return html;
+}
+
 function _detailHtml(t) {
   const isDone = t.status === 'completed';
   const isProc = t.status === 'processing';
@@ -779,14 +830,11 @@ function _detailHtml(t) {
 }
 
 function _renderTaskActionsInline(t) {
-  const _stage = t.stage || '';
   const _status = t.status || '';
   let html = '';
-  // Issue #51: 确认完成
-  if (_stage === 'pending_review' || _stage === 'sre' || _stage === 'sre_completed') {
-    if (_status !== 'completed' && _status !== 'cancelled') {
-      html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')}</button>`;
-    }
+  // Issue #131: 任意阶段均可确认完成（cancelled/completed 不显示）
+  if (_status !== 'completed' && _status !== 'cancelled') {
+    html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')}</button>`;
   }
   // 取消任务
   if (_status !== 'completed' && _status !== 'cancelled') {

@@ -623,3 +623,149 @@ class TestRedispatchOnboarding:
             db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
             db.cursor().execute("DELETE FROM agent_tasks WHERE id LIKE 't_redisp_onb%'")
             db.commit()
+
+
+class TestLocalRetry:
+    """本机重试（Issue #128）：local_only=True 强制使用原 runtime_id，跳过 pick_engine。"""
+
+    def _setup_engine_and_task(self, seq, runtime_id_override=None, runtime_healthy=True, runtime_status="online"):
+        """创建测试引擎 + 关联 task，返回 (rid, task_id)。"""
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_tasks WHERE id LIKE 't_lr%'")
+            c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'lr-cred%'")
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) VALUES ('hlr','lr-cred','lr-dev','global','tester','active')")
+            _cid = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
+                "VALUES ('opencode','opencode',?, ?, datetime('now'), 'global', '', 1, ?)",
+                (_cid, runtime_status, 1 if runtime_healthy else 0))
+            _rid = c.lastrowid
+            c.execute("INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status) VALUES ('lr-sess',?,?,?,'idle')",
+                      (_REPO_KEY, "vod", _rid))
+            # 创建旧 task（runtime_id 设为引擎 id，status=failed）
+            _task_runtime = runtime_id_override if runtime_id_override is not None else _rid
+            c.execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, agent_type, skill, prompt, cwd, runtime_session_id, event_type, account, user_id, repo_gitcode_token, env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, knowledge_files, affinity_runtime_id, pool_agent_type, status) "
+                "VALUES ('t_lr0', 'vod:'||?, ?, ?, '#5', ?, 'vod', 'repo-onboarding', 'p', '/old/vod/issues/5', 'ses_old', 'issue_comment', 'acct', 0, '', '{}', '{}', '', 'iss-redis', '{}', '{}', '{}', 0, '', 'failed')",
+                (_REPO_KEY, _task_runtime, seq, _REPO_KEY))
+            db.commit()
+        return _rid, "t_lr0"
+
+    def _cleanup(self, seq):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM events WHERE seq=?", (seq,))
+            c.execute("DELETE FROM agent_tasks WHERE event_seq=?", (seq,))
+            c.execute("DELETE FROM agent_tasks WHERE id LIKE 't_lr%'")
+            c.execute("DELETE FROM devops_agent_session WHERE id LIKE 'lr-sess%'")
+            c.execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'lr-cred%')")
+            c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'lr-cred%'")
+            db.commit()
+
+    def test_local_retry_uses_original_runtime_id(self):
+        """local_only=True：新任务 runtime_id 等于原任务 runtime_id，不调 pick_engine。"""
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
+                      (_REPO_KEY, "issue_comment", "vod", "lr-test", "#5", "{}", "failed", "x"))
+            seq = c.lastrowid
+            db.commit()
+        _rid, _tid = self._setup_engine_and_task(seq)
+
+        from src.user.db import set_meta_value
+        set_meta_value(f"redispatch:{seq}", "")
+
+        # patch pick_engine 确保不被调用
+        with patch("src.runtime.engine_select.pick_engine") as _mock_pe:
+            r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)
+            assert not _mock_pe.called, "local_only=True 不应调用 pick_engine"
+
+        assert r.status_code == 200, r.text
+        assert r.json().get("local_only") is True
+        # 新任务 runtime_id 应等于原 runtime_id
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT runtime_id FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                (seq,)).fetchone()
+        assert row, "应创建新任务"
+        assert row[0] == _rid, f"新任务 runtime_id 应等于原引擎 {_rid}，实际 {row[0]}"
+        self._cleanup(seq)
+
+    def test_local_retry_unhealthy_engine_returns_409(self):
+        """local_only=True：原引擎不健康 → 返回 409 错误，不切换机器。"""
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
+                      (_REPO_KEY, "issue_comment", "vod", "lr-unhealthy", "#5", "{}", "failed", "x"))
+            seq = c.lastrowid
+            db.commit()
+        _rid, _tid = self._setup_engine_and_task(seq, runtime_healthy=False)
+
+        from src.user.db import set_meta_value
+        set_meta_value(f"redispatch:{seq}", "")
+
+        r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)
+        assert r.status_code == 409, r.text
+        assert "不可用" in r.json().get("detail", {}).get("message", "")
+        self._cleanup(seq)
+
+    def test_local_retry_offline_engine_returns_409(self):
+        """local_only=True：原引擎离线 → 返回 409 错误，不切换机器。"""
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
+                      (_REPO_KEY, "issue_comment", "vod", "lr-offline", "#5", "{}", "failed", "x"))
+            seq = c.lastrowid
+            db.commit()
+        _rid, _tid = self._setup_engine_and_task(seq, runtime_status="offline")
+
+        from src.user.db import set_meta_value
+        set_meta_value(f"redispatch:{seq}", "")
+
+        r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)
+        assert r.status_code == 409, r.text
+        assert "不可用" in r.json().get("detail", {}).get("message", "")
+        self._cleanup(seq)
+
+    def test_local_retry_zero_runtime_id_returns_409(self):
+        """local_only=True：原任务 runtime_id=0 → 返回 409，无法本机重试。"""
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
+                      (_REPO_KEY, "issue_comment", "vod", "lr-zero-rid", "#5", "{}", "failed", "x"))
+            seq = c.lastrowid
+            db.commit()
+        _rid, _tid = self._setup_engine_and_task(seq, runtime_id_override=0)
+
+        from src.user.db import set_meta_value
+        set_meta_value(f"redispatch:{seq}", "")
+
+        r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)
+        assert r.status_code == 409, r.text
+        assert "未绑定引擎" in r.json().get("detail", {}).get("message", "")
+        self._cleanup(seq)
+
+    def test_local_retry_no_task_returns_409(self):
+        """local_only=True：无关联任务 → 返回 409。"""
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
+            c.execute("INSERT INTO events (repo_key, event_type, agent_type, title, issue_id, payload, status, result) VALUES (?,?,?,?,?,?,?,?)",
+                      (_REPO_KEY, "issue_comment", "vod", "lr-no-task", "#5", "{}", "failed", "x"))
+            seq = c.lastrowid
+            db.commit()
+
+        from src.user.db import set_meta_value
+        set_meta_value(f"redispatch:{seq}", "")
+
+        r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)
+        assert r.status_code == 409, r.text
+        assert "无关联任务" in r.json().get("detail", {}).get("message", "")
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
+            db.commit()
