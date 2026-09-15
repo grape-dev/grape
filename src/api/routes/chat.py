@@ -22,7 +22,7 @@ _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key, require_no_session_token
+from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.user import db as user_db
 from src.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
@@ -103,13 +103,13 @@ class NewConversationBody(BaseModel):
 
 
 @router.post("/conversations")
-def new_conversation(body: NewConversationBody, user: dict = Depends(get_current_user)):
+def new_conversation(body: NewConversationBody, user: dict = Depends(require_no_session_token)):
     cid = create_conversation(user["id"], repo_key=body.repo_key)
     return {"conversation_id": cid}
 
 
 @router.delete("/conversations/{conv_id}")
-def remove_conversation(conv_id: str, user: dict = Depends(get_current_user)):
+def remove_conversation(conv_id: str, user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
@@ -124,7 +124,7 @@ class EnsureIssueConvBody(BaseModel):
 
 
 @router.post("/conversations/ensure-issue")
-def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(get_current_user)):
+def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(require_no_session_token)):
     """基于 repo_key + issue_number 查找或新建任务会话（Task Center 跳转用）。
 
     会话被删除后，Task Center 双击跳转时调用此接口重建「Issue #N」会话，
@@ -473,7 +473,7 @@ def _understand_video(video_data: str) -> str:
 
 
 @router.post("/send")
-async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
+async def send_message(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
     # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
@@ -636,7 +636,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
 
 
 @router.post("/send/stream")
-async def send_message_stream(body: ChatMessage, user: dict = Depends(get_current_user)):
+async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
     # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
@@ -1043,7 +1043,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
 # ====== Feedback ======
 
 @router.post("/feedback")
-def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
+def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
 
     with db_lock:
@@ -1086,7 +1086,7 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
 # ====== Config ======
 
 @router.get("/config")
-def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
+def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = ""):
     cfg = _get_chat_config(user["id"])
     # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
     from src.runtime.instances import instance_name
@@ -1182,7 +1182,7 @@ def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
 
 
 @router.put("/config")
-async def update_chat_config(body: dict, user: dict = Depends(get_current_user), repo: str = ""):
+async def update_chat_config(body: dict, user: dict = Depends(require_no_session_token), repo: str = ""):
     im = body.get("im", {})
     feishu = im.get("feishu", {})
     kwargs = {}
@@ -1328,7 +1328,7 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user),
 # ===== Chat Agent v2: submit/stream 分离（学习 Admin AI AiTaskManager）=====
 
 @router.post("/submit")
-async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user)):
+async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     """提交 chat 查询 → 立即返回 {task_id, conversation_id, status}。
 
     学习 Admin AI submit/stream 分离：
@@ -1579,7 +1579,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
 
 
 @router.get("/task/{task_id}/stream")
-async def chat_task_stream(task_id: str, user: dict = Depends(get_current_user)):
+async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session_token)):
     """SSE 订阅任务输出 — 先重放缓冲，再实时追加（学习 Admin AI subscribe）。
 
     - 内存有任务 → 重放 events 缓冲 + 加入 subscribers 接收后续
@@ -1683,7 +1683,7 @@ def _chat_task_cleanup():
 
 
 @router.post("/send/async")
-async def send_message_async(body: ChatMessage, user: dict = Depends(get_current_user)):
+async def send_message_async(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     """异步发送消息：所有同步 DB/引擎操作在 run_in_executor 中执行，不阻塞 event loop。
 
     本机直连 → 返回 fallback_stream（前端回退到 send/stream）
@@ -1955,7 +1955,7 @@ def _execute_chat_task(task_id: str):
 
 
 @router.get("/task/{task_id}/status")
-def chat_task_status(task_id: str, user: dict = Depends(get_current_user)):
+def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """查询 chat 任务状态（跨机器可查，对齐 Admin AI getTaskFinalStatus）。
 
     ChatTaskManager 内存优先（v2）→ 旧 _chat_tasks 内存 → DB 兜底。
