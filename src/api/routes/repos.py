@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
-from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token, require_no_session_token
+from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token, require_no_session_token
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
@@ -241,7 +241,7 @@ def list_member_repos(user: dict = Depends(require_no_session_token)):
 
 
 @router.post("/sync")
-def sync_repos(user: dict = Depends(get_current_user)):
+def sync_repos(user: dict = Depends(require_no_session_token)):
     """手动从 VCS 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录"""
     provider, api_token = _get_user_provider_and_token(user["username"])
     if not api_token:
@@ -259,7 +259,7 @@ def sync_repos(user: dict = Depends(get_current_user)):
 
 
 @router.get("/check-name")
-def check_repo_name(name: str, user: dict = Depends(get_current_user)):
+def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
     """检查当前用户名下是否已存在同名仓库"""
     provider, api_token = _get_user_provider_and_token(user["username"])
     if not api_token:
@@ -300,7 +300,7 @@ def check_repo_name(name: str, user: dict = Depends(get_current_user)):
 
 
 @router.post("/create")
-def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)):
+def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_session_token)):
     """通过 VCS API 新建仓库，可选创建后自动托管"""
     import re as _re
     from src.repo_key import to_repo_key
@@ -454,7 +454,7 @@ def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: 
 
 
 @router.post("/host")
-def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
+def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
@@ -660,7 +660,7 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
 
 
 @router.post("/{owner}/{repo}/repair-host")
-def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """方案 F-4：自愈未完成的托管流程（bot 未加入 / webhook 未创建），幂等。
 
     流程：需要 owner token 邀请 + bot token 建 webhook；判定 bot 已是维护者则跳过邀请；
@@ -746,14 +746,14 @@ class BotTokenBody(BaseModel):
 
 
 @router.get("/bot-token/{owner}/{repo_name}")
-def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(get_current_user)):
+def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(require_no_session_token)):
     """获取仓库绑定的 DevOps Bot Token 是否存在"""
     token = get_bot_token_by_repo(owner, repo_name)
     return {"has_bot_token": bool(token)}
 
 
 @router.put("/bot-token")
-def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user)):
+def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_session_token)):
     """设置仓库绑定的 DevOps Bot Token；自动将 repo bot 加入维护者"""
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
@@ -796,7 +796,7 @@ class DeployUrlBody(BaseModel):
 
 
 @router.put("/deploy-url")
-def set_deploy_url(body: DeployUrlBody, user: dict = Depends(get_current_user)):
+def set_deploy_url(body: DeployUrlBody, user: dict = Depends(require_no_session_token)):
     """登记业务系统部署后的访问 URL"""
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
@@ -940,7 +940,7 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
 
 
 @router.post("/remove")
-def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)):
+def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
@@ -1079,7 +1079,7 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)
 
 
 @router.get("/{owner}/{repo}/project-info")
-def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_repo_project_info(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """读取仓库的权威项目知识基线（repo 全局，多机共享，见 multi-issue-isolation-design.md §2.4）。
 
     返回 files（全文）+ meta（commit/branches/updated/degraded）。无基线 → 空 files + meta。
@@ -1097,7 +1097,7 @@ class SceneRecommendConfigBody(BaseModel):
 
 
 @router.get("/{owner}/{repo}/scene-recommend-config")
-def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """读取仓库智能推荐配置（兜底场景 + 路由规则）。"""
     from src.repo_key import to_repo_key
     from src.user.db import get_scene_recommend_config
@@ -1107,7 +1107,7 @@ def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(get_c
 
 @router.put("/{owner}/{repo}/scene-recommend-config")
 def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfigBody,
-                                user: dict = Depends(get_current_user)):
+                                user: dict = Depends(require_no_session_token)):
     """保存仓库智能推荐配置（兜底场景 + 路由规则）。
 
     写入时自检：过滤 scene_id 不在当前场景列表中的规则。

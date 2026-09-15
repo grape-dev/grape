@@ -10,7 +10,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from src.api.deps import get_current_user
+from src.api.deps import require_no_session_token
 from src.config import log
 from src.runtime.service import list_task_messages
 
@@ -27,7 +27,7 @@ def _require_task_exists(task_id: str):
 
 
 @router.get("/{task_id}/info")
-def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_user)):
+def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_token)):
     """任务关联的执行引擎/机器信息 + 接收上下文（prompt）。
 
     返回：{agent_name, agent_version, device_name, last_ip, owner_name, prompt, prompt_full_length,
@@ -84,7 +84,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.get("/{task_id}/messages")
-def get_task_messages(task_id: str, user: dict = Depends(get_current_user),
+def get_task_messages(task_id: str, user: dict = Depends(require_no_session_token),
                             since: int = Query(0, ge=0)):
     """增量拉取：since 之后的消息（seq 单调递增）。"""
     _require_task_exists(task_id)
@@ -93,7 +93,7 @@ def get_task_messages(task_id: str, user: dict = Depends(get_current_user),
 
 @router.get("/{task_id}/stream")
 async def stream_task_messages(task_id: str, request: Request,
-                               user: dict = Depends(get_current_user),
+                               user: dict = Depends(require_no_session_token),
                                since: int = Query(0, ge=0)):
     """SSE 实时流：先发 since 之后存量 → 阻塞读订阅队列 → 心跳保活。"""
     _require_task_exists(task_id)

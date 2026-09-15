@@ -1,6 +1,8 @@
 # Events 事件接口（/api/events）
 
 > 对外公开，认证：`get_current_user_or_api_key`。worker agent 结果获取核心。
+> scope（x-token-scope）：`GET /api/events/detail/{seq}` = **dual**；操作类
+> （terminate/redispatch/thread/chat/knowledge/stream） = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 
 ## GET /api/events/{owner}/{repo} — 仓库事件列表
 

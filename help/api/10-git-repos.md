@@ -3,7 +3,9 @@
 > 设计：技能/第三方访问 Git 仓库资源（Issue/PR/内容/分支等）时，统一走 grape 的 Git 仓库 API。
 > ⚠️ **grape `/api/repos` 是平台业务接口**（托管/同步/成员/部署 URL 等，见 02-repos.md）；**本接口 `/api/git-repo` 是 Git 仓库透传**（Issue/PR/内容/分支等由 gitcode/github/gitlab 提供）。
 > **不是 GitCode 代理**：grape 侧定义中立的 Git 仓库资源语义，backend 由请求头/参数区分（gitcode / github / gitlab，未来扩展）。
-> 认证：`get_current_user_or_api_key`（API Key 用于 worker/技能）。写操作需授权。
+> 认证：`get_current_user_or_api_key`（契约收录）+ 体内 `_repo_token` **强制 session**。
+> scope（x-token-scope）：**全部 = `session_only`**——仅 `tk_` 会话 token（agent 专用）可用；
+> `grape_` API Key / Web JWT → **403**。写操作需授权。
 > Base：`{{SERVER_URL}}/api/git-repo`
 > 出参结构为 **gitcode 平台实际结构**（与技能 `gitcode-api-reference.md` 一致）；github/gitlab 未来映射。
 

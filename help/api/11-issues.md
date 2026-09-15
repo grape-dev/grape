@@ -1,6 +1,7 @@
 # Issues 对外接口（/api/issues）
 
 > 对外公开，认证：`get_current_user_or_api_key`（JWT 会话 / 会话 token（`tk_`）/ API Key 任一）。
+> scope（x-token-scope）：全部 = **dual**（三通道全放行）。
 > 以 **Issue 为中心**聚合：pipeline 阶段（`stage`）+ 任务中心状态（`task_status`）+ 事件流（`events`）+ 路线图（`pipeline`）。
 > 设计：`docs/weekly-03/issues-api-design.md`（含 Issue / Event / Task 概念澄清）。
 

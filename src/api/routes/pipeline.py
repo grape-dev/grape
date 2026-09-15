@@ -1,6 +1,6 @@
 """Pipeline 路由：Issue 工作流聚合展示"""
 from fastapi import APIRouter, Depends
-from src.api.deps import get_current_user
+from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
@@ -263,7 +263,7 @@ def _running_issue_ids(repo_keys) -> set[str]:
 
 
 @router.get("/{owner}/{repo}")
-def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"
     repo_key = to_repo_key(_owner_repo)

@@ -1,6 +1,7 @@
 # TaskLogs 任务日志接口（/api/task-logs）
 
 > 对外公开，认证：`get_current_user_or_api_key`。worker agent 结果的实时日志/消息来源。
+> scope（x-token-scope）：全部 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 
 ## GET /api/task-logs/{task_id}/info — 任务运行信息
 

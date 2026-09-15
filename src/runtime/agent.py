@@ -1529,10 +1529,19 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                                  f"server={_latest}, will upgrade when idle")
                     pending_upgrade = True
                     upgrade_target_version = _latest
-                else:
-                    if pending_upgrade and _latest and _latest == _local_ver:
+                elif _latest:
+                    if pending_upgrade and _latest == _local_ver:
                         pending_upgrade = False
                         log.info("Version now matches, clearing pending_upgrade")
+                else:
+                    # Server disabled auto-upgrade (empty latest_version):
+                    # clear any stale pending flag so worker stops retrying
+                    # downloads forever. (2026-09-15: worker with pending state
+                    # kept re-downloading the 26MB package on backoff.)
+                    if pending_upgrade:
+                        pending_upgrade = False
+                        log.info("Auto-upgrade disabled by server (empty latest_version), "
+                                 "clearing pending_upgrade")
 
         # ---- 升级执行（待升级 && 无活跃任务 && 退避已过）----
         if pending_upgrade and not active_tasks:
