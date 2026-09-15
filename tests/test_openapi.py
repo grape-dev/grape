@@ -83,20 +83,53 @@ EXPECTED_PUBLIC = {
     "issues_pipeline": ("get", "/api/issues/{owner}/{repo}/{number}/pipeline"),
     # ===== Issue #113: 任务中心仓库全部视图 =====
     "tasks_repo_all": ("get", "/api/tasks/repo/{owner}/{repo}"),
+    # ===== A 批（openapi-full-coverage-design.md）：skills/scenes 全量进契约 =====
+    "upload_skill_api_skills_upload_post": ("post", "/api/skills/upload"),
+    "toggle_skill_like_api_skills__skill_id__like_post": ("post", "/api/skills/{skill_id}/like"),
+    "get_skill_stats_api_skills_stats_get": ("get", "/api/skills/stats"),
+    "search_skills_api_skills_search_get": ("get", "/api/skills/search"),
+    "list_featured_skills_api_skills_featured_get": ("get", "/api/skills/featured"),
+    "download_skill_zip_by_id_api_skills_by_id__skill_id__download_get": ("get", "/api/skills/by-id/{skill_id}/download"),
+    "delete_skill_by_id_api_skills_by_id__skill_id__delete": ("delete", "/api/skills/by-id/{skill_id}"),
+    "convert_skill_api_skills_convert_post": ("post", "/api/skills/convert"),
+    "list_sub_skills_api_skills__skill_id__sub_get": ("get", "/api/skills/{skill_id}/sub"),
+    "read_sub_skill_api_skills__skill_id__sub__sub_name__get": ("get", "/api/skills/{skill_id}/sub/{sub_name}"),
+    "package_sub_skill_api_skills_package_sub__pkg_id___sub_name__get": ("get", "/api/skills/package-sub/{pkg_id}/{sub_name}"),
+    "create_scene_api_scenes_post": ("post", "/api/scenes"),
+    "list_scenes_with_pipeline_api_scenes_with_pipeline_get": ("get", "/api/scenes/with-pipeline"),
+    "create_market_scene_api_scenes_market_post": ("post", "/api/scenes/market"),
+    "list_scenes_market_api_scenes_market_get": ("get", "/api/scenes/market"),
+    "list_scene_categories_api_scenes_market_categories_get": ("get", "/api/scenes/market/categories"),
+    "get_scene_market_detail_api_scenes_market__market_id__get": ("get", "/api/scenes/market/{market_id}"),
+    "update_market_scene_api_scenes_market__market_id__put": ("put", "/api/scenes/market/{market_id}"),
+    "delete_market_scene_api_scenes_market__market_id__delete": ("delete", "/api/scenes/market/{market_id}"),
+    "check_market_scene_applied_api_scenes_market__market_id__applied_get": ("get", "/api/scenes/market/{market_id}/applied"),
+    "apply_market_scene_api_scenes_market__market_id__apply_post": ("post", "/api/scenes/market/{market_id}/apply"),
+    "check_market_scene_experience_api_scenes_market__market_id__experience_check_get": ("get", "/api/scenes/market/{market_id}/experience-check"),
+    "experience_market_scene_api_scenes_market__market_id__experience_post": ("post", "/api/scenes/market/{market_id}/experience"),
+    "toggle_scene_like_api_scenes_market__market_id__like_post": ("post", "/api/scenes/market/{market_id}/like"),
+    "upload_scene_icon_api_scenes_market_icon_upload_post": ("post", "/api/scenes/market/icon-upload"),
+    "check_scene_name_api_scenes_check_name_get": ("get", "/api/scenes/check-name"),
+    "list_skills_for_agent_api_scenes_skills__agent_type__get": ("get", "/api/scenes/skills/{agent_type}"),
+    "apply_scene_api_scenes_apply__owner___repo__post": ("post", "/api/scenes/apply/{owner}/{repo}"),
+    "list_repo_branches_api_scenes_branches__owner___repo__get": ("get", "/api/scenes/branches/{owner}/{repo}"),
+    "create_repo_branch_api_scenes_branches__owner___repo__post": ("post", "/api/scenes/branches/{owner}/{repo}"),
+    "get_scene_detail_api_scenes__scene_id__get": ("get", "/api/scenes/{scene_id}"),
+    "update_scene_api_scenes__scene_id__put": ("put", "/api/scenes/{scene_id}"),
+    "delete_scene_api_scenes__scene_id__delete": ("delete", "/api/scenes/{scene_id}"),
+    "get_advanced_options_api_scenes__scene_id__advanced_options_get": ("get", "/api/scenes/{scene_id}/advanced-options"),
+    "save_advanced_options_api_scenes__scene_id__advanced_options_put": ("put", "/api/scenes/{scene_id}/advanced-options"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
 NOT_IN_CONTRACT = [
     "/api/agents/types",                 # 无认证
-    "/api/scenes/with-pipeline",         # get_current_user
-    "/api/scenes/{scene_id}",            # get_current_user（CRUD）
     "/api/tasks/{task_id}/clarifications",  # get_current_user
     "/api/auth/login",
-    "/api/settings",                     # 管理类模块
+    "/api/settings",                     # 管理类模块（未开放，仍留内部）
     "/api/dashboard/ops/overview",       # 管理类模块
     "/api/runtime/start",                # 管理类模块
-    "/api/repos/host",                   # get_current_user（托管）
-    "/api/skills/upload",                # get_current_user（上传）
+    "/api/repos/host",                   # 托管（未开放，仍留内部）
 ]
 
 

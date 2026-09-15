@@ -188,7 +188,7 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
 # ===== Skill Market API（技能市场）=====
 
 @router.post("/{skill_id}/like")
-def toggle_skill_like(skill_id: int, user: dict = Depends(get_current_user)):
+def toggle_skill_like(skill_id: int, user: dict = Depends(require_no_session_token)):
     """点赞 toggle：已赞→取消，未赞→点赞"""
     from src.session_manager import db, db_lock
     from src.user.db import toggle_skill_like as _toggle
@@ -205,7 +205,7 @@ def toggle_skill_like(skill_id: int, user: dict = Depends(get_current_user)):
 
 
 @router.get("/featured")
-def list_featured_skills(user: dict = Depends(get_current_user), limit: int = 0):
+def list_featured_skills(user: dict = Depends(require_no_session_token), limit: int = 0):
     """精选技能：is_featured=1 的 official 技能，按 like_count 降序。limit=0 时默认 5"""
     from src.user.db import (get_featured_skills, batch_skill_liked,
                              get_skill_usage_stats, batch_skill_scenes)
@@ -232,7 +232,7 @@ def list_featured_skills(user: dict = Depends(get_current_user), limit: int = 0)
 
 
 @router.get("/stats")
-def get_skill_stats(user: dict = Depends(get_current_user)):
+def get_skill_stats(user: dict = Depends(require_no_session_token)):
     """技能使用统计（通过 scene_skill_ref 关联表 SQL 聚合）。
 
     返回 {skill_name: {scene_count: N, repo_count: N}}。
@@ -242,7 +242,7 @@ def get_skill_stats(user: dict = Depends(get_current_user)):
 
 
 @router.get("/search")
-def search_skills(q: str = "", user: dict = Depends(get_current_user)):
+def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
     """技能查找：根据任务描述推荐相关技能。
 
     先按 skill_name 精确匹配，匹配到则按名称过滤；
@@ -355,7 +355,7 @@ def download_skill_template():
 
 
 @router.get("/by-id/{skill_id}/download")
-def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_current_user),
+def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
                                    repo: str = ""):
     """下载技能包 zip（点击时动态签发，见 obs-skill-storage-design.md N8 下载模式）。
 
@@ -524,7 +524,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_sessio
 
 
 @router.post("/upload")
-async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_current_user),
+async def upload_skill(file: UploadFile = File(...), user: dict = Depends(require_no_session_token),
                        scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form("")):
     """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。"""
     VALID_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat"}
@@ -656,7 +656,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 
 
 @router.delete("/by-id/{skill_id}")
-def delete_skill_by_id(skill_id: int, user: dict = Depends(get_current_user),
+def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
                         scope: str = "user", repo: str = ""):
     """删除技能——按主键 id 精确查询，查到后做归属校验，再删除。
 
@@ -741,7 +741,7 @@ class ConvertSkillRequest(BaseModel):
 
 
 @router.post("/convert")
-def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_current_user)):
+def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_session_token)):
     """将个人技能（scope=user）复制为仓库技能（scope=repo）。
 
     原个人技能记录与目录保留（复制而非移动）。复制后可在此仓库的 Agent 中配置使用。
@@ -822,7 +822,7 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(get_current_us
 
 
 @router.get("/{skill_id}/sub")
-def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user)):
+def list_sub_skills(skill_id: int, user: dict = Depends(require_no_session_token)):
     """返回技能包的子技能列表（从 skill_path 的 references/ 目录读取）"""
     from src.session_manager import db, db_lock
     import re as _re
@@ -879,7 +879,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user)):
 
 
 @router.get("/{skill_id}/sub/{sub_name}")
-def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user)):
+def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
     """读取技能包子技能的 SKILL.md 内容"""
     from src.session_manager import db, db_lock
 
@@ -923,7 +923,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
 
 
 @router.get("/package-sub/{pkg_id}/{sub_name}")
-def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user)):
+def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
     """返回技能包子技能详情（格式与 skill detail 一致，支持导航到独立详情页）"""
     from src.session_manager import db, db_lock
     import re as _re
