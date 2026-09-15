@@ -561,7 +561,15 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_sessio
     else:
         from src.config import resolve_official_skill_path
         _r = resolve_official_skill_path(row[0])
-        skill_path = _r or os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
+        if _r:
+            skill_path = _r
+        else:
+            # fallback: skill_dir 可能是 3 层路径，尝试去掉中间层
+            _parts = skill_dir.split("/")
+            if len(_parts) >= 3:
+                skill_path = os.path.join(SKILLS_DIR, _parts[0], _parts[-1], "SKILL.md")
+            else:
+                skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
     content = ""
     if os.path.exists(skill_path):
         with open(skill_path, encoding="utf-8") as f:
@@ -895,10 +903,16 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user)):
 
     skill_name, skill_path = row[0], row[1] or ""
     from src.config import SKILLS_DIR, resolve_official_skill_path
-    base_dir = os.path.join(SKILLS_DIR, skill_path) if skill_path else ""
     _r = resolve_official_skill_path(skill_name)
     if _r:
         base_dir = os.path.dirname(_r)
+    else:
+        # fallback: skill_path 可能是 3 层，尝试去掉中间层
+        _parts = skill_path.split("/")
+        if len(_parts) >= 3:
+            base_dir = os.path.join(SKILLS_DIR, _parts[0], _parts[-1])
+        else:
+            base_dir = os.path.join(SKILLS_DIR, skill_path) if skill_path else ""
     ref_dir = os.path.join(base_dir, "references")
 
     if not os.path.isdir(ref_dir):
@@ -950,10 +964,16 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
     from src.config import SKILLS_DIR, resolve_official_skill_path
-    base_dir = os.path.join(SKILLS_DIR, row[1] or "") if row[1] else ""
     _r = resolve_official_skill_path(row[0])
     if _r:
         base_dir = os.path.dirname(_r)
+    else:
+        _sp = row[1] or ""
+        _parts = _sp.split("/")
+        if len(_parts) >= 3:
+            base_dir = os.path.join(SKILLS_DIR, _parts[0], _parts[-1])
+        else:
+            base_dir = os.path.join(SKILLS_DIR, _sp) if _sp else ""
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
 
     if not os.path.isfile(sub_md):
@@ -995,10 +1015,16 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
         raise HTTPException(status_code=404, detail={"code": 404, "message": "父技能未找到"})
 
     from src.config import SKILLS_DIR, resolve_official_skill_path
-    base_dir = os.path.join(SKILLS_DIR, row[1] or "") if row[1] else ""
     _r = resolve_official_skill_path(row[0])
     if _r:
         base_dir = os.path.dirname(_r)
+    else:
+        _sp = row[1] or ""
+        _parts = _sp.split("/")
+        if len(_parts) >= 3:
+            base_dir = os.path.join(SKILLS_DIR, _parts[0], _parts[-1])
+        else:
+            base_dir = os.path.join(SKILLS_DIR, _sp) if _sp else ""
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
     if not os.path.isfile(sub_md):
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})

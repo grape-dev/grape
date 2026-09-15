@@ -375,10 +375,13 @@ _OFFICIAL_AGENT_TYPES = ("vod", "issue", "coding", "qa", "sre", "chat")
 
 
 def resolve_official_skill_path(skill_name: str) -> str:
-    """官方技能 SKILL.md 绝对路径（skills/<agent_type>/<skill>/SKILL.md）。
+    """官方技能 SKILL.md 绝对路径。
 
-    依 skill-description.json 的 agent_type/path 映射解析（skill-description-sync.md），
-    兼容旧平铺布局（找不到 agent_type 目录时回退 skills/<skill>/SKILL.md）。
+    解析顺序：
+    1. skill-description.json 的 path 字段（3 层：agent_type/sub_scene/skill）
+    2. path 去掉中间层（2 层兼容：agent_type/skill）
+    3. skills/<agent_type>/<skill>/SKILL.md（按 agent_type 扫描）
+    4. skills/<skill>/SKILL.md（旧平铺兼容）
     返回空串表示未找到。
     """
     if not skill_name:
@@ -391,13 +394,22 @@ def resolve_official_skill_path(skill_name: str) -> str:
             _info = _data.get(skill_name) or {}
             _path = (_info.get("path") or "").strip().replace("/", os.sep)
             if _path:
+                # 1. 完整 path（3 层：agent_type/sub_scene/skill）
                 _cand = os.path.join(SKILLS_DIR, _path, "SKILL.md")
                 if os.path.isfile(_cand):
                     return _cand
+                # 2. 去掉中间层（2 层兼容：agent_type/skill）
+                _parts = _path.split(os.sep)
+                if len(_parts) >= 3:
+                    _cand2 = os.path.join(SKILLS_DIR, _parts[0], _parts[-1], "SKILL.md")
+                    if os.path.isfile(_cand2):
+                        return _cand2
+        # 3. 按 agent_type 扫描（2 层）
         for _at in _OFFICIAL_AGENT_TYPES:
             _cand = os.path.join(SKILLS_DIR, _at, skill_name, "SKILL.md")
             if os.path.isfile(_cand):
                 return _cand
+        # 4. 旧平铺（1 层）
         _legacy = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
         if os.path.isfile(_legacy):
             return _legacy
