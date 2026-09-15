@@ -15,36 +15,11 @@ Task 对象字段：`id / user_id / assignee / repo_key / issue_number / title /
 
 ---
 
-## POST /api/tasks/create — 创建任务（同时建 GitCode Issue）
+## POST /api/tasks/create — 已移除（请改用 POST /api/issues）
 
-请求头：`Content-Type: application/json`
-
-请求体（TaskCreateBody）：
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|:---:|------|
-| `repo_key` | string | ✅ | 仓库（如 `owner/repo` 或带前缀） |
-| `title` | string | ✅ | 任务/Issue 标题 |
-| `description` | string | ✅ | 任务描述（将成为 Issue body） |
-| `assignee` | string | 否 | 责任人 GitCode 用户名，默认当前用户 |
-| `scene_id` | string | 否 | 关联场景 ID |
-| `is_subtask_mode` | int | 否 | 0/1 多任务模式 |
-
-出参：
-
-```json
-{
-  "ok": true,
-  "task_id": 101,
-  "issue_number": 5,
-  "created": true,
-  "assignee": "Jason7602",
-  "is_subtask_mode": 0,
-  "message": "任务已创建，Issue 已同步"
-}
-```
-
-返回：200 成功；400 参数缺失（title/description/repo_key 缺）；409 同标题 Issue 已存在；502 建 GitCode Issue 失败。
+> ⚠️ **本端点已移除**（Phase C2）：其行为本质是**创建 GitCode Issue**。
+> **请用 `POST /api/issues/{owner}/{repo}`**（对外唯一创建入口，逻辑复用 `ensure_issue_task` + GitCode create + 触发 pipeline）。
+> 调用 `/api/tasks/create` 现返回 405；调用方（CLI/Agent）已统一迁移。
 
 ---
 

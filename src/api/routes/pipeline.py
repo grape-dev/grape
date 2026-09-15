@@ -80,7 +80,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         _iss_num = int(str(issue_id).lstrip("#"))
         with _dl:
             _c = _db.cursor()
-            _c.execute("SELECT title FROM tasks WHERE repo_key=? AND issue_number=?", (repo_key, _iss_num))
+            _c.execute("SELECT title FROM issue WHERE repo_key=? AND issue_number=?", (repo_key, _iss_num))
             _t = _c.fetchone()
             if _t and _t[0] and not _is_placeholder(_t[0]):
                 title = _t[0]
@@ -130,7 +130,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
                     from src.session_manager import db as _db2, db_lock as _dl2
                     with _dl2:
                         _c2 = _db2.cursor()
-                        _c2.execute("UPDATE tasks SET title=? WHERE repo_key=? AND issue_number=? AND (title='' OR title IS NULL)",
+                        _c2.execute("UPDATE issue SET title=? WHERE repo_key=? AND issue_number=? AND (title='' OR title IS NULL)",
                                     (_api_title, repo_key, _iss_num_api))
                         _db2.commit()
                 except Exception:
@@ -315,7 +315,7 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(get_current_user)):
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT DISTINCT issue_number, title FROM tasks "
+                "SELECT DISTINCT issue_number, title FROM issue "
                 "WHERE repo_key=? AND status IN ('active','processing') AND issue_number > 0",
                 (repo_key,)
             )

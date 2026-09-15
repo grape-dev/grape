@@ -409,6 +409,15 @@ def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
                     "probe_last": _probe.get("last_probe", ""),
                     "probe_error": _probe.get("error", ""),
                 })
+                # 引擎健康分（Issue #134 展示增强）
+                try:
+                    from src.runtime.health_scorer import get_health_score
+                    _hd = get_health_score(rid)
+                    runtime_list[-1]["health_score"] = _hd.get("health_score")
+                    runtime_list[-1]["health_consecutive_failures"] = _hd.get("consecutive_failures", 0)
+                    runtime_list[-1]["health_heartbeat_alive"] = _hd.get("heartbeat_alive")
+                except Exception:
+                    runtime_list[-1]["health_score"] = None
         except Exception:
             pass
 

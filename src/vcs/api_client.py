@@ -123,7 +123,7 @@ class VcsApiClient:
     # === 平台内部实现 ===
 
     def _gitcode_request(self, method: str, path: str, data: dict | None = None) -> dict:
-        url = f"https://api.gitcode.com/api/v5{path}"
+        url = f"https://gitcode.com/api/v5{path}"
         return self._do_request(url, method, data, headers={
             "Authorization": f"token {self.token}",
             "Content-Type": "application/json",

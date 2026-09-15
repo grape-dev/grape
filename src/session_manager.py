@@ -1,4 +1,6 @@
 """Session 管理：DB 初始化、Session CRUD、飞书绑定、Feishu 用户映射"""
+from __future__ import annotations
+
 import sqlite3, json, threading, os, time, shutil
 from datetime import datetime
 from src.config import log
@@ -517,7 +519,7 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
 
 
 def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) -> list[dict]:
-    from src.repo_key import to_repo_key, from_repo_key
+    from src.repo_key import to_repo_key
     if repo_key:
         repo_key = to_repo_key(repo_key)
     with db_lock:
@@ -526,25 +528,23 @@ def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) ->
             c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE user_id=? AND repo_key=? ORDER BY updated_at DESC LIMIT ?", (user_id, repo_key, limit))
         else:
             c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
-        return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "runtime_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": from_repo_key(r[5]), "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": normalize_event_time(r[9]), "updated_at": normalize_event_time(r[10]), "conv_type": r[11] or "general", "issue_number": r[12] or 0} for r in c.fetchall()]
+        return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "runtime_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": r[5] or "", "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": normalize_event_time(r[9]), "updated_at": normalize_event_time(r[10]), "conv_type": r[11] or "general", "issue_number": r[12] or 0} for r in c.fetchall()]
 
 
 def get_conversation(conv_id: str) -> dict | None:
-    from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE id=?", (conv_id,))
         row = c.fetchone()
         if not row:
             return None
-        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": from_repo_key(row[5]), "im_channel_id": row[6],
-                "title": row[7], "status": row[8], "created_at": normalize_event_time(row[9]), "updated_at": normalize_event_time(row[10]),
+        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5] or "",
+                "im_channel_id": row[6], "title": row[7], "status": row[8], "created_at": normalize_event_time(row[9]), "updated_at": normalize_event_time(row[10]),
                 "conv_type": row[11] or "general", "issue_number": row[12] or 0}
 
 
 def get_conversation_by_im(im_channel_id: str, user_id: int = 0) -> dict | None:
     """按 IM 渠道 + 用户查询会话（IM chat 场景用，幂等复用）"""
-    from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         if user_id > 0:
@@ -554,7 +554,7 @@ def get_conversation_by_im(im_channel_id: str, user_id: int = 0) -> dict | None:
         row = c.fetchone()
         if not row:
             return None
-        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": from_repo_key(row[5]), "im_channel_id": row[6],
+        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5] or "", "im_channel_id": row[6],
                 "title": row[7], "status": row[8], "created_at": normalize_event_time(row[9]), "updated_at": normalize_event_time(row[10]),
                 "conv_type": row[11] or "general", "issue_number": row[12] or 0}
 
@@ -601,11 +601,11 @@ def mark_task_processing_by_conversation(conv_id: str):
             return
         conv_user_id, repo_key, _ct, issue_number = row
         repo_key = to_repo_key(repo_key)
-        c.execute("UPDATE tasks SET status='processing' WHERE conversation_id=? AND user_id=? AND status='active'",
+        c.execute("UPDATE issue SET status='processing' WHERE conversation_id=? AND user_id=? AND status='active'",
                   (conv_id, conv_user_id))
         if c.rowcount == 0:
             c.execute(
-                "UPDATE tasks SET status='processing' WHERE repo_key=? AND issue_number=? AND user_id=? AND status='active'",
+                "UPDATE issue SET status='processing' WHERE repo_key=? AND issue_number=? AND user_id=? AND status='active'",
                 (repo_key, issue_number, conv_user_id))
         db.commit()
 

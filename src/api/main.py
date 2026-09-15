@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency
+from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues
 
 
 bot_manager = None
@@ -498,7 +498,7 @@ async def request_id_and_log_middleware(request: Request, call_next):
 
 app.include_router(auth.router)
 app.include_router(repos.router)
-# Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；与 repos.py 无路径冲突）
+# Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；prefix=/api/git-repo，与 grape 托管 repos.py 区分）
 from src.api.git_repo_api import router as git_repo_router
 app.include_router(git_repo_router)
 app.include_router(dashboard.router)
@@ -513,6 +513,7 @@ app.include_router(webhook.router)
 app.include_router(scenes.router)
 app.include_router(templates.router)
 app.include_router(tasks.router)
+app.include_router(issues.router)
 app.include_router(runtime.router)
 app.include_router(feishu_onboard.router)
 app.include_router(feishu_card.router)
@@ -525,10 +526,19 @@ app.include_router(latency.router)
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
 app.openapi = lambda: custom_openapi(app)
+# Issue 附件静态服务（Task Center 上传的文件）
+# 注意：必须在 /static 之前 mount，否则 /static 会拦截 /static/issue_attachments 请求
+# 路径与 tasks.py _attach_base_dir 对齐（基于 WORKSPACE_DIR）
+from src.config import WORKSPACE_DIR as _WS_DIR
+_ISSUE_ATTACH_DIR = os.path.join(_WS_DIR, "..", "data", "issue_attachments")
+os.makedirs(_ISSUE_ATTACH_DIR, exist_ok=True)
+app.mount("/static/issue_attachments", StaticFiles(directory=_ISSUE_ATTACH_DIR), name="issue_attachments")
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+if os.path.isdir(STATIC_DIR):
     # Prevent browser from caching stale JS/CSS (version bump in ?v= is the primary cache-buster,
     # but this header ensures even without ?v= change the browser revalidates)
     from starlette.middleware.base import BaseHTTPMiddleware

@@ -346,7 +346,7 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             await _send_card_reply(ctx, api, msg_id, _NO_REPO_CARD)
             return ""
         c = db.cursor()
-        c.execute("SELECT id, issue_number, title, status FROM tasks WHERE user_id=? AND repo_key=? ORDER BY id DESC LIMIT 20",
+        c.execute("SELECT id, issue_number, title, status FROM issue WHERE user_id=? AND repo_key=? ORDER BY id DESC LIMIT 20",
                   (uid, bound))
         tasks = c.fetchall()
         if not tasks:
@@ -533,7 +533,7 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
             conv_history = get_messages(conv_id, limit=20)
         except Exception:
             conv_history = []
-        body = build_task_chat_prompt(text, from_repo_key(repo_key), conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info, has_valid_session=has_valid_session)
+        body = build_task_chat_prompt(text, repo_key, conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info, has_valid_session=has_valid_session)
     else:
         # general chat：用 chat_messages 表的历史（格式 {role, content}），与 task 会话一致；
         # 不用 event_history（格式 {type, stdout}，与 _append_chat_history 的 role/content 不匹配）
@@ -607,7 +607,7 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
             tid, issue_number, title, status = items[idx]
             cid = ""
             c = db.cursor()
-            row = c.execute("SELECT conversation_id FROM tasks WHERE id=?", (tid,)).fetchone()
+            row = c.execute("SELECT conversation_id FROM issue WHERE id=?", (tid,)).fetchone()
             if row and row[0]:
                 cid = row[0]
             if not cid:
@@ -1056,6 +1056,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         #（feishu-web-chat-unified-design.md §3.2）。
         user_token = ""
         conv_id = ""
+        user_id = 0
         try:
             from src.user.db import get_user_gitcode_token
             from src.session_manager import create_conversation, get_conversation_by_im, update_conversation, add_message
@@ -1225,7 +1226,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     nonlocal final_text, exit_code, new_oc_session_id
                     async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
                                                                        backend_name=backend, account=exec_account,
-                                                                       user_token=user_token, agent_name="Chat Agent",
+                                                                       user_token=user_token, user_id=user_id,
+                                                                       agent_name="Chat Agent",
                                                                        agent_label=f"[Agent:chat|repo:{repository}]"):
                         if event_type == "done":
                             d = data

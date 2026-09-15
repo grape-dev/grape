@@ -319,7 +319,14 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                 }
                 _wf_fp.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
 
-    return {"status": "ok", "cancelled_tasks": cancelled_tasks}
+    _latest_ver = ""
+    try:
+        from src.worker_package import package_version
+        _latest_ver = package_version()
+    except Exception:
+        pass
+
+    return {"status": "ok", "cancelled_tasks": cancelled_tasks, "latest_version": _latest_ver}
 
 
 @router.get("/admin/event-bus")

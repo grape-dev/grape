@@ -108,6 +108,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     engine_instance = ""
     engine_device = ""
     engine_ip = ""
+    runtime_id = 0
     try:
         from src.runtime.instances import instance_name
         runtime_id = 0
@@ -155,6 +156,24 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     result["engine_instance"] = engine_instance
     result["engine_device"] = engine_device
     result["engine_ip"] = engine_ip
+
+    # 引擎健康分（Issue #134 展示增强）
+    engine_health = {"score": None, "total_tasks": 0, "failed_tasks": 0,
+                     "consecutive_failures": 0, "heartbeat_alive": None}
+    if runtime_id:
+        try:
+            from src.runtime.health_scorer import get_health_score
+            hd = get_health_score(runtime_id)
+            engine_health = {
+                "score": hd.get("health_score"),
+                "total_tasks": hd.get("total_tasks", 0),
+                "failed_tasks": hd.get("failed_tasks", 0),
+                "consecutive_failures": hd.get("consecutive_failures", 0),
+                "heartbeat_alive": hd.get("heartbeat_alive"),
+            }
+        except Exception:
+            pass
+    result["engine_health"] = engine_health
 
     # 关联任务（重派按钮展示/判定用，见 event-redispatch-design.md §4.1.1）
     task_info = {"task_id": "", "task_status": "", "runtime_id": 0,
@@ -474,10 +493,24 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
             _new_rid = 0
             with db_lock:
                 c2 = db.cursor()
-                # Get pool_tag and requeue in one step
-                c2.execute("SELECT pool_tag FROM agent_tasks WHERE id=?", (task_id,))
+                # Get pool_tag + pool_engine_ids + repo_key + user_id for scope filtering
+                c2.execute("SELECT pool_tag, pool_engine_ids, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
                 _ptag_row = c2.fetchone()
-                _ptag = (_ptag_row[0] if _ptag_row else "") or ""
+                _ptag = ""
+                _pool_eids = []
+                _task_repo = ""
+                _task_uid = 0
+                if _ptag_row:
+                    _ptag = _ptag_row[0] or ""
+                    import json as _json_pe
+                    try:
+                        _raw_eids = _ptag_row[1] or ""
+                        if _raw_eids:
+                            _pool_eids = [int(x) for x in _json_pe.loads(_raw_eids) if x]
+                    except Exception:
+                        pass
+                    _task_repo = _ptag_row[2] or ""
+                    _task_uid = _ptag_row[3] or 0
                 # Requeue
                 c2.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status IN ('dispatched','running')", (task_id,))
                 _requeued = c2.rowcount > 0
@@ -487,16 +520,35 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
                     _old_rid_row = c2.fetchone()
                     if _old_rid_row and _old_rid_row[0]:
                         c2.execute("UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?", (_old_rid_row[0],))
-                    # Reassign to an online engine with the right tag
+                    # Reassign to an online engine with the right tag + scope isolation
                     # Prefer remote (credential_id > 0) so workers can claim; fall back to local direct
+                    # pool_engine_ids 非空 → 限定场景绑定的引擎列表（与首次派发一致）
+                    # pool_engine_ids 为空 → 加 scope 过滤（与 claim_by_tag 对齐）
                     if _ptag:
+                        if _pool_eids:
+                            _ph = ",".join("?" * len(_pool_eids))
+                            _scope_extra = f" AND ar.id IN ({_ph})"
+                            _scope_params = list(_pool_eids)
+                        else:
+                            _repo_bare = _task_repo.split(":", 1)[1] if ":" in _task_repo else _task_repo
+                            _scope_extra = (
+                                " AND (ar.credential_id = 0"
+                                " OR rc.scope = 'global'"
+                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ?))"
+                                " OR (rc.scope = 'user' AND rc.owner_name ="
+                                " (SELECT username FROM user_accounts WHERE id=?)))"
+                            )
+                            _scope_params = [_repo_bare, f"gitcode:{_repo_bare}", _task_uid]
+                        # Query 1: prefer remote (credential_id > 0)
                         c2.execute(
                             "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
                             "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
                             "AND (ec.tag=? OR ec.tag='all') "
-                            "WHERE ar.status='online' AND ar.healthy=1 AND ar.credential_id > 0 "
-                            "ORDER BY ar.busy_slots ASC LIMIT 1",
-                            (_ptag,)
+                            "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                            "WHERE ar.status='online' AND ar.healthy=1 AND ar.credential_id > 0"
+                            + _scope_extra +
+                            " ORDER BY ar.busy_slots ASC LIMIT 1",
+                            (_ptag, *_scope_params)
                         )
                         _new_rid_row = c2.fetchone()
                         if not _new_rid_row:
@@ -505,9 +557,11 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
                                 "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
                                 "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
                                 "AND (ec.tag=? OR ec.tag='all') "
-                                "WHERE ar.status='online' AND ar.healthy=1 "
-                                "ORDER BY ar.busy_slots ASC LIMIT 1",
-                                (_ptag,)
+                                "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                                "WHERE ar.status='online' AND ar.healthy=1"
+                                + _scope_extra +
+                                " ORDER BY ar.busy_slots ASC LIMIT 1",
+                                (_ptag, *_scope_params)
                             )
                             _new_rid_row = c2.fetchone()
                         if _new_rid_row:
@@ -622,18 +676,46 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
                     _rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "", fallback_runtime_id=_rid) or 0
                 except Exception:
                     _rid = 0
-                # Plugin mode: prefer an engine that has the matching tag
+                # Plugin mode: prefer an engine that has the matching tag + scope isolation
+                # pool_engine_ids 非空 → 限定场景绑定的引擎列表（与首次派发一致）
+                # pool_engine_ids 为空 → 加 scope 过滤（与 claim_by_tag 对齐）
                 if is_plugin_mode() and old.get("pool_tag"):
                     try:
+                        _old_pool_eids = []
+                        import json as _json_pe2
+                        try:
+                            _raw = old.get("pool_engine_ids") or ""
+                            if _raw:
+                                _old_pool_eids = [int(x) for x in _json_pe2.loads(_raw) if x]
+                        except Exception:
+                            pass
+                        _old_repo = old.get("repo_key") or ""
+                        _old_uid = old.get("user_id") or 0
+                        if _old_pool_eids:
+                            _ph2 = ",".join("?" * len(_old_pool_eids))
+                            _scope_extra2 = f" AND ar.id IN ({_ph2})"
+                            _scope_params2 = list(_old_pool_eids)
+                        else:
+                            _repo_bare2 = _old_repo.split(":", 1)[1] if ":" in _old_repo else _old_repo
+                            _scope_extra2 = (
+                                " AND (ar.credential_id = 0"
+                                " OR rc.scope = 'global'"
+                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ?))"
+                                " OR (rc.scope = 'user' AND rc.owner_name ="
+                                " (SELECT username FROM user_accounts WHERE id=?)))"
+                            )
+                            _scope_params2 = [_repo_bare2, f"gitcode:{_repo_bare2}", _old_uid]
                         with db_lock:
                             c3 = db.cursor()
                             c3.execute(
                                 "SELECT ar.id FROM agent_runtimes ar "
                                 "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
                                 "AND (ec.tag=? OR ec.tag='all') "
-                                "WHERE ar.status='online' AND ar.healthy=1 "
-                                "ORDER BY ar.busy_slots ASC LIMIT 1",
-                                (old.get("pool_tag"),)
+                                "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                                "WHERE ar.status='online' AND ar.healthy=1"
+                                + _scope_extra2 +
+                                " ORDER BY ar.busy_slots ASC LIMIT 1",
+                                (old.get("pool_tag"), *_scope_params2)
                             )
                             _tagged_rid = c3.fetchone()
                             if _tagged_rid:

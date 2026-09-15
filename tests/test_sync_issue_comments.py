@@ -29,9 +29,9 @@ def setup_module():
     _conv_id = create_conversation(_uid, "gitcode:tc_sync_issue/demo", title="Issue #77")
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM tasks WHERE repo_key='gitcode:tc_sync_issue/demo' AND issue_number=77")
+        c.execute("DELETE FROM issue WHERE repo_key='gitcode:tc_sync_issue/demo' AND issue_number=77")
         c.execute(
-            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, conversation_id) "
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, conversation_id) "
             "VALUES (?,?, 'gitcode:tc_sync_issue/demo', 77, '评论同步测试', 'test', 'active', ?)",
             (_uid, "tc_sync_issue", _conv_id))
         db.commit()
@@ -116,9 +116,9 @@ def test_sync_issue_comments_case_insensitive():
     conv_id2 = create_conversation(_uid, "gitcode:tc_sync_issue/demo", title="Issue #88")
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM tasks WHERE repo_key='gitcode:tc_sync_issue/demo' AND issue_number=88")
+        c.execute("DELETE FROM issue WHERE repo_key='gitcode:tc_sync_issue/demo' AND issue_number=88")
         c.execute(
-            "INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, status, conversation_id) "
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, conversation_id) "
             "VALUES (?,?, 'gitcode:tc_sync_issue/demo', 88, '大小写测试', 'test', 'active', ?)",
             (_uid, "tc_sync_issue", conv_id2))
         db.commit()

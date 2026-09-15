@@ -275,7 +275,7 @@ def test_task_lists_and_enters_conversation():
     _seed()
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, status) VALUES (1,'navuser','gitcode:navuser/repo-a',7,'刷新readme','active')")
+        c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, status) VALUES (1,'navuser','gitcode:navuser/repo-a',7,'刷新readme','active')")
         db.commit()
     api = _run_cmd("/task")
     text = _card_text(api)
@@ -538,7 +538,7 @@ def test_feishu_task_prompt_injects_task_description():
     cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #7", conv_type="task", issue_number=7)
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO tasks (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (1,'navuser','gitcode:navuser/repo-a',7,'刷新readme','处理登录超时',?,'active')", (cid,))
+        c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (1,'navuser','gitcode:navuser/repo-a',7,'刷新readme','处理登录超时',?,'active')", (cid,))
         db.commit()
     prompt = _build_prompt(cid)
     assert "## 任务描述" in prompt

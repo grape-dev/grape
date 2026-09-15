@@ -1,4 +1,4 @@
-# Issue #45 参考：技能实际 API 使用面（vod/coding/issue/qa）
+﻿# Issue #45 参考：技能实际 API 使用面（vod/coding/issue/qa）
 
 > Issue：https://gitcode.com/grape-dev/grape/issues/45
 > 类型：参考基线（非实现文档）
@@ -61,4 +61,4 @@
 | `GET /api/v5/repos/{o}/{r}/labels` | 标签 |
 | `GET /api/v5/repos/{o}/{r}/milestones` | 里程碑 |
 
-> 这些 GitCode 接口原由技能以 `gitcode-api-reference.md` 公共参考承载（外部 API）；**按 2026-09-07 决策包装为 grape Git 仓库统一接口（`/api/repos/...`）**，技能统一走 grape API + 单一 token，`X-Git-Provider` 区分平台（见 `issue-45-git-repos-api-design.md`）。
+> 这些 GitCode 接口原由技能以 `gitcode-api-reference.md` 公共参考承载（外部 API）；**按 2026-09-07 决策包装为 grape Git 仓库统一接口（`/api/git-repo/...`）**，技能统一走 grape API + 单一 token，`X-Git-Provider` 区分平台（见 `issue-45-git-repos-api-design.md`）。

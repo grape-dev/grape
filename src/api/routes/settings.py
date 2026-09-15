@@ -416,6 +416,17 @@ def get_agent_runtimes(user: dict = Depends(get_current_user)):
             rt["owner"] = cred["owner_name"]
             rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
+        # 引擎健康分（Issue #134 展示增强）
+        try:
+            from src.runtime.health_scorer import get_health_score
+            _hd = get_health_score(rt["id"])
+            rt["health_score"] = _hd.get("health_score")
+            rt["health_total_tasks"] = _hd.get("total_tasks", 0)
+            rt["health_failed_tasks"] = _hd.get("failed_tasks", 0)
+            rt["health_consecutive_failures"] = _hd.get("consecutive_failures", 0)
+            rt["health_heartbeat_alive"] = _hd.get("heartbeat_alive")
+        except Exception:
+            rt["health_score"] = None
         # 引擎标签（event-dispatch-redesign-v2.md §2.5）
         try:
             with db_lock:

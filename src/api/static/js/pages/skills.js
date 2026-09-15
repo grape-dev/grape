@@ -20,64 +20,19 @@ let _agentList = [];         // ['vod','issue','coding','qa','sre','chat']
 let _activeAgentIdx = -1;    // -1=无选中(显示全部), 0+=第N个agent
 let _activeTagFilter = 'all';  // 当前标签筛选 id
 
-// 技能标签分类定义（二级筛选）
-const _SKILL_TAG_FILTERS = [
-  {id: 'all',              label: '全部'},
-  {id: 'ai-coding',        label: 'AI辅助编码与评审'},
-  {id: 'env-scaffold',     label: '环境与脚手架'},
-  {id: 'auto-test',        label: '自动化测试'},
-  {id: 'quality-security', label: '代码质量与安全'},
-  {id: 'app-publish',      label: '应用发布'},
-  {id: 'feedback-loop',    label: '反馈闭环'},
-  {id: 'ci',               label: '持续集成CI'},
-  {id: 'observability',    label: '可观测性'},
-  {id: 'log-diagnosis',    label: '日志与诊断'},
-  {id: 'im',               label: 'IM'},
-];
+// 技能标签分类定义（二级筛选）—— 从接口返回的 sub_scene 动态渲染
 
-// 技能名称 → 标签映射
-const _SKILL_TAG_MAP = {
-  'implementation':          ['ai-coding'],
-  'skill-creator':           ['ai-coding'],
-  'rest-api-skill-creator':  ['ai-coding'],
-  'iac-coding':              ['ai-coding', 'env-scaffold'],
-  'wan-video-generation':    ['ai-coding'],
-  'qwen-image-generation':   ['ai-coding'],
-  'ai-blog-generation':      ['ai-coding'],
-  'skill-issue':             ['ai-coding'],
-  'repo-onboarding':         ['env-scaffold'],
-  'iac-issue':               ['env-scaffold'],
-  'iac-vod':                 ['env-scaffold'],
-  'iac-sre':                 ['env-scaffold'],
-  'runtime-install':         ['env-scaffold'],
-  'os-disk-list':            ['env-scaffold'],
-  'skill-tester':            ['auto-test'],
-  'rest-api-skill-tester':   ['auto-test'],
-  'qa':                      ['auto-test', 'quality-security'],
-  'iac-qa':                  ['auto-test', 'env-scaffold'],
-  'pr':                      ['quality-security'],
-  'skill-pr':                ['quality-security'],
-  'impact-analysis':         ['quality-security'],
-  'cloud-deploy':            ['app-publish'],
-  'skill-publish':           ['app-publish'],
-  'blog-publish':            ['app-publish'],
-  'blog-manager':            ['app-publish'],
-  'huawei-cloud':            ['app-publish'],
-  'vod':                     ['feedback-loop'],
-  'blog-vod':                ['feedback-loop'],
-  'event-dialogue':          ['feedback-loop'],
-  'blog-issue':              ['feedback-loop'],
-  'build-debug':             ['ci'],
-  'changelog-gen':           ['ci'],
-  'incident-triage':         ['observability', 'log-diagnosis'],
-  'deploy-guard':            ['observability'],
-  'im-notify':               ['im'],
-  'chat':                    ['im'],
+// _getSkillTags 已废弃——sub_scene 由接口返回，直接匹配
+
+// 精选技能卡片渐变色（按 agent_type）
+const _FEAT_GRADIENT = {
+  vod:    {g1:'#8FA9C4', g2:'#53688A'},
+  issue:  {g1:'#A99C7C', g2:'#75684A'},
+  coding: {g1:'#7EA48C', g2:'#4B7359'},
+  qa:     {g1:'#A49AC0', g2:'#72638F'},
+  sre:    {g1:'#C3917E', g2:'#97503D'},
+  chat:   {g1:'#45B8B8', g2:'#0A7A7A'},
 };
-
-function _getSkillTags(skillName) {
-  return _SKILL_TAG_MAP[skillName] || [];
-}
 
 // _AGENT_META 定义在 scene-market.js 中，这里直接复用
 
@@ -129,6 +84,9 @@ function _backFromSubSkill(pkgId) {
 // 从技能详情返回技能列表（渲染完整页面含一级 Tab 栏）
 function _backToSkillList() {
   window._currentView = 'skills:' + _skillTab;
+  try {
+    history.replaceState({view: 'skills'}, '', '#skills');
+  } catch(e) {}
   renderSkills();
 }
 
@@ -234,19 +192,14 @@ function _renderSkillPage() {
     <a class="${_skillTab==='user'?'ac':''}" onclick="_switchSkillTab('user')">${_scopeName('user')}</a>
   </div></div>`;
 
-  // 精选技能（仅 official，独立加载，不受搜索影响）
+  // 精选技能（仅 official，独立加载，不受搜索影响）— 渐变广告卡网格
   if (_skillTab === 'official' && _featuredSkills.length > 0) {
     html += `<div class="apple-card">
       <div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_skills')||'精选技能'}</h2></div>
-      <div class="scn-scroll-wrap">
-        <div id="featured-skills" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-skills')">
-          ${_featuredSkills.map(s => _renderSkillCard(s, true)).join('')}
-        </div>
-        <button class="scn-scroll-btn scn-scroll-prev" id="featured-skills-prev" onclick="document.getElementById('featured-skills').scrollBy({left:-314,behavior:'smooth'})">◀</button>
-        <button class="scn-scroll-btn scn-scroll-next" id="featured-skills-next" onclick="document.getElementById('featured-skills').scrollBy({left:314,behavior:'smooth'})">▶</button>
+      <div class="feat-row" id="featured-skills">
+        ${_featuredSkills.map(s => _renderFeaturedSkillCard(s)).join('')}
       </div>
     </div>`;
-    setTimeout(() => _updateScrollBtns('featured-skills'), 100);
   }
 
   // 全部技能
@@ -295,13 +248,8 @@ function _renderSkillPage() {
   html += `</div>`;
   // 右侧：标签筛选行 + 技能列表 + 分页器
   html += `<div style="flex:1;min-width:280px">`;
-  // 标签筛选行（横向排列，二级筛选）
-  html += `<div id="tag-filters" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">`;
-  _SKILL_TAG_FILTERS.forEach(function(t) {
-    var isOn = _activeTagFilter === t.id;
-    html += `<a class="skill-tag-filter${isOn?' ac':''}" onclick="_switchTagFilter('${t.id}')" style="padding:5px 12px;font-size:11px;color:${isOn?'var(--a)':'var(--t2)'};border:1px solid ${isOn?'var(--a)':'var(--b)'};background:${isOn?'rgba(49,104,224,0.06)':'var(--c)'};cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap">${t.label}</a>`;
-  });
-  html += `</div>`;
+  // 标签筛选行（横向排列，二级筛选）—— 动态渲染，_renderTagFilters() 填充
+  html += `<div id="tag-filters" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px"></div>`;
   // 技能列表
   html += `<div id="all-skills"></div>`;
   // 分页器（始终显示，只有1页时按钮disabled但选择器可用）
@@ -325,6 +273,7 @@ function _renderSkillPage() {
   // 渲染全部技能
   _activeAgentIdx = -1;
   _activeTagFilter = 'all';
+  _renderTagFilters();
   _renderAgentSkills();
 }
 
@@ -421,10 +370,34 @@ function _switchTagFilter(tagId) {
 function _renderTagFilters() {
   var container = document.getElementById('tag-filters');
   if (!container) return;
+  // 从当前技能列表动态提取 sub_scene 去重
+  var scoped;
+  if (_activeAgentIdx === -1) {
+    scoped = _allSkills.filter(s => s.scope === _skillTab);
+  } else {
+    var at = _agentList[_activeAgentIdx];
+    scoped = (_agentGroups[at] || []).filter(s => s.scope === _skillTab);
+  }
+  var seen = {};
+  var tags = [];
+  scoped.forEach(function(s) {
+    var ss = s.sub_scene || '';
+    if (ss && !seen[ss]) {
+      seen[ss] = 1;
+      tags.push(ss);
+    }
+  });
+  // 当前选中的 tag 不在列表中时重置为 all
+  if (_activeTagFilter !== 'all' && tags.indexOf(_activeTagFilter) === -1) {
+    _activeTagFilter = 'all';
+  }
   var html = '';
-  _SKILL_TAG_FILTERS.forEach(function(t) {
-    var isOn = _activeTagFilter === t.id;
-    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" onclick="_switchTagFilter(\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap">' + t.label + '</a>';
+  // "全部" 始终第一个
+  var allOn = _activeTagFilter === 'all';
+  html += '<a class="skill-tag-filter' + (allOn?' ac':'') + '" onclick="_switchTagFilter(\'all\')" style="padding:5px 12px;font-size:11px;color:' + (allOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (allOn?'var(--a)':'var(--b)') + ';background:' + (allOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap">全部</a>';
+  tags.forEach(function(label) {
+    var isOn = _activeTagFilter === label;
+    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" onclick="_switchTagFilter(\'' + label.replace(/'/g, "\\'") + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap">' + label + '</a>';
   });
   container.innerHTML = html;
 }
@@ -453,15 +426,39 @@ function _renderAgentSkills() {
     const at = _agentList[_activeAgentIdx];
     skills = (_agentGroups[at] || []).filter(s => s.scope === _skillTab);
   }
-  // 二级标签筛选
+  // 二级标签筛选——直接匹配 sub_scene
   if (_activeTagFilter !== 'all') {
-    skills = skills.filter(s => _getSkillTags(s.name).indexOf(_activeTagFilter) !== -1);
+    skills = skills.filter(s => (s.sub_scene || '') === _activeTagFilter);
   }
   if (skills.length === 0) {
     container.innerHTML = `<div class="ts t3" style="padding:20px;text-align:center">${I18N.t('skills.empty.no_skills')||'暂无技能'}</div>`;
     return;
   }
   container.innerHTML = `<div class="rgrid">${skills.map(s => _renderSkillCard(s)).join('')}</div>`;
+}
+
+// ── 渲染精选技能卡片（渐变广告卡风格，对齐 new.html 原型）──
+function _renderFeaturedSkillCard(s) {
+  const at = s.agent_type || '';
+  const meta = _AGENT_META[at] || {};
+  const grad = _FEAT_GRADIENT[at] || {g1:'#3168e0', g2:'#2556c2'};
+  const scenesArr = (s.scenes || []).map(sc => sc.display_name || sc.name || sc);
+  const scenesStr = scenesArr.length > 0
+    ? (scenesArr.length <= 2
+        ? scenesArr.join(' · ')
+        : `${scenesArr.slice(0, 2).join(' · ')}(+${scenesArr.length - 2})`)
+    : '';
+  const sceneCount = s.scene_count || scenesArr.length || 0;
+  const repoCount = s.repo_count || 0;
+  const desc = (s.description || '').replace(/"/g, '&quot;');
+  return `<div class="feat-card" style="--fg1:${grad.g1};--fg2:${grad.g2}" onclick="app.nav('skill','${s.id}')">
+    <span class="feat-badge">★</span>
+    <div class="feat-ico">${meta.icon || '◈'}</div>
+    <div class="feat-name">${s.display_name || s.name}<span class="feat-agent">${meta.label || at}</span></div>
+    <div class="feat-desc">${desc}</div>
+    <div class="feat-scenes">${scenesStr || ''}</div>
+    <div class="feat-scenes" style="margin-top:auto;padding-top:8px">${sceneCount} 场景在用 · ${repoCount} 仓库在用</div>
+  </div>`;
 }
 
 // ── 渲染技能卡片（精选和列表共用）──
@@ -481,9 +478,8 @@ function _renderSkillCard(s, fixedWidth) {
   const likeIcon = s.liked_by_me ? '❤️' : '🤍';
   const likeCount = s.like_count || 0;
   const featuredBadge = (s.is_featured && !isUserSkill) ? '<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟</span>' : '';
-  const widthStyle = fixedWidth ? 'style="flex-shrink:0;width:300px"' : '';
 
-  // 精选区只显示查看按钮，不显示删除/转换
+  // 精选区只显示查看按钮，不显示删除/转换（fixedWidth 仅控制按钮差异，不再控制宽度）
   const actionBtns = fixedWidth ? '' : (() => {
     let btns = '';
     if (s.scope !== 'official') {
@@ -497,7 +493,7 @@ function _renderSkillCard(s, fixedWidth) {
 
   // 华为云技能包特殊处理
   if (s.name === 'huawei-cloud') {
-    return `<div class="rc" ${widthStyle} onclick="app.nav('skill','${s.id}')">
+    return `<div class="rc" onclick="app.nav('skill','${s.id}')">
       <div class="rh">
         <span style="font-size:20px">📁</span>
         <span class="tg ${tagClass}" style="font-size:9px">${meta.label||at}</span>
@@ -510,7 +506,7 @@ function _renderSkillCard(s, fixedWidth) {
     </div>`;
   }
 
-  return `<div class="rc skill-card" ${widthStyle} data-name="${s.name}" data-agent="${at}" onclick="app.nav('skill','${s.id}')">
+  return `<div class="rc skill-card" data-name="${s.name}" data-agent="${at}" onclick="app.nav('skill','${s.id}')">
     <div class="rh">
       <span style="font-size:14px">${meta.icon||''}</span>
       <span class="tg ${tagClass}" style="font-size:9px">${meta.label||at}</span>
@@ -567,59 +563,41 @@ function renderSkillDetail(data) {
 
   const at = data.agent_type || '';
   const meta = _AGENT_META[at] || {};
-  const tagClass = data.scope === 'official' ? 'tg-c' : data.scope === 'repo' ? 'tg-i' : 'tg-d';
+  const grad = _FEAT_GRADIENT[at] || {g1:'#3168e0', g2:'#2556c2'};
   const isUserDetail = data.scope === 'user';
-  const featuredBadge = (data.is_featured && !isUserDetail) ? `<span class="tg" style="background:rgba(212,156,15,.12);color:var(--y);font-size:9px">🌟 ${I18N.t('skills.featured')||'精选'}</span>` : '';
   const scenesArr = (data.scenes || []).map(sc => sc.display_name || sc.name || sc);
-  const showScenes = data.scope === 'official';
-  const SCENE_PREVIEW = 3;
-  let scenesHtml = '—';
-  if (showScenes && scenesArr.length) {
-    if (scenesArr.length <= SCENE_PREVIEW) {
-      scenesHtml = scenesArr.map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('');
-    } else {
-      const preview = scenesArr.slice(0, SCENE_PREVIEW).map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('');
-      const rest = scenesArr.slice(SCENE_PREVIEW).map(n => `<span class="tg" style="font-size:10px;margin:2px">${n}</span>`).join('');
-      scenesHtml = `${preview}<a onclick="(function(e){e.preventDefault();var r=document.getElementById('sceneRest');r.style.display='inline';var m=document.getElementById('sceneMore');m.style.display='none';})(event)" id="sceneMore" style="font-size:10px;color:var(--a);cursor:pointer;margin:2px">(+${scenesArr.length - SCENE_PREVIEW})</a><span id="sceneRest" style="display:none">${rest}</span>`;
-    }
-  }
+  const scenesStr = scenesArr.length > 0 ? scenesArr.join('、') : '—';
+  const tagsStr = data.sub_scene || '—';
   const likeCount = data.like_count || 0;
   const likedIcon = data.liked_by_me ? '❤️' : '🤍';
-  const content = (data.content || '').replace(/`/g, '\\`').replace(/\${/g, '\\${');
+  const rawContent = data.content || '';
+  const content = rawContent.replace(/`/g, '\\`').replace(/\${/g, '\\${');
+  const versionMatch = rawContent.match(/^---[\s\S]*?^version:\s*(.+?)$/m);
+  const version = versionMatch ? versionMatch[1].trim() : '—';
+  const descMatch = rawContent.match(/^---[\s\S]*?^description:\s*\|?\s*\n([\s\S]*?)^\w/m);
+  const fnDesc = descMatch ? descMatch[1].trim() : (data.description || '—');
 
   el.innerHTML = `
-    <button class="bt bt-o bt-s" onclick="_backFromSkillDetail()" style="margin-bottom:12px">← ${I18N.t('common.back')||'返回'}</button>
-    <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
-      <div class="cd" style="padding:16px 20px;overflow-y:auto">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px">
-          <div style="display:flex;align-items:center;gap:8px;min-width:0">
-            <span style="font-size:22px">${meta.icon||'◈'}</span>
-            <div>
-              <div style="display:flex;align-items:center;gap:6px">
-                <h3 style="font-size:15px;font-weight:600">${data.display_name || data.name}</h3>
-                ${featuredBadge}
-              </div>
-              <span class="tg ${tagClass}" style="font-size:9px">${(meta.label||at)+' Agent'} · ${_scopeName(data.scope)}</span>
-            </div>
-          </div>
-          <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
-            ${isUserDetail ? '' : `<button class="bt bt-o bt-s" onclick="toggleSkillLike(${data.id},this)" style="display:flex;align-items:center;gap:4px">${likedIcon} <span id="detailLikeCount">${likeCount}</span></button>`}
-            ${(data.is_obs || data.zip_url) ? `<button class="bt bt-o bt-s" onclick="downloadSkillZip('${data.id}')">${I18N.t('skills.download_skill')||'下载技能包'}</button>` : ''}
-          </div>
+    <button class="det-back" onclick="_backFromSkillDetail()">← ${I18N.t('common.back')||'返回'}</button>
+    <div class="det">
+      <div class="det-head">
+        <span class="det-ico" style="--fg1:${grad.g1};--fg2:${grad.g2}">${meta.icon || '◈'}</span>
+        <h1 class="det-name">${data.display_name || data.name}</h1>
+        <span class="agent-badge">${meta.label || at}</span>
+        <div class="det-actions">
+          ${isUserDetail ? '' : `<button class="det-like ${data.liked_by_me?'liked':''}" onclick="toggleSkillLike(${data.id},this)">${likedIcon} <span id="detailLikeCount">${likeCount}</span></button>`}
+          ${(data.is_obs || data.zip_url) ? `<button class="det-dl" onclick="downloadSkillZip('${data.id}')">${I18N.t('skills.download_skill')||'下载技能包'}</button>` : ''}
         </div>
-        <div style="font-size:12px;color:var(--t2);margin-bottom:14px;line-height:1.5">${data.description || ''}</div>
-        <h3 style="font-size:13px;font-weight:600;margin-bottom:6px">SKILL.md</h3>
-        <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${content || I18N.t('skills.empty.no_detail')||'无详情'}</pre>
       </div>
-      <div class="cd" style="padding:16px 20px;font-size:12px">
-        <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">${I18N.t('skills.info_title')||'技能信息'}</h3>
-        <div class="srow"><label>${I18N.t('skills.info_name')||'名称'}</label><span>${data.name}</span></div>
-        <div class="srow"><label>${I18N.t('skills.info_agent_type')||'Agent'}</label><span>${(meta.label||at)+' Agent'}</span></div>
-        <div class="srow"><label>${I18N.t('skills.info_type')||'类型'}</label><span>${_scopeName(data.scope)}</span></div>
-        ${isUserDetail ? '' : `<div class="srow"><label>${I18N.t('skills.info_featured')||'精选'}</label><span>${data.is_featured ? I18N.t('skills.featured')||'是' : '—'}</span></div>`}
-        ${isUserDetail ? '' : `<div class="srow"><label>${I18N.t('skills.info_likes')||'点赞'}</label><span id="detailInfoLikes">${likedIcon} ${likeCount}</span></div>`}
-        ${showScenes ? `<div class="srow"><label>${I18N.t('skills.info_scenes')||'场景'}</label><span class="t2">${scenesHtml}</span></div>` : ''}
-        <div class="srow"><label>${I18N.t('skills.info_description')||'描述'}</label><span class="t2">${data.description || '—'}</span></div>
+      <p class="det-sum">${data.description || ''}</p>
+      <div class="fn-card">
+        <div class="fn-label">${I18N.t('skills.info_function')||'功能说明'}</div>
+        <div class="fn-body">${fnDesc}</div>
+      </div>
+      <div class="info-grid">
+        <div class="info-cell"><div class="il">${I18N.t('skills.info_scenes')||'场景'}</div><div class="iv">${scenesStr}</div></div>
+        <div class="info-cell"><div class="il">${I18N.t('skills.info_tags')||'子场景'}</div><div class="iv">${tagsStr}</div></div>
+        <div class="info-cell"><div class="il">${I18N.t('skills.info_version')||'版本'}</div><div class="iv">${version}</div></div>
       </div>
     </div>`;
 }

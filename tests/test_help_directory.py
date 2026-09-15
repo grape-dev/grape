@@ -4,7 +4,7 @@ Verifies:
 - help/ directory exists with usage/ and api/ subdirectories
 - help/usage/ contains 9 expected markdown files
 - help/usage/ files contain no residual HTML tags
-- help/api/ contains 13 files matching docs/openapi/ source
+- help/api/ contains 14 files matching docs/openapi/ source
 - help.html retained with migration comment
 - file naming is lowercase + hyphens
 """
@@ -27,6 +27,7 @@ EXPECTED_USAGE_FILES = [
     "overview.md",
     "quickstart.md",
     "agents.md",
+    "agent-environment-variables.md",
     "pipeline.md",
     "skills.md",
     "runtimes.md",
@@ -47,9 +48,16 @@ EXPECTED_API_FILES = [
     "08-events.md",
     "09-task-logs.md",
     "10-git-repos.md",
+    "11-issues.md",
     "12-a2a.md",
     "README.md",
 ]
+
+# help/api 面向用户，允许与 docs/openapi 源文件不一致（docs 保留完整设计/实现说明，help 只留 API 参考）。
+# 对这类文件仍校验存在性 + 非空，但不要求字节一致。
+API_FILES_DIVERGENT_FROM_SOURCE = {
+    "10-git-repos.md",  # GitHub 等都透传；docs 版含方案③/token 不可感知等内部实现，help 版精简为纯 API 参考
+}
 
 
 class TestHelpDirectoryStructure:
@@ -75,7 +83,7 @@ class TestUsageFiles:
 
     def test_file_count(self):
         files = [f for f in USAGE_DIR.iterdir() if f.is_file()]
-        assert len(files) == 9, f"Expected 9 files, got {len(files)}"
+        assert len(files) == 10, f"Expected 10 files, got {len(files)}"
 
     @pytest.mark.parametrize("filename", EXPECTED_USAGE_FILES)
     def test_no_residual_html_tags(self, filename):
@@ -119,16 +127,31 @@ class TestApiFiles:
     def test_file_count(self):
         # 仅统计 markdown 文档（help/api/openapi.json 为启动期生成的契约生成物，不计入）
         files = [f for f in API_DIR.iterdir() if f.is_file() and f.suffix == ".md"]
-        assert len(files) == 13, f"Expected 13 md files, got {len(files)}"
+        assert len(files) == 14, f"Expected 14 md files, got {len(files)}"
 
     @pytest.mark.parametrize("filename", EXPECTED_API_FILES)
     def test_api_matches_openapi_source(self, filename):
-        """help/api/ files must be identical to docs/openapi/ source."""
+        """help/api/ files must be identical to docs/openapi/ source.
+
+        豁免 API_FILES_DIVERGENT_FROM_SOURCE：这些文件 help 版面向用户、docs 版含完整设计/实现说明，
+        仅校验存在性 + 非空（见 _test_api_help_usable）。
+        """
+        if filename in API_FILES_DIVERGENT_FROM_SOURCE:
+            self._test_api_help_usable(filename)
+            return
         src = OPENAPI_DIR / filename
         dst = API_DIR / filename
         assert src.exists(), f"Source {src} not found"
         assert dst.exists(), f"Destination {dst} not found"
         assert src.read_bytes() == dst.read_bytes(), f"{filename} differs from source"
+
+    def _test_api_help_usable(self, filename):
+        src = OPENAPI_DIR / filename
+        dst = API_DIR / filename
+        assert src.exists(), f"Source {src} not found"
+        assert dst.exists(), f"Destination {dst} not found"
+        content = dst.read_text(encoding="utf-8").strip()
+        assert len(content) > 200, f"{filename} help 版为空或过短（面向用户不可用）"
 
 
 class TestHelpHtmlMigration:

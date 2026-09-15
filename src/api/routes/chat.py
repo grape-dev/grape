@@ -21,7 +21,7 @@ _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import get_current_user, get_current_user_or_api_key, require_no_session_token
 from src.user import db as user_db
 from src.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
@@ -50,6 +50,50 @@ class FeedbackBody(BaseModel):
 
 
 # ====== Conversations ======
+
+@router.get("/analyze-image")
+async def analyze_image(url: str):
+    """供 agent curl 调用：下载图片 → VLM 分析 → 返回文字描述。
+
+    agent 在 issue body 里看到图片链接后，curl 调用本端点获取图片内容描述。
+    VLM 管线三级降级：qwen2.5-vl-72b 真视觉 → OCR+LLM 猜图 → 纯 OCR。
+    """
+    from urllib.parse import urlparse
+    import tempfile, urllib.request
+
+    # 域名白名单（防 SSRF）
+    parsed = urlparse(url)
+    _allowed = ("cdn-img.gitcode.com", "cdn-files.gitcode.com")
+    if parsed.hostname not in _allowed:
+        return {"error": "domain not allowed", "url": url}
+
+    # 下载图片到临时文件
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    try:
+        urllib.request.urlretrieve(url, tmp.name)
+    except Exception as e:
+        os.unlink(tmp.name)
+        return {"error": f"download failed: {e}", "url": url}
+
+    # 调 image_understanding 分析
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("image_understanding",
+            os.path.join(os.path.dirname(__file__), "..", "..", "agent", "image_understanding.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        desc = _mod.understand_image(tmp.name)
+    except Exception as e:
+        log.warning(f"analyze-image: understanding failed: {e}")
+        desc = ""
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+    return {"url": url, "description": desc or "(无法分析图片内容)"}
+
 
 @router.get("/image/{conv_id}/{filename}")
 def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")):
@@ -92,7 +136,7 @@ def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")
     return FileResponse(fpath, media_type=_mt, headers={"Cache-Control": "public, max-age=86400"})
 
 @router.get("/conversations", operation_id="chat_conversations", summary="会话列表")
-def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user_or_api_key)):
+def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(require_no_session_token)):
     convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
 
@@ -145,7 +189,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
         from src.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            c.execute("UPDATE tasks SET conversation_id=? WHERE repo_key=? AND issue_number=?",
+            c.execute("UPDATE issue SET conversation_id=? WHERE repo_key=? AND issue_number=?",
                       (conv_id, rk, body.issue_number))
             _db.commit()
     except Exception:
@@ -167,7 +211,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
 # ====== Messages ======
 
 @router.get("/messages/{conv_id}", operation_id="chat_messages", summary="会话消息列表")
-def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user_or_api_key)):
+def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})

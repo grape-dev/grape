@@ -5,9 +5,28 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import get_current_user, get_current_user_or_api_key, require_no_session_token
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
+
+# sub_scene 英文 ID → 中文标签（对齐 grape-skills 仓库目录命名）
+_SUB_SCENE_LABELS = {
+    "ai-coding-review": "AI辅助编码与评审",
+    "scaffolding":      "环境与脚手架",
+    "auto-testing":     "自动化测试",
+    "code-quality":     "代码质量与安全",
+    "app-release":      "应用发布",
+    "feedback-loop":    "反馈闭环",
+    "ci":               "持续集成CI",
+    "observability":    "可观测性",
+    "log-diagnostics":  "日志与诊断",
+    "container-deploy": "容器与集群部署",
+    "im":               "IM",
+}
+
+
+def _sub_scene_label(val: str) -> str:
+    return _SUB_SCENE_LABELS.get(val, val)
 
 # 解压后总大小上限（zip 炸弹防护，见 obs-skill-storage-design.md §7）
 MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
@@ -52,7 +71,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("", operation_id="skills_list", summary="技能列表")
-def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "", scope: str = "",
+def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
@@ -119,13 +138,13 @@ def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "
                 c.execute(f"SELECT COUNT(*) FROM skill{where_sql}", tuple(params))
                 total = c.fetchone()[0]
                 c.execute(
-                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count "
+                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count, sub_scene "
                     f"FROM skill{where_sql} {order_by} LIMIT {int(page_size)} OFFSET {int(offset)}",
                     tuple(params)
                 )
             else:
                 c.execute(
-                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count "
+                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count, sub_scene "
                     f"FROM skill{where_sql} {order_by}",
                     tuple(params)
                 )
@@ -140,6 +159,7 @@ def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "
                     "scope": r[5] or "",
                     "is_featured": r[7] or 0,
                     "like_count": r[8] or 0,
+                    "sub_scene": _sub_scene_label(r[9] or ""),
                 })
                 skill_ids.append(r[0])
         except Exception:
@@ -399,7 +419,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(get_current_use
 
 
 @router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="技能详情（含 SKILL.md）")
-def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_or_api_key),
+def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
                                  repo: str = ""):
     """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
 
@@ -411,7 +431,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count FROM skill WHERE id=? AND is_active=1",
+            "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count, sub_scene FROM skill WHERE id=? AND is_active=1",
             (skill_id,)
         )
         row = c.fetchone()
@@ -423,6 +443,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_
     owner_id = row[6] or ""
     is_featured = row[8] or 0
     like_count = row[9] or 0
+    sub_scene = _sub_scene_label(row[10] or "")
 
     # 归属校验
     if scope == "user" and owner_id != str(user["id"]):
@@ -469,6 +490,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_
             "like_count": like_count,
             "liked_by_me": liked_by_me,
             "scenes": scenes,
+            "sub_scene": sub_scene,
         }
     # ===== local 分支 =====
     if scope == "user":
@@ -497,6 +519,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_
         "like_count": like_count,
         "liked_by_me": liked_by_me,
         "scenes": scenes,
+        "sub_scene": sub_scene,
     }
 
 
