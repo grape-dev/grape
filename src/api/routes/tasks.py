@@ -10,7 +10,8 @@ import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key, get_user_token
+from src.api.deps import (get_current_user, get_current_user_or_api_key,
+                          require_no_session_token, get_user_token)
 from src.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (

@@ -250,6 +250,11 @@ EXPECTED_PUBLIC = {
     "get_task_messages_api_task_logs__task_id__messages_get": ("get", "/api/task-logs/{task_id}/messages"),
     "get_task_runtime_info_api_task_logs__task_id__info_get": ("get", "/api/task-logs/{task_id}/info"),
     "stream_task_messages_api_task_logs__task_id__stream_get": ("get", "/api/task-logs/{task_id}/stream"),
+    # ===== 合并 weekly-03-hc 新增（2026-09-15）=====
+    "skills_agent_stats": ("get", "/api/skills/agent-stats"),
+    "tasks_list_attachments": ("get", "/api/tasks/{task_id}/attachments"),
+    "gitrepo_git_credential": ("get", "/api/git-repo/{owner}/{repo}/git-credential"),
+    "gitrepo_workspace": ("get", "/api/git-repo/{owner}/{repo}/workspace"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
@@ -362,6 +367,8 @@ def test_x_token_scope_consistency():
 
     # 4) session_only 样例（需求 §四验收）
     session_samples = {"/api/git-repo/{owner}/{repo}/branches": "get",
+                       "/api/git-repo/{owner}/{repo}/git-credential": "get",
+                       "/api/git-repo/{owner}/{repo}/workspace": "get",
                        "/api/repos/{owner}/{repo}/git-credential": "get",
                        "/api/repos/{owner}/{repo}/workspace": "get"}
     for path, method in session_samples.items():
