@@ -1,14 +1,15 @@
 /*
  * Issue #117 回归测试：概览页 Worker / Runtime 列表分页
+ * （基于 Issue #162，分页栏在非空列表时始终包含「每页条数」选择器）
  *
  * 运行：node tests/js/test_observability_pagination.js
  *
  * 验证点：
  *   1. Worker >10 条时仅渲染当前页 10 条，分页控件可见
- *   2. Worker <=10 条时分页控件隐藏
+ *   2. Worker <=10 条时含每页条数选择器，无翻页按钮
  *   3. Worker 列表为空时显示占位文本，无分页
  *   4. Runtime >10 条时仅渲染当前页 10 条，分页控件可见
- *   5. Runtime <=10 条时分页控件隐藏
+ *   5. Runtime <=10 条时含每页条数选择器，无翻页按钮
  *   6. 筛选后 Runtime 分页正确（先筛选再分页）
  *   7. _rerenderRuntimeTable 切换页码后渲染对应行
  *   8. updateOverview 仅遍历当前页元素
@@ -117,14 +118,16 @@ test('Worker 15\u6761: \u4ec5\u6e32\u67d3 10 \u6761\u5361\u7247\uff0c\u5206\u987
   assert.ok(html.includes('1 / 2'), '\u5e94\u663e\u793a\u9875\u7801 1/2');
 });
 
-test('Worker 8\u6761: \u5206\u9875\u63a7\u4ef6\u9690\u85cf', () => {
+test('Worker 8\u6761: \u5305\u542b\u6bcf\u9875\u6761\u6570\u9009\u62e9\u5668\uff0c\u65e0\u7ffb\u9875\u6309\u94ae', () => {
   const dom = makeDom();
   const m = loadObs(dom);
   const ops = { workers: makeWorkers(8), runtimes: { total:0, online:0, offline:0, list:[] } };
   const html = m.renderOverview(ops, {});
   const cardCount = (html.match(/box-shadow:var\(--sh\)/g) || []).length;
   assert.strictEqual(cardCount, 8, '\u5e94\u6e32\u67d3 8 \u4e2a\u5361\u7247');
-  assert.ok(!html.match(/\d+ \/ \d+/), '\u4e0d\u5e94\u663e\u793a\u5206\u9875\u63a7\u4ef6');
+  assert.ok(html.includes('1 / 1'), '\u5e94\u663e\u793a\u9875\u7801 1/1');
+  assert.ok(html.includes('rows_per_page'), '\u5e94\u5305\u542b\u6bcf\u9875\u6761\u6570\u9009\u62e9\u5668');
+  assert.ok(!html.includes('prev_page'), '\u4e00\u9875\u65f6\u4e0d\u5e94\u6709\u7ffb\u9875\u6309\u94ae');
 });
 
 test('Worker 0\u6761: \u663e\u793a\u5360\u4f4d\u6587\u672c\uff0c\u65e0\u5206\u9875', () => {
@@ -146,14 +149,16 @@ test('Runtime 25\u6761: \u4ec5\u6e32\u67d3 10 \u884c\uff0c\u5206\u9875\u63a7\u4e
   assert.ok(html.includes('1 / 3'), '\u5e94\u663e\u793a\u9875\u7801 1/3');
 });
 
-test('Runtime 5\u6761: \u5206\u9875\u63a7\u4ef6\u9690\u85cf', () => {
+test('Runtime 5\u6761: \u5305\u542b\u6bcf\u9875\u6761\u6570\u9009\u62e9\u5668\uff0c\u65e0\u7ffb\u9875\u6309\u94ae', () => {
   const dom = makeDom();
   const m = loadObs(dom);
   const ops = { workers: { total:0, online:0, offline:0, list:[] }, runtimes: makeRuntimes(5) };
   const html = m.renderOverview(ops, {});
   const rowCount = (html.match(/<tr id="rt-\d+"/g) || []).length;
   assert.strictEqual(rowCount, 5, '\u5e94\u6e32\u67d3 5 \u884c');
-  assert.ok(!html.match(/\d+ \/ \d+/), '\u4e0d\u5e94\u663e\u793a\u5206\u9875\u63a7\u4ef6');
+  assert.ok(html.includes('1 / 1'), '\u5e94\u663e\u793a\u9875\u7801 1/1');
+  assert.ok(html.includes('rows_per_page'), '\u5e94\u5305\u542b\u6bcf\u9875\u6761\u6570\u9009\u62e9\u5668');
+  assert.ok(!html.includes('prev_page'), '\u4e00\u9875\u65f6\u4e0d\u5e94\u6709\u7ffb\u9875\u6309\u94ae');
 });
 
 test('\u7b5b\u9009\u540e\u5206\u9875: \u8bbe\u5907\u7b5b\u9009\u540e\u4ec5\u6e32\u67d3\u5339\u914d\u9879', () => {
@@ -189,11 +194,20 @@ test('updateOverview: \u4ec5\u904d\u5386\u5f53\u524d\u9875\u5143\u7d20', () => {
   assert.strictEqual(m.result, true, 'updateOverview \u5e94\u8fd4\u56de true');
 });
 
-test('\u9875\u7801\u8d8a\u754c\u81ea\u52a8\u94b3\u5236: _workerPage=99 + 15\u6761 \u2192 \u91cd\u7f6e\u4e3a 0', () => {
+test('页码越界自动钳制: _workerPage=99 + 15条 → 重置为 0', () => {
   const dom = makeDom();
   const ops = { workers: makeWorkers(15), runtimes: { total:0, online:0, offline:0, list:[] } };
   const m = loadObs(dom, '; _workerPage = 99; renderOverview(' + JSON.stringify(ops) + ', {}); return { _workerPage: _workerPage };');
-  assert.strictEqual(m._workerPage, 0, '\u9875\u7801\u5e94\u88ab\u91cd\u7f6e\u4e3a 0');
+  assert.strictEqual(m._workerPage, 0, '页码应被重置为 0');
+});
+
+test('Runtime 0条: renderOverview 不渲染 Runtime 分页栏（与 _rerenderRuntimeTable/updateOverview 守卫一致）', () => {
+  const dom = makeDom();
+  const m = loadObs(dom);
+  const ops = { workers: { total:0, online:0, offline:0, list:[] }, runtimes: { total:0, online:0, offline:0, list:[] } };
+  const html = m.renderOverview(ops, {});
+  assert.ok(html.includes('observability.no_engine'), '应显示无引擎占位文本');
+  assert.ok(!html.includes('rt-pager') || !html.match(/id="rt-pager">\s*<(?!\/)/), 'Runtime 分页栏应为空或不存在分页按钮');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
