@@ -62,11 +62,6 @@ function renderImChannelBody(d) {
   const curConfig = platforms[_imCurrentProvider] || {};
   const isConfigured = !!curConfig.app_id;
   const curName = I18N.getLang() === 'zh' ? cur.nameZh : cur.name;
-  const backend = d.backend || {};
-  const backendsOpts = (d._backends || []).map(b =>
-    `<option value="${b.name}" data-rid="${b.runtime_id || ''}" ${b.name === (backend.type || '').toLowerCase() || b.name.startsWith((backend.type || '').toLowerCase() + '-') ? 'selected' : ''}>${(b.display_name || b.name) + (b.scope === 'local' ? ' (' + I18N.t('chat.local_direct') + ')' : '')}</option>`
-  ).join('') || '<option value="">Default</option>';
-  _chatSkillScope = (d.skill_scope === 'repo') ? 'repo' : (d.skill_scope === 'user') ? 'user' : 'official';
 
   const platformCards = Object.entries(_IM_PLATFORMS).map(([key, p]) => {
     const config = platforms[key] || {};
@@ -94,7 +89,6 @@ function renderImChannelBody(d) {
 
   const _lbl = 'font-size:11px;color:var(--t2);display:block;margin-bottom:6px;font-weight:600;letter-spacing:.2px';
   const _inp = `width:100%;padding:11px 14px;border:1.5px solid var(--b);border-radius:10px;font-size:13px;background:var(--c);outline:none;transition:all .2s`;
-  const _sel = `width:100%;padding:11px 14px;border:1.5px solid var(--b);border-radius:10px;font-size:13px;background:var(--c);outline:none;transition:all .2s;cursor:pointer`;
 
   body.innerHTML = `
     <!-- 顶部 Banner -->
@@ -155,38 +149,6 @@ function renderImChannelBody(d) {
           </div>
         </div>
 
-        <!-- 模型与技能配置 -->
-        <div class="cd" style="padding:22px 24px;border-radius:16px;box-shadow:0 4px 16px rgba(0,0,0,.05)">
-          <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px;padding-bottom:16px;border-bottom:2px solid var(--bg)">
-            <div style="width:36px;height:36px;border-radius:10px;background:var(--bg);display:flex;align-items:center;justify-content:center;flex-shrink:0">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--t2)" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            </div>
-            <div>
-              <div style="font-size:14px;font-weight:700">${I18N.t('chat.engine_skill_title')}</div>
-              <div style="font-size:11px;color:var(--t3)">${I18N.t('chat.engine_skill_desc')}</div>
-            </div>
-          </div>
-
-          <div style="margin-bottom:16px">
-            <label style="${_lbl}">${I18N.t('chat.engine_label')}</label>
-            <select id="cfgBackend" style="${_sel}" onfocus="this.style.borderColor='var(--a)';this.style.boxShadow='0 0 0 3px var(--a)1a'" onblur="this.style.borderColor='var(--b)';this.style.boxShadow='none'">${backendsOpts}</select>
-          </div>
-
-          <div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-              <label style="font-size:11px;color:var(--t2);font-weight:600;flex-shrink:0;letter-spacing:.2px">${I18N.t('chat.skill_label')}</label>
-              <select id="cfgSkillScope" onchange="_switchChatSkillScope(this.value)" style="flex:0 0 78px;max-width:78px;padding:6px 8px;border:1.5px solid var(--b);border-radius:8px;font-size:11px;background:var(--bg);outline:none;cursor:pointer;transition:all .2s" onfocus="this.style.borderColor='var(--a)'" onblur="this.style.borderColor='var(--b)'">
-                <option value="official">${I18N.t('chat.scope_short.global')}</option>
-                <option value="repo">${I18N.t('chat.scope_short.repo')}</option>
-                <option value="user">${I18N.t('chat.scope_short.user')}</option>
-              </select>
-            </div>
-            <select id="cfgSkill" data-skill-id="${d.skill_id || 0}" style="${_sel}" onfocus="this.style.borderColor='var(--a)';this.style.boxShadow='0 0 0 3px var(--a)1a'" onblur="this.style.borderColor='var(--b)';this.style.boxShadow='none'">
-              <option value="0">${I18N.t('chat.skill.default_official')}</option>
-            </select>
-          </div>
-        </div>
-
         <!-- 说明卡片 -->
         <div style="padding:14px 18px;font-size:11px;color:var(--t3);line-height:1.7;border-radius:12px;border:1px solid ${cur.color}22;background:${cur.bgLight};display:flex;gap:10px;align-items:flex-start">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${cur.color}" stroke-width="2" style="flex-shrink:0;margin-top:1px"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
@@ -197,10 +159,6 @@ function renderImChannelBody(d) {
         </div>
       </div>
     </div>`;
-
-  const scopeSel = document.getElementById('cfgSkillScope');
-  if (scopeSel) scopeSel.value = _chatSkillScope;
-  _loadChatSkillOptions();
 }
 
 function selectImProvider(provider) {
@@ -215,19 +173,9 @@ function saveImChannelConfig() {
   const secret = rawSecret === '********' ? '' : rawSecret;
   const im = {};
   im[provider] = {app_id: appId, app_secret: secret};
-  const _bkSel = document.getElementById('cfgBackend');
-  const backend = _bkSel?.value || '';
-  const rid = _bkSel?.selectedOptions?.[0]?.dataset?.rid || '';
-  const skillVal = document.getElementById('cfgSkill')?.value || '0';
-  const skillId = parseInt(skillVal) || 0;
-  if (_chatSkillScope !== 'official' && !skillId) {
-    if (app && app.showToast) app.showToast(I18N.t('chat.skill.select_required'));
-    return;
-  }
   const _repo = app.currentRepo();
   const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
-  const _body = {backend, skill_id: skillId, im};
-  if (rid) _body.runtime_id = parseInt(rid, 10);
+  const _body = {im};
   API.put('/chat/config' + _qs, _body).then(() => {
     app.showToast(I18N.t('chat.config.saved'));
     loadImChannelConfig();

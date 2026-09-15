@@ -28,7 +28,10 @@ def _cleanup():
         c.execute("DELETE FROM events WHERE repo_key=?", (REPO,))
         c.execute("DELETE FROM event_skipped WHERE repo_key=?", (REPO,))
         c.execute("DELETE FROM issue WHERE repo_key=?", (REPO,))
-        c.execute("DELETE FROM issue_state WHERE repo_key=?", (REPO,))
+        try:
+            c.execute("DELETE FROM issue_state WHERE repo_key=?", (REPO,))
+        except Exception:
+            pass
         db.commit()
 
 
@@ -84,7 +87,7 @@ class TestPipelineTasksWithoutEvents:
             tasks_mod.ensure_issue_task(REPO, 100, title="Test Task", assignee="alice",
                                         event_type="issue_opened")
 
-        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester"}
+        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "session_token"}
         try:
             client = TestClient(app)
             r = client.get("/api/pipeline/owner/issue89-test")
@@ -113,7 +116,7 @@ class TestPipelineTasksWithoutEvents:
         append_event(repo_key=REPO, event_type="issue_opened", title="Test Task 2",
                      issue_id="#101", agent_type="vod", status="completed")
 
-        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester"}
+        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "session_token"}
         try:
             client = TestClient(app)
             r = client.get("/api/pipeline/owner/issue89-test")
@@ -135,7 +138,7 @@ class TestCreateTaskTriggersEvent:
         from src.api.main import app
         from src.api.deps import get_current_user, get_current_user_or_api_key
 
-        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester"}
+        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "session_token"}
         app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 1, "username": "tester"}
         try:
             with patch("src.api.routes.tasks.get_user_token", return_value="fake_token"), \

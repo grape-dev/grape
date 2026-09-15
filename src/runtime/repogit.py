@@ -167,16 +167,26 @@ def _default_base_branch(base: str, token: str = "", repo_key: str = "", env_wor
     return "main"
 
 
-def _write_askpass(issue_dir: str) -> str:
+def _write_askpass(issue_dir: str, repo_key: str = "") -> str:
     """写 GIT_ASKPASS 辅助脚本：从环境变量读 token，token 不落盘。
+
+    根据 repo_key 前缀选择正确的 token 环境变量：
+    - github: 优先 BOT_GITHUB_TOKEN，兜底 BOT_GITCODE_TOKEN
+    - gitcode: BOT_GITCODE_TOKEN
+    - 通用：BOT_TOKEN（executor.py 注入的别名）
 
     chmod 后检查执行权限，失败则用 sh wrapper 兜底（不依赖 +x）。
     返回实际可执行的脚本路径（原脚本或 wrapper）。
     """
+    # 按 provider 选择 token 环境变量，fallback 链保证兼容
+    if repo_key.startswith("github:"):
+        token_var = "${BOT_GITHUB_TOKEN:-${BOT_TOKEN:-$BOT_GITCODE_TOKEN}}"
+    else:
+        token_var = "${BOT_GITCODE_TOKEN:-${BOT_TOKEN:-$BOT_GITHUB_TOKEN}}"
     script = os.path.join(issue_dir, ".git-askpass.sh")
     try:
         with open(script, "w", encoding="utf-8") as f:
-            f.write('#!/bin/sh\necho "$BOT_GITCODE_TOKEN"\n')
+            f.write(f'#!/bin/sh\necho "{token_var}"\n')
         try:
             os.chmod(script, 0o700)
         except Exception:
@@ -219,7 +229,7 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
     os.makedirs(os.path.dirname(issue_dir), exist_ok=True)
     if os.path.isdir(issue_dir) and (os.path.isdir(os.path.join(issue_dir, ".git"))
                                      or os.path.isfile(os.path.join(issue_dir, ".git"))):
-        _write_askpass(issue_dir)
+        _write_askpass(issue_dir, repo_key)
         return issue_dir
     branch = f"feat/issue-{issue_num}"
     with _lock_for(repo_key):
@@ -233,7 +243,7 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             if r is None or r.returncode != 0:
                 log.warning(f"repogit worktree add failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                 return None
-            _write_askpass(issue_dir)
+            _write_askpass(issue_dir, repo_key)
             return issue_dir
         except Exception as e:
             log.warning(f"repogit worktree failed {repo_key}: {e}")
