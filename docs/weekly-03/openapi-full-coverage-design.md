@@ -95,7 +95,7 @@
 |----|------|------|:---:|
 | A | skills.py（11）、scenes.py（24） | 用户技能/场景管理，owner=user | ✅ 已完成（commit `954517ad`） |
 | B | settings.py（34）、repos.py（12）、agents.py（2）、knowledge.py（10） | 账号配置/仓库/知识 | ✅ 已完成（commit `dd2c0d32`） |
-| C | runtime.py（17）、tasks.py（6）、events.py（11）、chat.py（12） | 运维/任务操作 | ✅ tasks/events 已完成（commit `89fb8501`）；runtime/chat 待做 |
+| C | runtime.py（17）、tasks.py（6）、events.py（11）、chat.py（12） | 运维/任务操作 | ✅ 已完成（commit `30d93c4f`） |
 | D | devstage/templates/dashboard/pipeline/search/auth/feishu_onboard/task_logs | 其余 | 待做 |
 
 > 每批独立提交 + 回归；先 A 批验证契约与 owner 派生，再扩 B/C/D。
@@ -112,6 +112,14 @@
 - import 清理 `get_current_user` 残留；契约新增 62 端点（settings 全量/repos 托管/agents 配置/knowledge CRUD）
 - `NOT_IN_CONTRACT` 移除 `/api/repos/host`（已开放）；验证守卫 session→403、api_key/jwt 通过
 - 注：`repair-host` / `agents clean` 对未托管仓库 jwt/api_key 返回 403 属 `check_repo_access` 内部鉴权（非守卫）
+
+### C 批实施记录（2026-09-15，已完成）
+- `tasks.py` 6 + `events.py` 11 + `runtime.py` 17 + `chat.py` 12 → `require_no_session_token`（共 46 处）
+- tasks/events：confirm-done/cancel/resume/clarifications/pipeline + terminate/redispatch/thread/chat 进契约（commit `89fb8501`）
+- runtime/chat：health/batch/tasks/alias/场景标签 + 对话 CRUD/send/feedback/config 进契约（commit `30d93c4f`），契约 total 149 paths
+- ⚠️ **runtime URL 冲突处理**：`GET /runtimes/{id}/tags` 与 worker 端点（`_require_credential`）同路径冲突 → web 管理版改
+  `/role-tags`；`PUT /runtimes/{id}/tags`（web 唯一）保留
+- 验证：守卫 session→403、api_key/jwt 通过；回归 137 passed（2 基线失败）
 
 ---
 
