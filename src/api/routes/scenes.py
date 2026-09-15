@@ -2,7 +2,7 @@
 import json, os, re
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key, require_no_session_token
+from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.config import log
 
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])

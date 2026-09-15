@@ -2,7 +2,7 @@
 import json, os, re, asyncio, base64
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_user_token
+from src.api.deps import require_no_session_token
 from src.config import log, CONFIG_DIR, EXAMPLE_DIR
 from src.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
 
@@ -55,14 +55,14 @@ def _load_global_bot_config() -> tuple[str, str]:
 
 
 @router.get("")
-def list_templates(user: dict = Depends(get_current_user)):
+def list_templates(user: dict = Depends(require_no_session_token)):
     """返回配置化的模板分类与模板列表"""
     data = _load_templates()
     return {"categories": data.get("categories", [])}
 
 
 @router.get("/{template_id}/readme")
-def get_template_readme(template_id: str, user: dict = Depends(get_current_user)):
+def get_template_readme(template_id: str, user: dict = Depends(require_no_session_token)):
     """获取模板 README 内容（本地优先，git 来源从 GitCode/GitHub API 拉取）"""
     ctx = _find_template(template_id)
     if not ctx:
@@ -121,7 +121,7 @@ def get_template_readme(template_id: str, user: dict = Depends(get_current_user)
 
 
 @router.get("/{template_id}/preview")
-def get_template_preview(template_id: str, user: dict = Depends(get_current_user)):
+def get_template_preview(template_id: str, user: dict = Depends(require_no_session_token)):
     """获取模板预览图 HTML（本地模板读取 examples/{id}/preview.html）"""
     ctx = _find_template(template_id)
     if not ctx:
@@ -147,7 +147,7 @@ class CreateTemplateRequest(BaseModel):
 
 @router.post("/create")
 async def create_from_template(body: CreateTemplateRequest,
-                               user: dict = Depends(get_current_user)):
+                               user: dict = Depends(require_no_session_token)):
     """一键创建：建仓库 → 写模板代码 → 自动托管 → 应用开发场景"""
     ctx = _find_template(body.template_id)
     if not ctx:

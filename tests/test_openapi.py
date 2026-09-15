@@ -33,6 +33,7 @@ EXPECTED_PUBLIC = {
     "a2a_handoff": ("post", "/api/a2a"),
     # 合并引入的新公开操作（multi-vcs / knowledge detail / profile）
     "get_profile_api_auth_profile_get": ("get", "/api/auth/profile"),
+    "logout_api_auth_logout_post": ("post", "/api/auth/logout"),
     "knowledge_stats": ("get", "/api/knowledge/stats"),
     "get_knowledge_detail_api_knowledge__knowledge_id__get": ("get", "/api/knowledge/{knowledge_id}"),
     "repos_member": ("get", "/api/repos/member"),
@@ -226,13 +227,35 @@ EXPECTED_PUBLIC = {
     "chat_submit_api_chat_submit_post": ("post", "/api/chat/submit"),
     "chat_task_status_api_chat_task__task_id__status_get": ("get", "/api/chat/task/{task_id}/status"),
     "chat_task_stream_api_chat_task__task_id__stream_get": ("get", "/api/chat/task/{task_id}/stream"),
+    # ===== D 批（openapi-full-coverage-design.md）：devstage/templates/dashboard/pipeline/feishu/task-logs 进契约 =====
+    "get_devstage_config_api_devstage_config_get": ("get", "/api/devstage/config"),
+    "update_devstage_config_api_devstage_config_put": ("put", "/api/devstage/config"),
+    "list_templates_api_devstage_templates_get": ("get", "/api/devstage/templates"),
+    "list_specs_api_devstage_specs_get": ("get", "/api/devstage/specs"),
+    "list_environments_api_devstage_environments_get": ("get", "/api/devstage/environments"),
+    "create_environment_api_devstage_environments_post": ("post", "/api/devstage/environments"),
+    "delete_environment_api_devstage_environments__devstage_id__delete": ("delete", "/api/devstage/environments/{devstage_id}"),
+    "environment_action_api_devstage_environments__action__post": ("post", "/api/devstage/environments/{action}"),
+    "create_from_template_api_project_templates_create_post": ("post", "/api/project-templates/create"),
+    "list_templates_api_project_templates_get": ("get", "/api/project-templates"),
+    "get_template_preview_api_project_templates__template_id__preview_get": ("get", "/api/project-templates/{template_id}/preview"),
+    "get_template_readme_api_project_templates__template_id__readme_get": ("get", "/api/project-templates/{template_id}/readme"),
+    "get_ops_overview_api_dashboard_ops_overview_get": ("get", "/api/dashboard/ops/overview"),
+    "get_dashboard_api_dashboard__owner___repo__get": ("get", "/api/dashboard/{owner}/{repo}"),
+    "get_pipeline_api_pipeline__owner___repo__get": ("get", "/api/pipeline/{owner}/{repo}"),
+    "global_search_api_search_get": ("get", "/api/search"),
+    "start_onboard_api_feishu_onboard_start_post": ("post", "/api/feishu/onboard/start"),
+    "onboard_status_api_feishu_onboard_status_get": ("get", "/api/feishu/onboard/status"),
+    "cancel_onboard_api_feishu_onboard_cancel_post": ("post", "/api/feishu/onboard/cancel"),
+    "get_task_messages_api_task_logs__task_id__messages_get": ("get", "/api/task-logs/{task_id}/messages"),
+    "get_task_runtime_info_api_task_logs__task_id__info_get": ("get", "/api/task-logs/{task_id}/info"),
+    "stream_task_messages_api_task_logs__task_id__stream_get": ("get", "/api/task-logs/{task_id}/stream"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
 NOT_IN_CONTRACT = [
     "/api/agents/types",                 # 无认证
     "/api/auth/login",
-    "/api/dashboard/ops/overview",       # 管理类模块
     "/api/runtime/start",                # 管理类模块
 ]
 

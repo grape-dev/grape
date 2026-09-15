@@ -4,7 +4,7 @@
 > 使 CLI（基于契约生成命令）可访问这些用户管理类接口。
 > 依据 `docs/weekly-03/token-scope-classification-design.md`（已实施）：skills 等管理端点归 D 类
 > （**user/JWT 可访问、session 不可**），且 token 均有 user_id 可定位调用者。
-> 分支：`weekly-03-lyz`；状态：**实施中（A 批已完成并上线）**；日期：2026-09-15
+> 分支：`weekly-03-lyz`；状态：**全部完成（A/B/C/D 批均已完成上线）**；日期：2026-09-15
 
 ---
 
@@ -96,7 +96,7 @@
 | A | skills.py（11）、scenes.py（24） | 用户技能/场景管理，owner=user | ✅ 已完成（commit `954517ad`） |
 | B | settings.py（34）、repos.py（12）、agents.py（2）、knowledge.py（10） | 账号配置/仓库/知识 | ✅ 已完成（commit `dd2c0d32`） |
 | C | runtime.py（17）、tasks.py（6）、events.py（11）、chat.py（12） | 运维/任务操作 | ✅ 已完成（commit `30d93c4f`） |
-| D | devstage/templates/dashboard/pipeline/search/auth/feishu_onboard/task_logs | 其余 | 待做 |
+| D | devstage(8)/templates(4)/dashboard(2)/pipeline(1)/search(1)/feishu_onboard(3)/task_logs(3)/auth logout(1) | 其余 | ✅ 已完成 |
 
 > 每批独立提交 + 回归；先 A 批验证契约与 owner 派生，再扩 B/C/D。
 
@@ -120,6 +120,13 @@
 - ⚠️ **runtime URL 冲突处理**：`GET /runtimes/{id}/tags` 与 worker 端点（`_require_credential`）同路径冲突 → web 管理版改
   `/role-tags`；`PUT /runtimes/{id}/tags`（web 唯一）保留
 - 验证：守卫 session→403、api_key/jwt 通过；回归 137 passed（2 基线失败）
+
+### D 批实施记录（2026-09-15，已完成）
+- devstage 8 + templates 4 + dashboard 2 + pipeline 1 + search 1 + feishu_onboard 3 + task_logs 3 → `require_no_session_token`（共 22 处）
+- `auth.py`：`profile` 早已转换，`logout`（1 处）同步 → `require_no_session_token`（登出归用户账户操作，D 类）
+- import 清理：`get_current_user` 残留清零（scenes/skills/auth 移除未用 import）；`Depends(get_current_user)` 全仓归零 ✅（设计验证第 2 条达成）
+- 契约：devstage 全量/templates/dashboard/pipeline/search/feishu-onboard/task-logs/auth-logout 进 `/openapi.json`，`EXPECTED_PUBLIC` 补录 22 端点（契约 total 含 auth：+1）
+- 验证：`test_openapi.py` 6 passed；抽样守卫 api_key/jwt 通过；失败项核对为基线问题（devstage asyncio TypeError、skills/search 404、templates、OAuthCallback 等，stash 对比确认与本次改动无关）
 
 ---
 

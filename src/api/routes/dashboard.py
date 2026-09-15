@@ -1,7 +1,7 @@
 """Dashboard 路由：仓库概览、指标、Agent 状态、运维可观察性"""
 from fastapi import APIRouter, Depends
 from src.user import db as user_db
-from src.api.deps import get_current_user
+from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 from src.observability.engine_probe import get_probe_results
 from src.config import log
@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/ops/overview")
-def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
+def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_token)):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
 
     参考 multica BusinessSampler（metrics/business_sampler.go）的实时采样设计，
@@ -911,7 +911,7 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
 
 
 @router.get("/{owner}/{repo}")
-def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 

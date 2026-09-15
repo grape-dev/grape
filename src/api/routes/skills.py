@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
-from src.api.deps import get_current_user, get_current_user_or_api_key, require_no_session_token
+from src.api.deps import require_no_session_token
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
