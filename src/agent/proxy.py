@@ -103,7 +103,12 @@ def match_domain(host: str, pattern: str) -> bool:
         return host_base.endswith("." + suffix)
     host_base = host.split(":")[0]
     pattern_base = pattern.split(":")[0]
-    return host_base == pattern_base
+    if host_base == pattern_base:
+        return True
+    # 后缀匹配：pattern=example.com 匹配 sub.example.com（不支持 evil-example.com）
+    if host_base.endswith("." + pattern_base):
+        return True
+    return False
 
 
 # ===== DNS 地址校验 =====
@@ -201,10 +206,15 @@ def get_dynamic_whitelist(base_whitelist: list[str]) -> list[str]:
         host = parsed.hostname or ""
         if host and host not in wl:
             wl.append(host)
-        if host in ("localhost", "127.0.0.1") and "127.0.0.1" not in wl:
-            wl.append("127.0.0.1")
+        if host in ("localhost", "127.0.0.1"):
+            if "127.0.0.1" not in wl:
+                wl.append("127.0.0.1")
+            if "localhost" not in wl:
+                wl.append("localhost")
     if "127.0.0.1" not in wl:
         wl.append("127.0.0.1")
+    if "localhost" not in wl:
+        wl.append("localhost")
     return wl
 
 
@@ -314,6 +324,7 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
         # 剥离 hop-by-hop
         fwd_headers = strip_hop_by_hop_headers(dict(self.headers))
         fwd_headers["Host"] = host if port == 80 else f"{host}:{port}"
+        fwd_headers["Connection"] = "close"  # 响应完上游关连接，避免代理 readline 阻塞到超时
 
         # 连接目标
         try:
@@ -353,10 +364,8 @@ class WhitelistProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _forward_response(self, upstream: socket.socket):
         """从上游读取 HTTP 响应并转发给客户端。"""
-        # 用 makefile 缓冲读取（避免逐字节 recv），但 body 也从 buffer 读
-        if not hasattr(upstream, "_grape_rbuf"):
-            upstream._grape_rbuf = upstream.makefile("rb")
-        f = upstream._grape_rbuf
+        # socket.socket 有 __slots__，不能设自定义属性；每次创建局部 makefile 即可
+        f = upstream.makefile("rb")
 
         # 读取状态行 + headers 直到空行
         while True:

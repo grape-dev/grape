@@ -1345,7 +1345,7 @@ async def upload_task_attachment(task_id: int, file: UploadFile = File(...),
     from src.repo_key import split_owner_repo
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, issue_number FROM tasks WHERE id=?", (task_id,))
+        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (task_id,))
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
@@ -1372,7 +1372,7 @@ def list_task_attachments(task_id: int, user: dict = Depends(get_current_user_or
     from src.repo_key import split_owner_repo
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, issue_number FROM tasks WHERE id=?", (task_id,))
+        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (task_id,))
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
@@ -1394,7 +1394,7 @@ def delete_task_attachment(filename: str, task_id: int = Query(...),
         raise HTTPException(status_code=400, detail={"code": 400, "message": "非法文件名"})
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, issue_number FROM tasks WHERE id=?", (task_id,))
+        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (task_id,))
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})

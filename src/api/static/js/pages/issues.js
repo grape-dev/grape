@@ -297,6 +297,8 @@ window._openBoardDetail = function(taskId) {
       <div style="text-align:center;padding:20px;color:var(--t3,#86868b);font-size:13px">${I18N.t('tasks.loading')||'加载中...'}...</div>
     </div>
   </div>`;
+  // 异步加载附件列表（_detailHtml 渲染后 DOM 才有 _taskAttachmentsList）
+  _loadTaskAttachments(t.id);
   // 异步加载流水线信息
   API.get('/tasks/' + taskId + '/pipeline').then(function(data) {
     _renderPipelineSection(data);
@@ -424,7 +426,7 @@ function _renderPipelineSection(data) {
       var statusCol = e.status === 'completed' ? '#34c759' : e.status === 'failed' ? '#ef4444' : e.status === 'cancelled' ? '#86868b' : '#3b82f6';
       var statusIcon = e.status === 'completed' ? '✓' : e.status === 'failed' ? '✕' : e.status === 'cancelled' ? '○' : '●';
       var evSeq = e.seq || '';
-      var evClick = evSeq ? ' onclick="_jumpToNodeEvent(' + evSeq + ')"' : '';
+      var evClick = evSeq ? ' onclick="event.stopPropagation();_jumpToNodeEvent(' + evSeq + ')"' : '';
       var evCursor = evSeq ? ';cursor:pointer' : '';
       html += `<div style="display:flex;gap:10px;padding-bottom:${isLast?'0':'10px'};border-radius:8px;transition:background .15s"${evClick} onmouseover="this.style.background='rgba(0,0,0,.03)'" onmouseout="this.style.background='transparent'">`;
       html += `<div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">`;
@@ -846,16 +848,14 @@ function _detailHtml(t) {
     <div style="${_cardStyle}">
       <div style="${_cardTitle}">附件</div>
       <div id="_taskAttachmentsList" style="min-height:30px"><div style="font-size:12px;color:var(--t3,#86868b)">加载中...</div></div>
-      <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+      ${t.status === 'active' ? `<div style="display:flex;gap:6px;margin-top:10px;align-items:center">
         <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           上传附件
           <input type="file" style="display:none" onchange="_onTaskAttachSelect(this,${t.id})">
         </label>
-      </div>
+      </div>` : ''}
     </div>`;
-  // 异步加载附件列表
-  _loadTaskAttachments(t.id);
 }
 
 function _loadTaskAttachments(taskId) {

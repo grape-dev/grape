@@ -737,13 +737,19 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             desc = info.get("description", "")
             parts.append(f"- {ag}：{desc}")
         parts.append("""
+### 认证说明
+
+本环境注入了两种 token，用途不同，**严禁混用**：
+- **Grape API**（`{{SERVER_URL}}/api/a2a`、`{{SERVER_URL}}/api/events/*`、`{{SERVER_URL}}/api/tasks/*`）：使用 `$GRAPE_SESSION_TOKEN` 作为 Bearer
+- **__VCS__ API**（`__API_BASE__/*`）：使用 `$__BOT_TOKEN__` 作为 Bearer
+
 ### 调用方式
 
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
 然后调用 A2A API：
 
   curl -X POST {{SERVER_URL}}/api/a2a \\
-    -H "Authorization: Bearer $""" + _bot_token_env + """\" \\
+    -H "Authorization: Bearer $GRAPE_SESSION_TOKEN" \\
     -H "Content-Type: application/json" \\
     -d '{
       "agent": "coding",
@@ -770,7 +776,7 @@ context 是传给下一个 Agent 的接力说明，应包含：
 3. 建议下一步：需要下一个 Agent 做什么
 
 ⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
-""")
+""".replace("__VCS__", _vcs).replace("__API_BASE__", _api_base).replace("__BOT_TOKEN__", _bot_token_env))
 
     # 角色特定的 A2A 交办规则（按 agent_type 注入，指引何时 A2A 给哪个 Agent）
     _a2a_role_rules = {
@@ -813,6 +819,21 @@ API base URL: {_api_base}
     {_api_base}/repos/$REPO_FULL_NAME/issues
 Never print or reveal the token value.
 """)
+
+    # 引擎绑定信息（避免 agent 查 /openapi.json 核验引擎）
+    if runtime_id:
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
+                _rt_row = c.fetchone()
+            _engine_name = (_rt_row[0] if _rt_row else "") or "unknown"
+            parts.append(f"\n## 执行引擎\n当前绑定引擎: {_engine_name} (runtime_id={runtime_id})\n"
+                         "引擎绑定信息已通过 prompt 注入，无需查询 /openapi.json 核验。"
+                         "如接口返回 403 属正常安全限制，不应阻塞后续调度。\n")
+        except Exception:
+            pass
 
     parts.append(_build_output_contract(_rk))
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
