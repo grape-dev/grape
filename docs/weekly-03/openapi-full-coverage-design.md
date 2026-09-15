@@ -4,7 +4,7 @@
 > 使 CLI（基于契约生成命令）可访问这些用户管理类接口。
 > 依据 `docs/weekly-03/token-scope-classification-design.md`（已实施）：skills 等管理端点归 D 类
 > （**user/JWT 可访问、session 不可**），且 token 均有 user_id 可定位调用者。
-> 分支：`weekly-03-lyz`；状态：设计草案；日期：2026-09-14
+> 分支：`weekly-03-lyz`；状态：**实施中（A 批已完成并上线）**；日期：2026-09-15
 
 ---
 
@@ -91,14 +91,21 @@
 
 ### 3.4 分批落地（风险隔离）
 
-| 批 | 文件 | 说明 |
-|----|------|------|
-| A | skills.py（11）、scenes.py（24） | 用户技能/场景管理，owner=user |
-| B | settings.py（34）、repos.py（12）、agents.py（2）、knowledge.py（10） | 账号配置/仓库/知识 |
-| C | runtime.py（17）、tasks.py（6）、events.py（11）、chat.py（12） | 运维/任务操作 |
-| D | devstage/templates/dashboard/pipeline/search/auth/feishu_onboard/task_logs | 其余 |
+| 批 | 文件 | 说明 | 状态 |
+|----|------|------|:---:|
+| A | skills.py（11）、scenes.py（24） | 用户技能/场景管理，owner=user | ✅ 已完成（commit `954517ad`） |
+| B | settings.py（34）、repos.py（12）、agents.py（2）、knowledge.py（10） | 账号配置/仓库/知识 | 待做 |
+| C | runtime.py（17）、tasks.py（6）、events.py（11）、chat.py（12） | 运维/任务操作 | 待做 |
+| D | devstage/templates/dashboard/pipeline/search/auth/feishu_onboard/task_logs | 其余 | 待做 |
 
 > 每批独立提交 + 回归；先 A 批验证契约与 owner 派生，再扩 B/C/D。
+
+### A 批实施记录（2026-09-15，已完成并上线）
+- `skills.py` 11 处 + `scenes.py` 24 处 `get_current_user` → `require_no_session_token`
+- 契约：skills 12 端点 + scenes 17 端点全进 `/openapi.json`（upload/like/convert/CRUD/市场等），CLI 解锁
+- `test_openapi`：`EXPECTED_PUBLIC` 补录 34 端点，`NOT_IN_CONTRACT` 移除已开放的 `with-pipeline`/`scene_id`/`skills-upload`
+- 验证：A 批守卫端到端 session→403、API Key/JWT 通过（200/404 非 403）；回归 98 passed
+- **A 批迁移后 `get_current_user` 残留定义**：如确认某端点需保持 Web-only（内部），可保留 get_current_user 并加注释
 
 ---
 
