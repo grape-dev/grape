@@ -34,6 +34,6 @@ if [ "$1" != "--no-daemon" ]; then
 fi
 
 cd "/home/mys/grape"
-export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.local/npm-global/bin:$PATH"
+export PATH="/home/mys/grape/.venv/bin:$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.local/npm-global/bin:$PATH"
 set -a; . "/home/mys/.grape/runtime.env"; set +a
 exec "/home/mys/grape/.venv/bin/python" -m src.runtime.agent

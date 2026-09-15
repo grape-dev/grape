@@ -31,9 +31,8 @@ def _owner_repo(repo_key: str) -> tuple[str, str]:
 
 
 def _repo_base(repo_key: str) -> str:
-    from src.config import WORKSPACE_DIR
-    owner, rname = _owner_repo(repo_key)
-    return os.path.join(WORKSPACE_DIR, owner, rname)
+    from src.repo_key import workspace_repo_dir
+    return workspace_repo_dir(repo_key)
 
 
 def _resolve_repo_key(repo: str) -> str:

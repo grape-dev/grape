@@ -180,6 +180,32 @@ def get_repo_info(owner: str, repo: str, user: dict = Depends(get_current_user_o
     return _gitcode(p, "GET", _vcs_url(owner, repo, "", None, p), _repo_token(owner, repo, user, p))
 
 
+@router.get("/{owner}/{repo}/workspace", operation_id="gitrepo_workspace", summary="仓库工作区路径（CLI 本地 git 用）")
+def get_repo_workspace(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
+                       p: str = Depends(_provider)):
+    from src.repo_key import workspace_repo_dir, to_repo_key
+    ws = workspace_repo_dir(to_repo_key(f"{owner}/{repo}", p))
+    _gh = "github.com" if p == "github" else "gitcode.com"
+    return {"workspace": ws, "clone_url": f"https://{_gh}/{owner}/{repo}.git"}
+
+
+@router.get("/{owner}/{repo}/git-credential", operation_id="gitrepo_git_credential",
+            summary="一次性 git 平台凭据（方案③ CLI 内部使用，TTL 过期）")
+def get_git_credential(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
+                       p: str = Depends(_provider)):
+    """返回 CLI 本地执行 git 所需的平台凭据（一次性/短期，进程内使用不落盘）。
+
+    gitcode：Basic 用 username=`x-access-token`、password=配置的 gitcode token。
+    """
+    token = _repo_token(owner, repo, user, p)
+    _gh = "github.com" if p == "github" else "gitcode.com"
+    return {
+        "provider": p,
+        "username": "x-access-token",
+        "password": token,
+        "clone_url": f"https://{_gh}/{owner}/{repo}.git",
+        "expires_in": _CREDENTIAL_TTL,
+    }
 # ===================== 分支 / 提交 / 内容 / 标签 / 里程碑 =====================
 
 @router.get("/{owner}/{repo}/branches", operation_id="gitrepo_branches", summary="分支列表")

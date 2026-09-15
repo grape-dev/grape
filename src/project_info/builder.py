@@ -64,8 +64,8 @@ _CAP_TEMPLATE = """# Project Capabilities: {owner}/{repo}
 
 
 def _pi_dir(repo_key: str) -> str:
-    owner, rname = split_owner_repo(repo_key)
-    return os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
+    from src.repo_key import workspace_repo_dir
+    return os.path.join(workspace_repo_dir(repo_key), "project-info")
 
 
 def _analysis_dir(repo_key: str) -> str:
@@ -73,8 +73,8 @@ def _analysis_dir(repo_key: str) -> str:
 
 
 def _repo_base_dir(repo_key: str) -> str:
-    owner, rname = split_owner_repo(repo_key)
-    return os.path.join(WORKSPACE_DIR, owner, rname, "codebase")
+    from src.repo_key import workspace_repo_dir
+    return os.path.join(workspace_repo_dir(repo_key), "codebase")
 
 
 def _codegraph_available() -> bool:

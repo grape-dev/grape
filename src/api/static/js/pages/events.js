@@ -7,6 +7,18 @@ function _autoResizeTextarea(el) {
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
 
+// 从事件详情页返回需求详情页（路由 push 带任务 ID，非 history.back）
+window._backToTaskDetail = function(taskId) {
+  if (!taskId) { window.history.back(); return; }
+  window._pendingTaskDetailId = taskId;
+  window._eventFromTask = null;
+  if (typeof app !== 'undefined' && app.nav) {
+    app.nav('tasks');
+  } else {
+    window.history.back();
+  }
+};
+
 function navEvent(seq) {
   if (!seq || seq < 1) return;
   // 局部刷新：直接拿数据调 renderEventDetail，不走路由避免整体闪抖
@@ -83,8 +95,14 @@ function renderEventDetail(data) {
   const _ctxSummary = `${data.event_type || '—'} · ${data.actor || '—'}`;
   const _infoSummary = `${data.status === 'completed' ? '✅' : data.status === 'failed' ? '❌' : '⏳'} ${data.duration ? data.duration + 's' : '—'}`;
 
-  // 返回按钮：用 history.back() 返回上一个页面
-  const html = `<button class="bt bt-o bt-s" onclick="window.history.back()" style="margin-bottom:12px">← ${I18N.t('common.back')||'返回'}</button>
+  // 返回按钮：优先返回需求详情页（携带需求上下文），否则 history.back()
+  var _backBtn = '';
+  if (window._eventFromTask && window._eventFromTask.taskId) {
+    _backBtn = `<button class="bt bt-o bt-s" onclick="_backToTaskDetail(${window._eventFromTask.taskId})" style="margin-bottom:12px">← ${I18N.t('tasks.back_to_requirement')||'返回需求详情'}</button>`;
+  } else {
+    _backBtn = `<button class="bt bt-o bt-s" onclick="window.history.back()" style="margin-bottom:12px">← ${I18N.t('common.back')||'返回'}</button>`;
+  }
+  const html = `${_backBtn}
   <div id="evDetailGrid" style="display:grid;grid-template-columns:1fr;gap:14px;height:calc(100vh - 160px);overflow:hidden">
     <!-- 左栏大框：导航 + 可折叠区块 + 处理记录+答复结论 -->
     <div class="cd" style="padding:16px 20px;display:flex;flex-direction:column;overflow:hidden">

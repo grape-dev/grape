@@ -21,7 +21,7 @@ _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
-    "codex": ["codex", "exec", "--json", "--sandbox", "workspace-write", "hello"],
+    "codex": ["codex", "exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check", "hello"],
 }
 
 _PROBE_TIMEOUT = 30  # 秒

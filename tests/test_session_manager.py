@@ -300,7 +300,7 @@ class TestDumpHistoryToFile:
         sm = self._setup(tmp_path)
         history = [{"type": "chat", "text": "hello"}]
         sm.dump_history_to_file("gitcode:owner/repo", history)
-        fp = tmp_path / "history" / "default" / "owner_repo" / "session_history.json"
+        fp = tmp_path / "history" / "default" / "gitcode" / "owner_repo" / "session_history.json"
         assert fp.exists()
         data = json.loads(fp.read_text("utf-8"))
         assert len(data) == 1
@@ -309,13 +309,13 @@ class TestDumpHistoryToFile:
     def test_account_specific_dir(self, tmp_path):
         sm = self._setup(tmp_path)
         sm.dump_history_to_file("gitcode:owner/repo", [{"type": "chat"}], account="customer-a")
-        fp = tmp_path / "history" / "customer-a" / "owner_repo" / "session_history.json"
+        fp = tmp_path / "history" / "customer-a" / "gitcode" / "owner_repo" / "session_history.json"
         assert fp.exists()
 
     def test_oc_session_id_removed(self, tmp_path):
         sm = self._setup(tmp_path)
         sm.dump_history_to_file("gitcode:owner/repo", [{"type": "chat", "oc_session_id": "ses_secret"}])
-        fp = tmp_path / "history" / "default" / "owner_repo" / "session_history.json"
+        fp = tmp_path / "history" / "default" / "gitcode" / "owner_repo" / "session_history.json"
         data = json.loads(fp.read_text("utf-8"))
         assert "oc_session_id" not in data[0]
 
@@ -323,7 +323,7 @@ class TestDumpHistoryToFile:
         sm = self._setup(tmp_path)
         history = [{"type": "chat", "n": i} for i in range(25)]
         sm.dump_history_to_file("gitcode:owner/repo", history)
-        base = tmp_path / "history" / "default" / "owner_repo"
+        base = tmp_path / "history" / "default" / "gitcode" / "owner_repo"
         assert (base / "session_history.json").exists()
         assert (base / "session_history_1.json").exists()
         assert (base / "session_history_2.json").exists()
@@ -334,7 +334,7 @@ class TestDumpHistoryToFile:
 
     def test_rotation_cleanup_stale_files(self, tmp_path):
         sm = self._setup(tmp_path)
-        base = tmp_path / "history" / "default" / "owner_repo"
+        base = tmp_path / "history" / "default" / "gitcode" / "owner_repo"
         os.makedirs(base, exist_ok=True)
         (base / "session_history_5.json").write_text("[]", encoding="utf-8")
         sm.dump_history_to_file("gitcode:owner/repo", [{"type": "chat"}] * 3)

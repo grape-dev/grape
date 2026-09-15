@@ -72,6 +72,8 @@
   "engine_skill_title": "模型与技能",
   "engine_skill_desc": "配置 Chat Agent 的执行引擎和技能",
   "engine_label": "执行引擎",
+  "engine_config_tip": "引擎配置",
+  "skill_config_tip": "技能配置",
   "placeholder": "问我任何问题...",
   "send": "发送",
   "upload_image": "上传图片",

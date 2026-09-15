@@ -906,15 +906,26 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     # 6. workspace 目录（data/workspaces/...）
     try:
         from src.config import WORKSPACE_DIR
+        from src.repo_key import parse_repo_key, workspace_repo_dir
         _ws_base = WORKSPACE_DIR
-        # 所有候选目录（规范化后校验必须在 WORKSPACE_DIR 下）
+        _provider, _, _ = parse_repo_key(keys[0]) if keys else ("gitcode", "", "")
+        _provider = _provider or "gitcode"
+        # 新路径（含 provider 隔离）+ 旧路径兼容（无 provider + 带前缀）
         candidates = [
-            os.path.join(_ws_base, owner, repo),            # agent 执行目录
-            os.path.join(_ws_base, repo),                   # vod-agent 平级目录
+            # 新：{WORKSPACE_DIR}/{provider}/{owner}/{repo}
+            workspace_repo_dir(keys[0]) if keys else "",
+            # 旧：{WORKSPACE_DIR}/{owner}/{repo}
+            os.path.join(_ws_base, owner, repo),
+            # vod-agent 平级目录
+            os.path.join(_ws_base, repo),
+            # feishu/vod 旧路径 + 新路径（含 provider 段）
             os.path.join(_ws_base, "feishu", f"{owner}_{repo}"),
             os.path.join(_ws_base, "vod", f"{owner}_{repo}"),
+            os.path.join(_ws_base, "vod", _provider, f"{owner}_{repo}"),
+            # history 旧路径 + 新路径
             os.path.join(_ws_base, "history", owner, repo),
             os.path.join(_ws_base, "history", f"gitcode:{owner}", repo),
+            os.path.join(_ws_base, "history", owner, _provider, f"{owner}_{repo}"),
         ]
         for _dir in candidates:
             _abs = os.path.normpath(_dir)

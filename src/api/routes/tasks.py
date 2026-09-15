@@ -6,11 +6,12 @@
 - mine:   任务中心 → 当前登录用户的待处理/已完成任务
 """
 import asyncio
+import os
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from pydantic import BaseModel
-from src.api.deps import get_current_user_or_api_key, require_no_session_token
-from src.config import log
+from src.api.deps import get_current_user, get_current_user_or_api_key, get_user_token
+from src.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (
     db, db_lock, get_chat_config, create_conversation, add_message,
@@ -770,6 +771,16 @@ async def resume_task_api(task_id: int, user: dict = Depends(require_no_session_
     return {"ok": True, "task_id": task_id, "status": "processing"}
 
 
+def _cleanup_issue_attachments(repo_key: str, issue_number):
+    """删除指定 issue 的所有附件。任务完成/取消时调用。"""
+    try:
+        from src.repo_key import split_owner_repo
+        _owner, _rname = split_owner_repo(repo_key)
+        _attach_cleanup_dir(_owner, _rname, str(issue_number))
+    except Exception as _e:
+        log.warning(f"Attachment cleanup failed: {_e}")
+
+
 def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "issue_comment"):
     """Issue 评论确认完成 → 关闭该 issue 所有 active 任务 + stage=done"""
     with db_lock:
@@ -838,7 +849,7 @@ def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
     from src.user.repo_manager import _req
     try:
         data = _req("GET",
-                    f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=all&per_page=50&page=1",
+                    f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=all&per_page=50&page=1",
                     api_token)
     except Exception:
         return None
@@ -876,7 +887,7 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
         params["body"] = body_text
     if assignee:
         params["assignee"] = assignee
-    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?access_token={api_token}"
+    url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?access_token={api_token}"
     req = _ur.Request(url, data=_up.urlencode(params).encode(),
                       headers={"Content-Type": "application/x-www-form-urlencoded",
                                "Accept": "application/json"}, method="POST")
@@ -943,7 +954,7 @@ def _gitcode_api_with_refresh(user: dict, api_call_fn, *args, **kwargs):
 def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（追加多任务模式标记）。"""
     import urllib.request as _ur, urllib.error as _uerr, json as _json
-    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
+    url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
     data = _json.dumps({"body": body_text}).encode()
     req = _ur.Request(url, data=data, headers={"Content-Type": "application/json", "Accept": "application/json"}, method="PATCH")
     try:
@@ -1030,14 +1041,27 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                                      "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
                                                      "issue_number": issue_num})
     if issue_num is None:
+        # 拼接 Task Center 上传的附件到 issue body
+        _desc_with_attach = (body.description or "").strip()
+        _pending_attachments = _attach_list(owner, rname, "pending")
+        if _pending_attachments:
+            _attachments = []
+            for _att in _pending_attachments:
+                _ext = os.path.splitext(_att["filename"])[1].lower()
+                if _ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp'):
+                    _attachments.append(f"![{_att['filename']}]({_att['url']})")
+                else:
+                    _attachments.append(f"[{_att['filename']}]({_att['url']})")
+            if _attachments:
+                _desc_with_attach += "\n\n## 附件\n" + "\n".join(_attachments)
         if _is_github:
             resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
-                                      (body.description or "").strip(), assignee=assignee)
+                                      _desc_with_attach, assignee=assignee)
         else:
             # Issue #52: 401 时自动刷新 OAuth token 并重试
             resp = _gitcode_api_with_refresh(
                 user, _post_gitcode_issue, owner, rname, body.title.strip(),
-                (body.description or "").strip(), assignee=assignee
+                _desc_with_attach, assignee=assignee
             )
         n = None
         if isinstance(resp, dict):
@@ -1047,6 +1071,30 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                                          "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
         issue_num = int(n)
         created = True
+        # 附件从 pending 迁移到实际 issue_number（OBS: copy + delete old; 本地: rename）
+        from src.storage import get_storage
+        _storage = get_storage()
+        _pending_atts = _attach_list(owner, rname, "pending")
+        if _pending_atts:
+            for _att in _pending_atts:
+                _fname = _att["filename"]
+                if _storage:
+                    # OBS: read pending → save to issue_number → delete pending
+                    _old_key = _attach_obs_key(owner, rname, "pending", _fname)
+                    _new_key = _attach_obs_key(owner, rname, str(issue_num), _fname)
+                    _data = _storage.read_bytes(_old_key)
+                    if _data:
+                        _storage.save_bytes(_new_key, _data)
+                        _storage.delete_object(_old_key)
+                else:
+                    # 本地: move file
+                    _old_path = os.path.join(_attach_base_dir(owner, rname, "pending"), _fname)
+                    _new_dir = _attach_base_dir(owner, rname, str(issue_num))
+                    os.makedirs(_new_dir, exist_ok=True)
+                    try:
+                        os.rename(_old_path, os.path.join(_new_dir, _fname))
+                    except Exception as _e:
+                        log.warning(f"attachment file rename failed: {_e}")
     # 2) 场景选择：用户选了具体场景 → 写入 scene_id（issue_opened 读到有值则跳过推荐）
     #    选智能推荐（vod-auto）或留空 → 不写 scene_id → issue_opened 走智能推荐
     try:
@@ -1133,6 +1181,230 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
             "assignee": assignee, "is_subtask_mode": _auto_subtask_mode,
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
+
+
+# ====== 附件管理 ======
+
+# 允许的附件文件扩展名
+_ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+_ATTACH_DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".xml", ".html"}
+_ATTACH_CODE_EXTS = {".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp", ".h", ".sh", ".sql", ".tf", ".dockerfile"}
+_ATTACH_ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".7z"}
+_ATTACH_ALL_EXTS = _ATTACH_IMAGE_EXTS | _ATTACH_DOC_EXTS | _ATTACH_CODE_EXTS | _ATTACH_ARCHIVE_EXTS
+_ATTACH_MAX_SIZE = 50 * 1024 * 1024  # 50MB
+
+
+def _attach_obs_key(owner: str, repo: str, issue_number, filename: str) -> str:
+    """生成 OBS 对象键：{PREFIX}/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"""
+    from src.config import OBS_PREFIX
+    prefix = (OBS_PREFIX or "").strip("/")
+    return f"{prefix}/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
+
+
+def _attach_base_dir(owner: str, repo: str, issue_number) -> str:
+    """附件本地存储目录（OBS 未启用时使用）：data/issue_attachments/{owner}/{repo}/{issue_number}/"""
+    return os.path.join(WORKSPACE_DIR, "..", "data", "issue_attachments", owner, repo, str(issue_number))
+
+
+def _attach_save(owner: str, repo: str, issue_number, filename: str, content: bytes) -> str:
+    """保存附件。OBS 启用时上传到 OBS，否则写本地磁盘。返回可访问 URL。"""
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage:
+        key = _attach_obs_key(owner, repo, issue_number, filename)
+        storage.save_bytes(key, content)
+        url = storage.temporary_url(key, expires=7 * 24 * 3600)  # 7 天签名有效期
+        log.info(f"Attachment saved to OBS: {key} ({len(content)} bytes)")
+        return url
+    # 本地降级
+    attach_dir = _attach_base_dir(owner, repo, issue_number)
+    os.makedirs(attach_dir, exist_ok=True)
+    fpath = os.path.join(attach_dir, filename)
+    with open(fpath, "wb") as f:
+        f.write(content)
+    from src.user.db import get_meta_value as _gmv
+    _base_url = (_gmv("server_base_url") or "").rstrip("/")
+    return f"{_base_url}/static/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
+
+
+def _attach_delete(owner: str, repo: str, issue_number, filename: str) -> bool:
+    """删除单个附件。OBS 启用时删 OBS 对象，否则删本地文件。"""
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage:
+        key = _attach_obs_key(owner, repo, issue_number, filename)
+        return storage.delete_object(key)
+    fpath = os.path.join(_attach_base_dir(owner, repo, issue_number), filename)
+    if os.path.isfile(fpath):
+        os.unlink(fpath)
+        return True
+    return False
+
+
+def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
+    """列出附件。返回 [{filename, url, size, is_image}]。"""
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage:
+        prefix_key = _attach_obs_key(owner, repo, issue_number, "")
+        items, _ = storage.list_objects_with_meta(prefix_key)
+        from src.user.db import get_meta_value as _gmv
+        result = []
+        for item in items:
+            fname = item["key"].rsplit("/", 1)[-1]
+            if not fname:
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            result.append({
+                "filename": fname,
+                "url": storage.temporary_url(item["key"], expires=7 * 24 * 3600),
+                "size": item.get("size", 0),
+                "is_image": ext in _ATTACH_IMAGE_EXTS,
+            })
+        return result
+    # 本地降级
+    attach_dir = _attach_base_dir(owner, repo, issue_number)
+    from src.user.db import get_meta_value as _gmv
+    _base_url = (_gmv("server_base_url") or "").rstrip("/")
+    result = []
+    if os.path.isdir(attach_dir):
+        for fname in sorted(os.listdir(attach_dir)):
+            fpath = os.path.join(attach_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            result.append({
+                "filename": fname,
+                "url": f"{_base_url}/static/issue_attachments/{owner}/{repo}/{issue_number}/{fname}",
+                "size": os.path.getsize(fpath),
+                "is_image": ext in _ATTACH_IMAGE_EXTS,
+            })
+    return result
+
+
+def _attach_cleanup_dir(owner: str, repo: str, issue_number):
+    """删除整个 issue 的附件目录。任务完成/取消时调用。"""
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage:
+        prefix_key = _attach_obs_key(owner, repo, issue_number, "")
+        count = storage.delete_prefix(prefix_key)
+        if count > 0:
+            log.info(f"Attachment cleanup: deleted {count} OBS objects for {owner}/{repo}/{issue_number}")
+        return
+    import shutil
+    _attach_dir = _attach_base_dir(owner, repo, issue_number)
+    if os.path.isdir(_attach_dir):
+        shutil.rmtree(_attach_dir, ignore_errors=True)
+        log.info(f"Attachment cleanup: removed {_attach_dir}")
+
+
+@router.post("/attachments/pre-upload", operation_id="tasks_pre_upload_attachment", summary="创建任务前上传附件")
+async def pre_upload_attachment(file: UploadFile = File(...),
+                                repo_key: str = Query(default=""),
+                                user: dict = Depends(get_current_user)):
+    """创建任务前的临时附件上传。文件存到 pending（OBS 或本地），任务创建后自动拼入 issue body。"""
+    from src.repo_key import split_owner_repo, to_repo_key
+    rk = to_repo_key(repo_key)
+    if not rk:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key 必填"})
+    owner, rname = split_owner_repo(rk)
+    original_name = file.filename or "unnamed"
+    ext = os.path.splitext(original_name)[1].lower()
+    if ext not in _ATTACH_ALL_EXTS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的文件类型: {ext}"})
+    content = await file.read()
+    if len(content) > _ATTACH_MAX_SIZE:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "文件大小超过 50MB 限制"})
+    import uuid
+    safe_name = f"{uuid.uuid4().hex}{ext}"
+    url = _attach_save(owner, rname, "pending", safe_name, content)
+    log.info(f"Pre-upload attachment: file={original_name} -> {safe_name} ({len(content)} bytes)")
+    return {"url": url, "filename": original_name, "safe_name": safe_name, "size": len(content)}
+
+
+@router.delete("/attachments/pre-upload/{filename}", operation_id="tasks_pre_delete_attachment", summary="删除创建前上传的附件")
+def pre_delete_attachment(filename: str, repo_key: str = Query(default=""),
+                          user: dict = Depends(get_current_user)):
+    """删除 pending 里的临时附件。"""
+    from src.repo_key import split_owner_repo, to_repo_key
+    import re
+    if not re.match(r'^[0-9a-f]{32}\.\w+$', filename):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法文件名"})
+    rk = to_repo_key(repo_key)
+    owner, rname = split_owner_repo(rk)
+    if _attach_delete(owner, rname, "pending", filename):
+        return {"ok": True, "message": "已删除"}
+    raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
+
+
+@router.post("/{task_id}/attachments", operation_id="tasks_upload_attachment", summary="上传任务附件")
+async def upload_task_attachment(task_id: int, file: UploadFile = File(...),
+                                 user: dict = Depends(get_current_user)):
+    """上传附件到任务关联的 issue 附件目录。OBS 启用时存 OBS，否则存本地磁盘。"""
+    from src.repo_key import split_owner_repo
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    repo_key, issue_number = row[0], row[1]
+    owner, rname = split_owner_repo(repo_key)
+    import uuid
+    original_name = file.filename or "unnamed"
+    ext = os.path.splitext(original_name)[1].lower()
+    if ext not in _ATTACH_ALL_EXTS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的文件类型: {ext}"})
+    content = await file.read()
+    if len(content) > _ATTACH_MAX_SIZE:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "文件大小超过 50MB 限制"})
+    safe_name = f"{uuid.uuid4().hex}{ext}"
+    dir_name = str(issue_number) if issue_number else "pending"
+    url = _attach_save(owner, rname, dir_name, safe_name, content)
+    log.info(f"Task attachment uploaded: task={task_id} file={original_name} -> {safe_name} ({len(content)} bytes)")
+    return {"url": url, "filename": original_name, "size": len(content)}
+
+
+@router.get("/{task_id}/attachments", operation_id="tasks_list_attachments", summary="列出任务附件")
+def list_task_attachments(task_id: int, user: dict = Depends(get_current_user_or_api_key)):
+    """列出任务关联的附件文件列表。"""
+    from src.repo_key import split_owner_repo
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    repo_key, issue_number = row[0], row[1]
+    owner, rname = split_owner_repo(repo_key)
+    attachments = []
+    for dir_name in (["pending", str(issue_number)] if issue_number else ["pending"]):
+        attachments.extend(_attach_list(owner, rname, dir_name))
+    return {"attachments": attachments}
+
+
+@router.delete("/attachments/{filename}", operation_id="tasks_delete_attachment", summary="删除任务附件")
+def delete_task_attachment(filename: str, task_id: int = Query(...),
+                           user: dict = Depends(get_current_user)):
+    """删除指定附件文件。filename 为 UUID 文件名。"""
+    from src.repo_key import split_owner_repo
+    import re
+    if not re.match(r'^[0-9a-f]{32}\.\w+$', filename):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法文件名"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    repo_key, issue_number = row[0], row[1]
+    owner, rname = split_owner_repo(repo_key)
+    for dir_name in (["pending", str(issue_number)] if issue_number else ["pending"]):
+        if _attach_delete(owner, rname, dir_name, filename):
+            log.info(f"Task attachment deleted: task={task_id} file={filename}")
+            return {"ok": True, "message": "已删除"}
+    raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
 
 
 @router.put("/{task_id}/status", operation_id="tasks_status", summary="更新任务状态")
@@ -1374,7 +1646,7 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
             import urllib.parse as _up
             import urllib.request as _ur
             import urllib.error as _uerr
-            url = f"https://api.gitcode.com/api/v5/repos/{_owner}/{_rname}/issues/{_issue_num}/comments?access_token={token}"
+            url = f"https://gitcode.com/api/v5/repos/{_owner}/{_rname}/issues/{_issue_num}/comments?access_token={token}"
             req = _ur.Request(url, data=_up.urlencode({"body": _body}).encode(),
                               headers={"Content-Type": "application/x-www-form-urlencoded",
                                        "Accept": "application/json"}, method="POST")

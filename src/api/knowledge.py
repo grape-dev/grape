@@ -119,8 +119,8 @@ def _owner_repo(repo_key: str) -> tuple[str, str]:
 
 def knowledge_path(repo_key: str, scope: str, agent_type: str = "", issue_num: int = 0) -> str:
     """按 scope 返回知识文件绝对路径（scope 见 3.1.1）。"""
-    owner, rname = _owner_repo(repo_key)
-    base = os.path.join(WORKSPACE_DIR, owner, rname)
+    from src.repo_key import workspace_repo_dir
+    base = workspace_repo_dir(repo_key)
     if scope == "project":
         return os.path.join(base, "project-info", "knowledge.md")
     if scope == "issue":
@@ -929,13 +929,15 @@ async def knowledge_sync_loop():
                     if rid in _sync_not_found:
                         continue
                     try:
-                        # 兼容 file_path 格式：write_knowledge/builder 用 WORKSPACE_DIR 相对（owner/repo/...），
+                        # 兼容 file_path 格式：write_knowledge/builder 用 WORKSPACE_DIR 相对（含 provider 前缀），
                         # member 文档：用 file_path 生成
-                        owner, rname = _owner_repo(repo_key)
-                        if file_path.startswith(f"{owner}/{rname}/"):
+                        from src.repo_key import workspace_repo_dir
+                        _ws_repo = workspace_repo_dir(repo_key)
+                        _ws_repo_rel = os.path.relpath(_ws_repo, WORKSPACE_DIR)
+                        if file_path.startswith(_ws_repo_rel + "/"):
                             full_path = os.path.join(WORKSPACE_DIR, file_path)
                         else:
-                            full_path = os.path.join(WORKSPACE_DIR, owner, rname, file_path)
+                            full_path = os.path.join(_ws_repo, file_path)
                         if not os.path.isfile(full_path):
                             _sync_not_found.add(rid)
                             log.error(f"[knowledge] sync skip id={rid}: file not found {full_path} (repo may be deleted)")
@@ -945,6 +947,8 @@ async def knowledge_sync_loop():
                             content = f.read()
                         if content:
                             # 按 scope 生成 storage_key——member/baseline 不走 knowledge_storage_key
+                            from src.repo_key import split_owner_repo
+                            owner, rname = split_owner_repo(repo_key)
                             if scope == "member":
                                 # member 文档：用 file_path 生成 storage_key
                                 storage_key = f"knowledge/{owner}/{rname}/{file_path.replace('project-info/', '', 1)}"
@@ -1040,7 +1044,8 @@ def _sync_baseline_files():
             owner, repo = split_owner_repo(repo_key)
             if not owner or not repo:
                 continue
-            pi_dir = os.path.join(WORKSPACE_DIR, owner, repo, "project-info")
+            from src.repo_key import workspace_repo_dir
+            pi_dir = os.path.join(workspace_repo_dir(repo_key), "project-info")
             if not os.path.isdir(pi_dir):
                 continue
 

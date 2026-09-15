@@ -9,10 +9,12 @@ from src.api import session_store as ss
 def _clean():
     with db_lock:
         db.cursor().execute("DELETE FROM issue_state")
+        db.cursor().execute("DELETE FROM issue")
         db.commit()
     yield
     with db_lock:
         db.cursor().execute("DELETE FROM issue_state")
+        db.cursor().execute("DELETE FROM issue")
         db.commit()
 
 
@@ -38,8 +40,9 @@ class TestIssueState:
     def test_upsert_idempotent(self):
         ss.set_issue_stage("gitcode:test/repo", "#9", "issue", "issue")
         ss.set_issue_stage("gitcode:test/repo", "#9", "coding", "coding")
+        # Phase C3: set_issue_stage 只写 issue 单表（不再写 issue_state）
         with db_lock:
-            cnt = db.cursor().execute("SELECT COUNT(*) FROM issue_state WHERE repo_key='gitcode:test/repo' AND issue_id='#9'").fetchone()[0]
+            cnt = db.cursor().execute("SELECT COUNT(*) FROM issue WHERE repo_key='gitcode:test/repo' AND issue_number=9").fetchone()[0]
         assert cnt == 1, "upsert 应保持单行"
 
     def test_rollback_allowed(self):

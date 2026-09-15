@@ -355,14 +355,16 @@ SECURITY (MUST FOLLOW):
 4. NEVER write any token into files, logs, or comments."""
 
 
-def build_task_role_definition() -> str:
+def build_task_role_definition(repo_key="") -> str:
     """Task 会话专属 Role（task-vs-general-chat-flow-analysis.md §2.1）。
 
     与 general 的 build_chat_role_definition 不同：task 会话是**已被分配 Issue** 的对话，
     职责是澄清该 Issue 需求并回帖，不是"收到任务再创建新 Issue"。因此去掉
     general 的「创建 Issue 转交流水线」流程，突出澄清+回帖边界（对齐 chat-prompt-overview §2.2）。
     """
-    return """You are a DevOps operations assistant. Your domain:
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    return f"""You are a DevOps operations assistant. Your domain:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
 - Repository (GitCode/GitHub) API operations
@@ -372,7 +374,7 @@ You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, 
 ## 当前职责（任务对话）
 你正参与一个**已被分配 Issue** 的需求澄清对话。你的职责：
 1. 围绕该 Issue 的需求与用户多轮沟通，澄清关键参数与实现方案；
-2. 将澄清结论回帖到对应 Issue（GitCode 评论）；
+2. 将澄清结论回帖到对应 Issue（{_vcs} 评论）；
 3. 不实施 / 不部署 / 不写代码、不执行 git 命令——实现由 pipeline（coding/sre）在回帖后执行。
 
 SECURITY (MUST FOLLOW):
@@ -428,23 +430,24 @@ def _load_agent_registry() -> dict:
         return _agent_registry_cache or {}
 
 
-def _build_output_contract() -> str:
+def _build_output_contract(repo_key: str = "") -> str:
     """处理记录输出要求 + 行为约束（所有 DevOps agent 共用，见 agent-runtime-event-full-design.md §8）。
 
     包含：JSON 契约、任务结束规则、内部思考 vs 对外结论分离、评论内容边界、发布前自检。
     """
-    return """
+    _vcs = _vcs_name(repo_key)
+    return f"""
 ## 处理记录输出要求
 
 完成当前任务后，在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
 
-{
+{{
   "actions": ["做了什么，如 labeled:bug / assigned:@bob / 提交了PR / 发布了审查评论"],
   "conclusion": "处理结论/分析结果（简要）",
   "artifacts": ["产生的产物：PR#N / 评论 / 标签 / 部署 / Issue"],
   "next_step": "下一步建议；如需交办其他 Agent 则说明调用 A2A 的目标",
   "issue_summary": "Issue 最新聚合结论（覆盖档案 summary；紧凑文本，用 | 分隔）"
-}
+}}
 
 注意：
 - 只输出一个 JSON 块，放在答复末尾。
@@ -458,7 +461,7 @@ def _build_output_contract() -> str:
 不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
 
 ⚠️ 思考过程禁止出现在对外输出：任何思考过程叙述（如"让我…""现在我…""Let me…""Now I…"）
-只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 GitCode 评论 body 中。
+只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 {_vcs} 评论 body 中。
 最终答复只输出：动作结果结论 + 处理记录 JSON 块。
 
 ## 内部思考 vs 对外结论（必须分清）
@@ -517,6 +520,7 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
         return
 
     # 通过 tasks._attach_list 获取附件列表（自动适配 OBS/本地）
+    # 注意：_attach_list 尚未实现（远端 bbca2f9a 引用但未定义），容错跳过
     try:
         from src.api.routes.tasks import _attach_list
     except ImportError:
@@ -733,13 +737,19 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             desc = info.get("description", "")
             parts.append(f"- {ag}：{desc}")
         parts.append("""
+### 认证说明
+
+本环境注入了两种 token，用途不同，**严禁混用**：
+- **Grape API**（`{{SERVER_URL}}/api/a2a`、`{{SERVER_URL}}/api/events/*`、`{{SERVER_URL}}/api/tasks/*`）：使用 `$GRAPE_SESSION_TOKEN` 作为 Bearer
+- **__VCS__ API**（`__API_BASE__/*`）：使用 `$__BOT_TOKEN__` 作为 Bearer
+
 ### 调用方式
 
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
 然后调用 A2A API：
 
   curl -X POST {{SERVER_URL}}/api/a2a \\
-    -H "Authorization: Bearer $""" + _bot_token_env + """\" \\
+    -H "Authorization: Bearer $GRAPE_SESSION_TOKEN" \\
     -H "Content-Type: application/json" \\
     -d '{
       "agent": "coding",
@@ -766,7 +776,7 @@ context 是传给下一个 Agent 的接力说明，应包含：
 3. 建议下一步：需要下一个 Agent 做什么
 
 ⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
-""")
+""".replace("__VCS__", _vcs).replace("__API_BASE__", _api_base).replace("__BOT_TOKEN__", _bot_token_env))
 
     # 角色特定的 A2A 交办规则（按 agent_type 注入，指引何时 A2A 给哪个 Agent）
     _a2a_role_rules = {
@@ -810,7 +820,22 @@ API base URL: {_api_base}
 Never print or reveal the token value.
 """)
 
-    parts.append(_build_output_contract())
+    # 引擎绑定信息（避免 agent 查 /openapi.json 核验引擎）
+    if runtime_id:
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
+                _rt_row = c.fetchone()
+            _engine_name = (_rt_row[0] if _rt_row else "") or "unknown"
+            parts.append(f"\n## 执行引擎\n当前绑定引擎: {_engine_name} (runtime_id={runtime_id})\n"
+                         "引擎绑定信息已通过 prompt 注入，无需查询 /openapi.json 核验。"
+                         "如接口返回 403 属正常安全限制，不应阻塞后续调度。\n")
+        except Exception:
+            pass
+
+    parts.append(_build_output_contract(_rk))
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
 
@@ -865,7 +890,7 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
     - 不含全量技能枚举/中文标题（不在 Role 里展开 get_skill_capabilities）；
     - 注入项目知识基线（§2.1 要求）。
     """
-    parts = [build_chat_role_definition()]
+    parts = [build_chat_role_definition(repo_key)]
     if backend_name:
         parts.append(f"Runtime engine: {backend_name}")
     elif runtime_id:
@@ -973,7 +998,7 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
 
     # Role Definition（task 专属，见 task-vs-general-chat-flow-analysis.md §2.1；
     # 与 general 不同：去掉"创建 Issue 转交流水线"，突出澄清+回帖）
-    parts.append(build_task_role_definition())
+    parts.append(build_task_role_definition(repo_key))
 
     # 用户基本信息（飞书侧前置）
     if user_info:
@@ -1011,6 +1036,18 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     _append_chat_history(parts, history, has_valid_session)
 
     parts.append(f"\n## 本次用户消息\n{user_text}")
+
+    # VCS API 访问说明（与 general chat 一致，按 repo_key 前缀分流 GitHub/GitCode）
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    _api_base = _vcs_api_base(repo_key)
+    parts.append(f"""
+## {_vcs} API Access
+Your token is available as the {_token_env} environment variable.
+  curl -s -H "Authorization: Bearer ***" \\
+    {_api_base}/repos/{{owner}}/{{repo}}/issues
+Never print or reveal the token value.
+""")
 
     _sp = "{{SKILL_DIR}}/chat/SKILL.md"
     parts.append(
@@ -1119,7 +1156,10 @@ def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
         parts.append(f"## 共享知识\n{knowledge}")
 
     parts.append(f"## 用户消息\n{user_message}")
-    parts.append("请用中文简洁回复；如需沉淀共享知识或流程干预，调用对应端点（POST /api/events/{seq}/knowledge、/flow/reset，带 BOT_GITCODE_TOKEN）。")
+    _rk = evt.get("repo_key", "")
+    _bot_token_env = _vcs_bot_token_env(_rk)
+    _seq = evt.get("seq", "")
+    parts.append(f"请用中文简洁回复；如需沉淀共享知识或流程干预，调用对应端点（POST /api/events/{_seq}/knowledge、/flow/reset，带 {_bot_token_env}）。")
     return "\n\n".join(parts), _injected_ids
 
 
@@ -1262,7 +1302,7 @@ def build_scene_recommender_prompt(evt, repo_key: str) -> str:
     parts.append("- A2A 交办 → 禁止")
     parts.append("- 多轮对话/需求澄清 → 禁止")
     parts.append("- 读取项目知识基线 → 禁止")
-    parts.append("- 调用 GitCode API → 禁止")
+    parts.append(f"- 调用 {_vcs_name(repo_key)} API → 禁止")
     parts.append("- 读写文件 → 禁止")
     parts.append("- 输出 JSON 以外的内容 → 禁止")
 
@@ -1277,7 +1317,7 @@ def build_scene_recommender_prompt(evt, repo_key: str) -> str:
 
     parts.append("\n## 硬约束")
     parts.append("1. 只输出 JSON：答复中只能有一个 JSON 块，不得有任何前后文字。")
-    parts.append("2. 不调用任何 API：不访问 GitCode、不调用 A2A、不发评论、不查 Issue。")
+    parts.append(f"2. 不调用任何 API：不访问 {_vcs_name(repo_key)}、不调用 A2A、不发评论、不查 Issue。")
     parts.append("3. 不读取任何文件：所有信息已在 prompt 中注入。")
     parts.append("4. scene_id 必须来自列表：只能填写 prompt 注入的场景列表中存在的 scene_id。")
     parts.append("5. 用户路由规则优先于你的语义判断：规则命中时必须遵从，不要用语义匹配覆盖。")

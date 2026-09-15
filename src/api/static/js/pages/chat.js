@@ -54,11 +54,12 @@ function renderChat(openConvId) {
         <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
       <div id="chatImgPreview" style="display:none;padding:6px 12px;border-top:1px solid var(--b);flex-wrap:wrap;gap:6px"></div>
-      <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" data-tooltip="${I18N.t('chat.video_tooltip')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><input type="file" accept="video/*" style="display:none" onchange="_onChatVideoSelect(this)"></label><textarea id="chatInput" rows="1" placeholder="${I18N.t('chat.placeholder')}" style="flex:1" oninput="_autoResizeTextarea(this)"></textarea><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
+      <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" data-tooltip="${I18N.t('chat.video_tooltip')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><input type="file" accept="video/*" style="display:none" onchange="_onChatVideoSelect(this)"></label><textarea id="chatInput" rows="1" placeholder="${I18N.t('chat.placeholder')}" style="flex:1" oninput="_autoResizeTextarea(this)"></textarea><button class="chat-inpicker-btn" id="chatModelBtn" onclick="toggleChatPicker('model')" data-tooltip="${I18N.t('chat.engine_config_tip')}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="2" x2="9" y2="4"/><line x1="15" y1="2" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="22"/><line x1="15" y1="20" x2="15" y2="22"/><line x1="20" y1="9" x2="22" y2="9"/><line x1="20" y1="14" x2="22" y2="14"/><line x1="2" y1="9" x2="4" y2="9"/><line x1="2" y1="14" x2="4" y2="14"/></svg></button><button class="chat-inpicker-btn" id="chatSkillBtn" onclick="toggleChatPicker('skill')" data-tooltip="${I18N.t('chat.skill_config_tip')}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
     </div>
   </div>`;
   loadConversations(true);  // auto-select first
   setupChatStream();
+  loadChatConfigData();
   // Issue #63: 切回来时如果有进行中的接入任务，恢复轮询
   if (typeof _onboardTaskId !== 'undefined' && _onboardTaskId) pollOnboardStatus();
 }
@@ -71,9 +72,159 @@ function _switchChatSkillScope(scope) {
 }
 
 function _loadChatSkillOptions() {
-  const skillSelect = document.getElementById('cfgSkill');
-  if (!skillSelect) return;
-  const currentSkillId = skillSelect.dataset.skillId || '0';
+  // 不再依赖 DOM 中的 select 元素，仅保留函数供 im_channel.js 兼容
+  return;
+}
+
+// ====== Chat Agent 配置：弹出式选择器（模型 + 技能）======
+let _chatConfigData = null;  // 缓存后端返回的配置数据
+let _chatPickerOpen = null;  // 'model' | 'skill' | null
+
+function loadChatConfigData() {
+  const _repo = app.currentRepo();
+  const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
+  API.get('/chat/config' + _qs).then(d => {
+    _chatConfigData = d;
+    _chatSkillScope = (d.skill_scope === 'repo') ? 'repo' : (d.skill_scope === 'user') ? 'user' : 'official';
+    // 更新按钮标签
+    _updateModelBtnLabel(d);
+    _updateSkillBtnLabel(d);
+    // 加载技能选项到隐藏 select
+    _loadChatSkillOptions();
+  }).catch(() => {});
+}
+
+function _updateModelBtnLabel(d) {
+  // 按钮已简化为纯图标，无需更新文字
+}
+
+function _updateSkillBtnLabel(d) {
+  // 按钮已简化为纯图标，无需更新文字
+}
+
+function toggleChatPicker(type) {
+  // 关闭已打开的弹窗
+  _closeChatPicker();
+  if (_chatPickerOpen === type) {
+    _chatPickerOpen = null;
+    return;
+  }
+  _chatPickerOpen = type;
+  const btn = document.getElementById(type === 'model' ? 'chatModelBtn' : 'chatSkillBtn');
+  if (!btn) return;
+  btn.classList.add('active');
+
+  // 创建浮层
+  const overlay = document.createElement('div');
+  overlay.className = 'chat-picker-overlay';
+  overlay.onclick = function(e) { if (e.target === overlay) _closeChatPicker(); };
+
+  const pop = document.createElement('div');
+  pop.className = 'chat-picker-pop';
+
+  if (type === 'model') {
+    pop.innerHTML = _buildModelPicker();
+  } else {
+    pop.innerHTML = _buildSkillPicker();
+  }
+
+  overlay.appendChild(pop);
+  document.body.appendChild(overlay);
+
+  // 定位到按钮上方
+  const rect = btn.getBoundingClientRect();
+  pop.style.position = 'fixed';
+  pop.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+  pop.style.left = Math.min(rect.left, window.innerWidth - 300) + 'px';
+
+  requestAnimationFrame(function() { pop.classList.add('show'); });
+
+  // 绑定选择事件
+  if (type === 'model') {
+    pop.querySelectorAll('.chat-picker-item').forEach(item => {
+      item.addEventListener('click', function() {
+        const backend = this.dataset.value;
+        const rid = this.dataset.rid || '';
+        _saveModelConfig(backend, rid);
+        _closeChatPicker();
+      });
+    });
+  } else {
+    // 技能 scope 切换
+    const scopeSel = pop.querySelector('#pickerSkillScope');
+    if (scopeSel) {
+      scopeSel.addEventListener('change', function() {
+        _chatSkillScope = this.value;
+        const skillList = pop.querySelector('#pickerSkillList');
+        if (skillList) _renderSkillListItems(skillList);
+      });
+    }
+    const skillList = pop.querySelector('#pickerSkillList');
+    if (skillList) _renderSkillListItems(skillList);
+  }
+}
+
+function _closeChatPicker() {
+  const overlay = document.querySelector('.chat-picker-overlay');
+  if (overlay) overlay.remove();
+  const modelBtn = document.getElementById('chatModelBtn');
+  if (modelBtn) modelBtn.classList.remove('active');
+  const skillBtn = document.getElementById('chatSkillBtn');
+  if (skillBtn) skillBtn.classList.remove('active');
+  _chatPickerOpen = null;
+}
+
+function _buildModelPicker() {
+  const d = _chatConfigData || {};
+  const backend = d.backend || {};
+  const backends = d._backends || [];
+  const curType = (backend.type || '').toLowerCase();
+  let items;
+  if (backends.length === 0) {
+    items = `<div style="padding:16px;text-align:center;color:var(--t3);font-size:12px">${I18N.t('common.loading')}</div>`;
+  } else {
+    items = backends.map(b => {
+      const isActive = b.name === curType || b.name.startsWith(curType + '-') || curType === b.name.toLowerCase();
+      const icon = b.scope === 'local' ? '🖥' : '☁';
+      return `<div class="chat-picker-item${isActive ? ' active' : ''}" data-value="${b.name}" data-rid="${b.runtime_id || ''}" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .15s;border-radius:8px${isActive ? ';background:var(--a)11' : ''}">
+        <span style="font-size:14px">${icon}</span>
+        <span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.display_name || b.name}</span>
+        ${isActive ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--a)" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
+      </div>`;
+    }).join('');
+  }
+  return `<div style="font-size:11px;font-weight:700;color:var(--t3);padding:8px 14px 6px;letter-spacing:.3px;text-transform:uppercase">${I18N.t('chat.engine_label')}</div><div style="max-height:280px;overflow-y:auto;padding:0 6px 6px">${items}</div>`;
+}
+
+function _buildSkillPicker() {
+  return `<div style="padding:8px 14px 6px">
+    <div style="font-size:11px;font-weight:700;color:var(--t3);margin-bottom:8px;letter-spacing:.3px;text-transform:uppercase">${I18N.t('chat.skill_label')}</div>
+    <div style="display:flex;gap:4px;margin-bottom:8px">
+      ${['official','repo','user'].map(s => `<button class="chat-scope-tab${_chatSkillScope === s ? ' active' : ''}" data-scope="${s}" onclick="_chatPickerScope('${s}')" style="flex:1;padding:5px 8px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:${_chatSkillScope === s ? 'var(--a)' : 'var(--c)'};color:${_chatSkillScope === s ? '#fff' : 'var(--t2)'};cursor:pointer;transition:all .15s">${I18N.t('chat.scope_short.' + (s === 'official' ? 'global' : s))}</button>`).join('')}
+    </div>
+    <div id="pickerSkillList" style="max-height:220px;overflow-y:auto"></div>
+  </div>`;
+}
+
+function _chatPickerScope(scope) {
+  _chatSkillScope = scope;
+  const pop = document.querySelector('.chat-picker-pop');
+  if (!pop) return;
+  // 更新 tab 样式
+  pop.querySelectorAll('.chat-scope-tab').forEach(tab => {
+    const s = tab.dataset.scope;
+    tab.classList.toggle('active', s === scope);
+    tab.style.background = s === scope ? 'var(--a)' : 'var(--c)';
+    tab.style.color = s === scope ? '#fff' : 'var(--t2)';
+  });
+  const skillList = pop.querySelector('#pickerSkillList');
+  if (skillList) _renderSkillListItems(skillList);
+}
+
+function _renderSkillListItems(container) {
+  const d = _chatConfigData || {};
+  const skillId = d.skill_id || 0;
+  container.innerHTML = '<div style="padding:8px;text-align:center;color:var(--t3);font-size:11px">' + I18N.t('common.loading') + '</div>';
   let repo = '';
   try {
     const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
@@ -82,21 +233,74 @@ function _loadChatSkillOptions() {
   const scope = _chatSkillScope || 'official';
   let qs = '?scope=' + scope;
   if (repo) qs += '&repo=' + encodeURIComponent(repo);
-  API.get('/skills' + qs).then(d => {
-    const allSkills = d.skills || [];
+  API.get('/skills' + qs).then(data => {
+    const allSkills = data.skills || [];
     const filtered = allSkills.filter(s => s.agent_type === 'chat');
-    const matchCurrent = filtered.find(s => String(s.id) === currentSkillId);
-    const defaultOpt = scope === 'official' ? '<option value="0">' + I18N.t('chat.skill.default_official') + '</option>' : '';
-    let html = defaultOpt +
-      filtered.map((s, i) => {
-        const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
-        return `<option value="${s.id}" ${selected ? 'selected' : ''}>${s.display_name || s.name}</option>`;
-      }).join('');
-    if (filtered.length === 0) {
-      html = `<option value="0" disabled>${scope === 'repo' ? I18N.t('chat.skill.no_repo_skill') : I18N.t('chat.skill.no_personal_skill')}</option>`;
+    let html = '';
+    if (scope === 'official') {
+      const isActive = !skillId || skillId === 0;
+      html += `<div class="chat-picker-item${isActive ? ' active' : ''}" data-value="0" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .15s;border-radius:8px${isActive ? ';background:var(--a)11' : ''}">
+        <span style="flex:1;font-size:12px">${I18N.t('chat.skill.default_official')}</span>
+        ${isActive ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--a)" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
+      </div>`;
     }
-    skillSelect.innerHTML = html;
-  }).catch(() => {});
+    if (filtered.length === 0 && scope !== 'official') {
+      html = `<div style="padding:12px;text-align:center;color:var(--t3);font-size:11px">${scope === 'repo' ? I18N.t('chat.skill.no_repo_skill') : I18N.t('chat.skill.no_personal_skill')}</div>`;
+    }
+    html += filtered.map(s => {
+      const isActive = String(s.id) === String(skillId);
+      return `<div class="chat-picker-item${isActive ? ' active' : ''}" data-value="${s.id}" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .15s;border-radius:8px${isActive ? ';background:var(--a)11' : ''}">
+        <span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.display_name || s.name}</span>
+        ${isActive ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--a)" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
+      </div>`;
+    }).join('');
+    container.innerHTML = html;
+    container.querySelectorAll('.chat-picker-item').forEach(item => {
+      item.addEventListener('click', function() {
+        const sid = parseInt(this.dataset.value) || 0;
+        _saveSkillConfig(sid);
+        _closeChatPicker();
+      });
+    });
+  }).catch(() => {
+    container.innerHTML = '<div style="padding:12px;text-align:center;color:var(--t3);font-size:11px">' + I18N.t('common.load_failed') + '</div>';
+  });
+}
+
+function _saveModelConfig(backend, rid) {
+  const _repo = app.currentRepo();
+  const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
+  const _body = {backend};
+  if (rid) _body.runtime_id = parseInt(rid, 10);
+  API.put('/chat/config' + _qs, _body).then(() => {
+    app.showToast(I18N.t('chat.config.saved'));
+    if (_chatConfigData) {
+      _chatConfigData.backend = {type: backend};
+      _updateModelBtnLabel(_chatConfigData);
+    }
+  }).catch(e => app.showToast(I18N.t('chat.config.save_failed', {msg: e.message})));
+}
+
+function _saveSkillConfig(skillId) {
+  if (_chatSkillScope !== 'official' && !skillId) {
+    if (app && app.showToast) app.showToast(I18N.t('chat.skill.select_required'));
+    return;
+  }
+  const _repo = app.currentRepo();
+  const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
+  const _body = {skill_id: skillId};
+  API.put('/chat/config' + _qs, _body).then(() => {
+    app.showToast(I18N.t('chat.config.saved'));
+    if (_chatConfigData) {
+      _chatConfigData.skill_id = skillId;
+      _updateSkillBtnLabel(_chatConfigData);
+    }
+  }).catch(e => app.showToast(I18N.t('chat.config.save_failed', {msg: e.message})));
+}
+
+function saveChatConfig() {
+  // 兼容旧调用（onboard 完成后刷新）
+  loadChatConfigData();
 }
 
 function loadConversations(autoSelect) {
@@ -114,7 +318,7 @@ function loadConversations(autoSelect) {
   }
   const repoKey = _issueParam && _issueParam.repo
     ? _issueParam.repo
-    : (_openConvId ? '' : (repo ? repo.fullName : ''));
+    : (_openConvId ? '' : (repo ? (repo.repoKey || repo.fullName) : ''));
   API.get('/chat/conversations' + (repoKey ? '?repo_key=' + encodeURIComponent(repoKey) : '')).then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
@@ -159,7 +363,7 @@ function loadConversations(autoSelect) {
 
 function newConversation() {
   const repo = app.currentRepo();
-  API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
+  API.post('/chat/conversations', repo ? {repo_key: (repo.repoKey || repo.fullName)} : {}).then(d => {
     _currentConvId = d.conversation_id;
     loadConversations();
     var _cb = document.getElementById('chatBody');
@@ -451,7 +655,7 @@ function sendChatStream() {
   if (!input.value.trim() && _pendingImages.length === 0 && !_pendingVideo) return;
   if (!_currentConvId) {
     const repo = app.currentRepo();
-    API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
+    API.post('/chat/conversations', repo ? {repo_key: (repo.repoKey || repo.fullName)} : {}).then(d => {
       _currentConvId = d.conversation_id;
       loadConversations();
       doSend(input, body);
@@ -495,7 +699,7 @@ function doSend(input, body) {
   // 1. submit → 立即获取 task_id（视频理解在 agent_fn 内部异步执行，submit 不阻塞）
   API.post('/chat/submit', {
     message: msg || '请帮我分析这些图片',
-    repo_key: repo ? repo.fullName : '',
+    repo_key: repo ? (repo.repoKey || repo.fullName) : '',
     conversation_id: _currentConvId,
     image_data: imgs.length > 0 ? JSON.stringify(imgs.map(function(i) { return i.data })) : '',
     video_data: vid || '',
@@ -838,7 +1042,7 @@ function closeOnboardModal(refresh) {
     if (_onboardBotType === 'vod_bot' && typeof window.refreshVodOnboard === 'function') {
       window.refreshVodOnboard();
     } else {
-      loadSideConfig();
+      loadChatConfigPanel();
     }
   }
 }

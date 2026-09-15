@@ -251,7 +251,7 @@ class TestKnowledge:
         from src.prompt_builder import build_conversation_prompt
         evt = {"seq": seq, "repo_key": _REPO_KEY, "issue_id": "#5", "agent_type": "vod",
                "event_type": "issue_opened", "title": "t", "status": "completed", "result": "r"}
-        prompt = build_conversation_prompt(evt, "你好", [], "vod", 5)
+        prompt, _ = build_conversation_prompt(evt, "你好", [], "vod", 5)
         assert "此仓库 PR 走内部评审" in prompt
 
 

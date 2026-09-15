@@ -1179,7 +1179,6 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
                     "AND status IN ('running','dispatched') "
                     "AND event_type != 'a2a_event' "
-                    "AND source != 'task_center' "
                     "ORDER BY seq DESC LIMIT 1",
                     (repo_key, issue_id, agent_type))
                 _existing_evt = _dc.fetchone()
@@ -1513,15 +1512,15 @@ def _parse_parent_issue_from_payload(payload: dict) -> str:
 def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str:
     """Agent 工作目录（按 Issue 统一隔离，见 workdir-issue-centric-design.md §二）。
 
-    - 有关联 Issue：#5 → {owner}/{repo}/issues/5/{agent_type}/
-    - 无关联 Issue（push/#0）→ {owner}/{repo}/{agent_type}-agent（兼容现状）
+    - 有关联 Issue：#5 → {provider}/{owner}/{repo}/issues/5/{agent_type}/
+    - 无关联 Issue（push/#0）→ {provider}/{owner}/{repo}/{agent_type}-agent（兼容现状）
     """
-    from src.repo_key import split_owner_repo
-    owner, rname = split_owner_repo(repo_key)
+    from src.repo_key import workspace_repo_dir
+    _base = workspace_repo_dir(repo_key)
     num = _issue_num_from(issue_id)
     if num:
-        return os.path.join(WORKSPACE_DIR, owner, rname, "issues", num, agent_type)
-    return os.path.join(WORKSPACE_DIR, owner, rname, f"{agent_type}-agent")
+        return os.path.join(_base, "issues", num, agent_type)
+    return os.path.join(_base, f"{agent_type}-agent")
 
 
 def _fail_event(seq: int, reason: str):
@@ -1705,9 +1704,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     try:
         _num = _issue_num_from(issue_id)
         if _num and oc_session_id:
-            from src.repo_key import split_owner_repo
-            _o, _r = split_owner_repo(repo_key)
-            _expected_ws = os.path.join(WORKSPACE_DIR, _o, _r, "issues", _num, agent_type)
+            from src.repo_key import workspace_repo_dir
+            _expected_ws = os.path.join(workspace_repo_dir(repo_key), "issues", _num, agent_type)
             if ws != _expected_ws:
                 log.warning(f"Pipeline enqueue: cwd/session mismatch, issue={issue_id} ws={ws} expected={_expected_ws}")
     except Exception:

@@ -277,8 +277,9 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             pass
 
     prompt = _build_vod_prompt(evt, skill, skill_path)
-    from src.repo_key import from_repo_key
-    wsd = os.path.join(WORKSPACE_DIR, "vod", from_repo_key(repo_key).replace("/", "_"))
+    from src.repo_key import workspace_repo_dir, parse_repo_key, from_repo_key
+    _provider, _, _ = parse_repo_key(repo_key)
+    wsd = os.path.join(WORKSPACE_DIR, "vod", _provider or "gitcode", from_repo_key(repo_key).replace("/", "_"))
     os.makedirs(wsd, exist_ok=True)
 
     final_text = ""

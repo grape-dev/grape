@@ -99,7 +99,7 @@ def get_template_readme(template_id: str, user: dict = Depends(require_no_sessio
                 content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
                 return {"content": content, "source": "github"}
         else:
-            url = f"https://api.gitcode.com/api/v5/repos/{source_repo}/contents/README.md"
+            url = f"https://gitcode.com/api/v5/repos/{source_repo}/contents/README.md"
             gitcode_pat = os.environ.get("GITCODE_PAT", "")
             headers = {}
             if gitcode_pat:
@@ -109,7 +109,7 @@ def get_template_readme(template_id: str, user: dict = Depends(require_no_sessio
                 content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
                 return {"content": content, "source": "gitcode"}
             # 尝试小写 readme.md
-            url2 = f"https://api.gitcode.com/api/v5/repos/{source_repo}/contents/readme.md"
+            url2 = f"https://gitcode.com/api/v5/repos/{source_repo}/contents/readme.md"
             r2 = requests.get(url2, headers=headers, timeout=10)
             if r2.status_code == 200:
                 content = base64.b64decode(r2.json().get("content", "")).decode("utf-8")

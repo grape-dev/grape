@@ -11,15 +11,14 @@ def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     （同一 conv_id 同一路径，见 web-chat-no-response-cwd-fix.md §4）。
     远端 worker 执行时按 _remap_cwd 映射到各自用户 home；本机 direct 执行 root 可写。
     """
-    from src.repo_key import parse_repo_key
-    _, owner, repo = parse_repo_key(repo_key or "")
-    path = os.path.join(WORKSPACE_DIR, owner or "__none__", repo or "__none__",
+    from src.repo_key import workspace_repo_dir
+    path = os.path.join(workspace_repo_dir(repo_key or ""),
                         "chat", str(user_id), conv_id)
     os.makedirs(path, exist_ok=True)
     return path
 # 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
 _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
@@ -51,6 +50,62 @@ class FeedbackBody(BaseModel):
 
 
 # ====== Conversations ======
+
+@router.get("/analyze-image")
+async def analyze_image(request: Request):
+    """供 agent curl 调用：下载图片 → VLM 分析 → 返回文字描述。
+
+    agent 在 issue body 里看到图片链接后，curl 调用本端点获取图片内容描述。
+    VLM 管线三级降级：qwen2.5-vl-72b 真视觉 → OCR+LLM 猜图 → 纯 OCR。
+
+    注意：用 Request 而非 url 参数，因为 OBS 签名 URL 含未编码的 &（AccessKeyId=…&Signature=…），
+    FastAPI 的 query parameter 解析会按 & 截断，导致 url 只拿到第一个参数。
+    从原始 query string 手动提取 url= 后的完整内容。
+    """
+    from urllib.parse import urlparse
+    import tempfile, urllib.request
+
+    # 从原始 query string 提取 url= 后的完整值（含 & 未编码的 OBS 签名参数）
+    raw_qs = request.url.query
+    if raw_qs.startswith("url="):
+        url = raw_qs[4:]
+    else:
+        return {"error": "missing url parameter"}
+
+    # 域名白名单（防 SSRF）
+    parsed = urlparse(url)
+    _allowed = ("cdn-img.gitcode.com", "cdn-files.gitcode.com")
+    _allowed_suffixes = (".myhuaweicloud.com",)  # OBS 附件域名（桶名动态）
+    if parsed.hostname not in _allowed and not any(parsed.hostname.endswith(s) for s in _allowed_suffixes):
+        return {"error": "domain not allowed", "url": url}
+
+    # 下载图片到临时文件
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    try:
+        urllib.request.urlretrieve(url, tmp.name)
+    except Exception as e:
+        os.unlink(tmp.name)
+        return {"error": f"download failed: {e}", "url": url}
+
+    # 调 image_understanding 分析
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("image_understanding",
+            os.path.join(os.path.dirname(__file__), "..", "..", "agent", "image_understanding.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        desc = _mod.understand_image(tmp.name)
+    except Exception as e:
+        log.warning(f"analyze-image: understanding failed: {e}")
+        desc = ""
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+    return {"url": url, "description": desc or "(无法分析图片内容)"}
+
 
 @router.get("/image/{conv_id}/{filename}")
 def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")):
