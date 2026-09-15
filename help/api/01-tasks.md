@@ -1,6 +1,8 @@
 # Tasks 任务接口（/api/tasks）
 
-> 对外公开，认证：`get_current_user_or_api_key`（JWT 会话 / 会话 token（`tk_`）/ API Key 任一）。
+> 对外公开，认证：`get_current_user_or_api_key`。
+> scope（x-token-scope）：`mine/start/status/complete/repo/{owner}/{repo}` = **dual**（三通道全放行）；
+> `confirm-done/cancel/resume/clarifications/clarify/pipeline` = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 
 ## GET /api/tasks/mine — 当前用户任务列表
 
