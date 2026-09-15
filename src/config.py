@@ -448,10 +448,10 @@ def replace_skill_dir_placeholders(prompt: str, base_dir: str = "") -> str:
 
 
 # ====== Agent 文件系统隔离（组件2：bwrap 锁）======
-# 默认开启（关 = 回滚，设 GRAPE_AGENT_SANDBOX=off）；bwrap 沙箱隔离 agent 子进程。
-# 启用后 agent 子进程套 bwrap：只挂「基础系统 + 引擎运行时 + 工位 cwd」，
-# 敏感路径（configs/、data/sessions.db、.env、/root、~/.grape、其他仓库/issue）天然不可见。
-GRAPE_AGENT_SANDBOX = os.environ.get("GRAPE_AGENT_SANDBOX", "on").lower() in ("1", "true", "on", "yes")
+# 默认关闭（开 = 设 GRAPE_AGENT_SANDBOX=on）；bwrap 沙箱隔离 agent 子进程。
+# 关闭原因：Issue #168 — bwrap 白名单不完整，DevStage worker 三引擎全部失败。
+# 白名单修复由 Issue #156 系统性解决后方可重新开启。
+GRAPE_AGENT_SANDBOX = os.environ.get("GRAPE_AGENT_SANDBOX", "off").lower() in ("1", "true", "on", "yes")
 
 # bwrap 白名单（只读）——基础系统：动态库 / CA 证书 / DNS / nsswitch / 基础命令。
 # 注意：/run 必须挂（/etc/resolv.conf 是 symlink → /run/systemd/resolve/stub-resolv.conf，
