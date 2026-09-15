@@ -22,23 +22,6 @@ import threading as _threading
 _active_procs: set[subprocess.Popen] = set()
 _active_procs_lock = _threading.Lock()
 
-# 沙箱资源注册表（Issue #139）：供 terminate_active_agents 清理
-_active_sandboxes: list = []
-_active_sandboxes_lock = _threading.Lock()
-
-
-def register_sandbox(sb_ctx):
-    """注册沙箱上下文，供 terminate_active_agents 清理。"""
-    with _active_sandboxes_lock:
-        _active_sandboxes.append(sb_ctx)
-
-
-def unregister_sandbox(sb_ctx):
-    """注销沙箱上下文（任务正常结束后调用）。"""
-    with _active_sandboxes_lock:
-        if sb_ctx in _active_sandboxes:
-            _active_sandboxes.remove(sb_ctx)
-
 
 def _track_proc(proc: subprocess.Popen):
     with _active_procs_lock:
@@ -51,22 +34,11 @@ def _untrack_proc(proc: subprocess.Popen):
 
 
 def terminate_active_agents(grace_seconds: int = 5):
-    """服务停机时终止所有运行中的 agent 子进程 + 清理沙箱资源。
+    """服务停机时终止所有运行中的 agent 子进程（opencode 等）。
 
     子进程被杀 → stdout 管道 EOF → executor 线程的 reader/主循环 break → 线程结束，
     uvicorn `shutdown_default_executor()` 不再等待 → 服务快速退出，避免 stop-sigterm 超时。
     """
-    # 先清理沙箱资源（cgroup + socket + 代理进程）
-    with _active_sandboxes_lock:
-        sandboxes = list(_active_sandboxes)
-        _active_sandboxes.clear()
-    for sb in sandboxes:
-        try:
-            sb.cleanup()
-        except Exception:
-            pass
-
-    # 再杀 Agent 进程
     with _active_procs_lock:
         procs = list(_active_procs)
         _active_procs.clear()
@@ -298,9 +270,6 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                 else:
                     for k, v in cfg.items():
                         env[k.upper()] = str(v)
-                    # provider=openai: api_key → OPENAI_API_KEY（codex 读此变量）
-                    if provider == "openai" and cfg.get("api_key"):
-                        env["OPENAI_API_KEY"] = str(cfg["api_key"])
         except Exception as e:
             log.warning(f"Failed to inject user credentials: {e}")
 
@@ -420,9 +389,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         return
 
     # 单次进程执行：返回 (full_text, new_session_id, exit_code, stderr, error_events)
-    _sandbox_ctx = None  # Issue #139: 提到 stream_agent 层，供异常路径清理
     def _run_once(use_session_id: str):
-        nonlocal _sandbox_ctx
         # codearts 方案E2: 每次执行启动独立的 codearts serve
         # serve 信息存在局部变量 _serve_port/_serve_proc 中，不写到单例 backend 上
         # build_args 从 backend._serve_port 读取（同一 _run_once 内设置，串行无并发问题）
@@ -508,45 +475,13 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             log.info(f"{label}hermes HERMES_HOME isolated: {_iso_home} (state.db=:memory: via .pth)")
 
         # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
-        # Issue #139：网络隔离模式 — prepare_sandbox 创建代理/cgroup/socket
         _cmd = [agent_cmd] + args
         try:
-            from src.config import GRAPE_SANDBOX_NET
-            # Node.js CLI 引擎（opencode/codearts/codex）的 HTTP 客户端不兼容
-            # bwrap --unshare-net 代理模式（bridge localhost:3128 → Unix socket），
-            # 设 HTTPS_PROXY 后 opencode 连不上 API → "Cannot connect to API"。
-            # 仅对 hermes（Python ACP）启用网络隔离。
-            _net_backends = {"hermes"}
-            if GRAPE_SANDBOX_NET and backend.name in _net_backends:
-                from src.agent.sandbox import prepare_sandbox
-                _sandbox_ctx = prepare_sandbox(
-                    task_id=use_session_id or f"task-{os.getpid()}",
-                    cwd=cwd,
-                    backend_name=backend.name,
-                )
-                if _sandbox_ctx:
-                    register_sandbox(_sandbox_ctx)
-                    log.info(
-                        f"{label}{backend.name} sandbox net isolated "
-                        f"(socket={_sandbox_ctx.socket_path})"
-                    )
-
             from src.agent.sandbox import build_bwrap_cmd
-            _wrap = build_bwrap_cmd(cwd, backend_name=backend.name, sandbox_ctx=_sandbox_ctx)
+            _wrap = build_bwrap_cmd(cwd, backend_name=backend.name)
             if _wrap:
-                if _sandbox_ctx and _sandbox_ctx.net_enabled:
-                    # 网络隔离模式：bwrap 命令改为启动脚本（桥接 + trap + Agent）
-                    from src.agent.sandbox import _build_in_sandbox_script
-                    import shlex as _shlex
-                    agent_full = " ".join(_shlex.quote(arg) for arg in _cmd)
-                    script = _build_in_sandbox_script(agent_full, _sandbox_ctx.bridge_script_path)
-                    _cmd = _wrap + ["/bin/sh", "-c", script]
-                else:
-                    _cmd = _wrap + _cmd
-                if _sandbox_ctx:
-                    log.info(f"{label}{backend.name} sandboxed via bwrap+net (cwd={cwd})")
-                else:
-                    log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
+                _cmd = _wrap + _cmd
+                log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
         except Exception as _bw_e:
             log.warning(f"{label}{backend.name} bwrap wrap failed, running unsandboxed: {_bw_e}")
 
@@ -557,13 +492,6 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
         )
         _track_proc(proc)
-
-        # Issue #139：Agent 进程启动后，把 PID 写入 cgroup
-        if _sandbox_ctx and _sandbox_ctx._cgroup and _sandbox_ctx._cgroup.created:
-            try:
-                _sandbox_ctx._cgroup.attach_pid(proc.pid)
-            except Exception as _cg_e:
-                log.warning(f"{label}cgroup attach pid failed: {_cg_e}")
         if backend.prompt_via_stdin:
             proc.stdin.write(prompt.encode("utf-8"))
             proc.stdin.close()
@@ -799,34 +727,6 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             except Exception:
                 pass
 
-        # Issue #139：OOM 检测 + 资源统计 + 沙箱资源清理
-        _exit_code = proc.returncode if proc.returncode is not None else -1
-        if _exit_code == 137:
-            log.error(f"{label}{backend.name} OOM killed (cgroup memory limit)")
-        if _sandbox_ctx:
-            # 读取 cgroup 资源使用统计（CPU/内存峰值），写入审计日志
-            if _sandbox_ctx._cgroup and _sandbox_ctx._cgroup.created:
-                try:
-                    stats = _sandbox_ctx._cgroup.get_stats()
-                    if stats and _sandbox_ctx._audit_log:
-                        _sandbox_ctx._audit_log.write({
-                            "ts": __import__("datetime").datetime.now(
-                                __import__("datetime").timezone.utc
-                            ).isoformat(),
-                            "task_id": _sandbox_ctx.task_id,
-                            "event": "resource_stats",
-                            "exit_code": _exit_code,
-                            "oom": _exit_code == 137,
-                            **stats,
-                        })
-                except Exception as _stats_e:
-                    log.warning(f"{label}cgroup get_stats failed: {_stats_e}")
-            from src.agent.sandbox import cleanup_sandbox
-            from src.agent.executor import unregister_sandbox
-            cleanup_sandbox(_sandbox_ctx)
-            unregister_sandbox(_sandbox_ctx)
-            _sandbox_ctx = None
-
         yield ("done", {
             "exit_code": proc.returncode, "text": _redact(full_text, _tokens),
             "oc_session_id": new_session_id,
@@ -843,25 +743,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     run_gen = _run_once(session_id)
     done = None
     _forwarded_done = False
-    try:
-        for evt_type, data in run_gen:
-            if evt_type == "done":
-                done = data
-            else:
-                yield (evt_type, data)
-    except Exception:
-        # Issue #139 fix: 异常路径也清理沙箱资源
-        if _sandbox_ctx:
-            from src.agent.sandbox import cleanup_sandbox
-            unregister_sandbox(_sandbox_ctx)
-            cleanup_sandbox(_sandbox_ctx)
-        raise
+    for evt_type, data in run_gen:
+        if evt_type == "done":
+            done = data
+        else:
+            yield (evt_type, data)
     if done is None:
-        # Issue #139 fix: generator 被关闭但没 yield done — 清理沙箱
-        if _sandbox_ctx:
-            from src.agent.sandbox import cleanup_sandbox
-            unregister_sandbox(_sandbox_ctx)
-            cleanup_sandbox(_sandbox_ctx)
         return
 
     _stderr = (done.get("stderr") or "").lower()
@@ -885,25 +772,13 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         log.warning(f"{label}{backend.name} session {session_id[:20]}... invalid/not-found (exit={done.get('exit_code')} empty-out), retrying without session")
         run_gen2 = _run_once("")
         done2 = None
-        try:
-            for evt_type, data in run_gen2:
-                if evt_type == "done":
-                    done2 = data
-                else:
-                    yield (evt_type, data)
-        except Exception:
-            if _sandbox_ctx:
-                from src.agent.sandbox import cleanup_sandbox
-                unregister_sandbox(_sandbox_ctx)
-                cleanup_sandbox(_sandbox_ctx)
-            raise
-        if done2 is None:
-            if _sandbox_ctx:
-                from src.agent.sandbox import cleanup_sandbox
-                unregister_sandbox(_sandbox_ctx)
-                cleanup_sandbox(_sandbox_ctx)
-            return  # 二次重跑也没结果，不 yield done
-        done = done2
+        for evt_type, data in run_gen2:
+            if evt_type == "done":
+                done2 = data
+            else:
+                yield (evt_type, data)
+        if done2 is not None:
+            done = done2
     yield ("done", done)
 
 
