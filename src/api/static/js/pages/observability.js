@@ -410,7 +410,7 @@ function renderOverview(ops, rt) {
       runtimeTable += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
     }
     runtimeTable += '</div>';
-    runtimeTable += '<div id="rt-pager">' + _paginationWithPageSizeHTML(_runtimePage, _rtTotalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()', _runtimePageSize, '_runtimePageSize', '_runtimePage=0;_rerenderRuntimeTable()') + '</div>';
+    runtimeTable += '<div id="rt-pager">' + (_filteredRuntimes.length > 0 ? _paginationWithPageSizeHTML(_runtimePage, _rtTotalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()', _runtimePageSize, '_runtimePageSize', '_runtimePage=0;_rerenderRuntimeTable()') : '') + '</div>';
   }
 
   return `

@@ -194,11 +194,20 @@ test('updateOverview: \u4ec5\u904d\u5386\u5f53\u524d\u9875\u5143\u7d20', () => {
   assert.strictEqual(m.result, true, 'updateOverview \u5e94\u8fd4\u56de true');
 });
 
-test('\u9875\u7801\u8d8a\u754c\u81ea\u52a8\u94b3\u5236: _workerPage=99 + 15\u6761 \u2192 \u91cd\u7f6e\u4e3a 0', () => {
+test('页码越界自动钳制: _workerPage=99 + 15条 → 重置为 0', () => {
   const dom = makeDom();
   const ops = { workers: makeWorkers(15), runtimes: { total:0, online:0, offline:0, list:[] } };
   const m = loadObs(dom, '; _workerPage = 99; renderOverview(' + JSON.stringify(ops) + ', {}); return { _workerPage: _workerPage };');
-  assert.strictEqual(m._workerPage, 0, '\u9875\u7801\u5e94\u88ab\u91cd\u7f6e\u4e3a 0');
+  assert.strictEqual(m._workerPage, 0, '页码应被重置为 0');
+});
+
+test('Runtime 0条: renderOverview 不渲染 Runtime 分页栏（与 _rerenderRuntimeTable/updateOverview 守卫一致）', () => {
+  const dom = makeDom();
+  const m = loadObs(dom);
+  const ops = { workers: { total:0, online:0, offline:0, list:[] }, runtimes: { total:0, online:0, offline:0, list:[] } };
+  const html = m.renderOverview(ops, {});
+  assert.ok(html.includes('observability.no_engine'), '应显示无引擎占位文本');
+  assert.ok(!html.includes('rt-pager') || !html.match(/id="rt-pager">\s*<(?!\/)/), 'Runtime 分页栏应为空或不存在分页按钮');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
