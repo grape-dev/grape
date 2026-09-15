@@ -52,17 +52,30 @@ def _legacy_base_dir(repo_key: str) -> str:
     return os.path.join(WORKSPACE_DIR, repo_key, "issues")
 
 
-def get_event_json_path(repo_key: str, issue_num) -> str:
-    """事件归档路径（去前缀，与 agent 工作区/event_pipeline 统一，见 repo_key.py 约定）。"""
+def _legacy_no_provider_dir(repo_key: str) -> str:
+    """2026-09-14 前的无 provider 隔离路径（{WORKSPACE_DIR}/{owner}/{repo}/issues）。
+    仅供兼容读取；新写入一律走 workspace_repo_dir（含 provider 前缀）。
+    """
     from src.repo_key import from_repo_key
-    return os.path.join(WORKSPACE_DIR, from_repo_key(repo_key), "issues", str(issue_num), "event.json")
+    return os.path.join(WORKSPACE_DIR, from_repo_key(repo_key), "issues")
+
+
+def get_event_json_path(repo_key: str, issue_num) -> str:
+    """事件归档路径（与 agent 工作区/event_pipeline 统一，见 repo_key.py 约定）。"""
+    from src.repo_key import workspace_repo_dir
+    return os.path.join(workspace_repo_dir(repo_key), "issues", str(issue_num), "event.json")
 
 
 def _resolve_event_json_path(repo_key: str, issue_num) -> str:
-    """读优先新路径，缺失时兼容历史带前缀目录。"""
+    """读优先新路径，缺失时兼容历史路径（无 provider 隔离 + 带前缀）。"""
     new = get_event_json_path(repo_key, issue_num)
     if os.path.exists(new):
         return new
+    # 兼容旧无 provider 路径（{WORKSPACE_DIR}/{owner}/{repo}/issues/{n}/event.json）
+    old_no_provider = os.path.join(_legacy_no_provider_dir(repo_key), str(issue_num), "event.json")
+    if os.path.exists(old_no_provider):
+        return old_no_provider
+    # 兼容更早的带前缀路径
     legacy = _legacy_base_dir(repo_key)
     if ":" in (repo_key or "") and os.path.isdir(legacy):
         old = os.path.join(legacy, str(issue_num), "event.json")
@@ -122,8 +135,10 @@ def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[s
             num = _extract_num(ev["issue_id"])
             if num:
                 return num, _resolve_event_json_path(repo_key, num)
-    # 兜底：扫描 issues 目录（新去前缀 + 历史带前缀）
-    for base in (os.path.join(WORKSPACE_DIR, from_repo_key(repo_key), "issues"),
+    # 兜底：扫描 issues 目录（新 provider 隔离 + 旧无 provider + 历史带前缀）
+    from src.repo_key import workspace_repo_dir
+    for base in (os.path.join(workspace_repo_dir(repo_key), "issues"),
+                 _legacy_no_provider_dir(repo_key),
                  _legacy_base_dir(repo_key)):
         if not os.path.isdir(base):
             continue

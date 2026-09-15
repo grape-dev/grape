@@ -1,5 +1,6 @@
 """M0 project-info 服务端化测试（见 multi-issue-isolation-design.md §7.1）"""
 import json
+from pathlib import Path
 import pytest
 
 from src.config import WORKSPACE_DIR, log
@@ -17,9 +18,11 @@ def _clean_tasks():
         db.commit()
 
 
-def _write_project_info(tmp_path, repo="org/test", graph="graph", caps="caps", meta=None):
-    """在 tmp 工作区写入服务端权威 project-info，返回 project-info 目录"""
-    pi = tmp_path / repo / "project-info"
+def _write_project_info(tmp_path, repo="gitcode:org/test", graph="graph", caps="caps", meta=None):
+    """在 tmp 工作区写入服务端权威 project-info，返回 project-info 目录。
+    repo 参数接受 repo_key（含 provider 前缀），路径用 workspace_repo_dir 构造。"""
+    from src.repo_key import workspace_repo_dir
+    pi = Path(workspace_repo_dir(repo)) / "project-info"
     pi.mkdir(parents=True, exist_ok=True)
     (pi / "project-graph.md").write_text(graph, encoding="utf-8")
     (pi / "project-capabilities.md").write_text(caps, encoding="utf-8")
@@ -52,7 +55,8 @@ class TestLoadProjectInfo:
         files, _ = service.load_project_info("gitcode:org/test")
         # 删除 capabilities 后只打包存在的文件
         import os
-        os.remove(os.path.join(str(tmp_path), "org", "test", "project-info", "project-capabilities.md"))
+        from src.repo_key import workspace_repo_dir
+        os.remove(os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", "project-capabilities.md"))
         files2, _ = service.load_project_info("gitcode:org/test")
         assert "project-graph.md" in files2
         assert "project-capabilities.md" not in files2
@@ -113,9 +117,10 @@ class TestPromptProjectInfoSection:
         from src import prompt_builder
         evt = {
             "type": "issue_opened", "source": "gitcode", "repository": "org/test",
+            "repo_key": "gitcode:org/test",
             "title": "t", "body": "b", "actor": "a", "issue_id": "#5", "payload": {},
         }
-        prompt = prompt_builder.build_prompt(evt, [], "", ["issue"])
+        prompt = prompt_builder.build_devops_agent_prompt(evt, [], "", ["issue"])
         assert "项目知识基线" in prompt
         assert "# Graph" in prompt and "# Caps" in prompt
         assert "{{PROJECT_INFO_DIR}}" in prompt
@@ -125,8 +130,9 @@ class TestPromptProjectInfoSection:
         from src import prompt_builder
         evt = {
             "type": "issue_opened", "source": "gitcode", "repository": "org/none",
+            "repo_key": "gitcode:org/none",
             "title": "t", "body": "b", "actor": "a", "issue_id": "#5", "payload": {},
         }
-        prompt = prompt_builder.build_prompt(evt, [], "", ["issue"])
+        prompt = prompt_builder.build_devops_agent_prompt(evt, [], "", ["issue"])
         assert "无项目知识基线" in prompt
         assert "降级" in prompt

@@ -39,15 +39,13 @@ def is_git_agent(agent_type: str) -> bool:
 
 
 def repo_base_dir(repo_key: str) -> str:
-    from src.repo_key import split_owner_repo
-    owner, rname = split_owner_repo(repo_key)
-    return os.path.join(config.WORKSPACE_DIR, owner, rname, "codebase")
+    from src.repo_key import workspace_repo_dir
+    return os.path.join(workspace_repo_dir(repo_key), "codebase")
 
 
 def issue_dir_for(repo_key: str, agent_type: str, issue_num) -> str:
-    from src.repo_key import split_owner_repo
-    owner, rname = split_owner_repo(repo_key)
-    return os.path.join(config.WORKSPACE_DIR, owner, rname, "issues", str(issue_num), agent_type)
+    from src.repo_key import workspace_repo_dir
+    return os.path.join(workspace_repo_dir(repo_key), "issues", str(issue_num), agent_type)
 
 
 def clone_url_for(repo_key: str) -> str:

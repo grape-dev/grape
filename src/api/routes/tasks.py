@@ -849,7 +849,7 @@ def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
     from src.user.repo_manager import _req
     try:
         data = _req("GET",
-                    f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=all&per_page=50&page=1",
+                    f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=all&per_page=50&page=1",
                     api_token)
     except Exception:
         return None
@@ -887,7 +887,7 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
         params["body"] = body_text
     if assignee:
         params["assignee"] = assignee
-    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?access_token={api_token}"
+    url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?access_token={api_token}"
     req = _ur.Request(url, data=_up.urlencode(params).encode(),
                       headers={"Content-Type": "application/x-www-form-urlencoded",
                                "Accept": "application/json"}, method="POST")
@@ -954,7 +954,7 @@ def _gitcode_api_with_refresh(user: dict, api_call_fn, *args, **kwargs):
 def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（追加多任务模式标记）。"""
     import urllib.request as _ur, urllib.error as _uerr, json as _json
-    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
+    url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
     data = _json.dumps({"body": body_text}).encode()
     req = _ur.Request(url, data=data, headers={"Content-Type": "application/json", "Accept": "application/json"}, method="PATCH")
     try:
@@ -1646,7 +1646,7 @@ async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
             import urllib.parse as _up
             import urllib.request as _ur
             import urllib.error as _uerr
-            url = f"https://api.gitcode.com/api/v5/repos/{_owner}/{_rname}/issues/{_issue_num}/comments?access_token={token}"
+            url = f"https://gitcode.com/api/v5/repos/{_owner}/{_rname}/issues/{_issue_num}/comments?access_token={token}"
             req = _ur.Request(url, data=_up.urlencode({"body": _body}).encode(),
                               headers={"Content-Type": "application/x-www-form-urlencoded",
                                        "Accept": "application/json"}, method="POST")

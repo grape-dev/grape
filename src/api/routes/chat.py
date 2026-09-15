@@ -11,9 +11,8 @@ def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     （同一 conv_id 同一路径，见 web-chat-no-response-cwd-fix.md §4）。
     远端 worker 执行时按 _remap_cwd 映射到各自用户 home；本机 direct 执行 root 可写。
     """
-    from src.repo_key import parse_repo_key
-    _, owner, repo = parse_repo_key(repo_key or "")
-    path = os.path.join(WORKSPACE_DIR, owner or "__none__", repo or "__none__",
+    from src.repo_key import workspace_repo_dir
+    path = os.path.join(workspace_repo_dir(repo_key or ""),
                         "chat", str(user_id), conv_id)
     os.makedirs(path, exist_ok=True)
     return path
