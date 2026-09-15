@@ -456,29 +456,8 @@ GRAPE_AGENT_SANDBOX = os.environ.get("GRAPE_AGENT_SANDBOX", "on").lower() in ("1
 # bwrap 白名单（只读）——基础系统：动态库 / CA 证书 / DNS / nsswitch / 基础命令。
 # 注意：/run 必须挂（/etc/resolv.conf 是 symlink → /run/systemd/resolve/stub-resolv.conf，
 # 缺 /run 则沙箱内 DNS 解析失败、出网全 000）。绝对不放行 configs/、data/、WORKSPACE 其他仓库、/root、~/.grape 等敏感/越界路径。
-# /etc 不整体挂载（含 ssh 密钥/数据库密码/nginx 配置等敏感文件），改为白名单子集（BWRAP_RO_ETC_SAFE）。
-# /opt 不整体挂载（含 grape/grape-admin 等敏感目录），只挂 /opt/node（worker 上 node 符号链接目标）。
-BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/run")
-BWRAP_RO_SYSTEM_OPT = ("/opt/node",)  # Node.js 符号链接目标（ro-bind-try，不存在时跳过）
-
-# /etc 安全子集（借鉴 Shadi/isolate 的 safeEtcMounts）— 只挂程序运行必需的文件，
-# 不含 ssh 密钥/shadow/nginx 配置/数据库密码等敏感文件。用 --ro-bind-try（不存在时跳过）。
-# 注意：/etc/resolv.conf 在 WSL 等环境中可能是符号链接指向另一个挂载点，
-# --ro-bind 符号链接会失败。--ro-bind-try 不报错但可能挂载失败。
-# 如果部署到 WSL 环境，需要实现 cross-mount repair（先 --tmpfs 占位再 --ro-bind 真实目标）。
-# grape 当前部署目标是 Linux（非 WSL），resolv.conf 是普通文件，不受影响。
-BWRAP_RO_ETC_SAFE = (
-    "/etc/ssl",                  # CA 证书（HTTPS 验证）
-    "/etc/ca-certificates",      # CA 证书（Debian/Ubuntu）
-    "/etc/pki",                  # CA 证书（RHEL/CentOS）
-    "/etc/resolv.conf",          # DNS 解析
-    "/etc/hosts",                # 本地 DNS 覆盖
-    "/etc/nsswitch.conf",        # 名称解析顺序
-    "/etc/localtime",            # 时区
-    "/etc/ld.so.cache",          # 动态链接器缓存
-    "/etc/ld.so.conf",           # 动态链接器配置
-    "/etc/ld.so.conf.d",         # 动态链接器配置目录
-)
+# /etc 整体挂载（含 resolv.conf / hosts / ssl 证书等基础配置）。
+BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/run")
 
 # bwrap 白名单（只读）——引擎运行时，按后端名展开；二进制 + 配置 + 运行时（~ 由 sandbox 模块展开）。
 # 三引擎白名单不同（§7 兼容性清单），分别覆盖；不存在目录自动跳过。
@@ -509,71 +488,4 @@ BWRAP_RW_ENGINE = {
 }
 
 
-# ====== Agent 沙箱网络隔离（Issue #139）======
 
-# 网络隔离开关（默认 on，与 GRAPE_AGENT_SANDBOX 一致；回滚设 GRAPE_SANDBOX_NET=off）
-GRAPE_SANDBOX_NET = os.environ.get("GRAPE_SANDBOX_NET", "on").lower() in ("1", "true", "on", "yes")
-
-# 沙箱白名单 — 环境变量作为 DB 不可用时的降级默认值
-
-# cgroup 限额（0 = 不限制；memory 0 = 自动取宿主机 50%）
-# 支持 K8s 格式：GRAPE_SANDBOX_MEM_LIMIT_MB=2Gi, GRAPE_SANDBOX_CPU_QUOTA=500m
-# 内联解析逻辑（不 import cgroup，避免循环导入）
-_MEM_SUFFIX = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4,
-               "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4}
-
-def _parse_mem_env(raw: str) -> int:
-    """解析内存量 → MB。支持 256Mi/1Gi/512M/2048（纯数字=字节）。"""
-    raw = raw.strip()
-    if raw.isdigit():
-        return int(raw) // (1024 * 1024) if int(raw) > 10000 else int(raw)
-    for suffix, mult in _MEM_SUFFIX.items():
-        if raw.endswith(suffix):
-            num = raw[:-len(suffix)].strip()
-            if num.isdigit():
-                return int(num) * mult // (1024 * 1024)
-    return 0
-
-def _parse_cpu_env(raw: str) -> int:
-    """解析 CPU → 毫核（1000=1核）。支持 1/0.5/500m。"""
-    raw = raw.strip()
-    if raw.endswith("m"):
-        num = raw[:-1].strip()
-        return int(num) if num.isdigit() else 0
-    try:
-        return int(float(raw) * 1000)
-    except ValueError:
-        return 0
-
-GRAPE_SANDBOX_MEM_LIMIT_MB = _parse_mem_env(os.environ.get("GRAPE_SANDBOX_MEM_LIMIT_MB", "0"))
-GRAPE_SANDBOX_CPU_QUOTA = _parse_cpu_env(os.environ.get("GRAPE_SANDBOX_CPU_QUOTA", "0"))
-GRAPE_SANDBOX_MAX_PIDS = int(os.environ.get("GRAPE_SANDBOX_MAX_PIDS", "0"))
-
-# 审计日志路径（空 = 默认 {WORKSPACE_DIR}/logs/sandbox-audit.jsonl）
-SANDBOX_AUDIT_LOG = os.environ.get("SANDBOX_AUDIT_LOG", "")
-SANDBOX_AUDIT_HMAC_KEY = os.environ.get("SANDBOX_AUDIT_HMAC_KEY", "")
-
-# 凭据遮蔽清单（逗号分隔的 env 变量名；P0 默认空 — 不遮蔽任何凭据）
-SANDBOX_CREDENTIAL_ENV_VARS = [
-    v.strip() for v in os.environ.get("SANDBOX_CREDENTIAL_ENV_VARS", "").split(",")
-    if v.strip()
-]
-
-# 沙箱白名单 — 环境变量作为 DB 不可用时的降级默认值
-# 生产环境通过 DB 表 sandbox_whitelist 管理（见 src/api/db_setup.py）
-# 环境变量仅用于首次启动 / DB 不可用时降级
-SANDBOX_WHITELIST_FALLBACK = [
-    d.strip() for d in os.environ.get(
-        "GRAPE_SANDBOX_WHITELIST",
-        "gitcode.com,api.gitcode.com,raw.gitcode.com,"
-        "github.com,api.github.com,"
-        "opengw.clouddeveloper.club,api.deepseek.com,"
-        "api.modelarts-maas.com,api.openai.com,"
-        "registry.npmmirror.com,"
-        "pypi.tuna.tsinghua.edu.cn,"
-        "obs.cn-north-4.myhuaweicloud.com"
-    ).split(",") if d.strip()
-]
-
-# 兼容：保留 SANDBOX_WHITELIST 名称供现有代码引用（= FALLBACK）
-SANDBOX_WHITELIST = SANDBOX_WHITELIST_FALLBACK
