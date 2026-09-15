@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user, get_user_token
+from src.api.deps import require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 
@@ -32,7 +32,7 @@ def _resolve_repo_key(owner_repo: str) -> str:
 # ====== Credentials ======
 
 @router.get("/credentials")
-def get_credentials(user: dict = Depends(get_current_user), repo_key: str = ""):
+def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
     acc = user_db.get_user_account(user["username"]) or {}
     return {
         "gitcode": {
@@ -86,7 +86,7 @@ def _is_placeholder(value: str) -> bool:
 
 
 @router.put("/credentials")
-def update_credentials(body: UpdateCredentials, user: dict = Depends(get_current_user)):
+def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_session_token)):
     acc = user_db.get_user_account(user["username"]) or {}
     if body.huawei_cloud_ak and not _is_placeholder(body.huawei_cloud_ak):
         acc["huawei_cloud_ak"] = body.huawei_cloud_ak.strip()
@@ -126,7 +126,7 @@ class CreateApiKeyBody(BaseModel):
 
 
 @router.post("/api-keys")
-def create_api_key(body: CreateApiKeyBody, user: dict = Depends(get_current_user)):
+def create_api_key(body: CreateApiKeyBody, user: dict = Depends(require_no_session_token)):
     """生成 grape_ 前缀 API key——明文仅返回一次，DB 存 SHA-256 hash。
 
     复用 auth_token.generate_api_token（Issue-45 方式 B 已有后端），
@@ -154,7 +154,7 @@ def create_api_key(body: CreateApiKeyBody, user: dict = Depends(get_current_user
 
 
 @router.get("/api-keys")
-def list_api_keys(user: dict = Depends(get_current_user)):
+def list_api_keys(user: dict = Depends(require_no_session_token)):
     """列出当前用户的所有 API key（不含明文，仅展示名称+状态+时间）。"""
     from src.api.auth_token import list_api_tokens, API_KEY_PREFIX
 
@@ -172,7 +172,7 @@ def list_api_keys(user: dict = Depends(get_current_user)):
 
 
 @router.delete("/api-keys/{key_id}")
-def revoke_api_key(key_id: int, user: dict = Depends(get_current_user)):
+def revoke_api_key(key_id: int, user: dict = Depends(require_no_session_token)):
     """吊销 API key——软删除（revoked=1），立即失效，保审计。"""
     from src.api.auth_token import revoke_api_token
 
@@ -187,7 +187,7 @@ def revoke_api_key(key_id: int, user: dict = Depends(get_current_user)):
 # ====== Notifications ======
 
 @router.get("/notifications")
-def get_notifications(user: dict = Depends(get_current_user)):
+def get_notifications(user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -218,7 +218,7 @@ class NotificationPrefs(BaseModel):
 
 
 @router.put("/notifications")
-def update_notifications(body: NotificationPrefs, user: dict = Depends(get_current_user)):
+def update_notifications(body: NotificationPrefs, user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -234,7 +234,7 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(get_curre
 # ====== GitCode Repo ======
 
 @router.get("/gitcode-repo/{owner}/{repo}")
-def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     from src.user.db import get_bot_token_by_repo
     from src.repo_key import to_repo_key
     bot_token = get_bot_token_by_repo(owner, repo)
@@ -260,7 +260,7 @@ class GitCodeRepoConfig(BaseModel):
 
 @router.put("/gitcode-repo/{owner}/{repo}")
 def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
-                                     user: dict = Depends(get_current_user)):
+                                     user: dict = Depends(require_no_session_token)):
     # 将 Bot Token / Bot Username 存储到 managed_repos（webhook_token 由托管流程自动维护）
     from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
@@ -274,7 +274,7 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
 # ====== OAuth 凭据（管理员配置）======
 
 @router.get("/oauth")
-def get_oauth_config(user: dict = Depends(get_current_user)):
+def get_oauth_config(user: dict = Depends(require_no_session_token)):
     from src.user.db import get_meta_value
     return {
         "gitcode_oauth_client_id": bool(get_meta_value("oauth_gitcode_client_id")),
@@ -289,7 +289,7 @@ class OAuthConfig(BaseModel):
 
 
 @router.put("/oauth")
-def update_oauth_config(body: OAuthConfig, user: dict = Depends(get_current_user)):
+def update_oauth_config(body: OAuthConfig, user: dict = Depends(require_no_session_token)):
     from src.user.db import set_meta_value
     if body.gitcode_oauth_client_id:
         set_meta_value("oauth_gitcode_client_id", body.gitcode_oauth_client_id)
@@ -307,7 +307,7 @@ class GitHubOAuthConfig(BaseModel):
 
 
 @router.get("/oauth-github")
-def get_github_oauth_config(user: dict = Depends(get_current_user)):
+def get_github_oauth_config(user: dict = Depends(require_no_session_token)):
     from src.user.db import get_meta_value
     return {
         "github_oauth_client_id": bool(get_meta_value("oauth_github_client_id")),
@@ -316,7 +316,7 @@ def get_github_oauth_config(user: dict = Depends(get_current_user)):
 
 
 @router.put("/oauth-github")
-def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(get_current_user)):
+def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(require_no_session_token)):
     from src.user.db import set_meta_value
     if body.github_oauth_client_id:
         set_meta_value("oauth_github_client_id", body.github_oauth_client_id)
@@ -330,7 +330,7 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(get
 # ====== Agent Runtimes ======
 
 @router.get("/agent-runtimes")
-def get_agent_runtimes(user: dict = Depends(get_current_user)):
+def get_agent_runtimes(user: dict = Depends(require_no_session_token)):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
     可见性（按当前登录用户）：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级（仓库所有成员可见，不只 owner）。
@@ -575,7 +575,7 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
 @router.get("/backend-agents")
-def get_backend_agents(user: dict = Depends(get_current_user)):
+def get_backend_agents(user: dict = Depends(require_no_session_token)):
     cached = user_db_get_backend_agents_alias()
     return {"backends": cached}
 
@@ -586,7 +586,7 @@ def user_db_get_backend_agents_alias():
 
 
 @router.post("/agent-runtimes/refresh")
-def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
+def refresh_agent_runtimes(user: dict = Depends(require_no_session_token)):
     """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）
 
     P0 修复：save_agent_runtimes 可能因 MySQL Lock wait timeout (1205) 抛异常，
@@ -621,7 +621,7 @@ def refresh_agent_runtimes(user: dict = Depends(get_current_user)):
 
 # 兼容别名：旧路径 /backend-agents/refresh
 @router.post("/backend-agents/refresh")
-async def refresh_backend_agents(user: dict = Depends(get_current_user)):
+async def refresh_backend_agents(user: dict = Depends(require_no_session_token)):
     return await refresh_agent_runtimes(user)
 
 
@@ -644,7 +644,7 @@ def _normalize_scope(scope: str) -> str:
 
 
 @router.post("/runtime-credentials")
-def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(get_current_user)):
+def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
     """生成 rta_ token：仅展示一次明文，DB 存 sha256。owner=当前登录用户（不可选），scope 默认个人。"""
     import hashlib, secrets
     from src.session_manager import db, db_lock
@@ -684,7 +684,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(get_cu
 
 
 @router.put("/runtime-credentials/{cid}")
-def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depends(get_current_user)):
+def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
     """改名凭据（worker 名）：全局唯一，重名拒绝。owner/scope 不可改。"""
     from src.session_manager import db, db_lock
     name = (body.name or "").strip()
@@ -718,7 +718,7 @@ class CredScopeBody(BaseModel):
 
 
 @router.put("/runtime-credentials/{cid}/scope")
-def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(get_current_user)):
+def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(require_no_session_token)):
     """切换凭据 scope（仓库/个人）。仅 owner 可操作，仅 active 凭据可改。不允许设为 global。"""
     from src.session_manager import db, db_lock
     scope = _normalize_scope(body.scope)
@@ -746,7 +746,7 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
 
 
 @router.get("/runtime-credentials")
-def list_runtime_credentials(user: dict = Depends(get_current_user)):
+def list_runtime_credentials(user: dict = Depends(require_no_session_token)):
     """凭据列表（不含 token_hash / 明文）"""
     from src.session_manager import db, db_lock
     with db_lock:
@@ -760,7 +760,7 @@ def list_runtime_credentials(user: dict = Depends(get_current_user)):
 
 
 @router.post("/runtime-credentials/{cid}/revoke")
-def revoke_runtime_credential(cid: int, user: dict = Depends(get_current_user)):
+def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_token)):
     """吊销并删除 worker 记录：删 runtime_credentials 行 + 级联删其 agent_runtimes 行。
 
     2026-08-17 用户指示「吊销=删除」：删除后 token 即刻失效（_auth_credential
@@ -796,19 +796,19 @@ class ExecModeBody(BaseModel):
 
 
 @router.get("/execution-mode")
-def get_execution_mode_api(user: dict = Depends(get_current_user)):
+def get_execution_mode_api(user: dict = Depends(require_no_session_token)):
     from src.runtime.service import get_execution_mode
     return {"mode": get_execution_mode()}
 
 
 @router.get("/pipeline-mode")
-def get_pipeline_mode_api(user: dict = Depends(get_current_user)):
+def get_pipeline_mode_api(user: dict = Depends(require_no_session_token)):
     from src.api.event_pipeline import is_plugin_mode
     return {"mode": "plugin" if is_plugin_mode() else "legacy"}
 
 
 @router.put("/pipeline-mode")
-def set_pipeline_mode_api(body: dict, user: dict = Depends(get_current_user)):
+def set_pipeline_mode_api(body: dict, user: dict = Depends(require_no_session_token)):
     from src.user.db import set_meta_value
     mode = (body.get("mode") or "").strip().lower()
     if mode not in ("plugin", "legacy"):
@@ -818,7 +818,7 @@ def set_pipeline_mode_api(body: dict, user: dict = Depends(get_current_user)):
 
 
 @router.put("/execution-mode")
-def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(get_current_user)):
+def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(require_no_session_token)):
     from src.runtime.service import set_execution_mode
     if body.mode not in ("auto", "direct", "queue_remote"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 auto/direct/queue_remote（queue_local 已废除）"})
@@ -850,7 +850,7 @@ def _sync_agent_tags(rid: int, cursor):
 
 
 @router.get("/agent-runtimes/{rid}/tags")
-def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
+def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     """获取引擎的标签列表"""
     from src.session_manager import db, db_lock
     with db_lock:
@@ -872,7 +872,7 @@ def get_engine_tags(rid: int, user: dict = Depends(get_current_user)):
 
 
 @router.post("/agent-runtimes/{rid}/tags")
-def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_current_user)):
+def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_no_session_token)):
     """为引擎添加标签（幂等：已有则更新）"""
     from src.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -916,7 +916,7 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(get_curre
 
 @router.put("/agent-runtimes/{rid}/tags/{tag}")
 def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
-                            user: dict = Depends(get_current_user)):
+                            user: dict = Depends(require_no_session_token)):
     """修改引擎标签配置"""
     from src.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -943,7 +943,7 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
 
 
 @router.delete("/agent-runtimes/{rid}/tags/{tag}")
-def delete_engine_tag(rid: int, tag: str, user: dict = Depends(get_current_user)):
+def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_session_token)):
     """删除引擎标签"""
     from src.session_manager import db, db_lock
     tag = tag.strip().lower()
@@ -989,7 +989,7 @@ class EventActionFilterUpdateBody(BaseModel):
 
 
 @router.get("/event-action-filters")
-def list_event_action_filters(user: dict = Depends(get_current_user)):
+def list_event_action_filters(user: dict = Depends(require_no_session_token)):
     """查看全部事件 action 过滤规则（可配置热生效）。"""
     from src.session_manager import db, db_lock
     with db_lock:
@@ -1015,7 +1015,7 @@ def list_event_action_filters(user: dict = Depends(get_current_user)):
 
 
 @router.post("/event-action-filters")
-def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(get_current_user)):
+def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(require_no_session_token)):
     """新增事件 action 过滤规则（幂等：同 event_type×action 已存在则跳过）。"""
     from src.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -1042,7 +1042,7 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(get_
 
 @router.put("/event-action-filters/{rule_id}")
 def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
-                             user: dict = Depends(get_current_user)):
+                             user: dict = Depends(require_no_session_token)):
     """修改事件 action 过滤规则（改 allow/actor/changes/副作用/优先级/启用，热生效 ≤30s）。"""
     from src.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -1080,7 +1080,7 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
 
 
 @router.delete("/event-action-filters/{rule_id}")
-def delete_event_action_rule(rule_id: int, user: dict = Depends(get_current_user)):
+def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_session_token)):
     """删除事件 action 过滤规则（删除后无规则=放行）。"""
     from src.session_manager import db, db_lock
     with db_lock:

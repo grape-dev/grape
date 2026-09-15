@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token, require_no_session_token
+from src.api.deps import get_current_user_or_api_key, get_bot_token, require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 
@@ -324,7 +324,7 @@ class AgentConfig(BaseModel):
 
 @router.post("/{name}/{owner}/{repo}/clean")
 def clean_agent_session(name: str, owner: str, repo: str,
-                              user: dict = Depends(get_current_user)):
+                              user: dict = Depends(require_no_session_token)):
     """清理 Agent 会话：将 devops_agent_session.runtime_session_id 置空。
 
     clean 之后清除 runtime_session_id，下一次事件到来时会创建新的 runtime_session_id
@@ -350,7 +350,7 @@ def clean_agent_session(name: str, owner: str, repo: str,
 
 @router.put("/{name}/{owner}/{repo}")
 async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfig,
-                              user: dict = Depends(get_current_user)):
+                              user: dict = Depends(require_no_session_token)):
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 

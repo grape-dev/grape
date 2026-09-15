@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user, get_current_user_or_api_key, require_no_session_token
+from src.api.deps import require_no_session_token
 from src.config import log, COOKIE_SECURE
 import hashlib, os, time
 
@@ -414,7 +414,7 @@ def get_profile(user: dict = Depends(require_no_session_token)):
 
 
 @router.post("/logout")
-def logout(user: dict = Depends(get_current_user), response: Response = None):
+def logout(user: dict = Depends(require_no_session_token), response: Response = None):
     """登出——token_version+1 撤销所有 token + 清 cookie。"""
     user_db.increment_token_version(user["id"])
     if response:

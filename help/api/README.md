@@ -4,6 +4,41 @@
 > 覆盖：对外公开接口（Token/API Key 认证）+ Git 仓库统一接口 + A2A；Token 管理为内部（Web UI，不对外，不提供 OpenAPI 文档）。
 > 认证方式对齐 GitCode 官方：`Authorization: Bearer` / `PRIVATE-TOKEN` / `?access_token=` 三通道。
 
+## Token 作用域（x-token-scope）
+
+契约（`/openapi.json`）每个公开 operation 含 `x-token-scope` 扩展字段（自动推导，`src/api/openapi.py`），
+标识该接口可用的 token 类型，供 CLI/SDK 按凭证过滤命令：
+
+| 值 | 含义 | 认证守卫（源码） | 可用 Token |
+|----|------|------------------|------------|
+| `user_only` | 仅用户级凭证 | `require_no_session_token` | `grape_` API Key / Web JWT ✅；**`tk_` 会话 token ❌（403）** |
+| `session_only` | 仅会话级临时 token | 认证 `get_current_user_or_api_key` + 体内 `_repo_token`/`_repo_platform_token` 强制 | `tk_` ✅；**`grape_` API Key / JWT ❌（403）** |
+| `dual` | 会话 / 用户均可 | `get_current_user_or_api_key` | 三通道全放行 |
+
+> 设计：`docs/weekly-03/openapi-x-token-scope-design.md` + `docs/weekly-03/token-scope-classification-design.md`
+
+### 各文档 scope 一览
+
+| 文档 | 接口 | scope |
+|------|------|:---:|
+| [01 Tasks](01-tasks.md) | `mine/start/status/complete/repo/{owner}/{repo}` | dual |
+| | `confirm-done/cancel/resume/clarifications/clarify/pipeline` | user_only |
+| [02 Repos](02-repos.md) | `managed/member/sync/check-name/create/host/repair/bot-token/deploy-url/remove/project-info` | user_only |
+| | `{owner}/{repo}/git-credential`、`{owner}/{repo}/workspace` | session_only |
+| [03 Agents](03-agents.md) | 全部 | user_only |
+| [04 Chat](04-chat.md) | 全部 | user_only |
+| [05 Skills](05-skills.md) | 全部 | user_only |
+| [06 Scenes](06-scenes.md) | `GET /api/scenes`（VOD 技能用 session，有意例外） | dual |
+| | 其余 | user_only |
+| [07 Knowledge](07-knowledge.md) | `list/stats/detail/content/context` | dual |
+| | 写操作（entry/archive/refs/delete/update） | user_only |
+| [08 Events](08-events.md) | `GET /api/events/detail/{seq}` | dual |
+| | 操作类（terminate/redispatch/thread/chat/knowledge） | user_only |
+| [09 TaskLogs](09-task-logs.md) | 全部 | user_only |
+| [10 Git 仓库](10-git-repos.md) | **全部** | session_only |
+| [11 Issues](11-issues.md) | 全部 | dual |
+| [12 A2A](12-a2a.md) | `POST /api/a2a` | dual |
+
 ## 目录
 
 1. [认证与通用约定](00-auth.md)
