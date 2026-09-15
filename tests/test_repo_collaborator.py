@@ -10,7 +10,10 @@ from fastapi import HTTPException
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    import inspect
+    if inspect.iscoroutine(coro):
+        return asyncio.run(coro)
+    return coro  # sync function returns directly
 
 
 # ===================== repo_manager.add_collaborator =====================
@@ -166,7 +169,7 @@ def test_host_repo_global_bot_fail_rejects():
     class FakeBody:
         full_name = "owner/repo"
 
-    fake_user = {"id": 1, "username": "tester"}
+    fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
     gbt_json = '{"gitcode_api_token": "gbt", "bot_usernames": ["hwc-dev-bot"]}'
 
     with patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
@@ -196,7 +199,7 @@ def test_host_repo_global_bot_success():
     class FakeBody:
         full_name = "owner/repo"
 
-    fake_user = {"id": 1, "username": "tester"}
+    fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
     gbt_json = '{"gitcode_api_token": "gbt", "bot_usernames": ["hwc-dev-bot"]}'
 
     with patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
@@ -229,7 +232,7 @@ def test_host_repo_global_bot_not_maintainer_rejects():
     class FakeBody:
         full_name = "owner/repo"
 
-    fake_user = {"id": 1, "username": "tester"}
+    fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
     gbt_json = '{"gitcode_api_token": "gbt", "bot_usernames": ["hwc-dev-bot"]}'
 
     with patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
@@ -266,7 +269,7 @@ def test_set_repo_bot_token_updates_username():
         full_name = "owner/repo"
         bot_token = "repo_bot_tok"
 
-    fake_user = {"id": 1, "username": "tester"}
+    fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
 
     with patch.object(repos_mod, "update_managed_repo_bot_token", return_value=True) as mock_upd, \
          patch("src.user.repo_manager._req", return_value={"login": "repo-bot-login"}), \
@@ -291,7 +294,7 @@ def test_remove_managed_repo_removes_collaborators():
     class FakeBody:
         full_name = "owner/repo"
 
-    fake_user = {"id": 1, "username": "tester"}
+    fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
 
     def fake_managed(user_id):
         return [{"repo_key": "gitcode:owner/repo", "full_name": "owner/repo",

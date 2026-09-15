@@ -72,6 +72,8 @@
   "engine_skill_title": "Model & Skill",
   "engine_skill_desc": "Configure Chat Agent execution engine and skill",
   "engine_label": "Engine",
+  "engine_config_tip": "Engine Settings",
+  "skill_config_tip": "Skill Settings",
   "placeholder": "Ask me anything...",
   "send": "Send",
   "upload_image": "Upload Image",
