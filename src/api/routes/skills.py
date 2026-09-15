@@ -72,13 +72,15 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 @router.get("", operation_id="skills_list", summary="技能列表")
 def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
+                agent_type: str = "",
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
+    agent_type 参数：按 agent_type 过滤（vod/issue/coding/qa/sre/chat）。
     q 参数：搜索词，按 skill_name / display_name / description 模糊匹配。
     sort 参数：latest（默认顺序）/ hot（按 like_count 降序）。
     page/page_size：分页参数，page_size=0 时不分页（返回全部，兼容旧逻辑）。
-    扩展返回字段：is_featured, like_count, liked_by_me, scene_count, repo_count, scenes
+    扩展返回字段：is_featured, like_count, liked_by_me, scene_count, repo_count, scenes, sub_scene, sub_scene_id
     """
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key
@@ -118,6 +120,12 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
         conditions.append("(skill_name LIKE ? OR display_name LIKE ? OR description LIKE ?)")
         kw = f"%{q}%"
         params.extend([kw, kw, kw])
+
+    # agent_type 过滤
+    agent_type = (agent_type or "").strip()
+    if agent_type:
+        conditions.append("agent_type=?")
+        params.append(agent_type)
 
     # 排序
     order_by = "ORDER BY like_count DESC" if sort == "hot" else "ORDER BY agent_type, skill_name"
@@ -160,6 +168,7 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
                     "is_featured": r[7] or 0,
                     "like_count": r[8] or 0,
                     "sub_scene": _sub_scene_label(r[9] or ""),
+                    "sub_scene_id": r[9] or "",
                 })
                 skill_ids.append(r[0])
         except Exception:
@@ -229,6 +238,56 @@ def list_featured_skills(user: dict = Depends(get_current_user), limit: int = 0)
         s["repo_count"] = stats.get("repo_count", 0)
         s["scenes"] = scenes_map.get(s["id"], [])
     return {"skills": skills}
+
+
+@router.get("/agent-stats", operation_id="skills_agent_stats", summary="技能统计（总数 + 按 agent_type 分组）")
+def get_agent_stats(user: dict = Depends(get_current_user_or_api_key), scope: str = "", repo: str = ""):
+    """返回技能总数 + 每个 agent_type 的技能数量。
+
+    scope/repo 参数与 list_skills 一致，用于按维度统计。
+    """
+    from src.session_manager import db, db_lock
+
+    repo_key = _resolve_repo_key(repo) if repo else ""
+    conditions = ["is_active=1"]
+    params = []
+    if scope == "official":
+        conditions.append("scope='official'")
+    elif scope == "repo":
+        if not repo:
+            return {"total": 0, "agents": []}
+        conditions.append("scope='repo'")
+        conditions.append("owner_id=?")
+        params.append(repo_key)
+    elif scope == "user":
+        conditions.append("scope='user'")
+        conditions.append("owner_id=?")
+        params.append(str(user["id"]))
+    elif repo:
+        conditions.append("(scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))")
+        params.extend([str(user["id"]), repo_key])
+    else:
+        conditions.append("(scope='official' OR (scope='user' AND owner_id=?))")
+        params.append(str(user["id"]))
+
+    where_sql = " WHERE " + " AND ".join(conditions)
+    agents = []
+    total = 0
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                f"SELECT agent_type, COUNT(*) as cnt FROM skill{where_sql} GROUP BY agent_type ORDER BY "
+                f"CASE agent_type WHEN 'vod' THEN 1 WHEN 'issue' THEN 2 WHEN 'coding' THEN 3 "
+                f"WHEN 'qa' THEN 4 WHEN 'sre' THEN 5 WHEN 'chat' THEN 6 ELSE 99 END",
+                tuple(params)
+            )
+            for r in c.fetchall():
+                agents.append({"agent_type": r[0] or "", "count": r[1]})
+                total += r[1]
+        except Exception:
+            pass
+    return {"total": total, "agents": agents}
 
 
 @router.get("/stats")

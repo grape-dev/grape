@@ -104,6 +104,7 @@
   "info_tags": "子场景",
   "info_version": "版本",
   "info_function": "功能说明",
+  "reset_filters": "重置",
   "group_skills_suffix": "技能",
   "scene_market_title": "场景·技能",
   "scene_market_desc": "场景是多个技能按开发流程组合的开发模式，点击场景卡片查看完整流程",
