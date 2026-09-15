@@ -54,8 +54,8 @@ class TestLoadOnboardingTemplate:
             {"type": "experience", "title": "引导·快速部署体验", "description": "体验"},
             {"type": "dev", "title": "引导·二次开发", "description": "开发"},
         ])
-        # 仓库根 = {WORKSPACE_DIR}/{owner}/{repo}
-        repo_root = tmp_path / "owner" / "repo"
+        # 仓库根 = {WORKSPACE_DIR}/{provider}/{owner}/{repo}（provider 默认 gitcode）
+        repo_root = tmp_path / "gitcode" / "owner" / "repo"
         repo_root.mkdir(parents=True, exist_ok=True)
         (repo_root / "onboarding-tasks.json").write_text(
             json.dumps({"tasks": [

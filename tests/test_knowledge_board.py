@@ -54,15 +54,16 @@ def _clean():
         c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key=?", (_REPO_KEY,))
         c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id IN (SELECT id FROM agent_shared_knowledge WHERE repo_key=?)", (_REPO_KEY,))
         db.commit()
-    from src.config import WORKSPACE_DIR
+    from src.repo_key import workspace_repo_dir
     import shutil
-    shutil.rmtree(os.path.join(WORKSPACE_DIR, "org", "test", "project-info"), ignore_errors=True)
-    shutil.rmtree(os.path.join(WORKSPACE_DIR, "org", "test", "issues"), ignore_errors=True)
+    base = workspace_repo_dir(_REPO_KEY)
+    shutil.rmtree(os.path.join(base, "project-info"), ignore_errors=True)
+    shutil.rmtree(os.path.join(base, "issues"), ignore_errors=True)
 
 
 def _write_pi(file_name: str, content: str):
-    from src.config import WORKSPACE_DIR
-    p = os.path.join(WORKSPACE_DIR, "org", "test", "project-info", file_name)
+    from src.repo_key import workspace_repo_dir
+    p = os.path.join(workspace_repo_dir(_REPO_KEY), "project-info", file_name)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
         f.write(content)

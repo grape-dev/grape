@@ -490,7 +490,8 @@ BWRAP_RO_ENGINE = {
     "opencode": ("~/.nvm", "~/.config/opencode", "~/.cache", "~/.opencode"),
     "codearts": ("~/.codeartsdoer", "~/.nvm", "~/.local", "~/.cache"),
     "hermes": ("~/.local",),
-    "codex": ("~/.npm-global", "~/.codex", "~/.cache"),
+    # codex: 二进制 /usr/local/bin/codex 已在 COMMON(/usr/local) 覆盖。
+    # ~/.codex 和 ~/.cache 在 BWRAP_RW_ENGINE 中 rw 挂载（需写 sessions/logs/cache）。
 }
 
 # bwrap 白名单（读写）——引擎缓存；hermes overlay 由 sandbox 模块按 md5(cwd) 动态计算绑定。

@@ -18,9 +18,10 @@ class TestBuildProjectInfo:
         """codegraph 不可用 → 降级生成，degraded=true。"""
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: False)
         from src.project_info.builder import build_project_info
+        from src.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is True
-        pi = os.path.join(str(_tmp_workspace), "org", "test", "project-info")
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         assert os.path.isfile(os.path.join(pi, "project-graph.md"))
         assert os.path.isfile(os.path.join(pi, "project-capabilities.md"))
         meta = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))
@@ -34,9 +35,10 @@ class TestBuildProjectInfo:
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore:{q}")
         monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "file-tree")
         from src.project_info.builder import build_project_info
+        from src.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is False
-        pi = os.path.join(str(_tmp_workspace), "org", "test", "project-info")
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
         caps = open(os.path.join(pi, "project-capabilities.md"), encoding="utf-8").read()
         assert "Architecture Overview" in graph
@@ -59,12 +61,13 @@ class TestBuildProjectInfo:
         仅 VOD/Issue 的仓库无 codebase 时，builder 应主动建镜像而非直接 degraded。
         走真实 _ensure_analysis_worktree（不 mock），验证 ensure_repo_base 被调用。
         """
+        from src.repo_key import workspace_repo_dir
         calls = {"n": 0}
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
 
         def _fake_ensure_repo_base(repo_key, token=""):
             calls["n"] += 1
-            base = os.path.join(str(_tmp_workspace), "org", "test", "codebase")
+            base = os.path.join(workspace_repo_dir(repo_key), "codebase")
             os.makedirs(base, exist_ok=True)
             return base
 
@@ -77,22 +80,23 @@ class TestBuildProjectInfo:
 
     def test_ensure_repo_base_when_missing_then_generates(self, _tmp_workspace, monkeypatch):
         """无 codebase → ensure_repo_base 建立后 → 正常生成（degraded=false）。"""
+        from src.repo_key import workspace_repo_dir
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
 
         def _fake_ensure_repo_base(repo_key, token=""):
-            base = os.path.join(str(_tmp_workspace), "org", "test", "codebase")
+            base = os.path.join(workspace_repo_dir(repo_key), "codebase")
             os.makedirs(base, exist_ok=True)
             return base
 
         monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
         monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree",
-                            lambda repo_key, token="": os.path.join(str(_tmp_workspace), "org", "test", "codebase"))
+                            lambda repo_key, token="": os.path.join(workspace_repo_dir(repo_key), "codebase"))
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore:{q}")
         monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "file-tree")
         from src.project_info.builder import build_project_info
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is False
-        pi = os.path.join(str(_tmp_workspace), "org", "test", "project-info")
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         assert os.path.isfile(os.path.join(pi, "project-graph.md"))
 
 
@@ -104,7 +108,8 @@ class TestShouldRefresh:
     def test_degraded_with_codegraph_refresh(self, _tmp_workspace, monkeypatch):
         """degraded=true 且 codegraph 可用 → 应刷新。"""
         import os
-        pi = os.path.join(str(_tmp_workspace), "org", "test", "project-info")
+        from src.repo_key import workspace_repo_dir
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         os.makedirs(pi, exist_ok=True)
         open(os.path.join(pi, "project-graph.md"), "w", encoding="utf-8").write("g")
         open(os.path.join(pi, "project-capabilities.md"), "w", encoding="utf-8").write("c")
@@ -116,7 +121,8 @@ class TestShouldRefresh:
     def test_fresh_degraded_false_no_refresh(self, _tmp_workspace, monkeypatch):
         """degraded=false 且未超 7 天 → 不刷新。"""
         import os
-        pi = os.path.join(str(_tmp_workspace), "org", "test", "project-info")
+        from src.repo_key import workspace_repo_dir
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         os.makedirs(pi, exist_ok=True)
         open(os.path.join(pi, "project-graph.md"), "w", encoding="utf-8").write("g")
         open(os.path.join(pi, "project-capabilities.md"), "w", encoding="utf-8").write("c")

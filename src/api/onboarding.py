@@ -204,24 +204,21 @@ def _load_onboarding_template(repo_key: str, scene_id: str = "", template_id: st
         return out
 
     # 1. 仓库根目录自定义模板
-    #    repository 物化根目录 = {WORKSPACE_DIR}/{owner}/{repo}（与 repogit codebase mirror 同基）
+    #    repository 物化根目录 = {WORKSPACE_DIR}/{provider}/{owner}/{repo}（与 repogit codebase mirror 同基）
     try:
-        from src.repo_key import split_owner_repo
-        from src.config import WORKSPACE_DIR
-        _owner, _rname = split_owner_repo(repo_key)
-        if _owner and _rname:
-            _repo_root = os.path.join(WORKSPACE_DIR, _owner, _rname)
-            _p = os.path.join(_repo_root, "onboarding-tasks.json")
-            if os.path.isfile(_p):
-                try:
-                    with open(_p, encoding="utf-8") as f:
-                        data = json.load(f)
-                    tasks = _normalize(_extract(data))
-                    if tasks:
-                        log.info(f"[Onboarding|repo:{repo_key}] use repo custom template: {_p}")
-                        return tasks
-                except Exception as e:
-                    log.warning(f"[Onboarding|repo:{repo_key}] repo template parse failed ({_p}): {e}")
+        from src.repo_key import workspace_repo_dir
+        _repo_root = workspace_repo_dir(repo_key)
+        _p = os.path.join(_repo_root, "onboarding-tasks.json")
+        if os.path.isfile(_p):
+            try:
+                with open(_p, encoding="utf-8") as f:
+                    data = json.load(f)
+                tasks = _normalize(_extract(data))
+                if tasks:
+                    log.info(f"[Onboarding|repo:{repo_key}] use repo custom template: {_p}")
+                    return tasks
+            except Exception as e:
+                log.warning(f"[Onboarding|repo:{repo_key}] repo template parse failed ({_p}): {e}")
     except Exception as e:
         log.warning(f"[Onboarding|repo:{repo_key}] repo custom template check failed: {e}")
 

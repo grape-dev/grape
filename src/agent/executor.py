@@ -266,9 +266,15 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
         # GitHub 用户 token 注入
         if user_id > 0:
             try:
-                from src.user.db import get_user_account
-                _acc = get_user_account(username) or {}
-                _gh_tok = _acc.get("github_api_token", "")
+                from src.user.db import get_user_github_token
+                _gh_tok = get_user_github_token(user_id) or ""
+                if not _gh_tok:
+                    # 兜底：从 user_accounts.github_api_token 列读（OAuth 登录时写入）
+                    from src.user.db import _get_username_by_id, get_user_account
+                    _uname = _get_username_by_id(user_id)
+                    if _uname:
+                        _acc = get_user_account(_uname) or {}
+                        _gh_tok = _acc.get("github_api_token", "") or ""
                 if _gh_tok:
                     env["USER_GITHUB_TOKEN"] = _gh_tok
             except Exception as e:
@@ -512,12 +518,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         _cmd = [agent_cmd] + args
         try:
             from src.config import GRAPE_SANDBOX_NET
-            # Node.js CLI 引擎（opencode/codearts/codex）的 HTTP 客户端不兼容
-            # bwrap --unshare-net 代理模式（bridge localhost:3128 → Unix socket），
-            # 设 HTTPS_PROXY 后 opencode 连不上 API → "Cannot connect to API"。
-            # 仅对 hermes（Python ACP）启用网络隔离。
-            _net_backends = {"hermes"}
-            if GRAPE_SANDBOX_NET and backend.name in _net_backends:
+            if GRAPE_SANDBOX_NET:
                 from src.agent.sandbox import prepare_sandbox
                 _sandbox_ctx = prepare_sandbox(
                     task_id=use_session_id or f"task-{os.getpid()}",

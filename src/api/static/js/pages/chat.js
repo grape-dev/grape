@@ -114,7 +114,7 @@ function loadConversations(autoSelect) {
   }
   const repoKey = _issueParam && _issueParam.repo
     ? _issueParam.repo
-    : (_openConvId ? '' : (repo ? repo.fullName : ''));
+    : (_openConvId ? '' : (repo ? (repo.repoKey || repo.fullName) : ''));
   API.get('/chat/conversations' + (repoKey ? '?repo_key=' + encodeURIComponent(repoKey) : '')).then(d => {
     const convs = d.conversations || [];
     const list = document.getElementById('convList');
@@ -159,7 +159,7 @@ function loadConversations(autoSelect) {
 
 function newConversation() {
   const repo = app.currentRepo();
-  API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
+  API.post('/chat/conversations', repo ? {repo_key: (repo.repoKey || repo.fullName)} : {}).then(d => {
     _currentConvId = d.conversation_id;
     loadConversations();
     var _cb = document.getElementById('chatBody');
@@ -451,7 +451,7 @@ function sendChatStream() {
   if (!input.value.trim() && _pendingImages.length === 0 && !_pendingVideo) return;
   if (!_currentConvId) {
     const repo = app.currentRepo();
-    API.post('/chat/conversations', repo ? {repo_key: repo.fullName} : {}).then(d => {
+    API.post('/chat/conversations', repo ? {repo_key: (repo.repoKey || repo.fullName)} : {}).then(d => {
       _currentConvId = d.conversation_id;
       loadConversations();
       doSend(input, body);
@@ -495,7 +495,7 @@ function doSend(input, body) {
   // 1. submit → 立即获取 task_id（视频理解在 agent_fn 内部异步执行，submit 不阻塞）
   API.post('/chat/submit', {
     message: msg || '请帮我分析这些图片',
-    repo_key: repo ? repo.fullName : '',
+    repo_key: repo ? (repo.repoKey || repo.fullName) : '',
     conversation_id: _currentConvId,
     image_data: imgs.length > 0 ? JSON.stringify(imgs.map(function(i) { return i.data })) : '',
     video_data: vid || '',
