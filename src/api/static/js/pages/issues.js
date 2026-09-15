@@ -327,9 +327,10 @@ window._jumpToNodeEvent = function(seq) {
   if (!seq) { console.warn('jumpToNodeEvent: no seq'); return; }
   // 存储来源任务上下文，供事件详情页返回使用
   const t = window._currentDetailTask;
-  if (t && t.id) {
-    window._eventFromTask = { taskId: t.id };
-  }
+  // 始终赋值（无任务时置 null），避免非任务来源进入事件页时残留旧标志
+  window._eventFromTask = (t && t.id) ? { taskId: t.id } : null;
+  // 标记本次进入事件页来自任务详情，供 app.nav('event') 路由入口识别
+  window._eventNavFromTask = true;
   // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
   if (t && t.repo_key) {
     const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
@@ -341,12 +342,6 @@ window._jumpToNodeEvent = function(seq) {
   }
   // 直接修改 hash 跳转事件详情页（#event/seq），触发 hashchange → app.nav('event', seq)
   window.location.hash = '#event/' + seq;
-};
-
-// 点击事件历史条目 → 跳转到事件详情页（携带需求上下文）
-window._jumpToEventFromTask = function(seq) {
-  if (!seq) { console.warn('jumpToEventFromTask: no seq'); return; }
-  _jumpToNodeEvent(seq);
 };
 
 // 点击流水线卡片区域 → 跳转到流水线页面
@@ -429,7 +424,7 @@ function _renderPipelineSection(data) {
       var statusCol = e.status === 'completed' ? '#34c759' : e.status === 'failed' ? '#ef4444' : e.status === 'cancelled' ? '#86868b' : '#3b82f6';
       var statusIcon = e.status === 'completed' ? '✓' : e.status === 'failed' ? '✕' : e.status === 'cancelled' ? '○' : '●';
       var evSeq = e.seq || '';
-      var evClick = evSeq ? ' onclick="_jumpToEventFromTask(' + evSeq + ')"' : '';
+      var evClick = evSeq ? ' onclick="_jumpToNodeEvent(' + evSeq + ')"' : '';
       var evCursor = evSeq ? ';cursor:pointer' : '';
       html += `<div style="display:flex;gap:10px;padding-bottom:${isLast?'0':'10px'};border-radius:8px;transition:background .15s"${evClick} onmouseover="this.style.background='rgba(0,0,0,.03)'" onmouseout="this.style.background='transparent'">`;
       html += `<div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">`;
