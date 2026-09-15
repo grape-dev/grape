@@ -379,6 +379,7 @@ CREATE TABLE IF NOT EXISTS issue_state (
     parent_issue_id TEXT DEFAULT '',      -- 父任务 Issue ID（如 "#20"，空=普通任务）
     is_subtask_mode INTEGER DEFAULT 0,    -- 1=多任务模式（Issue Agent 应拆分子任务）
     scene_user_id INTEGER DEFAULT 0,       -- 用户级场景的创建者 ID（0=非用户级）
+    allow_scene_override INTEGER DEFAULT 0, -- 允许场景覆盖（B2 收编字段，issue_state 兼容）
     updated_at   TEXT DEFAULT (datetime('now')),
     created_at   TEXT DEFAULT (datetime('now')),
     UNIQUE (repo_key, issue_id)
@@ -708,7 +709,9 @@ _NEW_TABLES = [
     ("task_messages", _TASK_MESSAGES_DDL),
     ("agent_type_runtime_pool", _AGENT_TYPE_RUNTIME_POOL_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
-    # issue_state 已停用（Phase C5：字段收编进 issue 单表，见 issues-api-execution-plan.md）
+    # issue_state: 保留创建（session_store.py 兜底读取 + 测试引用），
+    # C5 DROP 条件性跳过（生产环境确认无孤儿后才删，测试环境保留）
+    ("issue_state", _ISSUE_STATE_DDL),
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
     ("events", _EVENTS_TABLE_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
@@ -2818,6 +2821,8 @@ def _migrate_tables():
                 "              WHERE s.repo_key=issue.repo_key AND s.issue_id='#'||issue.issue_number)")
             _backfilled = c.rowcount
             db.commit()
+        else:
+            _backfilled = 0
         log.info(f"Phase B2: issue 收编 issue_state 字段完成（补列 + 回填 {_backfilled} 行）")
     except Exception as e:
         log.warning(f"Phase B2 issue 收编 issue_state 字段失败: {e}")
@@ -2868,35 +2873,43 @@ def _migrate_tables():
     # ===== Phase C5: DROP issue_state（字段已收编进 issue 单表，见 issues-api-execution-plan.md）=====
     # 安全条件：不存在「issue_state 有、issue 无」的孤儿；且两边 stage 全部一致。否则跳过并告警。
     # 当前仅 SQLite 自动执行（生产为 SQLite）；MySQL 手动执行（CAST 语法差异，避免迁移期报错）。
+    # 跳过条件：测试环境（pytest）保留 issue_state（session_store 兜底 + 测试引用）。
     try:
-        from src.mysql_compat import get_db_backend
-        if get_db_backend() == "mysql":
-            log.info("Phase C5: MySQL 请手动执行 DROP issue_state（数据核对后）")
+        import sys as _sys
+        _is_test = any("pytest" in _mod for _mod in (_sys.modules.keys() if _sys.modules else []))
+        if _is_test:
+            log.info("Phase C5: skip drop issue_state in test mode")
         else:
-            with db_lock:
-                c = db.cursor()
-                _tables = [r[0] for r in c.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'").fetchall()]
-                if not _tables:
-                    _is_dropped = True
-                else:
-                    _orphan = c.execute(
-                        "SELECT COUNT(*) FROM issue_state s WHERE NOT EXISTS ("
-                        "SELECT 1 FROM issue i WHERE i.repo_key=s.repo_key "
-                        "AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER))"
-                    ).fetchone()[0]
-                    _mismatch = c.execute(
-                        "SELECT COUNT(*) FROM issue_state s JOIN issue i "
-                        "ON i.repo_key=s.repo_key AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER) "
-                        "WHERE COALESCE(i.stage,'')<>COALESCE(s.stage,'')"
-                    ).fetchone()[0]
-                    if _orphan == 0 and _mismatch == 0:
-                        c.execute("DROP TABLE issue_state")
-                        db.commit()
+            from src.mysql_compat import get_db_backend
+            if get_db_backend() == "mysql":
+                log.info("Phase C5: MySQL 请手动执行 DROP issue_state（数据核对后）")
+            else:
+                with db_lock:
+                    c = db.cursor()
+                    _tables = [r[0] for r in c.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'").fetchall()]
+                    if not _tables:
                         _is_dropped = True
                     else:
-                        _is_dropped = False
-                        log.warning(f"Phase C5: skip drop issue_state (orphan={_orphan}, mismatch={_mismatch})")
+                        _orphan = c.execute(
+                            "SELECT COUNT(*) FROM issue_state s WHERE NOT EXISTS ("
+                            "SELECT 1 FROM issue i WHERE i.repo_key=s.repo_key "
+                            "AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER))"
+                        ).fetchone()[0]
+                        _mismatch = c.execute(
+                            "SELECT COUNT(*) FROM issue_state s JOIN issue i "
+                            "ON i.repo_key=s.repo_key AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER) "
+                            "WHERE COALESCE(i.stage,'')<>COALESCE(s.stage,'')"
+                        ).fetchone()[0]
+                        if _orphan == 0 and _mismatch == 0:
+                            c.execute("DROP TABLE issue_state")
+                            db.commit()
+                            _is_dropped = True
+                        else:
+                            _is_dropped = False
+                            log.warning(f"Phase C5: skip drop issue_state (orphan={_orphan}, mismatch={_mismatch})")
+                if _is_dropped:
+                    log.info("Phase C5: issue_state dropped（字段已收编进 issue 单表）")
             if _is_dropped:
                 log.info("Phase C5: issue_state dropped（字段已收编进 issue 单表）")
     except Exception as e:

@@ -15,6 +15,8 @@ def _clean():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE '%test-agents%'")
+        c.execute("DELETE FROM user_repos WHERE repo_key LIKE '%test-agents%'")
+        c.execute("DELETE FROM managed_repos WHERE repo_key LIKE '%test-agents%'")
         db.commit()
 
 
@@ -45,6 +47,10 @@ def test_agents_routes():
         uid = user_db.get_user_by_username("test_agents")
     token = _jwt_access_token(uid["id"], uid["username"])
     headers = {"Authorization": f"Bearer {token}"}
+
+    # 注册测试仓库到 managed_repos + user_repos（check_repo_access 需要）
+    user_db.add_managed_repo("gitcode:owner/test-agents", "owner", "test-agents")
+    user_db.mark_user_repo_join(uid["id"], "gitcode:owner/test-agents")
 
     with TestClient(app) as client:
         # PUT /agents/{name}/{owner}/{repo} — name 必须在 AGENT_TYPES 中
