@@ -94,7 +94,7 @@
 | 批 | 文件 | 说明 | 状态 |
 |----|------|------|:---:|
 | A | skills.py（11）、scenes.py（24） | 用户技能/场景管理，owner=user | ✅ 已完成（commit `954517ad`） |
-| B | settings.py（34）、repos.py（12）、agents.py（2）、knowledge.py（10） | 账号配置/仓库/知识 | 待做 |
+| B | settings.py（34）、repos.py（12）、agents.py（2）、knowledge.py（10） | 账号配置/仓库/知识 | ✅ 已完成（commit `dd2c0d32`） |
 | C | runtime.py（17）、tasks.py（6）、events.py（11）、chat.py（12） | 运维/任务操作 | 待做 |
 | D | devstage/templates/dashboard/pipeline/search/auth/feishu_onboard/task_logs | 其余 | 待做 |
 
@@ -106,6 +106,12 @@
 - `test_openapi`：`EXPECTED_PUBLIC` 补录 34 端点，`NOT_IN_CONTRACT` 移除已开放的 `with-pipeline`/`scene_id`/`skills-upload`
 - 验证：A 批守卫端到端 session→403、API Key/JWT 通过（200/404 非 403）；回归 98 passed
 - **A 批迁移后 `get_current_user` 残留定义**：如确认某端点需保持 Web-only（内部），可保留 get_current_user 并加注释
+
+### B 批实施记录（2026-09-15，已完成）
+- `settings.py` 34 + `repos.py` 12 + `agents.py` 2 + `knowledge.py` 10 → `require_no_session_token`（共 58 处）
+- import 清理 `get_current_user` 残留；契约新增 62 端点（settings 全量/repos 托管/agents 配置/knowledge CRUD）
+- `NOT_IN_CONTRACT` 移除 `/api/repos/host`（已开放）；验证守卫 session→403、api_key/jwt 通过
+- 注：`repair-host` / `agents clean` 对未托管仓库 jwt/api_key 返回 403 属 `check_repo_access` 内部鉴权（非守卫）
 
 ---
 
