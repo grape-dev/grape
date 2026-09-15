@@ -119,6 +119,65 @@ EXPECTED_PUBLIC = {
     "delete_scene_api_scenes__scene_id__delete": ("delete", "/api/scenes/{scene_id}"),
     "get_advanced_options_api_scenes__scene_id__advanced_options_get": ("get", "/api/scenes/{scene_id}/advanced-options"),
     "save_advanced_options_api_scenes__scene_id__advanced_options_put": ("put", "/api/scenes/{scene_id}/advanced-options"),
+    # ===== B 批（openapi-full-coverage-design.md）：settings/repos/agents/knowledge 全量进契约 =====
+    "get_credentials_api_settings_credentials_get": ("get", "/api/settings/credentials"),
+    "update_credentials_api_settings_credentials_put": ("put", "/api/settings/credentials"),
+    "create_api_key_api_settings_api_keys_post": ("post", "/api/settings/api-keys"),
+    "list_api_keys_api_settings_api_keys_get": ("get", "/api/settings/api-keys"),
+    "revoke_api_key_api_settings_api_keys__key_id__delete": ("delete", "/api/settings/api-keys/{key_id}"),
+    "get_notifications_api_settings_notifications_get": ("get", "/api/settings/notifications"),
+    "update_notifications_api_settings_notifications_put": ("put", "/api/settings/notifications"),
+    "get_oauth_config_api_settings_oauth_get": ("get", "/api/settings/oauth"),
+    "update_oauth_config_api_settings_oauth_put": ("put", "/api/settings/oauth"),
+    "get_github_oauth_config_api_settings_oauth_github_get": ("get", "/api/settings/oauth-github"),
+    "update_github_oauth_config_api_settings_oauth_github_put": ("put", "/api/settings/oauth-github"),
+    "get_gitcode_repo_config_api_settings_gitcode_repo__owner___repo__get": ("get", "/api/settings/gitcode-repo/{owner}/{repo}"),
+    "update_gitcode_repo_config_api_settings_gitcode_repo__owner___repo__put": ("put", "/api/settings/gitcode-repo/{owner}/{repo}"),
+    "get_agent_runtimes_api_settings_agent_runtimes_get": ("get", "/api/settings/agent-runtimes"),
+    "get_backend_agents_api_settings_backend_agents_get": ("get", "/api/settings/backend-agents"),
+    "refresh_agent_runtimes_api_settings_agent_runtimes_refresh_post": ("post", "/api/settings/agent-runtimes/refresh"),
+    "refresh_backend_agents_api_settings_backend_agents_refresh_post": ("post", "/api/settings/backend-agents/refresh"),
+    "create_runtime_credential_api_settings_runtime_credentials_post": ("post", "/api/settings/runtime-credentials"),
+    "rename_runtime_credential_api_settings_runtime_credentials__cid__put": ("put", "/api/settings/runtime-credentials/{cid}"),
+    "change_credential_scope_api_settings_runtime_credentials__cid__scope_put": ("put", "/api/settings/runtime-credentials/{cid}/scope"),
+    "list_runtime_credentials_api_settings_runtime_credentials_get": ("get", "/api/settings/runtime-credentials"),
+    "revoke_runtime_credential_api_settings_runtime_credentials__cid__revoke_post": ("post", "/api/settings/runtime-credentials/{cid}/revoke"),
+    "get_execution_mode_api_api_settings_execution_mode_get": ("get", "/api/settings/execution-mode"),
+    "set_execution_mode_api_api_settings_execution_mode_put": ("put", "/api/settings/execution-mode"),
+    "get_pipeline_mode_api_api_settings_pipeline_mode_get": ("get", "/api/settings/pipeline-mode"),
+    "set_pipeline_mode_api_api_settings_pipeline_mode_put": ("put", "/api/settings/pipeline-mode"),
+    "get_engine_tags_api_settings_agent_runtimes__rid__tags_get": ("get", "/api/settings/agent-runtimes/{rid}/tags"),
+    "add_engine_tag_api_settings_agent_runtimes__rid__tags_post": ("post", "/api/settings/agent-runtimes/{rid}/tags"),
+    "delete_engine_tag_api_settings_agent_runtimes__rid__tags__tag__delete": ("delete", "/api/settings/agent-runtimes/{rid}/tags/{tag}"),
+    "update_engine_tag_api_settings_agent_runtimes__rid__tags__tag__put": ("put", "/api/settings/agent-runtimes/{rid}/tags/{tag}"),
+    "list_event_action_filters_api_settings_event_action_filters_get": ("get", "/api/settings/event-action-filters"),
+    "add_event_action_rule_api_settings_event_action_filters_post": ("post", "/api/settings/event-action-filters"),
+    "delete_event_action_rule_api_settings_event_action_filters__rule_id__delete": ("delete", "/api/settings/event-action-filters/{rule_id}"),
+    "update_event_action_rule_api_settings_event_action_filters__rule_id__put": ("put", "/api/settings/event-action-filters/{rule_id}"),
+    "check_repo_name_api_repos_check_name_get": ("get", "/api/repos/check-name"),
+    "sync_repos_api_repos_sync_post": ("post", "/api/repos/sync"),
+    "create_new_repo_api_repos_create_post": ("post", "/api/repos/create"),
+    "host_repo_api_repos_host_post": ("post", "/api/repos/host"),
+    "get_repo_bot_token_api_repos_bot_token__owner___repo_name__get": ("get", "/api/repos/bot-token/{owner}/{repo_name}"),
+    "set_repo_bot_token_api_repos_bot_token_put": ("put", "/api/repos/bot-token"),
+    "set_deploy_url_api_repos_deploy_url_put": ("put", "/api/repos/deploy-url"),
+    "remove_managed_repo_api_repos_remove_post": ("post", "/api/repos/remove"),
+    "repair_host_api_repos__owner___repo__repair_host_post": ("post", "/api/repos/{owner}/{repo}/repair-host"),
+    "get_repo_project_info_api_repos__owner___repo__project_info_get": ("get", "/api/repos/{owner}/{repo}/project-info"),
+    "get_scene_recommend_config_api_repos__owner___repo__scene_recommend_config_get": ("get", "/api/repos/{owner}/{repo}/scene-recommend-config"),
+    "save_scene_recommend_config_api_repos__owner___repo__scene_recommend_config_put": ("put", "/api/repos/{owner}/{repo}/scene-recommend-config"),
+    "update_agent_config_api_agents__name___owner___repo__put": ("put", "/api/agents/{name}/{owner}/{repo}"),
+    "clean_agent_session_api_agents__name___owner___repo__clean_post": ("post", "/api/agents/{name}/{owner}/{repo}/clean"),
+    "create_knowledge_entry_api_knowledge_entry_post": ("post", "/api/knowledge/entry"),
+    "delete_knowledge_api_knowledge_delete": ("delete", "/api/knowledge"),
+    "delete_knowledge_by_id_api_knowledge__knowledge_id__delete": ("delete", "/api/knowledge/{knowledge_id}"),
+    "update_knowledge_api_knowledge__knowledge_id__put": ("put", "/api/knowledge/{knowledge_id}"),
+    "archive_knowledge_api_knowledge__knowledge_id__archive_put": ("put", "/api/knowledge/{knowledge_id}/archive"),
+    "get_knowledge_refs_api_knowledge__knowledge_id__refs_get": ("get", "/api/knowledge/{knowledge_id}/refs"),
+    "add_knowledge_ref_api_knowledge__knowledge_id__refs_post": ("post", "/api/knowledge/{knowledge_id}/refs"),
+    "knowledge_add_refs_batch": ("post", "/api/knowledge/{knowledge_id}/refs/batch"),
+    "update_knowledge_ref_api_knowledge_ref__ref_id__put": ("put", "/api/knowledge/ref/{ref_id}"),
+    "delete_knowledge_ref_api_knowledge_ref__ref_id__delete": ("delete", "/api/knowledge/ref/{ref_id}"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
@@ -126,10 +185,8 @@ NOT_IN_CONTRACT = [
     "/api/agents/types",                 # 无认证
     "/api/tasks/{task_id}/clarifications",  # get_current_user
     "/api/auth/login",
-    "/api/settings",                     # 管理类模块（未开放，仍留内部）
     "/api/dashboard/ops/overview",       # 管理类模块
     "/api/runtime/start",                # 管理类模块
-    "/api/repos/host",                   # 托管（未开放，仍留内部）
 ]
 
 

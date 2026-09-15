@@ -10,7 +10,7 @@
 import os, re, time, uuid, hashlib
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.knowledge import read_entry_content
 from src.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
@@ -460,7 +460,7 @@ def knowledge_context(repo: str = Query(""),
 @router.delete("")
 def delete_knowledge(repo: str = Query(""),
                            file: str = Query(""),
-                           user: dict = Depends(get_current_user)):
+                           user: dict = Depends(require_no_session_token)):
     """删除成员上传的知识文档（仅限本人上传）。"""
     if not repo or not file:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repo 与 file 必填"})
@@ -707,7 +707,7 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
 # ===== CRUD API（固定路径在 {id} 之前） =====
 
 @router.post("/entry")
-def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(get_current_user)):
+def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(require_no_session_token)):
     """用户直接输入文本创建知识条目（source=manual）。"""
     if not (body.name or "").strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "name 必填"})
@@ -826,7 +826,7 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
 
 @router.put("/{knowledge_id}")
 def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
-                     user: dict = Depends(get_current_user)):
+                     user: dict = Depends(require_no_session_token)):
     """编辑知识内容，仅 source=manual 可编辑。"""
     row = _get_knowledge_by_id(knowledge_id)
     if not row:
@@ -874,7 +874,7 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
 
 
 @router.delete("/{knowledge_id}")
-def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(get_current_user)):
+def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(require_no_session_token)):
     """删除 source=manual 的知识条目。"""
     row = _get_knowledge_by_id(knowledge_id)
     if not row:
@@ -890,7 +890,7 @@ def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(get_current_u
 
 @router.put("/{knowledge_id}/archive")
 def archive_knowledge(knowledge_id: int, body: ArchiveBody,
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(require_no_session_token)):
     """标记/取消归档。body.archived=true 标记归档，false 取消归档。"""
     row = _get_knowledge_by_id(knowledge_id)
     if not row:
@@ -919,7 +919,7 @@ def archive_knowledge(knowledge_id: int, body: ArchiveBody,
 # ===== 关联管理 API =====
 
 @router.get("/{knowledge_id}/refs")
-def get_knowledge_refs(knowledge_id: int, user: dict = Depends(get_current_user)):
+def get_knowledge_refs(knowledge_id: int, user: dict = Depends(require_no_session_token)):
     """获取知识的所有关联关系。"""
     _check_ref_permission(knowledge_id, user)
     from src.session_manager import db, db_lock
@@ -936,7 +936,7 @@ def get_knowledge_refs(knowledge_id: int, user: dict = Depends(get_current_user)
 
 @router.post("/{knowledge_id}/refs")
 def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(require_no_session_token)):
     """为知识新增场景/Agent 关联。"""
     _check_ref_permission(knowledge_id, user)
 
@@ -996,7 +996,7 @@ def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
 
 @router.post("/{knowledge_id}/refs/batch", operation_id="knowledge_add_refs_batch")
 def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
-                              user: dict = Depends(get_current_user)):
+                              user: dict = Depends(require_no_session_token)):
     """批量新增场景/Agent 关联（幂等，跳过已存在的）。"""
     _check_ref_permission(knowledge_id, user)
     username = str(user.get("username") or "")
@@ -1032,7 +1032,7 @@ def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
 
 @router.put("/ref/{ref_id}")
 def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
-                         user: dict = Depends(get_current_user)):
+                         user: dict = Depends(require_no_session_token)):
     """修改关联的 enabled 开关。"""
     from src.session_manager import db, db_lock
     with db_lock:
@@ -1055,7 +1055,7 @@ def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
 
 
 @router.delete("/ref/{ref_id}")
-def delete_knowledge_ref(ref_id: int, user: dict = Depends(get_current_user)):
+def delete_knowledge_ref(ref_id: int, user: dict = Depends(require_no_session_token)):
     """删除知识的某条关联。"""
     from src.session_manager import db, db_lock
     with db_lock:
