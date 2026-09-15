@@ -319,12 +319,10 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                 }
                 _wf_fp.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
 
+    # Auto-upgrade disabled: stop returning latest_version to prevent worker
+    # from repeatedly downloading install-worker.sh and saturating bandwidth.
+    # Workers should be upgraded manually via the install script.
     _latest_ver = ""
-    try:
-        from src.worker_package import package_version
-        _latest_ver = package_version()
-    except Exception:
-        pass
 
     return {"status": "ok", "cancelled_tasks": cancelled_tasks, "latest_version": _latest_ver}
 
