@@ -95,7 +95,7 @@
 |----|------|------|:---:|
 | A | skills.py（11）、scenes.py（24） | 用户技能/场景管理，owner=user | ✅ 已完成（commit `954517ad`） |
 | B | settings.py（34）、repos.py（12）、agents.py（2）、knowledge.py（10） | 账号配置/仓库/知识 | ✅ 已完成（commit `dd2c0d32`） |
-| C | runtime.py（17）、tasks.py（6）、events.py（11）、chat.py（12） | 运维/任务操作 | 待做 |
+| C | runtime.py（17）、tasks.py（6）、events.py（11）、chat.py（12） | 运维/任务操作 | ✅ tasks/events 已完成（commit `89fb8501`）；runtime/chat 待做 |
 | D | devstage/templates/dashboard/pipeline/search/auth/feishu_onboard/task_logs | 其余 | 待做 |
 
 > 每批独立提交 + 回归；先 A 批验证契约与 owner 派生，再扩 B/C/D。

@@ -272,9 +272,9 @@ python -m pytest tests/test_openapi.py -q                   # 契约不回归
 - **A 批**（commit `954517ad`）：skills（11）+ scenes（24）`get_current_user` → `require_no_session_token`（全量进契约）
 - **B 批**（commit `dd2c0d32`）：settings（34）+ repos（12）+ agents（2）+ knowledge（10）→ `require_no_session_token`（契约 108 paths）
 
-**⏳ 待实施（C 批，openapi-full-coverage-design.md）**：
-- tasks（confirm-done/cancel/resume/clarifications/pipeline）+ events（terminate/redispatch/thread/chat）→ `require_no_session_token`
-- 本批即本次 §2.2-D 新增的 tasks/events 用户操作类端点（session 拒绝、user/JWT 允许）
+**⏳ 待实施（C 批剩余，openapi-full-coverage-design.md）**：
+- runtime.py（17）+ chat.py（12）+ 其余 devstage/templates/dashboard 等 → `require_no_session_token`（D 批）
+- 本批即本次 §2.2-D 新增的 tasks/events 用户操作类端点（session 拒绝、user/JWT 允许）——**tasks/events 部分已完成（commit `89fb8501`）**
 
 **遗留（可选，未在本次范围）**：
 - [ ] `x-token-scope` 契约扩展标注（§3.3，非必选，代码级已保证）
