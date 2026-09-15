@@ -178,12 +178,29 @@ EXPECTED_PUBLIC = {
     "knowledge_add_refs_batch": ("post", "/api/knowledge/{knowledge_id}/refs/batch"),
     "update_knowledge_ref_api_knowledge_ref__ref_id__put": ("put", "/api/knowledge/ref/{ref_id}"),
     "delete_knowledge_ref_api_knowledge_ref__ref_id__delete": ("delete", "/api/knowledge/ref/{ref_id}"),
+    # ===== C 批（openapi-full-coverage-design.md）：tasks/events 用户操作类进契约 =====
+    "confirm_task_done_api_tasks__task_id__confirm_done_post": ("post", "/api/tasks/{task_id}/confirm-done"),
+    "cancel_task_api_api_tasks__task_id__cancel_post": ("post", "/api/tasks/{task_id}/cancel"),
+    "resume_task_api_api_tasks__task_id__resume_post": ("post", "/api/tasks/{task_id}/resume"),
+    "get_task_clarifications_api_tasks__task_id__clarifications_get": ("get", "/api/tasks/{task_id}/clarifications"),
+    "reply_to_clarification_api_tasks__task_id__clarify_post": ("post", "/api/tasks/{task_id}/clarify"),
+    "get_task_pipeline_api_tasks__task_id__pipeline_get": ("get", "/api/tasks/{task_id}/pipeline"),
+    "terminate_event_api_events__seq__terminate_post": ("post", "/api/events/{seq}/terminate"),
+    "redispatch_event_api_events__seq__redispatch_post": ("post", "/api/events/{seq}/redispatch"),
+    "get_event_thread_api_events__seq__thread_get": ("get", "/api/events/{seq}/thread"),
+    "delete_event_thread_api_events__seq__chat_delete": ("delete", "/api/events/{seq}/chat"),
+    "delete_event_knowledge_api_events__seq__knowledge__scope__delete": ("delete", "/api/events/{seq}/knowledge/{scope}"),
+    "send_conversation_api_events__seq__chat_post": ("post", "/api/events/{seq}/chat"),
+    "stream_conversation_api_events__seq__chat_stream_post": ("post", "/api/events/{seq}/chat/stream"),
+    "submit_conversation_api_events__seq__chat_submit_post": ("post", "/api/events/{seq}/chat/submit"),
+    "conv_task_status_api_events_chat_task__task_id__status_get": ("get", "/api/events/chat/task/{task_id}/status"),
+    "conv_task_stream_api_events_chat_task__task_id__stream_get": ("get", "/api/events/chat/task/{task_id}/stream"),
+    "list_events_api_events__owner___repo__get": ("get", "/api/events/{owner}/{repo}"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
 NOT_IN_CONTRACT = [
     "/api/agents/types",                 # 无认证
-    "/api/tasks/{task_id}/clarifications",  # get_current_user
     "/api/auth/login",
     "/api/dashboard/ops/overview",       # 管理类模块
     "/api/runtime/start",                # 管理类模块

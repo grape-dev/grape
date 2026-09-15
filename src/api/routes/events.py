@@ -3,7 +3,7 @@ import asyncio
 import os
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 
@@ -200,7 +200,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
 
 
 @router.post("/{seq}/terminate")
-def terminate_event(seq: int, user: dict = Depends(get_current_user)):
+def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     """强行终止正在运行的事件任务。
 
     - worker 模式（runtime_id 绑定远端 worker）→ cancel_task（task 状态=cancelled）
@@ -303,7 +303,7 @@ def terminate_event(seq: int, user: dict = Depends(get_current_user)):
 
 
 @router.post("/{seq}/redispatch")
-def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(get_current_user)):
+def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(require_no_session_token)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
 
     见 event-redispatch-design.md §4.1.2：
@@ -1236,7 +1236,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
 
 
 @router.get("/{seq}/thread")
-def get_event_thread(seq: int, user: dict = Depends(get_current_user)):
+def get_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
     from src.api.knowledge import read_knowledge, _issue_num_from
     issue_num = _issue_num_from(evt["issue_id"])
@@ -1252,7 +1252,7 @@ def get_event_thread(seq: int, user: dict = Depends(get_current_user)):
 
 
 @router.delete("/{seq}/chat")
-def delete_event_thread(seq: int, user: dict = Depends(get_current_user)):
+def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     """Issue #100: 清理事件关联的对话消息（event_thread 记录）。"""
     evt = _load_event(seq)
     from src.api.routes.knowledge import _check_repo_member
@@ -1266,7 +1266,7 @@ def delete_event_thread(seq: int, user: dict = Depends(get_current_user)):
 
 
 @router.delete("/{seq}/knowledge/{scope}")
-def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(get_current_user)):
+def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no_session_token)):
     """Issue #100: 删除事件关联的 agent 沉淀知识（文件 + DB + ref）。"""
     evt = _load_event(seq)
     if scope not in ("project", "issue", "issue_agent"):
@@ -1321,7 +1321,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(get_curren
 
 
 @router.post("/{seq}/chat")
-async def send_conversation(seq: int, body: ConversationMessage, user: dict = Depends(get_current_user)):
+async def send_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
     gate = _thread_gate(evt["repo_key"], evt["issue_id"])
     if not gate["open"]:
@@ -1336,7 +1336,7 @@ async def send_conversation(seq: int, body: ConversationMessage, user: dict = De
 
 
 @router.post("/{seq}/chat/stream")
-async def stream_conversation(seq: int, body: ConversationMessage, user: dict = Depends(get_current_user)):
+async def stream_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     """SSE 流式对话（direct 模式；队列模式为一次性 done）。"""
     from fastapi.responses import StreamingResponse
     evt = _load_event(seq)
@@ -1380,7 +1380,7 @@ def _cleanup_conv_tasks():
 
 
 @router.post("/{seq}/chat/submit")
-async def submit_conversation(seq: int, body: ConversationMessage, user: dict = Depends(get_current_user)):
+async def submit_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     """提交对话查询 → 立即返回 task_id。后台异步执行 agent。"""
     _cleanup_conv_tasks()
     evt = _load_event(seq)
@@ -1545,7 +1545,7 @@ def _push_conv_event(task_id: str, evt_type: str, data):
 
 
 @router.get("/chat/task/{task_id}/status")
-def conv_task_status(task_id: str, user: dict = Depends(get_current_user)):
+def conv_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """查询对话任务状态（内存优先 → DB 兜底）。"""
     # 1. 内存
     with _conv_tasks_lock:
@@ -1575,7 +1575,7 @@ def conv_task_status(task_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.get("/chat/task/{task_id}/stream")
-async def conv_task_stream(task_id: str, user: dict = Depends(get_current_user)):
+async def conv_task_stream(task_id: str, user: dict = Depends(require_no_session_token)):
     """订阅对话任务 SSE 输出（重放缓冲 + 实时追加）。"""
     from fastapi.responses import StreamingResponse
 
@@ -1680,7 +1680,7 @@ def list_events(owner: str, repo: str,
                       page: int = Query(1, ge=1),
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 
