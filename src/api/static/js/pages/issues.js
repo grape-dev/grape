@@ -212,6 +212,14 @@ function loadTasks() {
     if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
     _render();
+    // 从事件详情页返回时，自动打开对应任务详情
+    if (window._pendingTaskDetailId) {
+      var pid = window._pendingTaskDetailId;
+      window._pendingTaskDetailId = null;
+      if (window._tasksById && window._tasksById[pid]) {
+        _openBoardDetail(pid);
+      }
+    }
   }).catch(e => {
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
     if (window._currentView !== 'tasks') return;  // stale guard
@@ -317,8 +325,12 @@ window._jumpToPipeline = function(nodeId) {
 // 点击流水线节点 → 跳转到该节点最新事件详情页
 window._jumpToNodeEvent = function(seq) {
   if (!seq) { console.warn('jumpToNodeEvent: no seq'); return; }
-  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
+  // 存储来源任务上下文，供事件详情页返回使用
   const t = window._currentDetailTask;
+  if (t && t.id) {
+    window._eventFromTask = { taskId: t.id };
+  }
+  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
   if (t && t.repo_key) {
     const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
     const parts = repoKey.split('/');
@@ -329,6 +341,12 @@ window._jumpToNodeEvent = function(seq) {
   }
   // 直接修改 hash 跳转事件详情页（#event/seq），触发 hashchange → app.nav('event', seq)
   window.location.hash = '#event/' + seq;
+};
+
+// 点击事件历史条目 → 跳转到事件详情页（携带需求上下文）
+window._jumpToEventFromTask = function(seq) {
+  if (!seq) { console.warn('jumpToEventFromTask: no seq'); return; }
+  _jumpToNodeEvent(seq);
 };
 
 // 点击流水线卡片区域 → 跳转到流水线页面
@@ -410,12 +428,15 @@ function _renderPipelineSection(data) {
       var isLast = i === events.length - 1;
       var statusCol = e.status === 'completed' ? '#34c759' : e.status === 'failed' ? '#ef4444' : e.status === 'cancelled' ? '#86868b' : '#3b82f6';
       var statusIcon = e.status === 'completed' ? '✓' : e.status === 'failed' ? '✕' : e.status === 'cancelled' ? '○' : '●';
-      html += `<div style="display:flex;gap:10px;padding-bottom:${isLast?'0':'10px'}">`;
+      var evSeq = e.seq || '';
+      var evClick = evSeq ? ' onclick="_jumpToEventFromTask(' + evSeq + ')"' : '';
+      var evCursor = evSeq ? ';cursor:pointer' : '';
+      html += `<div style="display:flex;gap:10px;padding-bottom:${isLast?'0':'10px'};border-radius:8px;transition:background .15s"${evClick} onmouseover="this.style.background='rgba(0,0,0,.03)'" onmouseout="this.style.background='transparent'">`;
       html += `<div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">`;
       html += `<div style="width:18px;height:18px;border-radius:50%;background:${statusCol}15;display:flex;align-items:center;justify-content:center;font-size:9px;color:${statusCol};font-weight:600">${statusIcon}</div>`;
       if (!isLast) html += `<div style="width:2px;flex:1;background:rgba(0,0,0,.08);margin-top:2px;min-height:16px"></div>`;
       html += `</div>`;
-      html += `<div style="flex:1;min-width:0;padding-top:1px">`;
+      html += `<div style="flex:1;min-width:0;padding-top:1px${evCursor}">`;
       html += `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">`;
       html += `<span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f);font-family:-apple-system,BlinkMacSystemFont,sans-serif">${e.agent_type || e.event_type || ''}</span>`;
       html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${(e.created_at||'').substring(5,16)}</span>`;
