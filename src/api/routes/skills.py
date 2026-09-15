@@ -72,11 +72,12 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 @router.get("", operation_id="skills_list", summary="技能列表")
 def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
-                agent_type: str = "",
+                agent_type: str = "", sub_scene: str = "",
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
     agent_type 参数：按 agent_type 过滤（vod/issue/coding/qa/sre/chat）。
+    sub_scene 参数：按子场景英文 ID 过滤（如 scaffolding/im/feedback-loop）。
     q 参数：搜索词，按 skill_name / display_name / description 模糊匹配。
     sort 参数：latest（默认顺序）/ hot（按 like_count 降序）。
     page/page_size：分页参数，page_size=0 时不分页（返回全部，兼容旧逻辑）。
@@ -126,6 +127,12 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
     if agent_type:
         conditions.append("agent_type=?")
         params.append(agent_type)
+
+    # sub_scene 过滤（英文 ID）
+    sub_scene = (sub_scene or "").strip()
+    if sub_scene:
+        conditions.append("sub_scene=?")
+        params.append(sub_scene)
 
     # 排序
     order_by = "ORDER BY like_count DESC" if sort == "hot" else "ORDER BY agent_type, skill_name"
@@ -272,6 +279,7 @@ def get_agent_stats(user: dict = Depends(get_current_user_or_api_key), scope: st
 
     where_sql = " WHERE " + " AND ".join(conditions)
     agents = []
+    sub_scenes = []
     total = 0
     with db_lock:
         c = db.cursor()
@@ -285,9 +293,18 @@ def get_agent_stats(user: dict = Depends(get_current_user_or_api_key), scope: st
             for r in c.fetchall():
                 agents.append({"agent_type": r[0] or "", "count": r[1]})
                 total += r[1]
+            # 全量子场景列表（供未选 agent 时展示）
+            c.execute(
+                f"SELECT DISTINCT sub_scene FROM skill{where_sql} AND sub_scene!='' AND sub_scene IS NOT NULL ORDER BY sub_scene",
+                tuple(params)
+            )
+            for r in c.fetchall():
+                ss = r[0] or ""
+                if ss:
+                    sub_scenes.append({"id": ss, "label": _sub_scene_label(ss)})
         except Exception:
             pass
-    return {"total": total, "agents": agents}
+    return {"total": total, "agents": agents, "sub_scenes": sub_scenes}
 
 
 @router.get("/stats")

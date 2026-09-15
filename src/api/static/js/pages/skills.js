@@ -17,6 +17,7 @@ let _skillPageTotal = 0;      // 当前分页查询的总数（来自 list 接�
 let _allSkills = [];         // 当前页技能缓存
 let _featuredSkills = [];    // 精选技能（独立加载，不受搜索影响）
 let _agentStats = {};        // {agent_type: count} 来自 agent-stats 接口
+let _allSubScenes = [];      // 全量子场景列表 [{id, label}] 来自 agent-stats 接口
 let _agentList = ['vod','issue','coding','qa','sre','chat'];  // 固定顺序
 let _activeAgentIdx = -1;    // -1=无选中(显示全部), 0+=第N个agent
 let _activeTagFilter = 'all';  // 当前标签筛选（中文 label 用于显示）
@@ -144,8 +145,10 @@ function _loadAgentStats() {
   API.get('/skills/agent-stats?' + params.join('&')).then(d => {
     _agentStats = {};
     (d.agents || []).forEach(a => { _agentStats[a.agent_type] = a.count; });
+    _allSubScenes = d.sub_scenes || [];
     _skillTotal = d.total || 0;
     _renderAgentSidebar();
+    _renderTagFilters();
   }).catch(() => {});
 }
 
@@ -168,6 +171,10 @@ function _reloadSkills(searchInit) {
   // agent_type 过滤
   if (_activeAgentIdx >= 0 && _agentList[_activeAgentIdx]) {
     params.push('agent_type=' + _agentList[_activeAgentIdx]);
+  }
+  // sub_scene 作为 API 入参：仅未选中 agent 时（全量查询场景）
+  if (_activeAgentIdx < 0 && _activeTagFilterId) {
+    params.push('sub_scene=' + encodeURIComponent(_activeTagFilterId));
   }
   params.push('page=' + _skillPage);
   params.push('page_size=' + _skillPageSize);
@@ -374,23 +381,35 @@ function _switchTagFilter(label, id) {
   _activeTagFilter = label;
   _activeTagFilterId = id || '';
   _renderTagFilters();
-  _renderAgentSkills();
+  if (_activeAgentIdx === -1) {
+    // 未选中 agent：作为 API 入参查询
+    _skillPage = 1;
+    _reloadSkills();
+  } else {
+    // 选中 agent：客户端过滤当前页
+    _renderAgentSkills();
+  }
 }
 
 function _renderTagFilters() {
   var container = document.getElementById('tag-filters');
   if (!container) return;
-  // 从当前页技能列表动态提取 sub_scene 去重
-  var seen = {};
   var tags = [];
-  _allSkills.forEach(function(s) {
-    var label = s.sub_scene || '';
-    var id = s.sub_scene_id || '';
-    if (label && id && !seen[id]) {
-      seen[id] = 1;
-      tags.push({label: label, id: id});
-    }
-  });
+  if (_activeAgentIdx === -1) {
+    // 未选中 agent：全量展示（来自 agent-stats）
+    tags = _allSubScenes.map(function(s) { return {label: s.label, id: s.id}; });
+  } else {
+    // 选中 agent：仅展示当前页数据的 sub_scene
+    var seen = {};
+    _allSkills.forEach(function(s) {
+      var label = s.sub_scene || '';
+      var id = s.sub_scene_id || '';
+      if (label && id && !seen[id]) {
+        seen[id] = 1;
+        tags.push({label: label, id: id});
+      }
+    });
+  }
   // 当前选中的 tag 不在列表中时重置为 all
   if (_activeTagFilter !== 'all' && tags.every(function(t) { return t.id !== _activeTagFilterId; })) {
     _activeTagFilter = 'all';
@@ -399,10 +418,10 @@ function _renderTagFilters() {
   var html = '';
   // "全部" 始终第一个
   var allOn = _activeTagFilter === 'all';
-  html += '<a class="skill-tag-filter' + (allOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'all\',\'\')" style="padding:5px 12px;font-size:11px;color:' + (allOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (allOn?'var(--a)':'var(--b)') + ';background:' + (allOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap">全部</a>';
+  html += '<a class="skill-tag-filter' + (allOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'all\',\'\')" style="padding:5px 12px;font-size:11px;color:' + (allOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (allOn?'var(--a)':'var(--b)') + ';background:' + (allOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">全部</a>';
   tags.forEach(function(t) {
     var isOn = _activeTagFilterId === t.id;
-    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'' + t.label.replace(/'/g, "\\'") + '\',\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap">' + t.label + '</a>';
+    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'' + t.label.replace(/'/g, "\\'") + '\',\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + t.label + '</a>';
   });
   container.innerHTML = html;
 }
