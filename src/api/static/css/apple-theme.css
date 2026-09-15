@@ -437,7 +437,7 @@
 .det-dl{display:inline-flex;align-items:center;gap:7px;font-size:14px;font-weight:600;color:#fff;background:var(--a);border:1px solid var(--a);border-radius:9px;padding:8px 18px;cursor:pointer;white-space:nowrap;transition:filter .16s ease,transform 80ms ease}
 .det-dl:hover{filter:brightness(1.07)}
 .det-dl:active{transform:scale(.97)}
-.det-sum{font-size:15px;color:var(--t2);line-height:1.75;margin-bottom:32px;max-width:60ch}
+.det-sum{font-size:15px;color:var(--t2);line-height:1.75;margin-bottom:32px}
 .fn-card{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:24px;margin-bottom:14px}
 .fn-label{font-size:11.5px;font-weight:600;color:var(--t3);letter-spacing:.1em;margin-bottom:12px}
 .fn-body{font-size:14.5px;line-height:1.9;color:var(--t)}
