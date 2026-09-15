@@ -4,7 +4,7 @@
 - opencode: opencode run "hello"（超时 30s）
 - hermes: hermes chat -q "hello" --yolo（超时 30s）
 - codearts: codearts run "hello"（超时 30s）
-- codex: codex exec --json --sandbox workspace-write "hello"（超时 30s）
+- codex: codex exec --json --sandbox danger-full-access "hello"（超时 30s）
 
 结果存内存 _probe_results，ops/overview 读取展示。
 """
@@ -21,7 +21,7 @@ _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
-    "codex": ["codex", "exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check", "hello"],
+    "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
 }
 
 _PROBE_TIMEOUT = 30  # 秒
