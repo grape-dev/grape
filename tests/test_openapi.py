@@ -16,7 +16,7 @@ os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.api import auth_token
+from src.api import auth_token, openapi
 from src.api.jwt_utils import create_access_token
 from src.user import db as user_db
 
@@ -304,6 +304,69 @@ def test_public_ops_have_operation_id_summary_security():
             seen.add((method, path))
     assert op_ids == set(EXPECTED_PUBLIC)
     assert seen == set(EXPECTED_PUBLIC.values())
+
+
+# ===================== x-token-scope 强制（openapi-x-token-scope-design.md §3.2/§五） =====================
+def test_public_ops_have_x_token_scope():
+    """L2：每个公开 op 必须有合法 x-token-scope（user_only/session_only/dual），不允许遗漏。"""
+    s = _schema()
+    for path, ops in s["paths"].items():
+        for method, op in ops.items():
+            scope = op.get("x-token-scope")
+            assert scope in {"user_only", "session_only", "dual"}, \
+                f"缺 x-token-scope: {method} {path} -> {scope!r}"
+
+
+def test_x_token_scope_consistency():
+    """L3：session_only 覆盖表与前缀规则 ↔ 契约双相一致；抽查 user_only/dual 命中。"""
+    s = _schema()
+
+    # 契约中实际被标 session_only 的 (method, path)
+    actual_session_only = {
+        (m, p)
+        for p, ops in s["paths"].items()
+        for m, op in ops.items()
+        if op.get("x-token-scope") == "session_only"
+    }
+
+    # 1) 覆盖表 / 前缀规则命中的 operation 必须在契约中且被标 session_only
+    for path, ops in s["paths"].items():
+        for method, op in ops.items():
+            op_id = op["operationId"]
+            is_session_rule = (
+                op_id in openapi._SESSION_ONLY_OPERATIONS
+                or path.startswith(openapi._SESSION_ONLY_PATH_PREFIXES)
+            )
+            if is_session_rule:
+                assert (method, path) in actual_session_only, \
+                    f"session 规则命中但未标 session_only: {op_id} {method} {path}"
+
+    # 2) 所有标为 session_only 的必须命中规则（防漏登记/误标）
+    for method, path in actual_session_only:
+        op_id = s["paths"][path][method]["operationId"]
+        assert (op_id in openapi._SESSION_ONLY_OPERATIONS
+                or path.startswith(openapi._SESSION_ONLY_PATH_PREFIXES)), \
+            f"标了 session_only 但未命中规则: {op_id} {method} {path}"
+
+    # 3) 抽样：user_only（D 类管理）/ dual（开放读）实例
+    user_only_samples = {"/api/skills": "get", "/api/skills/upload": "post",
+                         "/api/auth/logout": "post", "/api/dashboard/ops/overview": "get"}
+    for path, method in user_only_samples.items():
+        assert s["paths"][path][method]["x-token-scope"] == "user_only", \
+            f"期望 user_only: {method} {path}"
+
+    dual_samples = {"/api/tasks/mine": "get", "/api/a2a": "post"}
+    for path, method in dual_samples.items():
+        assert s["paths"][path][method]["x-token-scope"] == "dual", \
+            f"期望 dual: {method} {path}"
+
+    # 4) session_only 样例（需求 §四验收）
+    session_samples = {"/api/git-repo/{owner}/{repo}/branches": "get",
+                       "/api/repos/{owner}/{repo}/git-credential": "get",
+                       "/api/repos/{owner}/{repo}/workspace": "get"}
+    for path, method in session_samples.items():
+        assert (method, path) in actual_session_only, \
+            f"期望 session_only: {method} {path}"
 
 
 def _user():
