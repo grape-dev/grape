@@ -429,6 +429,13 @@ function loadAgentTypes() {
       var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'event') {
+      // 路由入口清理：非 _jumpToNodeEvent 触发的进入（如全局搜索 / 直接路由）清除残留来源标志，
+      // 防止上次任务详情遗留的 _eventFromTask 导致事件页错误显示「返回需求详情」按钮。
+      if (!window._eventNavFromTask) {
+        window._eventFromTask = null;
+      }
+      // 消费瞬态标志（仅本次跳转有效，后续任何再进入都需重新标记）
+      window._eventNavFromTask = false;
       title.textContent = I18N.t('app.current_project');
       API.get('/events/detail/' + param).then(d => { if (window._currentView !== 'event') return; renderEventDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'event') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
       // 切换回事件详情时恢复活跃对话查询

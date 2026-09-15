@@ -13,6 +13,7 @@
   "stage_sre": "SRE",
   "detail_title": "需求详情",
   "back_to_board": "返回看板",
+  "back_to_requirement": "返回需求详情",
   "event_history": "事件历史",
   "filter": "筛选",
   "filter_status": "状态",

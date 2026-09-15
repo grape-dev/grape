@@ -18,7 +18,7 @@ def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     return path
 # 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
 _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from src.api.deps import get_current_user, get_current_user_or_api_key, require_no_session_token
@@ -52,19 +52,31 @@ class FeedbackBody(BaseModel):
 # ====== Conversations ======
 
 @router.get("/analyze-image")
-async def analyze_image(url: str):
+async def analyze_image(request: Request):
     """供 agent curl 调用：下载图片 → VLM 分析 → 返回文字描述。
 
     agent 在 issue body 里看到图片链接后，curl 调用本端点获取图片内容描述。
     VLM 管线三级降级：qwen2.5-vl-72b 真视觉 → OCR+LLM 猜图 → 纯 OCR。
+
+    注意：用 Request 而非 url 参数，因为 OBS 签名 URL 含未编码的 &（AccessKeyId=…&Signature=…），
+    FastAPI 的 query parameter 解析会按 & 截断，导致 url 只拿到第一个参数。
+    从原始 query string 手动提取 url= 后的完整内容。
     """
     from urllib.parse import urlparse
     import tempfile, urllib.request
 
+    # 从原始 query string 提取 url= 后的完整值（含 & 未编码的 OBS 签名参数）
+    raw_qs = request.url.query
+    if raw_qs.startswith("url="):
+        url = raw_qs[4:]
+    else:
+        return {"error": "missing url parameter"}
+
     # 域名白名单（防 SSRF）
     parsed = urlparse(url)
     _allowed = ("cdn-img.gitcode.com", "cdn-files.gitcode.com")
-    if parsed.hostname not in _allowed:
+    _allowed_suffixes = (".myhuaweicloud.com",)  # OBS 附件域名（桶名动态）
+    if parsed.hostname not in _allowed and not any(parsed.hostname.endswith(s) for s in _allowed_suffixes):
         return {"error": "domain not allowed", "url": url}
 
     # 下载图片到临时文件

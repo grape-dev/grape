@@ -212,6 +212,14 @@ function loadTasks() {
     if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
     _render();
+    // 从事件详情页返回时，自动打开对应任务详情
+    if (window._pendingTaskDetailId) {
+      var pid = window._pendingTaskDetailId;
+      window._pendingTaskDetailId = null;
+      if (window._tasksById && window._tasksById[pid]) {
+        _openBoardDetail(pid);
+      }
+    }
   }).catch(e => {
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
     if (window._currentView !== 'tasks') return;  // stale guard
@@ -289,6 +297,8 @@ window._openBoardDetail = function(taskId) {
       <div style="text-align:center;padding:20px;color:var(--t3,#86868b);font-size:13px">${I18N.t('tasks.loading')||'加载中...'}...</div>
     </div>
   </div>`;
+  // 异步加载附件列表（_detailHtml 渲染后 DOM 才有 _taskAttachmentsList）
+  _loadTaskAttachments(t.id);
   // 异步加载流水线信息
   API.get('/tasks/' + taskId + '/pipeline').then(function(data) {
     _renderPipelineSection(data);
@@ -317,8 +327,13 @@ window._jumpToPipeline = function(nodeId) {
 // 点击流水线节点 → 跳转到该节点最新事件详情页
 window._jumpToNodeEvent = function(seq) {
   if (!seq) { console.warn('jumpToNodeEvent: no seq'); return; }
-  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
+  // 存储来源任务上下文，供事件详情页返回使用
   const t = window._currentDetailTask;
+  // 始终赋值（无任务时置 null），避免非任务来源进入事件页时残留旧标志
+  window._eventFromTask = (t && t.id) ? { taskId: t.id } : null;
+  // 标记本次进入事件页来自任务详情，供 app.nav('event') 路由入口识别
+  window._eventNavFromTask = true;
+  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
   if (t && t.repo_key) {
     const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
     const parts = repoKey.split('/');
@@ -410,12 +425,15 @@ function _renderPipelineSection(data) {
       var isLast = i === events.length - 1;
       var statusCol = e.status === 'completed' ? '#34c759' : e.status === 'failed' ? '#ef4444' : e.status === 'cancelled' ? '#86868b' : '#3b82f6';
       var statusIcon = e.status === 'completed' ? '✓' : e.status === 'failed' ? '✕' : e.status === 'cancelled' ? '○' : '●';
-      html += `<div style="display:flex;gap:10px;padding-bottom:${isLast?'0':'10px'}">`;
+      var evSeq = e.seq || '';
+      var evClick = evSeq ? ' onclick="event.stopPropagation();_jumpToNodeEvent(' + evSeq + ')"' : '';
+      var evCursor = evSeq ? ';cursor:pointer' : '';
+      html += `<div style="display:flex;gap:10px;padding-bottom:${isLast?'0':'10px'};border-radius:8px;transition:background .15s"${evClick} onmouseover="this.style.background='rgba(0,0,0,.03)'" onmouseout="this.style.background='transparent'">`;
       html += `<div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">`;
       html += `<div style="width:18px;height:18px;border-radius:50%;background:${statusCol}15;display:flex;align-items:center;justify-content:center;font-size:9px;color:${statusCol};font-weight:600">${statusIcon}</div>`;
       if (!isLast) html += `<div style="width:2px;flex:1;background:rgba(0,0,0,.08);margin-top:2px;min-height:16px"></div>`;
       html += `</div>`;
-      html += `<div style="flex:1;min-width:0;padding-top:1px">`;
+      html += `<div style="flex:1;min-width:0;padding-top:1px${evCursor}">`;
       html += `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">`;
       html += `<span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f);font-family:-apple-system,BlinkMacSystemFont,sans-serif">${e.agent_type || e.event_type || ''}</span>`;
       html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${(e.created_at||'').substring(5,16)}</span>`;
@@ -830,16 +848,14 @@ function _detailHtml(t) {
     <div style="${_cardStyle}">
       <div style="${_cardTitle}">附件</div>
       <div id="_taskAttachmentsList" style="min-height:30px"><div style="font-size:12px;color:var(--t3,#86868b)">加载中...</div></div>
-      <div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+      ${t.status === 'active' ? `<div style="display:flex;gap:6px;margin-top:10px;align-items:center">
         <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           上传附件
           <input type="file" style="display:none" onchange="_onTaskAttachSelect(this,${t.id})">
         </label>
-      </div>
+      </div>` : ''}
     </div>`;
-  // 异步加载附件列表
-  _loadTaskAttachments(t.id);
 }
 
 function _loadTaskAttachments(taskId) {
