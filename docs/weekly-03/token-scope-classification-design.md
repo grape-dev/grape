@@ -51,19 +51,19 @@
 
 ### 2.2 端点归属建议映射
 
-#### A. Core workflows — session_token 允许（本次不变）
+#### A. Core workflows — session_token 允许（本次不变；**仅 agent 驱动的执行动作**）
 
 | 端点 | operationId | 当前认证 | 本次 |
 |------|--------------|----------|:---:|
 | `POST /api/tasks/complete` | tasks_complete | get_current_user_or_api_key | 维持现状 |
 | `POST /api/tasks/{task_id}/start` | tasks_start | get_current_user_or_api_key | 维持现状 |
 | `GET/PUT /api/tasks/{task_id}/status` | tasks_status / tasks_status_get | get_current_user_or_api_key | 维持现状 |
-| `GET /api/tasks/mine` | tasks_mine | get_current_user_or_api_key | 维持现状 |
-| `GET /api/tasks/repo/{owner}/{repo}` | tasks_repo_all | get_current_user_or_api_key | 维持现状 |
 | `POST /api/tasks/notify` | tasks_notify(内部) | `_require_bot_token` | 已 session/内部，保留 |
 | `POST /api/a2a` | a2a_handoff | get_current_user_or_api_key | 维持现状 |
 
-> **A 类本次不变**：session_token 允许；`grape_` 与 JWT 维持现状（均放行）——不新增任何收紧。
+> **A 类 = agent/worker 驱动的执行动作**（自报完成、启会话、状态、A2A 交接、通知）。
+> `tasks/mine` / `tasks/repo_all`（用户查看本人/仓库任务）与 `tasks/{id}/clarifications`/`pipeline`（查看）
+> 归 **A 或 B**（只读，session/JWT/API Key 均放行）——见 §2.2 D 的边界澄清。
 
 #### B. Agent Context — session + API Key + JWT（本次均维持现状）
 
@@ -93,13 +93,28 @@
 | `GET /api/chat/conversations|messages` | chat_conversations/messages | or_api_key | **session→403** |
 | `GET /api/repos/member|managed|deploy-url` | repos_member/managed/deploy_url | or_api_key | **session→403** |
 | `GET /api/skills|skills/by-id` | skills_list/detail | or_api_key | **session→403** |
+| **`POST /api/tasks/{task_id}/confirm-done`** | confirm_task_done | get_current_user | **session→403** |
+| **`POST /api/tasks/{task_id}/cancel`** | cancel_task_api | get_current_user | **session→403** |
+| **`POST /api/tasks/{task_id}/resume`** | resume_task_api | get_current_user | **session→403** |
+| **`GET /api/tasks/{task_id}/clarifications`** | get_task_clarifications | get_current_user | **session→403** |
+| **`GET /api/tasks/{task_id}/pipeline`** | get_task_pipeline | get_current_user | **session→403** |
+| **`POST /api/events/{seq}/terminate`** | terminate_event | get_current_user | **session→403** |
+| **`POST /api/events/{seq}/redispatch`** | redispatch_event | get_current_user | **session→403** |
+| **`GET/DELETE /api/events/{seq}/thread`** | get/delete_event_thread | get_current_user | **session→403** |
+| **`DELETE /api/events/{seq}/knowledge`** | delete_event_knowledge | get_current_user | **session→403** |
+| **`POST /api/events/{seq}/chat*`** | send/submit_conversation | get_current_user | **session→403** |
+| **`GET/POST /api/events/chat/task/*`** | conv_task_status/stream | get_current_user | **session→403** |
 
 > ❗ **`/api/scenes`（list）不在 D 类**：VOD 技能（`skills/vod/vod/references/grape-cli-reference.md`）
 > 用 `$GRAPE_SESSION_TOKEN` 调 `grape api GET /api/scenes`（通用兜底），若将 scenes 归 D 类（session→403）
 > 会**破坏 VOD 技能**。故 scenes 维持现状（session/API Key/JWT 均放行）。
 >
-> **D 类说明**：账户/平台管理属用户身份范畴，**agent 会话 token（tk_）不得用于此类管理端点** → 本次对
-> session_token 返回 403；`grape_`（API Key）与 JWT（Web 页面：仓库管理/技能）**维持现状放行**。
+> **D 类说明**：
+> - 账户/平台管理属用户身份范畴，**agent 会话 token（tk_）不得用于此类管理端点** → 本次对 session_token 返回 403。
+> - **tasks/events 的用户操作类**（确认完成/取消/恢复/查看详情、事件终止/重派/线程/对话）同为「用户个人/仓库操作」——
+>   内部用 `user["id"]`（归属校验 `user_id=? OR user_id=0`）或 `check_repo_access`（仓库权限），必须用户身份，**session（agent）不可执行**。
+> - 而 **agent 驱动的执行动作**（tasks complete/start/status、a2a handoff、notify）归 A 类（session 允许）。
+> - `grape_`（API Key）与 JWT（Web 页面）**维持现状放行**。
 
 ---
 
@@ -135,11 +150,11 @@ def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) 
 
 ## 四、约定与原则
 
-1. **本次唯一变更**：D 类（账户/平台管理）端点对 `session_token`（tk_）返回 403。
-2. **session_token 语义**：agent 执行期（pipeline/worker/A2A）临时凭据——不用于账户/平台管理。
-3. **API Key（`grape_`）与 JWT 维持现状**：不发生任何收紧/放宽，防 CLI/Web 页面损坏。
-4. **双兼容维持**：A/B 类保持三通道现状（session + API Key + JWT 均放行），不新增约束。
-5. **不破坏现有流程**：确认无 agent 用 session 调 D 类端点后才收紧（见 §五/§六）。
+1. **session_token 语义**：agent 执行期（pipeline/worker/A2A）临时凭据——仅用于**agent 驱动的执行动作**与敏感凭据访问，**不用于用户账户/任务/仓库管理**。
+2. **A/D 边界**：tasks 的 `complete/start/status`、`a2a/handoff` → A（session 允许）；tasks 的 `confirm-done/cancel/resume/clarifications/pipeline` 与 events 操作类 → D（session 拒绝，用户操作）。
+3. **API Key（`grape_`）与 JWT 维持现状**：D 类端点两者均放行（用户本人可操作），防 CLI/Web 页面损坏。
+4. **双兼容维持**：B 类（issues/events_detail/knowledge 读）三通道放行。
+5. **不破坏现有流程**：确认无 agent 用 session 调 D 类端点后才收紧（§六 已核对：tasks/events 用户操作类无 agent 调用）。
 
 ---
 
@@ -249,9 +264,17 @@ python -m pytest tests/test_openapi.py -q                   # 契约不回归
 
 **✅ 已实施（commit `203d0316`，已上线生产并实测）**：
 - `src/api/deps.py`：`require_no_session_token`
-- D 类端点替换：`agents_detail` / `auth/profile` / `chat conversations|messages` / `repos member|managed|deploy-url` / `skills list|detail`
+- D 类端点替换（首批）：`agents_detail` / `auth/profile` / `chat conversations|messages` / `repos member|managed|deploy-url` / `skills list|detail`
 - `/api/scenes` 不归 D 类（VOD 技能用 session 调，维持现状）
 - 测试 `tests/test_token_scope_guard.py`（25 用例）
+
+**✅ 扩展实施（openapi-full-coverage-design.md A/B 批，已上线）**：
+- **A 批**（commit `954517ad`）：skills（11）+ scenes（24）`get_current_user` → `require_no_session_token`（全量进契约）
+- **B 批**（commit `dd2c0d32`）：settings（34）+ repos（12）+ agents（2）+ knowledge（10）→ `require_no_session_token`（契约 108 paths）
+
+**⏳ 待实施（C 批，openapi-full-coverage-design.md）**：
+- tasks（confirm-done/cancel/resume/clarifications/pipeline）+ events（terminate/redispatch/thread/chat）→ `require_no_session_token`
+- 本批即本次 §2.2-D 新增的 tasks/events 用户操作类端点（session 拒绝、user/JWT 允许）
 
 **遗留（可选，未在本次范围）**：
 - [ ] `x-token-scope` 契约扩展标注（§3.3，非必选，代码级已保证）
