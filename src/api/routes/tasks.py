@@ -981,13 +981,14 @@ def create_standard_task(repo_key: str, title: str, description: str,
     - token：bot_token 注入（onboarding 无登录用户上下文，用仓库 bot token）
     - 不额外写入任何消息：任务上下文消息只由 ensure_issue_task → _ensure_task_conversation 产生 1 条
     """
-    from src.repo_key import to_repo_key, split_owner_repo
+    from src.repo_key import to_repo_key, split_owner_repo, parse_repo_key
     repo_key = to_repo_key(repo_key)
     owner, rname = split_owner_repo(repo_key)
+    _provider, _, _ = parse_repo_key(repo_key)
     if not title or not title.strip():
         return {"ok": False, "code": 400, "message": "任务标题必填"}
     if not bot_token:
-        return {"ok": False, "code": 400, "message": "GitCode bot token 缺失"}
+        return {"ok": False, "code": 400, "message": "bot token 缺失"}
     if not assignee:
         assignee = owner or ""
     issue_num = _find_open_issue_by_title(bot_token, owner, rname, title.strip())
@@ -996,8 +997,12 @@ def create_standard_task(repo_key: str, title: str, description: str,
         # 已有同标题 open Issue → 直接建档（幂等：不再重复创建 Issue）
         issue_num = int(issue_num)
     else:
-        resp = _post_gitcode_issue(bot_token, owner, rname, title.strip(),
-                                   (description or "").strip(), assignee=assignee)
+        if _provider == "github":
+            resp = _post_github_issue(bot_token, owner, rname, title.strip(),
+                                      (description or "").strip(), assignee=assignee)
+        else:
+            resp = _post_gitcode_issue(bot_token, owner, rname, title.strip(),
+                                       (description or "").strip(), assignee=assignee)
         n = None
         if isinstance(resp, dict):
             n = resp.get("number") or resp.get("iid") or resp.get("id")

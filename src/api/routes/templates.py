@@ -38,15 +38,18 @@ def _find_template(template_id: str) -> dict | None:
     return None
 
 
-def _load_global_bot_config() -> tuple[str, str]:
-    """读取全局 bot 配置，返回 (bot_token, bot_username)。"""
+def _load_global_bot_config(provider: str = "gitcode") -> tuple[str, str]:
+    """读取全局 bot 配置，返回 (bot_token, bot_username)。按 provider 选 token 字段。"""
     bot_token, bot_username = "", ""
     try:
         path = os.path.join(CONFIG_DIR, "global-bot-token.json")
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 gbt = json.load(f)
-            bot_token = gbt.get("gitcode_api_token", "") or ""
+            if provider == "github":
+                bot_token = gbt.get("github_bot_token", "") or gbt.get("gitcode_api_token", "") or ""
+            else:
+                bot_token = gbt.get("gitcode_api_token", "") or ""
             us = gbt.get("bot_usernames") or []
             bot_username = us[0] if us else ""
     except Exception as e:
@@ -195,7 +198,7 @@ async def create_from_template(body: CreateTemplateRequest,
 
     # 2. 写入模板代码（放到 executor 避免阻塞 event loop）
     try:
-        bot_token, _ = _load_global_bot_config()
+        bot_token, _ = _load_global_bot_config(provider=provider)
         import asyncio, functools
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None,

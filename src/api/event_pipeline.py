@@ -1995,8 +1995,14 @@ def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
         if _num:
             _token = ""
             try:
-                from src.user.db import get_gitcode_token
-                _token = get_gitcode_token(repo_key=repo_key) or ""
+                from src.repo_key import parse_repo_key
+                _provider, _, _ = parse_repo_key(repo_key)
+                if _provider == "github":
+                    from src.user.db import get_github_token
+                    _token = get_github_token(repo_key=repo_key) or ""
+                else:
+                    from src.user.db import get_gitcode_token
+                    _token = get_gitcode_token(repo_key=repo_key) or ""
             except Exception:
                 pass
             repogit.remove_issue_worktree_if_pushed(repo_key, agent_type, _num, token=_token)
