@@ -119,6 +119,7 @@ function renderTasks() {
   if (!el) return;
   _taskSel = null;   // 进入页面重置选中（避免切换 repo 后详情残留旧仓库任务）
   _taskFilterPopoverOpen = false;
+  window._pendingTaskDetailId = null;  // Issue #175: 清理残留，防止意外跳详情
   el.innerHTML = '<div class="loading">' + I18N.t('tasks.loading') + '</div>';
   loadTasks();
   _startScenePoll();
@@ -239,6 +240,10 @@ function loadTasks() {
     var _openedDetail = false;  // 跟踪本次 loadTasks 是否打开了详情页
     if (!window._pendingTaskDetailId && !window._pendingIssueNumber) {
       _render();
+    } else {
+      // 跳过 _render() 时仍需更新 _tasksById 供 _openBoardDetail 使用
+      window._tasksById = {};
+      _tasksAll.forEach(t => { window._tasksById[t.id] = t; });
     }
     // Issue #166: 从场景详情页流水线跳转来时，按 issue_number 匹配并打开需求详情
     if (window._pendingIssueNumber) {
@@ -1058,7 +1063,7 @@ function _withTaskLoading(taskId, apiCall, successMsg, errorFn) {
     // position:fixed 覆盖全屏（不受可滚动容器的 overflow-y:auto 限制）
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,.7);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:9998';
     var spinner = document.createElement('div');
-    spinner.style.cssText = 'width:24px;height:24px;border:3px solid rgba(0,0,0,.1);border-top-color:#0071e3;border-radius:50%;animation:_grapeSpin .7s linear infinite';
+    spinner.style.cssText = 'width:24px;height:24px;border:3px solid var(--b,rgba(0,0,0,.1));border-top-color:#0071e3;border-radius:50%;animation:_grapeSpin .7s linear infinite';
     // 注入 spinner 动画（仅一次）
     if (!document.getElementById('_grapeSpinCSS')) {
       var style = document.createElement('style');
@@ -1074,12 +1079,14 @@ function _withTaskLoading(taskId, apiCall, successMsg, errorFn) {
     pc.appendChild(overlay);
   }
   apiCall().then(function() {
+    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return; }  // 导航离开不弹 toast
     if (overlay) overlay.remove();
     app.showToast(successMsg);
     if (taskId && window._currentDetailTask) window._pendingTaskDetailId = taskId;
     loadTasks();
   }).catch(function(e) {
     if (e && e.name === 'AbortError' && e.silent) { if (overlay) overlay.remove(); return; }  // 导航离开时静默
+    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return; }  // 导航离开不弹 toast
     if (overlay) overlay.remove();
     app.showToast(errorFn(e));
     loadTasks();  // 超时或错误后刷新页面保证可用
