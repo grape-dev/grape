@@ -1115,11 +1115,13 @@ function openTaskConversation(t) {
     // Issue #175: 给按钮加 loading 反馈，防止用户以为没点到反复点击
     var btn = document.querySelector('[onclick*="openTaskConversation(' + t.id + ')"]');
     if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+    var _restoreBtn = function() { if (btn) { btn.disabled = false; btn.style.opacity = '1'; } };
     API.post('/issues/' + t.id + '/start').then(d => {
       if (window._tasksById[t.id] && d && d.status) { window._tasksById[t.id].status = d.status; }
+      _restoreBtn();
       go();
     }).catch(function() {
-      if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+      _restoreBtn();
       go();
     });
   } else {
