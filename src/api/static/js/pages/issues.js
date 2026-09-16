@@ -229,8 +229,11 @@ function loadTasks() {
   API.get(apiUrl).then(d => {
     if (window._currentView !== 'tasks') return;  // stale guard
     _tasksAll = d.issues || d.tasks || [];
-    // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
-    if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
+    // Issue #175: 刷新 _taskSel 指向新对象（旧引用的 status 等字段已过时）
+    if (_taskSel) {
+      var updated = _tasksAll.find(t => t.id === _taskSel.id);
+      _taskSel = updated || null;
+    }
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
     _render();
     // Issue #166: 从场景详情页流水线跳转来时，按 issue_number 匹配并打开需求详情
@@ -259,6 +262,7 @@ function loadTasks() {
   }).catch(e => {
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
     if (window._currentView !== 'tasks') return;  // stale guard
+    window._pendingTaskDetailId = null;  // Issue #175: 清理待打开详情（loadTasks 失败时不残留）
     el.innerHTML = '<div class="error">' + I18N.t('tasks.load_failed', {msg: e.message}) + '</div>';
   });
 }
@@ -965,13 +969,12 @@ function _onTaskAttachSelect(fileInput, taskId) {
 
 function _deleteTaskAttach(taskId, filename) {
   if (!confirm('确认删除附件？')) return;
-  fetch('/api/issues/' + taskId + '/attachments/' + filename, {
-    method: 'DELETE',
-    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
-  }).then(function(r) { return r.json(); }).then(function() {
+  // Issue #175: 走 API.js 获得超时保护
+  API.del('/issues/' + taskId + '/attachments/' + filename).then(function() {
     _loadTaskAttachments(taskId);
   }).catch(function(e) {
-    alert('删除失败: ' + e.message);
+    if (e && e.name === 'AbortError' && e.silent) return;
+    app.showToast(I18N.t('tasks.operation_failed', {msg: (e && e.detail && e.detail.message || e && e.message || String(e))}));
   });
 }
 
@@ -1031,15 +1034,42 @@ window._grapeConfirm = function(opts, event) {
   overlay.onclick = function(e) { if (e.target === overlay) _close(); };
 };
 
+// Issue #175 v3: 遮罩整个 #pageContent，成功后保持详情页视图，超时/错误自动恢复
+function _withTaskLoading(taskId, apiCall, successMsg, errorFn) {
+  var pc = document.getElementById('pageContent');
+  var overlay = null;
+  if (pc) {
+    if (getComputedStyle(pc).position === 'static') pc.style.position = 'relative';
+    overlay = document.createElement('div');
+    overlay.style.cssText = 'position:absolute;inset:0;background:rgba(255,255,255,.7);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;color:var(--t3,#86868b);z-index:50;border-radius:inherit';
+    overlay.textContent = I18N.t('tasks.processing');
+    pc.appendChild(overlay);
+  }
+  apiCall().then(function() {
+    if (overlay) overlay.remove();
+    app.showToast(successMsg);
+    if (taskId && window._currentDetailTask) window._pendingTaskDetailId = taskId;
+    loadTasks();
+  }).catch(function(e) {
+    if (e && e.name === 'AbortError' && e.silent) { if (overlay) overlay.remove(); return; }  // 导航离开时静默
+    if (overlay) overlay.remove();
+    app.showToast(errorFn(e));
+    loadTasks();  // 超时或错误后刷新页面保证可用
+  });
+}
+
 window.confirmTaskDone = function(taskId, event) {
   _grapeConfirm({
     title: I18N.t('tasks.confirm_done'),
     message: I18N.t('tasks.confirm_done_message'),
     confirmText: I18N.t('tasks.confirm_done'),
     onConfirm: function() {
-      API.post('/issues/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}).then(() => {
-        app.showToast(I18N.t('tasks.task_done_toast'));
-      }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
+      _withTaskLoading(
+        taskId,
+        function() { return API.post('/issues/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}); },
+        I18N.t('tasks.task_done_toast'),
+        function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
+      );
     }
   }, event);
 };
@@ -1051,17 +1081,23 @@ window.cancelTask = function(taskId, event) {
     confirmText: I18N.t('tasks.cancel_task'),
     danger: true,
     onConfirm: function() {
-      API.post('/issues/' + taskId + '/cancel').then(() => {
-        app.showToast(I18N.t('tasks.task_cancelled_toast'));
-      }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
+      _withTaskLoading(
+        taskId,
+        function() { return API.post('/issues/' + taskId + '/cancel'); },
+        I18N.t('tasks.task_cancelled_toast'),
+        function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
+      );
     }
   }, event);
 };
 
 window.resumeTask = function(taskId) {
-  API.post('/issues/' + taskId + '/resume').then(() => {
-    app.showToast(I18N.t('tasks.task_resumed_toast'));
-  }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
+  _withTaskLoading(
+    taskId,
+    function() { return API.post('/issues/' + taskId + '/resume'); },
+    I18N.t('tasks.task_resumed_toast'),
+    function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
+  );
 };
 
 function openTaskConversation(t) {
@@ -1073,6 +1109,9 @@ function openTaskConversation(t) {
   const param = issueNum && repoKey ? 'issue:' + issueNum + ':' + repoKey : (t && t.conversation_id || undefined);
   const go = () => app.nav('chat', param);
   if (t && t.id && t.status === 'active') {
+    // Issue #175: 给按钮加 loading 反馈，防止用户以为没点到反复点击
+    var btn = document.querySelector('[onclick*="openTaskConversation"]');
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
     API.post('/issues/' + t.id + '/start').then(d => {
       if (window._tasksById[t.id] && d && d.status) { window._tasksById[t.id].status = d.status; }
       go();
