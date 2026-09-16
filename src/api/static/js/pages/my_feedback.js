@@ -11,7 +11,7 @@ function renderMyFeedback() {
 
   function load() {
     el.innerHTML = '<div class="loading">加载中...</div>';
-    API.get('/feedback/mine', { params: { page: _page, size: _size } })
+    API.get('/feedback/mine?page=' + _page + '&size=' + _size)
       .then(function (resp) {
         renderList(resp);
       })
