@@ -2822,13 +2822,13 @@ def get_featured_skills(limit: int = 5) -> list[dict]:
         c = db.cursor()
         c.execute(
             "SELECT id, skill_name, display_name, description, agent_type, "
-            "is_featured, like_count "
+            "is_featured, like_count, category_id "
             "FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
             "ORDER BY like_count DESC LIMIT ?",
             (limit,)
         )
         return [{"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
                  "description": r[3] or "", "agent_type": r[4] or "",
-                 "is_featured": r[5], "like_count": r[6]}
+                 "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
                 for r in c.fetchall()]
 

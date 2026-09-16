@@ -528,6 +528,7 @@ function _renderSkillCard(s, fixedWidth) {
     <div class="rh">
       <span style="font-size:14px">${meta.icon||''}</span>
       <span class="tg ${tagClass}" style="font-size:9px">${meta.label||at}</span>
+      ${s.category_name ? `<span class="tg" style="font-size:9px;background:rgba(49,104,224,0.08);color:var(--a)">${s.category_name}</span>` : ''}
       <span class="rn">${s.display_name || s.name}</span>
       ${featuredBadge}
     </div>

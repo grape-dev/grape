@@ -213,7 +213,8 @@ def toggle_skill_like(skill_id: int, user: dict = Depends(require_no_session_tok
 def list_featured_skills(user: dict = Depends(require_no_session_token), limit: int = 0):
     """精选技能：is_featured=1 的 official 技能，按 like_count 降序。limit=0 时默认 5"""
     from src.user.db import (get_featured_skills, batch_skill_liked,
-                             get_skill_usage_stats, batch_skill_scenes)
+                             get_skill_usage_stats, batch_skill_scenes,
+                             list_skill_categories)
 
     skills = get_featured_skills(limit=limit if limit > 0 else 5)
     if not skills:
@@ -225,6 +226,13 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
     # 补充使用统计和所属场景（按 skill_id 关联）
     usage_stats = get_skill_usage_stats(skill_ids) if skill_ids else {}
     scenes_map = batch_skill_scenes(skill_ids) if skill_ids else {}
+    # 批量查分类名称
+    cat_map = {}
+    try:
+        for cat in list_skill_categories():
+            cat_map[cat["id"]] = cat["name"]
+    except Exception:
+        pass
     for s in skills:
         s["name"] = s["skill_name"]  # 前端用 name 字段
         s["scope"] = "official"
@@ -233,6 +241,7 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
         s["scene_count"] = stats.get("scene_count", 0)
         s["repo_count"] = stats.get("repo_count", 0)
         s["scenes"] = scenes_map.get(s["id"], [])
+        s["category_name"] = cat_map.get(s.get("category_id", 0), "")
     return {"skills": skills}
 
 
@@ -327,19 +336,28 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
     先按 skill_name 精确匹配，匹配到则按名称过滤；
     匹配不到则按 description + display_name + agent_type 做关键词匹配。
     不调 LLM（第一期简单实现）——分词后匹配技能描述。
-    返回 [{skill_id, name, display_name, description, match_reason}]
+    返回 [{skill_id, name, display_name, description, category_id, category_name, match_reason}]
     """
     from src.session_manager import db, db_lock
+    from src.user.db import list_skill_categories
 
     q = (q or "").strip()
     if not q:
         return {"skills": []}
 
+    # 批量查分类名称（在 db_lock 外查，避免 SQLite cursor 复用）
+    cat_map = {}
+    try:
+        for cat in list_skill_categories():
+            cat_map[cat["id"]] = cat["name"]
+    except Exception:
+        pass
+
     # 1. 先按 skill_name 精确匹配
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, skill_name, display_name, description, agent_type "
+            "SELECT id, skill_name, display_name, description, agent_type, category_id "
             "FROM skill WHERE is_active=1 AND scope='official' "
             "AND (skill_name=? OR display_name=?) ORDER BY skill_name",
             (q, q),
@@ -349,7 +367,8 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
     if exact_rows:
         return {"skills": [
             {"skill_id": r[0], "name": r[1], "display_name": r[2] or r[1],
-             "description": r[3] or "", "match_reason": "名称精确匹配"}
+             "description": r[3] or "", "category_id": r[5] or 0,
+             "category_name": cat_map.get(r[5] or 0, ""), "match_reason": "名称精确匹配"}
             for r in exact_rows
         ]}
 
@@ -364,7 +383,7 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, skill_name, display_name, description, agent_type "
+            "SELECT id, skill_name, display_name, description, agent_type, category_id "
             "FROM skill WHERE is_active=1 AND scope='official' "
             "ORDER BY agent_type, skill_name",
         )
@@ -372,7 +391,7 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
 
     results = []
     for r in all_skills:
-        skill_id, name, display_name, desc, agent_type = r
+        skill_id, name, display_name, desc, agent_type, cat_id = r
         display_name = display_name or name
         desc = desc or ""
         # 计算命中关键词
@@ -385,7 +404,9 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
             match_reason = f"匹配关键词：{', '.join(hit_keywords)}"
             results.append({
                 "skill_id": skill_id, "name": name, "display_name": display_name,
-                "description": desc, "match_reason": match_reason,
+                "description": desc, "category_id": cat_id or 0,
+                "category_name": cat_map.get(cat_id or 0, ""),
+                "match_reason": match_reason,
                 "_hit_count": len(hit_keywords),
             })
 
