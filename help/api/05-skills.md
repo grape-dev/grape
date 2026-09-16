@@ -12,6 +12,7 @@
 ---
 
 ## GET /api/skills/stats — 技能统计
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 出参 | 使用统计（被场景/仓库引用次数） |
 | 返回 | 200 |
@@ -27,6 +28,7 @@
 ---
 
 ## GET /api/skills/by-id/{skill_id} — 技能详情
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{skill_id}` |
 | 出参 | `{id, skill_name, display_name, description, agent_type, skill_path, scope, owner_id, ...}` |
@@ -35,6 +37,7 @@
 ---
 
 ## GET /api/skills/by-id/{skill_id}/download — 下载技能 ZIP
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{skill_id}` |
 | 出参 | ZIP（application/zip） |
@@ -43,6 +46,7 @@
 ---
 
 ## POST /api/skills/upload — 上传技能
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`multipart/form-data`，字段：
 
@@ -66,6 +70,7 @@
 ---
 
 ## DELETE /api/skills/by-id/{skill_id} — 删除技能
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{skill_id}` |
 | 返回 | 200/204；400 被引用；404 |
@@ -73,6 +78,7 @@
 ---
 
 ## POST /api/skills/sync-official — 同步官方技能
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 出参 | `{"added": n, "updated": n, "skipped": n}` |
 | 返回 | 200 |
@@ -80,6 +86,7 @@
 ---
 
 ## GET /api/skills/template — 技能模板 ZIP
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 出参 | ZIP（含 my-skill/ 示例） |
 | 返回 | 200 |
@@ -87,16 +94,20 @@
 ---
 
 ## GET /api/skills/{skill_id}/sub — 子技能列表
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 ## GET /api/skills/{skill_id}/sub/{sub_name} — 读子技能
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 ## GET /api/skills/package-sub/{pkg_id}/{sub_name} — 包内子技能
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 > 子技能接口返回 SKILL.md/references 内容，供 agent 运行时按需加载。
 
 ---
 
 ## POST /api/skills/{skill_id}/like — 点赞技能
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 出参 | `{"liked": true, "likes": n}` |
 | 返回 | 200 |
@@ -104,6 +115,7 @@
 ---
 
 ## POST /api/skills/convert — 转换技能（跨模式）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`Content-Type: application/json`
 

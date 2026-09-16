@@ -1,33 +1,22 @@
-# Tasks 任务接口（/api/tasks）
+# Tasks 接口（/api/tasks）— Agent 执行实例动作
 
-> 对外公开，认证：`get_current_user_or_api_key`。
-> scope（x-token-scope）：`mine/start/status/complete/repo/{owner}/{repo}` = **dual**（三通道全放行）；
-> `confirm-done/cancel/resume/clarifications/clarify/pipeline` = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
-
-## GET /api/tasks/mine — 当前用户任务列表
-
-| 项 | 值 |
-|----|-----|
-| 认证 | 必填 |
-| Query | `status`（可选，active/processing/completed/cancelled）、`repo_key`（可选）、`sort_order`（可选，asc/desc）、`mode`（可选，default 等） |
-| 出参 | `{tasks: Task[], total: int}` 或直接任务数组（取决于实现） |
-| 返回 | 200 成功；401 未认证 |
-
-Task 对象字段：`id / user_id / assignee / repo_key / issue_number / title / task_description / conversation_id / status / completed_reason / created_at / completed_at / is_subtask_mode / parent_issue_number`
-
----
-
-## POST /api/tasks/create — 已移除（请改用 POST /api/issues）
-
-> ⚠️ **本端点已移除**（Phase C2）：其行为本质是**创建 GitCode Issue**。
-> **请用 `POST /api/issues/{owner}/{repo}`**（对外唯一创建入口，逻辑复用 `ensure_issue_task` + GitCode create + 触发 pipeline）。
-> 调用 `/api/tasks/create` 现返回 405；调用方（CLI/Agent）已统一迁移。
+> `/api/tasks` 现仅承载「Agent 执行期动作」类接口；用户侧的**需求列表与操作接口都在 `/api/issues`**
+> （见 [11-issues.md](11-issues.md)）。
+>
+> | 端点 | 语义 | 认证 |
+> |------|------|------|
+> | `POST /api/tasks/notify` | Agent 分配/换人/接管通知 | `tk_` 会话 token（仅 `GRAPE_SESSION_TOKEN`） |
+> | `POST /api/tasks/complete` | Agent 完成一次执行实例 | dual（三通道） |
 
 ---
 
 ## POST /api/tasks/notify — 任务分配/通知
 
-请求头：`Content-Type: application/json`
+> 调用方：issue 系列技能（issue/issue、vod/repo-onboarding 等）在分配/换人/接管时调用。
+> 认证：`Authorization: Bearer <tk_ 会话 token>`——**仅支持 `GRAPE_SESSION_TOKEN`**，仓库作用域必须与
+> `repo_key` 匹配（Agent 执行期由系统注入 `$GRAPE_SESSION_TOKEN`，见 event_pipeline 签发）。
+> ⚠️ **不再支持 `BOT_GITCODE_TOKEN`**：若使用 `BOT_GITCODE_TOKEN` 调用，返回 **403 token 无效**。
+> 也**不接受** `grape_` API Key / WebUI JWT。
 
 请求体（TaskNotifyBody）：
 
@@ -44,52 +33,11 @@ Task 对象字段：`id / user_id / assignee / repo_key / issue_number / title /
 {"ok": true, "task_id": 5, "conversation_id": "uuid", "message": "任务已创建并通知责任人"}
 ```
 
-返回：200；400 责任人未注册平台；403 token 无效；bot_takeover 场景返回 `{"ok":true,"task_id":0,"message":"任务已由 ... 接管"}`。
+返回：200；400 责任人未注册平台；**403 非 `GRAPE_SESSION_TOKEN` 或仓库作用域不匹配（含 `BOT_GITCODE_TOKEN`）**；bot_takeover 场景返回 `{"ok":true,"task_id":0,"message":"任务已由 ... 接管"}`。
 
 ---
 
-## POST /api/tasks/close — 关闭任务
-
-请求头：`Content-Type: application/json`
-
-请求体（TaskCloseBody）：
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|:---:|------|
-| `repo_key` | string | ✅ | 仓库 |
-| `issue_number` | int | ✅ | Issue 编号 |
-
-出参：`{"ok": true}`
-
-返回：200。
-
----
-
-## POST /api/tasks/{task_id}/start — 打开任务会话（不翻转状态）
-
-| 项 | 值 |
-|----|-----|
-| Path | `{task_id}` int |
-| 出参 | `{"id": ..., "status": "active"}` |
-| 返回 | 200；403 无权；404 任务不存在 |
-
----
-
-## PUT /api/tasks/{task_id}/status — 状态迁移
-
-请求头：`Content-Type: application/json`
-
-请求体（TaskStatusBody）：`{"status": "processing"}`（active/processing/completed/cancelled 按流转规则）
-
-| 项 | 值 |
-|----|-----|
-| Path | `{task_id}` int |
-| 出参 | `{"ok": true, "task_id": ..., "status": "processing"}` |
-| 返回 | 200；400 非法迁移；403 无权；404 不存在 |
-
----
-
-## POST /api/tasks/complete — 任务自报完成（grape tasks complete）
+## POST /api/tasks/complete — 任务自报完成（grape CLI tasks complete，Event 执行实例）
 
 请求头：`Content-Type: application/json`
 
@@ -127,34 +75,7 @@ Task 对象字段：`id / user_id / assignee / repo_key / issue_number / title /
 
 ---
 
-## GET /api/tasks/{task_id}/status — 查询任务状态（轮询 wait 用）
-
-| 项 | 值 |
-|----|-----|
-| Path | `{task_id}` int |
-| 出参 | `{"id": ..., "status": "running", "repo_key": ..., "issue_number": ..., "title": ..., "completed_reason": ..., "completed_at": ...}` |
-| 返回 | 200；401；404 |
-
-> `grape tasks wait --json-out` 即轮询本端点直至终态（completed/failed/cancelled）。
-
----
-
-## GET /api/tasks/{task_id}/clarifications — 澄清历史
-
-| Path | `{task_id}` int |
-| 出参 | 澄清消息数组 |
-| 返回 | 200 |
-
----
-
-## POST /api/tasks/{task_id}/clarify — 回复澄清
-
-请求头：`Content-Type: application/json`
-
-请求体（TaskClarifyBody）：`{"message": "..."}`
-
-| 项 | 值 |
-|----|-----|
-| Path | `{task_id}` int |
-| 出参 | `{"ok": true, ...}` |
-| 返回 | 200；400 message 缺 |
+> 迁移索引：原 `/api/tasks/{task_id}/*` 用户操作端点已迁至 `/api/issues/{issue_id}/...`（见 11-issues.md）；
+> CLI 轮询状态改用 `GET /api/issues/{issue_id}/status`。
+> `POST /api/tasks/close`、`POST/DELETE /api/tasks/attachments/pre-upload*` 已移除——
+> 附件统一走 `/api/issues/{issue_id}/attachments`；Issue 关闭由平台 webhook 自动收尾。
