@@ -721,11 +721,73 @@ class CreateBranchRequest(BaseModel):
     refs: str = "main"
 
 
+def _detect_repo_provider(owner: str, repo: str) -> str:
+    """根据 managed_repos.repo_key 前缀判断仓库属于 gitcode 还是 github。
+
+    优先查 managed_repos 表（托管仓库有明确的 provider 前缀）；
+    其次查 user_repos（用户绑定的仓库缓存）；
+    默认返回 'gitcode'。
+    """
+    from src.user.db import db_lock, db
+    from src.repo_key import to_repo_key
+    for prov in ("github", "gitcode"):
+        rk = to_repo_key(f"{owner}/{repo}", provider=prov)
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (rk,))
+                if c.fetchone():
+                    return prov
+        except Exception:
+            pass
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT 1 FROM user_repos WHERE repo_key=? LIMIT 1", (rk,))
+                if c.fetchone():
+                    return prov
+        except Exception:
+            pass
+    return "gitcode"
+
+
 @router.get("/branches/{owner}/{repo}")
 def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """列出仓库所有分支（供高级选项工作分支选择）"""
+    from src.user.repo_manager import _req, _github_req
+
+    provider = _detect_repo_provider(owner, repo)
+
+    if provider == "github":
+        from src.user.db import get_github_token
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(f"{owner}/{repo}", provider="github")
+        token = get_github_token(repo_key=rk)
+        if not token:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": "GitHub Bot Token 未配置，无法查询分支"})
+        branches = []
+        try:
+            page = 1
+            while page <= 5:
+                url = f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100&page={page}"
+                data = _github_req("GET", url, token)
+                if not isinstance(data, list) or not data:
+                    break
+                for b in data:
+                    branches.append({
+                        "name": b.get("name", ""),
+                        "protected": bool(b.get("protected", False)),
+                    })
+                if len(data) < 100:
+                    break
+                page += 1
+        except Exception as e:
+            log.warning(f"List branches failed for GitHub {owner}/{repo}: {e}")
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
+        return {"branches": branches}
+
+    # GitCode（原逻辑）
     from src.user.db import get_bot_token_by_repo
-    from src.user.repo_manager import _req
 
     # 仓库 bot token → 全局 bot token
     token = get_bot_token_by_repo(owner, repo)
@@ -769,8 +831,60 @@ def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_se
 def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
                         user: dict = Depends(require_no_session_token)):
     """在仓库中创建新分支"""
+    from src.user.repo_manager import _req, _github_req
+
+    provider = _detect_repo_provider(owner, repo)
+
+    if provider == "github":
+        from src.user.db import get_github_token
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(f"{owner}/{repo}", provider="github")
+        token = get_github_token(repo_key=rk)
+        if not token:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": "GitHub Bot Token 未配置，无法创建分支"})
+        if not body.branch_name or not body.branch_name.strip():
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "分支名不能为空"})
+        try:
+            # GitHub 创建分支：先获取 base branch 的 sha，再创建 ref
+            base_ref = body.refs or "main"
+            # 尝试获取 base branch 的 commit sha
+            sha = None
+            try:
+                branch_info = _github_req("GET",
+                    f"https://api.github.com/repos/{owner}/{repo}/branches/{base_ref}", token)
+                sha = branch_info.get("commit", {}).get("sha", "")
+            except Exception:
+                pass
+            if not sha:
+                # fallback: 获取默认分支
+                repo_info = _github_req("GET", f"https://api.github.com/repos/{owner}/{repo}", token)
+                default_branch = repo_info.get("default_branch", "main")
+                branch_info = _github_req("GET",
+                    f"https://api.github.com/repos/{owner}/{repo}/branches/{default_branch}", token)
+                sha = branch_info.get("commit", {}).get("sha", "")
+            if not sha:
+                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取基准分支 SHA"})
+            url = f"https://api.github.com/repos/{owner}/{repo}/git/refs"
+            _github_req("POST", url, token, {
+                "ref": f"refs/heads/{body.branch_name.strip()}",
+                "sha": sha,
+            })
+            log.info(f"Branch created: {body.branch_name} in GitHub {owner}/{repo}")
+            return {"name": body.branch_name.strip(), "message": "分支已创建"}
+        except RuntimeError as e:
+            err_msg = str(e)
+            if "422" in err_msg or "already exists" in err_msg:
+                raise HTTPException(status_code=409, detail={"code": 409, "message": "分支已存在"})
+            if "403" in err_msg:
+                raise HTTPException(status_code=403, detail={"code": 403, "message": "需要维护者权限才能创建分支"})
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {err_msg}"})
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
+
+    # GitCode（原逻辑）
     from src.user.db import get_bot_token_by_repo
-    from src.user.repo_manager import _req
 
     # 仓库 bot token → 全局 bot token
     token = get_bot_token_by_repo(owner, repo)

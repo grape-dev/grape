@@ -953,7 +953,7 @@ def _gitcode_api_with_refresh(user: dict, api_call_fn, *args, **kwargs):
 
 
 def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
-    """PATCH Issue body（追加多任务模式标记）。"""
+    """PATCH Issue body（追加多任务模式标记）。GitCode 版。"""
     import urllib.request as _ur, urllib.error as _uerr, json as _json
     url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
     data = _json.dumps({"body": body_text}).encode()
@@ -963,6 +963,13 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
             return _json.loads(resp.read().decode()) if resp.read else {}
     except Exception:
         raise
+
+
+def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
+    """PATCH Issue body（GitHub 版）。"""
+    from src.user.repo_manager import _github_req
+    return _github_req("PATCH", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}",
+                       api_token, {"body": body_text})
 
 
 def create_standard_task(repo_key: str, title: str, description: str,
@@ -1139,8 +1146,15 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.warning(f"create_task: set_subtask_mode failed: {_e}")
         try:
             _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 自动判断是否拆分为子任务执行。"
-            # Issue #52: 401 时自动刷新 token 重试
-            _gitcode_api_with_refresh(user, _patch_issue_body, owner, rname, issue_num, (body.description or "") + _marker)
+            if _is_github:
+                # GitHub: 直接用用户 github_api_token
+                from src.user.db import get_user_github_token
+                _gh_token = get_user_github_token(user["id"]) or ""
+                if _gh_token:
+                    _patch_github_issue_body(_gh_token, owner, rname, issue_num, (body.description or "") + _marker)
+            else:
+                # Issue #52: 401 时自动刷新 token 重试
+                _gitcode_api_with_refresh(user, _patch_issue_body, owner, rname, issue_num, (body.description or "") + _marker)
         except HTTPException:
             raise  # reauth_required 需要传递给前端
         except Exception as _e:
