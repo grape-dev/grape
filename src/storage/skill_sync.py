@@ -85,41 +85,46 @@ def _sync_skills_to_db(data: dict) -> int:
         except Exception:
             pass
         for skill_name, info in data.items():
-            display_name = info.get("name", skill_name)
-            description = info.get("description", "")
-            agent_type = info.get("agent_type", "")
-            skill_path_val = info.get("path", skill_name)
-            sub_scene = info.get("sub_scene", "")
-            category_id = cat_map.get(sub_scene, 0)
-            row = c.execute(
-                "SELECT display_name, description, agent_type, skill_path, file_path, sub_scene, category_id FROM skill WHERE skill_name=? AND scope='official'",
-                (skill_name,)
-            ).fetchone()
-            if row:
-                old_display, old_desc, old_agent, old_path, old_fp, old_sub, old_cat = row
-                # 只在数据实际变更时才 UPDATE（避免 blanket UPDATE 刷新 updated_at 架空 sort=latest）
-                fp_nonempty = old_fp and old_fp != ""
-                changed = (old_display != display_name or old_desc != description
-                           or old_agent != agent_type or old_sub != sub_scene
-                           or old_cat != category_id
-                           or (not fp_nonempty and old_path != skill_path_val))
-                if changed:
-                    if fp_nonempty:
-                        c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, sub_scene, category_id, skill_name)
-                        )
-                    else:
-                        c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
-                        )
-            else:
-                c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','','',?,?)",
-                    (skill_name, display_name, description, agent_type, skill_path_val, sub_scene, category_id)
-                )
-            count += 1
+            try:
+                display_name = info.get("name", skill_name)
+                description = info.get("description", "")
+                agent_type = info.get("agent_type", "")
+                skill_path_val = info.get("path", skill_name)
+                sub_scene = info.get("sub_scene", "")
+                category_id = cat_map.get(sub_scene, 0)
+                if sub_scene and category_id == 0:
+                    logger.warning(f"skill '{skill_name}' sub_scene='{sub_scene}' has no matching skill_category slug, category_id=0")
+                row = c.execute(
+                    "SELECT display_name, description, agent_type, skill_path, file_path, sub_scene, category_id FROM skill WHERE skill_name=? AND scope='official'",
+                    (skill_name,)
+                ).fetchone()
+                if row:
+                    old_display, old_desc, old_agent, old_path, old_fp, old_sub, old_cat = row
+                    # 只在数据实际变更时才 UPDATE（避免 blanket UPDATE 刷新 updated_at 架空 sort=latest）
+                    fp_nonempty = old_fp and old_fp != ""
+                    changed = (old_display != display_name or old_desc != description
+                               or old_agent != agent_type or old_sub != sub_scene
+                               or old_cat != category_id
+                               or (not fp_nonempty and old_path != skill_path_val))
+                    if changed:
+                        if fp_nonempty:
+                            c.execute(
+                                "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
+                                (display_name, description, agent_type, sub_scene, category_id, skill_name)
+                            )
+                        else:
+                            c.execute(
+                                "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
+                                (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
+                            )
+                else:
+                    c.execute(
+                        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','','',?,?)",
+                        (skill_name, display_name, description, agent_type, skill_path_val, sub_scene, category_id)
+                    )
+                count += 1
+            except Exception:
+                logger.exception(f"sync skill '{skill_name}' to DB failed, skipping")
         _db.commit()
     return count
 
@@ -325,10 +330,13 @@ async def _skill_sync_worker(interval: float = 1800.0):
                 logger.exception("skill remote sync failed, continuing to DB+OBS sync")
 
             # DB 同步统一在此处执行，避免远程同步和 OBS 同步重复调
-            json_path = os.path.join(CONFIG_DIR, "skill-description.json")
-            if os.path.exists(json_path):
-                with open(json_path, "r", encoding="utf-8") as f:
-                    _sync_skills_to_db(json.load(f))
+            try:
+                json_path = os.path.join(CONFIG_DIR, "skill-description.json")
+                if os.path.exists(json_path):
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        _sync_skills_to_db(json.load(f))
+            except Exception:
+                logger.exception("skill DB sync failed, continuing to OBS sync")
 
             await sync_official_skills_to_obs()
         except asyncio.CancelledError:

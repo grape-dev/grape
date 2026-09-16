@@ -126,6 +126,13 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
 
     skills = []
     skill_ids: list[int] = []
+    # 批量查分类名称（避免 N+1）— 在 db_lock 外查，避免 SQLite cursor 复用冲突
+    cat_map = {}
+    try:
+        for cat in list_skill_categories():
+            cat_map[cat["id"]] = cat["name"]
+    except Exception:
+        pass
     with db_lock:
         c = db.cursor()
         try:
@@ -144,13 +151,6 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
                     f"FROM skill{where_sql} {order_by}",
                     tuple(params)
                 )
-            # 批量查分类名称（避免 N+1）
-            cat_map = {}
-            try:
-                for cat in list_skill_categories():
-                    cat_map[cat["id"]] = cat["name"]
-            except Exception:
-                pass
             for r in c.fetchall():
                 cat_id = r[10] or 0
                 skills.append({
