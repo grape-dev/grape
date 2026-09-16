@@ -172,8 +172,8 @@ function _reloadSkills(searchInit) {
   if (_activeAgentIdx >= 0 && _agentList[_activeAgentIdx]) {
     params.push('agent_type=' + _agentList[_activeAgentIdx]);
   }
-  // category_id 作为 API 入参：仅未选中 agent 时（全量查询场景）
-  if (_activeAgentIdx < 0 && _activeTagFilterId) {
+  // category_id 作为 API 入参：不管是否选中 agent 都传
+  if (_activeTagFilterId) {
     params.push('category_id=' + encodeURIComponent(_activeTagFilterId));
   }
   params.push('page=' + _skillPage);
@@ -381,14 +381,9 @@ function _switchTagFilter(label, id) {
   _activeTagFilter = label;
   _activeTagFilterId = id || '';
   _renderTagFilters();
-  if (_activeAgentIdx === -1) {
-    // 未选中 agent：作为 API 入参查询
-    _skillPage = 1;
-    _reloadSkills();
-  } else {
-    // 选中 agent：客户端过滤当前页
-    _renderAgentSkills();
-  }
+  // 统一走 API 查询（不管是否选中 agent）
+  _skillPage = 1;
+  _reloadSkills();
 }
 
 function _escapeHtml(s) {
@@ -398,22 +393,8 @@ function _escapeHtml(s) {
 function _renderTagFilters() {
   var container = document.getElementById('tag-filters');
   if (!container) return;
-  var tags = [];
-  if (_activeAgentIdx === -1) {
-    // 未选中 agent：全量展示（来自 agent-stats 的 categories）
-    tags = _skillCategories.map(function(c) { return {label: c.name, id: String(c.id), icon: c.icon||''}; });
-  } else {
-    // 选中 agent：仅展示当前页数据的分类
-    var seen = {};
-    _allSkills.forEach(function(s) {
-      var label = s.category_name || '';
-      var id = String(s.category_id || '');
-      if (label && id && id !== '0' && !seen[id]) {
-        seen[id] = 1;
-        tags.push({label: label, id: id, icon: ''});
-      }
-    });
-  }
+  // 固定展示全量分类标签（来自 _skillCategories），不随数据动态变化
+  var tags = _skillCategories.map(function(c) { return {label: c.name, id: String(c.id), icon: c.icon||''}; });
   // 当前选中的 tag 不在列表中时重置为 all
   if (_activeTagFilter !== 'all' && tags.every(function(t) { return t.id !== _activeTagFilterId; })) {
     _activeTagFilter = 'all';
@@ -447,11 +428,8 @@ function _renderAgentSidebar() {
 function _renderAgentSkills() {
   const container = document.getElementById('all-skills');
   if (!container) return;
-  // 二级标签筛选——客户端过滤当前页数据
+  // 分类筛选统一走 API 查询，这里只渲染当前页数据
   let skills = _allSkills;
-  if (_activeTagFilter !== 'all') {
-    skills = skills.filter(s => String(s.category_id || '') === _activeTagFilterId);
-  }
   if (!skills.length) {
     container.innerHTML = `<div class="ts t3" style="padding:20px;text-align:center">${I18N.t('skills.empty.no_skills')||'暂无技能'}</div>`;
     return;

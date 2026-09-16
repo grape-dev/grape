@@ -318,13 +318,13 @@ category_name 通过查 skill_category 表获得（批量查，避免 N+1）。
 | 6 | `_renderSkillCard()` | 卡片标签显示 `s.category_name`，替代 `s.sub_scene` |
 | 7 | `renderSkillDetail()` | `tagsStr = data.category_name`，替代 `data.sub_scene` |
 | 8 | `showSkillUpload()` | 上传表单增加分类下拉选择器，异步调 `/api/skills/categories` 获取列表（不依赖 agent-stats 缓存） |
-| 9 | `_renderAgentSkills()` 第 449 行 | 客户端二级过滤 `s.sub_scene_id` 改为 `s.category_id` |
-| 10 | `_renderTagFilters()` 选中 agent 分支（第 402-411 行） | 从 `_allSkills` 提取标签用 `s.category_name` / `s.category_id`，替代 `s.sub_scene` / `s.sub_scene_id` |
+| 9 | `_renderAgentSkills()` 第 449 行 | 删除客户端二级过滤，统一走 API 查询 |
+| 10 | `_renderTagFilters()` 选中 agent 分支（第 402-411 行） | 统一用 `_skillCategories` 渲染全量分类标签，不再从当前页数据提取 |
 | 11 | `_renderTagFilters()` 标签渲染 | 标签按钮前置分类图标 `<span>{icon}</span>` |
 | 12 | `_renderSkillCard()` | 卡片标题行加分类标签（蓝色，agent_type 标签后面） |
 | 13 | `showSkillUpload()` i18n | 分类 label 用 `I18N.t('skills.upload.category')`，「未分类」option 用 `I18N.t('skills.upload.uncategorized')` |
 
-> 遗漏：选中 agent 后的标签筛选是客户端过滤当前页数据（`_renderAgentSkills` 第 449 行 `s.sub_scene_id === _activeTagFilterId`）。改后继续客户端过滤，用 `s.category_id` 匹配。list_skills 返回的每条 skill 要带 `category_id` 字段。
+> 分类标签固定展示全量 11 个（来自 `_skillCategories`），不随数据动态变化。选中 agent 后点分类标签走 API 查询（传 category_id + agent_type），不做客户端过滤。无数据的分类显示"暂无技能"。
 
 #### 2.4.2 三 Tab 分类一致性
 
