@@ -64,11 +64,12 @@ def _pack_skill_zip(skill_dir: str) -> bytes:
 def _sync_skills_to_db(data: dict) -> int:
     """从 skill-description.json 数据同步官方技能元信息到 DB（INSERT/UPDATE，含 category_id）。
 
-    被三处复用：
-    - skill_sync.sync_official_skills_to_obs() — OBS 同步前先刷新 DB
-    - skill_sync.sync_official_skills_from_remote() — 远程同步后刷新 DB
+    调用方：
+    - _skill_sync_worker() — 定时任务每 30 分钟调一次
     - db_setup._sync_official_skills() — 启动时刷新 DB
+    - db_setup._insert_seed_data() skill_official 分支 — 首次 seed
 
+    仅在实际数据变更时才 UPDATE + 更新 updated_at，避免 blanket UPDATE 架空 sort=latest。
     返回处理的 skill 数量。
     """
     from src.session_manager import db as _db, db_lock as _db_lock
@@ -90,25 +91,29 @@ def _sync_skills_to_db(data: dict) -> int:
             skill_path_val = info.get("path", skill_name)
             sub_scene = info.get("sub_scene", "")
             category_id = cat_map.get(sub_scene, 0)
-            existed = c.execute(
-                "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'",
+            row = c.execute(
+                "SELECT display_name, description, agent_type, skill_path, file_path, sub_scene, category_id FROM skill WHERE skill_name=? AND scope='official'",
                 (skill_name,)
-            ).fetchone()[0]
-            if existed:
-                _fp = c.execute(
-                    "SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''",
-                    (skill_name,)
-                ).fetchone()
-                if _fp:
-                    c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, sub_scene, category_id, skill_name)
-                    )
-                else:
-                    c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
-                    )
+            ).fetchone()
+            if row:
+                old_display, old_desc, old_agent, old_path, old_fp, old_sub, old_cat = row
+                # 只在数据实际变更时才 UPDATE（避免 blanket UPDATE 刷新 updated_at 架空 sort=latest）
+                fp_nonempty = old_fp and old_fp != ""
+                changed = (old_display != display_name or old_desc != description
+                           or old_agent != agent_type or old_sub != sub_scene
+                           or old_cat != category_id
+                           or (not fp_nonempty and old_path != skill_path_val))
+                if changed:
+                    if fp_nonempty:
+                        c.execute(
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, sub_scene, category_id, skill_name)
+                        )
+                    else:
+                        c.execute(
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
+                        )
             else:
                 c.execute(
                     "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','','',?,?)",
