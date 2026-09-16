@@ -421,7 +421,7 @@ function _renderTagFilters() {
   html += '<a class="skill-tag-filter' + (allOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'all\',\'\')" style="padding:5px 12px;font-size:11px;color:' + (allOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (allOn?'var(--a)':'var(--b)') + ';background:' + (allOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">全部</a>';
   tags.forEach(function(t) {
     var isOn = _activeTagFilterId === t.id;
-    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'' + t.label.replace(/'/g, "\\'") + '\',\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + t.label + '</a>';
+    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'' + t.label.replace(/'/g, "\\'") + '\',\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + (t.icon ? '<span style="margin-right:3px">' + t.icon + '</span>' : '') + t.label + '</a>';
   });
   container.innerHTML = html;
 }
@@ -647,7 +647,6 @@ function showSkillUpload() {
     <div class="srow" style="margin-bottom:10px"><label>分类</label>
       <select id="skillCategoryId" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">
         <option value="0">未分类</option>
-        ${_skillCategories.map(c=>`<option value="${c.id}">${c.icon||''} ${c.name}</option>`).join('')}
       </select>
     </div>
     <div style="margin-bottom:14px">
@@ -667,6 +666,17 @@ function showSkillUpload() {
     </div>
   </div>`;
   document.body.appendChild(modal);
+  // 异步加载分类列表（不依赖 agent-stats 缓存，确保列表不为空）
+  API.get('/skills/categories').then(d => {
+    const sel = document.getElementById('skillCategoryId');
+    if (!sel) return;
+    (d.categories || []).forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = (c.icon || '') + ' ' + c.name;
+      sel.appendChild(opt);
+    });
+  }).catch(() => {});
 }
 
 function downloadSkillTemplate() {

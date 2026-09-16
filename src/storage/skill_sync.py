@@ -120,8 +120,9 @@ def _sync_skills_to_db(data: dict) -> int:
 
 
 async def sync_official_skills_to_obs() -> dict:
-    """全量同步官方技能到 OBS（增量：hash 不变的跳过）。
+    """OBS 同步：扫描本地 skill 目录，算 hash → 打包 → 上传 OBS（增量）。
 
+    DB 同步由调用方（_skill_sync_worker）负责，此函数只做 hash + OBS 上传。
     返回 {"added": N, "updated": N, "skipped": N}。
     """
     from src.storage import get_storage, skill_key
@@ -130,7 +131,7 @@ async def sync_official_skills_to_obs() -> dict:
     # 读 skill-description.json 获取官方技能清单
     json_path = os.path.join(CONFIG_DIR, "skill-description.json")
     if not os.path.exists(json_path):
-        logger.warning("skill-description.json not found, skip sync")
+        logger.warning("skill-description.json not found, skip obs sync")
         return {"added": 0, "updated": 0, "skipped": 0}
 
     with open(json_path, "r", encoding="utf-8") as f:
@@ -138,9 +139,6 @@ async def sync_official_skills_to_obs() -> dict:
 
     storage = get_storage()
     result = {"added": 0, "updated": 0, "skipped": 0}
-
-    # 1. DB 同步：从 skill-description.json INSERT/UPDATE 元信息（含 category_id）
-    _sync_skills_to_db(data)
 
     for skill_name, info in data.items():
         skill_path = info.get("path", skill_name)
@@ -292,13 +290,6 @@ async def sync_official_skills_from_remote() -> dict:
                 result["dirs_synced"] += 1
                 logger.info(f"skill remote sync: synced directory {skill_name}")
 
-        # 6. 执行 DB 同步（读合并后的本地 json，只刷新 DB 元信息）
-        local_json_path = os.path.join(CONFIG_DIR, "skill-description.json")
-        if os.path.exists(local_json_path):
-            with open(local_json_path, "r", encoding="utf-8") as f:
-                local_data = json.load(f)
-            _sync_skills_to_db(local_data)
-
         logger.info(
             f"skill remote sync done: json_merged={result['json_merged']}, "
             f"dirs_synced={result['dirs_synced']}, dirs_skipped={result['dirs_skipped']}"
@@ -315,11 +306,19 @@ async def sync_official_skills_from_remote() -> dict:
 async def _skill_sync_worker(interval: float = 1800.0):
     """定时同步 worker：启动即执行，之后每 interval 秒。
 
-    执行顺序：先远程同步（DB + 文件目录），再 OBS 同步（打包上传）。
+    执行顺序：
+    1. 远程同步：下载 zip → 合并 json → 拷贝 skill 目录（失败不影响后续）
+    2. DB 同步：读本地 json → _sync_skills_to_db（只跑一次）
+    3. OBS 同步：算 hash → 打包 → 上传 OBS
     """
     while True:
         try:
             await sync_official_skills_from_remote()
+            # DB 同步统一在此处执行，避免远程同步和 OBS 同步重复调
+            json_path = os.path.join(CONFIG_DIR, "skill-description.json")
+            if os.path.exists(json_path):
+                with open(json_path, "r", encoding="utf-8") as f:
+                    _sync_skills_to_db(json.load(f))
             await sync_official_skills_to_obs()
         except asyncio.CancelledError:
             logger.info("skill sync worker cancelled")
