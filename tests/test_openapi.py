@@ -24,10 +24,6 @@ client = TestClient(app)
 
 # 预期进契约的对外端点（M1.4/M3 显式 operation_id）
 EXPECTED_PUBLIC = {
-    "tasks_mine": ("get", "/api/tasks/mine"),
-    "tasks_start": ("post", "/api/tasks/{task_id}/start"),
-    "tasks_status": ("put", "/api/tasks/{task_id}/status"),
-    "tasks_status_get": ("get", "/api/tasks/{task_id}/status"),
     "tasks_complete": ("post", "/api/tasks/complete"),
     # POST /api/tasks/create 已废弃移除（C2）→ 创建走 POST /api/issues/{owner}/{repo}
     "a2a_handoff": ("post", "/api/a2a"),
@@ -82,8 +78,10 @@ EXPECTED_PUBLIC = {
     "issues_detail": ("get", "/api/issues/{owner}/{repo}/{number}"),
     "issues_events": ("get", "/api/issues/{owner}/{repo}/{number}/events"),
     "issues_pipeline": ("get", "/api/issues/{owner}/{repo}/{number}/pipeline"),
+    # ===== A 类列表归位（tasks-issues-api-rebound-design.md）：mine / repo 迁 /api/issues =====
+    "issues_mine": ("get", "/api/issues/mine"),
+    "issues_repo_all": ("get", "/api/issues/repo/{owner}/{repo}"),
     # ===== Issue #113: 任务中心仓库全部视图 =====
-    "tasks_repo_all": ("get", "/api/tasks/repo/{owner}/{repo}"),
     # ===== A 批（openapi-full-coverage-design.md）：skills/scenes 全量进契约 =====
     "upload_skill_api_skills_upload_post": ("post", "/api/skills/upload"),
     "toggle_skill_like_api_skills__skill_id__like_post": ("post", "/api/skills/{skill_id}/like"),
@@ -180,12 +178,6 @@ EXPECTED_PUBLIC = {
     "update_knowledge_ref_api_knowledge_ref__ref_id__put": ("put", "/api/knowledge/ref/{ref_id}"),
     "delete_knowledge_ref_api_knowledge_ref__ref_id__delete": ("delete", "/api/knowledge/ref/{ref_id}"),
     # ===== C 批（openapi-full-coverage-design.md）：tasks/events 用户操作类进契约 =====
-    "confirm_task_done_api_tasks__task_id__confirm_done_post": ("post", "/api/tasks/{task_id}/confirm-done"),
-    "cancel_task_api_api_tasks__task_id__cancel_post": ("post", "/api/tasks/{task_id}/cancel"),
-    "resume_task_api_api_tasks__task_id__resume_post": ("post", "/api/tasks/{task_id}/resume"),
-    "get_task_clarifications_api_tasks__task_id__clarifications_get": ("get", "/api/tasks/{task_id}/clarifications"),
-    "reply_to_clarification_api_tasks__task_id__clarify_post": ("post", "/api/tasks/{task_id}/clarify"),
-    "get_task_pipeline_api_tasks__task_id__pipeline_get": ("get", "/api/tasks/{task_id}/pipeline"),
     "terminate_event_api_events__seq__terminate_post": ("post", "/api/events/{seq}/terminate"),
     "redispatch_event_api_events__seq__redispatch_post": ("post", "/api/events/{seq}/redispatch"),
     "get_event_thread_api_events__seq__thread_get": ("get", "/api/events/{seq}/thread"),
@@ -252,7 +244,19 @@ EXPECTED_PUBLIC = {
     "stream_task_messages_api_task_logs__task_id__stream_get": ("get", "/api/task-logs/{task_id}/stream"),
     # ===== 合并 weekly-03-hc 新增（2026-09-15）=====
     "skills_agent_stats": ("get", "/api/skills/agent-stats"),
-    "tasks_list_attachments": ("get", "/api/tasks/{task_id}/attachments"),
+    # ===== B 类操作归位 /api/issues（tasks-issues-api-rebound-design.md §三）=====
+    "issues_start": ("post", "/api/issues/{issue_id}/start"),
+    "issues_status": ("put", "/api/issues/{issue_id}/status"),
+    "issues_status_get": ("get", "/api/issues/{issue_id}/status"),
+    "issues_confirm_done": ("post", "/api/issues/{issue_id}/confirm-done"),
+    "issues_cancel": ("post", "/api/issues/{issue_id}/cancel"),
+    "issues_resume": ("post", "/api/issues/{issue_id}/resume"),
+    "issues_pipeline_detail": ("get", "/api/issues/{issue_id}/pipeline"),
+    "issues_clarifications": ("get", "/api/issues/{issue_id}/clarifications"),
+    "issues_clarify": ("post", "/api/issues/{issue_id}/clarify"),
+    "issues_upload_attachment": ("post", "/api/issues/{issue_id}/attachments"),
+    "issues_list_attachments": ("get", "/api/issues/{issue_id}/attachments"),
+    "issues_delete_attachment": ("delete", "/api/issues/{issue_id}/attachments/{filename}"),
     "gitrepo_git_credential": ("get", "/api/git-repo/{owner}/{repo}/git-credential"),
     "gitrepo_workspace": ("get", "/api/git-repo/{owner}/{repo}/workspace"),
 }
@@ -360,7 +364,8 @@ def test_x_token_scope_consistency():
         assert s["paths"][path][method]["x-token-scope"] == "user_only", \
             f"期望 user_only: {method} {path}"
 
-    dual_samples = {"/api/tasks/mine": "get", "/api/a2a": "post"}
+    dual_samples = {"/api/issues/mine": "get", "/api/a2a": "post",
+                    "/api/issues/repo/{owner}/{repo}": "get"}
     for path, method in dual_samples.items():
         assert s["paths"][path][method]["x-token-scope"] == "dual", \
             f"期望 dual: {method} {path}"
@@ -396,16 +401,16 @@ def test_three_channels_can_call_public_api():
         session_key=f"conv-{uid}", repo_key="o/r", agent_type="chat", user_id=uid)
 
     # JWT
-    assert client.get("/api/tasks/mine",
+    assert client.get("/api/issues/mine",
                       headers={"Authorization": f"Bearer {jwt}"}).status_code == 200
     # api_key 三通道
-    assert client.get("/api/tasks/mine",
+    assert client.get("/api/issues/mine",
                       headers={"Authorization": f"Bearer {api_key}"}).status_code == 200
-    assert client.get("/api/tasks/mine",
+    assert client.get("/api/issues/mine",
                       headers={"PRIVATE-TOKEN": api_key}).status_code == 200
-    assert client.get("/api/tasks/mine?access_token=" + api_key).status_code == 200
+    assert client.get("/api/issues/mine?access_token=" + api_key).status_code == 200
     # session token（chat 会话携带 user_id）
-    assert client.get("/api/tasks/mine",
+    assert client.get("/api/issues/mine",
                       headers={"Authorization": f"Bearer {session_tk}"}).status_code == 200
     # 场景/技能/事件详情读类接口也走 token
     assert client.get("/api/scenes",
@@ -415,8 +420,8 @@ def test_three_channels_can_call_public_api():
 
 
 def test_public_api_401_without_or_invalid_token():
-    assert client.get("/api/tasks/mine").status_code == 401
-    assert client.get("/api/tasks/mine",
+    assert client.get("/api/issues/mine").status_code == 401
+    assert client.get("/api/issues/mine",
                       headers={"Authorization": "Bearer <bad-token>"}).status_code == 401
     assert client.get("/api/scenes",
                       headers={"PRIVATE-TOKEN": "grape_bad"}).status_code == 401
