@@ -66,6 +66,8 @@
     "type": "Type",
     "repo": "Repo",
     "agent_type": "Skill Type *",
+    "category": "Category",
+    "uncategorized": "Uncategorized",
     "select_agent": "-- Select Agent Type --",
     "file_label": "Select skill ZIP file (directory name = skill name, contains SKILL.md)",
     "format_req": "Format requirements:",

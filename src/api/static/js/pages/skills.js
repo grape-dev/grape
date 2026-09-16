@@ -646,7 +646,7 @@ function showSkillUpload() {
     </div>
     <div class="srow" style="margin-bottom:10px"><label>${I18N.t('skills.upload.category')||'分类'}</label>
       <select id="skillCategoryId" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">
-        <option value="0">未分类</option>
+        <option value="0">${I18N.t('skills.upload.uncategorized')||'未分类'}</option>
       </select>
     </div>
     <div style="margin-bottom:14px">
