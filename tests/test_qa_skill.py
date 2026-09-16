@@ -77,7 +77,9 @@ class TestQaSkillConfig:
         EXPECTED_QA = {"iac": "iac-qa", "skill-dev": "skill-tester", "api-skill-dev": "rest-api-skill-tester"}
         cfg = _load_json("agent-skill-mapping.json")
         for scene, info in cfg["scenes"].items():
-            qa_skill = info["mapping"]["qa"]
+            qa_skill = info["mapping"].get("qa", "")
+            if not qa_skill:
+                continue  # hello-world 等精简场景不含 qa
             expected = EXPECTED_QA.get(scene, "pr")
             assert qa_skill == expected, f"scene '{scene}' qa should be '{expected}', got '{qa_skill}'"
 
