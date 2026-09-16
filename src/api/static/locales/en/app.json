@@ -133,5 +133,9 @@
     "priority_high": "High",
     "attachment_label": "Attachment"
   },
-  "back_home": "← Back"
+  "back_home": "← Back",
+  "pipeline": {
+    "status_cancelled": "Cancelled",
+    "status_skipped": "Skipped"
+  }
 }
