@@ -86,11 +86,11 @@
       'font-size:13px;color:var(--t1,#1d1d1f);font-family:inherit;margin-bottom:12px;outline:none;resize:vertical;line-height:1.5;"></textarea>' +
       // 截图上传
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">' +
-      '<input id="fbFile" type="file" accept="image/*" style="display:none" />' +
+      '<input id="fbFile" type="file" accept="image/*,.zip" style="display:none" />' +
       '<button id="fbFileBtn" type="button" ' +
       'style="padding:8px 14px;border-radius:8px;border:1.5px solid var(--b,rgba(0,0,0,.12));' +
       'background:var(--c,#fff);font-size:12px;font-weight:500;color:var(--t2,#3a3a3c);' +
-      'cursor:pointer;font-family:inherit;">📎 选择截图</button>' +
+      'cursor:pointer;font-family:inherit;">📎 选择附件</button>' +
       '<span id="fbFileName" style="font-size:12px;color:var(--t3,#86868b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;"></span>' +
       '</div>' +
       // 页面信息
@@ -172,7 +172,7 @@
       if (!file) return;
       // 限制 5MB
       if (file.size > 5 * 1024 * 1024) {
-        if (app && app.showToast) app.showToast('截图不能超过 5MB');
+        if (app && app.showToast) app.showToast('附件不能超过 5MB');
         fileInput.value = '';
         return;
       }
@@ -201,13 +201,13 @@
         } else {
           _attachmentUrl = '';
           fileNameSpan.textContent = '上传失败';
-          if (app && app.showToast) app.showToast('截图上传失败');
+          if (app && app.showToast) app.showToast('附件上传失败');
         }
       };
       xhr.onerror = function () {
         _attachmentUrl = '';
         fileNameSpan.textContent = '上传失败';
-        if (app && app.showToast) app.showToast('截图上传失败');
+        if (app && app.showToast) app.showToast('附件上传失败');
       };
       xhr.send(fd);
     };

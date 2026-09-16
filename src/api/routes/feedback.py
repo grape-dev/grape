@@ -165,19 +165,22 @@ def _get_stats():
 @router.post('/feedback/upload')
 async def upload_feedback_attachment(file: UploadFile = File(...),
                                      user: dict = Depends(get_current_user)):
-    """上传反馈截图附件。
+    """上传反馈附件（图片或 zip 文件）。
 
     OBS 模式下存到 OBS 桶（feedback/ 目录），返回签名 URL。
     非 OBS 模式下存到本地 static/uploads/feedback/，返回本地路径。
     """
-    # 校验文件类型
-    allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/svg+xml"}
-    allowed_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}
+    # 校验文件类型：图片 + zip
+    allowed_types = {
+        "image/jpeg", "image/png", "image/webp", "image/gif", "image/svg+xml",
+        "application/zip", "application/x-zip-compressed", "application/octet-stream",
+    }
+    allowed_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".zip"}
     content_type = file.content_type or ""
     filename = file.filename or ""
     ext = os.path.splitext(filename)[1].lower()
     if content_type not in allowed_types and ext not in allowed_exts:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持 jpg/png/webp/gif/svg 格式"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持 jpg/png/webp/gif/svg/zip 格式"})
     if not ext:
         ext = ".png"
 
@@ -207,4 +210,4 @@ async def upload_feedback_attachment(file: UploadFile = File(...),
         url = f"/static/uploads/feedback/{local_name}"
         log.info(f"feedback upload: local path={url} size={len(content)} by={user.get('username')}")
 
-    return {"url": url, "file_key": file_key}
+    return {"url": url, "file_key": file_key, "is_zip": ext == ".zip"}
