@@ -295,29 +295,29 @@ function renderPipeline(data, focusIssueNum) {
 
   el.innerHTML = html;
 
-  // 如果指定了 focusIssueNum，滚动并高亮对应 issue 的流水线卡片
+  // 如果指定了 focusIssueNum，自动选中对应 issue 的流水线（而非默认 active）
   if (focusIssueNum) {
-    var targetId = 'pipe-issue-' + String(focusIssueNum).replace(/^#/, '');
-    setTimeout(function() {
-      var target = document.getElementById(targetId);
-      if (target) {
-        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        target.style.transition = 'box-shadow .3s';
-        target.style.boxShadow = '0 0 0 3px #0071e3';
-        setTimeout(function() { target.style.boxShadow = ''; }, 3000);
-      } else {
-        // 可能在 history 列表中
-        var histRows = document.querySelectorAll('.pl-hist-row');
-        histRows.forEach(function(row) {
-          if (row.getAttribute('data-issue') === String(focusIssueNum).replace(/^#/, '')) {
-            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            row.style.transition = 'background .3s';
-            row.style.background = 'rgba(0,113,227,0.08)';
-            setTimeout(function() { row.style.background = ''; }, 3000);
-          }
-        });
-      }
-    }, 100);
+    var targetNum = String(focusIssueNum).replace(/^#/, '');
+    var _allPipes = active ? [active, ...history] : history;
+    var foundIdx = -1;
+    for (var i = 0; i < _allPipes.length; i++) {
+      var pNum = String(_allPipes[i].issue_id || '').replace(/^#/, '');
+      if (pNum === targetNum) { foundIdx = i; break; }
+    }
+    if (foundIdx >= 0) {
+      // 切换流程图到对应 issue（不重建表格，保持滚动位置）
+      selPipe(foundIdx);
+      // 滚动到对应 history 行
+      setTimeout(function() {
+        var row = document.querySelector('.pl-hist-row[data-issue="' + targetNum + '"]');
+        if (row) {
+          row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          row.style.transition = 'background .3s';
+          row.style.background = 'rgba(0,113,227,0.08)';
+          setTimeout(function() { row.style.background = ''; }, 3000);
+        }
+      }, 100);
+    }
   }
 }
 
