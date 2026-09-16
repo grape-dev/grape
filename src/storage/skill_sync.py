@@ -268,37 +268,47 @@ async def sync_official_skills_from_remote() -> dict:
             logger.info(f"skill remote sync: merged {result['json_merged']} skills into local json")
 
         # 5. 同步 skill 文件目录（增量 hash 比对）
-        remote_skills_dir = os.path.join(repo_root, "skills")
-        if not os.path.isdir(remote_skills_dir):
-            logger.warning("skill remote sync: skills/ directory not found in zip")
+        # 分布式锁保护：多实例部署时避免并发 rmtree+copytree 导致目录损坏
+        from src.lock import acquire_lock, release_lock
+        _LOCK_KEY = "skill_remote_sync"
+        _LOCK_TTL = 300  # 5 分钟（目录同步不会超过）
+        if not acquire_lock(_LOCK_KEY, ttl=_LOCK_TTL):
+            logger.info("skill remote sync: lock contention, skip directory sync (another instance is running)")
         else:
-            for skill_name, info in remote_data.items():
-                skill_path = info.get("path", skill_name)
-                remote_skill_dir = os.path.join(remote_skills_dir, skill_path)
-                if not os.path.isdir(remote_skill_dir):
-                    continue
+            try:
+                remote_skills_dir = os.path.join(repo_root, "skills")
+                if not os.path.isdir(remote_skills_dir):
+                    logger.warning("skill remote sync: skills/ directory not found in zip")
+                else:
+                    for skill_name, info in remote_data.items():
+                        skill_path = info.get("path", skill_name)
+                        remote_skill_dir = os.path.join(remote_skills_dir, skill_path)
+                        if not os.path.isdir(remote_skill_dir):
+                            continue
 
-                local_skill_dir = os.path.join(SKILLS_DIR, skill_path)
+                        local_skill_dir = os.path.join(SKILLS_DIR, skill_path)
 
-                # 算远程 hash
-                remote_hash = _compute_skill_hash(remote_skill_dir)
-                if not remote_hash:
-                    continue
+                        # 算远程 hash
+                        remote_hash = _compute_skill_hash(remote_skill_dir)
+                        if not remote_hash:
+                            continue
 
-                # 算本地 hash（目录不存在则空串）
-                local_hash = _compute_skill_hash(local_skill_dir)
+                        # 算本地 hash（目录不存在则空串）
+                        local_hash = _compute_skill_hash(local_skill_dir)
 
-                if remote_hash == local_hash:
-                    result["dirs_skipped"] += 1
-                    continue
+                        if remote_hash == local_hash:
+                            result["dirs_skipped"] += 1
+                            continue
 
-                # hash 变了或本地不存在 → 删除旧目录 → 拷贝新目录
-                if os.path.isdir(local_skill_dir):
-                    shutil.rmtree(local_skill_dir, ignore_errors=True)
-                os.makedirs(os.path.dirname(local_skill_dir), exist_ok=True)
-                shutil.copytree(remote_skill_dir, local_skill_dir, dirs_exist_ok=True)
-                result["dirs_synced"] += 1
-                logger.info(f"skill remote sync: synced directory {skill_name}")
+                        # hash 变了或本地不存在 → 删除旧目录 → 拷贝新目录
+                        if os.path.isdir(local_skill_dir):
+                            shutil.rmtree(local_skill_dir, ignore_errors=True)
+                        os.makedirs(os.path.dirname(local_skill_dir), exist_ok=True)
+                        shutil.copytree(remote_skill_dir, local_skill_dir, dirs_exist_ok=True)
+                        result["dirs_synced"] += 1
+                        logger.info(f"skill remote sync: synced directory {skill_name}")
+            finally:
+                release_lock(_LOCK_KEY)
 
         logger.info(
             f"skill remote sync done: json_merged={result['json_merged']}, "
