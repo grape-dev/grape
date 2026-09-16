@@ -702,7 +702,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
                     created_by_me: str = Query("", description="仅我创建的任务"),
                     assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
-                    user: dict = Depends(get_current_user_or_api_key)):
+                    user: dict = Depends(require_no_session_token)):
     """我的需求列表（迁移自 /api/tasks/mine，A 类归位，issue 视角）。
 
     返回当前用户的需求（Issue 卡片行，user_id 过滤）+ 富化
@@ -728,25 +728,23 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
         _order_by = f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 ELSE 2 END, created_at {_order_dir}"
     issues_out = _query_tasks(where, params, _order_by, include_user_id=False)
     return {"issues": issues_out, "sort_order": sort_order, "mode": mode}
- 
 
-@router.get("/repo/{owner}/{repo}", operation_id="issues_repo_all", summary="仓库下全部 Issue 列表（需求中心·仓库全部视图）")
-async def repo_all_issues(owner: str,
-                          repo: str,
-                          status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
-                          sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
-                          mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
-                          assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
-                          user: dict = Depends(get_current_user_or_api_key)):
-    """仓库下全部需求列表（迁移自 /api/tasks/repo/{owner}/{repo}，A 类归位，issue 视角）。
 
-    - 按 owner/repo 定位仓库（to_repo_key 归一化），先校验访问权（防 IDOR，复用 tasks._require_repo_access）
-    - 返回该仓库全部需求（不限 user_id）+ 富化（scene/stage/is_running/agent_statuses）
+@router.get("/{owner}/{repo}", operation_id="issues_list", summary="仓库 Issue 列表（含阶段/状态/富化聚合）")
+def list_repo_issues(owner: str, repo: str,
+                     status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
+                     sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
+                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
+                     assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                     user: dict = Depends(get_current_user_or_api_key)):
+    """仓库 Issue 列表（归一：收编原 repo/{owner}/{repo}，复用 _query_tasks 富化 + 事件聚合）。
+
+    - 按 owner/repo 定位仓库，返回全部卡片富化（scene/stage/is_running/agent_statuses）+ events_count/latest_event
+    - 排序按 created_at + 状态优先级（mode 可切换纯时间序）
+    - 行为对齐原 issues_list（仓库 public 读聚合，无显式仓库权限门禁）
     """
-    from src.api.routes.tasks import _query_tasks, _require_repo_access, _build_assignee_filter
-    from src.repo_key import to_repo_key, from_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
-    _require_repo_access(user, repo_key)
+    from src.api.routes.tasks import _query_tasks, _build_assignee_filter
+    repo_key = _repo_key_of(owner, repo)
     clauses = ["repo_key=?"]
     params: list = [repo_key]
     if status:
@@ -760,30 +758,28 @@ async def repo_all_issues(owner: str,
         _order_by = (f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 "
                      f"WHEN status='awaiting_input' THEN 2 WHEN status='pending_review' THEN 3 "
                      f"ELSE 4 END, created_at {_order_dir}")
-    issues_out = _query_tasks(where, params, _order_by, include_user_id=True)
-    return {"issues": issues_out, "sort_order": sort_order, "mode": mode,
-            "repo_key": from_repo_key(repo_key)}
-
-
-@router.get("/{owner}/{repo}", operation_id="issues_list", summary="仓库 Issue 列表（含阶段/状态聚合）")
-def list_repo_issues(owner: str, repo: str,
-                     user: dict = Depends(get_current_user_or_api_key)):
-    repo_key = _repo_key_of(owner, repo)
-    stage_map = _issue_stage_map(repo_key)
-    status_map = _task_status_map(repo_key)
+    issues = _query_tasks(where, params, _order_by, include_user_id=True)
+    # 事件聚合字段 + number/task_status/owner_agent 等别名（原 issues_list 字段兼容）
     group_map = _group_events_by_issue(repo_key)
-    title_map = _issue_title_map(repo_key)
-    numbers = set(stage_map) | set(status_map) | set(group_map)
-    issues = sorted((_assemble_issue(repo_key, n, stage_map, status_map, group_map, title_map)
-                     for n in numbers),
-                    key=lambda i: i["latest_event"]["created_at"] if i["latest_event"] else "",
-                    reverse=True)
+    stage_map = _issue_stage_map(repo_key)
+    for it in issues:
+        _num = it.get("issue_number")
+        it["number"] = _num or it.get("number")
+        it["task_status"] = it["task_status"] if "task_status" in it else it.get("status", "")
+        _st = stage_map.get(str(_num or "")) or {}
+        it["owner_agent"] = it.get("owner_agent") or _st.get("owner_agent", "vod")
+        it.setdefault("assignee", _st.get("assignee", ""))
+        it.setdefault("parent_issue_id", _st.get("parent_issue_id", ""))
+        it.setdefault("is_subtask_mode", _st.get("is_subtask_mode") or 0)
+        evs = group_map.get(str(_num or "")) or []
+        it["events_count"] = len(evs)
+        it["latest_event"] = evs[-1] if evs else None
     return {"issues": issues, "total": len(issues)}
 
 
 @router.post("/{owner}/{repo}", operation_id="issues_create", summary="创建 Issue（对外唯一创建入口）")
 async def create_issue(owner: str, repo: str, body: dict = None,
-                       user: dict = Depends(get_current_user_or_api_key)):
+                       user: dict = Depends(require_no_session_token)):
     """创建 Issue：复用 create_task_via_issue 逻辑（ensure_issue_task + GitCode create + 触发 pipeline）。
 
     POST /api/tasks/create 已废弃移除（Phase C2），本端点为对外唯一创建入口。

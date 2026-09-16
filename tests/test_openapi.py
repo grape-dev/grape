@@ -80,7 +80,6 @@ EXPECTED_PUBLIC = {
     "issues_pipeline": ("get", "/api/issues/{owner}/{repo}/{number}/pipeline"),
     # ===== A 类列表归位（tasks-issues-api-rebound-design.md）：mine / repo 迁 /api/issues =====
     "issues_mine": ("get", "/api/issues/mine"),
-    "issues_repo_all": ("get", "/api/issues/repo/{owner}/{repo}"),
     # ===== Issue #113: 任务中心仓库全部视图 =====
     # ===== A 批（openapi-full-coverage-design.md）：skills/scenes 全量进契约 =====
     "upload_skill_api_skills_upload_post": ("post", "/api/skills/upload"),
@@ -359,13 +358,13 @@ def test_x_token_scope_consistency():
 
     # 3) 抽样：user_only（D 类管理）/ dual（开放读）实例
     user_only_samples = {"/api/skills": "get", "/api/skills/upload": "post",
-                         "/api/auth/logout": "post", "/api/dashboard/ops/overview": "get"}
+                         "/api/auth/logout": "post", "/api/dashboard/ops/overview": "get",
+                         "/api/issues/mine": "get", "/api/issues/{owner}/{repo}": "post"}
     for path, method in user_only_samples.items():
         assert s["paths"][path][method]["x-token-scope"] == "user_only", \
             f"期望 user_only: {method} {path}"
 
-    dual_samples = {"/api/issues/mine": "get", "/api/a2a": "post",
-                    "/api/issues/repo/{owner}/{repo}": "get"}
+    dual_samples = {"/api/issues/{owner}/{repo}": "get", "/api/a2a": "post"}
     for path, method in dual_samples.items():
         assert s["paths"][path][method]["x-token-scope"] == "dual", \
             f"期望 dual: {method} {path}"
@@ -409,9 +408,9 @@ def test_three_channels_can_call_public_api():
     assert client.get("/api/issues/mine",
                       headers={"PRIVATE-TOKEN": api_key}).status_code == 200
     assert client.get("/api/issues/mine?access_token=" + api_key).status_code == 200
-    # session token（chat 会话携带 user_id）
+    # session token（chat 会话携带 user_id）→ mine 为 user_only，session 应 403
     assert client.get("/api/issues/mine",
-                      headers={"Authorization": f"Bearer {session_tk}"}).status_code == 200
+                      headers={"Authorization": f"Bearer {session_tk}"}).status_code == 403
     # 场景/技能/事件详情读类接口也走 token
     assert client.get("/api/scenes",
                       headers={"Authorization": f"Bearer {api_key}"}).status_code == 200

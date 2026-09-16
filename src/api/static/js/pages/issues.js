@@ -192,10 +192,10 @@ function loadTasks() {
   const repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
   _loadTasksSortPref(repoKey);
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
-  // Issue #72: 「仓库全部」视图调用 /issues/repo/{owner}/{repo}（不限 user_id）
+  // 「仓库全部」视图统一走 /issues/{owner}/{repo}（归一，见 issues-list-merge-design.md）
   let apiUrl;
   if (_tasksViewMode === 'repo_all' && repo) {
-    apiUrl = '/issues/repo/' + repo.owner + '/' + repo.name +
+    apiUrl = '/issues/' + repo.owner + '/' + repo.name +
              '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode;
     if (_taskFilterAssignees.length) {
       apiUrl += '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(','));
@@ -207,7 +207,7 @@ function loadTasks() {
   }
   API.get(apiUrl).then(d => {
     if (window._currentView !== 'tasks') return;  // stale guard
-    _tasksAll = d.tasks || [];
+    _tasksAll = d.issues || d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
     if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
