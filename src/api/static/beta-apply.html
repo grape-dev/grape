@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Grape — 申请内测</title>
+<link rel="icon" type="image/png" href="/static/logo-64.png">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:radial-gradient(ellipse at 20% 50%,#162240 0%,#0c1222 60%);min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#fff;border-radius:20px;padding:40px;width:440px;max-width:90vw;box-shadow:0 12px 48px rgba(0,0,0,0.2)}
+.logo{text-align:center;margin-bottom:28px}
+.logo img{width:72px;height:72px;border-radius:18px}
+.logo h1{color:#1d1d1f;font-size:22px;font-weight:700;margin-top:12px}
+.logo p{color:#86868b;font-size:13px;margin-top:4px}
+.field{margin-bottom:16px}
+.field label{display:block;font-size:12px;color:#5b667b;margin-bottom:6px;font-weight:500}
+.field .req{color:#dc2828}
+.field input,.field select,.field textarea{width:100%;padding:11px 14px;border:1px solid #e3e6ee;border-radius:10px;font-size:14px;background:#fff;color:#1d1d1f;outline:none;transition:border-color .2s;font-family:inherit}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:#3168e0}
+.field textarea{resize:vertical;min-height:80px}
+.btn{width:100%;padding:14px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px;transition:transform .15s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,0.3)}
+.btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
+.toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:12px 24px;border-radius:10px;font-size:14px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.2);display:none}
+.toast.show{display:block}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <img src="/static/logo-128.png" alt="Grape">
+    <h1>Grape</h1>
+    <p>Multi-Agent DevOps · 申请内测</p>
+  </div>
+  <div class="field">
+    <label>平台 <span class="req">*</span></label>
+    <select id="platform">
+      <option value="gitcode">GitCode</option>
+      <option value="github">GitHub</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>用户名 <span class="req">*</span></label>
+    <input id="accountName" type="text" placeholder="GitCode 或 GitHub 用户名">
+  </div>
+  <div class="field">
+    <label>联系方式 <span class="req">*</span></label>
+    <input id="email" type="text" placeholder="邮箱或手机号">
+  </div>
+  <div class="field">
+    <label>申请理由</label>
+    <textarea id="reason" rows="3" placeholder="选填"></textarea>
+  </div>
+  <button class="btn" id="submitBtn" onclick="submitForm()">提交申请</button>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+function showToast(msg) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(function() { t.classList.remove('show'); }, 3000);
+}
+function submitForm() {
+  var accountType = document.getElementById('platform').value;
+  var accountName = document.getElementById('accountName').value.trim();
+  var email = document.getElementById('email').value.trim();
+  var reason = document.getElementById('reason').value.trim();
+  if (!accountName) { showToast('请填写用户名'); return; }
+  if (!email) { showToast('请填写联系方式'); return; }
+  var btn = document.getElementById('submitBtn');
+  btn.disabled = true; btn.textContent = '提交中...';
+  fetch('/api/settings/beta-apply/submit', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({accountType: accountType, accountName: accountName, email: email, reason: reason})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.detail && d.detail.message) {
+      showToast(d.detail.message);
+    } else {
+      showToast(d.message || '申请已提交');
+      setTimeout(function() { window.location.reload(); }, 1500);
+    }
+    btn.disabled = false; btn.textContent = '提交申请';
+  }).catch(function(e) {
+    showToast('提交失败: ' + e);
+    btn.disabled = false; btn.textContent = '提交申请';
+  });
+}
+</script>
+</body>
+</html>
