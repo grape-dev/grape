@@ -821,6 +821,7 @@ CREATE TABLE IF NOT EXISTS user_feedback (
     repo_key        TEXT         DEFAULT '',
     user_agent      TEXT         DEFAULT '',
     attachment_url  TEXT         DEFAULT '',
+    attachment_name TEXT         DEFAULT '',
     status          TEXT         NOT NULL DEFAULT 'open',
     priority        INTEGER      NOT NULL DEFAULT 0,
     handler_name    TEXT         DEFAULT '',

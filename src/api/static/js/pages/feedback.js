@@ -8,6 +8,7 @@
 
   var _selectedCategory = 'bug';
   var _attachmentUrl = '';
+  var _attachmentName = '';
 
   // i18n 辅助
   function t(key) {
@@ -28,6 +29,7 @@
 
     _selectedCategory = 'bug';
     _attachmentUrl = '';
+    _attachmentName = '';
 
     var overlay = document.createElement('div');
     overlay.id = 'feedbackOverlay';
@@ -188,7 +190,8 @@
             if (app && app.showToast) app.showToast('上传失败: ' + resp.error);
           } else {
             _attachmentUrl = resp.url || '';
-            fileNameSpan.textContent = file.name + ' ✓';
+            _attachmentName = resp.original_name || file.name || '';
+            fileNameSpan.textContent = _attachmentName + ' ✓';
           }
         })
         .catch(function (err) {
@@ -243,6 +246,7 @@
         page_url: window.location.hash || '',
         repo_key: repoKey,
         attachment_url: _attachmentUrl || '',
+        attachment_name: _attachmentName || '',
       })
         .then(function (resp) {
           if (resp && resp.error) {

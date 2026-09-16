@@ -21,6 +21,7 @@ class FeedbackBody(BaseModel):
     page_url: str = ''
     repo_key: str = ''
     attachment_url: str = ''
+    attachment_name: str = ''
 
 
 @router.post('/feedback')
@@ -31,11 +32,12 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
             c = db.cursor()
             c.execute(
                 "INSERT INTO user_feedback "
-                "(user_id, username, category, title, description, page_url, repo_key, attachment_url, status) "
-                "VALUES (?,?,?,?,?,?,?,?, 'open')",
+                "(user_id, username, category, title, description, page_url, repo_key, attachment_url, attachment_name, status) "
+                "VALUES (?,?,?,?,?,?,?,?,?, 'open')",
                 (user.get('id') or 0, user.get('username') or '',
                  body.category, body.title, body.description,
-                 body.page_url or '', body.repo_key or '', body.attachment_url or ''))
+                 body.page_url or '', body.repo_key or '',
+                 body.attachment_url or '', body.attachment_name or ''))
             db.commit()
             fid = c.lastrowid
         log.info(f"feedback: submitted id={fid} by user={user.get('username')} category={body.category}")
@@ -75,7 +77,7 @@ def list_feedback(
 
             c.execute(
                 f"SELECT id, user_id, username, category, title, description, "
-                f"page_url, repo_key, attachment_url, status, priority, "
+                f"page_url, repo_key, attachment_url, attachment_name, status, priority, "
                 f"handler_name, handler_remark, handled_at, created_at, updated_at "
                 f"FROM user_feedback{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 tuple(params + [size, page * size]))
@@ -87,10 +89,11 @@ def list_feedback(
                 "id": r[0], "user_id": r[1], "username": r[2],
                 "category": r[3], "title": r[4], "description": r[5],
                 "page_url": r[6] or '', "repo_key": r[7] or '',
-                "attachment_url": r[8] or '', "status": r[9],
-                "priority": r[10], "handler_name": r[11] or '',
-                "handler_remark": r[12] or '', "handled_at": r[13] or '',
-                "created_at": r[14] or '', "updated_at": r[15] or '',
+                "attachment_url": r[8] or '', "attachment_name": r[9] or '',
+                "status": r[10], "priority": r[11],
+                "handler_name": r[12] or '', "handler_remark": r[13] or '',
+                "handled_at": r[14] or '', "created_at": r[15] or '',
+                "updated_at": r[16] or '',
             })
 
         # 统计
@@ -210,4 +213,4 @@ async def upload_feedback_attachment(file: UploadFile = File(...),
         url = f"/static/uploads/feedback/{local_name}"
         log.info(f"feedback upload: local path={url} size={len(content)} by={user.get('username')}")
 
-    return {"url": url, "file_key": file_key, "is_zip": ext == ".zip"}
+    return {"url": url, "file_key": file_key, "is_zip": ext == ".zip", "original_name": filename}
