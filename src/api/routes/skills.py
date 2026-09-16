@@ -474,27 +474,8 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
     if scope == "official":
         raise HTTPException(status_code=400, detail={"code": 400, "message": "官方技能为部署内置，未转集群模式不提供下载"})
 
-    # local 分支：本地技能目录打包 zip 流式返回
-    from src.config import SKILLS_DIR
-    if scope == "user":
-        skill_dir = os.path.join(SKILLS_DIR, "custom", owner_id or str(user["id"]), skill_path or name)
-    else:
-        skill_dir = os.path.join(SKILLS_DIR, "repo", from_repo_key(owner_id), skill_path or name)
-    if not os.path.isdir(skill_dir):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能目录不存在"})
-    import io as _io
-    buf = _io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(skill_dir):
-            dirs[:] = [d for d in dirs if d not in ("__MACOSX", ".git", "__pycache__")]
-            for f in files:
-                full = os.path.join(root, f)
-                rel = os.path.relpath(full, os.path.dirname(skill_dir)).replace(os.sep, "/")
-                zf.write(full, rel)
-    buf.seek(0)
-    from fastapi.responses import Response
-    return Response(content=buf.getvalue(), media_type="application/zip",
-                    headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
+    # local 分支已移除：均衡负载环境下 local 存储会导致文件只存在单机
+    raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能下载失败。请检查服务端 OBS 配置后重试。"})
 
 
 @router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="技能详情（含 SKILL.md）")
@@ -572,24 +553,21 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_sessio
             "sub_scene": sub_scene,
         }
     # ===== local 分支 =====
-    if scope == "user":
-        skill_path = os.path.join(SKILLS_DIR, "custom", owner_id or str(user["id"]), skill_dir, "SKILL.md")
-    elif scope == "repo":
-        # owner_id 可能带 gitcode: 前缀，目录路径用不带前缀的 owner/repo
-        from src.repo_key import from_repo_key
-        skill_path = os.path.join(SKILLS_DIR, "repo", from_repo_key(owner_id), skill_dir, "SKILL.md")
+    # user/repo 技能：均衡负载环境下 local 存储会导致文件只存在单机，OBS 不可用时直接报 503
+    if scope in ("user", "repo"):
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能详情获取失败。请检查服务端 OBS 配置后重试。"})
+    # official 技能：目录在代码仓库中，两台机器都有，保留磁盘读取
+    from src.config import resolve_official_skill_path
+    _r = resolve_official_skill_path(row[0])
+    if _r:
+        skill_path = _r
     else:
-        from src.config import resolve_official_skill_path
-        _r = resolve_official_skill_path(row[0])
-        if _r:
-            skill_path = _r
+        # fallback: skill_dir 可能是 3 层路径，尝试去掉中间层
+        _parts = skill_dir.split("/")
+        if len(_parts) >= 3:
+            skill_path = os.path.join(SKILLS_DIR, _parts[0], _parts[-1], "SKILL.md")
         else:
-            # fallback: skill_dir 可能是 3 层路径，尝试去掉中间层
-            _parts = skill_dir.split("/")
-            if len(_parts) >= 3:
-                skill_path = os.path.join(SKILLS_DIR, _parts[0], _parts[-1], "SKILL.md")
-            else:
-                skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
+            skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
     content = ""
     if os.path.exists(skill_path):
         with open(skill_path, encoding="utf-8") as f:
@@ -708,31 +686,8 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(requir
             except Exception as e:
                 raise HTTPException(status_code=502, detail={"code": 502, "message": f"技能上传 OBS 失败: {e}"})
             return {"message": f"技能 {skill_name} 上传成功"}
-        # ===== local 分支 =====
-        if scope == "repo":
-            from src.repo_key import to_repo_key, from_repo_key
-            repo_key = _resolve_repo_key(repo)
-            target_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", from_repo_key(repo_key), skill_name)
-            os.makedirs(os.path.dirname(target_dir), exist_ok=True)
-            if os.path.exists(target_dir):
-                shutil.rmtree(target_dir)
-            shutil.copytree(skill_dir, target_dir)
-            with db_lock:
-                db.cursor().execute("DELETE FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?", (skill_name, repo_key))
-                db.commit()
-            user_db.create_skill(user["id"], skill_name, agent_type, description, "", scope="repo", owner_id=repo_key)
-        else:
-            user_skill_dir = os.path.join(user_db.SKILL_DIR, str(user["id"]), skill_name)
-            os.makedirs(os.path.dirname(user_skill_dir), exist_ok=True)
-            if os.path.exists(user_skill_dir):
-                shutil.rmtree(user_skill_dir)
-            shutil.copytree(skill_dir, user_skill_dir)
-            with db_lock:
-                db.cursor().execute("DELETE FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?", (skill_name, str(user["id"])))
-                db.commit()
-            user_db.create_skill(user["id"], skill_name, agent_type, description, "")
-
-        return {"message": f"技能 {skill_name} 上传成功"}
+        # ===== local 分支已移除：均衡负载环境下 local 存储会导致文件只存在单机 =====
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能上传失败。请检查服务端 OBS 配置后重试。"})
     except HTTPException:
         raise
     except Exception as e:
@@ -797,19 +752,10 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
         c.execute("DELETE FROM skill WHERE id=?", (skill_id,))
         db.commit()
 
-    # local 目录清理（local 模式下 skill 文件在磁盘上）
+    # local 磁盘清理已移除：均衡负载环境下 local 目录清理只作用于单机
     if storage is None:
-        import shutil
-        from src.config import SKILLS_DIR
-        from src.repo_key import from_repo_key
-        if skill_scope == "user":
-            local_dir = os.path.join(SKILLS_DIR, "custom", owner_id, skill_name)
-        elif skill_scope == "repo":
-            local_dir = os.path.join(SKILLS_DIR, "repo", from_repo_key(owner_id), skill_name)
-        else:
-            local_dir = None
-        if local_dir and os.path.exists(local_dir):
-            shutil.rmtree(local_dir, ignore_errors=True)
+        from src.config import log
+        log.warning("OBS 不可用，仅清理 DB 记录，磁盘文件需手动清理 (skill_id=%s, scope=%s, name=%s)", skill_id, skill_scope, skill_name)
 
     if object_key:
         from src.storage import invalidate_skill_caches
@@ -880,32 +826,8 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         mem_cache_invalidate(skill_name)
         return {"message": f"技能 {skill_name} 已复制到仓库 {repo}", "skill_name": skill_name, "scope": "repo", "repo": repo}
 
-    # 3. 复制目录 skills/custom/{user_id}/{skill}/ → skills/repo/{owner}/{repo}/{skill}/
-    src_dir = os.path.join(user_db.SKILL_DIR, str(user["id"]), skill_name)
-    dst_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", from_repo_key(repo_key), skill_name)
-    if not os.path.isdir(src_dir):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "个人技能目录不存在"})
-    if os.path.exists(dst_dir):
-        raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
-
-    os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
-    shutil.copytree(src_dir, dst_dir)
-
-    # 4. 创建仓库技能记录（沿用 agent_type / description）
-    try:
-        ok = user_db.create_skill(user["id"], skill_name, skill_rec.get("agent_type", ""),
-                                  skill_rec.get("description", ""), "", scope="repo", owner_id=repo_key)
-        if not ok:
-            # 若创建失败（如并发冲突），回滚目录
-            shutil.rmtree(dst_dir, ignore_errors=True)
-            raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
-    except HTTPException:
-        raise
-    except Exception as e:
-        shutil.rmtree(dst_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail={"code": 500, "message": f"复制技能失败: {e}"})
-
-    return {"message": f"技能 {skill_name} 已复制到仓库 {repo}", "skill_name": skill_name, "scope": "repo", "repo": repo}
+    # local 分支已移除：均衡负载环境下 local 存储会导致文件只存在单机
+    raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能转换失败。请检查服务端 OBS 配置后重试。"})
 
 
 @router.get("/{skill_id}/sub")
