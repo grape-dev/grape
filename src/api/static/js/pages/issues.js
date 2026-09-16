@@ -233,6 +233,21 @@ function loadTasks() {
     if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
     _render();
+    // Issue #166: 从场景详情页流水线跳转来时，按 issue_number 匹配并打开需求详情
+    if (window._pendingIssueNumber) {
+      var _pinNum = window._pendingIssueNumber;
+      window._pendingIssueNumber = null;
+      var _match = _tasksAll.find(function(t) { return String(t.issue_number) === _pinNum; });
+      if (_match) {
+        _openBoardDetail(_match.id);
+      } else if (window._taskDetailFromScene && window._taskDetailFromScene.latestSeq) {
+        var _seq = window._taskDetailFromScene.latestSeq;
+        window._taskDetailFromScene = null;
+        app.nav('event', _seq);
+      } else {
+        window._taskDetailFromScene = null;
+      }
+    }
     // 从事件详情页返回时，自动打开对应任务详情
     if (window._pendingTaskDetailId) {
       var pid = window._pendingTaskDetailId;
@@ -302,10 +317,17 @@ window._openBoardDetail = function(taskId) {
   // 暂停轮询——防止详情页被 loadTasks() 覆盖
   if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
   // 先渲染基本详情，然后异步加载流水线
+  // Issue #166: 从场景详情页进入时，返回按钮回到场景详情页
+  var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
+  var _backAction = 'loadTasks()';
+  if (window._taskDetailFromScene) {
+    _backLabel = '← ' + (I18N.t('dashboard.scene_detail')||'场景详情');
+    _backAction = "window._taskDetailFromScene=null;window.history.back()";
+  }
   el.innerHTML = `
   <div style="padding:0;max-width:720px;margin:0 auto">
     <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
-      <button class="tsk-btn tsk-btn-ghost" onclick="loadTasks()" style="padding:6px 14px">← ${I18N.t('tasks.back_to_board')||'返回看板'}</button>
+      <button class="tsk-btn tsk-btn-ghost" onclick="${_backAction}" style="padding:6px 14px">${_backLabel}</button>
       <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
@@ -348,6 +370,8 @@ window._jumpToPipeline = function(nodeId) {
 // 点击流水线节点 → 跳转到该节点最新事件详情页
 window._jumpToNodeEvent = function(seq) {
   if (!seq) { console.warn('jumpToNodeEvent: no seq'); return; }
+  // Issue #166: 清除场景来源标记，避免从事件页返回任务详情时错误回退到场景页
+  window._taskDetailFromScene = null;
   // 存储来源任务上下文，供事件详情页返回使用
   const t = window._currentDetailTask;
   // 始终赋值（无任务时置 null），避免非任务来源进入事件页时残留旧标志

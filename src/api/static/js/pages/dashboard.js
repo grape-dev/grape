@@ -366,6 +366,18 @@ window.addEventListener('resize', function() {
 // ═══════════════════════════════════════════════════════════════
 // 场景详情页（点击卡片后进入）
 // ═══════════════════════════════════════════════════════════════
+// Issue #166: 场景详情页流水线 → 跳转任务中心对应需求详情
+window._jumpFromScenePipeline = function(issueNum, sceneId, latestSeq) {
+  if (!issueNum) {
+    if (latestSeq) app.nav('event', latestSeq);
+    return;
+  }
+  window._pendingIssueNumber = String(issueNum).replace(/^#/, '');
+  window._taskDetailFromScene = { sceneId: sceneId, latestSeq: latestSeq || '' };
+  if (typeof _tasksViewMode !== 'undefined') _tasksViewMode = 'repo_all';
+  app.nav('tasks');
+};
+
 // 构建相关流水线 HTML（从 pipeData 提取当前场景的流水线统计+表格）
 function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
   const allPipesRaw = (pipeData.active ? [pipeData.active] : []).concat(pipeData.history || []);
@@ -415,7 +427,7 @@ function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
           }
         }
       }
-      html += `<tr onclick="if('${latestSeq}')app.nav('event','${latestSeq}')">
+      html += `<tr onclick="_jumpFromScenePipeline('${_issueNum}','${sceneId}','${latestSeq}')">
         <td><b>${p.issue_id || '?'}</b> ${execBadge}</td>
         <td><a href="${_issueUrl||'#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${(p.title || '—').substring(0, 40)}</a></td>
         <td>${dur}</td>
