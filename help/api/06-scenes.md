@@ -6,6 +6,7 @@
 > **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 
 ## GET /api/scenes/with-pipeline — 场景列表（含流水线）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Query | `repo`（可选） |
 | 出参 | `[{scene_id, name, description, display_name, nodes, onboarding, is_active}]` |
@@ -14,6 +15,7 @@
 ---
 
 ## GET /api/scenes/market/categories — 场景市场分类
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 出参 | `[{id, name, slug, icon, order_num}]` |
 | 返回 | 200 |
@@ -21,6 +23,7 @@
 ---
 
 ## GET /api/scenes/market — 场景市场列表
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Query | `page`、`scene_id`、`keyword` 等 |
 | 出参 | `{items: [...], total}` |
@@ -29,6 +32,7 @@
 ---
 
 ## GET /api/scenes/market/{market_id} — 市场场景详情
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{market_id}` |
 | 出参 | 场景详情 |
@@ -37,6 +41,7 @@
 ---
 
 ## GET /api/scenes/market/{market_id}/applied — 是否已应用
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{market_id}` |
 | Query | `repo` |
@@ -46,6 +51,7 @@
 ---
 
 ## POST /api/scenes/market/{market_id}/apply — 应用市场场景
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{market_id}` |
 | Query | `repo` |
@@ -55,6 +61,7 @@
 ---
 
 ## POST /api/scenes/market/{market_id}/experience — 体验市场场景
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{market_id}` |
 | 出参 | `{"ok": true, ...}` |
@@ -63,6 +70,7 @@
 ---
 
 ## GET /api/scenes/market/{market_id}/experience-check — 体验前检查
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{market_id}` |
 | 出参 | `{"ok": bool, "reason": ""}` |
@@ -71,6 +79,7 @@
 ---
 
 ## POST /api/scenes/market/{market_id}/like — 点赞场景
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 出参 | `{"liked": true, "likes": n}` |
 | 返回 | 200 |
@@ -78,6 +87,7 @@
 ---
 
 ## GET /api/scenes/{scene_id} — 场景详情
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{scene_id}` |
 | 出参 | `{scene_id, name, nodes, onboarding, ...}` |
@@ -86,6 +96,7 @@
 ---
 
 ## GET /api/scenes/skills/{agent_type} — Agent 可用技能
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{agent_type}` |
 | 出参 | 技能数组 |
@@ -94,6 +105,7 @@
 ---
 
 ## PUT /api/scenes/{scene_id} — 更新场景
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`Content-Type: application/json`
 
@@ -105,12 +117,14 @@
 ---
 
 ## DELETE /api/scenes/{scene_id} — 删除场景
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 返回 | 200/204；404 |
 
 ---
 
 ## POST /api/scenes/apply/{owner}/{repo} — 应用场景到仓库
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`Content-Type: application/json`
 

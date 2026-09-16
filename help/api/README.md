@@ -21,8 +21,7 @@
 
 | 文档 | 接口 | scope |
 |------|------|:---:|
-| [01 Tasks](01-tasks.md) | `mine/start/status/complete/repo/{owner}/{repo}` | dual |
-| | `confirm-done/cancel/resume/clarifications/clarify/pipeline` | user_only |
+| [01 Tasks](01-tasks.md) | `complete`（Event 执行）/ `notify`+`close`（Agent，bot-token）/ pre-upload | dual / bot-token |
 | [02 Repos](02-repos.md) | `managed/member/sync/check-name/create/host/repair/bot-token/deploy-url/remove/project-info` | user_only |
 | | `{owner}/{repo}/git-credential`、`{owner}/{repo}/workspace` | session_only |
 | [03 Agents](03-agents.md) | 全部 | user_only |
@@ -36,7 +35,9 @@
 | | 操作类（terminate/redispatch/thread/chat/knowledge） | user_only |
 | [09 TaskLogs](09-task-logs.md) | 全部 | user_only |
 | [10 Git 仓库](10-git-repos.md) | **全部** | session_only |
-| [11 Issues](11-issues.md) | 全部 | dual |
+| [11 Issues](11-issues.md) | 仓库列表 + 详情/事件/pipeline | dual |
+| | `mine`（个人维度）、`create`（创建人=调用者） | user_only |
+| | 操作类（confirm-done/cancel/resume/pipeline/clarify/attachments 写） | user_only |
 | [12 A2A](12-a2a.md) | `POST /api/a2a` | dual |
 
 ## 目录

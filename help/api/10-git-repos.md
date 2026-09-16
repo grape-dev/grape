@@ -31,6 +31,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ## 1. 仓库信息
 
 ### GET /api/git-repo/{owner}/{repo}
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参**
 
@@ -60,6 +61,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ## 2. 分支
 
 ### GET /api/git-repo/{owner}/{repo}/branches
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参**：Path `{owner}`/`{repo}`（provider 由 token 派生，不传）；Query `?per_page=50`（技能用）。
 
@@ -77,6 +79,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ## 3. 文件内容
 
 ### GET /api/git-repo/{owner}/{repo}/tree?ref={branch}&depth={single|recursive}
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参**
 
@@ -101,6 +104,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ---
 
 ### GET /api/git-repo/{owner}/{repo}/contents/{path}?ref={branch}
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参**
 
@@ -133,6 +137,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ## 4. 提交历史
 
 ### GET /api/git-repo/{owner}/{repo}/commits
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参**：Path owner/repo；Query `?per_page=`（可选）。
 
@@ -148,10 +153,12 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ## 5. 标签
 
 ### GET /api/git-repo/{owner}/{repo}/labels
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **返回（200）**：标签数组 `[{"id":1,"name":"bug","color":"#ff0000","description":""}]`
 
 ### POST /api/git-repo/{owner}/{repo}/labels
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `#d73a4a`）
 
@@ -162,6 +169,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ## 6. 里程碑
 
 ### GET /api/git-repo/{owner}/{repo}/milestones?state=all
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **Query**：`state`（open/closed/all，技能用 all）
 
@@ -174,6 +182,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ## 7. Issues
 
 ### GET /api/git-repo/{owner}/{repo}/issues
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参**：Query `?state=open&page=1&per_page=50`（state: open/closed/all）
 
@@ -186,6 +195,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ```
 
 ### POST /api/git-repo/{owner}/{repo}/issues
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参**：
 - GitCode（issue-advance 风格）：Body `{repo, title, body}`（repo = 仓库名，可省略）
@@ -202,10 +212,12 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 **返回（201）**：创建后的 Issue 对象（同 GET 单个结构）。
 
 ### GET /api/git-repo/{owner}/{repo}/issues/{number}
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **返回（200）**：单个 Issue 对象（结构同上）。**错误**：404。
 
 ### PATCH /api/git-repo/{owner}/{repo}/issues/{number}
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参 Body（JSON）**：
 
@@ -221,11 +233,13 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 **返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
 
 ### GET/POST /api/git-repo/{owner}/{repo}/issues/{number}/comments
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 - **GET**：返回评论数组 `[{"id":1,"body":"...","user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）创建后的评论对象。
 
 ### GET/DELETE /api/git-repo/{owner}/{repo}/issues/{number}/labels
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 - **GET**：返回标签数组。
 - **DELETE**：清除全部标签 → 返回 204（空）。
@@ -235,6 +249,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ## 8. Pull Requests
 
 ### GET /api/git-repo/{owner}/{repo}/pulls
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **返回（200）**：PR 对象数组
 ```json
@@ -245,6 +260,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ```
 
 ### POST /api/git-repo/{owner}/{repo}/pulls
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参 Body（JSON）**：
 
@@ -259,26 +275,31 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 **返回（201）**：创建的 PR 对象。**错误**：400（缺 head/base）/ 404 / 403。
 
 ### GET /api/git-repo/{owner}/{repo}/pulls/{number}
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **返回（200）**：单个 PR 对象（结构同上）。**错误**：404。
 
 ### PATCH /api/git-repo/{owner}/{repo}/pulls/{number}
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **入参 Body（JSON）**：`title` / `body` / `labels`（按需更新字段）。
 
 **返回（200）**：更新后的 PR 对象。
 
 ### PUT /api/git-repo/{owner}/{repo}/pulls/{number}/merge
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **返回（200）**：`{"merged": true, "sha": "..."}`。**错误**：409（不可合并）。
 
 ### GET/POST /api/git-repo/{owner}/{repo}/pulls/{number}/comments
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 - **GET**：返回 PR 行内评论数组 `[{"id":1,"body":"LGTM","path":"a.py","line":5,"user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）评论对象。
 - **PUT /pulls/{number}/comments/{discussion_id}**：标记 resolved → 更新后的评论对象。
 
 ### GET /api/git-repo/{owner}/{repo}/pulls/{number}/files
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
 **返回（200）**：变更文件数组
 ```json
