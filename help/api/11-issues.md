@@ -1,7 +1,9 @@
 # Issues 对外接口（/api/issues）
 
 > 对外公开，认证：`get_current_user_or_api_key`（JWT 会话 / 会话 token（`tk_`）/ API Key 任一）。
-> scope（x-token-scope）：读列表 = **dual**；操作类（confirm-done/cancel/resume/pipeline/clarify/attachments 写）= **user_only**。
+> scope（x-token-scope）：仓库列表/详情/事件/pipeline/repo_all = **dual**；
+> `mine`（个人维度）与 `create`（创建人=调用者）= **user_only**（`tk_` → 403）；
+> 操作类（confirm-done/cancel/resume/pipeline/clarify/attachments 写）= **user_only**。
 > 以 **Issue 为中心**聚合：pipeline 阶段（`stage`）+ 需求中心状态（`status`）+ 事件流（`events`）+ 路线图（`pipeline`）。
 > 设计：`docs/weekly-03/issues-api-design.md`。
 
@@ -28,51 +30,45 @@
 
 | 项 | 值 |
 |----|-----|
-| scope（x-token-scope） | **dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可） |
+| scope（x-token-scope） | **user_only**（`grape_` API Key / JWT；`tk_` → 403） |
 | Query | `status`（active/processing/awaiting_input/pending_review/completed）、`repo_key`（可选，按仓库过滤）、`sort_order`（可选，desc/asc）、`mode`（可选，default=状态优先/time=纯时间序）、`created_by_me`（可选）、`assignees`（可选，逗号分隔创建人） |
 | 出参 | `{issues: Issue[], sort_order, mode}`（跨仓库，user_id=当前用户） |
-| 返回 | 200；401 未认证 |
+| 返回 | 200；401 未认证；403 session token |
 
 > 富化字段：`scene_id/scene_name/stage/is_running/agent_statuses`。
+> 个人维度查询依赖调用者身份（`user_id` 过滤）——session token（`tk_`）无个人语义，故禁。
 
 ---
 
-## GET /api/issues/repo/{owner}/{repo} — 仓库下全部需求列表（需求中心·仓库全部视图）
+## GET /api/issues/{owner}/{repo} — 仓库 Issue 列表（含阶段/状态/富化聚合）
+
+> 归一：仓库「全部」视图的**唯一入口**（收编原 `/api/issues/repo/{owner}/{repo}`，见 `issues-list-merge-design.md`）。
 
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
 | Path | `{owner}` / `{repo}` 仓库 |
-| Query | `status`（.../cancelled）、`sort_order`、`mode`、`assignees`（同上） |
-| 出参 | `{issues: Issue[], sort_order, mode, repo_key}`（不限 user_id） |
-| 返回 | 200；403 无权访问该仓库；401 未认证 |
+| Query | `status`（active/processing/awaiting_input/pending_review/completed/cancelled）、`sort_order`（desc/asc）、`mode`（default=状态优先/time=纯时间序）、`assignees`（逗号分隔创建人） |
+| 出参 | `{issues: Issue[], total: int}`（不限 user_id） |
+| 返回 | 200；401 未认证 |
 
-> 防 IDOR：校验调用方可访问该仓库，无权返回 403。
-
----
-
-## GET /api/issues/{owner}/{repo} — 仓库 Issue 列表（含阶段/状态聚合）
-
-| 项 | 值 |
-|----|-----|
-| scope（x-token-scope） | **dual**（三通道） |
-| Path | `{owner}` / `{repo}` 仓库 |
-| 出参 | `{issues: Issue[], total: int}` |
-| 返回 | 200 成功；401 未认证 |
+> 仓库列表为公开只读聚合（对齐原 `issues_list` 行为，无仓库权限门禁）。
 
 Issue 对象字段：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `number` | int | Issue 编号 |
-| `title` | string | 标题（事件首条带 title 的事件；无则 `Issue #N`） |
+| `id` / `issue_number` | int | Issue 内部 id / GitCode 编号（`id` 即 `/api/issues/{issue_id}/...` 操作入参） |
+| `title` | string | 标题 |
+| `status` | string | 需求中心状态（active/processing/awaiting_input/pending_review/completed/cancelled） |
 | `stage` | string | pipeline 阶段（vod/issue/coding/qa/sre/pending_review/done） |
-| `task_status` | string | 需求中心状态（active/processing/awaiting_input/pending_review/completed/cancelled） |
-| `owner_agent` | string | 当前归属 agent（默认 vod） |
-| `scene_id` | string | Issue 级开发场景（空=回退仓库默认） |
-| `assignee` | string | Issue 责任人（GitCode 用户名） |
+| `assignee` | string | 责任人（GitCode 用户名） |
+| `scene_id` / `scene_name` / `scene_source` | string | 开发场景（vod / repo_default） |
+| `is_running` | bool | 是否有运行中的 agent |
+| `agent_statuses` | array | 各 agent 状态摘要 |
 | `is_subtask_mode` | int | 0/1 多任务模式 |
-| `parent_issue_id` | string | 父任务 Issue ID（如 `#20`，空=普通任务） |
+| `parent_issue_id` / `parent_issue_number` | string/int | 父任务 |
 | `events_count` | int | 该 Issue 事件数 |
 | `latest_event` | object? | 最新事件（seq 升序末条） |
 
@@ -82,8 +78,8 @@ Issue 对象字段：
 
 ## POST /api/issues/{owner}/{repo} — 创建 Issue（对外统一创建入口）
 
-> scope（x-token-scope）：**dual**（三通道）。
-> 创建 GitCode Issue + 建档 + 触发 pipeline。
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> 创建 GitCode Issue + 建档 + 触发 pipeline（创建人 = 调用者本人，故 session token 不适用）。
 
 请求头：`Content-Type: application/json`
 

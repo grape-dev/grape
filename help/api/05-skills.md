@@ -5,6 +5,8 @@
 
 ## GET /api/skills/featured — 精选技能
 
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
 | Query | `repo`（可选，scope 过滤） |
 | 出参 | 技能数组（featured） |
 | 返回 | 200 |
