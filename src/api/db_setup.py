@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS skill (
     updated_by VARCHAR(64) DEFAULT '',
     is_active INTEGER DEFAULT 1,
     sub_scene TEXT DEFAULT '',
+    category_id INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (skill_name, scope, owner_id)
@@ -609,6 +610,21 @@ CREATE TABLE IF NOT EXISTS scene_category (
 )
 """
 
+_SKILL_CATEGORY_DDL = """
+CREATE TABLE IF NOT EXISTS skill_category (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    slug        VARCHAR(64) NOT NULL,
+    icon        TEXT DEFAULT '',
+    order_num   INTEGER DEFAULT 0,
+    is_active   INTEGER DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (name),
+    UNIQUE (slug)
+)
+"""
+
 _SCENE_MARKET_DDL = """
 CREATE TABLE IF NOT EXISTS scene_market (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -746,6 +762,7 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("scene_likes", _SCENE_LIKES_DDL),
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
+    ("skill_category", _SKILL_CATEGORY_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
     ("distributed_locks", _DISTRIBUTED_LOCKS_DDL),
     ("api_latency_log", _API_LATENCY_LOG_DDL),
@@ -942,6 +959,7 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_uploaded_files_ref ON uploaded_files(ref_table, ref_id, is_active)",
         "CREATE INDEX IF NOT EXISTS idx_scene_skill_ref_skill_name ON scene_skill_ref(skill_name)",
         "CREATE INDEX IF NOT EXISTS idx_skill_is_featured ON skill(is_featured)",
+        "CREATE INDEX IF NOT EXISTS idx_skill_category_id ON skill(category_id)",
         "CREATE INDEX IF NOT EXISTS idx_market_scene_id ON devops_pipeline_scene(market_scene_id)",
         # ===== API 慢请求监控索引 =====
         "CREATE INDEX IF NOT EXISTS idx_latency_log_created ON api_latency_log(created_at)",
@@ -1111,15 +1129,23 @@ def _insert_seed_data(table: str, data: dict):
 
         elif table == "skill_official":
             # skill-description.json: {"skill_name": {"name": "...", "agent_type": "...", "path": "...", ...}}
+            # 构建 slug → category_id 缓存
+            cat_map = {}
+            try:
+                for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
+                    cat_map[row[0]] = row[1]
+            except Exception:
+                pass
             for skill_name, info in data.items():
                 display_name = info.get("name", skill_name)
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
                 skill_path = info.get("path", skill_name)
                 sub_scene = info.get("sub_scene", "")
+                category_id = cat_map.get(sub_scene, 0)
                 c.execute(
-                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene) VALUES (?,?,?,?,?,'official','',?)",
-                    (skill_name, display_name, description, agent_type, skill_path, sub_scene)
+                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?)",
+                    (skill_name, display_name, description, agent_type, skill_path, sub_scene, category_id)
                 )
 
         elif table == "agent_registry":
@@ -1190,6 +1216,64 @@ def _init_scene_category_data():
         log.info("Seeded scene_category with 6 categories")
     except Exception as e:
         log.warning(f"Init scene_category data failed: {e}")
+
+
+def _init_skill_category_data():
+    """初始化 skill_category 表的 11 条分类数据（幂等）。
+
+    Issue #179: 技能分类表独立化，对齐 scene_category 模式。
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        if get_meta_value("skill_category_seeded") == "1":
+            return
+        categories = [
+            ("AI辅助编码与评审", "ai-coding-review", "🤖", 1),
+            ("应用发布", "app-release", "📦", 2),
+            ("自动化测试", "auto-testing", "🧪", 3),
+            ("持续集成CI", "ci", "🔧", 4),
+            ("代码质量与安全", "code-quality", "🛡️", 5),
+            ("容器与集群部署", "container-deploy", "☸️", 6),
+            ("反馈闭环", "feedback-loop", "🔄", 7),
+            ("IM", "im", "💬", 8),
+            ("日志与诊断", "log-diagnostics", "🔍", 9),
+            ("可观测性", "observability", "📊", 10),
+            ("环境与脚手架", "scaffolding", "🏗️", 11),
+        ]
+        with db_lock:
+            c = db.cursor()
+            for name, slug, icon, order_num in categories:
+                c.execute(
+                    "INSERT OR IGNORE INTO skill_category (name, slug, icon, order_num, is_active) VALUES (?,?,?,?,1)",
+                    (name, slug, icon, order_num),
+                )
+            db.commit()
+        set_meta_value("skill_category_seeded", "1")
+        log.info("Seeded skill_category with 11 categories")
+    except Exception as e:
+        log.warning(f"Init skill_category data failed: {e}")
+
+
+def _backfill_skill_category_id():
+    """一次性回填：sub_scene → category_id（幂等）。
+
+    Issue #179: 已有 official 技能的 sub_scene 有值，通过 slug 关联 skill_category 获取 category_id。
+    user/repo 技能 sub_scene 为空，category_id 保持 0。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE skill SET category_id = "
+                "(SELECT sc.id FROM skill_category sc WHERE sc.slug = skill.sub_scene) "
+                "WHERE sub_scene != '' AND category_id = 0"
+            )
+            updated = c.rowcount
+            db.commit()
+        if updated:
+            log.info(f"Backfilled skill category_id: {updated} rows")
+    except Exception as e:
+        log.warning(f"Backfill skill category_id failed: {e}")
 
 
 def _init_scene_market_data():
@@ -1385,6 +1469,9 @@ def init_database():
                 _init_scene_market_data()
                 _init_scene_skill_ref()
                 _init_skill_featured()
+                # ===== Issue #179: skill 分类表初始化 + category_id 回填 =====
+                _init_skill_category_data()
+                _backfill_skill_category_id()
                 # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
                 try:
                     _backfill_scene_display_names()
@@ -1416,6 +1503,9 @@ def init_database():
         _init_scene_market_data()
         _init_scene_skill_ref()
         _init_skill_featured()
+        # ===== Issue #179: skill 分类表初始化 + category_id 回填 =====
+        _init_skill_category_data()
+        _backfill_skill_category_id()
         # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
         try:
             _backfill_scene_display_names()
@@ -1632,12 +1722,20 @@ def _sync_official_skills():
         updated = 0
         with db_lock:
             c = db.cursor()
+            # 构建 slug → category_id 缓存
+            cat_map = {}
+            try:
+                for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
+                    cat_map[row[0]] = row[1]
+            except Exception:
+                pass
             for skill_name, info in data.items():
                 display_name = info.get("name", skill_name)
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
                 skill_path = info.get("path", skill_name)
                 sub_scene = info.get("sub_scene", "")
+                category_id = cat_map.get(sub_scene, 0)
                 existed = c.execute(
                     "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'",
                     (skill_name,)
@@ -1651,19 +1749,19 @@ def _sync_official_skills():
                     ).fetchone()
                     if _fp:
                         c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, sub_scene, skill_name)
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, sub_scene, category_id, skill_name)
                         )
                     else:
                         c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_path, sub_scene, skill_name)
+                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
+                            (display_name, description, agent_type, skill_path, sub_scene, category_id, skill_name)
                         )
                     updated += 1
                 else:
                     c.execute(
-                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene) VALUES (?,?,?,?,?,'official','',?,?)",
-                        (skill_name, display_name, description, agent_type, skill_path, "", sub_scene)
+                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?,?)",
+                        (skill_name, display_name, description, agent_type, skill_path, "", sub_scene, category_id)
                     )
                     added += 1
             db.commit()
@@ -2619,6 +2717,15 @@ def _migrate_tables():
             log.info("Added managed_repos.host_status column")
     except Exception as e:
         log.warning(f"Add managed_repos.host_status column failed: {e}")
+    # ===== Issue #179: skill 表加 category_id 列（老库升级） =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "skill", "category_id", "INTEGER DEFAULT 0")
+            db.commit()
+            log.info("Added skill.category_id column")
+    except Exception as e:
+        log.warning(f"Add skill.category_id column failed: {e}")
     # ===== devops_pipeline_scene 高级选项列（场景级工作分支 + 自定义 key:value）=====
     try:
         with db_lock:

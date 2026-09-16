@@ -17,15 +17,15 @@ let _skillPageTotal = 0;      // 当前分页查询的总数（来自 list 接�
 let _allSkills = [];         // 当前页技能缓存
 let _featuredSkills = [];    // 精选技能（独立加载，不受搜索影响）
 let _agentStats = {};        // {agent_type: count} 来自 agent-stats 接口
-let _allSubScenes = [];      // 全量子场景列表 [{id, label}] 来自 agent-stats 接口
+let _skillCategories = [];   // 技能分类列表 [{id, name, slug, icon, order_num}] 来自 agent-stats 接口
 let _agentList = ['vod','issue','coding','qa','sre','chat'];  // 固定顺序
 let _activeAgentIdx = -1;    // -1=无选中(显示全部), 0+=第N个agent
 let _activeTagFilter = 'all';  // 当前标签筛选（中文 label 用于显示）
-let _activeTagFilterId = '';  // 当前标签筛选英文 ID（用于 API 查询）
+let _activeTagFilterId = '';  // 当前标签筛选 ID（用于 API 查询和客户端过滤）
 
-// 技能标签分类定义（二级筛选）—— 从接口返回的 sub_scene 动态渲染
+// 技能分类定义（二级筛选）—— 从 agent-stats 接口返回的 categories 动态渲染
 
-// _getSkillTags 已废弃——sub_scene 由接口返回，直接匹配
+// _getSkillTags 已废弃——分类由接口返回，直接匹配
 
 // 精选技能卡片渐变色（按 agent_type）
 const _FEAT_GRADIENT = {
@@ -145,7 +145,7 @@ function _loadAgentStats() {
   API.get('/skills/agent-stats?' + params.join('&')).then(d => {
     _agentStats = {};
     (d.agents || []).forEach(a => { _agentStats[a.agent_type] = a.count; });
-    _allSubScenes = d.sub_scenes || [];
+    _skillCategories = d.categories || [];
     _skillTotal = d.total || 0;
     _renderAgentSidebar();
     _renderTagFilters();
@@ -172,9 +172,9 @@ function _reloadSkills(searchInit) {
   if (_activeAgentIdx >= 0 && _agentList[_activeAgentIdx]) {
     params.push('agent_type=' + _agentList[_activeAgentIdx]);
   }
-  // sub_scene 作为 API 入参：仅未选中 agent 时（全量查询场景）
+  // category_id 作为 API 入参：仅未选中 agent 时（全量查询场景）
   if (_activeAgentIdx < 0 && _activeTagFilterId) {
-    params.push('sub_scene=' + encodeURIComponent(_activeTagFilterId));
+    params.push('category_id=' + encodeURIComponent(_activeTagFilterId));
   }
   params.push('page=' + _skillPage);
   params.push('page_size=' + _skillPageSize);
@@ -396,17 +396,17 @@ function _renderTagFilters() {
   if (!container) return;
   var tags = [];
   if (_activeAgentIdx === -1) {
-    // 未选中 agent：全量展示（来自 agent-stats）
-    tags = _allSubScenes.map(function(s) { return {label: s.label, id: s.id}; });
+    // 未选中 agent：全量展示（来自 agent-stats 的 categories）
+    tags = _skillCategories.map(function(c) { return {label: c.name, id: String(c.id), icon: c.icon||''}; });
   } else {
-    // 选中 agent：仅展示当前页数据的 sub_scene
+    // 选中 agent：仅展示当前页数据的分类
     var seen = {};
     _allSkills.forEach(function(s) {
-      var label = s.sub_scene || '';
-      var id = s.sub_scene_id || '';
-      if (label && id && !seen[id]) {
+      var label = s.category_name || '';
+      var id = String(s.category_id || '');
+      if (label && id && id !== '0' && !seen[id]) {
         seen[id] = 1;
-        tags.push({label: label, id: id});
+        tags.push({label: label, id: id, icon: ''});
       }
     });
   }
@@ -446,7 +446,7 @@ function _renderAgentSkills() {
   // 二级标签筛选——客户端过滤当前页数据
   let skills = _allSkills;
   if (_activeTagFilter !== 'all') {
-    skills = skills.filter(s => (s.sub_scene_id || '') === _activeTagFilterId);
+    skills = skills.filter(s => String(s.category_id || '') === _activeTagFilterId);
   }
   if (!skills.length) {
     container.innerHTML = `<div class="ts t3" style="padding:20px;text-align:center">${I18N.t('skills.empty.no_skills')||'暂无技能'}</div>`;
@@ -585,7 +585,7 @@ function renderSkillDetail(data) {
   const isUserDetail = data.scope === 'user';
   const scenesArr = (data.scenes || []).map(sc => sc.display_name || sc.name || sc);
   const scenesStr = scenesArr.length > 0 ? scenesArr.join('、') : '—';
-  const tagsStr = data.sub_scene || '—';
+  const tagsStr = data.category_name || '—';
   const likeCount = data.like_count || 0;
   const likedIcon = data.liked_by_me ? '❤️' : '🤍';
   const rawContent = data.content || '';
@@ -644,6 +644,12 @@ function showSkillUpload() {
         ${AGENT_OPTS.map(o=>`<option value="${o.v}">${o.label}</option>`).join('')}
       </select>
     </div>
+    <div class="srow" style="margin-bottom:10px"><label>分类</label>
+      <select id="skillCategoryId" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">
+        <option value="0">未分类</option>
+        ${_skillCategories.map(c=>`<option value="${c.id}">${c.icon||''} ${c.name}</option>`).join('')}
+      </select>
+    </div>
     <div style="margin-bottom:14px">
       <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">${I18N.t('skills.upload.file_label')||'技能 ZIP 包'}</label>
       <input type="file" id="skillFile" accept=".zip" style="font-size:12px">
@@ -695,10 +701,12 @@ function doSkillUpload() {
   }
   const scope = _skillTab;
   const repo = _currentRepo();
+  const categoryId = parseInt(document.getElementById('skillCategoryId')?.value || '0', 10);
   const fd = new FormData();
   fd.append('file', fileInput.files[0]);
   fd.append('scope', scope);
   fd.append('agent_type', agentType);
+  fd.append('category_id', String(categoryId));
   if (scope === 'repo' && repo) fd.append('repo', repo);
   _setSkillUploadProgress(0, false);
   API.upload('/skills/upload', fd, (pct) => _setSkillUploadProgress(pct, false)).then(r => {

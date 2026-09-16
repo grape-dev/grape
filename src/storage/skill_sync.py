@@ -1,14 +1,13 @@
-"""官方技能 OBS 自动同步模块（official-skill-obs-sync-design.md）。
+"""官方技能同步模块。
 
 职责：
-1. 从 skill-description.json 同步技能元信息到 DB（INSERT/UPDATE）
-2. 扫描本地 skills/<agent_type>/<skill>/ 目录，计算 content_hash
-3. hash 变了 → 打包 zip → 上传 OBS → 更新 DB file_path + content_hash
+1. 远程同步：从 grape-skills 仓库下载 zip → 合并 skill-description.json → 同步 skill 文件目录 → DB 同步
+2. OBS 同步：扫描本地 skills/<agent_type>/<skill>/ 目录，计算 content_hash → 打包 zip → 上传 OBS
+3. DB 同步：从 skill-description.json INSERT/UPDATE 技能元信息（含 category_id）
 
 触发方式：
-- asyncio 定时任务（OBS 模式，每 30 分钟，启动即执行）
-
-非 OBS 模式（storage=None）：定时调度不启动。
+- asyncio 定时任务（每 30 分钟，启动即执行）
+- 任何模式都启动（非 OBS 模式跳过上传步骤，DB 同步正常执行）
 
 不处理删除——保持和原有 DB 同步逻辑一致（只加不删，以 skill-description.json 为权威）。
 """
@@ -17,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import zipfile
 
 from src.config import SKILLS_DIR, CONFIG_DIR, log, resolve_official_skill_path
@@ -81,16 +81,24 @@ async def sync_official_skills_to_obs() -> dict:
     storage = get_storage()
     result = {"added": 0, "updated": 0, "skipped": 0}
 
-    # 1. DB 同步：从 skill-description.json INSERT/UPDATE 元信息（与 db_setup._sync_official_skills 逻辑一致）
+    # 1. DB 同步：从 skill-description.json INSERT/UPDATE 元信息（含 category_id）
     from src.session_manager import db as _db, db_lock as _db_lock
     with _db_lock:
         c = _db.cursor()
+        # 构建 slug → category_id 缓存
+        cat_map = {}
+        try:
+            for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
+                cat_map[row[0]] = row[1]
+        except Exception:
+            pass
         for skill_name, info in data.items():
             display_name = info.get("name", skill_name)
             description = info.get("description", "")
             agent_type = info.get("agent_type", "")
             skill_path_val = info.get("path", skill_name)
             sub_scene = info.get("sub_scene", "")
+            category_id = cat_map.get(sub_scene, 0)
             existed = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'", (skill_name,)).fetchone()[0]
             if existed:
                 _fp = c.execute(
@@ -99,18 +107,18 @@ async def sync_official_skills_to_obs() -> dict:
                 ).fetchone()
                 if _fp:
                     c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, sub_scene, skill_name)
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, sub_scene, category_id, skill_name)
                     )
                 else:
                     c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, skill_path_val, sub_scene, skill_name)
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
                     )
             else:
                 c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene) VALUES (?,?,?,?,?,'official','',?,?)",
-                    (skill_name, display_name, description, agent_type, skill_path_val, "", sub_scene)
+                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?,?)",
+                    (skill_name, display_name, description, agent_type, skill_path_val, "", sub_scene, category_id)
                 )
         _db.commit()
 
@@ -171,33 +179,137 @@ async def sync_official_skills_to_obs() -> dict:
                 result["added"] += 1
                 logger.info(f"skill added: {skill_name} (hash: {current_hash[:8]}...)")
 
-    logger.info(f"sync done: +{result['added']} ~{result['updated']} skipped={result['skipped']}")
+    logger.info(f"obs sync done: +{result['added']} ~{result['updated']} skipped={result['skipped']}")
+    return result
+
+
+async def sync_official_skills_from_remote() -> dict:
+    """远程同步：从 grape-skills 仓库下载 zip → 合并 skill-description.json → 同步 skill 文件目录 → DB 同步。
+
+    Issue #179: 补齐 skill 远程同步能力，参考 scene_sync 的 _download_repo_zip 模式。
+    返回 {"json_merged": N, "dirs_synced": N, "dirs_skipped": N}。
+    """
+    import httpx
+    from src.storage.scene_sync import _download_repo_zip, _get_sync_token
+
+    result = {"json_merged": 0, "dirs_synced": 0, "dirs_skipped": 0}
+
+    # 1. 获取 token
+    token = _get_sync_token()
+    if not token:
+        logger.warning("skill remote sync: no GitCode token configured, skip")
+        return result
+
+    tmp_dir = None
+    try:
+        # 2. 下载 zip
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                repo_root = await _download_repo_zip(client, token)
+            except Exception as e:
+                logger.warning(f"skill remote sync: download repo zip failed: {e}")
+                return result
+
+        # 保存临时目录路径用于 finally 清理
+        tmp_dir = repo_root
+
+        # 3. 读远程 skill-description.json
+        remote_json_path = os.path.join(repo_root, "skill-description.json")
+        if not os.path.exists(remote_json_path):
+            logger.warning("skill remote sync: skill-description.json not found in zip")
+            return result
+        with open(remote_json_path, "r", encoding="utf-8") as f:
+            remote_data = json.load(f)
+
+        # 4. 合并到本地 skill-description.json（远程覆盖本地，本地自定义保留）
+        local_json_path = os.path.join(CONFIG_DIR, "skill-description.json")
+        local_data = {}
+        if os.path.exists(local_json_path):
+            with open(local_json_path, "r", encoding="utf-8") as f:
+                local_data = json.load(f)
+
+        merged = dict(local_data)  # 本地为基础
+        for skill_name, info in remote_data.items():
+            if skill_name not in merged or merged[skill_name] != info:
+                merged[skill_name] = info  # 远程覆盖
+                result["json_merged"] += 1
+
+        if result["json_merged"] > 0:
+            with open(local_json_path, "w", encoding="utf-8") as f:
+                json.dump(merged, f, ensure_ascii=False, indent=2)
+            logger.info(f"skill remote sync: merged {result['json_merged']} skills into local json")
+
+        # 5. 同步 skill 文件目录（增量 hash 比对）
+        remote_skills_dir = os.path.join(repo_root, "skills")
+        if not os.path.isdir(remote_skills_dir):
+            logger.warning("skill remote sync: skills/ directory not found in zip")
+        else:
+            for skill_name, info in remote_data.items():
+                skill_path = info.get("path", skill_name)
+                remote_skill_dir = os.path.join(remote_skills_dir, skill_path)
+                if not os.path.isdir(remote_skill_dir):
+                    continue
+
+                local_skill_dir = os.path.join(SKILLS_DIR, skill_path)
+
+                # 算远程 hash
+                remote_hash = _compute_skill_hash(remote_skill_dir)
+                if not remote_hash:
+                    continue
+
+                # 算本地 hash（目录不存在则空串）
+                local_hash = _compute_skill_hash(local_skill_dir)
+
+                if remote_hash == local_hash:
+                    result["dirs_skipped"] += 1
+                    continue
+
+                # hash 变了或本地不存在 → 删除旧目录 → 拷贝新目录
+                if os.path.isdir(local_skill_dir):
+                    shutil.rmtree(local_skill_dir, ignore_errors=True)
+                os.makedirs(os.path.dirname(local_skill_dir), exist_ok=True)
+                shutil.copytree(remote_skill_dir, local_skill_dir, dirs_exist_ok=True)
+                result["dirs_synced"] += 1
+                logger.info(f"skill remote sync: synced directory {skill_name}")
+
+        # 6. 执行 DB 同步（复用已有函数，读合并后的本地 json）
+        await sync_official_skills_to_obs()
+
+        logger.info(
+            f"skill remote sync done: json_merged={result['json_merged']}, "
+            f"dirs_synced={result['dirs_synced']}, dirs_skipped={result['dirs_skipped']}"
+        )
+    except Exception as e:
+        logger.exception(f"skill remote sync failed: {e}")
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     return result
 
 
 async def _skill_sync_worker(interval: float = 1800.0):
-    """定时同步 worker：启动即执行，之后每 interval 秒增量扫描。"""
+    """定时同步 worker：启动即执行，之后每 interval 秒。
+
+    执行顺序：先远程同步（DB + 文件目录），再 OBS 同步（打包上传）。
+    """
     while True:
         try:
+            await sync_official_skills_from_remote()
             await sync_official_skills_to_obs()
         except asyncio.CancelledError:
             logger.info("skill sync worker cancelled")
-            raise  # 必须重新 raise，不能吞掉取消异常
+            raise
         except Exception:
             logger.exception("skill sync run failed")
-        # 无论成功失败都 sleep，避免雪崩式死循环
         await asyncio.sleep(interval)
 
 
 def start_skill_sync_scheduler():
-    """启动定时同步调度（仅 OBS 模式）。"""
-    from src.storage import get_storage
-    if get_storage() is None:
-        log.info("skill sync scheduler: OBS not enabled, skip")
-        return
+    """启动定时同步调度（任何模式都启动）。"""
     interval = float(os.environ.get("SKILL_SYNC_INTERVAL", "1800"))
     t = asyncio.create_task(_skill_sync_worker(interval), name="skill-sync")
-    _bg_tasks.add(t)  # 持有强引用，防止 GC 回收导致任务静默消失
+    _bg_tasks.add(t)
     t.add_done_callback(_bg_tasks.discard)
     log.info(f"skill sync scheduler started (interval={interval}s)")
 

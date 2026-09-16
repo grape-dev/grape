@@ -951,10 +951,12 @@ def get_skill_current_version(skill_id) -> int:
 
 
 def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
-                     description: str, object_key: str, created_by: str = "") -> bool:
+                     description: str, object_key: str, created_by: str = "",
+                     category_id: int = 0) -> bool:
     """OBS 模式技能记录 upsert（存在则更新固定 key，不存在则插入；v2.5 file_path + by 字段）。
 
     scope: user/repo；owner: user_id 或 repo_key。返回是否成功。
+    Issue #179: 新增 category_id 参数。
     """
     try:
         with db_lock:
@@ -971,16 +973,16 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
             if row:
                 c.execute(
                     "UPDATE skill SET file_path=?, display_name=?, "
-                    "agent_type=?, description=?, updated_by=?, is_active=1, updated_at=datetime('now') WHERE id=?",
+                    "agent_type=?, description=?, category_id=?, updated_by=?, is_active=1, updated_at=datetime('now') WHERE id=?",
                     (object_key, skill_name, agent_type or "", description or "",
-                     created_by or "", row[0]))
+                     category_id, created_by or "", row[0]))
             else:
                 c.execute(
                     "INSERT INTO skill (skill_name, display_name, description, agent_type, "
-                    "file_path, scope, owner_id, created_by, updated_by, is_active) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,1)",
+                    "file_path, scope, owner_id, created_by, updated_by, is_active, category_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,1,?)",
                     (skill_name, skill_name, description or "", agent_type or "",
-                     object_key, scope, owner, created_by or "", created_by or ""))
+                     object_key, scope, owner, created_by or "", created_by or "", category_id))
             db.commit()
             return True
     except Exception as e:
@@ -2186,6 +2188,29 @@ def get_scene_category(category_id: int) -> dict | None:
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, name, slug, icon FROM scene_category WHERE id=?", (category_id,))
+        row = c.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "slug": row[2] or "", "icon": row[3] or ""}
+
+
+def list_skill_categories() -> list[dict]:
+    """返回启用的技能分类列表，按 order_num 排序"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, name, slug, icon, order_num FROM skill_category "
+            "WHERE is_active=1 ORDER BY order_num"
+        )
+        return [{"id": r[0], "name": r[1], "slug": r[2] or "", "icon": r[3] or "", "order_num": r[4]}
+                for r in c.fetchall()]
+
+
+def get_skill_category(category_id: int) -> dict | None:
+    """按 id 查技能分类"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, name, slug, icon FROM skill_category WHERE id=?", (category_id,))
         row = c.fetchone()
     if not row:
         return None

@@ -9,24 +9,6 @@ from src.api.deps import get_current_user_or_api_key, require_no_session_token
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
-# sub_scene 英文 ID → 中文标签（对齐 grape-skills 仓库目录命名）
-_SUB_SCENE_LABELS = {
-    "ai-coding-review": "AI辅助编码与评审",
-    "scaffolding":      "环境与脚手架",
-    "auto-testing":     "自动化测试",
-    "code-quality":     "代码质量与安全",
-    "app-release":      "应用发布",
-    "feedback-loop":    "反馈闭环",
-    "ci":               "持续集成CI",
-    "observability":    "可观测性",
-    "log-diagnostics":  "日志与诊断",
-    "container-deploy": "容器与集群部署",
-    "im":               "IM",
-}
-
-
-def _sub_scene_label(val: str) -> str:
-    return _SUB_SCENE_LABELS.get(val, val)
 
 # 解压后总大小上限（zip 炸弹防护，见 obs-skill-storage-design.md §7）
 MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
@@ -72,21 +54,21 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 @router.get("", operation_id="skills_list", summary="技能列表")
 def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
-                agent_type: str = "", sub_scene: str = "",
+                agent_type: str = "", category_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
     agent_type 参数：按 agent_type 过滤（vod/issue/coding/qa/sre/chat）。
-    sub_scene 参数：按子场景英文 ID 过滤（如 scaffolding/im/feedback-loop）。
+    category_id 参数：按分类 ID 过滤（Issue #179）。
     q 参数：搜索词，按 skill_name / display_name / description 模糊匹配。
     sort 参数：latest（默认顺序）/ hot（按 like_count 降序）。
     page/page_size：分页参数，page_size=0 时不分页（返回全部，兼容旧逻辑）。
-    扩展返回字段：is_featured, like_count, liked_by_me, scene_count, repo_count, scenes, sub_scene, sub_scene_id
+    扩展返回字段：is_featured, like_count, liked_by_me, scene_count, repo_count, scenes, category_id, category_name
     """
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key
     from src.user.db import (batch_skill_liked, get_skill_usage_stats,
-                             batch_skill_scenes)
+                             batch_skill_scenes, list_skill_categories)
 
     # repo 参数可能是 fullName（xiaowu2119/hello-skill），转成 repo_key（gitcode:xiaowu2119/hello-skill）
     repo_key = _resolve_repo_key(repo) if repo else ""
@@ -128,11 +110,10 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
         conditions.append("agent_type=?")
         params.append(agent_type)
 
-    # sub_scene 过滤（英文 ID）
-    sub_scene = (sub_scene or "").strip()
-    if sub_scene:
-        conditions.append("sub_scene=?")
-        params.append(sub_scene)
+    # category_id 过滤
+    if category_id and category_id > 0:
+        conditions.append("category_id=?")
+        params.append(category_id)
 
     # 排序
     order_by = "ORDER BY like_count DESC" if sort == "hot" else "ORDER BY agent_type, skill_name"
@@ -153,17 +134,25 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
                 c.execute(f"SELECT COUNT(*) FROM skill{where_sql}", tuple(params))
                 total = c.fetchone()[0]
                 c.execute(
-                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count, sub_scene "
+                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count, sub_scene, category_id "
                     f"FROM skill{where_sql} {order_by} LIMIT {int(page_size)} OFFSET {int(offset)}",
                     tuple(params)
                 )
             else:
                 c.execute(
-                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count, sub_scene "
+                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count, sub_scene, category_id "
                     f"FROM skill{where_sql} {order_by}",
                     tuple(params)
                 )
+            # 批量查分类名称（避免 N+1）
+            cat_map = {}
+            try:
+                for cat in list_skill_categories():
+                    cat_map[cat["id"]] = cat["name"]
+            except Exception:
+                pass
             for r in c.fetchall():
+                cat_id = r[10] or 0
                 skills.append({
                     "id": r[0],
                     "name": r[1],
@@ -174,8 +163,8 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
                     "scope": r[5] or "",
                     "is_featured": r[7] or 0,
                     "like_count": r[8] or 0,
-                    "sub_scene": _sub_scene_label(r[9] or ""),
-                    "sub_scene_id": r[9] or "",
+                    "category_id": cat_id,
+                    "category_name": cat_map.get(cat_id, ""),
                 })
                 skill_ids.append(r[0])
         except Exception:
@@ -257,6 +246,7 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
     且 tk_ 会话 token 的 user_id 在仓库身份下为 0，scope=user 过滤 owner_id=0 亦无可达数据——故禁 session。
     """
     from src.session_manager import db, db_lock
+    from src.user.db import list_skill_categories
 
     repo_key = _resolve_repo_key(repo) if repo else ""
     conditions = ["is_active=1"]
@@ -265,7 +255,7 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
         conditions.append("scope='official'")
     elif scope == "repo":
         if not repo:
-            return {"total": 0, "agents": []}
+            return {"total": 0, "agents": [], "categories": []}
         conditions.append("scope='repo'")
         conditions.append("owner_id=?")
         params.append(repo_key)
@@ -282,7 +272,7 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
 
     where_sql = " WHERE " + " AND ".join(conditions)
     agents = []
-    sub_scenes = []
+    categories = []
     total = 0
     with db_lock:
         c = db.cursor()
@@ -296,18 +286,21 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
             for r in c.fetchall():
                 agents.append({"agent_type": r[0] or "", "count": r[1]})
                 total += r[1]
-            # 全量子场景列表（供未选 agent 时展示）
+            # 分类列表：查 skill 表里 DISTINCT category_id（过滤 0），关联 skill_category 表返回详情
             c.execute(
-                f"SELECT DISTINCT sub_scene FROM skill{where_sql} AND sub_scene!='' AND sub_scene IS NOT NULL ORDER BY sub_scene",
+                f"SELECT DISTINCT category_id FROM skill{where_sql} AND category_id > 0",
                 tuple(params)
             )
-            for r in c.fetchall():
-                ss = r[0] or ""
-                if ss:
-                    sub_scenes.append({"id": ss, "label": _sub_scene_label(ss)})
+            cat_ids = [r[0] for r in c.fetchall()]
         except Exception:
-            pass
-    return {"total": total, "agents": agents, "sub_scenes": sub_scenes}
+            cat_ids = []
+    # 查分类详情
+    all_cats = list_skill_categories() if cat_ids else []
+    cat_id_set = set(cat_ids)
+    for cat in all_cats:
+        if cat["id"] in cat_id_set:
+            categories.append(cat)
+    return {"total": total, "agents": agents, "categories": categories}
 
 
 @router.get("/stats")
@@ -318,6 +311,13 @@ def get_skill_stats(user: dict = Depends(require_no_session_token)):
     """
     from src.user.db import get_skill_usage_stats
     return {"stats": get_skill_usage_stats()}
+
+
+@router.get("/categories", operation_id="skills_categories", summary="技能分类列表")
+def list_categories(user: dict = Depends(require_no_session_token)):
+    """返回技能分类列表（Issue #179）。"""
+    from src.user.db import list_skill_categories
+    return {"categories": list_skill_categories()}
 
 
 @router.get("/search")
@@ -491,7 +491,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_sessio
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count, sub_scene FROM skill WHERE id=? AND is_active=1",
+            "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count, sub_scene, category_id FROM skill WHERE id=? AND is_active=1",
             (skill_id,)
         )
         row = c.fetchone()
@@ -503,7 +503,12 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_sessio
     owner_id = row[6] or ""
     is_featured = row[8] or 0
     like_count = row[9] or 0
-    sub_scene = _sub_scene_label(row[10] or "")
+    category_id = row[11] or 0
+
+    # 查分类名称
+    from src.user.db import get_skill_category
+    cat = get_skill_category(category_id) if category_id else None
+    category_name = cat["name"] if cat else ""
 
     # 归属校验
     if scope == "user" and owner_id != str(user["id"]):
@@ -550,7 +555,8 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_sessio
             "like_count": like_count,
             "liked_by_me": liked_by_me,
             "scenes": scenes,
-            "sub_scene": sub_scene,
+            "category_id": category_id,
+            "category_name": category_name,
         }
     # ===== local 分支 =====
     # user/repo 技能：均衡负载环境下 local 存储会导致文件只存在单机，OBS 不可用时直接报 503
@@ -584,14 +590,16 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_sessio
         "like_count": like_count,
         "liked_by_me": liked_by_me,
         "scenes": scenes,
-        "sub_scene": sub_scene,
+        "category_id": category_id,
+        "category_name": category_name,
     }
 
 
 @router.post("/upload")
 async def upload_skill(file: UploadFile = File(...), user: dict = Depends(require_no_session_token),
-                       scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form("")):
-    """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。"""
+                       scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form(""),
+                       category_id: int = Form(0)):
+    """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。category_id 可选（分类ID，Issue #179）。"""
     VALID_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat"}
     if scope not in ("user", "repo"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 user 或 repo"})
@@ -675,7 +683,8 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(requir
                 zip_bytes = _normalize_skill_zip(skill_dir, skill_name)
                 storage.save_bytes(object_key, zip_bytes)
                 ok = upsert_skill_obs(db_scope, owner, skill_name, agent_type,
-                                      description, object_key, str(user["id"]))
+                                      description, object_key, str(user["id"]),
+                                      category_id)
                 if not ok:
                     raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录写入失败（同名冲突或并发上传）"})
                 zip_cache_put(object_key, zip_bytes)  # put 覆盖同名 key 即天然失效旧缓存
@@ -815,7 +824,8 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         if not storage.copy_object(src_key, dst_key):
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"OBS 复制技能失败: {src_key} -> {dst_key}"})
         ok = upsert_skill_obs("repo", repo_key, skill_name, skill_rec.get("agent_type", ""),
-                              skill_rec.get("description", ""), dst_key, str(user["id"]))
+                              skill_rec.get("description", ""), dst_key, str(user["id"]),
+                              skill_rec.get("category_id", 0))
         if not ok:
             storage.delete_object(dst_key)
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
