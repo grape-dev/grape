@@ -5,7 +5,10 @@
 - 该 Issue 的事件流（events 表，按 issue_id 聚类）
 - Issue pipeline 路线图（event.json 结构化链）
 
-认证：get_current_user_or_api_key（JWT / tk_ 会话 token / grape_ API Key 三通道）。
+认证：`get_current_user_or_api_key`（JWT / tk_ 会话 token / grape_ API Key 三通道）。
+- 读类（列表/详情/事件/pipeline/GET status）→ dual 可达。
+- 写/操作类（create/start/confirm-done/cancel/resume/PUT status/clarify/attachments 写）→ `require_no_session_token`
+  （用户仅限 user_only，`tk_` → 403；避免 Agent 任意改状态干扰 pipeline）。
 Design: docs/weekly-02/issues-api-design.md
 """
 import os
@@ -218,8 +221,12 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
 
 
 @router.post("/{issue_id}/start", operation_id="issues_start", summary="打开 Issue 会话")
-async def start_issue(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
-    """打开 Issue 会话（"去对话"）——仅校验归属并返回当前状态，不翻转状态。"""
+async def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
+    """打开 Issue 会话（"去对话"）——仅校验归属并返回当前状态，不翻转状态。
+
+    user_only：纯前端导航预检（确认可访问 + 取当前状态），Agent 执行期（tk_ 会话）无此场景；
+    与周边操作类端点（confirm-done/cancel/resume/clarify 等）保持一致，收缩暴露面。
+    """
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -257,8 +264,13 @@ class _IssueStatusBody(BaseModel):
 
 
 @router.put("/{issue_id}/status", operation_id="issues_status", summary="更新 Issue 状态")
-def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depends(get_current_user_or_api_key)):
-    """Issue 状态迁移（active/processing/awaiting_input/pending_review/completed/cancelled 流转规则）。"""
+def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depends(require_no_session_token)):
+    """Issue 状态迁移（active/processing/awaiting_input/pending_review/completed/cancelled 流转规则）。
+
+    user_only：状态是**需求中心视角（用户可读）**，且 awaiting_input/completed/cancelled 允许用户直接
+    设置（高优先级覆盖）；若放行 tk_ 会话 token，Agent 执行期可随意改状态，与 pipeline 驱动的 stage
+    脱钩→冲突/不一致，干扰任务执行。故仅用户（JWT / grape_）可改；读（GET /status，轮询 wait 用）保持 dual。
+    """
     from src.api.routes.tasks import _TASK_STATUS_FLOWS
     from src.session_manager import db, db_lock
     ns = (body.status or "").strip()

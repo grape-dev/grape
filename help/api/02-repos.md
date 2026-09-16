@@ -146,8 +146,30 @@
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{owner}` `{repo}` |
-| 出参 | `{"project-graph.md": "...", "project-capabilities.md": "..."}` |
+| 出参 | `{files: {project-graph.md: "...", project-capabilities.md: "..."}, meta: {commit, branches, updated, degraded}}` |
 | 返回 | 200 |
+
+---
+
+## GET /api/repos/{owner}/{repo}/scene-recommend-config — 获取场景推荐配置
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Path | `{owner}` `{repo}` |
+| 出参 | 场景推荐配置（入口场景 + 路由规则） |
+| 返回 | 200 |
+
+## PUT /api/repos/{owner}/{repo}/scene-recommend-config — 保存场景推荐配置
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+请求头：`Content-Type: application/json`
+
+请求体（SceneRecommendConfigBody）：`{scene_id, fallback_scene, ...}`
+
+> 写入时自检：`scene_id` 必须存在于当前场景列表中（`fallback_scene` 同理），否则报错。
+
+| Path | `{owner}` `{repo}` |
+| 出参 | `{"ok": true}` |
+| 返回 | 200；400 场景不存在 |
 
 ---
 

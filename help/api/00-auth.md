@@ -29,7 +29,8 @@ GET /api/...?access_token=<api_key>
 
 ## 获取 API Key
 
-通过 **Web UI Settings 页「API Tokens」面板（登录会话）** 生成；明文仅创建时返回一次，落库 SHA-256。Token 管理**不对外**（不提供 OpenAPI 文档、不允许 API Key 自调用），见 `docs/openapi/README.md` 状态码表上方说明。
+通过 **Web UI Settings 页「API Tokens」面板（登录会话）** 生成；明文仅创建时返回一次，落库 SHA-256。Token 管理**不对外自调用**
+（不提供 API Key 自调用端点，创建/吊销走 Web UI 或 `/api/settings/api-keys`，见 [13-settings.md](13-settings.md)）。
 
 ## 请求头通用约定
 

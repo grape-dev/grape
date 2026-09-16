@@ -1,8 +1,10 @@
 # Agents Agent 配置接口（/api/agents）
 
 > 对外公开，认证：`get_current_user_or_api_key`。
+> scope（x-token-scope）：全部 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 
 ## GET /api/agents/types — Agent 类型列表
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 出参 | `[{agent_type, display_name, description, icon, order_num, ...}]` |
 | 返回 | 200 |
@@ -10,6 +12,7 @@
 ---
 
 ## GET /api/agents/{name}/{owner}/{repo} — 查询 Agent 配置
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{name}`（vod/issue/coding/qa/sre/chat）`{owner}` `{repo}` |
 | 出参 | `{id, runtime, skill, skill_id, repo_gitcode_token(脱敏), runtime_session_id, status, last_active_at, enable, subscribe_events, im_*}` |
@@ -18,6 +21,7 @@
 ---
 
 ## PUT /api/agents/{name}/{owner}/{repo} — 更新 Agent 配置
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`Content-Type: application/json`
 
@@ -40,6 +44,7 @@
 ---
 
 ## POST /api/agents/{name}/{owner}/{repo}/clean — 清理 Agent 会话
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{name}` `{owner}` `{repo}` |
 | 出参 | `{"message": "Agent 会话已清理（runtime_session_id 已置空）", "cleaned": true, "agent_type": "vod"}` |

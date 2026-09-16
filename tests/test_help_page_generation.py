@@ -2,7 +2,7 @@
 
 Verifies the generator renders help/usage + help/api markdown into src/api/static/help.html:
 - output is UTF-8 without BOM, cleanly decodable
-- embedded data parses; usage(9) + api(13) docs with html/toc/title/id
+- embedded data parses; usage + api docs with html/toc/title/id
 - landing offers 使用文档 / API 文档 ; section scoping labels present
 - every doc's first H1 appears; heading ids unique across all docs
 - same-level sub-TOC items share the same level (2.1/2.2 not nested)
@@ -81,8 +81,10 @@ class TestShell:
         assert "/static/openapi.json" in page_text
 
     def test_data_parses_with_correct_counts(self, data):
-        assert len(data["usage"]) == 9, f"expected 9 usage docs, got {len(data['usage'])}"
-        assert len(data["api"]) == 13, f"expected 13 api docs, got {len(data['api'])}"
+        assert len(data["usage"]) == len(gen.USAGE_ORDER), \
+            f"expected {len(gen.USAGE_ORDER)} usage docs, got {len(data['usage'])}"
+        assert len(data["api"]) == len(API_FILES), \
+            f"expected {len(API_FILES)} api docs, got {len(data['api'])}"
 
     def test_every_doc_has_fields(self, data):
         for section in ("usage", "api"):

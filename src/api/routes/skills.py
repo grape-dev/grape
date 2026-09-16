@@ -248,10 +248,13 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
 
 
 @router.get("/agent-stats", operation_id="skills_agent_stats", summary="技能统计（总数 + 按 agent_type 分组）")
-def get_agent_stats(user: dict = Depends(get_current_user_or_api_key), scope: str = "", repo: str = ""):
+def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str = "", repo: str = ""):
     """返回技能总数 + 每个 agent_type 的技能数量。
 
     scope/repo 参数与 list_skills 一致，用于按维度统计。
+
+    user_only：仅 Web UI / 用户级调用方消费（skills.js 页面统计），Agent 执行期无此场景；
+    且 tk_ 会话 token 的 user_id 在仓库身份下为 0，scope=user 过滤 owner_id=0 亦无可达数据——故禁 session。
     """
     from src.session_manager import db, db_lock
 

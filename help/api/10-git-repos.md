@@ -8,6 +8,8 @@
 > `grape_` API Key / Web JWT → **403**。写操作需授权。
 > Base：`{{SERVER_URL}}/api/git-repo`
 > 出参结构为 **gitcode 平台实际结构**（与技能 `gitcode-api-reference.md` 一致）；github/gitlab 未来映射。
+> CLI：`grape git-repo <子资源>`（如 `grape git-repo branches` 对应 `GET /api/git-repo/{owner}/{repo}/branches`；
+> `owner`/`repo` 由 CLI 参数传入，**命令名 ≠ 路径**，见 README「CLI 命令映射」）。
 
 ## 后端区分（Git Provider 判定）
 
@@ -58,6 +60,35 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ---
 
+## 1.b 仓库会话凭据 / 工作区（CLI 本地 git）
+
+### GET /api/git-repo/{owner}/{repo}/git-credential — 一次性 git 平台凭据
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+
+> ⚠️ 非 gitcode/github/gitlab 平台原生接口——是 **grape 自身能力**：把平台 token 按会话身份
+> （chat→用户 token / devops agent→仓库 bot token）以**一次性/短期凭证**形式交 CLI 本地 `git clone/push` 用。
+> gitcode：Basic 认证 `username = x-access-token`，`password = 凭证 token`。
+
+| Path | `{owner}` `{repo}` |
+| Provider | 由认证 token 的 `repo_key` 前缀派生（gitcode:/github:），不传 provider 参数 |
+| 出参 | `{username: "x-access-token", password: "<一次性 token>", clone_url: "...", expires_in: 600}` |
+| 返回 | 200；403 非会话级 token / provider 未接入；502 平台 token 解析失败 |
+
+### GET /api/git-repo/{owner}/{repo}/workspace — 仓库工作区路径
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+
+> ⚠️ 非平台原生——返回 grape 管理工作区（worktree）的本地路径，供 CLI 在本地执行 git。
+
+| Path | `{owner}` `{repo}` |
+| Provider | 由认证 token 的 `repo_key` 前缀派生（gitcode:/github:），不传 provider 参数 |
+| 出参 | `{workspace: "<本地路径>", clone_url: "https://gitcode.com/{owner}/{repo}.git"}` |
+| 返回 | 200 |
+
+> 兼容入口：`/api/repos/{owner}/{repo}/git-credential` 与 `/api/repos/{owner}/{repo}/workspace`
+> 行为一致（见 [02-repos.md](02-repos.md)），本命名空间为统一 Git 仓库透传下的等价路径。
+
+---
+
 ## 2. 分支
 
 ### GET /api/git-repo/{owner}/{repo}/branches
@@ -100,6 +131,19 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 > 丢失 blob），会返回 **400 提示**；GitHub 原生支持递归（`git/trees/{sha}?recursive=1`）。
 
 **错误**：401 / 403 / 400（GitCode 递归）/ 404。
+
+---
+
+### GET /api/git-repo/{owner}/{repo}/contents — 根目录列表
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+
+> 无尾斜杠的根路由（`gitrepo_contents_root`），等价 `contents/{path}` 的空 path：返回根目录条目数组。
+
+**返回（200）**：条目数组（同目录列表结构）：
+```json
+[{"type":"dir","name":"configs","path":"configs","sha":"..."},
+ {"type":"file","name":"README.md","path":"README.md","sha":"..."}]
+```
 
 ---
 
@@ -237,12 +281,6 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 - **GET**：返回评论数组 `[{"id":1,"body":"...","user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）创建后的评论对象。
-
-### GET/DELETE /api/git-repo/{owner}/{repo}/issues/{number}/labels
-> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
-
-- **GET**：返回标签数组。
-- **DELETE**：清除全部标签 → 返回 204（空）。
 
 ---
 

@@ -357,15 +357,22 @@ def test_x_token_scope_consistency():
                 or path.startswith(openapi._SESSION_ONLY_PATH_PREFIXES)), \
             f"标了 session_only 但未命中规则: {op_id} {method} {path}"
 
-    # 3) 抽样：user_only（D 类管理）/ dual（开放读）实例
+    # 3) 抽样：user_only（D 类管理 / 用户操作类）/ dual（开放读）实例
     user_only_samples = {"/api/skills": "get", "/api/skills/upload": "post",
                          "/api/auth/logout": "post", "/api/dashboard/ops/overview": "get",
-                         "/api/issues/mine": "get", "/api/issues/{owner}/{repo}": "post"}
+                         "/api/issues/mine": "get", "/api/issues/{owner}/{repo}": "post",
+                         # 用户操作类：状态写/会话预检禁止 tk_（避免 Agent 干扰 pipeline）
+                         "/api/issues/{issue_id}/status": "put",
+                         "/api/issues/{issue_id}/start": "post",
+                         # skills agent-stats：仅 Web UI/用户级消费，禁 session
+                         "/api/skills/agent-stats": "get", "/api/skills/stats": "get"}
     for path, method in user_only_samples.items():
         assert s["paths"][path][method]["x-token-scope"] == "user_only", \
             f"期望 user_only: {method} {path}"
 
-    dual_samples = {"/api/issues/{owner}/{repo}": "get", "/api/a2a": "post"}
+    dual_samples = {"/api/issues/{owner}/{repo}": "get", "/api/a2a": "post",
+                    # Issue 状态只读轮询（CLI wait 用）保持 dual
+                    "/api/issues/{issue_id}/status": "get"}
     for path, method in dual_samples.items():
         assert s["paths"][path][method]["x-token-scope"] == "dual", \
             f"期望 dual: {method} {path}"
@@ -413,6 +420,16 @@ def test_three_channels_can_call_public_api():
     # session token（chat 会话携带 user_id）→ mine 为 user_only，session 应 403
     assert client.get("/api/issues/mine",
                       headers={"Authorization": f"Bearer {session_tk}"}).status_code == 403
+    # Issue 状态写（PUT /status）/ start 为 user_only：session token → 403；api_key 通过守卫（无该 issue → 404）
+    assert client.put("/api/issues/999999/status", json={"status": "processing"},
+                      headers={"Authorization": f"Bearer {session_tk}"}).status_code == 403
+    assert client.post("/api/issues/999999/start",
+                       headers={"Authorization": f"Bearer {session_tk}"}).status_code == 403
+    assert client.put("/api/issues/999999/status", json={"status": "processing"},
+                      headers={"Authorization": f"Bearer {api_key}"}).status_code == 404
+    # GET /status 为 dual（读）：session token 可达（无该 issue → 404，而非 403）
+    assert client.get("/api/issues/999999/status",
+                      headers={"Authorization": f"Bearer {session_tk}"}).status_code == 404
     # 场景/技能/事件详情读类接口也走 token
     assert client.get("/api/scenes",
                       headers={"Authorization": f"Bearer {api_key}"}).status_code == 200

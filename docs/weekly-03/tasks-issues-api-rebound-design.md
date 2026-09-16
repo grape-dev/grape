@@ -132,3 +132,19 @@
 3. `/api/tasks/{task_id}/...` 旧路径 **404**（已移除，无兼容）。
 4. 契约 `test_openapi` 全绿；`/api/tasks` 仅剩 `complete/notify/close`。
 5. 前端需求中心操作回归：确认完成/取消/恢复/状态/附件/流水线全部正常。
+
+---
+
+## 附：scope 修正（2026-09-16 评审）
+
+> 评审意见：`status` 状态变更是需求中心用户视角状态（`awaiting_input/completed/cancelled` 可用户直接设置，
+> 高优先级覆盖），放行 `tk_` 会话 token（Agent 执行期）任意改动会与 pipeline 驱动 `stage` 脱钩，制造冲突/不一致。
+> 修正后（代码已改，`issues.py` 认证守卫变更，openapi 重新派生）：
+
+| 端点 | 修正前 | 修正后 |
+|------|:---:|:---:|
+| `POST /api/issues/{issue_id}/start`（打开会话，纯导航预检，不翻转状态） | dual | **user_only** |
+| `GET  /api/issues/{issue_id}/status`（轮询 wait，读） | dual | dual（保持） |
+| `PUT  /api/issues/{issue_id}/status`（状态迁移，写） | dual | **user_only** |
+
+`./scripts/regenerate_openapi.py` 重生成契约；`test_openapi` 增加 user_only 抽样 + session→403 运行时断言。
