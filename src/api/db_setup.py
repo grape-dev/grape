@@ -807,8 +807,28 @@ CREATE TABLE IF NOT EXISTS runtime_health_scores (
     last_status         TEXT DEFAULT '',               -- 最近一条任务状态
     window_days         INTEGER NOT NULL DEFAULT 7,    -- 滑动窗口天数
     updated_at          TEXT DEFAULT (datetime('now'))
-)"""""),
-]
+)"""),
+    # ===== Issue #174: 用户问题反馈表（grape_db）=====
+    ("user_feedback", """
+CREATE TABLE IF NOT EXISTS user_feedback (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER      NOT NULL DEFAULT 0,
+    username        TEXT         NOT NULL DEFAULT '',
+    category        TEXT         NOT NULL DEFAULT 'bug',
+    title           TEXT         NOT NULL,
+    description     TEXT         NOT NULL,
+    page_url        TEXT         DEFAULT '',
+    repo_key        TEXT         DEFAULT '',
+    user_agent      TEXT         DEFAULT '',
+    attachment_url  TEXT         DEFAULT '',
+    status          TEXT         NOT NULL DEFAULT 'open',
+    priority        INTEGER      NOT NULL DEFAULT 0,
+    handler_name    TEXT         DEFAULT '',
+    handler_remark  TEXT         DEFAULT '',
+    handled_at      TEXT         DEFAULT NULL,
+    created_at      TEXT         DEFAULT (datetime('now')),
+    updated_at      TEXT         DEFAULT (datetime('now'))
+)""")]
 
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
