@@ -219,7 +219,7 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
 
 @router.post("/{issue_id}/start", operation_id="issues_start", summary="打开 Issue 会话")
 async def start_issue(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
-    """打开 Issue 会话（"去对话"）——不再翻转状态（迁移自 /api/tasks/{id}/start）。"""
+    """打开 Issue 会话（"去对话"）——仅校验归属并返回当前状态，不翻转状态。"""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -234,7 +234,7 @@ async def start_issue(issue_id: int, user: dict = Depends(get_current_user_or_ap
 
 @router.get("/{issue_id}/status", operation_id="issues_status_get", summary="查询 Issue 状态（轮询 wait 用）")
 def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
-    """返回 Issue 当前状态（含 repo/issue 上下文），供 CLI `grape issues wait` 轮询（迁移自 /api/tasks/{id}/status）。"""
+    """返回 Issue 当前状态（含 repo/issue 上下文），供 CLI `grape issues wait` 轮询至终态。"""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -258,7 +258,7 @@ class _IssueStatusBody(BaseModel):
 
 @router.put("/{issue_id}/status", operation_id="issues_status", summary="更新 Issue 状态")
 def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depends(get_current_user_or_api_key)):
-    """Issue 状态迁移（迁移自 /api/tasks/{id}/status，Issue #85 流转规则）。"""
+    """Issue 状态迁移（active/processing/awaiting_input/pending_review/completed/cancelled 流转规则）。"""
     from src.api.routes.tasks import _TASK_STATUS_FLOWS
     from src.session_manager import db, db_lock
     ns = (body.status or "").strip()
@@ -292,7 +292,7 @@ class _IssueConfirmBody(BaseModel):
 
 @router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="确认 Issue 完成")
 async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
-    """开发者确认需求完成（迁移自 /api/tasks/{id}/confirm-done，Issue #51）。"""
+    """开发者确认需求完成：status→completed、stage→done（任意阶段可确认，终态幂等）。"""
     from src.api.session_store import set_issue_stage
     from src.session_manager import db, db_lock
     with db_lock:
@@ -319,7 +319,7 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
 
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="取消 Issue（停流水线）")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
-    """开发者取消需求（迁移自 /api/tasks/{id}/cancel，Issue #51）。任何阶段可取消，Agent 终止 + 流水线停止。"""
+    """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -372,7 +372,7 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
 
 @router.post("/{issue_id}/resume", operation_id="issues_resume", summary="恢复已取消的 Issue")
 async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
-    """恢复已取消的需求（迁移自 /api/tasks/{id}/resume，Issue #51）。回到取消前 stage 继续流转。"""
+    """恢复已取消的需求：回到取消前 stage 继续流转。"""
     from src.api.session_store import get_issue_stage
     from src.session_manager import db, db_lock
     with db_lock:
@@ -441,7 +441,7 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
 
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline 路线图（按 issue.id）")
 async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
-    """获取需求关联的流水线信息和事件历史（迁移自 /api/tasks/{id}/pipeline，Issue #51 详情页）。"""
+    """获取需求关联的流水线信息和事件历史（详情页展示）。"""
     from src.api.event_store import get_events
     from src.api.pipeline_config import get_pipeline_config
     from src.api.session_store import get_issue_stage, get_issue_scene
@@ -494,7 +494,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
 
 @router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue 澄清历史")
 async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
-    """拉取 agent 在该 Issue 上的澄清消息（迁移自 /api/tasks/{id}/clarifications）。"""
+    """拉取 agent 在该 Issue 上的澄清消息。"""
     from src.api.routes.tasks import _get_task_issue_info, _find_agent_task_ids
     from src.session_manager import db, db_lock
     info = _get_task_issue_info(issue_id)
@@ -539,7 +539,7 @@ class _IssueClarifyBody(BaseModel):
 
 @router.post("/{issue_id}/clarify", operation_id="issues_clarify", summary="回复 Issue 澄清")
 async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Depends(require_no_session_token)):
-    """开发者在需求中心回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话（迁移自 /api/tasks/{id}/clarify）。"""
+    """开发者在需求中心回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。"""
     from src.api.routes.tasks import _get_task_issue_info, _gitcode_api_with_refresh, _is_gitcode_401
     from src.session_manager import db, db_lock
     msg = (body.message or "").strip()
@@ -625,7 +625,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
 @router.post("/{issue_id}/attachments", operation_id="issues_upload_attachment", summary="上传 Issue 附件")
 async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
                                   user: dict = Depends(require_no_session_token)):
-    """上传附件到需求关联的附件目录（迁移自 /api/tasks/{id}/attachments）。"""
+    """上传附件到需求关联的附件目录。"""
     from src.api.routes.tasks import (_attach_save, _ATTACH_ALL_EXTS, _ATTACH_MAX_SIZE)
     from src.repo_key import split_owner_repo
     from src.session_manager import db, db_lock
@@ -654,7 +654,7 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
 
 @router.get("/{issue_id}/attachments", operation_id="issues_list_attachments", summary="列出 Issue 附件")
 def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
-    """列出需求关联的附件文件列表（迁移自 /api/tasks/{id}/attachments）。"""
+    """列出需求关联的附件文件列表。"""
     from src.api.routes.tasks import _attach_list
     from src.repo_key import split_owner_repo
     from src.session_manager import db, db_lock
@@ -674,7 +674,7 @@ def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_
 
 @router.delete("/{issue_id}/attachments/{filename}", operation_id="issues_delete_attachment", summary="删除 Issue 附件")
 def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(require_no_session_token)):
-    """删除指定附件文件（迁移自 /api/tasks/attachments/{filename}?task_id=）。filename 为 UUID 文件名。"""
+    """删除指定附件文件。filename 为 UUID 文件名。"""
     from src.api.routes.tasks import _attach_delete
     from src.repo_key import split_owner_repo
     from src.session_manager import db, db_lock
@@ -703,10 +703,10 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
                     created_by_me: str = Query("", description="仅我创建的任务"),
                     assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
                     user: dict = Depends(require_no_session_token)):
-    """我的需求列表（迁移自 /api/tasks/mine，A 类归位，issue 视角）。
+    """我的需求列表（需求中心·个人维度）。
 
     返回当前用户的需求（Issue 卡片行，user_id 过滤）+ 富化
-    （scene/stage/is_running/agent_statuses，复用 tasks._query_tasks）。
+    （scene/stage/is_running/agent_statuses）。
     """
     from src.api.routes.tasks import _query_tasks, _build_assignee_filter
     from src.repo_key import to_repo_key
@@ -780,9 +780,7 @@ def list_repo_issues(owner: str, repo: str,
 @router.post("/{owner}/{repo}", operation_id="issues_create", summary="创建 Issue（对外唯一创建入口）")
 async def create_issue(owner: str, repo: str, body: dict = None,
                        user: dict = Depends(require_no_session_token)):
-    """创建 Issue：复用 create_task_via_issue 逻辑（ensure_issue_task + GitCode create + 触发 pipeline）。
-
-    POST /api/tasks/create 已废弃移除（Phase C2），本端点为对外唯一创建入口。
+    """创建 Issue（对外唯一创建入口）：建 GitCode Issue + 建档 + 触发 pipeline。
 
     body: {repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode?}
     repo_key 可选（缺省按 {owner}/{repo} 拼）。返回 {ok, issue_number, task_id, created, ...}

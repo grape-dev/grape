@@ -25,6 +25,7 @@ client = TestClient(app)
 # 预期进契约的对外端点（M1.4/M3 显式 operation_id）
 EXPECTED_PUBLIC = {
     "tasks_complete": ("post", "/api/tasks/complete"),
+    "tasks_current": ("get", "/api/tasks/current"),
     # POST /api/tasks/create 已废弃移除（C2）→ 创建走 POST /api/issues/{owner}/{repo}
     "a2a_handoff": ("post", "/api/a2a"),
     # 合并引入的新公开操作（multi-vcs / knowledge detail / profile）
@@ -371,6 +372,7 @@ def test_x_token_scope_consistency():
 
     # 4) session_only 样例（需求 §四验收）
     session_samples = {"/api/git-repo/{owner}/{repo}/branches": "get",
+                       "/api/tasks/current": "get",
                        "/api/git-repo/{owner}/{repo}/git-credential": "get",
                        "/api/git-repo/{owner}/{repo}/workspace": "get",
                        "/api/repos/{owner}/{repo}/git-credential": "get",

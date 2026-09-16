@@ -1185,6 +1185,81 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
     return {"ok": True, "task_id": task_id, "status": "completed"}
 
 
+@router.get("/current", operation_id="tasks_current", summary="获取当前任务详情（Agent 执行期自省）")
+def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
+    """Agent 执行期自省接口：通过本次会话 token（tk_）获取当前执行实例详情。
+
+    - **仅会话通道**：`auth_type` 必须为 `session_token`（执行期注入 GRAPE_SESSION_TOKEN）；
+      `grape_` API Key / JWT → 403（本接口属 Agent 执行期内网自省，不由用户侧调用）。
+    - 定位：`session_key`（= agent_tasks.id）自动派生，客户端零入参。
+    - 返回：task（执行实例）+ issue（关联需求）+ events 计数/最新事件；**不含 prompt**。
+    """
+    if user.get("auth_type") != "session_token":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅会话 token（tk_）可调用（Agent 执行期自省）"})
+    task_id = user.get("session_key") or ""
+    if not task_id:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在（会话未绑定 task）"})
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, repo_key, agent_type, skill, event_seq, issue_id, status, "
+            "result_text, errors, exit_code, started_at, completed_at, created_at "
+            "FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    _repo = row[1]
+    if user.get("repo_key") != _repo:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该任务（仓库作用域不匹配）"})
+
+    task = {
+        "id": row[0], "status": row[6], "agent_type": row[2] or "",
+        "skill": row[3] or "", "event_seq": row[4],
+        "result_text": row[7] or "", "errors": row[8] or "",
+        "exit_code": row[9],
+        "started_at": row[10], "completed_at": row[11], "created_at": row[12],
+        "repo_key": _repo,
+    }
+
+    # 关联需求（repo_key + issue_id 去 '#'）
+    import re as _re
+    _num = _re.sub(r"[^0-9]", "", str(row[5] or ""))
+    task["issue"] = None
+    task["events_count"] = 0
+    task["latest_event"] = None
+    if _num:
+        try:
+            from src.api.routes.issues import _group_events_by_issue
+            group = _group_events_by_issue(_repo)
+            evs = group.get(_num) or []
+            task["events_count"] = len(evs)
+            task["latest_event"] = evs[-1] if evs else None
+            from src.api.session_store import get_issue_stage
+            st = get_issue_stage(_repo, f"#{_num}")
+            _host = "github.com" if _repo.startswith("github:") else "gitcode.com"
+            from src.repo_key import split_owner_repo
+            _owner, _rname = split_owner_repo(_repo)
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute("SELECT id, issue_number, title, assignee, status "
+                           "FROM issue WHERE repo_key=? AND issue_number=?", (_repo, int(_num)))
+                ir = c2.fetchone()
+            task["issue"] = {
+                "id": ir[0] if ir else None,
+                "issue_number": ir[1] if ir else int(_num),
+                "title": ir[2] if ir else "",
+                "assignee": ir[3] if ir else (st or {}).get("assignee", ""),
+                "stage": (st or {}).get("stage", "vod"),
+                "status": ir[4] if ir else "",
+                "scene_id": (st or {}).get("scene_id", ""),
+                "url": f"https://{_host}/{_owner}/{_rname}/issues/{_num}",
+            }
+        except Exception as _e:
+            from src.config import log
+            log.warning(f"tasks/current: enrich issue failed for {task_id}: {_e}")
+    return {"task": task}
+
+
 class TaskClarifyBody(BaseModel):
     message: str = ""
 

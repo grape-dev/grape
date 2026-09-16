@@ -7,6 +7,7 @@
 > |------|------|------|
 > | `POST /api/tasks/notify` | Agent 分配/换人/接管通知 | `tk_` 会话 token（仅 `GRAPE_SESSION_TOKEN`） |
 > | `POST /api/tasks/complete` | Agent 完成一次执行实例 | dual（三通道） |
+> | `GET /api/tasks/current` | Agent 自省当前任务详情（执行实例 + issue + 事件） | `tk_`（session_only） |
 
 ---
 
@@ -72,6 +73,24 @@
 
 > 会话 token：任务 id 由 `session_key` 自动定位（M2 以 task_id 签发），agent 收尾直接
 > `grape tasks complete --json '{"result_text":"...","next_step":"a2a_issue"}'`，无需 `--task-id`。
+
+---
+
+## GET /api/tasks/current — 获取当前任务详情（Agent 执行期自省）
+
+> 调用方：Agent 执行期（`$GRAPE_SESSION_TOKEN`）。认证：**仅 `tk_` 会话 token**（scope=session_only）；
+> `grape_` API Key / WebUI JWT → **403**。`session_key` 自动定位当前执行实例，客户端零入参。
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **session_only**（仅 `tk_`；API Key / JWT → 403） |
+| 入参 | 无（`session_key` 自动定位） |
+| 出参 | `{task: {id, status, agent_type, skill, event_seq, result_text, errors, exit_code, 时间, repo_key, issue: {id, issue_number, title, assignee, stage, status, scene_id, url}, events_count, latest_event}}` |
+| 返回 | 200；401 未认证；403 非 session / 仓库作用域不匹配；404 任务不存在 |
+
+> - **`issue`**：关联需求（`agent_tasks.issue_id` → `issue` 表）；`url` 为 GitCode/GitHub 该 issue 链接。
+> - **`latest_event`**：`events` 表按 `repo_key + #issue_number` 的最新事件（seq 升序末条）。
+> - **不含 `prompt`**：prompt 是指令/知识性内容，Agent 在 Worker 工作区已可读，服务端不下发。
 
 ---
 
