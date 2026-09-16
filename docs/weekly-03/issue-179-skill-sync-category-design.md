@@ -201,13 +201,11 @@ skill 表同时保留 `sub_scene`（英文 slug）和 `category_id`（数字 ID�
 - 映射失败（slug 在 skill_category 表找不到）：`category_id=0`，打 warning 日志
 - `sub_scene` 字段保留不废弃，作为 fallback
 
-映射逻辑在 `_sync_skills_to_db()` 中统一执行（被 worker / db_setup._sync_official_skills / db_setup._insert_seed_data 三处调用）。
+映射逻辑在 `_sync_skills_to_db()` 中执行，唯一调用方是 `sync_official_skills()`（worker 每 30 分钟调一次）。
 
-| 调用方 | 位置 | 时机 |
-|--------|------|------|
-| `_skill_sync_worker` | skill_sync.py | 每 30 分钟定时 |
-| `_sync_official_skills()` | db_setup.py | 启动时 |
-| `_insert_seed_data()` skill_official 分支 | db_setup.py | 首次 seed |
+> skill 已和服务分离，集群场景不依赖本地文件。init_database 不做 skill DB 同步，
+> 启动后由 worker 异步完成（worker `while True` 第一轮立即执行，不等 sleep）。
+> 原有 `db_setup._sync_official_skills()` 和 `_insert_seed_data` skill 补种已删除。
 
 > `_sync_skills_to_db` 内部构建 slug→category_id 缓存（cat_map），sub_scene 非空但 category_id=0 时打 warning 日志。
 > `_seed_from_json` 补种分支也独立构建 cat_map 写 category_id（不依赖 _sync_skills_to_db）。

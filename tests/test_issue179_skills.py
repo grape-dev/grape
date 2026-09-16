@@ -40,6 +40,14 @@ def _setup():
     """初始化测试 DB，结束时清理测试数据"""
     from src.api.db_setup import init_database
     init_database()
+    # init_database 不再 seed skill，手动同步测试数据
+    from src.storage.skill_sync import _sync_skills_to_db
+    import json as _json
+    import os as _os
+    _json_path = _os.path.join(_os.path.dirname(__file__), "..", "configs", "skill-description.json")
+    if _os.path.exists(_json_path):
+        with open(_json_path, "r", encoding="utf-8") as f:
+            _sync_skills_to_db(_json.load(f))
     yield
     # 清理测试用户和技能
     from src.session_manager import db, db_lock
@@ -280,6 +288,12 @@ class TestApiEndpoints:
 
     def test_featured_returns_category(self):
         headers = self._headers()
+        # 手动设一个 official skill 为 featured
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE skill SET is_featured=1 WHERE id=(SELECT id FROM skill WHERE scope='official' LIMIT 1)")
+            db.commit()
         r = client.get("/api/skills/featured", headers=headers)
         assert r.status_code == 200
         data = r.json()

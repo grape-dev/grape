@@ -989,11 +989,9 @@ def _seed_from_json():
         seeded_keys = set(row[0].split(",")) if row and row[0] else set()
 
     for seed_key, json_file, db_table in _SEED_FILES:
-        if seed_key in seeded_keys and seed_key != "agent_type":
-            # 已 seed 过:skill_official 仍需幂等补种缺失技能;其余跳过
-            if seed_key != "skill_official":
-                log.info(f"Seed key '{seed_key}' already run, skip")
-                continue
+        if seed_key in seeded_keys:
+            log.info(f"Seed key '{seed_key}' already run, skip")
+            continue
 
         filepath = os.path.join(_CONFIG_DIR, json_file)
         if not os.path.exists(filepath):
@@ -1002,11 +1000,7 @@ def _seed_from_json():
 
         with db_lock:
             c = db.cursor()
-            if seed_key == "skill_official":
-                # 官方技能:scope='official' 行
-                c.execute("SELECT COUNT(*) FROM skill WHERE scope='official'")
-            else:
-                c.execute(f"SELECT COUNT(*) FROM {db_table}")
+            c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
             if count > 0 and db_table != "agent_type":
                 # 表已有数据，跳过 seed
@@ -1111,10 +1105,8 @@ def _insert_seed_data(table: str, data: dict):
                 )
 
         elif table == "skill_official":
-            # skill-description.json: {"skill_name": {"name": "...", "agent_type": "...", "path": "...", ...}}
-            # 复用 skill_sync._sync_skills_to_db 统一 DB 同步逻辑（含 category_id）
-            from src.storage.skill_sync import _sync_skills_to_db
-            _sync_skills_to_db(data)
+            # skill 同步由 worker 异步完成，init_database 不做
+            pass
 
         elif table == "agent_registry":
             # agent-routing.json 已废弃(agent_registry 表移除),backend 统一用 backend_agents
@@ -2171,27 +2163,7 @@ def _migrate_tables():
             log.info("Migrated backend -> backend_id across agent tables")
     except Exception as e:
         log.warning(f"Migrate backend->backend_id failed: {e}")
-    # 同步 skill 归属:从 skill-description.json 更新 skill 表 agent_type(确保 pr->qa 等归属一致)
-    try:
-        _skill_desc_path = os.path.join(_CONFIG_DIR, "skill-description.json")
-        if os.path.exists(_skill_desc_path):
-            with open(_skill_desc_path, "r", encoding="utf-8") as _f:
-                _skill_desc = json.load(_f)
-            with db_lock:
-                c = db.cursor()
-                _updated = 0
-                for _sn, _info in _skill_desc.items():
-                    _at = (_info or {}).get("agent_type", "")
-                    if _sn and _at:
-                        _cur = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=?", (_sn,)).fetchone()
-                        if _cur and _cur[0] > 0:
-                            c.execute("UPDATE skill SET agent_type=? WHERE skill_name=?", (_at, _sn))
-                            _updated += c.rowcount
-                db.commit()
-                if _updated:
-                    log.info(f"Synced {_updated} skill agent_type mappings from skill-description.json")
-    except Exception as e:
-        log.warning(f"Sync skill agent_type failed: {e}")
+    # skill agent_type 同步由 worker 的 _sync_skills_to_db 变更检测覆盖，init_database 不做
     # backend_agents 大小写去重(合并为小写 name,保留最小 id,更新引用)
     try:
         with db_lock:
