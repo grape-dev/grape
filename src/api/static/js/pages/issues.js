@@ -394,11 +394,15 @@ function _renderPipelineSection(data) {
   if (nodes.length > 0) {
     html += '<div style="display:flex;align-items:center;gap:0;margin-bottom:16px;padding:10px;background:rgba(0,0,0,.02);border-radius:10px">';
     nodes.forEach(function(n, i) {
-      var ns = n.node_status || 'pending';
-      var col = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : '#86868b';
-      var bg = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : 'rgba(0,0,0,.06)';
-      var isCurrent = ns === 'current';
-      var isCompleted = ns === 'completed';
+      var ns = n.node_status;
+      // 兼容数字状态码（0=pending,1=running,2=completed,3=failed,4=cancelled,5=skipped）和旧字符串
+      var isCompleted = ns === 'completed' || ns === 2;
+      var isCurrent = ns === 'current' || ns === 1;
+      var isFailed = ns === 'failed' || ns === 3;
+      var isCancelled = ns === 'cancelled' || ns === 4;
+      var isSkipped = ns === 'skipped' || ns === 5;
+      var col = isCompleted ? '#34c759' : isCurrent ? '#3b82f6' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : '#86868b';
+      var bg = isCompleted ? '#34c759' : isCurrent ? '#3b82f6' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : 'rgba(0,0,0,.06)';
       var pulseStyle = isCurrent ? ';animation:grapePulse 1.2s ease-in-out infinite' : '';
       var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #3b82f6;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
       var innerStyle = isCurrent ? ';position:relative' : '';
@@ -406,12 +410,15 @@ function _renderPipelineSection(data) {
       var nodeSeq = (n.latest_event && n.latest_event.seq) || '';
       var nodeClick = (isCurrent || isCompleted) ? (nodeSeq ? ` onclick="event.stopPropagation();_jumpToNodeEvent(${nodeSeq})"` : ` onclick="event.stopPropagation();_jumpToPipePage()"`) : '';
       var nodeCursor = (isCurrent || isCompleted) ? ';cursor:pointer' : '';
+      var nodeIcon = isCompleted ? '✓' : isFailed ? '✕' : isCancelled ? '⊘' : isSkipped ? '–' : (i+1);
       html += `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0${nodeCursor}"${nodeClick}>`;
-      html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${isCompleted?'✓':i+1}</div>`;
+      html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${nodeIcon}</div>`;
       html += `<span style="font-size:9px;color:${col};font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${n.name||n.id||''}</span>`;
       html += `</div>`;
       if (i < nodes.length - 1) {
-        var lineCol = (nodes[i+1].node_status === 'completed' || ns === 'completed') ? '#34c759' : 'rgba(0,0,0,.1)';
+        var nextNs = nodes[i+1].node_status;
+        var nextCompleted = nextNs === 'completed' || nextNs === 2;
+        var lineCol = (nextCompleted || isCompleted) ? '#34c759' : 'rgba(0,0,0,.1)';
         html += `<div style="height:2px;flex:0 0 14px;background:${lineCol};border-radius:1px;margin-top:-12px"></div>`;
       }
     });

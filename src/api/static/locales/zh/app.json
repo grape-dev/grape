@@ -133,5 +133,9 @@
     "priority_high": "高优",
     "attachment_label": "附件"
   },
-  "back_home": "← 返回主页"
+  "back_home": "← 返回主页",
+  "pipeline": {
+    "status_cancelled": "已取消",
+    "status_skipped": "已跳过"
+  }
 }
