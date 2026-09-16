@@ -124,6 +124,11 @@ function renderSkills() {
     window._skillMarketSearchInit = null;
   }
 
+  // 加载全量分类列表（固定缓存，不随 scope/agent/数据变化）
+  API.get('/skills/categories').then(d => {
+    _skillCategories = d.categories || [];
+    _renderTagFilters();
+  }).catch(() => {});
   // 并行加载：agent-stats + 技能列表 + 精选技能(official)
   _loadAgentStats();
   _loadSkills(searchInit);
@@ -145,7 +150,6 @@ function _loadAgentStats() {
   API.get('/skills/agent-stats?' + params.join('&')).then(d => {
     _agentStats = {};
     (d.agents || []).forEach(a => { _agentStats[a.agent_type] = a.count; });
-    _skillCategories = d.categories || [];
     _skillTotal = d.total || 0;
     _renderAgentSidebar();
     _renderTagFilters();
