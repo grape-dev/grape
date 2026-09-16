@@ -235,7 +235,10 @@ function loadTasks() {
       _taskSel = updated || null;
     }
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
-    _render();
+    // Issue #175: 有待打开详情时不先渲染列表，避免列表闪现后立刻被详情覆盖
+    if (!window._pendingTaskDetailId && !window._pendingIssueNumber) {
+      _render();
+    }
     // Issue #166: 从场景详情页流水线跳转来时，按 issue_number 匹配并打开需求详情
     if (window._pendingIssueNumber) {
       var _pinNum = window._pendingIssueNumber;
@@ -246,9 +249,11 @@ function loadTasks() {
       } else if (window._taskDetailFromScene && window._taskDetailFromScene.latestSeq) {
         var _seq = window._taskDetailFromScene.latestSeq;
         window._taskDetailFromScene = null;
+        _render();  // 无匹配任务，渲染列表
         app.nav('event', _seq);
       } else {
         window._taskDetailFromScene = null;
+        _render();  // 无匹配任务，渲染列表
       }
     }
     // 从事件详情页返回时，自动打开对应任务详情
@@ -257,6 +262,8 @@ function loadTasks() {
       window._pendingTaskDetailId = null;
       if (window._tasksById && window._tasksById[pid]) {
         _openBoardDetail(pid);
+      } else {
+        _render();  // 任务不存在了，渲染列表
       }
     } else if (!window._pendingIssueNumber) {
       // Issue #175: 普通列表刷新时清除详情页状态，防止 _withTaskLoading 误判在详情页。
@@ -1044,10 +1051,23 @@ function _withTaskLoading(taskId, apiCall, successMsg, errorFn) {
   var pc = document.getElementById('pageContent');
   var overlay = null;
   if (pc) {
-    if (getComputedStyle(pc).position === 'static') pc.style.position = 'relative';
     overlay = document.createElement('div');
-    overlay.style.cssText = 'position:absolute;inset:0;background:rgba(255,255,255,.7);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;color:var(--t3,#86868b);z-index:100;border-radius:inherit';
-    overlay.textContent = I18N.t('tasks.processing');
+    // position:fixed 覆盖全屏（不受可滚动容器的 overflow-y:auto 限制）
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,.7);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:9998';
+    var spinner = document.createElement('div');
+    spinner.style.cssText = 'width:24px;height:24px;border:3px solid rgba(0,0,0,.1);border-top-color:#0071e3;border-radius:50%;animation:_grapeSpin .7s linear infinite';
+    // 注入 spinner 动画（仅一次）
+    if (!document.getElementById('_grapeSpinCSS')) {
+      var style = document.createElement('style');
+      style.id = '_grapeSpinCSS';
+      style.textContent = '@keyframes _grapeSpin{to{transform:rotate(360deg)}}';
+      document.head.appendChild(style);
+    }
+    var text = document.createElement('div');
+    text.style.cssText = 'font-size:14px;font-weight:500;color:var(--t3,#86868b)';
+    text.textContent = I18N.t('tasks.processing');
+    overlay.appendChild(spinner);
+    overlay.appendChild(text);
     pc.appendChild(overlay);
   }
   apiCall().then(function() {
@@ -1232,6 +1252,7 @@ function createTaskSubmit() {
     });
 }
 
+// @deprecated 死代码——UI 无调用点。如需启用，catch 里的 alert 应改为 app.showToast。
 function changeTaskStatus(taskId, status) {
   API.put('/issues/' + taskId + '/status', {status: status})
     .then(() => loadTasks())
