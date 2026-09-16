@@ -93,7 +93,7 @@ function selPipe(idx) {
   flowHtml += '</div></div></div>';
 
   // 替换流程图区域（表格不动，保持滚动位置）
-  const flowEl = document.getElementById('pipeFlow');
+  const flowEl = document.querySelector('.pl-flow-card');
   if (flowEl) flowEl.innerHTML = flowHtml;
 
   // 更新选中行高亮（不重建表格）
@@ -102,7 +102,7 @@ function selPipe(idx) {
   if (selRow) selRow.classList.add('sel');
 }
 
-function renderPipeline(data) {
+function renderPipeline(data, focusIssueNum) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   _pipeData = data;
@@ -183,7 +183,7 @@ function renderPipeline(data) {
     const _repoFullName = (data.repo_key || '').replace(/^(gitcode|github):/, '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div class="pl-flow-card" id="pipeFlow"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div></div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
+    flowHtml = `<div class="pl-flow-card" id="pipe-issue-${String(displayPipe.issue_id || '').replace(/^#/, '')}"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div></div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
     var pipeNodes2 = _getPipeNodes(data, displayPipe);
     pipeNodes2.forEach(function(node, i) {
       var tag = node.tag || node.id;
@@ -280,7 +280,7 @@ function renderPipeline(data) {
     const execBadge = p.executing
       ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ ' + I18N.t('pipeline.executing') + '</span>'
       : '<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
-    html += `<tr class="${s ? 'sel' : ''}" data-idx="${realIdx}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">
+    html += `<tr class="${s ? 'sel' : ''} pl-hist-row" data-idx="${realIdx}" data-issue="${_issueNum}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">\
       <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${_esc(p.title || '—')}</a></td>
       <td>${_parentIssueHtml}</td>
@@ -294,6 +294,31 @@ function renderPipeline(data) {
   html += `</div>`;
 
   el.innerHTML = html;
+
+  // 如果指定了 focusIssueNum，滚动并高亮对应 issue 的流水线卡片
+  if (focusIssueNum) {
+    var targetId = 'pipe-issue-' + String(focusIssueNum).replace(/^#/, '');
+    setTimeout(function() {
+      var target = document.getElementById(targetId);
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        target.style.transition = 'box-shadow .3s';
+        target.style.boxShadow = '0 0 0 3px #0071e3';
+        setTimeout(function() { target.style.boxShadow = ''; }, 3000);
+      } else {
+        // 可能在 history 列表中
+        var histRows = document.querySelectorAll('.pl-hist-row');
+        histRows.forEach(function(row) {
+          if (row.getAttribute('data-issue') === String(focusIssueNum).replace(/^#/, '')) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            row.style.transition = 'background .3s';
+            row.style.background = 'rgba(0,113,227,0.08)';
+            setTimeout(function() { row.style.background = ''; }, 3000);
+          }
+        });
+      }
+    }, 100);
+  }
 }
 
 function triggerSREDeploy(repoFullName, issueNum, stage) {

@@ -377,7 +377,9 @@ window._jumpToPipePage = function() {
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
   localStorage.setItem('currentRepo', JSON.stringify(repoObj));
   if (typeof app !== 'undefined' && app.nav) {
-    app.nav('pipe');
+    // 传递 issue_number 让流水线页高亮对应任务
+    var issueNum = t.issue_number || '';
+    app.nav('pipe', issueNum ? String(issueNum) : undefined);
   }
 };
 
