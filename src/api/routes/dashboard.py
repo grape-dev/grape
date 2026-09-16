@@ -225,21 +225,27 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
         try:
             if repo:
                 # 仓库级看板：global + 自己的 user + 该 repo 的 worker
+                # 过滤：从未连接(last_seen_at IS NULL)或长期失联(>7天)的设备不展示
+                _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
+                    "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key=? OR repo_key=?) ORDER BY id",
-                    (_uname, repo_key, repo),
+                    (_stale_cutoff, _uname, repo_key, repo),
                 )
             else:
                 # 全局看板：global + 自己的 user scope worker
+                # 过滤：从未连接(last_seen_at IS NULL)或长期失联(>7天)的设备不展示
+                _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
+                    "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
-                    (_uname,),
+                    (_stale_cutoff, _uname),
                 )
             for w in c.fetchall():
                 wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w
