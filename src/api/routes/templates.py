@@ -251,8 +251,8 @@ async def create_from_template(body: CreateTemplateRequest,
         msg += f"。⚠️ 重要提醒：请到仓库设置 → 成员管理，将机器人账号（{bot_username}）添加为维护者，然后手动托管仓库以完成自动化配置。"
 
     # 4. 异步首次托管引导（仅模板创建触发）
-    #    dev_scene 已退役，不再写仓库级场景指针；场景数据由仓库托管时
-    #    apply_default_scene_to_repo 自动复刻，Issue 级场景由用户/智能推荐决定。
+    #    仓库托管时 apply_default_scene_to_repo 已应用默认「通用开发」场景。
+    #    如果模板自带 scene_id（如 hello-world），覆盖为模板对应的场景。
     try:
         from src.repo_key import to_repo_key
         from src.api.onboarding import trigger_onboarding, cleanup_stale_repo_data
@@ -263,6 +263,17 @@ async def create_from_template(body: CreateTemplateRequest,
         #   events/issue_state/agent_tasks/sessions 等残留，导致新仓库前端界面混乱）
         if repo_created:
             cleanup_stale_repo_data(repo_key)
+
+        # 模板 scene_id 覆盖默认场景
+        tpl_scene_id = tpl.get("scene_id") or ctx.get("scene_id") or ""
+        if tpl_scene_id and tpl_scene_id != "default":
+            try:
+                from src.api.pipeline_config import apply_market_scene_by_name
+                apply_market_scene_by_name(repo_key, tpl_scene_id, user.get("id", 0))
+                log.info(f"template scene override: applied '{tpl_scene_id}' to {repo_key}")
+            except Exception as e:
+                log.warning(f"template scene override failed for '{tpl_scene_id}': {e}")
+
         trigger_onboarding(repo_key, owner, template_id=body.template_id)
     except Exception as e:
         log.warning(f"template onboarding trigger failed: {e}")
