@@ -460,29 +460,12 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     _current_stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
     pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
     nodes = (pipe_cfg or {}).get("nodes", [])
-    _stage_order = [n.get("id", "") for n in nodes]
-    _cur_idx = _stage_order.index(_current_stage) if _current_stage in _stage_order else -1
-    for i, n in enumerate(nodes):
-        nid = n.get("id", "")
-        if _current_stage == "done" or _current_stage == "pending_review":
-            n["node_status"] = "completed"
-        elif i < _cur_idx:
-            n["node_status"] = "completed"
-        elif i == _cur_idx:
-            n["node_status"] = "current"
-        else:
-            n["node_status"] = "pending"
     events = []
     if issue_key:
         events = get_events(repo_key, issue_id=issue_key, limit=30)
-    _events_by_agent = {}
-    for e in events:
-        _at = e.get("agent_type", "")
-        if _at and _at not in _events_by_agent:
-            _events_by_agent[_at] = e
-    for n in nodes:
-        _nid = n.get("id", "")
-        n["latest_event"] = _events_by_agent.get(_nid, None)
+    # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
+    from src.api.pipeline_status import compute_node_statuses
+    nodes, _ = compute_node_statuses(nodes, events, _current_stage)
     return {
         "scene_id": _scene_id,
         "scene_name": (pipe_cfg or {}).get("name", _scene_id),
