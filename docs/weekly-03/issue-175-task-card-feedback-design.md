@@ -110,7 +110,7 @@ loadTasks 自身的 catch 也清理 _pendingTaskDetailId，防止失败后残留
 | `issues.js` | 修改 `loadTasks` | 刷新 _taskSel 指向新对象；catch 清理 _pendingTaskDetailId |
 | `issues.js` | 修改 `openTaskConversation` | "去对话"按钮加 disabled+半透明 loading |
 | `issues.js` | 修改 `_deleteTaskAttach` | 裸 fetch 改 API.del；alert 改 showToast |
-| `index.html` | issues.js 版本号 90→91 | 缓存刷新 |
+| `index.html` | issues.js 版本号 94→97 | 缓存刷新（rebase 后 base 已是 v=94，bump 到 v=97） |
 
 ## 4. 不做的事
 
