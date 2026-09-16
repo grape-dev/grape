@@ -160,7 +160,7 @@
       catBtns[0].style.color = '#0071e3';
     }
 
-    // 截图上传
+    // 附件上传
     var fileInput = document.getElementById('fbFile');
     var fileBtn = document.getElementById('fbFileBtn');
     var fileNameSpan = document.getElementById('fbFileName');
@@ -172,44 +172,35 @@
       if (!file) return;
       // 限制 5MB
       if (file.size > 5 * 1024 * 1024) {
-        if (app && app.showToast) app.showToast('附件不能超过 5MB');
+        if (app && app.showToast) app.showToast('附件不能超过 5MB（当前 ' + Math.round(file.size / 1024) + 'KB）');
         fileInput.value = '';
         return;
       }
       fileNameSpan.textContent = file.name + '（上传中...）';
-      // 通过后端 API 上传（OBS 模式存 OBS 桶，非 OBS 模式存本地）
+      // 使用 API.upload（自动带 JWT Authorization header + token 刷新）
       var fd = new FormData();
       fd.append('file', file);
-      var xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/feedback/upload');
-      xhr.onload = function () {
-        if (xhr.status === 200) {
-          try {
-            var resp = JSON.parse(xhr.responseText);
-            if (resp.error) {
-              _attachmentUrl = '';
-              fileNameSpan.textContent = '';
-              if (app && app.showToast) app.showToast('上传失败: ' + resp.error);
-            } else {
-              _attachmentUrl = resp.url || '';
-              fileNameSpan.textContent = file.name + ' ✓';
-            }
-          } catch (e) {
+      API.upload('/feedback/upload', fd)
+        .then(function (resp) {
+          if (resp && resp.error) {
             _attachmentUrl = '';
-            fileNameSpan.textContent = '上传失败';
+            fileNameSpan.textContent = '';
+            if (app && app.showToast) app.showToast('上传失败: ' + resp.error);
+          } else {
+            _attachmentUrl = resp.url || '';
+            fileNameSpan.textContent = file.name + ' ✓';
           }
-        } else {
+        })
+        .catch(function (err) {
           _attachmentUrl = '';
-          fileNameSpan.textContent = '上传失败';
-          if (app && app.showToast) app.showToast('附件上传失败');
-        }
-      };
-      xhr.onerror = function () {
-        _attachmentUrl = '';
-        fileNameSpan.textContent = '上传失败';
-        if (app && app.showToast) app.showToast('附件上传失败');
-      };
-      xhr.send(fd);
+          // 展示具体错误信息（HTTP 状态码 + 后端 detail）
+          var msg = '上传失败';
+          if (err && err.message) {
+            msg = '上传失败(' + err.message + ')';
+          }
+          fileNameSpan.textContent = msg;
+          if (app && app.showToast) app.showToast(msg);
+        });
     };
 
     // 提交
