@@ -269,9 +269,9 @@ async def sync_official_skills_from_remote() -> dict:
 
         # 5. 同步 skill 文件目录（增量 hash 比对）
         # 分布式锁保护：多实例部署时避免并发 rmtree+copytree 导致目录损坏
-        from src.lock import acquire_lock, release_lock
+        from src.lock import acquire_lock, release_lock, renew_lock
         _LOCK_KEY = "skill_remote_sync"
-        _LOCK_TTL = 300  # 5 分钟（目录同步不会超过）
+        _LOCK_TTL = 300  # 5 分钟，每处理一个 skill 续期一次
         if not acquire_lock(_LOCK_KEY, ttl=_LOCK_TTL):
             logger.info("skill remote sync: lock contention, skip directory sync (another instance is running)")
         else:
@@ -281,6 +281,10 @@ async def sync_official_skills_from_remote() -> dict:
                     logger.warning("skill remote sync: skills/ directory not found in zip")
                 else:
                     for skill_name, info in remote_data.items():
+                        # 每处理一个 skill 续期一次，防止 47 个 skill 处理超过 TTL
+                        if not renew_lock(_LOCK_KEY, ttl=_LOCK_TTL):
+                            logger.warning("skill remote sync: lock lost during directory sync, aborting")
+                            break
                         skill_path = info.get("path", skill_name)
                         remote_skill_dir = os.path.join(remote_skills_dir, skill_path)
                         if not os.path.isdir(remote_skill_dir):
