@@ -5,7 +5,7 @@
   `git_repo_provider_from_token` 设计（单一信息源，消除错配）；github/gitlab 预留（403）。
 - 白名单：只暴露 Issue/PR/评论/内容/分支/提交/标签/里程碑等资源端点，**无限制透传被拒**。
 - gitcode 后端：复用 `repo_manager._req` 调 `api.gitcode.com/api/v5`，token 取仓库 bot token。
-- git-credential / workspace：供 CLI（方案③ 本地执行 git）内部取一次性/短期平台 token 与工作区。
+- git-credential / workspace 归 `/api/repos` 平台接口（本命名空间只做纯透传，见 2bac1c60）。
 
 出参结构 = gitcode 平台实际结构（与技能 `gitcode-api-reference.md` 一致，见 docs/openapi/10-git-repos.md）。
 """
@@ -76,7 +76,7 @@ def _provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
 
 
 def _repo_token(owner: str, repo: str, user: dict, provider: str = "gitcode") -> str:
-    """解析仓库平台 token（git-repo / git-credential 共用）。
+    """解析仓库平台 token（git-repo 透传端点共用）。
 
     ⚠️ 本接口**仅服务会话级临时 token（tk_）**——用户级 API Key（`grape_`）/ Web JWT **不适用**（403）。
     token 按会话 agent_type 决定平台凭据（issue-45-api-token-design §2.5.1）：
@@ -180,32 +180,6 @@ def get_repo_info(owner: str, repo: str, user: dict = Depends(get_current_user_o
     return _gitcode(p, "GET", _vcs_url(owner, repo, "", None, p), _repo_token(owner, repo, user, p))
 
 
-@router.get("/{owner}/{repo}/workspace", operation_id="gitrepo_workspace", summary="仓库工作区路径（CLI 本地 git 用）")
-def get_repo_workspace(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
-                       p: str = Depends(_provider)):
-    from src.repo_key import workspace_repo_dir, to_repo_key
-    ws = workspace_repo_dir(to_repo_key(f"{owner}/{repo}", p))
-    _gh = "github.com" if p == "github" else "gitcode.com"
-    return {"workspace": ws, "clone_url": f"https://{_gh}/{owner}/{repo}.git"}
-
-
-@router.get("/{owner}/{repo}/git-credential", operation_id="gitrepo_git_credential",
-            summary="一次性 git 平台凭据（方案③ CLI 内部使用，TTL 过期）")
-def get_git_credential(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
-                       p: str = Depends(_provider)):
-    """返回 CLI 本地执行 git 所需的平台凭据（一次性/短期，进程内使用不落盘）。
-
-    gitcode：Basic 用 username=`x-access-token`、password=配置的 gitcode token。
-    """
-    token = _repo_token(owner, repo, user, p)
-    _gh = "github.com" if p == "github" else "gitcode.com"
-    return {
-        "provider": p,
-        "username": "x-access-token",
-        "password": token,
-        "clone_url": f"https://{_gh}/{owner}/{repo}.git",
-        "expires_in": _CREDENTIAL_TTL,
-    }
 # ===================== 分支 / 提交 / 内容 / 标签 / 里程碑 =====================
 
 @router.get("/{owner}/{repo}/branches", operation_id="gitrepo_branches", summary="分支列表")

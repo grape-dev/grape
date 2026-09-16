@@ -22,8 +22,6 @@ _HELP_DIR = os.path.join(_REPO_ROOT, "help", "api")
 DOC_EXEMPT: frozenset[tuple[str, str]] = frozenset({
     # 事件流程重置（events.py，内部 worker/前端面板用，不走契约标注）
     ("post", "/api/events/{seq}/flow/reset"),
-    # tasks/notify：bot-token 回调端点（_require_bot_token），非三通道公开接口，不进契约（notify-close-session-token-design.md）
-    ("post", "/api/tasks/notify"),
     # 无 Token 公开端点（UI 用），不进契约但仍属对外可用接口
     ("get", "/api/agents/types"),
     ("get", "/api/skills/template"),
