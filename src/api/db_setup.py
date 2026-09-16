@@ -855,7 +855,6 @@ _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 # (seed_key, json_filename, actual_table_name)
 _SEED_FILES = [
     ("agent_type", "agent-description.json", "agent_type"),
-    ("skill_official", "skill-description.json", "skill"),
 ]
 
 
@@ -1103,10 +1102,6 @@ def _insert_seed_data(table: str, data: dict):
                     "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable) VALUES (?,?,?,0,?,?,?,?)",
                     (agent_type, display_name, description, icon, order_num, subscribe_events, enable)
                 )
-
-        elif table == "skill_official":
-            # skill 同步由 worker 异步完成，init_database 不做
-            pass
 
         elif table == "agent_registry":
             # agent-routing.json 已废弃(agent_registry 表移除),backend 统一用 backend_agents

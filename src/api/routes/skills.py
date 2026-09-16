@@ -250,12 +250,12 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
     """返回技能总数 + 每个 agent_type 的技能数量。
 
     scope/repo 参数与 list_skills 一致，用于按维度统计。
+    分类列表由 /api/skills/categories 独立获取，不在本接口返回。
 
     user_only：仅 Web UI / 用户级调用方消费（skills.js 页面统计），Agent 执行期无此场景；
     且 tk_ 会话 token 的 user_id 在仓库身份下为 0，scope=user 过滤 owner_id=0 亦无可达数据——故禁 session。
     """
     from src.session_manager import db, db_lock
-    from src.user.db import list_skill_categories
 
     repo_key = _resolve_repo_key(repo) if repo else ""
     conditions = ["is_active=1"]
@@ -264,7 +264,7 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
         conditions.append("scope='official'")
     elif scope == "repo":
         if not repo:
-            return {"total": 0, "agents": [], "categories": []}
+            return {"total": 0, "agents": []}
         conditions.append("scope='repo'")
         conditions.append("owner_id=?")
         params.append(repo_key)
@@ -281,7 +281,6 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
 
     where_sql = " WHERE " + " AND ".join(conditions)
     agents = []
-    categories = []
     total = 0
     with db_lock:
         c = db.cursor()
@@ -295,21 +294,9 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
             for r in c.fetchall():
                 agents.append({"agent_type": r[0] or "", "count": r[1]})
                 total += r[1]
-            # 分类列表：查 skill 表里 DISTINCT category_id（过滤 0），关联 skill_category 表返回详情
-            c.execute(
-                f"SELECT DISTINCT category_id FROM skill{where_sql} AND category_id > 0",
-                tuple(params)
-            )
-            cat_ids = [r[0] for r in c.fetchall()]
         except Exception:
-            cat_ids = []
-    # 查分类详情
-    all_cats = list_skill_categories() if cat_ids else []
-    cat_id_set = set(cat_ids)
-    for cat in all_cats:
-        if cat["id"] in cat_id_set:
-            categories.append(cat)
-    return {"total": total, "agents": agents, "categories": categories}
+            pass
+    return {"total": total, "agents": agents}
 
 
 @router.get("/stats")

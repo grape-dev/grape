@@ -31,7 +31,7 @@
 > CLI：`grape skills agent-stats`。
 
 | Query | `scope`（可选）、`repo`（可选；过滤规则与列表一致） |
-| 出参 | `total, agents: [{agent_type, count}], categories: [{id, name, slug, icon, order_num}]`（Issue #179：categories 替代 sub_scenes） |
+| 出参 | `total, agents: [{agent_type, count}]`（分类列表由 /api/skills/categories 独立获取） |
 | 返回 | 200 |
 
 ---

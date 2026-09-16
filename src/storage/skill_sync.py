@@ -64,10 +64,7 @@ def _pack_skill_zip(skill_dir: str) -> bytes:
 def _sync_skills_to_db(data: dict) -> int:
     """从 skill-description.json 数据同步官方技能元信息到 DB（INSERT/UPDATE，含 category_id）。
 
-    调用方：
-    - _skill_sync_worker() — 定时任务每 30 分钟调一次
-    - db_setup._sync_official_skills() — 启动时刷新 DB
-    - db_setup._insert_seed_data() skill_official 分支 — 首次 seed
+    唯一调用方：sync_official_skills()（worker 每 30 分钟调一次）。
 
     仅在实际数据变更时才 UPDATE + 更新 updated_at，避免 blanket UPDATE 架空 sort=latest。
     返回处理的 skill 数量。

@@ -242,14 +242,14 @@ class TestApiEndpoints:
         assert "categories" in data
         assert len(data["categories"]) == 11
 
-    def test_agent_stats_returns_categories(self):
+    def test_agent_stats_returns_agents(self):
         headers = self._headers()
         r = client.get("/api/skills/agent-stats?scope=official", headers=headers)
         assert r.status_code == 200
         data = r.json()
-        assert "categories" in data
-        assert "sub_scenes" not in data
-        assert len(data["categories"]) > 0
+        assert "total" in data
+        assert "agents" in data
+        assert "categories" not in data  # categories 由 /api/skills/categories 独立获取
 
     def test_list_skills_returns_category(self):
         headers = self._headers()
