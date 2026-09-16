@@ -1122,6 +1122,11 @@ async def _execute_task(client, task, engine_name: str = ""):
             if not _os.path.exists(_global_json):  # 幂等
                 with open(_global_json, "w") as f:
                     json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
+            # 1b. 预写 config.json (codearts 26.8.8 getEffectivePermissions 实际读取路径)
+            _config_json = _os.path.join(_perm_dir, "config.json")
+            if not _os.path.exists(_config_json):  # 幂等
+                with open(_config_json, "w") as f:
+                    json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
             # 2. 预写 sandbox/config.json (network_policy=allow_all)
             _sandbox_dir = _os.path.join(_cli_data, "storage", "sandbox")
             _os.makedirs(_sandbox_dir, exist_ok=True)
