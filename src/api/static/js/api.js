@@ -348,11 +348,17 @@ const API = (() => {
     window.addEventListener('beforeunload', _flushLatency);
   }
 
+  // ===== 反馈 API 封装（Issue #177） =====
+  function deleteFeedback(fid) {
+    return _del('/feedback/' + fid);
+  }
+
   return {
     get: _get,
     post: _post,
     put: _put,
     del: _del,
+    deleteFeedback: deleteFeedback,  // Issue #177: 删除反馈封装
     scheduleProactiveRefresh: scheduleProactiveRefresh,  // Issue #86: app.js 登录成功后调用
     upload: (path, formData, onUploadProgress) => {
       return ensureTokenValid().then(token => {

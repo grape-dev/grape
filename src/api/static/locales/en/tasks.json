@@ -27,6 +27,7 @@
   "task_cancelled_toast": "Requirement cancelled",
   "task_resumed_toast": "Requirement resumed",
   "operation_failed": "Operation failed: {{msg}}",
+  "processing": "Processing…",
   "confirm": "Confirm",
   "cancel": "Cancel",
   "tab": {

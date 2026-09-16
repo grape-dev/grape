@@ -770,7 +770,7 @@ def _gitcode_api_with_refresh(user: dict, api_call_fn, *args, **kwargs):
 
 
 def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
-    """PATCH Issue body（追加多任务模式标记）。"""
+    """PATCH Issue body（追加多任务模式标记）。GitCode 版。"""
     import urllib.request as _ur, urllib.error as _uerr, json as _json
     url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_num}?access_token={api_token}"
     data = _json.dumps({"body": body_text}).encode()
@@ -782,6 +782,13 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
         raise
 
 
+def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
+    """PATCH Issue body（GitHub 版）。"""
+    from src.user.repo_manager import _github_req
+    return _github_req("PATCH", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}",
+                       api_token, {"body": body_text})
+
+
 def create_standard_task(repo_key: str, title: str, description: str,
                          bot_token: str, assignee: str = "", labels=None) -> dict:
     """真实 GitCode Issue 创建 + 标准任务建档（onboarding 模块调用，与手动创建任务同一原子路径）。
@@ -791,13 +798,14 @@ def create_standard_task(repo_key: str, title: str, description: str,
     - token：bot_token 注入（onboarding 无登录用户上下文，用仓库 bot token）
     - 不额外写入任何消息：任务上下文消息只由 ensure_issue_task → _ensure_task_conversation 产生 1 条
     """
-    from src.repo_key import to_repo_key, split_owner_repo
+    from src.repo_key import to_repo_key, split_owner_repo, parse_repo_key
     repo_key = to_repo_key(repo_key)
     owner, rname = split_owner_repo(repo_key)
+    _provider, _, _ = parse_repo_key(repo_key)
     if not title or not title.strip():
         return {"ok": False, "code": 400, "message": "任务标题必填"}
     if not bot_token:
-        return {"ok": False, "code": 400, "message": "GitCode bot token 缺失"}
+        return {"ok": False, "code": 400, "message": "bot token 缺失"}
     if not assignee:
         assignee = owner or ""
     issue_num = _find_open_issue_by_title(bot_token, owner, rname, title.strip())
@@ -806,8 +814,12 @@ def create_standard_task(repo_key: str, title: str, description: str,
         # 已有同标题 open Issue → 直接建档（幂等：不再重复创建 Issue）
         issue_num = int(issue_num)
     else:
-        resp = _post_gitcode_issue(bot_token, owner, rname, title.strip(),
-                                   (description or "").strip(), assignee=assignee)
+        if _provider == "github":
+            resp = _post_github_issue(bot_token, owner, rname, title.strip(),
+                                      (description or "").strip(), assignee=assignee)
+        else:
+            resp = _post_gitcode_issue(bot_token, owner, rname, title.strip(),
+                                       (description or "").strip(), assignee=assignee)
         n = None
         if isinstance(resp, dict):
             n = resp.get("number") or resp.get("iid") or resp.get("id")
@@ -956,8 +968,15 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.warning(f"create_task: set_subtask_mode failed: {_e}")
         try:
             _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 自动判断是否拆分为子任务执行。"
-            # Issue #52: 401 时自动刷新 token 重试
-            _gitcode_api_with_refresh(user, _patch_issue_body, owner, rname, issue_num, (body.description or "") + _marker)
+            if _is_github:
+                # GitHub: 直接用用户 github_api_token
+                from src.user.db import get_user_github_token
+                _gh_token = get_user_github_token(user["id"]) or ""
+                if _gh_token:
+                    _patch_github_issue_body(_gh_token, owner, rname, issue_num, (body.description or "") + _marker)
+            else:
+                # Issue #52: 401 时自动刷新 token 重试
+                _gitcode_api_with_refresh(user, _patch_issue_body, owner, rname, issue_num, (body.description or "") + _marker)
         except HTTPException:
             raise  # reauth_required 需要传递给前端
         except Exception as _e:

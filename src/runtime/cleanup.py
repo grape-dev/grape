@@ -559,9 +559,9 @@ def _sweep_stale_workspace_repos() -> int:
                 repo_dir = os.path.join(owner_dir, repo_name)
                 if not os.path.isdir(repo_dir):
                     continue
-                # 构造 repo_key（workspace 用 owner/repo 结构，repo_key 是 gitcode:owner/repo）
-                repo_key = f"gitcode:{owner}/{repo_name}"
-                if repo_key in active_repos:
+                # 构造 repo_key（workspace 用 owner/repo 结构，检查两种 provider 前缀）
+                _base_key = f"{owner}/{repo_name}"
+                if f"gitcode:{_base_key}" in active_repos or f"github:{_base_key}" in active_repos:
                     continue  # 有活跃任务，跳过
                 # 检查 issue 目录是否有活跃任务
                 issues_root = os.path.join(repo_dir, "issues")

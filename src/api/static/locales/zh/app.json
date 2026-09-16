@@ -131,7 +131,12 @@
     "priority_normal": "普通",
     "priority_urgent": "紧急",
     "priority_high": "高优",
-    "attachment_label": "附件"
+    "attachment_label": "附件",
+    "delete": "删除",
+    "delete_confirm_title": "删除反馈",
+    "delete_confirm_msg": "确定要删除这条反馈吗？删除后不可恢复。",
+    "delete_failed": "删除失败: {msg}",
+    "delete_success": "反馈已删除"
   },
   "back_home": "← 返回主页",
   "pipeline": {

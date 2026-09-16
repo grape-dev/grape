@@ -1107,8 +1107,14 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     from src.prompt_builder import build_conversation_prompt
     prompt, _inj_ids = build_conversation_prompt(evt, user_message, _list_thread(anchor_seq), agent_type, issue_num)
 
-    from src.user.db import get_gitcode_token
-    bot_token = get_gitcode_token(repo_key=repo_key) or ""
+    from src.repo_key import parse_repo_key, from_repo_key
+    _provider, _, _ = parse_repo_key(repo_key)
+    if _provider == "github":
+        from src.user.db import get_github_token
+        bot_token = get_github_token(repo_key=repo_key) or ""
+    else:
+        from src.user.db import get_gitcode_token
+        bot_token = get_gitcode_token(repo_key=repo_key) or ""
     repository = from_repo_key(repo_key)
 
     from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task, runtime_execution_kind
@@ -1467,7 +1473,14 @@ def _execute_conv_task(task_id: str, loop):
         import os
         os.makedirs(ws, exist_ok=True)
         prompt, injected_ids = build_conversation_prompt(evt, message, _list_thread(anchor_seq), agent_type, issue_num)
-        bot_token = get_gitcode_token(repo_key=repo_key) or ""
+        from src.repo_key import parse_repo_key
+        _provider, _, _ = parse_repo_key(repo_key)
+        if _provider == "github":
+            from src.user.db import get_github_token
+            bot_token = get_github_token(repo_key=repo_key) or ""
+        else:
+            from src.user.db import get_gitcode_token
+            bot_token = get_gitcode_token(repo_key=repo_key) or ""
         repository = from_repo_key(repo_key)
         # 用 hermes 引擎（对齐 Chat Agent）
         for evt_type, data in stream_devops_agent(
