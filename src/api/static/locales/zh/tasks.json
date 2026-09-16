@@ -27,6 +27,7 @@
   "task_cancelled_toast": "需求已取消",
   "task_resumed_toast": "需求已恢复",
   "operation_failed": "操作失败: {{msg}}",
+  "processing": "处理中…",
   "confirm": "确认",
   "cancel": "取消",
   "tab": {
