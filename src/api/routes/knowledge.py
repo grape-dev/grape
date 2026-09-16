@@ -456,7 +456,7 @@ def knowledge_context(repo: str = Query(""),
     return {"repo_key": repo_key, "context": "\n\n".join(lines)}
 
 
-@router.delete("")
+@router.delete("", operation_id="knowledge_files_delete", summary="删除成员上传文档")
 def delete_knowledge(repo: str = Query(""),
                            file: str = Query(""),
                            user: dict = Depends(require_no_session_token)):
@@ -705,7 +705,7 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
 
 # ===== CRUD API（固定路径在 {id} 之前） =====
 
-@router.post("/entry")
+@router.post("/entry", operation_id="knowledge_entry_create", summary="创建知识条目")
 def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(require_no_session_token)):
     """用户直接输入文本创建知识条目（source=manual）。"""
     if not (body.name or "").strip():
@@ -765,7 +765,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
 
 # ===== {id} 路由 =====
 
-@router.get("/{knowledge_id}")
+@router.get("/{knowledge_id}", operation_id="knowledge_detail", summary="知识详情")
 def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """按 id 查询单条知识全文。"""
     row = _get_knowledge_by_id(knowledge_id)
@@ -823,7 +823,7 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
     }
 
 
-@router.put("/{knowledge_id}")
+@router.put("/{knowledge_id}", operation_id="knowledge_update", summary="编辑知识")
 def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
                      user: dict = Depends(require_no_session_token)):
     """编辑知识内容，仅 source=manual 可编辑。"""
@@ -872,7 +872,7 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
     return {"ok": True, "message": "知识已更新"}
 
 
-@router.delete("/{knowledge_id}")
+@router.delete("/{knowledge_id}", operation_id="knowledge_delete", summary="删除知识条目")
 def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(require_no_session_token)):
     """删除 source=manual 的知识条目。"""
     row = _get_knowledge_by_id(knowledge_id)
@@ -887,7 +887,7 @@ def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(require_no_se
     return {"ok": True, "message": "知识已删除"}
 
 
-@router.put("/{knowledge_id}/archive")
+@router.put("/{knowledge_id}/archive", operation_id="knowledge_archive", summary="归档/取消归档知识")
 def archive_knowledge(knowledge_id: int, body: ArchiveBody,
                       user: dict = Depends(require_no_session_token)):
     """标记/取消归档。body.archived=true 标记归档，false 取消归档。"""
@@ -917,7 +917,7 @@ def archive_knowledge(knowledge_id: int, body: ArchiveBody,
 
 # ===== 关联管理 API =====
 
-@router.get("/{knowledge_id}/refs")
+@router.get("/{knowledge_id}/refs", operation_id="knowledge_refs_list", summary="知识关联列表")
 def get_knowledge_refs(knowledge_id: int, user: dict = Depends(require_no_session_token)):
     """获取知识的所有关联关系。"""
     _check_ref_permission(knowledge_id, user)
@@ -933,7 +933,7 @@ def get_knowledge_refs(knowledge_id: int, user: dict = Depends(require_no_sessio
                        for r in rows]}
 
 
-@router.post("/{knowledge_id}/refs")
+@router.post("/{knowledge_id}/refs", operation_id="knowledge_ref_create", summary="添加知识关联")
 def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
                       user: dict = Depends(require_no_session_token)):
     """为知识新增场景/Agent 关联。"""
@@ -1029,7 +1029,7 @@ def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
     return {"ok": True, "added": added}
 
 
-@router.put("/ref/{ref_id}")
+@router.put("/ref/{ref_id}", operation_id="knowledge_ref_update", summary="修改知识关联")
 def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
                          user: dict = Depends(require_no_session_token)):
     """修改关联的 enabled 开关。"""
@@ -1053,7 +1053,7 @@ def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
     return {"ok": True}
 
 
-@router.delete("/ref/{ref_id}")
+@router.delete("/ref/{ref_id}", operation_id="knowledge_ref_delete", summary="删除知识关联")
 def delete_knowledge_ref(ref_id: int, user: dict = Depends(require_no_session_token)):
     """删除知识的某条关联。"""
     from src.session_manager import db, db_lock

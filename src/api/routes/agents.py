@@ -322,7 +322,7 @@ class AgentConfig(BaseModel):
     im_app_secret: str = ""
 
 
-@router.post("/{name}/{owner}/{repo}/clean")
+@router.post("/{name}/{owner}/{repo}/clean", operation_id="agents_clean", summary="清理 Agent 会话")
 def clean_agent_session(name: str, owner: str, repo: str,
                               user: dict = Depends(require_no_session_token)):
     """清理 Agent 会话：将 devops_agent_session.runtime_session_id 置空。
@@ -348,7 +348,7 @@ def clean_agent_session(name: str, owner: str, repo: str,
     return {"message": "Agent 会话已清理（runtime_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
 
 
-@router.put("/{name}/{owner}/{repo}")
+@router.put("/{name}/{owner}/{repo}", operation_id="agents_update", summary="更新 Agent 配置")
 async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfig,
                               user: dict = Depends(require_no_session_token)):
     if name not in AGENT_TYPES:

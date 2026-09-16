@@ -276,7 +276,7 @@ def list_member_repos(user: dict = Depends(require_no_session_token)):
     return {"repos": _filter_repos(user["id"], repos), "_cached": False}
 
 
-@router.post("/sync")
+@router.post("/sync", operation_id="repos_sync", summary="同步仓库列表")
 def sync_repos(user: dict = Depends(require_no_session_token)):
     """手动从 VCS 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录"""
     provider, api_token = _get_user_provider_and_token(user["username"])
@@ -294,7 +294,7 @@ def sync_repos(user: dict = Depends(require_no_session_token)):
     return {"repos": _filter_repos(user["id"], repos), "message": "同步成功"}
 
 
-@router.get("/check-name")
+@router.get("/check-name", operation_id="repos_check_name", summary="校验仓库名")
 def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
     """检查当前用户名下是否已存在同名仓库"""
     provider, api_token = _get_user_provider_and_token(user["username"])
@@ -335,7 +335,7 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
 
 
-@router.post("/create")
+@router.post("/create", operation_id="repos_create", summary="创建仓库（可选自动托管）")
 def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_session_token)):
     """通过 VCS API 新建仓库，可选创建后自动托管"""
     import re as _re
@@ -489,7 +489,7 @@ def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: 
                 "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
 
 
-@router.post("/host")
+@router.post("/host", operation_id="repos_host", summary="托管仓库")
 def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
@@ -695,7 +695,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
 
 
-@router.post("/{owner}/{repo}/repair-host")
+@router.post("/{owner}/{repo}/repair-host", operation_id="repos_repair_host", summary="修复托管")
 def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """方案 F-4：自愈未完成的托管流程（bot 未加入 / webhook 未创建），幂等。
 
@@ -781,14 +781,14 @@ class BotTokenBody(BaseModel):
     bot_token: str = ""
 
 
-@router.get("/bot-token/{owner}/{repo_name}")
+@router.get("/bot-token/{owner}/{repo_name}", operation_id="repos_bot_token_get", summary="获取仓库 bot token")
 def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(require_no_session_token)):
     """获取仓库绑定的 DevOps Bot Token 是否存在"""
     token = get_bot_token_by_repo(owner, repo_name)
     return {"has_bot_token": bool(token)}
 
 
-@router.put("/bot-token")
+@router.put("/bot-token", operation_id="repos_bot_token_set", summary="设置仓库 bot token")
 def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_session_token)):
     """设置仓库绑定的 DevOps Bot Token；自动将 repo bot 加入维护者"""
     from src.repo_key import to_repo_key
@@ -846,7 +846,7 @@ class DeployUrlBody(BaseModel):
     deploy_url: str = ""
 
 
-@router.put("/deploy-url")
+@router.put("/deploy-url", operation_id="repos_deploy_url_set", summary="设置部署 URL")
 def set_deploy_url(body: DeployUrlBody, user: dict = Depends(require_no_session_token)):
     """登记业务系统部署后的访问 URL"""
     from src.repo_key import to_repo_key
@@ -990,7 +990,7 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     return stats
 
 
-@router.post("/remove")
+@router.post("/remove", operation_id="repos_remove", summary="解除托管")
 def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
@@ -1129,7 +1129,7 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
     return {"message": "已移除仓库"}
 
 
-@router.get("/{owner}/{repo}/project-info")
+@router.get("/{owner}/{repo}/project-info", operation_id="repos_project_info", summary="项目知识")
 def get_repo_project_info(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """读取仓库的权威项目知识基线（repo 全局，多机共享，见 multi-issue-isolation-design.md §2.4）。
 
@@ -1147,7 +1147,7 @@ class SceneRecommendConfigBody(BaseModel):
     rules: list = []  # [{"scene_id": "", "condition": ""}]
 
 
-@router.get("/{owner}/{repo}/scene-recommend-config")
+@router.get("/{owner}/{repo}/scene-recommend-config", operation_id="repos_scene_recommend_config_get", summary="获取场景推荐配置")
 def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """读取仓库智能推荐配置（兜底场景 + 路由规则）。"""
     from src.repo_key import to_repo_key
@@ -1156,7 +1156,7 @@ def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(requi
     return get_scene_recommend_config(repo_key)
 
 
-@router.put("/{owner}/{repo}/scene-recommend-config")
+@router.put("/{owner}/{repo}/scene-recommend-config", operation_id="repos_scene_recommend_config_set", summary="保存场景推荐配置")
 def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfigBody,
                                 user: dict = Depends(require_no_session_token)):
     """保存仓库智能推荐配置（兜底场景 + 路由规则）。

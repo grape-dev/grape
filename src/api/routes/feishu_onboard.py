@@ -275,7 +275,7 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
         _TASKS.pop(task_id, None)
 
 
-@router.post("/start")
+@router.post("/start", operation_id="feishu_onboard_start", summary="创建扫码任务")
 async def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token)):
     """创建扫码任务，返回 task_id（前端轮询 status 获取二维码/结果）。"""
     if body.bot_type not in ("chat_bot", "vod_bot"):
@@ -303,7 +303,7 @@ async def start_onboard(body: StartBody, user: dict = Depends(require_no_session
     return {"task_id": task_id, "status": _STATUS_PENDING}
 
 
-@router.get("/status")
+@router.get("/status", operation_id="feishu_onboard_status", summary="查询扫码任务状态")
 def onboard_status(task_id: str = Query(...), user: dict = Depends(require_no_session_token)):
     """查询扫码任务状态（前端轮询）。"""
     t = _get_task(task_id)
@@ -326,7 +326,7 @@ class CancelBody(BaseModel):
     task_id: str = ""
 
 
-@router.post("/cancel")
+@router.post("/cancel", operation_id="feishu_onboard_cancel", summary="取消扫码任务")
 def cancel_onboard(body: CancelBody, user: dict = Depends(require_no_session_token)):
     """取消进行中的扫码任务。已 connected 的任务取消为幂等，不影响已保存配置。"""
     t = _get_task(body.task_id)
