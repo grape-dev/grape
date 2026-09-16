@@ -211,125 +211,132 @@ async def sync_official_skills_to_obs() -> dict:
     return result
 
 
-async def sync_official_skills_from_remote() -> dict:
-    """远程同步：从 grape-skills 仓库下载 zip → 合并 skill-description.json → 同步 skill 文件目录 → DB 同步。
+async def sync_official_skills() -> dict:
+    """完整同步：远程下载 → DB 同步 → OBS 同步。
 
+    每步独立 try/except，失败不阻塞后续步骤。
     Issue #179: 补齐 skill 远程同步能力，参考 scene_sync 的 _download_repo_zip 模式。
-    返回 {"json_merged": N, "dirs_synced": N, "dirs_skipped": N}。
     """
     import httpx
     from src.storage.scene_sync import _download_repo_zip, _get_sync_token
 
-    result = {"json_merged": 0, "dirs_synced": 0, "dirs_skipped": 0}
+    result = {"json_merged": 0, "dirs_synced": 0, "dirs_skipped": 0, "db_synced": 0, "obs_added": 0, "obs_updated": 0, "obs_skipped": 0}
 
-    # 1. 获取 token
-    token = _get_sync_token()
-    if not token:
-        logger.warning("skill remote sync: no GitCode token configured, skip")
-        return result
-
+    # 1. 远程同步：下载 zip → 合并 json → 拷贝 skill 目录
     tmp_dir = None
     try:
-        # 2. 下载 zip
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            try:
-                repo_root = await _download_repo_zip(client, token)
-            except Exception as e:
-                logger.warning(f"skill remote sync: download repo zip failed: {e}")
-                return result
-
-        # 保存临时目录路径用于 finally 清理
-        tmp_dir = repo_root
-
-        # 3. 读远程 skill-description.json
-        remote_json_path = os.path.join(repo_root, "skill-description.json")
-        if not os.path.exists(remote_json_path):
-            logger.warning("skill remote sync: skill-description.json not found in zip")
-            return result
-        with open(remote_json_path, "r", encoding="utf-8") as f:
-            remote_data = json.load(f)
-
-        # 4. 合并到本地 skill-description.json（远程覆盖本地，本地自定义保留）
-        local_json_path = os.path.join(CONFIG_DIR, "skill-description.json")
-        local_data = {}
-        if os.path.exists(local_json_path):
-            with open(local_json_path, "r", encoding="utf-8") as f:
-                local_data = json.load(f)
-
-        merged = dict(local_data)  # 本地为基础
-        for skill_name, info in remote_data.items():
-            if skill_name not in merged or merged[skill_name] != info:
-                merged[skill_name] = info  # 远程覆盖
-                result["json_merged"] += 1
-
-        if result["json_merged"] > 0:
-            # 原子写入：先写临时文件再 rename，避免进程崩溃导致 json 损坏
-            tmp_path = local_json_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(merged, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, local_json_path)
-            logger.info(f"skill remote sync: merged {result['json_merged']} skills into local json")
-
-        # 5. 同步 skill 文件目录（增量 hash 比对）
-        # 分布式锁保护：多实例部署时避免并发 rmtree+copytree 导致目录损坏
-        from src.lock import acquire_lock, release_lock, renew_lock
-        _LOCK_KEY = "skill_remote_sync"
-        _LOCK_TTL = 300  # 5 分钟，每处理一个 skill 续期一次
-        if not acquire_lock(_LOCK_KEY, ttl=_LOCK_TTL):
-            logger.info("skill remote sync: lock contention, skip directory sync (another instance is running)")
+        token = _get_sync_token()
+        if not token:
+            logger.warning("skill sync: no GitCode token configured, skip remote sync")
         else:
-            try:
-                remote_skills_dir = os.path.join(repo_root, "skills")
-                if not os.path.isdir(remote_skills_dir):
-                    logger.warning("skill remote sync: skills/ directory not found in zip")
-                else:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                try:
+                    repo_root = await _download_repo_zip(client, token)
+                except Exception as e:
+                    logger.warning(f"skill sync: download repo zip failed: {e}")
+                    repo_root = None
+
+            if repo_root:
+                tmp_dir = repo_root
+
+                # 读远程 skill-description.json
+                remote_json_path = os.path.join(repo_root, "skill-description.json")
+                if os.path.exists(remote_json_path):
+                    with open(remote_json_path, "r", encoding="utf-8") as f:
+                        remote_data = json.load(f)
+
+                    # 合并到本地 json（远程覆盖本地，本地自定义保留）
+                    local_json_path = os.path.join(CONFIG_DIR, "skill-description.json")
+                    local_data = {}
+                    if os.path.exists(local_json_path):
+                        with open(local_json_path, "r", encoding="utf-8") as f:
+                            local_data = json.load(f)
+
+                    merged = dict(local_data)
                     for skill_name, info in remote_data.items():
-                        # 每处理一个 skill 续期一次，防止 47 个 skill 处理超过 TTL
-                        if not renew_lock(_LOCK_KEY, ttl=_LOCK_TTL):
-                            logger.warning("skill remote sync: lock lost during directory sync, aborting")
-                            break
-                        skill_path = info.get("path", skill_name)
-                        # 路径安全：拒绝含 ".." 或绝对路径的 skill_path
-                        if ".." in skill_path or skill_path.startswith("/"):
-                            logger.warning(f"skill remote sync: skip unsafe path '{skill_path}' for {skill_name}")
-                            continue
-                        remote_skill_dir = os.path.join(remote_skills_dir, skill_path)
-                        if not os.path.isdir(remote_skill_dir):
-                            continue
+                        if skill_name not in merged or merged[skill_name] != info:
+                            merged[skill_name] = info
+                            result["json_merged"] += 1
 
-                        local_skill_dir = os.path.join(SKILLS_DIR, skill_path)
+                    if result["json_merged"] > 0:
+                        tmp_path = local_json_path + ".tmp"
+                        with open(tmp_path, "w", encoding="utf-8") as f:
+                            json.dump(merged, f, ensure_ascii=False, indent=2)
+                        os.replace(tmp_path, local_json_path)
+                        logger.info(f"skill sync: merged {result['json_merged']} skills into local json")
+                else:
+                    remote_data = {}
+                    logger.warning("skill sync: skill-description.json not found in zip")
 
-                        # 算远程 hash
-                        remote_hash = _compute_skill_hash(remote_skill_dir)
-                        if not remote_hash:
-                            continue
+                # 同步 skill 文件目录（增量 hash 比对，分布式锁保护）
+                from src.lock import acquire_lock, release_lock, renew_lock
+                _LOCK_KEY = "skill_remote_sync"
+                _LOCK_TTL = 300
+                if not acquire_lock(_LOCK_KEY, ttl=_LOCK_TTL):
+                    logger.info("skill sync: lock contention, skip directory sync")
+                else:
+                    try:
+                        remote_skills_dir = os.path.join(repo_root, "skills")
+                        if os.path.isdir(remote_skills_dir) and remote_data:
+                            for skill_name, info in remote_data.items():
+                                if not renew_lock(_LOCK_KEY, ttl=_LOCK_TTL):
+                                    logger.warning("skill sync: lock lost during directory sync, aborting")
+                                    break
+                                skill_path = info.get("path", skill_name)
+                                if ".." in skill_path or skill_path.startswith("/"):
+                                    logger.warning(f"skill sync: skip unsafe path '{skill_path}' for {skill_name}")
+                                    continue
+                                remote_skill_dir = os.path.join(remote_skills_dir, skill_path)
+                                if not os.path.isdir(remote_skill_dir):
+                                    continue
+                                local_skill_dir = os.path.join(SKILLS_DIR, skill_path)
+                                remote_hash = _compute_skill_hash(remote_skill_dir)
+                                if not remote_hash:
+                                    continue
+                                local_hash = _compute_skill_hash(local_skill_dir)
+                                if remote_hash == local_hash:
+                                    result["dirs_skipped"] += 1
+                                    continue
+                                if os.path.isdir(local_skill_dir):
+                                    shutil.rmtree(local_skill_dir, ignore_errors=True)
+                                os.makedirs(os.path.dirname(local_skill_dir), exist_ok=True)
+                                shutil.copytree(remote_skill_dir, local_skill_dir, dirs_exist_ok=True)
+                                result["dirs_synced"] += 1
+                                logger.info(f"skill sync: synced directory {skill_name}")
+                    finally:
+                        release_lock(_LOCK_KEY)
 
-                        # 算本地 hash（目录不存在则空串）
-                        local_hash = _compute_skill_hash(local_skill_dir)
+                # 清理过期锁
+                from src.lock import cleanup_expired_locks
+                cleanup_expired_locks()
 
-                        if remote_hash == local_hash:
-                            result["dirs_skipped"] += 1
-                            continue
-
-                        # hash 变了或本地不存在 → 删除旧目录 → 拷贝新目录
-                        if os.path.isdir(local_skill_dir):
-                            shutil.rmtree(local_skill_dir, ignore_errors=True)
-                        os.makedirs(os.path.dirname(local_skill_dir), exist_ok=True)
-                        shutil.copytree(remote_skill_dir, local_skill_dir, dirs_exist_ok=True)
-                        result["dirs_synced"] += 1
-                        logger.info(f"skill remote sync: synced directory {skill_name}")
-            finally:
-                release_lock(_LOCK_KEY)
-
-        logger.info(
-            f"skill remote sync done: json_merged={result['json_merged']}, "
-            f"dirs_synced={result['dirs_synced']}, dirs_skipped={result['dirs_skipped']}"
-        )
+                logger.info(
+                    f"skill sync: remote done json_merged={result['json_merged']}, "
+                    f"dirs_synced={result['dirs_synced']}, dirs_skipped={result['dirs_skipped']}"
+                )
     except Exception as e:
-        logger.exception(f"skill remote sync failed: {e}")
+        logger.exception(f"skill sync: remote sync failed: {e}")
     finally:
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # 2. DB 同步：读本地 json → _sync_skills_to_db
+    try:
+        json_path = os.path.join(CONFIG_DIR, "skill-description.json")
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                result["db_synced"] = _sync_skills_to_db(json.load(f))
+    except Exception as e:
+        logger.exception(f"skill sync: DB sync failed: {e}")
+
+    # 3. OBS 同步：算 hash → 打包 → 上传
+    try:
+        obs_result = await sync_official_skills_to_obs()
+        result["obs_added"] = obs_result.get("added", 0)
+        result["obs_updated"] = obs_result.get("updated", 0)
+        result["obs_skipped"] = obs_result.get("skipped", 0)
+    except Exception as e:
+        logger.exception(f"skill sync: OBS sync failed: {e}")
 
     return result
 
@@ -337,32 +344,12 @@ async def sync_official_skills_from_remote() -> dict:
 async def _skill_sync_worker(interval: float = 1800.0):
     """定时同步 worker：启动即执行，之后每 interval 秒。
 
-    执行顺序：
-    1. 远程同步：下载 zip → 合并 json → 拷贝 skill 目录（失败不影响后续）
-    2. DB 同步：读本地 json → _sync_skills_to_db（只跑一次）
-    3. OBS 同步：算 hash → 打包 → 上传 OBS
+    调用 sync_official_skills() 完成完整同步：
+    远程下载 → DB 同步 → OBS 同步（每步独立 try/except）。
     """
     while True:
         try:
-            # 远程同步：失败不阻塞后续 DB + OBS 同步
-            try:
-                await sync_official_skills_from_remote()
-                # 清理过期分布式锁（防表膨胀）
-                from src.lock import cleanup_expired_locks
-                cleanup_expired_locks()
-            except Exception:
-                logger.exception("skill remote sync failed, continuing to DB+OBS sync")
-
-            # DB 同步统一在此处执行，避免远程同步和 OBS 同步重复调
-            try:
-                json_path = os.path.join(CONFIG_DIR, "skill-description.json")
-                if os.path.exists(json_path):
-                    with open(json_path, "r", encoding="utf-8") as f:
-                        _sync_skills_to_db(json.load(f))
-            except Exception:
-                logger.exception("skill DB sync failed, continuing to OBS sync")
-
-            await sync_official_skills_to_obs()
+            await sync_official_skills()
         except asyncio.CancelledError:
             logger.info("skill sync worker cancelled")
             raise
