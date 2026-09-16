@@ -236,6 +236,7 @@ function loadTasks() {
     }
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
     // Issue #175: 有待打开详情时不先渲染列表，避免列表闪现后立刻被详情覆盖
+    var _openedDetail = false;  // 跟踪本次 loadTasks 是否打开了详情页
     if (!window._pendingTaskDetailId && !window._pendingIssueNumber) {
       _render();
     }
@@ -246,6 +247,7 @@ function loadTasks() {
       var _match = _tasksAll.find(function(t) { return String(t.issue_number) === _pinNum; });
       if (_match) {
         _openBoardDetail(_match.id);
+        _openedDetail = true;
       } else if (window._taskDetailFromScene && window._taskDetailFromScene.latestSeq) {
         var _seq = window._taskDetailFromScene.latestSeq;
         window._taskDetailFromScene = null;
@@ -262,10 +264,11 @@ function loadTasks() {
       window._pendingTaskDetailId = null;
       if (window._tasksById && window._tasksById[pid]) {
         _openBoardDetail(pid);
+        _openedDetail = true;
       } else {
         _render();  // 任务不存在了，渲染列表
       }
-    } else if (!window._pendingIssueNumber) {
+    } else if (!_openedDetail) {
       // Issue #175: 普通列表刷新时清除详情页状态，防止 _withTaskLoading 误判在详情页。
       // 安全前提：_openBoardDetail 进入详情页时会 clearInterval 停止轮询（L325），
       // 所以轮询触发的 loadTasks 不会在详情页期间执行此清除。如未来改为详情页也保持轮询，需同步调整此处。
