@@ -643,6 +643,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                 agent_label=f"[Agent:chat|user:{user['username']}]",
+                repo_key=repo_key,
             ):
                 # 日志输出
                 if evt_type == "step_start":
@@ -885,6 +886,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
+                    repo_key=repo_key,
                 ):
                     # 日志输出（对齐 master 分支 im/handler.py）
                     if evt_type == "step_start":
@@ -1515,6 +1517,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     account=user["username"], user_token=gitcode_token,
                     agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
+                    repo_key=repo_key,
                 ):
                     if evt_type == "text":
                         text = data if isinstance(data, str) else (

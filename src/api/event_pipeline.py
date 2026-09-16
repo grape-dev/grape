@@ -2245,6 +2245,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             agent_name=agent_name,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}|engine:{inst_name}]",
             env_extra=env_extra,
+            repo_key=repo_key,
         ):
             # 写库兜底脱敏：即使上游 executor 已脱敏，此处再防御一次（agent 可能在 text/result 复述 token）
             _msg = str(data)[:500]

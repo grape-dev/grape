@@ -15,7 +15,7 @@ CONFIGS_DIR = os.path.join(ROOT, "configs")
 REQUIRED_REFS = [
     "workflow-harness-review.md",
     "findings-format.md",
-    "gitcode-api-reference.md",
+    "vcs-api-reference.md",
     "code-review-and-quality.md",
     "skill-review-and-quality.md",
     "pr-config-check.md",
@@ -70,7 +70,7 @@ class TestQaSkillConfig:
         cfg = _load_json("skill-description.json")
         assert "qa" in cfg
         assert cfg["qa"]["agent_type"] == "qa"
-        assert cfg["qa"]["path"] == "qa/qa"
+        assert cfg["qa"]["path"].endswith("/qa")  # 兼容 qa/qa 和 qa/code-quality/qa
 
     def test_agent_skill_mapping_qa_defaults_to_pr(self):
         # 默认场景 qa 映射为 pr；使用专属 skill 的场景（iac→iac-qa, skill-dev→skill-tester）例外

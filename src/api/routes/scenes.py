@@ -10,6 +10,25 @@ router = APIRouter(prefix="/api/scenes", tags=["scenes"])
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "agent-skill-mapping.json")
 
 
+def _resolve_repo_key(repo: str) -> str:
+    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(repo)
+    if ":" in repo:
+        return rk
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            c = _db.cursor()
+            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+                            (f"gitcode:{repo}", f"github:{repo}")).fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return rk
+
+
 def _load_scenes() -> dict:
     """读取 agent-skill-mapping.json 的场景配置（legacy fallback for apply）"""
     if not os.path.exists(_CONFIG_PATH):
@@ -23,15 +42,14 @@ def _load_scenes() -> dict:
 def list_scenes(user: dict = Depends(get_current_user_or_api_key), repo: str = ""):
     """返回所有可用场景列表（repo，不含 official）"""
     from src.api.pipeline_config import get_scenes
-    from src.repo_key import to_repo_key
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
     scenes = get_scenes(repo_key=repo_key)
@@ -49,12 +67,12 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
     from src.repo_key import to_repo_key
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
     scene_list = get_scenes(repo_key=repo_key)
@@ -155,12 +173,12 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     elif scope in ("repo",):
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
 
@@ -327,7 +345,7 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(require_no_s
     if not owner or not repo:
         return {"applied": False, "scene_name": ""}
 
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _resolve_repo_key(f"{owner}/{repo}")
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -365,7 +383,7 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
 
     # repo_key：优先用传入的（保留 provider 前缀），否则默认 gitcode:
     if not repo_key:
-        repo_key = to_repo_key(f"{owner}/{repo}")
+        repo_key = _resolve_repo_key(f"{owner}/{repo}")
     nodes_json = scene["nodes_json"]
     try:
         nodes = json.loads(nodes_json) if nodes_json else []
@@ -490,7 +508,7 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
         return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
 
     full_name = f"{gitcode_login}/{repo_name}"
-    repo_key = to_repo_key(full_name)
+    repo_key = _resolve_repo_key(full_name)
     user_id = user.get("id", 0)
 
     repo_exists = False
@@ -577,7 +595,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     already_exists = False
 
     # 查 managed_repos 里是否已托管
-    repo_key = to_repo_key(full_name)
+    repo_key = _resolve_repo_key(full_name)
     already_hosted = False
     repo_in_user_repos = False
     with db_lock:
@@ -626,7 +644,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
 
     # 创建/复用仓库级 devops_pipeline_scene（只与仓库关联，方案 B）
     # 幂等：同一仓库同一市场场景不重复创建（按 market_scene_id + repo_key 查重）
-    experience_repo_key = to_repo_key(full_name) if full_name else ""
+    experience_repo_key = _resolve_repo_key(full_name) if full_name else ""
     existing_scene_id = ""
     existing_row_id = 0
     with db_lock:
@@ -955,12 +973,12 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     # 获取 repo_key
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
     if not repo_key:
@@ -1125,12 +1143,12 @@ def check_scene_name(name: str, scope: str, user: dict = Depends(require_no_sess
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
 
@@ -1281,7 +1299,7 @@ def get_scene_detail(scene_id: str, user: dict = Depends(require_no_session_toke
     try:
         repo = app_current_repo()
         if repo:
-            repo_key = to_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
+            repo_key = _resolve_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
     except Exception:
         pass
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
@@ -1304,13 +1322,13 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
     repo_key = ""
     if repo:
         from src.repo_key import to_repo_key
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
                 from src.repo_key import to_repo_key
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
     user_id = str(user.get("id", ""))
@@ -1442,12 +1460,12 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持仓库级场景"})
 
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             repo_key = ""
     if not repo_key:
@@ -1481,12 +1499,12 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
 
@@ -1513,12 +1531,12 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
 
@@ -1542,7 +1560,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.user.db import get_bot_token_by_repo
     from src.api.session_store import upsert_agent_session
 
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _resolve_repo_key(f"{owner}/{repo}")
     cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{body.scene_id}' 不存在"})
@@ -1638,7 +1656,7 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     if not repo_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
 
@@ -1677,7 +1695,7 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     if not repo_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
 
