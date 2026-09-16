@@ -347,6 +347,9 @@ async def _skill_sync_worker(interval: float = 1800.0):
             # 远程同步：失败不阻塞后续 DB + OBS 同步
             try:
                 await sync_official_skills_from_remote()
+                # 清理过期分布式锁（防表膨胀）
+                from src.lock import cleanup_expired_locks
+                cleanup_expired_locks()
             except Exception:
                 logger.exception("skill remote sync failed, continuing to DB+OBS sync")
 
@@ -370,7 +373,7 @@ async def _skill_sync_worker(interval: float = 1800.0):
 
 def start_skill_sync_scheduler():
     """启动定时同步调度（任何模式都启动）。"""
-    interval = float(os.environ.get("SKILL_SYNC_INTERVAL", "1800"))
+    interval = max(float(os.environ.get("SKILL_SYNC_INTERVAL", "1800")), 60)
     t = asyncio.create_task(_skill_sync_worker(interval), name="skill-sync")
     _bg_tasks.add(t)
     t.add_done_callback(_bg_tasks.discard)

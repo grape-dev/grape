@@ -422,7 +422,7 @@ function _renderTagFilters() {
   var html = '';
   // "全部" 始终第一个
   var allOn = _activeTagFilter === 'all';
-  html += '<a class="skill-tag-filter' + (allOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'all\',\'\')" style="padding:5px 12px;font-size:11px;color:' + (allOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (allOn?'var(--a)':'var(--b)') + ';background:' + (allOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">全部</a>';
+  html += '<a class="skill-tag-filter' + (allOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'all\',\'\')" style="padding:5px 12px;font-size:11px;color:' + (allOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (allOn?'var(--a)':'var(--b)') + ';background:' + (allOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + (I18N.t('skills.all_categories')||'全部') + '</a>';
   tags.forEach(function(t) {
     var isOn = _activeTagFilterId === t.id;
     html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'' + _escapeHtml(t.label).replace(/'/g, "\\'") + '\',\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + (t.icon ? '<span style="margin-right:3px">' + _escapeHtml(t.icon) + '</span>' : '') + _escapeHtml(t.label) + '</a>';
