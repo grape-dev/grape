@@ -78,7 +78,7 @@ class TestPipelineTasksWithoutEvents:
         """tasks 有记录但 events 无记录 → has_tasks_without_events=True"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.api.deps import get_current_user
+        from src.api.deps import get_current_user, get_current_user_or_api_key
         from src.api.routes import tasks as tasks_mod
 
         # 在 tasks 表插入一条任务，但不创建 events
@@ -87,7 +87,8 @@ class TestPipelineTasksWithoutEvents:
             tasks_mod.ensure_issue_task(REPO, 100, title="Test Task", assignee="alice",
                                         event_type="issue_opened")
 
-        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "session_token"}
+        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "api_key"}
+        app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 1, "username": "tester", "auth_type": "api_key"}
         try:
             client = TestClient(app)
             r = client.get("/api/pipeline/owner/issue89-test")
@@ -103,7 +104,7 @@ class TestPipelineTasksWithoutEvents:
         """tasks 有记录且 events 也有记录 → has_tasks_without_events=False"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.api.deps import get_current_user
+        from src.api.deps import get_current_user, get_current_user_or_api_key
         from src.api.event_store import append_event
         from src.api.routes import tasks as tasks_mod
 
@@ -116,7 +117,8 @@ class TestPipelineTasksWithoutEvents:
         append_event(repo_key=REPO, event_type="issue_opened", title="Test Task 2",
                      issue_id="#101", agent_type="vod", status="completed")
 
-        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "session_token"}
+        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "api_key"}
+        app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 1, "username": "tester", "auth_type": "api_key"}
         try:
             client = TestClient(app)
             r = client.get("/api/pipeline/owner/issue89-test")

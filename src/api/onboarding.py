@@ -262,13 +262,19 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     - 完成层自愈：仅创建 `onboarded_task:{repo}:{type}` 未完成的任务；全部成功后置位总闸
     - 全部任务同步创建（同请求内完成），每个任务仅 1 条任务上下文消息
     """
-    from src.user.db import get_gitcode_token
     from src.api.routes.tasks import create_standard_task
+    from src.repo_key import parse_repo_key
+    _provider, _, _ = parse_repo_key(repo_key)
     task_defs = _load_onboarding_template(repo_key, template_id=template_id)
     if not task_defs:
         log.info(f"[Onboarding|repo:{repo_key}] 无 onboarding 任务模板，跳过")
         return
-    bot_token = get_gitcode_token(repo_key=repo_key) or ""
+    if _provider == "github":
+        from src.user.db import get_github_token
+        bot_token = get_github_token(repo_key=repo_key) or ""
+    else:
+        from src.user.db import get_gitcode_token
+        bot_token = get_gitcode_token(repo_key=repo_key) or ""
     if not bot_token:
         log.warning(f"[Onboarding|repo:{repo_key}] 无仓库 bot token，跳过 onboarding 任务创建")
         return
@@ -321,9 +327,15 @@ def retry_onboarding_task(repo_key: str, owner: str, task_type: str) -> dict:
         return {"ok": False, "reason": f"task type not in template: {task_type}"}
     if _task_done(repo_key, task_type):
         return {"ok": True, "reason": "task already complete, no retry needed"}
-    from src.user.db import get_gitcode_token
+    from src.repo_key import parse_repo_key
+    _provider, _, _ = parse_repo_key(repo_key)
     from src.api.routes.tasks import create_standard_task
-    bot_token = get_gitcode_token(repo_key=repo_key) or ""
+    if _provider == "github":
+        from src.user.db import get_github_token
+        bot_token = get_github_token(repo_key=repo_key) or ""
+    else:
+        from src.user.db import get_gitcode_token
+        bot_token = get_gitcode_token(repo_key=repo_key) or ""
     if not bot_token:
         return {"ok": False, "reason": "no repo bot token"}
     try:

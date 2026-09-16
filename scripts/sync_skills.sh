@@ -76,3 +76,8 @@ else
 fi
 
 echo "[sync-skills] done (${SKILLS_REPO}@${SKILLS_REF})"
+
+# ── VCS 多 provider 适配（兜底）──────────────────────────────────────
+# 将硬编码 GitCode 的 skill 文件转换为多 VCS provider 兼容格式。
+# 幂等：已适配的文件跳过。skills 仓库自行适配后此调用也无副作用。
+bash "$(dirname "$0")/adapt_skills_vcs.sh"

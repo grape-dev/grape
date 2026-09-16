@@ -209,10 +209,15 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(re
     # 从 GitCode Issue 补拉 agent 评论到新会话
     try:
         from src.api.event_pipeline import _sync_issue_comments_to_conversation
-        from src.user.db import get_gitcode_token
-        from src.repo_key import from_repo_key
+        from src.repo_key import from_repo_key, parse_repo_key
         _repo = from_repo_key(rk)
-        _token = get_gitcode_token(repo_key=rk) or ""
+        _provider, _, _ = parse_repo_key(rk)
+        if _provider == "github":
+            from src.user.db import get_github_token
+            _token = get_github_token(repo_key=rk) or ""
+        else:
+            from src.user.db import get_gitcode_token
+            _token = get_gitcode_token(repo_key=rk) or ""
         if _repo and _token:
             _sync_issue_comments_to_conversation(rk, body.issue_number, _token, repository=_repo)
     except Exception:
@@ -232,11 +237,16 @@ def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depen
     if not before and conv.get("conv_type") == "task" and conv.get("issue_number"):
         try:
             from src.api.event_pipeline import _sync_issue_comments_to_conversation
-            from src.user.db import get_gitcode_token
-            from src.repo_key import from_repo_key
+            from src.repo_key import from_repo_key, parse_repo_key
             _rk = conv.get("repo_key", "")
             _repo = from_repo_key(_rk) if _rk else ""
-            _token = get_gitcode_token(repo_key=_rk) or ""
+            _provider, _, _ = parse_repo_key(_rk) if _rk else ("gitcode", "", "")
+            if _provider == "github":
+                from src.user.db import get_github_token
+                _token = get_github_token(repo_key=_rk) or ""
+            else:
+                from src.user.db import get_gitcode_token
+                _token = get_gitcode_token(repo_key=_rk) or ""
             if _repo and _token:
                 _sync_issue_comments_to_conversation(_rk, conv["issue_number"], _token, repository=_repo)
         except Exception:
@@ -349,8 +359,14 @@ def _resolve_gitcode_token(conv: dict | None, conv_id: str, user_token: str, rep
         return cached
     if repo_key:
         try:
-            from src.user.db import get_gitcode_token
-            repo_tok = get_gitcode_token(repo_key=repo_key) or ""
+            from src.repo_key import parse_repo_key
+            _provider, _, _ = parse_repo_key(repo_key)
+            if _provider == "github":
+                from src.user.db import get_github_token
+                repo_tok = get_github_token(repo_key=repo_key) or ""
+            else:
+                from src.user.db import get_gitcode_token
+                repo_tok = get_gitcode_token(repo_key=repo_key) or ""
             if repo_tok:
                 log.warning(f"Chat resolve token: user token empty, fallback to repo token (repo={repo_key})")
                 return repo_tok
@@ -643,6 +659,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                 agent_label=f"[Agent:chat|user:{user['username']}]",
+                repo_key=repo_key,
             ):
                 # 日志输出
                 if evt_type == "step_start":
@@ -885,6 +902,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
+                    repo_key=repo_key,
                 ):
                     # 日志输出（对齐 master 分支 im/handler.py）
                     if evt_type == "step_start":
@@ -1515,6 +1533,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     account=user["username"], user_token=gitcode_token,
                     agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
+                    repo_key=repo_key,
                 ):
                     if evt_type == "text":
                         text = data if isinstance(data, str) else (

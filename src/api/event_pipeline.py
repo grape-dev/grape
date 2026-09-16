@@ -390,7 +390,7 @@ def resolve_issue_id(payload: dict) -> str:
     return ""
 
 
-def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
+def resolve_pr_issue_id(payload: dict, api_token: str = "", repo_key: str = "") -> str:
     """从 PR 事件 payload 解析关联的 Issue 编号。
     优先级：payload 标题 #N → 分支名 issue-N → 同步调 PR 详情 API。
     """
@@ -430,8 +430,15 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
                 repo_path = repo.get("full_name", "")
         if repo_path and "/" in repo_path:
             try:
-                url = f"https://gitcode.com/api/v5/repos/{repo_path}/pulls/{pr_number}"
-                req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_token}"})
+                if _is_github_repo(repo_key):
+                    url = f"https://api.github.com/repos/{repo_path}/pulls/{pr_number}"
+                    hdrs = {"Authorization": f"Bearer {api_token}",
+                            "Accept": "application/vnd.github+json",
+                            "User-Agent": "Grape-DevOps"}
+                else:
+                    url = f"https://gitcode.com/api/v5/repos/{repo_path}/pulls/{pr_number}"
+                    hdrs = {"Authorization": f"Bearer {api_token}"}
+                req = urllib.request.Request(url, headers=hdrs)
                 data = json.loads(urllib.request.urlopen(req, timeout=10).read())
                 # title / head.ref
                 issue = _extract_issue_id_from_text(str(data.get("title", "")))
@@ -492,7 +499,7 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
 
     # 解析关联 issue_id：PR 类事件优先用 title/分支提取（无需 token），Issue 类用 payload 字段
     if event_type in PR_EVENT_TYPES:
-        issue_id = resolve_pr_issue_id(payload) or resolve_issue_id(payload) or ""
+        issue_id = resolve_pr_issue_id(payload, repo_key=repo_key) or resolve_issue_id(payload) or ""
     else:
         issue_id = resolve_issue_id(payload) or ""
     if not issue_id:
@@ -745,7 +752,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     _pre_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
     if not _pre_issue_id and event_type in PR_EVENT_TYPES:
         try:
-            _pre_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}) or ""
+            _pre_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}, repo_key=repo_key) or ""
         except Exception:
             pass
 
@@ -1058,7 +1065,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     _issue_scene_uid = 0
     _early_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
     if not _early_issue_id and event_type in PR_EVENT_TYPES:
-        _early_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}) or ""
+        _early_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}, repo_key=repo_key) or ""
     if _early_issue_id:
         try:
             from src.api.session_store import get_issue_scene
@@ -1148,7 +1155,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         try:
             from src.user.db import get_agent_bot_token
             _pr_api_token = get_agent_bot_token(repo_key) or ""
-            _pr_issue = resolve_pr_issue_id(payload, _pr_api_token)
+            _pr_issue = resolve_pr_issue_id(payload, _pr_api_token, repo_key=repo_key)
             if _pr_issue:
                 issue_id = _pr_issue
                 log.info(f"Pipeline: PR 关联 Issue -> {issue_id}")
@@ -1984,8 +1991,14 @@ def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
         if _num:
             _token = ""
             try:
-                from src.user.db import get_gitcode_token
-                _token = get_gitcode_token(repo_key=repo_key) or ""
+                from src.repo_key import parse_repo_key
+                _provider, _, _ = parse_repo_key(repo_key)
+                if _provider == "github":
+                    from src.user.db import get_github_token
+                    _token = get_github_token(repo_key=repo_key) or ""
+                else:
+                    from src.user.db import get_gitcode_token
+                    _token = get_gitcode_token(repo_key=repo_key) or ""
             except Exception:
                 pass
             repogit.remove_issue_worktree_if_pushed(repo_key, agent_type, _num, token=_token)
@@ -2234,6 +2247,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             agent_name=agent_name,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}|engine:{inst_name}]",
             env_extra=env_extra,
+            repo_key=repo_key,
         ):
             # 写库兜底脱敏：即使上游 executor 已脱敏，此处再防御一次（agent 可能在 text/result 复述 token）
             _msg = str(data)[:500]
@@ -2459,12 +2473,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _parent_num = _issue_num_from(_parent)
                 _sub_num = _issue_num_from(issue_id)
                 if _parent_num and _sub_num:
-                    _post_subtask_completion_to_parent(repository, _sub_num, _parent_num, result_text, repo_gitcode_token)
+                    _post_subtask_completion_to_parent(repository, _sub_num, _parent_num, result_text, repo_gitcode_token, repo_key=repo_key)
                     # 检查所有子任务是否全部完成
                     _subs = get_subtask_issues(repo_key, _parent)
                     _all_done = all(s.get("stage") == "done" or s.get("issue_id") == issue_id for s in _subs)
                     if _all_done and len(_subs) > 0:
-                        _post_all_subtasks_done(repository, _parent_num, _subs, repo_gitcode_token)
+                        _post_all_subtasks_done(repository, _parent_num, _subs, repo_gitcode_token, repo_key=repo_key)
         except Exception as _e:
             log.warning(f"Subtask completion post failed: {_e}")
 
@@ -2603,7 +2617,7 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
 
 
 def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, parent_issue_num: str,
-                                        result_text: str, bot_token: str):
+                                        result_text: str, bot_token: str, repo_key: str = ""):
     """子任务完成后，在父 Issue 评论登记完成情况。"""
     try:
         import urllib.request, json as _json
@@ -2612,17 +2626,23 @@ def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, pare
         _summary = (_out.get("conclusion", "") if _out else "") or result_text[:200]
         _comment = f"### \u5b50\u4efb\u52a1 #{sub_issue_num} \u5df2\u5b8c\u6210\n\n{_summary}\n\n---\n\u5b50\u4efb\u52a1\u6d41\u6c34\u7ebf\u5df2\u5168\u90e8\u5b8c\u6210\u3002"
         _comment += "\n<!-- grape-auto-comment -->"
-        _data = _json.dumps({"body": _comment}).encode("utf-8")
-        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
-        _req = urllib.request.Request(_url, data=_data,
-            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
-        urllib.request.urlopen(_req, timeout=15)
+        if _is_github_repo(repo_key):
+            from src.repo_key import split_owner_repo
+            _owner, _repo = split_owner_repo(repo_key)
+            _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
+        else:
+            _data = _json.dumps({"body": _comment}).encode("utf-8")
+            _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
+            _req = urllib.request.Request(_url, data=_data,
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(_req, timeout=15)
         log.info(f"Subtask #{sub_issue_num} completion posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post subtask completion failed: {e}")
 
 
-def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: list, bot_token: str):
+def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: list, bot_token: str,
+                            repo_key: str = ""):
     """所有子任务完成后，在父 Issue 发汇总报告。"""
     try:
         import urllib.request, json as _json
@@ -2635,11 +2655,16 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
         _lines.append(f"\n\u7236\u4efb\u52a1 #{parent_issue_num} \u7684\u6240\u6709\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\u3002")
         _comment = "\n".join(_lines)
         _comment += "\n<!-- grape-auto-comment -->"
-        _data = _json.dumps({"body": _comment}).encode("utf-8")
-        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
-        _req = urllib.request.Request(_url, data=_data,
-            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
-        urllib.request.urlopen(_req, timeout=15)
+        if _is_github_repo(repo_key):
+            from src.repo_key import split_owner_repo
+            _owner, _repo = split_owner_repo(repo_key)
+            _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
+        else:
+            _data = _json.dumps({"body": _comment}).encode("utf-8")
+            _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
+            _req = urllib.request.Request(_url, data=_data,
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(_req, timeout=15)
         log.info(f"All subtasks done summary posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post all subtasks done failed: {e}")

@@ -33,8 +33,9 @@ def _fake_user():
 @pytest.fixture(scope="module")
 def client():
     from src.api.main import app
-    from src.api.deps import get_current_user
+    from src.api.deps import get_current_user, get_current_user_or_api_key
     app.dependency_overrides[get_current_user] = _fake_user
+    app.dependency_overrides[get_current_user_or_api_key] = _fake_user
     yield TestClient(app)
     app.dependency_overrides.clear()
 

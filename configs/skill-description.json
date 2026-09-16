@@ -2,316 +2,330 @@
   "skill-creator": {
     "name": "华为云Skill创建生成器",
     "agent_type": "coding",
-    "path": "coding/skill-creator",
-    "description": "按需求自动创建华为云 skill：查重 → 读取 Spec → CLI/SDK/OpenAPI 三级调研 → 骨架生成 → 自测 → 创建 PR → A2A 交棒 QA Agent 测试",
-    "sub_scene": "scaffolding"
+    "sub_scene": "scaffolding",
+    "path": "coding/scaffolding/huawei-cloud-skill-creator",
+    "description": "按需求自动创建华为云 skill：查重 → 读取 Spec → CLI/SDK/OpenAPI 三级调研 → 骨架生成 → 自测 → 创建 PR → A2A 交棒 QA Agent 测试"
   },
   "skill-tester": {
     "name": "华为云Skill测试验证",
     "agent_type": "qa",
-    "path": "qa/skill-tester",
-    "description": "skill 功能验证（创建后 QA 门控）：跑 skill 验证功能正确性 + 规范脚本化检查（frontmatter/文件结构）+ gitleaks 密钥扫描（安全）——输出 Issue 报告 + PR 评论（✅ 通过 / 🔴 失败+原因）。测试通过后调合并脚本 + A2A 交棒 SRE Agent",
-    "sub_scene": "auto-testing"
+    "sub_scene": "auto-testing",
+    "path": "qa/auto-testing/huawei-cloud-skill-tester",
+    "description": "skill 功能验证（创建后 QA 门控）：跑 skill 验证功能正确性 + 规范脚本化检查（frontmatter/文件结构）+ gitleaks 密钥扫描（安全）——输出 Issue 报告 + PR 评论（✅ 通过 / 🔴 失败+原因）。测试通过后调合并脚本 + A2A 交棒 SRE Agent"
+  },
+  "common-skill-creator": {
+    "name": "通用 Skill 创建生成器",
+    "agent_type": "coding",
+    "sub_scene": "scaffolding",
+    "path": "coding/scaffolding/common-skill-creator",
+    "description": "按需求创建通用 Agent Skill（五阶段流水线）：需求分析（Socratic 问答）→ 设计 → 生成 → 校验（Spec 规范 + 动态通用 lint 规则）→ 评估驱动迭代，产出合规 Skill 包。适用于任意领域，华为云专属场景用 huawei-cloud-skill-creator"
+  },
+  "common-skill-tester": {
+    "name": "通用 Skill 三合一测试器",
+    "agent_type": "qa",
+    "sub_scene": "auto-testing",
+    "path": "qa/auto-testing/common-skill-tester",
+    "description": "通用 Skill 三合一测试（QA 门控）：Lint 规范检查 + 功能测试 + 安全审计（恶意代码/CWE）。三套规范动态拉取，Critical/P0/CRITICAL 一票否决，三套评分 ≥95 才通过，输出组合报告"
   },
   "vod": {
     "name": "开发者声音分析",
     "agent_type": "vod",
-    "path": "vod/vod",
-    "description": "开发者声音分析：构建项目知识基线，从 Issue/飞书收集反馈，多轮引导收敛为清晰需求并建 Issue；接管 issue_opened 审视，澄清后 A2A 交办 Issue Agent",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "vod/feedback-loop/vod",
+    "description": "开发者声音分析：构建项目知识基线，从 Issue/飞书收集反馈，多轮引导收敛为清晰需求并建 Issue；接管 issue_opened 审视，澄清后 A2A 交办 Issue Agent"
   },
   "issue": {
     "name": "Issue 管理",
     "agent_type": "issue",
-    "path": "issue/issue",
-    "description": "Issue 全生命周期管理：分类、打标签、指派人、设置里程碑、关联 PR、回复评论",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "issue/feedback-loop/issue",
+    "description": "Issue 全生命周期管理：分类、打标签、指派人、设置里程碑、关联 PR、回复评论"
   },
   "issue-advance": {
     "name": "Issue 高级运营",
     "agent_type": "issue",
-    "path": "issue/issue-advance",
-    "description": "Issue 高级运营（增强版）：项目知识基线（codegraph）→ 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "issue/feedback-loop/issue-advance",
+    "description": "Issue 高级运营（增强版）：项目知识基线（codegraph）→ 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发"
   },
   "issue-multitask": {
     "name": "Issue 运营 v2（单任务+多任务）",
     "agent_type": "issue",
-    "path": "issue/issue-multitask",
-    "description": "Issue 全生命周期运营（单任务深度运营 + 多任务拆分，统一技能）：项目知识基线 → 深度可开发性分析 → 标签/分配 → Spec 生成 → A2A 触发开发。需求复杂时自动拆分子 Issue 并行/串行执行；子任务走快速通道跳过分析直接 A2A 交办 coding。",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "issue/feedback-loop/issue-multitask",
+    "description": "Issue 全生命周期运营（单任务深度运营 + 多任务拆分，统一技能）：项目知识基线 → 深度可开发性分析 → 标签/分配 → Spec 生成 → A2A 触发开发。需求复杂时自动拆分子 Issue 并行/串行执行；子任务走快速通道跳过分析直接 A2A 交办 coding。"
   },
   "implementation": {
     "name": "代码实现",
     "agent_type": "coding",
-    "path": "coding/implementation",
-    "description": "代码实现与 PR 创建：分析问题、制定方案、编码实现、提交 PR",
-    "sub_scene": "ai-coding-review"
+    "sub_scene": "ai-coding-review",
+    "path": "coding/ai-coding-review/implementation",
+    "description": "代码实现与 PR 创建：分析问题、制定方案、编码实现、提交 PR"
   },
   "pr": {
     "name": "PR 管理",
     "agent_type": "qa",
-    "path": "qa/pr",
-    "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作",
-    "sub_scene": "code-quality"
+    "sub_scene": "code-quality",
+    "path": "qa/code-quality/pr",
+    "description": "Pull Request 全流程管理：关联 Issue、代码审查、安全扫描、合并操作"
   },
   "qa": {
     "name": "PR 审查与工作流质量审查",
     "agent_type": "qa",
-    "path": "qa/qa",
-    "description": "pr 技能的平替与增强：PR 全流程审查 + Agent Work Loop 五维工作流审查（任务理解/受控执行/变更验证/可靠交付/经验沉淀）",
-    "sub_scene": "code-quality"
+    "sub_scene": "code-quality",
+    "path": "qa/code-quality/qa",
+    "description": "pr 技能的平替与增强：PR 全流程审查 + Agent Work Loop 五维工作流审查（任务理解/受控执行/变更验证/可靠交付/经验沉淀）"
   },
   "impact-analysis": {
     "name": "PR 影响范围评估",
     "agent_type": "qa",
-    "path": "qa/impact-analysis",
-    "description": "qa 技能的增强超集：PR 全生命周期审查 + 工作流五维审查 + 影响范围评估（解析 git diff → codegraph 追溯调用链 → 匹配测试用例 → 风险评级），补齐 5 轴审查之外的影响面评估视角",
-    "sub_scene": "code-quality"
+    "sub_scene": "code-quality",
+    "path": "qa/code-quality/impact-analysis",
+    "description": "qa 技能的增强超集：PR 全生命周期审查 + 工作流五维审查 + 影响范围评估（解析 git diff → codegraph 追溯调用链 → 匹配测试用例 → 风险评级），补齐 5 轴审查之外的影响面评估视角"
   },
   "skill-pr": {
     "name": "技能仓库 PR 审查",
     "agent_type": "qa",
-    "path": "qa/skill-pr",
-    "description": "技能仓库专有 PR 审查：校验自定义技能格式、质量检查",
-    "sub_scene": "code-quality"
+    "sub_scene": "code-quality",
+    "path": "qa/code-quality/skill-pr",
+    "description": "技能仓库专有 PR 审查：校验自定义技能格式、质量检查"
   },
   "build-debug": {
     "name": "构建调试",
     "agent_type": "sre",
-    "path": "sre/build-debug",
-    "description": "构建失败诊断：分析构建日志、识别常见错误模式、修复编译问题",
-    "sub_scene": "ci"
+    "sub_scene": "ci",
+    "path": "sre/ci/build-debug",
+    "description": "构建失败诊断：分析构建日志、识别常见错误模式、修复编译问题"
   },
   "cloud-deploy": {
     "name": "云部署",
     "agent_type": "sre",
-    "path": "sre/cloud-deploy",
-    "description": "云部署：SSH 登录服务器、拉取代码、重启服务、健康检查",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "sre/app-release/cloud-deploy",
+    "description": "云部署：SSH 登录服务器、拉取代码、重启服务、健康检查"
   },
   "deploy-guard": {
     "name": "部署安全审查",
     "agent_type": "sre",
-    "path": "sre/deploy-guard",
-    "description": "部署前安全合规检查：审核代码变更、检查配置、验证部署条件",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "sre/app-release/deploy-guard",
+    "description": "部署前安全合规检查：审核代码变更、检查配置、验证部署条件"
   },
   "changelog-gen": {
     "name": "变更日志生成",
     "agent_type": "sre",
-    "path": "sre/changelog-gen",
-    "description": "基于 commit 历史自动生成 CHANGELOG",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "sre/app-release/changelog-gen",
+    "description": "基于 commit 历史自动生成 CHANGELOG"
   },
   "incident-triage": {
     "name": "事件分诊",
     "agent_type": "sre",
-    "path": "sre/incident-triage",
-    "description": "生产事件分诊与定级：判断影响范围、确定优先级、触发应急响应",
-    "sub_scene": "observability"
+    "sub_scene": "observability",
+    "path": "sre/observability/incident-triage",
+    "description": "生产事件分诊与定级：判断影响范围、确定优先级、触发应急响应"
   },
   "im-notify": {
     "name": "IM 通知",
     "agent_type": "chat",
-    "path": "chat/im-notify",
-    "description": "仓库事件监控与飞书通知：Issue 指派、PR 审查、部署结果等",
-    "sub_scene": "im"
+    "sub_scene": "im",
+    "path": "chat/im/im-notify",
+    "description": "仓库事件监控与飞书通知：Issue 指派、PR 审查、部署结果等"
   },
   "chat": {
     "name": "对话助手",
     "agent_type": "chat",
-    "path": "chat/chat",
-    "description": "IM 对话处理：判断话题相关性、决定是否回复、能力边界管理",
-    "sub_scene": "im"
+    "sub_scene": "im",
+    "path": "chat/im/chat",
+    "description": "IM 对话处理：判断话题相关性、决定是否回复、能力边界管理"
   },
   "repo-onboarding": {
     "name": "首次托管引导",
     "agent_type": "vod",
-    "path": "vod/repo-onboarding",
-    "description": "首次托管引导（VOD Agent 执行）：建立项目知识基线，按引导目标创建「快速部署体验」或「探索方向引导」单个 Issue",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "vod/feedback-loop/repo-onboarding",
+    "description": "首次托管引导（VOD Agent 执行）：建立项目知识基线，按引导目标创建「快速部署体验」或「探索方向引导」单个 Issue"
   },
   "skill-publish": {
     "name": "skill 发布",
     "agent_type": "sre",
-    "path": "sre/skill-publish",
-    "description": "将 skill 发布/下架到外部平台（ClawHub/GitHub/GitCode）：幂等探测 → bump 重试（≤3 次）→ 多平台发布/下架 → 校验 → 汇总回复。ClawHub 支持组织发布（ownerHandle，可选）；403/404/401 严格区分，防止误判",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "sre/app-release/skill-publish",
+    "description": "将 skill 发布/下架到外部平台（ClawHub/GitHub/GitCode）：幂等探测 → bump 重试（≤3 次）→ 多平台发布/下架 → 校验 → 汇总回复。ClawHub 支持组织发布（ownerHandle，可选）；403/404/401 严格区分，防止误判"
   },
   "huawei-cloud": {
     "name": "华为云技能包",
     "agent_type": "sre",
-    "path": "sre/huawei-cloud",
-    "description": "华为云综合管理技能包（22 个子技能）：ECS 弹性云服务器、VPC 虚拟私有云、OBS 对象存储、CCE 云容器引擎、IAM 统一身份认证、RDS 关系型数据库、GaussDB、APIG、WAF、NAT 等",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "sre/app-release/huawei-cloud",
+    "description": "华为云综合管理技能包（22 个子技能）：ECS 弹性云服务器、VPC 虚拟私有云、OBS 对象存储、CCE 云容器引擎、IAM 统一身份认证、RDS 关系型数据库、GaussDB、APIG、WAF、NAT 等"
   },
   "wan-video-generation": {
     "name": "视频生成",
     "agent_type": "coding",
-    "path": "coding/wan-video-generation",
-    "description": "视频/媒体生成：通过 ModelArts MaaS Wan2.2-T2V-A14B 文生视频 + Edge TTS + FFmpeg 合成带中文旁白的短视频",
-    "sub_scene": "ai-coding-review"
+    "sub_scene": "ai-coding-review",
+    "path": "coding/ai-coding-review/wan-video-generation",
+    "description": "视频/媒体生成：通过 ModelArts MaaS Wan2.2-T2V-A14B 文生视频 + Edge TTS + FFmpeg 合成带中文旁白的短视频"
   },
   "qwen-image-generation": {
     "name": "图片生成",
     "agent_type": "coding",
-    "path": "coding/qwen-image-generation",
-    "description": "图片生成：通过 ModelArts MaaS qwen-image 模型批量生成主题配图，支持城市介绍、产品展示、景点宣传等场景",
-    "sub_scene": "ai-coding-review"
+    "sub_scene": "ai-coding-review",
+    "path": "coding/ai-coding-review/qwen-image-generation",
+    "description": "图片生成：通过 ModelArts MaaS qwen-image 模型批量生成主题配图，支持城市介绍、产品展示、景点宣传等场景"
   },
   "ai-blog-generation": {
     "name": "AI 博客生成",
     "agent_type": "coding",
-    "path": "coding/ai-blog-generation",
-    "description": "AI 博客生成：学习参考文章样式 → 生成图文博客 → AI 配图 + AI 视频 + 部署/发布。适合技术专栏、产品介绍等场景",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "coding/app-release/ai-blog-generation",
+    "description": "AI 博客生成：学习参考文章样式 → 生成图文博客 → AI 配图 + AI 视频 + 部署/发布。适合技术专栏、产品介绍等场景"
   },
   "blog-vod": {
     "name": "博客需求精细化引导",
     "agent_type": "vod",
-    "path": "vod/blog-vod",
-    "description": "博客需求精细化引导：通过结构化问卷引导用户完整描述博客需求（主题、风格、配图、视频、结构等），输出高质量需求摘要供 Issue/Coding Agent 继承",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "vod/feedback-loop/blog-vod",
+    "description": "博客需求精细化引导：通过结构化问卷引导用户完整描述博客需求（主题、风格、配图、视频、结构等），输出高质量需求摘要供 Issue/Coding Agent 继承"
   },
   "blog-publish": {
     "name": "博客系统发布",
     "agent_type": "sre",
-    "path": "sre/blog-publish",
-    "description": "博客系统 API 发布：通过 Blog System API 发布/更新/删除文章，管理标签、评论、说说、留言",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "sre/app-release/blog-publish",
+    "description": "博客系统 API 发布：通过 Blog System API 发布/更新/删除文章，管理标签、评论、说说、留言"
   },
   "skill-issue": {
     "name": "Skill Issue 运营",
     "agent_type": "issue",
-    "path": "issue/skill-issue",
-    "description": "Issue 运营（skill-dev 专用）：项目知识基线 → 深度可开发性分析 → Spec 生成 → 危险场景识别 → 用户确认 → A2A 触发开发",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "issue/feedback-loop/skill-issue",
+    "description": "Issue 运营（skill-dev 专用）：项目知识基线 → 深度可开发性分析 → Spec 生成 → 危险场景识别 → 用户确认 → A2A 触发开发"
   },
   "rest-api-skill-creator": {
-    "name": "通用Skill创建生成器",
+    "name": "通用REST API skill生成器",
     "agent_type": "coding",
-    "path": "coding/rest-api-skill-creator",
-    "description": "按需求自动创建 REST API 管理 skill：查重 → 读取 Spec → OpenAPI/文档/基础信息三级调研 → 骨架生成 → 自测 → 创建 PR → A2A 交棒 QA Agent 测试。通用不限目标系统",
-    "sub_scene": "scaffolding"
+    "sub_scene": "scaffolding",
+    "path": "coding/scaffolding/rest-api-skill-creator",
+    "description": "按需求自动创建 REST API 管理 skill：查重 → 读取 Spec → OpenAPI/文档/基础信息三级调研 → 骨架生成 → 自测 → 创建 PR → A2A 交棒 QA Agent 测试。通用不限目标系统"
   },
   "rest-api-skill-tester": {
-    "name": "通用Skill测试验证",
+    "name": "通用REST API skill功能验证",
     "agent_type": "qa",
-    "path": "qa/rest-api-skill-tester",
-    "description": "REST API skill 功能验证（QA 门控）：凭据/地址检测（项目知识优先）→ 跑 skill 验证 + 规范检查（生成质量6项）→ Issue 报告 + PR 评论 → A2A 交棒 SRE Agent 发布",
-    "sub_scene": "auto-testing"
+    "sub_scene": "auto-testing",
+    "path": "qa/auto-testing/rest-api-skill-tester",
+    "description": "REST API skill 功能验证（QA 门控）：凭据/地址检测（项目知识优先）→ 跑 skill 验证 + 规范检查（生成质量6项）→ Issue 报告 + PR 评论 → A2A 交棒 SRE Agent 发布"
   },
   "blog-manager": {
     "name": "博客系统管理",
     "agent_type": "sre",
-    "path": "sre/blog-manager",
-    "description": "封装 Blog System REST API 的管理 skill，提供文章/标签/用户/评论/留言/说说/上传/健康检查共 8 模块 28 个子命令的命令行能力",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "sre/app-release/blog-manager",
+    "description": "封装 Blog System REST API 的管理 skill，提供文章/标签/用户/评论/留言/说说/上传/健康检查共 8 模块 28 个子命令的命令行能力"
   },
   "iac-vod": {
     "name": "IaC 需求分析",
     "agent_type": "vod",
-    "path": "vod/iac-vod",
-    "description": "IaC 场景开发者声音分析：收集基础设施需求，聚类分析共性诉求，提炼价值需求，自动创建 Issue 推进改进",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "vod/feedback-loop/iac-vod",
+    "description": "IaC 场景开发者声音分析：收集基础设施需求，聚类分析共性诉求，提炼价值需求，自动创建 Issue 推进改进"
   },
   "iac-issue": {
     "name": "IaC Issue 运营",
     "agent_type": "issue",
-    "path": "issue/iac-issue",
-    "description": "IaC Issue 高级运营：分类、标签管理、负责人指派、Spec 生成。通过 A2A 协议触发 Coding Agent 进行基础设施开发交付",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "issue/feedback-loop/iac-issue",
+    "description": "IaC Issue 高级运营：分类、标签管理、负责人指派、Spec 生成。通过 A2A 协议触发 Coding Agent 进行基础设施开发交付"
   },
   "blog-issue": {
     "name": "博客 Issue 运营",
     "agent_type": "issue",
-    "path": "issue/blog-issue",
-    "description": "Issue 高级运营（博客增强版）：保留 issue-advance 全部能力，增加博客场景分流→博客 Spec→A2A coding(ai-blog-generation)→A2A sre(blog-publish)",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "issue/feedback-loop/blog-issue",
+    "description": "Issue 高级运营（博客增强版）：保留 issue-advance 全部能力，增加博客场景分流→博客 Spec→A2A coding(ai-blog-generation)→A2A sre(blog-publish)"
   },
   "iac-coding": {
     "name": "IaC 代码实现",
     "agent_type": "coding",
-    "path": "coding/iac-coding",
-    "description": "IaC 代码实现与 PR 创建：Terraform 配置编写、fmt/init/validate、提交 PR。禁止执行 terraform apply/destroy（SRE 职责）",
-    "sub_scene": "ai-coding-review"
+    "sub_scene": "ai-coding-review",
+    "path": "coding/ai-coding-review/iac-coding",
+    "description": "IaC 代码实现与 PR 创建：Terraform 配置编写、fmt/init/validate、提交 PR。禁止执行 terraform apply/destroy（SRE 职责）"
   },
   "iac-qa": {
     "name": "IaC 质量审查",
     "agent_type": "qa",
-    "path": "qa/iac-qa",
-    "description": "IaC QA 审查：代码审查、terraform plan 审查、安全检查。通过 A2A 协议被 Coding Agent 调用执行审查",
-    "sub_scene": "code-quality"
+    "sub_scene": "code-quality",
+    "path": "qa/code-quality/iac-qa",
+    "description": "IaC QA 审查：代码审查、terraform plan 审查、安全检查。通过 A2A 协议被 Coding Agent 调用执行审查"
   },
   "iac-sre": {
     "name": "IaC 部署运维",
     "agent_type": "sre",
-    "path": "sre/iac-sre",
-    "description": "IaC 基础设施部署与运维：Terraform 部署执行（init/plan/apply）、资源验证、资源清单输出、OBS 状态管理、部署故障排查",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "sre/app-release/iac-sre",
+    "description": "IaC 基础设施部署与运维：Terraform 部署执行（init/plan/apply）、资源验证、资源清单输出、OBS 状态管理、部署故障排查"
   },
   "os-disk-list": {
     "name": "系统磁盘列表",
     "agent_type": "sre",
-    "path": "sre/os-disk-list",
-    "description": "枚举当前系统所有挂载硬盘列表，输出设备名/挂载点/文件系统类型/总容量/已用容量",
-    "sub_scene": "log-diagnostics"
+    "sub_scene": "log-diagnostics",
+    "path": "sre/log-diagnostics/os-disk-list",
+    "description": "枚举当前系统所有挂载硬盘列表，输出设备名/挂载点/文件系统类型/总容量/已用容量"
   },
   "event-dialogue": {
     "name": "事件对话",
     "agent_type": "vod",
-    "path": "vod/event-dialogue",
-    "description": "以事件为锚点与用户就 DevOps Agent 处理结果进行多轮对话：解释处理逻辑、沉淀共享知识、触发流程干预（暂停/回退/重新派发）",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "vod/feedback-loop/event-dialogue",
+    "description": "以事件为锚点与用户就 DevOps Agent 处理结果进行多轮对话：解释处理逻辑、沉淀共享知识、触发流程干预（暂停/回退/重新派发）"
   },
   "runtime-install": {
     "name": "引擎安装配置",
     "agent_type": "sre",
-    "path": "sre/runtime-install",
-    "description": "安装、配置和注册 hermes/opencode/codearts 运行时引擎到 Grape 系统，包括自定义 API 端点和模型配置",
-    "sub_scene": "container-deploy"
+    "sub_scene": "container-deploy",
+    "path": "sre/container-deploy/runtime-install",
+    "description": "安装、配置和注册 hermes/opencode/codearts 运行时引擎到 Grape 系统，包括自定义 API 端点和模型配置"
   },
   "vod-cli": {
     "name": "开发者声音分析（CLI 版）",
     "agent_type": "vod",
-    "path": "vod/vod-cli",
-    "description": "开发者声音分析（CLI 版）：构建项目知识基线，从 Issue/飞书收集反馈，多轮引导收敛为清晰需求并建 Issue。全部操作使用 grape CLI 命令",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "vod/feedback-loop/vod-cli",
+    "description": "开发者声音分析（CLI 版）：构建项目知识基线，从 Issue/飞书收集反馈，多轮引导收敛为清晰需求并建 Issue。全部操作使用 grape CLI 命令"
   },
   "coding-cli": {
     "name": "代码实现（CLI 版）",
     "agent_type": "coding",
-    "path": "coding/coding-cli",
-    "description": "代码实现与 PR 创建/优化（CLI 版）：被 issue skill 调用执行新开发，或按 PR skill 审查意见优化 PR 代码实现。全部操作使用 grape CLI 命令行（含 grape git）",
-    "sub_scene": "ai-coding-review"
+    "sub_scene": "ai-coding-review",
+    "path": "coding/ai-coding-review/coding-cli",
+    "description": "代码实现与 PR 创建/优化（CLI 版）：被 issue skill 调用执行新开发，或按 PR skill 审查意见优化 PR 代码实现。全部操作使用 grape CLI 命令行（含 grape git）"
   },
   "issue-cli": {
     "name": "Issue 高级运营（CLI 版）",
     "agent_type": "issue",
-    "path": "issue/issue-cli",
-    "description": "Issue 高级运营（CLI 版）：项目知识基线 → 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发。全部操作使用 grape CLI 命令",
-    "sub_scene": "feedback-loop"
+    "sub_scene": "feedback-loop",
+    "path": "issue/feedback-loop/issue-cli",
+    "description": "Issue 高级运营（CLI 版）：项目知识基线 → 深度可开发性分析 → 分类/标签/分配 → Spec 生成 → A2A 触发开发。全部操作使用 grape CLI 命令"
   },
   "qa-cli": {
     "name": "PR 审查与工作流质量审查（CLI 版）",
     "agent_type": "qa",
-    "path": "qa/qa-cli",
-    "description": "pr 技能的平替与增强（CLI 版）：PR 全流程审查 + Agent Work Loop 五维工作流审查（任务理解/受控执行/变更验证/可靠交付/经验沉淀）。全部操作使用 grape CLI 命令",
-    "sub_scene": "code-quality"
+    "sub_scene": "code-quality",
+    "path": "qa/code-quality/qa-cli",
+    "description": "pr 技能的平替与增强（CLI 版）：PR 全流程审查 + Agent Work Loop 五维工作流审查（任务理解/受控执行/变更验证/可靠交付/经验沉淀）。全部操作使用 grape CLI 命令"
   },
   "chat-cli": {
     "name": "对话助手（CLI 版）",
     "agent_type": "chat",
-    "path": "chat/chat-cli",
-    "description": "IM 对话处理（CLI 版）：场景识别（task/inquiry/implementation-start）+ 能力边界管理。GitCode 操作使用 grape CLI 命令",
-    "sub_scene": "im"
+    "sub_scene": "im",
+    "path": "chat/im/chat-cli",
+    "description": "IM 对话处理（CLI 版）：场景识别（task/inquiry/implementation-start）+ 能力边界管理。GitCode 操作使用 grape CLI 命令"
   },
   "deploy-cli": {
     "name": "云部署（CLI 版）",
     "agent_type": "sre",
-    "path": "sre/deploy-cli",
-    "description": "华为云部署（CLI 版）：A2A 直连部署或 PR 合并全流程构建→部署→验证，自动识别构建方式并用 hcloud CLI 部署验证。Grape/GitCode 操作使用 grape CLI",
-    "sub_scene": "app-release"
+    "sub_scene": "app-release",
+    "path": "sre/app-release/deploy-cli",
+    "description": "华为云部署（CLI 版）：A2A 直连部署或 PR 合并全流程构建→部署→验证，自动识别构建方式并用 hcloud CLI 部署验证。Grape/GitCode 操作使用 grape CLI"
   }
 }

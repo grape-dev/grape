@@ -15,7 +15,7 @@ CONFIGS_DIR = os.path.join(ROOT, "configs")
 REQUIRED_REFS = [
     "workflow-harness-review.md",
     "findings-format.md",
-    "gitcode-api-reference.md",
+    "vcs-api-reference.md",
     "code-review-and-quality.md",
     "skill-review-and-quality.md",
     "pr-config-check.md",
@@ -70,14 +70,16 @@ class TestQaSkillConfig:
         cfg = _load_json("skill-description.json")
         assert "qa" in cfg
         assert cfg["qa"]["agent_type"] == "qa"
-        assert cfg["qa"]["path"] == "qa/qa"
+        assert cfg["qa"]["path"].endswith("/qa")  # 兼容 qa/qa 和 qa/code-quality/qa
 
     def test_agent_skill_mapping_qa_defaults_to_pr(self):
         # 默认场景 qa 映射为 pr；使用专属 skill 的场景（iac→iac-qa, skill-dev→skill-tester）例外
         EXPECTED_QA = {"iac": "iac-qa", "skill-dev": "skill-tester", "api-skill-dev": "rest-api-skill-tester"}
         cfg = _load_json("agent-skill-mapping.json")
         for scene, info in cfg["scenes"].items():
-            qa_skill = info["mapping"]["qa"]
+            qa_skill = info["mapping"].get("qa", "")
+            if not qa_skill:
+                continue  # hello-world 等精简场景不含 qa
             expected = EXPECTED_QA.get(scene, "pr")
             assert qa_skill == expected, f"scene '{scene}' qa should be '{expected}', got '{qa_skill}'"
 
@@ -169,7 +171,7 @@ class TestQaSkillPrompt:
             "payload": {"pull_request": {"number": 1, "title": "t", "body": "b"}},
             "account": "owner/repo",
         }
-        prompt = pb.build_prompt(evt, [], "", ["qa"])
+        prompt = pb.build_devops_agent_prompt(evt, [], "", ["qa"])
         # 新版：skill 通过 SKILL.md 路径引用注入（agent 运行时读取），prompt 应包含 Skill 指引
         assert "## Skill: qa" in prompt
         assert "SKILL.md" in prompt

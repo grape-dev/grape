@@ -298,11 +298,19 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
     # 获取 main HEAD sha（用于刷新判定）
     try:
         import urllib.request
-        from src.user.db import get_gitcode_token
-        tok = token or get_gitcode_token(repo_key=repo_key) or ""
+        from src.repo_key import parse_repo_key
+        _provider, _, _ = parse_repo_key(repo_key)
+        if _provider == "github":
+            from src.user.db import get_github_token
+            tok = token or get_github_token(repo_key=repo_key) or ""
+            _api_base = "https://api.github.com"
+        else:
+            from src.user.db import get_gitcode_token
+            tok = token or get_gitcode_token(repo_key=repo_key) or ""
+            _api_base = "https://gitcode.com/api/v5"
         if tok:
             req = urllib.request.Request(
-                f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                f"{_api_base}/repos/{owner}/{rname}/commits?per_page=1",
                 headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
             import json as _json
             commits = _json.load(urllib.request.urlopen(req, timeout=20))
@@ -384,13 +392,20 @@ def should_refresh(repo_key: str) -> bool:
     if last_sha:
         try:
             import urllib.request, json as _json
-            from src.user.db import get_gitcode_token
-            from src.repo_key import split_owner_repo
-            tok = get_gitcode_token(repo_key=repo_key) or ""
+            from src.repo_key import split_owner_repo, parse_repo_key
+            _provider, _, _ = parse_repo_key(repo_key)
+            if _provider == "github":
+                from src.user.db import get_github_token
+                tok = get_github_token(repo_key=repo_key) or ""
+                _api_base = "https://api.github.com"
+            else:
+                from src.user.db import get_gitcode_token
+                tok = get_gitcode_token(repo_key=repo_key) or ""
+                _api_base = "https://gitcode.com/api/v5"
             if tok:
                 owner, rname = split_owner_repo(repo_key)
                 req = urllib.request.Request(
-                    f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                    f"{_api_base}/repos/{owner}/{rname}/commits?per_page=1",
                     headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
                 commits = _json.load(urllib.request.urlopen(req, timeout=20))
                 if commits and commits[0].get("sha", "") != last_sha:

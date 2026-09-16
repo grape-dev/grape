@@ -174,6 +174,26 @@ def _fetch_gitcode_collaborators(owner: str, repo: str, api_token: str) -> list:
     return collabs
 
 
+def _fetch_github_collaborators(owner: str, repo: str, api_token: str) -> list:
+    """分页拉取 GitHub 仓库协作者（同步 urllib，快速场景）。"""
+    collabs = []
+    import urllib.request
+    page = 1
+    while True:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{owner}/{repo}/collaborators?per_page=100&page={page}",
+            headers={"Authorization": f"Bearer {api_token}",
+                     "Accept": "application/vnd.github+json",
+                     "User-Agent": "Grape-DevOps"},
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        if not data:
+            break
+        collabs.extend(data)
+        page += 1
+    return collabs
+
+
 class FeishuAsync:
     """纯异步飞书API客户端 — 基于 aiohttp，无阻塞调用"""
 
@@ -669,43 +689,51 @@ class FeishuAsync:
 
     async def sync_repo_feishu_mapping(self, ctx: BotContext, repo_key: str,
                                        chat_id: str) -> int:
-        """异步同步群成员 ↔ GitCode 协作者映射（repo_key 带平台前缀）。
+        """异步同步群成员 ↔ VCS 协作者映射（repo_key 带平台前缀）。
 
         等价值于旧同步 feishu.sync_repo_feishu_mapping（feishu.py:360-418）：
           - members = await self.get_chat_members(ctx, chat_id)
-          - api_token = get_bot_token_by_repo(owner, repo) or 全局 bot token 兜底
-          - GitCode 协作者分页拉取（同步 urllib，快速场景）→ 按昵称匹配写 unified_user_mapping
+          - api_token = 按平台分流获取（GitHub → get_github_token，GitCode → get_bot_token_by_repo / 全局）
+          - 协作者分页拉取（按平台选 API）→ 按昵称匹配写 unified_user_mapping
         """
         members = await self.get_chat_members(ctx, chat_id)
         if not members:
             return 0
 
-        from src.repo_key import split_owner_repo, to_repo_key
+        from src.repo_key import split_owner_repo, to_repo_key, parse_repo_key
         owner, repo = split_owner_repo(repo_key)
         if not owner or not repo:
             return 0
         repo_key = to_repo_key(repo_key)
+        provider, _, _ = parse_repo_key(repo_key)
 
-        # 从 managed_repos 获取 repo 绑定的 Bot Token；无则用全局 bot token 兜底
-        from src.user.db import get_bot_token_by_repo
-        api_token = get_bot_token_by_repo(owner, repo)
-        if not api_token:
-            try:
-                import json as _json, os as _os
-                _gbt_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                                          "..", "..", "configs", "global-bot-token.json")
-                if _os.path.exists(_gbt_path):
-                    with open(_gbt_path, "r", encoding="utf-8") as _f:
-                        _gbt = _json.load(_f)
-                    api_token = _gbt.get("gitcode_api_token", "") or ""
-            except Exception:
-                pass
+        # 按 provider 分流获取 token
+        if provider == "github":
+            from src.user.db import get_github_token
+            api_token = get_github_token(repo_key=repo_key) or ""
+        else:
+            from src.user.db import get_bot_token_by_repo
+            api_token = get_bot_token_by_repo(owner, repo)
+            if not api_token:
+                try:
+                    import json as _json, os as _os
+                    _gbt_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                                              "..", "..", "configs", "global-bot-token.json")
+                    if _os.path.exists(_gbt_path):
+                        with open(_gbt_path, "r", encoding="utf-8") as _f:
+                            _gbt = _json.load(_f)
+                        api_token = _gbt.get("gitcode_api_token", "") or ""
+                except Exception:
+                    pass
         if not api_token:
             log.warning(f"[{ctx.name}] sync mapping: no bot token for {repo_key}, skipping")
             return 0
 
         try:
-            collabs = _fetch_gitcode_collaborators(owner, repo, api_token)
+            if provider == "github":
+                collabs = _fetch_github_collaborators(owner, repo, api_token)
+            else:
+                collabs = _fetch_gitcode_collaborators(owner, repo, api_token)
         except Exception as e:
             log.warning(f"[{ctx.name}] sync mapping: failed to fetch collaborators for {repo_key}: {e}")
             return 0
@@ -713,8 +741,9 @@ class FeishuAsync:
         from src.session_manager import update_unified_user_info
         matched = 0
         for collab in collabs:
-            nick = collab.get("nick_name", "")
-            login = collab.get("username", "")
+            # GitCode 协作者字段: nick_name/username；GitHub: login/name
+            nick = collab.get("nick_name", "") or collab.get("login", "")
+            login = collab.get("username", "") or collab.get("login", "")
             if not nick or not login:
                 continue
             for m in members:
