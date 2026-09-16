@@ -489,3 +489,7 @@ BWRAP_RW_ENGINE = {
 
 
 
+
+# ===== Admin Console =====
+ADMIN_CONSOLE_URL = os.environ.get("ADMIN_CONSOLE_URL", "").rstrip("/")
+ADMIN_BETA_APPLY_API_KEY = os.environ.get("ADMIN_BETA_APPLY_API_KEY", "")

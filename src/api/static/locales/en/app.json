@@ -39,6 +39,7 @@
   "login": {
     "gitcode_login": "Sign in with GitCode",
     "github_login": "Sign in with GitHub",
+    "beta_apply": "Apply for Beta",
     "pwd_login": "← Sign in with username",
     "username": "Username",
     "password": "Password",

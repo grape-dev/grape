@@ -1101,3 +1101,35 @@ def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_sessi
     except Exception:
         pass
     return {"message": "规则已删除"}
+
+
+# ===== 内测申请代理（转发到 Admin Console）=====
+class BetaApplyBody(BaseModel):
+    accountType: str
+    accountName: str
+    email: str = ""
+    reason: str = ""
+
+
+@router.post("/beta-apply/submit")
+def beta_apply_submit(body: BetaApplyBody):
+    """第三方内测申请提交——转发到 Admin Console 的 /api/admin/beta-apply/submit。"""
+    import httpx
+    from src.config import ADMIN_CONSOLE_URL, ADMIN_BETA_APPLY_API_KEY
+    if not ADMIN_CONSOLE_URL:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "内测申请服务未配置"})
+    if not ADMIN_BETA_APPLY_API_KEY:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "内测申请服务未配置"})
+    try:
+        resp = httpx.post(
+            f"{ADMIN_CONSOLE_URL}/api/admin/beta-apply/submit",
+            headers={"X-API-Key": ADMIN_BETA_APPLY_API_KEY, "Content-Type": "application/json"},
+            json={"accountType": body.accountType, "accountName": body.accountName,
+                  "email": body.email, "reason": body.reason},
+            timeout=10.0
+        )
+        return resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail={"code": 504, "message": "内测申请服务超时"})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"内测申请服务不可达: {e}"})

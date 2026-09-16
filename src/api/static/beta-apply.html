@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Grape — 申请内测</title>
+<link rel="icon" type="image/png" href="/static/logo-64.png">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:radial-gradient(ellipse at 20% 50%,#162240 0%,#0c1222 60%);min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#fff;border-radius:20px;padding:40px;width:440px;max-width:90vw;box-shadow:0 12px 48px rgba(0,0,0,0.2)}
+.logo{text-align:center;margin-bottom:28px}
+.logo img{width:72px;height:72px;border-radius:18px}
+.logo h1{color:#1d1d1f;font-size:22px;font-weight:700;margin-top:12px}
+.logo p{color:#86868b;font-size:13px;margin-top:4px}
+.field{margin-bottom:16px}
+.field label{display:block;font-size:12px;color:#5b667b;margin-bottom:6px;font-weight:500}
+.field .req{color:#dc2828}
+.field input,.field select,.field textarea{width:100%;padding:11px 14px;border:1px solid #e3e6ee;border-radius:10px;font-size:14px;background:#fff;color:#1d1d1f;outline:none;transition:border-color .2s;font-family:inherit}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:#3168e0}
+.field textarea{resize:vertical;min-height:80px}
+.btn{width:100%;padding:14px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px;transition:transform .15s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,0.3)}
+.btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
+.toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:12px 24px;border-radius:10px;font-size:14px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.2);display:none}
+.toast.show{display:block}
+.success-overlay{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .3s}
+.success-overlay.show{opacity:1}
+.success-box{background:#fff;border-radius:20px;padding:40px;text-align:center;width:380px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25);transform:scale(.9);transition:transform .3s}
+.success-overlay.show .success-box{transform:scale(1)}
+.success-icon{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#34c759,#30d158);margin:0 auto 20px;display:flex;align-items:center;justify-content:center}
+.success-icon svg{width:32px;height:32px;fill:#fff}
+.success-box h2{font-size:20px;font-weight:700;color:#1d1d1f;margin-bottom:8px}
+.success-box p{font-size:14px;color:#86868b;line-height:1.6;margin-bottom:24px}
+.success-box .count{font-size:13px;color:#86868b;margin-bottom:20px}
+.success-btn{width:100%;padding:13px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:transform .15s}
+.success-btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,0.3)}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <img src="/static/logo-128.png" alt="Grape">
+    <h1>Grape</h1>
+    <p>Multi-Agent DevOps · 申请内测</p>
+  </div>
+  <div class="field">
+    <label>平台 <span class="req">*</span></label>
+    <select id="platform">
+      <option value="gitcode">GitCode</option>
+      <option value="github">GitHub</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>用户名 <span class="req">*</span></label>
+    <input id="accountName" type="text" placeholder="GitCode 或 GitHub 用户名">
+  </div>
+  <div class="field">
+    <label>联系方式 <span class="req">*</span></label>
+    <input id="email" type="text" placeholder="邮箱或手机号">
+  </div>
+  <div class="field">
+    <label>申请理由</label>
+    <textarea id="reason" rows="3" placeholder="选填"></textarea>
+  </div>
+  <button class="btn" id="submitBtn" onclick="submitForm()">提交申请</button>
+</div>
+<div class="toast" id="toast"></div>
+<div class="success-overlay" id="successOverlay" style="display:none">
+  <div class="success-box">
+    <div class="success-icon">
+      <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+    </div>
+    <h2>申请已提交</h2>
+    <p>您的内测申请已成功提交，请等待审核。</p>
+    <div class="count" id="redirectCount">3 秒后自动跳转到 Grape 主页...</div>
+    <button class="success-btn" onclick="window.location.href='/'">立即进入 Grape</button>
+  </div>
+</div>
+<script>
+function showToast(msg) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(function() { t.classList.remove('show'); }, 3000);
+}
+function showSuccess() {
+  var overlay = document.getElementById('successOverlay');
+  overlay.style.display = 'flex';
+  setTimeout(function() { overlay.classList.add('show'); }, 10);
+  var count = 3;
+  var countEl = document.getElementById('redirectCount');
+  var timer = setInterval(function() {
+    count--;
+    if (count <= 0) {
+      clearInterval(timer);
+      window.location.href = '/';
+    } else {
+      countEl.textContent = count + ' 秒后自动跳转到 Grape 主页...';
+    }
+  }, 1000);
+}
+function submitForm() {
+  var accountType = document.getElementById('platform').value;
+  var accountName = document.getElementById('accountName').value.trim();
+  var email = document.getElementById('email').value.trim();
+  var reason = document.getElementById('reason').value.trim();
+  if (!accountName) { showToast('请填写用户名'); return; }
+  if (!email) { showToast('请填写联系方式'); return; }
+  var btn = document.getElementById('submitBtn');
+  btn.disabled = true; btn.textContent = '提交中...';
+  fetch('/api/settings/beta-apply/submit', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({accountType: accountType, accountName: accountName, email: email, reason: reason})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.detail && d.detail.message) {
+      showToast(d.detail.message);
+      btn.disabled = false; btn.textContent = '提交申请';
+    } else if (d.success || d.id) {
+      showSuccess();
+    } else {
+      showToast(d.message || '申请已提交');
+      btn.disabled = false; btn.textContent = '提交申请';
+    }
+  }).catch(function(e) {
+    showToast('提交失败: ' + e);
+    btn.disabled = false; btn.textContent = '提交申请';
+  });
+}
+</script>
+</body>
+</html>
