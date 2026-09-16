@@ -6,6 +6,8 @@
 
 ## GET /api/knowledge/content — 读取知识内容
 
+> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）。
+
 | Query | `repo_key`、`scope`（project/issue/issue_agent）、`issue_num`（可选）、`agent_type`（可选）、`filename`（可选） |
 | 出参 | `{filename, content}` 或 `[{filename, content}]` |
 | 返回 | 200；403 越权；404 |
@@ -13,6 +15,8 @@
 ---
 
 ## GET /api/knowledge/context — 获取知识上下文
+
+> scope（x-token-scope）：**dual**（三通道）。
 
 | Query | `repo_key`、`scope`、`issue_num`（可选）、`agent_type`（可选） |
 | 出参 | `{knowledge.md: "...", project_info: {...}}`（合并上下文） |

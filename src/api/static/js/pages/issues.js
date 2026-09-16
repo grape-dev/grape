@@ -213,26 +213,41 @@ function loadTasks() {
   const repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
   _loadTasksSortPref(repoKey);
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
-  // Issue #72: 「仓库全部」视图调用 /tasks/repo/{owner}/{repo}（不限 user_id）
+  // 「仓库全部」视图统一走 /issues/{owner}/{repo}（归一，见 issues-list-merge-design.md）
   let apiUrl;
   if (_tasksViewMode === 'repo_all' && repo) {
-    apiUrl = '/tasks/repo/' + repo.owner + '/' + repo.name +
+    apiUrl = '/issues/' + repo.owner + '/' + repo.name +
              '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode;
     if (_taskFilterAssignees.length) {
       apiUrl += '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(','));
     }
   } else {
-    apiUrl = '/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
+    apiUrl = '/issues/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
              '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
              (_taskFilterAssignees.length ? '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '');
   }
   API.get(apiUrl).then(d => {
     if (window._currentView !== 'tasks') return;  // stale guard
-    _tasksAll = d.tasks || [];
+    _tasksAll = d.issues || d.tasks || [];
     // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
     if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
     _render();
+    // Issue #166: 从场景详情页流水线跳转来时，按 issue_number 匹配并打开需求详情
+    if (window._pendingIssueNumber) {
+      var _pinNum = window._pendingIssueNumber;
+      window._pendingIssueNumber = null;
+      var _match = _tasksAll.find(function(t) { return String(t.issue_number) === _pinNum; });
+      if (_match) {
+        _openBoardDetail(_match.id);
+      } else if (window._taskDetailFromScene && window._taskDetailFromScene.latestSeq) {
+        var _seq = window._taskDetailFromScene.latestSeq;
+        window._taskDetailFromScene = null;
+        app.nav('event', _seq);
+      } else {
+        window._taskDetailFromScene = null;
+      }
+    }
     // 从事件详情页返回时，自动打开对应任务详情
     if (window._pendingTaskDetailId) {
       var pid = window._pendingTaskDetailId;
@@ -302,10 +317,17 @@ window._openBoardDetail = function(taskId) {
   // 暂停轮询——防止详情页被 loadTasks() 覆盖
   if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
   // 先渲染基本详情，然后异步加载流水线
+  // Issue #166: 从场景详情页进入时，返回按钮回到场景详情页
+  var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
+  var _backAction = 'loadTasks()';
+  if (window._taskDetailFromScene) {
+    _backLabel = '← ' + (I18N.t('dashboard.scene_detail')||'场景详情');
+    _backAction = "window._taskDetailFromScene=null;window.history.back()";
+  }
   el.innerHTML = `
   <div style="padding:0;max-width:720px;margin:0 auto">
     <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
-      <button class="tsk-btn tsk-btn-ghost" onclick="loadTasks()" style="padding:6px 14px">← ${I18N.t('tasks.back_to_board')||'返回看板'}</button>
+      <button class="tsk-btn tsk-btn-ghost" onclick="${_backAction}" style="padding:6px 14px">${_backLabel}</button>
       <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
@@ -321,7 +343,7 @@ window._openBoardDetail = function(taskId) {
   // 异步加载附件列表（_detailHtml 渲染后 DOM 才有 _taskAttachmentsList）
   _loadTaskAttachments(t.id);
   // 异步加载流水线信息
-  API.get('/tasks/' + taskId + '/pipeline').then(function(data) {
+  API.get('/issues/' + taskId + '/pipeline').then(function(data) {
     _renderPipelineSection(data);
   }).catch(function() {
     document.getElementById('_boardPipelineSection').innerHTML = '';
@@ -348,6 +370,8 @@ window._jumpToPipeline = function(nodeId) {
 // 点击流水线节点 → 跳转到该节点最新事件详情页
 window._jumpToNodeEvent = function(seq) {
   if (!seq) { console.warn('jumpToNodeEvent: no seq'); return; }
+  // Issue #166: 清除场景来源标记，避免从事件页返回任务详情时错误回退到场景页
+  window._taskDetailFromScene = null;
   // 存储来源任务上下文，供事件详情页返回使用
   const t = window._currentDetailTask;
   // 始终赋值（无任务时置 null），避免非任务来源进入事件页时残留旧标志
@@ -885,7 +909,7 @@ function _detailHtml(t) {
 }
 
 function _loadTaskAttachments(taskId) {
-  API.get('/tasks/' + taskId + '/attachments').then(function(data) {
+  API.get('/issues/' + taskId + '/attachments').then(function(data) {
     var list = document.getElementById('_taskAttachmentsList');
     if (!list) return;
     var atts = data.attachments || [];
@@ -926,7 +950,7 @@ function _onTaskAttachSelect(fileInput, taskId) {
   formData.append('file', fileInput.files[0]);
   var list = document.getElementById('_taskAttachmentsList');
   if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">上传中...</div>';
-  fetch('/api/tasks/' + taskId + '/attachments', {
+  fetch('/api/issues/' + taskId + '/attachments', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
     body: formData
@@ -941,7 +965,7 @@ function _onTaskAttachSelect(fileInput, taskId) {
 
 function _deleteTaskAttach(taskId, filename) {
   if (!confirm('确认删除附件？')) return;
-  fetch('/api/tasks/attachments/' + filename + '?task_id=' + taskId, {
+  fetch('/api/issues/' + taskId + '/attachments/' + filename, {
     method: 'DELETE',
     headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
   }).then(function(r) { return r.json(); }).then(function() {
@@ -951,66 +975,7 @@ function _deleteTaskAttach(taskId, filename) {
   });
 }
 
-// ===== 创建弹窗附件上传 =====
-let _createAttachments = [];
-
-function _onCreateAttachSelect(fileInput) {
-  if (!fileInput.files || !fileInput.files[0]) return;
-  var repo = app.currentRepo();
-  var repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
-  var file = fileInput.files[0];
-  var formData = new FormData();
-  formData.append('file', file);
-  var container = document.getElementById('tcCreateAttachments');
-  var loading = document.createElement('div');
-  loading.style.cssText = 'font-size:11px;color:#888;padding:4px 8px;background:rgba(0,113,227,.06);border-radius:6px';
-  loading.textContent = '上传中...';
-  container.appendChild(loading);
-  fetch('/api/tasks/attachments/pre-upload?repo_key=' + encodeURIComponent(repoKey), {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
-    body: formData
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    loading.remove();
-    if (d.error) { alert('上传失败: ' + d.error); return; }
-    _createAttachments.push({filename: d.filename, safe_name: d.safe_name, size: d.size, url: d.url});
-    _renderCreateAttachments();
-  }).catch(function(e) {
-    loading.remove();
-    alert('上传失败: ' + e.message);
-  });
-  fileInput.value = '';
-}
-
-function _renderCreateAttachments() {
-  var container = document.getElementById('tcCreateAttachments');
-  if (!container) return;
-  if (_createAttachments.length === 0) { container.innerHTML = ''; return; }
-  container.innerHTML = _createAttachments.map(function(a, i) {
-    return '<div style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;background:rgba(0,113,227,.06);border-radius:6px;font-size:11px">'
-      + '<span>📎 ' + a.filename + '</span>'
-      + '<span style="color:#888">' + _formatSize(a.size) + '</span>'
-      + '<button onclick="_removeCreateAttach(' + i + ')" style="margin-left:2px;color:#ff3b30;background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px">✕</button>'
-      + '</div>';
-  }).join('');
-}
-
-function _removeCreateAttach(idx) {
-  var a = _createAttachments[idx];
-  if (!a) return;
-  var repo = app.currentRepo();
-  var repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
-  fetch('/api/tasks/attachments/pre-upload/' + a.safe_name + '?repo_key=' + encodeURIComponent(repoKey), {
-    method: 'DELETE',
-    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
-  }).then(function() {
-    _createAttachments.splice(idx, 1);
-    _renderCreateAttachments();
-  }).catch(function() {
-    _createAttachments.splice(idx, 1);
-    _renderCreateAttachments();
-  });
-}
+// ===== 创建弹窗附件上传（已移除：附件统一走 /api/issues/{issue_id}/attachments）=====
 
 function _renderTaskActionsInline(t) {
   const _status = t.status || '';
@@ -1072,7 +1037,7 @@ window.confirmTaskDone = function(taskId, event) {
     message: I18N.t('tasks.confirm_done_message'),
     confirmText: I18N.t('tasks.confirm_done'),
     onConfirm: function() {
-      API.post('/tasks/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}).then(() => {
+      API.post('/issues/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}).then(() => {
         app.showToast(I18N.t('tasks.task_done_toast'));
       }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
     }
@@ -1086,7 +1051,7 @@ window.cancelTask = function(taskId, event) {
     confirmText: I18N.t('tasks.cancel_task'),
     danger: true,
     onConfirm: function() {
-      API.post('/tasks/' + taskId + '/cancel').then(() => {
+      API.post('/issues/' + taskId + '/cancel').then(() => {
         app.showToast(I18N.t('tasks.task_cancelled_toast'));
       }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
     }
@@ -1094,7 +1059,7 @@ window.cancelTask = function(taskId, event) {
 };
 
 window.resumeTask = function(taskId) {
-  API.post('/tasks/' + taskId + '/resume').then(() => {
+  API.post('/issues/' + taskId + '/resume').then(() => {
     app.showToast(I18N.t('tasks.task_resumed_toast'));
   }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
 };
@@ -1108,7 +1073,7 @@ function openTaskConversation(t) {
   const param = issueNum && repoKey ? 'issue:' + issueNum + ':' + repoKey : (t && t.conversation_id || undefined);
   const go = () => app.nav('chat', param);
   if (t && t.id && t.status === 'active') {
-    API.post('/tasks/' + t.id + '/start').then(d => {
+    API.post('/issues/' + t.id + '/start').then(d => {
       if (window._tasksById[t.id] && d && d.status) { window._tasksById[t.id].status = d.status; }
       go();
     }).catch(() => go());
@@ -1124,7 +1089,6 @@ function openTaskCreateModal() {
   const repo = app.currentRepo();
   const defaultRepo = repo ? repo.fullName : '';
   if (_taskCreateModal) _taskCreateModal.remove();
-  _createAttachments = [];
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
   // 异步加载可用场景列表
@@ -1146,15 +1110,6 @@ function openTaskCreateModal() {
         <select id="tcCreateScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
       </label>
       <div style="font-size:11px;color:#888">${I18N.t('tasks.create.assignee_hint')}</div>
-      <div style="display:flex;flex-direction:column;gap:4px;color:#333">
-        <span style="font-size:12px">附件 <span style="font-size:11px;color:#888">（可选，创建 Issue 时同步附加）</span></span>
-        <div id="tcCreateAttachments" style="display:flex;flex-wrap:wrap;gap:6px;min-height:30px"></div>
-        <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3;width:fit-content" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          添加附件
-          <input type="file" style="display:none" onchange="_onCreateAttachSelect(this)">
-        </label>
-      </div>
       <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
@@ -1229,7 +1184,7 @@ function createTaskSubmit() {
 }
 
 function changeTaskStatus(taskId, status) {
-  API.put('/tasks/' + taskId + '/status', {status: status})
+  API.put('/issues/' + taskId + '/status', {status: status})
     .then(() => loadTasks())
     .catch(e => {
       const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);

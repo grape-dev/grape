@@ -171,7 +171,7 @@ class TestQaSkillPrompt:
             "payload": {"pull_request": {"number": 1, "title": "t", "body": "b"}},
             "account": "owner/repo",
         }
-        prompt = pb.build_prompt(evt, [], "", ["qa"])
+        prompt = pb.build_devops_agent_prompt(evt, [], "", ["qa"])
         # 新版：skill 通过 SKILL.md 路径引用注入（agent 运行时读取），prompt 应包含 Skill 指引
         assert "## Skill: qa" in prompt
         assert "SKILL.md" in prompt

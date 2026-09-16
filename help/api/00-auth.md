@@ -56,7 +56,7 @@ GET /api/...?access_token=<api_key>
 |----|------|-----------|------|
 | **user_only** | `require_no_session_token` | `grape_` API Key / Web JWT；`tk_` → **403** | 账户/平台管理（settings/skills/scenes 管理/chat/runtime/agents/devstage/dashboard/pipeline/search/feishu/task-logs + 用户操作类） |
 | **session_only** | `get_current_user_or_api_key` + 体内强制 | 仅 `tk_`；API Key / JWT → **403** | Git 仓库透传（`/api/git-repo`）+ CLI git-credential/workspace |
-| **dual** | `get_current_user_or_api_key` | 三通道全放行 | 开放读/执行（tasks mine/start/status/complete、issues、knowledge 读、events detail、scenes list、a2a） |
+| **dual** | `get_current_user_or_api_key` | 三通道全放行 | 开放读/执行（issues 仓库列表/详情/事件、complete、knowledge 读、events detail、scenes list、a2a） |
 
 > 三通道传法完全一致：`Authorization: Bearer` / `PRIVATE-TOKEN` / `?access_token=`；
 > 能否通过取决于 **token 前缀**（`grape_` API Key / `tk_` 会话 / JWT），与传输通道无关。
