@@ -1,94 +1,101 @@
 {
- "scenes": {
-  "default": {
-   "name": "通用开发",
-   "mapping": {
-    "vod": "vod",
-    "issue": "issue-advance",
-    "coding": "implementation",
-    "qa": "pr",
-    "sre": "cloud-deploy"
-   }
-  },
-  "cloud-native": {
-   "name": "云原生开发",
-   "mapping": {
-    "vod": "vod",
-    "issue": "issue-advance",
-    "coding": "implementation",
-    "qa": "pr",
-    "sre": "cloud-deploy"
-   }
-  },
-  "iac": {
-   "name": "IaC开发",
-   "mapping": {
-    "vod": "iac-vod",
-    "issue": "iac-issue",
-    "coding": "iac-coding",
-    "qa": "iac-qa",
-    "sre": "iac-sre"
-   }
-  },
-  "agent-dev": {
-   "name": "Agent开发",
-   "mapping": {
-    "vod": "vod",
-    "issue": "issue-advance",
-    "coding": "implementation",
-    "qa": "pr",
-    "sre": "cloud-deploy"
-   }
-  },
-  "skill-dev": {
-   "name": "华为云Skill开发",
-   "mapping": {
-    "vod": "vod",
-    "issue": "skill-issue",
-    "coding": "skill-creator",
-    "qa": "skill-tester",
-    "sre": "skill-publish"
-   }
-  },
-  "api-skill-dev": {
-   "name": "通用Skill开发",
-   "mapping": {
-    "vod": "vod",
-    "issue": "skill-issue",
-    "coding": "rest-api-skill-creator",
-    "qa": "rest-api-skill-tester",
-    "sre": "skill-publish"
-   }
-  },
-  "blog-publish": {
-   "name": "博客发布",
-   "mapping": {
-    "vod": "blog-vod",
-    "issue": "blog-issue",
-    "coding": "ai-blog-generation",
-    "qa": "pr",
-    "sre": "blog-publish"
-   }
-  },
-  "harmony": {
-   "name": "鸿蒙开发",
-   "mapping": {
-    "vod": "vod",
-    "issue": "issue-advance",
-    "coding": "implementation",
-    "qa": "pr",
-    "sre": "cloud-deploy"
-   }
-  },
-  "hello-demo": {
-   "name": "Hello Demo",
-   "mapping": {
-    "vod": "vod",
-    "issue": "issue",
-    "coding": "implementation",
-    "qa": "pr",
-    "sre": "cloud-deploy"
-   }
+  "scenes": {
+    "default": {
+      "name": "通用开发",
+      "mapping": {
+        "vod": "vod",
+        "issue": "issue-advance",
+        "coding": "implementation",
+        "qa": "pr",
+        "sre": "cloud-deploy"
+      }
+    },
+    "cloud-native": {
+      "name": "云原生开发",
+      "mapping": {
+        "vod": "vod",
+        "issue": "issue-advance",
+        "coding": "implementation",
+        "qa": "pr",
+        "sre": "cloud-deploy"
+      }
+    },
+    "iac": {
+      "name": "IaC开发",
+      "mapping": {
+        "vod": "iac-vod",
+        "issue": "iac-issue",
+        "coding": "iac-coding",
+        "qa": "iac-qa",
+        "sre": "iac-sre"
+      }
+    },
+    "agent-dev": {
+      "name": "Agent开发",
+      "mapping": {
+        "vod": "vod",
+        "issue": "issue-advance",
+        "coding": "implementation",
+        "qa": "pr",
+        "sre": "cloud-deploy"
+      }
+    },
+    "skill-dev": {
+      "name": "华为云Skill开发",
+      "mapping": {
+        "vod": "vod",
+        "issue": "skill-issue",
+        "coding": "skill-creator",
+        "qa": "skill-tester",
+        "sre": "skill-publish"
+      }
+    },
+    "api-skill-dev": {
+      "name": "通用Skill开发",
+      "mapping": {
+        "vod": "vod",
+        "issue": "skill-issue",
+        "coding": "rest-api-skill-creator",
+        "qa": "rest-api-skill-tester",
+        "sre": "skill-publish"
+      }
+    },
+    "blog-publish": {
+      "name": "博客发布",
+      "mapping": {
+        "vod": "blog-vod",
+        "issue": "blog-issue",
+        "coding": "ai-blog-generation",
+        "qa": "pr",
+        "sre": "blog-publish"
+      }
+    },
+    "harmony": {
+      "name": "鸿蒙开发",
+      "mapping": {
+        "vod": "vod",
+        "issue": "issue-advance",
+        "coding": "implementation",
+        "qa": "pr",
+        "sre": "cloud-deploy"
+      }
+    },
+    "hello-demo": {
+      "name": "Hello Demo",
+      "mapping": {
+        "vod": "vod",
+        "issue": "issue",
+        "coding": "implementation",
+        "qa": "pr",
+        "sre": "cloud-deploy"
+      }
+    },
+    "hello-world": {
+        "name": "Hello World 部署",
+        "mapping": {
+            "vod": "vod-strict",
+            "sre": "devbridge-deploy"
+        }
+    }
   }
- }
 }
