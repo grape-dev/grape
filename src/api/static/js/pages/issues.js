@@ -258,6 +258,9 @@ function loadTasks() {
       if (window._tasksById && window._tasksById[pid]) {
         _openBoardDetail(pid);
       }
+    } else if (!window._pendingIssueNumber) {
+      // Issue #175: 普通列表刷新时清除详情页状态，防止 _withTaskLoading 误判在详情页
+      window._currentDetailTask = null;
     }
   }).catch(e => {
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
@@ -1041,7 +1044,7 @@ function _withTaskLoading(taskId, apiCall, successMsg, errorFn) {
   if (pc) {
     if (getComputedStyle(pc).position === 'static') pc.style.position = 'relative';
     overlay = document.createElement('div');
-    overlay.style.cssText = 'position:absolute;inset:0;background:rgba(255,255,255,.7);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;color:var(--t3,#86868b);z-index:50;border-radius:inherit';
+    overlay.style.cssText = 'position:absolute;inset:0;background:rgba(255,255,255,.7);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;color:var(--t3,#86868b);z-index:100;border-radius:inherit';
     overlay.textContent = I18N.t('tasks.processing');
     pc.appendChild(overlay);
   }
@@ -1110,12 +1113,15 @@ function openTaskConversation(t) {
   const go = () => app.nav('chat', param);
   if (t && t.id && t.status === 'active') {
     // Issue #175: 给按钮加 loading 反馈，防止用户以为没点到反复点击
-    var btn = document.querySelector('[onclick*="openTaskConversation"]');
+    var btn = document.querySelector('[onclick*="openTaskConversation(' + t.id + ')"]');
     if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
     API.post('/issues/' + t.id + '/start').then(d => {
       if (window._tasksById[t.id] && d && d.status) { window._tasksById[t.id].status = d.status; }
       go();
-    }).catch(() => go());
+    }).catch(function() {
+      if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+      go();
+    });
   } else {
     go();
   }
