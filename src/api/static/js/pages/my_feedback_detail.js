@@ -124,7 +124,7 @@ function renderMyFeedbackDetail(feedbackId) {
         confirmText: delLabel,
         danger: true,
         onConfirm: function () {
-          API.del('/feedback/' + fid)
+          API.deleteFeedback(fid)
             .then(function () { app.nav('my-feedback'); })
             .catch(function (err) {
               var el2 = document.getElementById('pageContent');
@@ -135,7 +135,7 @@ function renderMyFeedbackDetail(feedbackId) {
       }, event);
     } else {
       if (confirm(msg)) {
-        API.del('/feedback/' + fid).then(function () { app.nav('my-feedback'); });
+        API.deleteFeedback(fid).then(function () { app.nav('my-feedback'); });
       }
     }
   };

@@ -124,7 +124,7 @@ function renderMyFeedback() {
         confirmText: t('delete'),
         danger: true,
         onConfirm: function () {
-          API.del('/feedback/' + fid)
+          API.deleteFeedback(fid)
             .then(function () {
               load();
             })
@@ -136,7 +136,7 @@ function renderMyFeedback() {
       }, event);
     } else {
       if (confirm(t('delete_confirm_msg'))) {
-        API.del('/feedback/' + fid).then(function () { load(); });
+        API.deleteFeedback(fid).then(function () { load(); });
       }
     }
   };
