@@ -97,6 +97,14 @@
         {"id": "sre", "tag": "sre", "skill": "cloud-deploy", "mode": "emit", "next": "done", "handoff": "complete"}
       ],
       "onboarding": "repo-onboarding"
+    },
+    "hello-world": {
+      "name": "Hello World 部署",
+      "nodes": [
+        {"id": "vod", "tag": "vod", "skill": "vod-strict", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "sre", "tag": "sre", "skill": "devbridge-deploy", "mode": "emit", "next": "done", "handoff": "complete"}
+      ],
+      "onboarding": "repo-onboarding"
     }
   }
 }

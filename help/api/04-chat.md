@@ -1,6 +1,7 @@
 # Chat 对话接口（/api/chat）
 
 > 对外公开，认证：`get_current_user_or_api_key`。
+> scope（x-token-scope）：全部 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 
 ## GET /api/chat/conversations — 会话列表
 

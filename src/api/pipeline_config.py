@@ -430,12 +430,20 @@ def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
     skill 校验 → 幂等查重 → 创建/更新场景 + 回写 market_scene_id。
     skill 缺失时抛 HTTPException(400)，托管流程应让异常冒出暴露给前端。
     """
-    from fastapi import HTTPException
-    from src.repo_key import from_repo_key
     default_name = _get_default_scene_market_name()
     if not default_name:
         log.info(f"apply_default_scene_to_repo: default scene disabled ({repo_key})")
         return False
+    return apply_market_scene_by_name(repo_key, default_name, user_id)
+
+
+def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0) -> bool:
+    """按场景名从 scene_market 查 market_id 并应用到仓库。
+
+    供模板创建流程按模板 scene_id 覆盖默认场景使用。
+    幂等：仓库已有同 market_scene_id 的场景则不重复创建。
+    """
+    from src.repo_key import from_repo_key
 
     # 按 name 查 scene_market 拿 market_id
     db, lock = _db()
@@ -443,11 +451,11 @@ def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
         c = db.cursor()
         c.execute(
             "SELECT id FROM scene_market WHERE name=? AND source='official' AND is_active=1 LIMIT 1",
-            (default_name,),
+            (scene_name,),
         )
         row = c.fetchone()
     if not row:
-        log.warning(f"apply_default_scene_to_repo: market scene '{default_name}' not found for {repo_key}")
+        log.warning(f"apply_market_scene_by_name: market scene '{scene_name}' not found for {repo_key}")
         return False
     market_id = row[0]
 
@@ -455,7 +463,7 @@ def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
     full_name = from_repo_key(repo_key)  # "XOcto/repo-name"
     parts = full_name.split("/", 1)
     if len(parts) != 2:
-        log.warning(f"apply_default_scene_to_repo: invalid repo_key '{repo_key}'")
+        log.warning(f"apply_market_scene_by_name: invalid repo_key '{repo_key}'")
         return False
     owner, repo_name = parts
 
@@ -463,7 +471,7 @@ def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
     # 传入 repo_key 避免 apply_market_scene 内部用 to_repo_key 默认 gitcode: 前缀
     from src.api.routes.scenes import apply_market_scene
     result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
-    log.info(f"apply_default_scene_to_repo: applied market scene {market_id} to {repo_key}: {result}")
+    log.info(f"apply_market_scene_by_name: applied market scene {market_id} ({scene_name}) to {repo_key}: {result}")
     return True
 
 

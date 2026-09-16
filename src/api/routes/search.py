@@ -1,6 +1,6 @@
 """Search 路由：全局搜索"""
 from fastapi import APIRouter, Depends, Query
-from src.api.deps import get_current_user
+from src.api.deps import require_no_session_token
 from src.user import db as user_db
 
 router = APIRouter(prefix="/api/search", tags=["search"])
@@ -9,7 +9,7 @@ router = APIRouter(prefix="/api/search", tags=["search"])
 @router.get("")
 def global_search(q: str = Query("", min_length=1),
                         type: str = Query("all", pattern="^(all|event|repo|agent)$"),
-                        user: dict = Depends(get_current_user)):
+                        user: dict = Depends(require_no_session_token)):
     results = {"events": [], "repos": [], "agents": []}
     q_lower = q.lower()
 

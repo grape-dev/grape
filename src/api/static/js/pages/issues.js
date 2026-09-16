@@ -1,5 +1,26 @@
 // ====== 需求中心（Account ▸ 需求中心 / Issues Center）======
 // 方案 B：列表工作流风（左列表 + 右详情面板）
+
+// 事件时间友好格式：转为本地时间，1小时内显示"X分钟前"，1天内显示"X小时前"，超过1天显示"MM-DD HH:mm"
+function _fmtEventTime(utcStr) {
+  if (!utcStr) return '';
+  var local = fmtLocalTime(utcStr);
+  if (!local) return utcStr;
+  var d = new Date(local.replace(' ', 'T'));
+  if (isNaN(d.getTime())) return local;
+  var now = Date.now();
+  var diff = now - d.getTime();
+  if (diff < 0) diff = 0;
+  var mins = Math.floor(diff / 60000);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return mins + '分钟前';
+  var hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + '小时前';
+  // 超过1天：显示 MM-DD HH:mm
+  var pad = function(n) { return String(n).padStart(2, '0'); };
+  return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
 let _tasksAll = [];           // 全部任务缓存
 let _taskSel = null;          // 选中的任务
 let _taskQuery = '';          // 搜索关键字
@@ -380,7 +401,9 @@ window._jumpToPipePage = function() {
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
   localStorage.setItem('currentRepo', JSON.stringify(repoObj));
   if (typeof app !== 'undefined' && app.nav) {
-    app.nav('pipe');
+    // 传递 issue_number 让流水线页高亮对应任务
+    var issueNum = t.issue_number || '';
+    app.nav('pipe', issueNum ? String(issueNum) : undefined);
   }
 };
 
@@ -406,36 +429,39 @@ function _renderPipelineSection(data) {
   const _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px';
   const _cardTitle = 'font-size:12px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-family:-apple-system,BlinkMacSystemFont,sans-serif';
   let html = `<div style="${_cardStyle};cursor:pointer" onclick="_jumpToPipePage()">`;
-  // 卡片标题：流水线 + 场景名 + 当前状态
-  const _stageStatusMap = {vod:'VOD分析中',issue:'需求处理中',coding:'编码中',qa:'测试中',sre:'部署中',pending_review:'待审核',done:'已完成','':'待启动'};
-  const _stageStatusText = _stageStatusMap[data.current_stage] || data.current_stage || '待启动';
-  const _stageStatusColor = data.current_stage === 'done' ? '#34c759' : data.current_stage === 'pending_review' ? '#10b981' : ['#vod','#issue','#coding','#qa','#sre'].includes('#'+data.current_stage) ? '#3b82f6' : '#86868b';
-  html += `<div style="${_cardTitle};display:flex;align-items:center;justify-content:space-between">`;
+  // 卡片标题：流水线 + 场景名
+  html += `<div style="${_cardTitle}">`;
   html += `<span>${I18N.t('tasks.pipeline_scene')||'流水线'} · ${data.scene_name || ''}</span>`;
-  html += `<span style="font-size:10px;font-weight:600;color:${_stageStatusColor};background:${_stageStatusColor}15;border-radius:4px;padding:2px 8px;text-transform:none;letter-spacing:0">${_stageStatusText}</span>`;
   html += `</div>`;
   // 流水线节点进度条
   if (nodes.length > 0) {
     html += '<div style="display:flex;align-items:center;gap:0;margin-bottom:16px;padding:10px;background:rgba(0,0,0,.02);border-radius:10px">';
     nodes.forEach(function(n, i) {
-      var ns = n.node_status || 'pending';
-      var col = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : '#86868b';
-      var bg = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : 'rgba(0,0,0,.06)';
-      var isCurrent = ns === 'current';
-      var isCompleted = ns === 'completed';
+      var ns = n.node_status;
+      // 兼容数字状态码（0=pending,1=running,2=completed,3=failed,4=cancelled,5=skipped）和旧字符串
+      var isCompleted = ns === 'completed' || ns === 2;
+      var isCurrent = ns === 'current' || ns === 1;
+      var isFailed = ns === 'failed' || ns === 3;
+      var isCancelled = ns === 'cancelled' || ns === 4;
+      var isSkipped = ns === 'skipped' || ns === 5;
+      var col = isCompleted ? '#34c759' : isCurrent ? '#0071e3' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : '#86868b';
+      var bg = isCompleted ? '#34c759' : isCurrent ? '#0071e3' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : 'rgba(0,0,0,.06)';
       var pulseStyle = isCurrent ? ';animation:grapePulse 1.2s ease-in-out infinite' : '';
-      var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #3b82f6;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
+      var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #0071e3;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
       var innerStyle = isCurrent ? ';position:relative' : '';
       // 节点点击：有事件 seq 则跳转事件详情，否则跳转流水线页面（阻止冒泡到卡片）
       var nodeSeq = (n.latest_event && n.latest_event.seq) || '';
       var nodeClick = (isCurrent || isCompleted) ? (nodeSeq ? ` onclick="event.stopPropagation();_jumpToNodeEvent(${nodeSeq})"` : ` onclick="event.stopPropagation();_jumpToPipePage()"`) : '';
       var nodeCursor = (isCurrent || isCompleted) ? ';cursor:pointer' : '';
+      var nodeIcon = isCompleted ? '✓' : isFailed ? '✕' : isCancelled ? '⊘' : isSkipped ? '–' : (i+1);
       html += `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0${nodeCursor}"${nodeClick}>`;
-      html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${isCompleted?'✓':i+1}</div>`;
+      html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${nodeIcon}</div>`;
       html += `<span style="font-size:9px;color:${col};font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${n.name||n.id||''}</span>`;
       html += `</div>`;
       if (i < nodes.length - 1) {
-        var lineCol = (nodes[i+1].node_status === 'completed' || ns === 'completed') ? '#34c759' : 'rgba(0,0,0,.1)';
+        var nextNs = nodes[i+1].node_status;
+        var nextCompleted = nextNs === 'completed' || nextNs === 2;
+        var lineCol = (nextCompleted || isCompleted) ? '#34c759' : 'rgba(0,0,0,.1)';
         html += `<div style="height:2px;flex:0 0 14px;background:${lineCol};border-radius:1px;margin-top:-12px"></div>`;
       }
     });
@@ -460,7 +486,7 @@ function _renderPipelineSection(data) {
       html += `<div style="flex:1;min-width:0;padding-top:1px${evCursor}">`;
       html += `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">`;
       html += `<span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f);font-family:-apple-system,BlinkMacSystemFont,sans-serif">${e.agent_type || e.event_type || ''}</span>`;
-      html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${(e.created_at||'').substring(5,16)}</span>`;
+      html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${_fmtEventTime(e.created_at)}</span>`;
       html += `</div>`;
       if (e.title) html += `<div style="font-size:10px;color:var(--t2,#3a3a3c);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.title}</div>`;
       if (e.summary) html += `<div style="font-size:9px;color:var(--t3,#86868b);margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${e.summary}</div>`;

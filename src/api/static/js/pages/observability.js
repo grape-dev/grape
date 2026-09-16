@@ -12,7 +12,10 @@ let _rtSearch = '';            // Runtime 引擎搜索筛选
 let _rtDeviceFilter = '';      // Runtime 设备下拉筛选
 let _workerPage = 0;           // Worker 卡片当前页（0 基）
 let _runtimePage = 0;          // Runtime 引擎当前页（0 基）
-const _OBS_PAGE_SIZE = 10;     // 概览分页大小（参照异常任务 Tab anomalyPageSize）
+let _workerPageSize = 10;      // Worker 每页条数
+let _runtimePageSize = 10;     // Runtime 每页条数
+let _timelinePage = 0;         // 任务列表当前页（0 基）
+let _timelinePageSize = 10;    // 任务列表每页条数
 
 function renderObservability() {
   const pc = document.getElementById('pageContent');
@@ -49,6 +52,7 @@ function switchObsTab(tab, ev) {
   _obsRenderedTab = null;
   _workerPage = 0;
   _runtimePage = 0;
+  _timelinePage = 0;
   // 直接用缓存数据渲染，不重新 fetch
   if (_obsData.ops) {
     renderObsContent(false);
@@ -106,14 +110,20 @@ function refreshObs(isAutoRefresh) {
 
 // ===== 概览分页辅助函数（参照异常任务 Tab 的 slice 分页模式）=====
 
-function _paginationHTML(page, totalPages, prevExpr, nextExpr) {
-  if (totalPages <= 1) return '';
+function _paginationWithPageSizeHTML(page, totalPages, prevExpr, nextExpr, pageSize, pageSizeVar, rerenderExpr) {
   const prevDis = page === 0 ? 'disabled style="opacity:.4;cursor:not-allowed"' : '';
   const nextDis = page >= totalPages - 1 ? 'disabled style="opacity:.4;cursor:not-allowed"' : '';
-  return `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0">
-    <button class="bt bt-o bt-s" ${prevDis} onclick="${prevExpr}">${I18N.t('observability.prev_page')}</button>
+  return `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0;flex-wrap:wrap">
+    ${totalPages > 1 ? `<button class="bt bt-o bt-s" ${prevDis} onclick="${prevExpr}">${I18N.t('observability.prev_page')}</button>` : ''}
     <span class="ts t3">${page + 1} / ${totalPages}</span>
-    <button class="bt bt-o bt-s" ${nextDis} onclick="${nextExpr}">${I18N.t('observability.next_page')}</button>
+    ${totalPages > 1 ? `<button class="bt bt-o bt-s" ${nextDis} onclick="${nextExpr}">${I18N.t('observability.next_page')}</button>` : ''}
+    <label class="ts t3" style="display:flex;align-items:center;gap:4px;margin-left:8px">${I18N.t('observability.rows_per_page')}
+      <select onchange="${pageSizeVar}=parseInt(this.value)||10;${rerenderExpr}" style="padding:4px 8px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">
+        <option value="10"${pageSize===10?' selected':''}>10</option>
+        <option value="20"${pageSize===20?' selected':''}>20</option>
+        <option value="50"${pageSize===50?' selected':''}>50</option>
+      </select>
+    </label>
   </div>`;
 }
 
@@ -210,10 +220,10 @@ function _rerenderWorkerGrid() {
   const realOps = (ops && !ops.error) ? ops : fallbackOps(realtime);
   if (!realOps) return;
   const workers = _sortedWorkers(realOps.workers || {});
-  const totalPages = Math.max(1, Math.ceil(workers.length / _OBS_PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(workers.length / _workerPageSize));
   if (_workerPage >= totalPages) _workerPage = 0;
-  const start = _workerPage * _OBS_PAGE_SIZE;
-  const pageWorkers = workers.slice(start, start + _OBS_PAGE_SIZE);
+  const start = _workerPage * _workerPageSize;
+  const pageWorkers = workers.slice(start, start + _workerPageSize);
   const gridEl = document.getElementById('wk-grid');
   if (gridEl) {
     gridEl.innerHTML = workers.length === 0
@@ -221,7 +231,7 @@ function _rerenderWorkerGrid() {
       : pageWorkers.map(_workerCardHTML).join('');
   }
   const pagerEl = document.getElementById('wk-pager');
-  if (pagerEl) pagerEl.innerHTML = _paginationHTML(_workerPage, totalPages, '_workerPage--;_rerenderWorkerGrid()', '_workerPage++;_rerenderWorkerGrid()');
+  if (pagerEl) pagerEl.innerHTML = workers.length > 0 ? _paginationWithPageSizeHTML(_workerPage, totalPages, '_workerPage--;_rerenderWorkerGrid()', '_workerPage++;_rerenderWorkerGrid()', _workerPageSize, '_workerPageSize', '_workerPage=0;_rerenderWorkerGrid()') : '';
 }
 
 function _rerenderRuntimeTable() {
@@ -231,10 +241,10 @@ function _rerenderRuntimeTable() {
   const r = realOps.runtimes || {};
   const runtimes = _sortedRuntimes(r);
   const _filteredRuntimes = _filterRuntimes(runtimes);
-  const totalPages = Math.max(1, Math.ceil(_filteredRuntimes.length / _OBS_PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(_filteredRuntimes.length / _runtimePageSize));
   if (_runtimePage >= totalPages) _runtimePage = 0;
-  const start = _runtimePage * _OBS_PAGE_SIZE;
-  const pageRuntimes = _filteredRuntimes.slice(start, start + _OBS_PAGE_SIZE);
+  const start = _runtimePage * _runtimePageSize;
+  const pageRuntimes = _filteredRuntimes.slice(start, start + _runtimePageSize);
   const rowsEl = document.getElementById('obs-runtime-rows');
   const countEl = document.getElementById('obs-runtime-count');
   if (countEl) countEl.textContent = _filteredRuntimes.length + '/' + runtimes.length;
@@ -250,7 +260,7 @@ function _rerenderRuntimeTable() {
     rowsEl.innerHTML = html;
   }
   const pagerEl = document.getElementById('rt-pager');
-  if (pagerEl) pagerEl.innerHTML = _paginationHTML(_runtimePage, totalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()');
+  if (pagerEl) pagerEl.innerHTML = _filteredRuntimes.length > 0 ? _paginationWithPageSizeHTML(_runtimePage, totalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()', _runtimePageSize, '_runtimePageSize', '_runtimePage=0;_rerenderRuntimeTable()') : '';
 }
 
 function renderObsContent(isAutoRefresh) {
@@ -362,10 +372,10 @@ function renderOverview(ops, rt) {
 
   // Worker 卡片（带 id 供局部更新）— 按 device_name 排序保证位置稳定，分页渲染
   const workers = _sortedWorkers(w);
-  const _wkTotalPages = Math.max(1, Math.ceil(workers.length / _OBS_PAGE_SIZE));
+  const _wkTotalPages = Math.max(1, Math.ceil(workers.length / _workerPageSize));
   if (_workerPage >= _wkTotalPages) _workerPage = 0;
-  const _wkStart = _workerPage * _OBS_PAGE_SIZE;
-  const _pageWorkers = workers.slice(_wkStart, _wkStart + _OBS_PAGE_SIZE);
+  const _wkStart = _workerPage * _workerPageSize;
+  const _pageWorkers = workers.slice(_wkStart, _wkStart + _workerPageSize);
   let workerCards = workers.length === 0
     ? '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_remote_worker') + '</div>'
     : _pageWorkers.map(_workerCardHTML).join('');
@@ -374,10 +384,10 @@ function renderOverview(ops, rt) {
   const runtimes = _sortedRuntimes(r);
   const _devices = [...new Set(runtimes.map(rt => rt.device_name || '-').filter(d => d && d !== '-'))];
   const _filteredRuntimes = _filterRuntimes(runtimes);
-  const _rtTotalPages = Math.max(1, Math.ceil(_filteredRuntimes.length / _OBS_PAGE_SIZE));
+  const _rtTotalPages = Math.max(1, Math.ceil(_filteredRuntimes.length / _runtimePageSize));
   if (_runtimePage >= _rtTotalPages) _runtimePage = 0;
-  const _rtStart = _runtimePage * _OBS_PAGE_SIZE;
-  const _pageRuntimes = _filteredRuntimes.slice(_rtStart, _rtStart + _OBS_PAGE_SIZE);
+  const _rtStart = _runtimePage * _runtimePageSize;
+  const _pageRuntimes = _filteredRuntimes.slice(_rtStart, _rtStart + _runtimePageSize);
   let runtimeTable = '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_engine') + '</div>';
   if (runtimes.length) {
     let _filterBar = '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">';
@@ -400,7 +410,7 @@ function renderOverview(ops, rt) {
       runtimeTable += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
     }
     runtimeTable += '</div>';
-    runtimeTable += '<div id="rt-pager">' + _paginationHTML(_runtimePage, _rtTotalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()') + '</div>';
+    runtimeTable += '<div id="rt-pager">' + (_filteredRuntimes.length > 0 ? _paginationWithPageSizeHTML(_runtimePage, _rtTotalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()', _runtimePageSize, '_runtimePageSize', '_runtimePage=0;_rerenderRuntimeTable()') : '') + '</div>';
   }
 
   return `
@@ -414,7 +424,7 @@ function renderOverview(ops, rt) {
     <div id="wk-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:16px">
       ${workerCards}
     </div>
-    <div id="wk-pager">${_paginationHTML(_workerPage, _wkTotalPages, '_workerPage--;_rerenderWorkerGrid()', '_workerPage++;_rerenderWorkerGrid()')}</div>
+    <div id="wk-pager">${workers.length > 0 ? _paginationWithPageSizeHTML(_workerPage, _wkTotalPages, '_workerPage--;_rerenderWorkerGrid()', '_workerPage++;_rerenderWorkerGrid()', _workerPageSize, '_workerPageSize', '_workerPage=0;_rerenderWorkerGrid()') : ''}</div>
     ${section(I18N.t('observability.runtime_engine'), I18N.t('observability.runtime_subtitle', {online: (r.online || 0), total: (r.total || 0)}))}
     <div id="obs-runtime-table">${runtimeTable}</div>
   `;
@@ -434,10 +444,10 @@ function updateOverview(ops, rt) {
 
   // 2) 更新 Worker 卡片（仅当前页元素，避免分页后找不到未渲染的卡片）
   const workers = _sortedWorkers(w);
-  const _wkTotalPages = Math.max(1, Math.ceil(workers.length / _OBS_PAGE_SIZE));
+  const _wkTotalPages = Math.max(1, Math.ceil(workers.length / _workerPageSize));
   if (_workerPage >= _wkTotalPages) { _workerPage = 0; return false; }
-  const _wkStart = _workerPage * _OBS_PAGE_SIZE;
-  const _pageWorkers = workers.slice(_wkStart, _wkStart + _OBS_PAGE_SIZE);
+  const _wkStart = _workerPage * _workerPageSize;
+  const _pageWorkers = workers.slice(_wkStart, _wkStart + _workerPageSize);
   for (const wk of _pageWorkers) {
     const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
     const card = document.getElementById('wk-' + wid);
@@ -462,15 +472,15 @@ function updateOverview(ops, rt) {
   }
   // 同步 Worker 分页控件（总页数可能变化）
   const wkPager = document.getElementById('wk-pager');
-  if (wkPager) wkPager.innerHTML = _paginationHTML(_workerPage, _wkTotalPages, '_workerPage--;_rerenderWorkerGrid()', '_workerPage++;_rerenderWorkerGrid()');
+  if (wkPager) wkPager.innerHTML = workers.length > 0 ? _paginationWithPageSizeHTML(_workerPage, _wkTotalPages, '_workerPage--;_rerenderWorkerGrid()', '_workerPage++;_rerenderWorkerGrid()', _workerPageSize, '_workerPageSize', '_workerPage=0;_rerenderWorkerGrid()') : '';
 
   // 3) 更新 Runtime 表格行（仅当前页元素）
   const runtimes = _sortedRuntimes(r);
   const _filteredRt = _filterRuntimes(runtimes);
-  const _rtTotalPages = Math.max(1, Math.ceil(_filteredRt.length / _OBS_PAGE_SIZE));
+  const _rtTotalPages = Math.max(1, Math.ceil(_filteredRt.length / _runtimePageSize));
   if (_runtimePage >= _rtTotalPages) { _runtimePage = 0; return false; }
-  const _rtStart = _runtimePage * _OBS_PAGE_SIZE;
-  const _pageRt = _filteredRt.slice(_rtStart, _rtStart + _OBS_PAGE_SIZE);
+  const _rtStart = _runtimePage * _runtimePageSize;
+  const _pageRt = _filteredRt.slice(_rtStart, _rtStart + _runtimePageSize);
   for (const rti of _pageRt) {
     const rid = rti.id;
     const tr = document.getElementById('rt-' + rid);
@@ -506,7 +516,7 @@ function updateOverview(ops, rt) {
   const countEl = document.getElementById('obs-runtime-count');
   if (countEl) countEl.textContent = _filteredRt.length + '/' + runtimes.length;
   const rtPager = document.getElementById('rt-pager');
-  if (rtPager) rtPager.innerHTML = _paginationHTML(_runtimePage, _rtTotalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()');
+  if (rtPager) rtPager.innerHTML = _filteredRt.length > 0 ? _paginationWithPageSizeHTML(_runtimePage, _rtTotalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()', _runtimePageSize, '_runtimePageSize', '_runtimePage=0;_rerenderRuntimeTable()') : '';
 
   return true;
 }
@@ -921,7 +931,7 @@ function renderTimelineList(container, issues, repoKey) {
   _timelineGlobalRepoPath = (repoKey || '').replace(/^gitcode:/, '');
   let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
   html += '<div style="margin-bottom:10px;display:flex;align-items:center;gap:8px">';
-  html += '<input type="text" id="timelineSearchInput" placeholder="' + I18N.t('observability.search_tasks_placeholder') + '" value="' + _timelineSearch.replace(/"/g, '&quot;') + '" oninput="_timelineSearch=this.value;_filterTimelineIssues()" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
+  html += '<input type="text" id="timelineSearchInput" placeholder="' + I18N.t('observability.search_tasks_placeholder') + '" value="' + _timelineSearch.replace(/"/g, '&quot;') + '" oninput="_timelineSearch=this.value;_timelinePage=0;_filterTimelineIssues()" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
   html += '</div>';
   html += '<div id="obs-timeline-issues"></div>';
   container.innerHTML = html;
@@ -957,6 +967,9 @@ function _filterTimelineIssues() {
   if (locateIssueId) {
     _expandedIssues.add(locateIssueId);
     if (!_issueViewMode[locateIssueId]) _issueViewMode[locateIssueId] = 'diagram';
+    // 定位到目标 Issue 所在页，确保其可见
+    const _idx = filtered.findIndex(iss => iss.issueId === locateIssueId);
+    if (_idx >= 0) _timelinePage = Math.floor(_idx / _timelinePageSize);
   }
 
   if (!filtered.length) {
@@ -976,8 +989,14 @@ function _filterTimelineIssues() {
     return repoPath && num ? 'https://gitcode.com/' + repoPath + '/issues/' + num : '';
   }
 
+  // 分页：先筛选，再按 _timelinePage/_timelinePageSize 切片
+  const _tlTotalPages = Math.max(1, Math.ceil(filtered.length / _timelinePageSize));
+  if (_timelinePage >= _tlTotalPages) _timelinePage = 0;
+  const _tlStart = _timelinePage * _timelinePageSize;
+  const pageItems = filtered.slice(_tlStart, _tlStart + _timelinePageSize);
+
   let html = '<div style="display:flex;flex-direction:column;gap:0">';
-  filtered.forEach(iss => {
+  pageItems.forEach(iss => {
     const expanded = _expandedIssues.has(iss.issueId);
     const hasFailed = iss.events.some(e => e.status === 'failed');
     const statusBadge = hasFailed ? '<span style="color:var(--r);font-size:10px;font-weight:600">' + I18N.t('observability.has_failure') + '</span>' : '<span style="color:var(--g);font-size:10px;font-weight:600">' + I18N.t('observability.normal') + '</span>';
@@ -1014,8 +1033,10 @@ function _filterTimelineIssues() {
     html += '</div></div>';
   });
   html += '</div>';
+  // 分页栏（含每页条数选择器）
+  html += _paginationWithPageSizeHTML(_timelinePage, _tlTotalPages, '_timelinePage--;_filterTimelineIssues()', '_timelinePage++;_filterTimelineIssues()', _timelinePageSize, '_timelinePageSize', '_timelinePage=0;_filterTimelineIssues()');
   container.innerHTML = html;
-  filtered.forEach(iss => {
+  pageItems.forEach(iss => {
     if (_expandedIssues.has(iss.issueId) && _issueViewMode[iss.issueId] !== 'events') {
       const box = container.querySelector('#tl-diagram-' + iss.issueId);
       if (box) _renderMermaid(box, iss);

@@ -10,7 +10,8 @@ import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key, get_user_token
+from src.api.deps import (get_current_user, get_current_user_or_api_key,
+                          require_no_session_token, get_user_token)
 from src.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
 from src.session_manager import (
@@ -608,7 +609,7 @@ class TaskConfirmBody(BaseModel):
 
 
 @router.post("/{task_id}/confirm-done")
-async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = Depends(get_current_user)):
+async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = Depends(require_no_session_token)):
     """开发者确认任务完成（Issue #51）。
 
     将 task status → completed，issue_state stage → done，
@@ -640,7 +641,7 @@ async def confirm_task_done(task_id: int, body: TaskConfirmBody, user: dict = De
 
 
 @router.post("/{task_id}/cancel")
-async def cancel_task_api(task_id: int, user: dict = Depends(get_current_user)):
+async def cancel_task_api(task_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消任务（Issue #51）。任何阶段可取消，取消后 Agent 终止 + 流水线停止。"""
     with db_lock:
         c = db.cursor()
@@ -696,7 +697,7 @@ async def cancel_task_api(task_id: int, user: dict = Depends(get_current_user)):
 
 
 @router.post("/{task_id}/resume")
-async def resume_task_api(task_id: int, user: dict = Depends(get_current_user)):
+async def resume_task_api(task_id: int, user: dict = Depends(require_no_session_token)):
     """开发者恢复已取消的任务（Issue #51）。回到取消前 stage 继续流转。"""
     from src.api.session_store import get_issue_stage
     with db_lock:
@@ -1553,7 +1554,7 @@ def _find_agent_task_ids(repo_key: str, issue_number: int) -> list[str]:
 
 
 @router.get("/{task_id}/clarifications")
-async def get_task_clarifications(task_id: int, user: dict = Depends(get_current_user)):
+async def get_task_clarifications(task_id: int, user: dict = Depends(require_no_session_token)):
     """拉取 agent 在该 Issue 上的澄清消息（task_messages 中 text/tool_use 类型）。
 
     关联链：tasks.issue_number + repo_key → agent_tasks.id → task_messages.task_id。
@@ -1599,7 +1600,7 @@ async def get_task_clarifications(task_id: int, user: dict = Depends(get_current
 
 @router.post("/{task_id}/clarify")
 async def reply_to_clarification(task_id: int, body: TaskClarifyBody,
-                                 user: dict = Depends(get_current_user)):
+                                 user: dict = Depends(require_no_session_token)):
     """开发者在 Task Center 回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。
 
     - Issue 评论：以「💬 开发者澄清」前缀发到 GitCode（agent 通过 webhook issue_comment 事件继续处理）
@@ -1710,7 +1711,7 @@ async def close_tasks(body: TaskCloseBody, request: Request):
 
 
 @router.get("/{task_id}/pipeline")
-async def get_task_pipeline(task_id: int, user: dict = Depends(get_current_user)):
+async def get_task_pipeline(task_id: int, user: dict = Depends(require_no_session_token)):
     """获取任务关联的流水线信息和事件历史（Issue #51 详情页展示）"""
     from src.api.event_store import get_events
     from src.api.pipeline_config import get_pipeline_config
@@ -1734,34 +1735,14 @@ async def get_task_pipeline(task_id: int, user: dict = Depends(get_current_user)
     pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
     nodes = (pipe_cfg or {}).get("nodes", [])
 
-    # 标记每个节点状态
-    _stage_order = [n.get("id", "") for n in nodes]
-    _cur_idx = _stage_order.index(_current_stage) if _current_stage in _stage_order else -1
-    for i, n in enumerate(nodes):
-        nid = n.get("id", "")
-        if _current_stage == "done" or _current_stage == "pending_review":
-            n["node_status"] = "completed"
-        elif i < _cur_idx:
-            n["node_status"] = "completed"
-        elif i == _cur_idx:
-            n["node_status"] = "current"
-        else:
-            n["node_status"] = "pending"
-
     # 事件历史
     events = []
     if issue_id:
         events = get_events(repo_key, issue_id=issue_id, limit=30)
 
-    # 为每个节点关联最新事件（含 seq，供前端点击跳转事件详情）
-    _events_by_agent = {}
-    for e in events:
-        _at = e.get("agent_type", "")
-        if _at and _at not in _events_by_agent:
-            _events_by_agent[_at] = e
-    for n in nodes:
-        _nid = n.get("id", "")
-        n["latest_event"] = _events_by_agent.get(_nid, None)
+    # 统一计算节点状态（消除与菜单流水线页的不一致）
+    from src.api.pipeline_status import compute_node_statuses
+    nodes, _ = compute_node_statuses(nodes, events, _current_stage)
 
     return {
         "scene_id": _scene_id,

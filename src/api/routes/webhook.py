@@ -450,7 +450,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 try:
                     import os as _os, json as _json
                     from src.api.session_store import get_issue_scene
-                    _scene_id = get_issue_scene(repo_key, f"#{issue_number}") or "default"
+                    _scene_id, _ = get_issue_scene(repo_key, f"#{issue_number}") or ("default", 0)
                     _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
                                                "configs", "pipelines.json")
                     with open(_pipe_path, "r", encoding="utf-8") as _f:
