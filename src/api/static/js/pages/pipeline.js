@@ -77,7 +77,7 @@ function selPipe(idx) {
     var tag = node.tag || node.id;
     var sc = statuses[i] || 0;
     var ev = (stages[i] && stages[i].latest_event) || {};
-    var dotc = sc === 2 ? '#34c759' : sc === 1 ? '#ff9f0a' : sc === 3 ? '#ff3b30' : '#86868b';
+    var dotc = sc === 2 ? '#34c759' : sc === 1 ? '#0071e3' : sc === 3 ? '#ff3b30' : sc === 4 ? '#86868b' : sc === 5 ? '#c7c7cc' : '#86868b';
     var color = (_TAG_COLORS[tag] || agentColors[i % agentColors.length]).replace('var(--pk)','#ff2d92').replace('var(--r)','#ff3b30').replace('var(--a)','#0071e3').replace('var(--pu)','#af52de').replace('var(--or)','#ff9f0a').replace('var(--sk)','#0c92d4');
     var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
     var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;
@@ -87,13 +87,13 @@ function selPipe(idx) {
       + '<div class="pl-nd-name"><span class="pl-nd-dot" style="background:' + (sc === 0 ? '#c3c9d4' : color) + '"></span>' + label + ' <span style="font-size:9px;color:#86868b">' + modeIcon + '</span></div>'
       + '<div class="pl-nd-ev">' + (ev ? ev.event_type || '—' : '—') + '</div>'
       + '<div class="pl-nd-actor">' + (ev && ev.actor ? '@' + ev.actor : ' ') + '</div>'
-      + '<div class="pl-nd-status"><span class="d' + (sc === 1 ? ' d-heartbeat' : '') + '" style="background:' + dotc + '"></span>' + (sc === 2 ? I18N.t('pipeline.status_done') : sc === 1 ? I18N.t('pipeline.status_in_progress') : sc === 3 ? I18N.t('pipeline.status_failed') : I18N.t('pipeline.status_pending')) + '</div>'
+      + '<div class="pl-nd-status"><span class="d' + (sc === 1 ? ' d-heartbeat' : '') + '" style="background:' + dotc + '"></span>' + (sc === 2 ? I18N.t('pipeline.status_done') : sc === 1 ? I18N.t('pipeline.status_in_progress') : sc === 3 ? I18N.t('pipeline.status_failed') : sc === 4 ? (I18N.t('pipeline.status_cancelled') || '已取消') : sc === 5 ? (I18N.t('pipeline.status_skipped') || '已跳过') : I18N.t('pipeline.status_pending')) + '</div>'
       + '</div>';
   });
   flowHtml += '</div></div></div>';
 
   // 替换流程图区域（表格不动，保持滚动位置）
-  const flowEl = document.getElementById('pipeFlow');
+  const flowEl = document.querySelector('.pl-flow-card');
   if (flowEl) flowEl.innerHTML = flowHtml;
 
   // 更新选中行高亮（不重建表格）
@@ -102,7 +102,7 @@ function selPipe(idx) {
   if (selRow) selRow.classList.add('sel');
 }
 
-function renderPipeline(data) {
+function renderPipeline(data, focusIssueNum) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   _pipeData = data;
@@ -183,18 +183,18 @@ function renderPipeline(data) {
     const _repoFullName = (data.repo_key || '').replace(/^(gitcode|github):/, '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div class="pl-flow-card" id="pipeFlow"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div></div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
+    flowHtml = `<div class="pl-flow-card" id="pipe-issue-${String(displayPipe.issue_id || '').replace(/^#/, '')}"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div></div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
     var pipeNodes2 = _getPipeNodes(data, displayPipe);
     pipeNodes2.forEach(function(node, i) {
       var tag = node.tag || node.id;
       var sc = statuses[i] || 0;
       var ev = (stages[i] && stages[i].latest_event) || {};
-      var dotc = sc === 2 ? '#34c759' : sc === 1 ? '#ff9f0a' : sc === 3 ? '#ff3b30' : '#86868b';
+      var dotc = sc === 2 ? '#34c759' : sc === 1 ? '#0071e3' : sc === 3 ? '#ff3b30' : sc === 4 ? '#86868b' : sc === 5 ? '#c7c7cc' : '#86868b';
       var color = (_TAG_COLORS[tag] || agentColors[i % agentColors.length]).replace('var(--pk)','#ff2d92').replace('var(--r)','#ff3b30').replace('var(--a)','#0071e3').replace('var(--pu)','#af52de').replace('var(--or)','#ff9f0a').replace('var(--sk)','#0c92d4');
       var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
       var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;
       var dimCls = sc === 0 ? ' dim' : sc === 1 ? ' run' : '';
-      var statusText = sc === 2 ? I18N.t('pipeline.status_done') : sc === 1 ? I18N.t('pipeline.status_in_progress') : sc === 3 ? I18N.t('pipeline.status_failed') : I18N.t('pipeline.status_pending');
+      var statusText = sc === 2 ? I18N.t('pipeline.status_done') : sc === 1 ? I18N.t('pipeline.status_in_progress') : sc === 3 ? I18N.t('pipeline.status_failed') : sc === 4 ? (I18N.t('pipeline.status_cancelled') || '已取消') : sc === 5 ? (I18N.t('pipeline.status_skipped') || '已跳过') : I18N.t('pipeline.status_pending');
       flowHtml += '<div class="pl-nd' + dimCls + (sc === 1 ? ' nd-heartbeat' : '') + '" onclick="app.nav(\'' + tag + '\', \'' + _issueNum + '\')">'
         + '<div class="pl-nd-bar" style="background:' + (sc === 0 ? '#d5d9e0' : color) + '"></div>'
         + '<div class="pl-nd-name"><span class="pl-nd-dot" style="background:' + (sc === 0 ? '#c3c9d4' : color) + '"></span>' + label + ' <span style="font-size:9px;color:#86868b">' + modeIcon + '</span></div>'
@@ -280,7 +280,7 @@ function renderPipeline(data) {
     const execBadge = p.executing
       ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡ ' + I18N.t('pipeline.executing') + '</span>'
       : '<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
-    html += `<tr class="${s ? 'sel' : ''}" data-idx="${realIdx}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">
+    html += `<tr class="${s ? 'sel' : ''} pl-hist-row" data-idx="${realIdx}" data-issue="${_issueNum}" onclick="selPipe(${realIdx})" ondblclick="pipeRowDblClick(${realIdx})">\
       <td><span class="ts"><b>${p.issue_id || '?'}</b></span><br>${execBadge}</td>
       <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${_esc(p.title || '—')}</a></td>
       <td>${_parentIssueHtml}</td>
@@ -294,6 +294,31 @@ function renderPipeline(data) {
   html += `</div>`;
 
   el.innerHTML = html;
+
+  // 如果指定了 focusIssueNum，自动选中对应 issue 的流水线（而非默认 active）
+  if (focusIssueNum) {
+    var targetNum = String(focusIssueNum).replace(/^#/, '');
+    var _allPipes = active ? [active, ...history] : history;
+    var foundIdx = -1;
+    for (var i = 0; i < _allPipes.length; i++) {
+      var pNum = String(_allPipes[i].issue_id || '').replace(/^#/, '');
+      if (pNum === targetNum) { foundIdx = i; break; }
+    }
+    if (foundIdx >= 0) {
+      // 切换流程图到对应 issue（不重建表格，保持滚动位置）
+      selPipe(foundIdx);
+      // 滚动到对应 history 行
+      setTimeout(function() {
+        var row = document.querySelector('.pl-hist-row[data-issue="' + targetNum + '"]');
+        if (row) {
+          row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          row.style.transition = 'background .3s';
+          row.style.background = 'rgba(0,113,227,0.08)';
+          setTimeout(function() { row.style.background = ''; }, 3000);
+        }
+      }, 100);
+    }
+  }
 }
 
 function triggerSREDeploy(repoFullName, issueNum, stage) {

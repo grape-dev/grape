@@ -137,30 +137,36 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
                     pass
         except Exception:
             pass
+    # 统一计算节点状态（与任务详情页共享同一套逻辑）
+    from src.api.pipeline_status import compute_node_statuses, STATUS_COMPLETED
+    from src.api.session_store import get_issue_stage, get_issue_scene
+    from src.api.pipeline_config import get_pipeline_config
+
+    _st = get_issue_stage(repo_key, issue_id) or {}
+    _stage = _st.get("stage", "")
+    _scene_id = (_st.get("scene_id") if _st else "") or get_issue_scene(repo_key, issue_id) or ""
+    _pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key) if _scene_id else None
+    _scene_nodes = (_pipe_cfg or {}).get("nodes", []) or [{"id": a, "tag": a} for a in AGENT_ORDER]
+
+    _nodes, stage_statuses = compute_node_statuses(_scene_nodes, issue_events, _stage)
+
+    # 转换为原有数据格式（兼容前端 pipeline.js）
     stages = []
-    stage_statuses = []
+    for n in _nodes:
+        _le = n.get("latest_event")
+        if _le:
+            _latest_event = {
+                "seq": _le.get("seq", 0),
+                "title": _le.get("title", "") or _le.get("event_type", ""),
+                "event_type": _le.get("event_type", ""),
+                "status": _le.get("status", ""),
+                "actor": _le.get("actor", ""),
+            }
+        else:
+            _latest_event = None
+        stages.append({"agent": n.get("id", ""), "latest_event": _latest_event})
 
-    for agent in AGENT_ORDER:
-        agent_events = [e for e in issue_events if e.get("agent_type") == agent]
-        if not agent_events:
-            stages.append({"agent": agent, "latest_event": None})
-            stage_statuses.append(0)
-            continue
-
-        latest = agent_events[-1]
-        status = STAGE_STATUS_MAP.get(latest.get("status", "pending"), 0)
-        # 最新一条 event 明细（卡片展示用）
-        latest_event = {
-            "seq": latest.get("seq", 0),
-            "title": latest.get("title", "") or latest.get("event_type", ""),
-            "event_type": latest.get("event_type", ""),
-            "status": latest.get("status", ""),
-            "actor": latest.get("actor", ""),
-        }
-        stages.append({"agent": agent, "latest_event": latest_event})
-        stage_statuses.append(status)
-
-    all_done = all(s == 2 for s in stage_statuses)
+    all_done = all(s == STATUS_COMPLETED for s in stage_statuses)
     any_failed = any(s == 3 for s in stage_statuses)
     any_running = any(s == 1 for s in stage_statuses)
 
@@ -173,13 +179,12 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
     else:
         result = "Pending"
 
-    involved_agents = [AGENT_LABELS[i] for i, s in enumerate(stage_statuses) if s > 0]
+    involved_agents = [_nodes[i].get("name") or _nodes[i].get("id", "") for i, s in enumerate(stage_statuses) if s > 0]
 
     # 责任人：优先 Issue assignee（issue_state.assignee，GitCode 真实指派，可为 grape_bot 或用户），
     # 回退从事件 actor 推断（_get_latest_assignee 已因 payload 不含 assignee 而基本失效，保留兜底）。
     current_owner = ""
-    from src.api.session_store import get_issue_stage
-    _st = get_issue_stage(repo_key, issue_id)
+    # _st 已在上方统一计算中获取
     if _st and _st.get("assignee"):
         current_owner = _resolve_feishu_name(_st["assignee"])
     else:
@@ -189,7 +194,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         else:
             for i in range(len(stage_statuses) - 1, -1, -1):
                 if stage_statuses[i] > 0:
-                    agent = AGENT_ORDER[i]
+                    agent = _nodes[i].get("id", "") if i < len(_nodes) else ""
                     latest = stages[i].get("latest_event") or {}
                     actor = latest.get("actor", "")
                     if actor:
