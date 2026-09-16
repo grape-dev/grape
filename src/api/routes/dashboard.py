@@ -225,21 +225,27 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
         try:
             if repo:
                 # 仓库级看板：global + 自己的 user + 该 repo 的 worker
+                # 过滤：从未连接(last_seen_at IS NULL)或长期失联(>7天)的设备不展示
+                _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
+                    "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key=? OR repo_key=?) ORDER BY id",
-                    (_uname, repo_key, repo),
+                    (_stale_cutoff, _uname, repo_key, repo),
                 )
             else:
                 # 全局看板：global + 自己的 user scope worker
+                # 过滤：从未连接(last_seen_at IS NULL)或长期失联(>7天)的设备不展示
+                _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
                     "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
+                    "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
-                    (_uname,),
+                    (_stale_cutoff, _uname),
                 )
             for w in c.fetchall():
                 wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w
@@ -350,6 +356,34 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                 # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）
                 if (cid or 0) > 0 and rcred_status == 'revoked':
                     continue
+                # 跳过从未连接或长期失联(>7天)的远端引擎（与 Workers 视图过滤一致）
+                if (cid or 0) > 0:
+                    if not rlast_seen:
+                        continue
+                    try:
+                        _seen_ts = datetime.fromisoformat(rlast_seen.replace('Z', '+00:00')).timestamp() if rlast_seen else 0
+                    except Exception:
+                        _seen_ts = 0
+                    if _seen_ts and (now_ts - _seen_ts) > 7 * 86400:
+                        continue
+                # 远端引擎跟随 Worker scope 过滤（与 Workers 视图一致）
+                if (cid or 0) > 0 and repo:
+                    # 仓库级看板：global + 自己的 user + 该 repo 的 worker
+                    pass  # repo 级过滤由前端按需处理，后端不过滤
+                elif (cid or 0) > 0:
+                    # 全局看板：global scope worker 的引擎才展示给所有用户
+                    # user scope worker 的引擎只展示给 owner
+                    _cred_scope = ''
+                    _cred_owner = ''
+                    try:
+                        c.execute("SELECT scope, owner_name FROM runtime_credentials WHERE id=?", (cid,))
+                        _cr = c.fetchone()
+                        if _cr:
+                            _cred_scope, _cred_owner = _cr[0] or '', _cr[1] or ''
+                    except Exception:
+                        pass
+                    if _cred_scope == 'user' and _cred_owner != _uname:
+                        continue
                 runtimes_total += 1
                 base_health = derive_runtime_health(rstatus or "offline", rlast_seen, now_ts)
                 mode = "remote" if (cid or 0) > 0 else "local"

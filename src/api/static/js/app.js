@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -300,7 +300,7 @@ function loadAgentTypes() {
       return;
     }
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -423,7 +423,7 @@ function loadAgentTypes() {
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
-      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
       var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
@@ -454,6 +454,20 @@ function loadAgentTypes() {
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
       renderSettings(param || 'credentials');
+    } else if (view === 'my-feedback') {
+      title.textContent = '我的反馈';
+      if (typeof renderMyFeedback === 'function') {
+        renderMyFeedback();
+      } else {
+        pc.innerHTML = '<div class="error">反馈页面加载失败，请刷新重试</div>';
+      }
+    } else if (view === 'my-feedback-detail') {
+      title.textContent = '反馈详情';
+      if (typeof renderMyFeedbackDetail === 'function') {
+        renderMyFeedbackDetail(param);
+      } else {
+        pc.innerHTML = '<div class="error">详情页面加载失败，请刷新重试</div>';
+      }
     } else if (view === 'skills') {
       title.textContent = I18N.t('app.current_project');
       renderSkills();
@@ -510,7 +524,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local'];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail'];
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {
@@ -547,6 +561,63 @@ function loadAgentTypes() {
   }
   function oauthLoginGithub() {
     API.get('/auth/login/github').then(d => { if (d.redirect_url) window.location.href = d.redirect_url; }).catch(e => showToast(I18N.t('app.login.oauth_not_configured')));
+  }
+
+  // 内测申请表单
+  function openBetaApply() {
+    var isZh = I18N.getLang() === 'zh';
+    var overlay = document.createElement('div');
+    overlay.id = 'betaApplyModal';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+    overlay.innerHTML = `
+      <div style="background:var(--c,#fff);border-radius:16px;padding:32px;width:440px;max-width:90vw;box-shadow:0 12px 48px rgba(0,0,0,0.15)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+          <h2 style="font-size:20px;font-weight:600">${isZh ? '申请内测' : 'Beta Apply'}</h2>
+          <span onclick="document.getElementById('betaApplyModal').remove()" style="cursor:pointer;font-size:20px;color:var(--t3,#86868b);line-height:1">×</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${isZh ? '平台 <span style="color:var(--r,#dc2828)">*</span>' : 'Platform <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <select id="betaPlatform" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+              <option value="gitcode">GitCode</option>
+              <option value="github">GitHub</option>
+            </select>
+          </div>
+          <div>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${isZh ? '用户名 <span style="color:var(--r,#dc2828)">*</span>' : 'Username <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <input id="betaAccountName" type="text" placeholder="${isZh ? 'GitCode 或 GitHub 用户名' : 'GitCode or GitHub username'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+          </div>
+          <div>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${isZh ? '联系方式 <span style="color:var(--r,#dc2828)">*</span>' : 'Contact <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <input id="betaEmail" type="text" placeholder="${isZh ? '邮箱或手机号' : 'Email or phone'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+          </div>
+          <div>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${isZh ? '申请理由' : 'Reason'}</label>
+            <textarea id="betaReason" rows="3" placeholder="${isZh ? '选填' : 'Optional'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;resize:vertical;font-family:inherit"></textarea>
+          </div>
+          <button id="betaSubmitBtn" onclick="app.submitBetaApply()" style="width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px">${isZh ? '提交申请' : 'Submit'}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+  }
+  function submitBetaApply() {
+    var isZh = I18N.getLang() === 'zh';
+    var accountType = document.getElementById('betaPlatform').value;
+    var accountName = document.getElementById('betaAccountName').value.trim();
+    var email = document.getElementById('betaEmail').value.trim();
+    var reason = document.getElementById('betaReason').value.trim();
+    if (!accountName) { showToast(isZh ? '请填写用户名' : 'Username is required'); return; }
+    if (!email) { showToast(isZh ? '请填写联系方式' : 'Contact is required'); return; }
+    var btn = document.getElementById('betaSubmitBtn');
+    btn.disabled = true; btn.textContent = isZh ? '提交中...' : 'Submitting...';
+    API.post('/settings/beta-apply/submit', { accountType: accountType, accountName: accountName, email: email, reason: reason }).then(function(d) {
+      showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+      document.getElementById('betaApplyModal').remove();
+    }).catch(function(e) {
+      showToast((isZh ? '提交失败: ' : 'Failed: ') + (e.message || e));
+      btn.disabled = false; btn.textContent = isZh ? '提交申请' : 'Submit';
+    });
   }
 
   let pwdVisible = false;
@@ -711,7 +782,7 @@ function loadAgentTypes() {
         const view = parts[0];
         const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
         // Views that don't require a repo
-        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail'];
+        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'my-feedback', 'my-feedback-detail'];
         if (noRepoViews.includes(view) || currentRepo()) {
           nav(view, param);
         } else {
@@ -754,7 +825,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
+  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
