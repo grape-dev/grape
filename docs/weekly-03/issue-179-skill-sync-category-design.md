@@ -9,7 +9,7 @@
 | 模块 | 远程同步 | 本地同步 | 问题 |
 |------|---------|---------|------|
 | scene_sync.py | 有（下载 zip → 解压 → 同步 scene_market 表） | 无 | 正常 |
-| skill_sync.py | 无（只读本地 skill-description.json） | 有（读 JSON → 写 DB → 上传 OBS） | 远程新增 skill 不会同步到本地 DB |
+| skill_sync.py | 有（下载 zip → 合并 json → 拷贝 skill 目录 → 写 DB → 上传 OBS） | 有（读 JSON → 写 DB → 上传 OBS） | 已修复（sync_official_skills 统一同步） |
 
 scene_sync 的 `_check_skills_exist()` 预检发现 skill 表缺失 → 场景同步 skip。
 
@@ -347,7 +347,7 @@ Admin 后端（SkillRo / SkillService / SkillManage）本期不做，后续迭�
 
 | 文件 | 改动内容 |
 |------|---------|
-| `src/storage/skill_sync.py` | 新增 `sync_official_skills_from_remote()` + `_sync_skills_to_db()` 提取 + 删除 OBS 入口检查 + 三步独立 try/except + 逐字段变更检测 + per-skill 错误处理 + INSERT OR IGNORE + category_id warning + 分布式锁（含续期） |
+| `src/storage/skill_sync.py` | `sync_official_skills()` 统一同步（远程下载 → DB 同步 → OBS 上传）+ `_sync_skills_to_db()` 变更检测 + per-skill 错误处理 + INSERT OR IGNORE + category_id warning + 分布式锁（含续期）+ 路径安全 + 原子 json 写入 + hash 目录排序 |
 | `src/storage/scene_sync.py` | 无改动（_download_repo_zip / _get_sync_token 直接被 import 复用） |
 | `src/api/db_setup.py` | 新建 skill_category 表 DDL + 注册 _NEW_TABLES + skill 表加 category_id（_ensure_column）+ _init_skill_category_data() + _backfill_skill_category_id() + 索引注册 _create_indexes() |
 | `src/api/routes/skills.py` | list_skills 加 category_id 过滤 + cat_map 移到 db_lock 外（cursor 修复）+ agent-stats 改查 skill_category + 新增 /categories 接口 + upload 加 category_id + detail 加 category_id + convert_skill 补传 category_id + featured 加 category_id/category_name + search 加 category_id/category_name + sort=latest 改 updated_at DESC + 删除 _SUB_SCENE_LABELS |

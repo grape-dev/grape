@@ -17,7 +17,7 @@ let _skillPageTotal = 0;      // 当前分页查询的总数（来自 list 接�
 let _allSkills = [];         // 当前页技能缓存
 let _featuredSkills = [];    // 精选技能（独立加载，不受搜索影响）
 let _agentStats = {};        // {agent_type: count} 来自 agent-stats 接口
-let _skillCategories = [];   // 技能分类列表 [{id, name, slug, icon, order_num}] 来自 agent-stats 接口
+let _skillCategories = [];   // 技能分类列表 [{id, name, slug, icon, order_num}] 来自 /api/skills/categories 接口
 let _agentList = ['vod','issue','coding','qa','sre','chat'];  // 固定顺序
 let _activeAgentIdx = -1;    // -1=无选中(显示全部), 0+=第N个agent
 let _activeTagFilter = 'all';  // 当前标签筛选（中文 label 用于显示）
