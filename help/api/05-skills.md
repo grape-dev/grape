@@ -1,14 +1,46 @@
 # Skills 技能接口（/api/skills）
 
 > 对外公开，认证：`get_current_user_or_api_key`。
-> scope（x-token-scope）：全部 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> scope（x-token-scope）：全部 = **user_only**（`grape_` API Key / JWT；`tk_` → 403），
+> 仅 `GET /agent-stats` = **dual**（三通道）。
+
+## GET /api/skills — 技能列表
+
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Query | 参数 | 类型 | 必填 | 说明 |
+|------|------|------|:---:|------|
+| `repo` | string | 否 | 仓库（scope 过滤） |
+| `scope` | string | 否 | official / repo / user（缺省 = 全部；同 scope 维度过滤） |
+| `agent_type` | string | 否 | vod/issue/coding/qa/sre/chat |
+| `sub_scene` | string | 否 | 子场景英文 id（scaffolding/feedback-loop 等） |
+| `q` | string | 否 | 关键字（skill_name / display_name / description 模糊匹配） |
+| `sort` | string | 否 | `latest`（默认）/ `hot`（like_count） |
+| `page` / `page_size` | int | 否 | 分页（page_size=0 时不分页返回全量） |
+
+> 扩展字段：`is_featured, like_count, liked_by_me, scene_count, repo_count, scenes, sub_scene, sub_scene_id`。
+
+| 出参 | 技能数组（见上过滤规则） |
+| 返回 | 200 |
+
+---
+
+## GET /api/skills/agent-stats — Agent 维度技能统计
+
+> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）
+
+| Query | `scope`（可选）、`repo`（可选；过滤规则与列表一致） |
+| 出参 | 技能总数 + 各 agent_type 的技能数量 |
+| 返回 | 200 |
+
+---
 
 ## GET /api/skills/featured — 精选技能
 
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
-| Query | `repo`（可选，scope 过滤） |
-| 出参 | 技能数组（featured） |
+| Query | `limit`（可选，默认 5）、`repo`（可选，scope 过滤） |
+| 出参 | 精选技能数组（is_featured=1 且 official，按 like_count 排序） |
 | 返回 | 200 |
 
 ---
@@ -16,15 +48,16 @@
 ## GET /api/skills/stats — 技能统计
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
-| 出参 | 使用统计（被场景/仓库引用次数） |
+| 出参 | `{skill_name: {scene_count: N, repo_count: N}}`（scene_skill_ref 聚合） |
 | 返回 | 200 |
 
 ---
 
 ## GET /api/skills/search — 搜索技能
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
-| Query | `q`、`scope`、`category` 等 |
-| 出参 | 技能数组 |
+| Query | `q`（必填） |
+| 出参 | `[{skill_id, name, display_name, description, match_reason}]`（先 skill_name 精准，再 description+display_name+agent_type 模糊） |
 | 返回 | 200 |
 
 ---
@@ -76,14 +109,6 @@
 
 | Path | `{skill_id}` |
 | 返回 | 200/204；400 被引用；404 |
-
----
-
-## POST /api/skills/sync-official — 同步官方技能
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
-
-| 出参 | `{"added": n, "updated": n, "skipped": n}` |
-| 返回 | 200 |
 
 ---
 

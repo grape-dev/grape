@@ -92,8 +92,41 @@ Event 字段：`seq / repo_key / issue_id / event_type / source / agent_type / t
 
 ---
 
+## DELETE /api/events/{seq}/chat — 删除事件对话（清理线程）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+> Issue #100：清除该事件关联的对话消息（event_thread 记录删空）。
+
+| Path | `{seq}` int |
+| 出参 | `{"ok": true, "message": "对话已清理"}` |
+| 返回 | 200 |
+
+---
+
+## POST /api/events/{seq}/chat/submit — 事件对话异步提交
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+请求头：`Content-Type: application/json`
+
+请求体（ConversationMessage）：`{"message": "..."}`
+
+> 提交对话查询到后台异步队列，返回 task_id；随后轮询 `GET /api/events/chat/task/{task_id}/status`。
+
+| 出参 | `{"task_id", "seq", "status": "running"}` |
+| 返回 | 200 |
+
+---
+
 ## GET /api/events/chat/task/{task_id}/status — 事件对话异步状态
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
+| Path | `{task_id}` |
+| 出参 | `{"task_id", "status": "processing/completed/failed/not_found", "result": "..."}` |
+| 返回 | 200 |
+
 ## GET /api/events/chat/task/{task_id}/stream — 事件对话异步流
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Path | `{task_id}` |
+| 出参 | SSE 流（回放历史 + 实时追帧） |
+| 返回 | 200 |
