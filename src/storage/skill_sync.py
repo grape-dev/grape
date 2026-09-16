@@ -34,7 +34,7 @@ def _compute_skill_hash(skill_dir: str) -> str:
         return ""
     h = hashlib.sha256()
     for root, dirs, files in os.walk(skill_dir):
-        dirs[:] = [d for d in dirs if d not in ("__pycache__", "__MACOSX", ".git")]
+        dirs[:] = sorted(d for d in dirs if d not in ("__pycache__", "__MACOSX", ".git"))
         for f in sorted(files):
             rel = os.path.relpath(os.path.join(root, f), skill_dir)
             h.update(rel.encode())
@@ -263,8 +263,11 @@ async def sync_official_skills_from_remote() -> dict:
                 result["json_merged"] += 1
 
         if result["json_merged"] > 0:
-            with open(local_json_path, "w", encoding="utf-8") as f:
+            # 原子写入：先写临时文件再 rename，避免进程崩溃导致 json 损坏
+            tmp_path = local_json_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(merged, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, local_json_path)
             logger.info(f"skill remote sync: merged {result['json_merged']} skills into local json")
 
         # 5. 同步 skill 文件目录（增量 hash 比对）
@@ -286,6 +289,10 @@ async def sync_official_skills_from_remote() -> dict:
                             logger.warning("skill remote sync: lock lost during directory sync, aborting")
                             break
                         skill_path = info.get("path", skill_name)
+                        # 路径安全：拒绝含 ".." 或绝对路径的 skill_path
+                        if ".." in skill_path or skill_path.startswith("/"):
+                            logger.warning(f"skill remote sync: skip unsafe path '{skill_path}' for {skill_name}")
+                            continue
                         remote_skill_dir = os.path.join(remote_skills_dir, skill_path)
                         if not os.path.isdir(remote_skill_dir):
                             continue

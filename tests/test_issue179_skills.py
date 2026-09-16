@@ -239,12 +239,12 @@ class TestApiEndpoints:
         assert r.status_code == 200
         data = r.json()
         assert "skills" in data
-        if data["skills"]:
-            s = data["skills"][0]
-            assert "category_id" in s
-            assert "category_name" in s
-            assert "sub_scene" not in s
-            assert "sub_scene_id" not in s
+        assert data["skills"], "no skills returned"
+        s = data["skills"][0]
+        assert "category_id" in s
+        assert "category_name" in s
+        assert "sub_scene" not in s
+        assert "sub_scene_id" not in s
 
     def test_list_skills_category_filter(self):
         headers = self._headers()
@@ -263,17 +263,17 @@ class TestApiEndpoints:
         r = client.get("/api/skills/search?q=vod", headers=headers)
         assert r.status_code == 200
         data = r.json()
-        if data["skills"]:
-            s = data["skills"][0]
-            assert "category_id" in s
-            assert "category_name" in s
+        assert data["skills"], "no search results"
+        s = data["skills"][0]
+        assert "category_id" in s
+        assert "category_name" in s
 
     def test_featured_returns_category(self):
         headers = self._headers()
         r = client.get("/api/skills/featured", headers=headers)
         assert r.status_code == 200
         data = r.json()
-        if data["skills"]:
-            s = data["skills"][0]
-            assert "category_id" in s
-            assert "category_name" in s
+        assert data["skills"], "no featured skills"
+        s = data["skills"][0]
+        assert "category_id" in s
+        assert "category_name" in s

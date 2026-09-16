@@ -13,12 +13,12 @@
 | `repo` | string | 否 | 仓库（scope 过滤） |
 | `scope` | string | 否 | official / repo / user（缺省 = 全部；同 scope 维度过滤） |
 | `agent_type` | string | 否 | vod/issue/coding/qa/sre/chat |
-| `sub_scene` | string | 否 | 子场景英文 id（scaffolding/feedback-loop 等） |
+| `category_id` | int | 否 | 分类 ID（Issue #179，替代 sub_scene） |
 | `q` | string | 否 | 关键字（skill_name / display_name / description 模糊匹配） |
-| `sort` | string | 否 | `latest`（默认）/ `hot`（like_count） |
+| `sort` | string | 否 | `latest`（默认，updated_at DESC）/ `hot`（like_count） |
 | `page` / `page_size` | int | 否 | 分页（page_size=0 时不分页返回全量） |
 
-> 扩展字段：`is_featured, like_count, liked_by_me, scene_count, repo_count, scenes, sub_scene, sub_scene_id`。
+> 扩展字段：`is_featured, like_count, liked_by_me, scene_count, repo_count, scenes, category_id, category_name`。
 
 | 出参 | 技能数组（见上过滤规则） |
 | 返回 | 200 |
@@ -31,7 +31,17 @@
 > CLI：`grape skills agent-stats`。
 
 | Query | `scope`（可选）、`repo`（可选；过滤规则与列表一致） |
-| 出参 | 技能总数 + 各 agent_type 的技能数量 |
+| 出参 | `total, agents: [{agent_type, count}], categories: [{id, name, slug, icon, order_num}]`（Issue #179：categories 替代 sub_scenes） |
+| 返回 | 200 |
+
+---
+
+## GET /api/skills/categories — 技能分类列表
+
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> Issue #179 新增。
+
+| 出参 | `categories: [{id, name, slug, icon, order_num}]`（11 个分类，按 order_num 排序） |
 | 返回 | 200 |
 
 ---
@@ -41,7 +51,7 @@
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Query | `limit`（可选，默认 5）、`repo`（可选，scope 过滤） |
-| 出参 | 精选技能数组（is_featured=1 且 official，按 like_count 排序） |
+| 出参 | 精选技能数组（is_featured=1 且 official，按 like_count 排序），含 `category_id, category_name` |
 | 返回 | 200 |
 
 ---
@@ -60,7 +70,7 @@
 > CLI：`grape skills search`。
 
 | Query | `q`（必填） |
-| 出参 | `[{skill_id, name, display_name, description, match_reason}]`（先 skill_name 精准，再 description+display_name+agent_type 模糊） |
+| 出参 | `[{skill_id, name, display_name, description, category_id, category_name, match_reason}]`（先 skill_name 精准，再 description+display_name+agent_type 模糊） |
 | 返回 | 200 |
 
 ---
@@ -69,7 +79,7 @@
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{skill_id}` |
-| 出参 | `{id, skill_name, display_name, description, agent_type, skill_path, scope, owner_id, ...}` |
+| 出参 | `{id, skill_name, display_name, description, agent_type, skill_path, scope, owner_id, category_id, category_name, ...}` |
 | 返回 | 200；404 |
 
 ---
@@ -95,6 +105,7 @@
 | `scope` | string | 否 | `user`（个人技能，默认）/ `repo`（仓库技能） |
 | `repo` | string | repo 时必填 | 仓库技能归属仓库（`owner/repo`） |
 | `agent_type` | string | ✅ | 技能类型（vod/issue/coding/qa/sre/chat） |
+| `category_id` | int | 否 | 分类 ID（Issue #179，默认 0=未分类） |
 
 > **owner 由服务端派生，不接受客户端传入**：
 > - `scope=user` → 归属 `user["id"]`（当前登录用户）
