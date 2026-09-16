@@ -827,6 +827,7 @@ CREATE TABLE IF NOT EXISTS user_feedback (
     handler_name    TEXT         DEFAULT '',
     handler_remark  TEXT         DEFAULT '',
     handled_at      TEXT         DEFAULT NULL,
+    is_deleted      INTEGER      NOT NULL DEFAULT 0,
     created_at      TEXT         DEFAULT (datetime('now')),
     updated_at      TEXT         DEFAULT (datetime('now'))
 )""")]
@@ -2038,6 +2039,8 @@ def _migrate_tables():
         "ALTER TABLE scene_category ADD COLUMN slug VARCHAR(64) DEFAULT ''",
         # ===== Issue-89: event_skipped 加 issue_id 列（skipped 事件审计需关联 Issue） =====
         "ALTER TABLE event_skipped ADD COLUMN issue_id TEXT DEFAULT ''",
+        # ===== Issue #177: user_feedback 软删除标记 =====
+        "ALTER TABLE user_feedback ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0",
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [

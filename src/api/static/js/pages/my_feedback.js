@@ -67,6 +67,8 @@ function renderMyFeedback() {
         '<span style="color:' + stColor + ';font-weight:600;font-size:13px;flex-shrink:0">' + statusLabel(st) + '</span>' +
         '<span style="font-size:14px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (item.title || '—') + '</span>' +
         '<span class="ts t3" style="font-size:11px;flex-shrink:0">' + timeStr + '</span>' +
+        '<button class="bt bt-o bt-s" onclick="event.stopPropagation();_myFbDelete(' + item.id + ', event)" ' +
+        'style="flex-shrink:0;color:#ff3b30;border-color:rgba(255,59,48,.3);font-size:11px">' + t('delete') + '</button>' +
         '</div>' +
         '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--t2)">' +
         '<span>' + catIcon + ' ' + (item.category || '') + '</span>';
@@ -112,6 +114,31 @@ function renderMyFeedback() {
   window._myFbPage = function (p) {
     _page = p;
     load();
+  };
+
+  window._myFbDelete = function (fid, event) {
+    if (window._grapeConfirm) {
+      _grapeConfirm({
+        title: t('delete_confirm_title'),
+        message: t('delete_confirm_msg'),
+        confirmText: t('delete'),
+        danger: true,
+        onConfirm: function () {
+          API.deleteFeedback(fid)
+            .then(function () {
+              load();
+            })
+            .catch(function (err) {
+              el.innerHTML = '<div class="ts t2" style="padding:20px">' + t('delete_failed', { msg: err.message || '' }) + '</div>';
+              setTimeout(load, 2000);
+            });
+        },
+      }, event);
+    } else {
+      if (confirm(t('delete_confirm_msg'))) {
+        API.deleteFeedback(fid).then(function () { load(); });
+      }
+    }
   };
 
   load();
