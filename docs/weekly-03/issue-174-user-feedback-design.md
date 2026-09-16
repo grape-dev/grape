@@ -16,7 +16,7 @@ Grape 工作台用户需要一个便捷的问题反馈通道，在使用过程�
 
 ### 1.3 设计目标
 
-- 工作台侧：在侧边栏底部（帮助按钮旁）增加"问题反馈"入口，弹出轻量表单提交
+- 工作台侧：在顶栏右上角（帮助链接前面）增加"反馈"入口，弹出轻量表单提交
 - Admin 管理台侧：新增"问题反馈"管理页面，支持列表查看、筛选、状态处理
 - 数据隔离：反馈数据存储在 admin_db（运营管理台独立数据库），工作台通过 API 跨库写入
 - 轻量实现：不引入新的中间件，复用现有 grape-admin 后端 + grape 工作台前端
@@ -30,18 +30,16 @@ Grape 工作台用户需要一个便捷的问题反馈通道，在使用过程�
 ```
 Grape 工作台（用户侧）                    Grape Admin 管理台（运营侧）
 ┌─────────────────────┐                 ┌─────────────────────────┐
-│  侧边栏底部           │                 │  侧边菜单 → 问题反馈      │
-│  ┌───┐ ┌───┐ ┌───┐  │                 │                         │
-│  │ ⚙ │ │ 💡│ │ ↩ │  │                 │  FeedbackManage.vue     │
-│  └───┘ └───┘ └───┘  │                 │  ├── 列表表格            │
-│         │反馈入口     │                 │  ├── 筛选（状态/类型）    │
-│         ▼            │                 │  ├── 详情弹窗            │
-│  ┌──────────────┐    │                 │  └── 状态操作            │
-│  │ 反馈弹窗      │    │                 │                         │
-│  │ 类型/内容/截图 │    │                 └─────────────────────────┘
-│  └──────┬───────┘    │                          │
-│         │ POST        │                          │ GET/PUT
-│         ▼            │                          ▼
+│  顶栏右上角           │                 │  侧边菜单 → 问题反馈      │
+│  ... [反馈] [←主页] [📖]│                 │                         │
+│         │反馈入口     │                 │  FeedbackManage.vue     │
+│         ▼            │                 │  ├── 列表表格            │
+│  ┌──────────────┐    │                 │  ├── 筛选（状态/类型）    │
+│  │ 反馈弹窗      │    │                 │  ├── 详情弹窗            │
+│  │ 类型/内容/截图 │    │                 │  └── 状态操作            │
+│  └──────┬───────┘    │                 │                         │
+│         │ POST        │                 └─────────────────────────┘
+│         ▼            │                          │
 └─────────┼────────────┘              ┌─────────────────────────┐
           │                           │  Admin Backend           │
           │                           │  FeedbackController.java │
@@ -74,7 +72,7 @@ Grape 工作台（用户侧）                    Grape Admin 管理台（运营
 | 提交 API 归属 | grape-admin 后端（Java） | 数据在 admin_db，由 admin 后端统一管理读写 |
 | 工作台如何调用 admin API | 直接 HTTP 调用（跨服务） | 工作台已有 admin 后端地址配置（用于 AI 助手等功能） |
 | 认证方式 | 工作台 JWT 用户身份 → admin 后端验证 | 复用现有工作台 JWT，admin 后端解析用户信息 |
-| 前端入口位置 | 侧边栏底部（帮助按钮旁） | 不侵入主导航，与帮助/登出同属辅助功能区 |
+| 前端入口位置 | 顶栏右上角（帮助链接前面） | 全局可见，用户在任何页面都能快速反馈；与帮助/返回主页同属顶栏辅助区 |
 
 ---
 
@@ -277,17 +275,23 @@ GET /api/feedback/stats
 
 #### 5.1.1 入口位置
 
-在侧边栏底部（`.sb-ft` 区域），帮助按钮旁增加"问题反馈"按钮：
+在顶栏（`.tb`）右上角，"返回主页"链接前面增加"反馈"按钮，与帮助链接同属顶栏辅助区。全局可见，用户在任何页面都能快速反馈。
 
 ```html
-<!-- index.html 侧边栏底部，help-btn 旁 -->
-<a onclick="openFeedbackDialog()" class="help-btn" title="问题反馈">
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-       stroke-width="2" stroke-linecap="round" stroke-linecap="round">
+<!-- index.html 顶栏，返回主页前 -->
+<a id="tbFeedback" onclick="openFeedbackDialog()"
+   style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px"
+   title="问题反馈" data-i18n-title="app.feedback.title">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
   </svg>
+  <span data-i18n="app.feedback.link_text">反馈</span>
 </a>
+<!-- 后面紧跟：返回主页、帮助链接 -->
 ```
+
+顶栏布局效果：`标题 | ... | [💬 反馈] [← 返回主页] [📖 帮助]`
 
 #### 5.1.2 反馈弹窗
 
@@ -452,7 +456,7 @@ SELECT 'feedback.manage', '问题反馈', '/feedback/manage',
 | `src/api/routes/feedback.py` | 新增：反馈提交路由，转发到 admin 后端 |
 | `src/api/main.py` | 注册 feedback router |
 | `src/api/static/js/pages/feedback.js` | 新增：反馈弹窗组件 |
-| `src/api/static/index.html` | 引入 feedback.js + 侧边栏增加反馈按钮 |
+| `src/api/static/index.html` | 引入 feedback.js + 顶栏右上角增加反馈按钮 |
 | `src/api/static/locales/zh/app.json` | 新增反馈相关 i18n key |
 | `src/api/static/locales/en/app.json` | 同上英文 |
 
