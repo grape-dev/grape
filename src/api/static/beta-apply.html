@@ -24,6 +24,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 .btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
 .toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:12px 24px;border-radius:10px;font-size:14px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.2);display:none}
 .toast.show{display:block}
+.success-overlay{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .3s}
+.success-overlay.show{opacity:1}
+.success-box{background:#fff;border-radius:20px;padding:40px;text-align:center;width:380px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25);transform:scale(.9);transition:transform .3s}
+.success-overlay.show .success-box{transform:scale(1)}
+.success-icon{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#34c759,#30d158);margin:0 auto 20px;display:flex;align-items:center;justify-content:center}
+.success-icon svg{width:32px;height:32px;fill:#fff}
+.success-box h2{font-size:20px;font-weight:700;color:#1d1d1f;margin-bottom:8px}
+.success-box p{font-size:14px;color:#86868b;line-height:1.6;margin-bottom:24px}
+.success-box .count{font-size:13px;color:#86868b;margin-bottom:20px}
+.success-btn{width:100%;padding:13px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:transform .15s}
+.success-btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,0.3)}
 </style>
 </head>
 <body>
@@ -55,12 +66,39 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
   <button class="btn" id="submitBtn" onclick="submitForm()">提交申请</button>
 </div>
 <div class="toast" id="toast"></div>
+<div class="success-overlay" id="successOverlay" style="display:none">
+  <div class="success-box">
+    <div class="success-icon">
+      <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+    </div>
+    <h2>申请已提交</h2>
+    <p>您的内测申请已成功提交，请等待审核。</p>
+    <div class="count" id="redirectCount">3 秒后自动跳转到 Grape 主页...</div>
+    <button class="success-btn" onclick="window.location.href='/'">立即进入 Grape</button>
+  </div>
+</div>
 <script>
 function showToast(msg) {
   var t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
   setTimeout(function() { t.classList.remove('show'); }, 3000);
+}
+function showSuccess() {
+  var overlay = document.getElementById('successOverlay');
+  overlay.style.display = 'flex';
+  setTimeout(function() { overlay.classList.add('show'); }, 10);
+  var count = 3;
+  var countEl = document.getElementById('redirectCount');
+  var timer = setInterval(function() {
+    count--;
+    if (count <= 0) {
+      clearInterval(timer);
+      window.location.href = '/';
+    } else {
+      countEl.textContent = count + ' 秒后自动跳转到 Grape 主页...';
+    }
+  }, 1000);
 }
 function submitForm() {
   var accountType = document.getElementById('platform').value;
@@ -78,11 +116,13 @@ function submitForm() {
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.detail && d.detail.message) {
       showToast(d.detail.message);
+      btn.disabled = false; btn.textContent = '提交申请';
+    } else if (d.success || d.id) {
+      showSuccess();
     } else {
       showToast(d.message || '申请已提交');
-      setTimeout(function() { window.location.reload(); }, 1500);
+      btn.disabled = false; btn.textContent = '提交申请';
     }
-    btn.disabled = false; btn.textContent = '提交申请';
   }).catch(function(e) {
     showToast('提交失败: ' + e);
     btn.disabled = false; btn.textContent = '提交申请';
