@@ -470,9 +470,15 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
         log.warning(f"Task notify _run_notify error: {e}")
 
 
-@router.post("/notify")
-async def notify_task(body: TaskNotifyBody, request: Request):
-    """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 静态模板通知 + 飞书通知（不触发 ChatAgent）"""
+@router.post("/notify", operation_id="tasks_notify", summary="任务分配/通知（Agent 执行期）")
+async def notify_task(body: TaskNotifyBody, request: Request,
+                      user: dict = Depends(get_current_user_or_api_key)):
+    """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 静态模板通知 + 飞书通知（不触发 ChatAgent）
+
+    - **仅会话通道**：`get_current_user_or_api_key` 让本端点进契约（CLI 可见），但体内
+      `_require_session_repo_token` 强制 `tk_` + 仓库作用域；`grape_` API Key / JWT → 403。
+    - x-token-scope：session_only（见 openapi._SESSION_ONLY_OPERATIONS）。
+    """
     from src.repo_key import to_repo_key
     if not body.assignee or not body.repo_key or not body.issue_number:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "assignee / repo_key / issue_number 必填"})

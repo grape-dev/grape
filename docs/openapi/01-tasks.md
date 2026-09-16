@@ -13,11 +13,14 @@
 
 ## POST /api/tasks/notify — 任务分配/通知
 
+> scope（x-token-scope）：**session_only**（仅 `tk_`；API Key / JWT → 403）。
+> CLI：`grape tasks notify`（2026-09-16 起进契约，命令名 ≠ 路径，见 README「CLI 命令映射」）。
+
 > 调用方：issue 系列技能（issue/issue、vod/repo-onboarding 等）在分配/换人/接管时调用。
 > 认证：`Authorization: Bearer <tk_ 会话 token>`——**仅支持 `GRAPE_SESSION_TOKEN`**，仓库作用域必须与
 > `repo_key` 匹配（Agent 执行期由系统注入 `$GRAPE_SESSION_TOKEN`，见 event_pipeline 签发）。
 > ⚠️ **不再支持 `BOT_GITCODE_TOKEN`**：若使用 `BOT_GITCODE_TOKEN` 调用，返回 **403 token 无效**。
-> 也**不接受** `grape_` API Key / WebUI JWT。
+> 也**不接受** `grape_` API Key / WebUI JWT（契约标 session_only + 服务端体内强制）。
 
 请求体（TaskNotifyBody）：
 
@@ -34,7 +37,7 @@
 {"ok": true, "task_id": 5, "conversation_id": "uuid", "message": "任务已创建并通知责任人"}
 ```
 
-返回：200；400 责任人未注册平台；**403 非 `GRAPE_SESSION_TOKEN` 或仓库作用域不匹配（含 `BOT_GITCODE_TOKEN`）**；bot_takeover 场景返回 `{"ok":true,"task_id":0,"message":"任务已由 ... 接管"}`。
+返回：200；400 责任人未注册平台；401 未认证/无效 token（契约依赖层）；**403 非 `GRAPE_SESSION_TOKEN` 或仓库作用域不匹配（含 `BOT_GITCODE_TOKEN`）**；404 仓库未托管；bot_takeover 场景返回 `{"ok":true,"task_id":0,"message":"任务已由 ... 接管"}`。
 
 ---
 

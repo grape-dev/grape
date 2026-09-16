@@ -100,6 +100,13 @@ def _require_session_repo_token(request: Request, repo_key: str) -> dict:
 - **建议**：notify/close 属「Agent 执行期内网动作」——**不对外暴露合理**，对齐 `_require_event_bot_token`
   （events 内部端点不进契约）。文档标注为「Agent 会话（tk_）可调，不入契约」即可。
 
+> **修正（2026-09-16 评审）**：notify 改为**进契约**（CLI 可见），实现对齐 `tasks_current` 模式：
+> - `notify_task` 增加 `Depends(get_current_user_or_api_key)`（进 `route_is_public` → 收录进契约），
+>   体内 `_require_session_repo_token` 仍强制 `tk_` + 仓库作用域（`grape_`/JWT → 403）；
+> - `openapi._SESSION_ONLY_OPERATIONS` 登记 `tasks_notify` → `x-token-scope=session_only`；
+> - 契约 175 paths；CLI 生成 `grape tasks notify`（WORKER/ALL 可见，USER 隐藏）。
+> 安全性不变：契约标 session_only 且服务端体内强制；设计文档「建议不进契约」已被本修正取代。
+
 ### 3.2 文档刷新（help/api/01-tasks.md）
 
 | 端点 | 认证 | 说明 |

@@ -27,7 +27,17 @@ _BOT_TOKEN = "bot_test_token"
 
 
 def _bot_headers():
-    return {"Authorization": f"Bearer {_BOT_TOKEN}"}
+    """签发真实 tk_ 会话 token（作用域 gitcode:org/test），通过 get_current_user_or_api_key + 仓库作用域校验。
+
+    notify 进契约后先走契约依赖鉴权：无效 token → 401；旧 `bot_test_token`（非 tk_）会被拦。
+    """
+    import uuid
+    from src.api import auth_token
+    tok = auth_token.issue_session_token(
+        session_key=f"notify-test-{uuid.uuid4().hex}",
+        repo_key="gitcode:org/test", agent_type="issue",
+        user_id=(_uid.get("id") if _uid else 0))
+    return {"Authorization": f"Bearer {tok}"}
 
 
 def setup_module():
