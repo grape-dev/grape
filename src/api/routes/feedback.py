@@ -149,7 +149,7 @@ def feedback_stats():
 def my_feedback(
     user: dict = Depends(get_current_user),
     page: int = Query(0, ge=0),
-    size: int = Query(10, ge=1, le=50),
+    size: int = Query(10, ge=1, le=100),
 ):
     """查看当前用户提交的反馈列表（分页）。"""
     uid = user.get('id') or 0
