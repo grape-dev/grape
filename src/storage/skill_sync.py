@@ -111,8 +111,8 @@ def _sync_skills_to_db(data: dict) -> int:
                     )
             else:
                 c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?)",
-                    (skill_name, display_name, description, agent_type, skill_path_val, "", sub_scene, category_id)
+                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','','',?,?)",
+                    (skill_name, display_name, description, agent_type, skill_path_val, sub_scene, category_id)
                 )
             count += 1
         _db.commit()
