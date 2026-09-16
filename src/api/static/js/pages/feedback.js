@@ -95,11 +95,6 @@
       'cursor:pointer;font-family:inherit;">📎 选择附件</button>' +
       '<span id="fbFileName" style="font-size:12px;color:var(--t3,#86868b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;"></span>' +
       '</div>' +
-      // 页面信息
-      '<div style="font-size:11px;color:var(--t3,#86868b);margin-bottom:18px;padding:8px 10px;' +
-      'background:var(--b,rgba(0,0,0,.03));border-radius:8px;">' +
-      '📍 ' + (window.location.hash || '#') +
-      '</div>' +
       // 按钮行
       '<div style="display:flex;gap:10px;justify-content:flex-end;">' +
       '<button id="fbCancel" type="button" ' +

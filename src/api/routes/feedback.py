@@ -145,6 +145,41 @@ def feedback_stats():
     return _get_stats()
 
 
+@router.get('/feedback/mine')
+def my_feedback(
+    user: dict = Depends(get_current_user),
+    page: int = Query(0, ge=0),
+    size: int = Query(10, ge=1, le=50),
+):
+    """查看当前用户提交的反馈列表（分页）。"""
+    uid = user.get('id') or 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM user_feedback WHERE user_id=?", (uid,))
+            total = c.fetchone()[0]
+            c.execute(
+                "SELECT id, category, title, description, attachment_url, attachment_name, "
+                "status, priority, handler_name, handler_remark, created_at, updated_at "
+                "FROM user_feedback WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (uid, size, page * size))
+            rows = c.fetchall()
+        items = []
+        for r in rows:
+            items.append({
+                "id": r[0], "category": r[1], "title": r[2], "description": r[3],
+                "attachment_url": r[4] or '', "attachment_name": r[5] or '',
+                "status": r[6], "priority": r[7],
+                "handler_name": r[8] or '', "handler_remark": r[9] or '',
+                "created_at": r[10] or '', "updated_at": r[11] or '',
+            })
+        return {"items": items, "total": total, "page": page,
+                "total_pages": max(1, (total + size - 1) // size)}
+    except Exception as e:
+        log.warning(f"feedback mine failed: {e}")
+        return {"items": [], "total": 0, "error": str(e)}
+
+
 def _get_stats():
     """查询反馈统计数据。"""
     try:
