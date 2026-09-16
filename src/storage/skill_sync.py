@@ -61,6 +61,64 @@ def _pack_skill_zip(skill_dir: str) -> bytes:
     return buf.getvalue()
 
 
+def _sync_skills_to_db(data: dict) -> int:
+    """从 skill-description.json 数据同步官方技能元信息到 DB（INSERT/UPDATE，含 category_id）。
+
+    被三处复用：
+    - skill_sync.sync_official_skills_to_obs() — OBS 同步前先刷新 DB
+    - skill_sync.sync_official_skills_from_remote() — 远程同步后刷新 DB
+    - db_setup._sync_official_skills() — 启动时刷新 DB
+
+    返回处理的 skill 数量。
+    """
+    from src.session_manager import db as _db, db_lock as _db_lock
+
+    count = 0
+    with _db_lock:
+        c = _db.cursor()
+        # 构建 slug → category_id 缓存
+        cat_map = {}
+        try:
+            for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
+                cat_map[row[0]] = row[1]
+        except Exception:
+            pass
+        for skill_name, info in data.items():
+            display_name = info.get("name", skill_name)
+            description = info.get("description", "")
+            agent_type = info.get("agent_type", "")
+            skill_path_val = info.get("path", skill_name)
+            sub_scene = info.get("sub_scene", "")
+            category_id = cat_map.get(sub_scene, 0)
+            existed = c.execute(
+                "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'",
+                (skill_name,)
+            ).fetchone()[0]
+            if existed:
+                _fp = c.execute(
+                    "SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''",
+                    (skill_name,)
+                ).fetchone()
+                if _fp:
+                    c.execute(
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, sub_scene, category_id, skill_name)
+                    )
+                else:
+                    c.execute(
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
+                        (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
+                    )
+            else:
+                c.execute(
+                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?)",
+                    (skill_name, display_name, description, agent_type, skill_path_val, "", sub_scene, category_id)
+                )
+            count += 1
+        _db.commit()
+    return count
+
+
 async def sync_official_skills_to_obs() -> dict:
     """全量同步官方技能到 OBS（增量：hash 不变的跳过）。
 
@@ -82,45 +140,7 @@ async def sync_official_skills_to_obs() -> dict:
     result = {"added": 0, "updated": 0, "skipped": 0}
 
     # 1. DB 同步：从 skill-description.json INSERT/UPDATE 元信息（含 category_id）
-    from src.session_manager import db as _db, db_lock as _db_lock
-    with _db_lock:
-        c = _db.cursor()
-        # 构建 slug → category_id 缓存
-        cat_map = {}
-        try:
-            for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
-                cat_map[row[0]] = row[1]
-        except Exception:
-            pass
-        for skill_name, info in data.items():
-            display_name = info.get("name", skill_name)
-            description = info.get("description", "")
-            agent_type = info.get("agent_type", "")
-            skill_path_val = info.get("path", skill_name)
-            sub_scene = info.get("sub_scene", "")
-            category_id = cat_map.get(sub_scene, 0)
-            existed = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'", (skill_name,)).fetchone()[0]
-            if existed:
-                _fp = c.execute(
-                    "SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''",
-                    (skill_name,)
-                ).fetchone()
-                if _fp:
-                    c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, sub_scene, category_id, skill_name)
-                    )
-                else:
-                    c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
-                        (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
-                    )
-            else:
-                c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?,?)",
-                    (skill_name, display_name, description, agent_type, skill_path_val, "", sub_scene, category_id)
-                )
-        _db.commit()
+    _sync_skills_to_db(data)
 
     for skill_name, info in data.items():
         skill_path = info.get("path", skill_name)
@@ -272,8 +292,12 @@ async def sync_official_skills_from_remote() -> dict:
                 result["dirs_synced"] += 1
                 logger.info(f"skill remote sync: synced directory {skill_name}")
 
-        # 6. 执行 DB 同步（复用已有函数，读合并后的本地 json）
-        await sync_official_skills_to_obs()
+        # 6. 执行 DB 同步（读合并后的本地 json，只刷新 DB 元信息）
+        local_json_path = os.path.join(CONFIG_DIR, "skill-description.json")
+        if os.path.exists(local_json_path):
+            with open(local_json_path, "r", encoding="utf-8") as f:
+                local_data = json.load(f)
+            _sync_skills_to_db(local_data)
 
         logger.info(
             f"skill remote sync done: json_merged={result['json_merged']}, "

@@ -1129,24 +1129,9 @@ def _insert_seed_data(table: str, data: dict):
 
         elif table == "skill_official":
             # skill-description.json: {"skill_name": {"name": "...", "agent_type": "...", "path": "...", ...}}
-            # 构建 slug → category_id 缓存
-            cat_map = {}
-            try:
-                for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
-                    cat_map[row[0]] = row[1]
-            except Exception:
-                pass
-            for skill_name, info in data.items():
-                display_name = info.get("name", skill_name)
-                description = info.get("description", "")
-                agent_type = info.get("agent_type", "")
-                skill_path = info.get("path", skill_name)
-                sub_scene = info.get("sub_scene", "")
-                category_id = cat_map.get(sub_scene, 0)
-                c.execute(
-                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?)",
-                    (skill_name, display_name, description, agent_type, skill_path, sub_scene, category_id)
-                )
+            # 复用 skill_sync._sync_skills_to_db 统一 DB 同步逻辑（含 category_id）
+            from src.storage.skill_sync import _sync_skills_to_db
+            _sync_skills_to_db(data)
 
         elif table == "agent_registry":
             # agent-routing.json 已废弃(agent_registry 表移除),backend 统一用 backend_agents
@@ -1706,9 +1691,7 @@ def _migrate_knowledge_issue67():
 def _sync_official_skills():
     """启动时从 configs/skill-description.json 同步官方技能到 skill 表(幂等).
 
-    与 skill_sync.sync_official_skills_to_obs 逻辑一致:新增 INSERT + 已有 UPDATE 元信息
-   (display_name/description/agent_type)._seed_from_json 只补种缺失技能,
-    不更新已有技能的元信息--配置文件中改名/改描述后需要此步骤同步.
+    复用 skill_sync._sync_skills_to_db，统一 DB 同步逻辑（含 category_id）。
     """
     try:
         import json as _json
@@ -1718,55 +1701,10 @@ def _sync_official_skills():
             return
         with open(json_path, "r", encoding="utf-8") as f:
             data = _json.load(f)
-        added = 0
-        updated = 0
-        with db_lock:
-            c = db.cursor()
-            # 构建 slug → category_id 缓存
-            cat_map = {}
-            try:
-                for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
-                    cat_map[row[0]] = row[1]
-            except Exception:
-                pass
-            for skill_name, info in data.items():
-                display_name = info.get("name", skill_name)
-                description = info.get("description", "")
-                agent_type = info.get("agent_type", "")
-                skill_path = info.get("path", skill_name)
-                sub_scene = info.get("sub_scene", "")
-                category_id = cat_map.get(sub_scene, 0)
-                existed = c.execute(
-                    "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'",
-                    (skill_name,)
-                ).fetchone()[0]
-                if existed:
-                    # 更新元信息；本地（非 OBS 集群模式，file_path 为空）同时刷新 skill_path，
-                    # 保证目录按 agent_type 分组后（skills/<agent_type>/<skill>/）DB 路径与磁盘一致。
-                    _fp = c.execute(
-                        "SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''",
-                        (skill_name,)
-                    ).fetchone()
-                    if _fp:
-                        c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, sub_scene, category_id, skill_name)
-                        )
-                    else:
-                        c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_path, sub_scene, category_id, skill_name)
-                        )
-                    updated += 1
-                else:
-                    c.execute(
-                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?,?)",
-                        (skill_name, display_name, description, agent_type, skill_path, "", sub_scene, category_id)
-                    )
-                    added += 1
-            db.commit()
-        if added or updated:
-            log.info(f"Official skills synced: +{added} added, {updated} updated")
+        from src.storage.skill_sync import _sync_skills_to_db
+        count = _sync_skills_to_db(data)
+        if count:
+            log.info(f"Official skills synced: {count} skills processed")
     except Exception as e:
         log.warning(f"Sync official skills failed: {e}")
 
