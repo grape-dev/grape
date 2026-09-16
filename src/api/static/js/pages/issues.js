@@ -382,13 +382,9 @@ function _renderPipelineSection(data) {
   const _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px';
   const _cardTitle = 'font-size:12px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-family:-apple-system,BlinkMacSystemFont,sans-serif';
   let html = `<div style="${_cardStyle};cursor:pointer" onclick="_jumpToPipePage()">`;
-  // 卡片标题：流水线 + 场景名 + 当前状态
-  const _stageStatusMap = {vod:'VOD分析中',issue:'需求处理中',coding:'编码中',qa:'测试中',sre:'部署中',pending_review:'待审核',done:'已完成','':'待启动'};
-  const _stageStatusText = _stageStatusMap[data.current_stage] || data.current_stage || '待启动';
-  const _stageStatusColor = data.current_stage === 'done' ? '#34c759' : data.current_stage === 'pending_review' ? '#10b981' : ['#vod','#issue','#coding','#qa','#sre'].includes('#'+data.current_stage) ? '#3b82f6' : '#86868b';
-  html += `<div style="${_cardTitle};display:flex;align-items:center;justify-content:space-between">`;
+  // 卡片标题：流水线 + 场景名
+  html += `<div style="${_cardTitle}">`;
   html += `<span>${I18N.t('tasks.pipeline_scene')||'流水线'} · ${data.scene_name || ''}</span>`;
-  html += `<span style="font-size:10px;font-weight:600;color:${_stageStatusColor};background:${_stageStatusColor}15;border-radius:4px;padding:2px 8px;text-transform:none;letter-spacing:0">${_stageStatusText}</span>`;
   html += `</div>`;
   // 流水线节点进度条
   if (nodes.length > 0) {
