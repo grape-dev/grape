@@ -1011,11 +1011,20 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                             _asg3 = _fetch_issue_assignee(repo_key, _iid3) or ""
                         except Exception:
                             pass
+                    # Issue #178: 提取 webhook 操作用户（sender）作为 assignee fallback
+                    _sender3 = ""
+                    try:
+                        _snd = _p3.get("sender") or _p3.get("user") or {}
+                        if isinstance(_snd, dict):
+                            _sender3 = _snd.get("username") or _snd.get("login") or ""
+                    except Exception:
+                        pass
                     _t3 = str(_o3.get("title", "") or "") if isinstance(_o3, dict) else ""
                     if not _t3:
                         _t3 = evt.get("title", "") or ""
-                    ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3, event_type=event_type)
-                    log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or '(owner)'}")
+                    ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3,
+                                      event_type=event_type, sender=_sender3)
+                    log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or _sender3 or '(owner)'}")
     except Exception as _e:
         log.warning(f"Pipeline: task-center sync failed: {_e}")
 
