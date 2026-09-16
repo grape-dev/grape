@@ -631,6 +631,12 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(requir
     if agent_type not in VALID_AGENT_TYPES:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"技能类型不合法，可选: {', '.join(sorted(VALID_AGENT_TYPES))}"})
 
+    # 校验 category_id 存在性（0=未分类，>0 时必须在 skill_category 表中存在）
+    if category_id > 0:
+        from src.user.db import get_skill_category
+        if not get_skill_category(category_id):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {category_id} 不存在"})
+
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "Skill 文件不能超过 10MB"})
