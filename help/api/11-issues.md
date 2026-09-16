@@ -1,9 +1,9 @@
 # Issues 对外接口（/api/issues）
 
 > 对外公开，认证：`get_current_user_or_api_key`（JWT 会话 / 会话 token（`tk_`）/ API Key 任一）。
-> scope（x-token-scope）：仓库列表/详情/事件/pipeline/repo_all = **dual**；
-> `mine`（个人维度）与 `create`（创建人=调用者）= **user_only**（`tk_` → 403）；
-> 操作类（confirm-done/cancel/resume/pipeline/clarify/attachments 写）= **user_only**。
+> scope（x-token-scope）：仓库列表/详情/事件/pipeline/`GET status`（读）= **dual**；
+> `mine`（个人维度）、`create`（创建人=调用者）与全部**操作/写类**（start/`PUT status`/confirm-done/cancel/resume/pipeline/clarify/attachments 写）
+> = **user_only**（`tk_` → 403）——避免 Agent 任意改写需求状态干扰 pipeline。
 > 以 **Issue 为中心**聚合：pipeline 阶段（`stage`）+ 需求中心状态（`status`）+ 事件流（`events`）+ 路线图（`pipeline`）。
 > 设计：`docs/weekly-03/issues-api-design.md`。
 
@@ -185,25 +185,140 @@ Issue 对象字段：
 
 ## Issue 操作（按 `{issue_id}` 定位）
 
-> `{issue_id}` = `issue.id`（需求中心列表返回的 `id` 字段）。scope：`start/status/attachments 读` = **dual**；
-> `confirm-done/cancel/resume/pipeline/clarifications/clarify/attachments 写` = **user_only**（`tk_` → 403）。
+> `{issue_id}` = `issue.id`（需求中心列表返回的 `id` 字段）。
+> scope：`status 读（GET）` = **dual**；`start` / `status 写（PUT）` / `attachments 读` = **user_only**；
+> `confirm-done` / `cancel` / `resume` / `pipeline` / `clarifications` / `clarify` / `attachments 写` = **user_only**（`tk_` → 403）。
+> ⚠️ 操作/写类端点一律 **user_only**：`issue.status` 是需求中心用户可读状态（awaiting_input/completed/cancelled
+> 可用户直接设置，高优先级），放行 Agent（`tk_`）任意改动会与 pipeline 驱动的 `stage` 脱钩、干扰任务执行。
+> 通用错误：404 需求不存在 / 403 无权 / 401 未认证。
 
-| 方法 | 路径 | 说明 | 返回 |
-|:---:|------|------|------|
-| POST | `/api/issues/{issue_id}/start` | 打开 Issue 会话 | `{status}` |
-| GET | `/api/issues/{issue_id}/status` | 查询状态（轮询 wait） | `{id,status,repo_key,issue_number,title,...}` |
-| PUT | `/api/issues/{issue_id}/status` | 状态迁移（active/processing/awaiting_input/pending_review/completed/cancelled） | `{ok,status}` |
-| POST | `/api/issues/{issue_id}/confirm-done` | 开发者确认完成（stage→done） | `{ok,status:completed,stage:done}` |
-| POST | `/api/issues/{issue_id}/cancel` | 取消（停流水线 + 终止 agent） | `{ok,status:cancelled}` |
-| POST | `/api/issues/{issue_id}/resume` | 恢复已取消 | `{ok,status:processing}` |
-| GET | `/api/issues/{issue_id}/pipeline` | 流水线路线图（scene/stage/nodes/events） | `{scene_id,current_stage,nodes,events}` |
-| GET | `/api/issues/{issue_id}/clarifications` | agent 澄清消息 | `{messages,conversation_id,issue_url}` |
-| POST | `/api/issues/{issue_id}/clarify` | 回复澄清（发 GitCode 评论 + 写会话） | `{ok,message}` |
-| POST | `/api/issues/{issue_id}/attachments` | 上传附件（multipart `file`） | `{url,filename,size}` |
-| GET | `/api/issues/{issue_id}/attachments` | 列出附件 | `{attachments:[...]}` |
-| DELETE | `/api/issues/{issue_id}/attachments/{filename}` | 删除附件（filename 为 UUID 名） | `{ok,message}` |
+### POST /api/issues/{issue_id}/start — 打开会话
 
-> 通用错误码见下节（404 需求不存在 / 403 无权 / 401 未认证）。
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int |
+| 出参 | `{"status": "active"}`（仅校验归属并返回当前状态，不翻转状态） |
+| 返回 | 200；403 非本人需求；404 需求不存在；401 |
+
+> 「去对话」入口：跳转 Chat 前调用，确认可访问并取当前状态。纯前端导航预检，Agent 执行期无此场景，故不对外放开 `tk_`。
+
+### GET /api/issues/{issue_id}/status — 查询状态（轮询）
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **dual**（三通道） |
+| Path | `{issue_id}` int |
+| 出参 | `{"id", "status", "repo_key", "issue_number", "title", "completed_reason", "completed_at"}` |
+| 返回 | 200；404 需求不存在；401 |
+
+> 供 CLI `grape issues wait` 轮询至终态（completed/cancelled）。
+
+### PUT /api/issues/{issue_id}/status — 状态迁移
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int |
+| Body | `{"status": "processing"}`（active/processing/awaiting_input/pending_review/completed/cancelled 按流转规则） |
+| 出参 | `{"ok": true, "issue_id": ..., "status": "processing"}` |
+| 返回 | 200；400 非法迁移；403 无权；404 需求不存在 |
+
+> 流转：active→processing→awaiting_input→pending_review→completed/cancelled；终态不可改。
+> **写状态仅限用户本人（JWT / `grape_`）**：`status` 是可被用户高优先级覆盖的「需求中心状态」，若允许 `tk_`
+> 会话 token（Agent 执行期）修改，可能与 pipeline 推进的 `stage` 冲突，造成状态不一致、干扰任务执行。
+
+### POST /api/issues/{issue_id}/confirm-done — 确认完成
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int |
+| Body | `{"confirmation": "user_confirmed"}`（可选） |
+| 出参 | `{"ok": true, "issue_id": ..., "status": "completed", "stage": "done"}`；终态幂等 `already_done: true` |
+| 返回 | 200；400 已取消；403；404 |
+
+> 任意阶段可确认完成（stage→done）；开发者确认需求完结。
+
+### POST /api/issues/{issue_id}/cancel — 取消
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int |
+| 出参 | `{"ok": true, "issue_id": ..., "status": "cancelled", "agents_cancelled": n}`；终态幂等 `already_cancelled: true` |
+| 返回 | 200；400 已完成不可取消；403；404 |
+
+> 取消即终止运行中 agent + 停流水线。
+
+### POST /api/issues/{issue_id}/resume — 恢复
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int |
+| 出参 | `{"ok": true, "issue_id": ..., "status": "processing"}`（回到取消前 stage 继续流转） |
+| 返回 | 200；400 仅已取消可恢复；403；404 |
+
+### GET /api/issues/{issue_id}/pipeline — 流水线路线图
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int |
+| 出参 | `{"scene_id", "scene_name", "current_stage", "nodes", "events"}`（nodes 含 `node_status` 数值码 0-5 + `latest_event`） |
+| 返回 | 200；403；404 |
+
+> 节点状态由 `compute_node_statuses` 统一计算（与流水线菜单页一致）；`node_status`：0=pending 1=running 2=completed 3=failed 4=cancelled 5=skipped。
+
+### GET /api/issues/{issue_id}/clarifications — 澄清历史
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int |
+| 出参 | `{"messages": [...], "conversation_id": "...", "issue_url": "..."}` |
+| 返回 | 200；403；404 |
+
+### POST /api/issues/{issue_id}/clarify — 回复澄清
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int |
+| Body | `{"message": "..."}` |
+| 出参 | `{"ok": true, "message": "澄清已发送到 Issue 并同步到任务会话"}` |
+| 返回 | 200；400 message 空；403；404 |
+
+> 同步发 GitCode Issue 评论（`💬 开发者澄清` 前缀）+ 写入任务会话；awaiting_input 自动恢复 processing。
+
+### POST /api/issues/{issue_id}/attachments — 上传附件
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int |
+| Body | `multipart/form-data`，字段 `file` |
+| 出参 | `{"url": "...", "filename": "...", "size": N}` |
+| 返回 | 200；400 类型/大小超限；403；404 |
+
+### GET /api/issues/{issue_id}/attachments — 列出附件
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **dual**（三通道） |
+| Path | `{issue_id}` int |
+| 出参 | `{"attachments": [{"filename", "url", "size", ...}]}` |
+| 返回 | 200；403；404 |
+
+### DELETE /api/issues/{issue_id}/attachments/{filename} — 删除附件
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
+| Path | `{issue_id}` int、`{filename}`（UUID 名） |
+| 出参 | `{"ok": true, "message": "已删除"}` |
+| 返回 | 200；400 非法文件名；404 附件/需求不存在；403 |
 
 ---
 
