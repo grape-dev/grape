@@ -52,6 +52,10 @@ function renderMyFeedbackDetail(feedbackId) {
     // 返回按钮
     html += '<button class="bt bt-o bt-s" onclick="app.nav(\'my-feedback\')" style="margin-bottom:12px">' + t('back_to_list') + '</button>';
 
+    // 删除按钮（右上角）
+    html += '<button class="bt bt-o bt-s" onclick="_myFbDetailDelete(' + item.id + ', event)" ' +
+      'style="margin-bottom:12px;margin-left:8px;color:#ff3b30;border-color:rgba(255,59,48,.3)">' + t('delete') + '</button>';
+
     // 标题行
     html += '<div class="cd" style="padding:20px 24px;margin-bottom:14px">' +
       '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">' +
@@ -108,4 +112,31 @@ function renderMyFeedbackDetail(feedbackId) {
 
     el.innerHTML = html;
   }
+
+  window._myFbDetailDelete = function (fid, event) {
+    var msg = I18N.t('app.feedback.delete_confirm_msg');
+    var title = I18N.t('app.feedback.delete_confirm_title');
+    var delLabel = I18N.t('app.feedback.delete');
+    if (window._grapeConfirm) {
+      _grapeConfirm({
+        title: title,
+        message: msg,
+        confirmText: delLabel,
+        danger: true,
+        onConfirm: function () {
+          API.del('/feedback/' + fid)
+            .then(function () { app.nav('my-feedback'); })
+            .catch(function (err) {
+              var el2 = document.getElementById('pageContent');
+              if (el2) el2.innerHTML = '<div class="ts t2" style="padding:20px">' +
+                I18N.t('app.feedback.delete_failed', { msg: err.message || '' }) + '</div>';
+            });
+        },
+      }, event);
+    } else {
+      if (confirm(msg)) {
+        API.del('/feedback/' + fid).then(function () { app.nav('my-feedback'); });
+      }
+    }
+  };
 }

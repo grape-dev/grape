@@ -59,7 +59,7 @@ def list_feedback(
     try:
         with db_lock:
             c = db.cursor()
-            conditions = []
+            conditions = ["is_deleted=0"]
             params = []
             if status:
                 conditions.append("status=?")
@@ -70,7 +70,7 @@ def list_feedback(
             if search:
                 conditions.append("(title LIKE ? OR description LIKE ?)")
                 params.extend([f"%{search}%", f"%{search}%"])
-            where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+            where = " WHERE " + " AND ".join(conditions)
 
             c.execute(f"SELECT COUNT(*) FROM user_feedback{where}", tuple(params))
             total = c.fetchone()[0]
@@ -127,7 +127,7 @@ def update_feedback_status(fid: int, body: dict):
                 params.append(datetime.now(timezone.utc).isoformat())
             params.append(fid)
             c.execute(
-                f"UPDATE user_feedback SET {', '.join(sets)} WHERE id=?",
+                f"UPDATE user_feedback SET {', '.join(sets)} WHERE id=? AND is_deleted=0",
                 tuple(params))
             db.commit()
             if c.rowcount == 0:
@@ -137,6 +137,37 @@ def update_feedback_status(fid: int, body: dict):
     except Exception as e:
         log.warning(f"feedback update failed: {e}")
         return {"error": "更新失败"}
+
+
+@router.delete('/feedback/{fid}')
+def delete_feedback(fid: int, user: dict = Depends(get_current_user)):
+    """删除反馈（软删除，仅本人可操作）。
+
+    校验 user_id 归属：非本人返回 403。
+    """
+    uid = user.get('id') or 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT user_id FROM user_feedback WHERE id=? AND is_deleted=0",
+                (fid,))
+            row = c.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "反馈记录不存在"})
+            if row[0] != uid:
+                raise HTTPException(status_code=403, detail={"code": 403, "message": "无权删除他人反馈"})
+            c.execute(
+                "UPDATE user_feedback SET is_deleted=1, updated_at=? WHERE id=?",
+                (datetime.now(timezone.utc).isoformat(), fid))
+            db.commit()
+        log.info(f"feedback: deleted id={fid} by user={user.get('username')} (uid={uid})")
+        return {"success": True, "message": "反馈已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"feedback delete failed: {e}")
+        return {"error": "删除失败，请稍后重试"}
 
 
 @router.get('/feedback/stats')
@@ -156,12 +187,12 @@ def my_feedback(
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM user_feedback WHERE user_id=?", (uid,))
+            c.execute("SELECT COUNT(*) FROM user_feedback WHERE user_id=? AND is_deleted=0", (uid,))
             total = c.fetchone()[0]
             c.execute(
                 "SELECT id, category, title, description, attachment_url, attachment_name, "
                 "status, priority, handler_name, handler_remark, created_at, updated_at "
-                "FROM user_feedback WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                "FROM user_feedback WHERE user_id=? AND is_deleted=0 ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (uid, size, page * size))
             rows = c.fetchall()
         items = []
@@ -187,11 +218,11 @@ def _get_stats():
             c = db.cursor()
             result = {"byStatus": {}, "byCategory": {}}
             for st in ("open", "in_progress", "resolved", "closed"):
-                c.execute("SELECT COUNT(*) FROM user_feedback WHERE status=?", (st,))
+                c.execute("SELECT COUNT(*) FROM user_feedback WHERE status=? AND is_deleted=0", (st,))
                 result["byStatus"][st] = c.fetchone()[0]
             result["byStatus"]["total"] = sum(result["byStatus"].values())
             for cat in ("bug", "suggestion", "question", "other"):
-                c.execute("SELECT COUNT(*) FROM user_feedback WHERE category=?", (cat,))
+                c.execute("SELECT COUNT(*) FROM user_feedback WHERE category=? AND is_deleted=0", (cat,))
                 result["byCategory"][cat] = c.fetchone()[0]
             result["byCategory"]["total"] = sum(result["byCategory"].values())
             return result
