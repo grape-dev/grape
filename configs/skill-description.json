@@ -3,15 +3,29 @@
     "name": "华为云Skill创建生成器",
     "agent_type": "coding",
     "sub_scene": "scaffolding",
-    "path": "coding/scaffolding/skill-creator",
+    "path": "coding/scaffolding/huawei-cloud-skill-creator",
     "description": "按需求自动创建华为云 skill：查重 → 读取 Spec → CLI/SDK/OpenAPI 三级调研 → 骨架生成 → 自测 → 创建 PR → A2A 交棒 QA Agent 测试"
   },
   "skill-tester": {
     "name": "华为云Skill测试验证",
     "agent_type": "qa",
     "sub_scene": "auto-testing",
-    "path": "qa/auto-testing/skill-tester",
+    "path": "qa/auto-testing/huawei-cloud-skill-tester",
     "description": "skill 功能验证（创建后 QA 门控）：跑 skill 验证功能正确性 + 规范脚本化检查（frontmatter/文件结构）+ gitleaks 密钥扫描（安全）——输出 Issue 报告 + PR 评论（✅ 通过 / 🔴 失败+原因）。测试通过后调合并脚本 + A2A 交棒 SRE Agent"
+  },
+  "common-skill-creator": {
+    "name": "通用 Skill 创建生成器",
+    "agent_type": "coding",
+    "sub_scene": "scaffolding",
+    "path": "coding/scaffolding/common-skill-creator",
+    "description": "按需求创建通用 Agent Skill（五阶段流水线）：需求分析（Socratic 问答）→ 设计 → 生成 → 校验（Spec 规范 + 动态通用 lint 规则）→ 评估驱动迭代，产出合规 Skill 包。适用于任意领域，华为云专属场景用 huawei-cloud-skill-creator"
+  },
+  "common-skill-tester": {
+    "name": "通用 Skill 三合一测试器",
+    "agent_type": "qa",
+    "sub_scene": "auto-testing",
+    "path": "qa/auto-testing/common-skill-tester",
+    "description": "通用 Skill 三合一测试（QA 门控）：Lint 规范检查 + 功能测试 + 安全审计（恶意代码/CWE）。三套规范动态拉取，Critical/P0/CRITICAL 一票否决，三套评分 ≥95 才通过，输出组合报告"
   },
   "vod": {
     "name": "开发者声音分析",
