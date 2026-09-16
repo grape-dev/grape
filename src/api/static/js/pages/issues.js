@@ -1,5 +1,26 @@
 // ====== 需求中心（Account ▸ 需求中心 / Issues Center）======
 // 方案 B：列表工作流风（左列表 + 右详情面板）
+
+// 事件时间友好格式：转为本地时间，1小时内显示"X分钟前"，1天内显示"X小时前"，超过1天显示"MM-DD HH:mm"
+function _fmtEventTime(utcStr) {
+  if (!utcStr) return '';
+  var local = fmtLocalTime(utcStr);
+  if (!local) return utcStr;
+  var d = new Date(local.replace(' ', 'T'));
+  if (isNaN(d.getTime())) return local;
+  var now = Date.now();
+  var diff = now - d.getTime();
+  if (diff < 0) diff = 0;
+  var mins = Math.floor(diff / 60000);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return mins + '分钟前';
+  var hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + '小时前';
+  // 超过1天：显示 MM-DD HH:mm
+  var pad = function(n) { return String(n).padStart(2, '0'); };
+  return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
 let _tasksAll = [];           // 全部任务缓存
 let _taskSel = null;          // 选中的任务
 let _taskQuery = '';          // 搜索关键字
@@ -439,7 +460,7 @@ function _renderPipelineSection(data) {
       html += `<div style="flex:1;min-width:0;padding-top:1px${evCursor}">`;
       html += `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">`;
       html += `<span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f);font-family:-apple-system,BlinkMacSystemFont,sans-serif">${e.agent_type || e.event_type || ''}</span>`;
-      html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${(e.created_at||'').substring(5,16)}</span>`;
+      html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${_fmtEventTime(e.created_at)}</span>`;
       html += `</div>`;
       if (e.title) html += `<div style="font-size:10px;color:var(--t2,#3a3a3c);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.title}</div>`;
       if (e.summary) html += `<div style="font-size:9px;color:var(--t3,#86868b);margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${e.summary}</div>`;
