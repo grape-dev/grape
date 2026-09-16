@@ -1009,32 +1009,7 @@ def _seed_from_json():
                 c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
             if count > 0 and db_table != "agent_type":
-                # 表已有数据:跳过全量 seed,但对 skill-description.json 中缺失的官方技能幂等补种
-                if seed_key == "skill_official":
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    # 构建 slug → category_id 缓存
-                    cat_map = {}
-                    try:
-                        for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
-                            cat_map[row[0]] = row[1]
-                    except Exception:
-                        pass
-                    for skill_name, info in data.items():
-                        existing = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=?", (skill_name,)).fetchone()
-                        if existing and existing[0] == 0:
-                            display_name = info.get("name", skill_name)
-                            description = info.get("description", "")
-                            agent_type = info.get("agent_type", "")
-                            skill_path = info.get("path", skill_name)
-                            sub_scene = info.get("sub_scene", "")
-                            category_id = cat_map.get(sub_scene, 0)
-                            c.execute(
-                                "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?)",
-                                (skill_name, display_name, description, agent_type, skill_path, sub_scene, category_id)
-                            )
-                            log.info(f"Seeded missing official skill: {skill_name}")
-                    db.commit()
+                # 表已有数据，跳过 seed
                 continue
 
         with open(filepath, "r", encoding="utf-8") as f:
@@ -1451,7 +1426,6 @@ def init_database():
                 _create_indexes()
                 _seed_from_json()
                 _seed_event_action_filter()
-                _sync_official_skills()
                 _align_agent_enable()
                 _cleanup_stale_meta()
                 _cleanup_chat_shared_worker_runtime()
@@ -1485,7 +1459,6 @@ def init_database():
         _create_indexes()
         _seed_from_json()
         _seed_event_action_filter()
-        _sync_official_skills()
         _align_agent_enable()
         _cleanup_stale_meta()
         _cleanup_chat_shared_worker_runtime()
@@ -1694,27 +1667,6 @@ def _migrate_knowledge_issue67():
             log.warning(f"[Issue #67] MySQL native DDL failed: {e}")
 
     log.info("[Issue #67] knowledge migration done")
-
-
-def _sync_official_skills():
-    """启动时从 configs/skill-description.json 同步官方技能到 skill 表(幂等).
-
-    复用 skill_sync._sync_skills_to_db，统一 DB 同步逻辑（含 category_id）。
-    """
-    try:
-        import json as _json
-        config_dir = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
-        json_path = os.path.join(config_dir, "skill-description.json")
-        if not os.path.exists(json_path):
-            return
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-        from src.storage.skill_sync import _sync_skills_to_db
-        count = _sync_skills_to_db(data)
-        if count:
-            log.info(f"Official skills synced: {count} skills processed")
-    except Exception as e:
-        log.warning(f"Sync official skills failed: {e}")
 
 
 def _cleanup_stale_meta():
