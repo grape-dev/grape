@@ -401,10 +401,10 @@ function _renderPipelineSection(data) {
       var isFailed = ns === 'failed' || ns === 3;
       var isCancelled = ns === 'cancelled' || ns === 4;
       var isSkipped = ns === 'skipped' || ns === 5;
-      var col = isCompleted ? '#34c759' : isCurrent ? '#3b82f6' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : '#86868b';
-      var bg = isCompleted ? '#34c759' : isCurrent ? '#3b82f6' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : 'rgba(0,0,0,.06)';
+      var col = isCompleted ? '#34c759' : isCurrent ? '#0071e3' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : '#86868b';
+      var bg = isCompleted ? '#34c759' : isCurrent ? '#0071e3' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : 'rgba(0,0,0,.06)';
       var pulseStyle = isCurrent ? ';animation:grapePulse 1.2s ease-in-out infinite' : '';
-      var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #3b82f6;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
+      var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #0071e3;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
       var innerStyle = isCurrent ? ';position:relative' : '';
       // 节点点击：有事件 seq 则跳转事件详情，否则跳转流水线页面（阻止冒泡到卡片）
       var nodeSeq = (n.latest_event && n.latest_event.seq) || '';

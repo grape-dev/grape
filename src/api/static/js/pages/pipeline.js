@@ -77,7 +77,7 @@ function selPipe(idx) {
     var tag = node.tag || node.id;
     var sc = statuses[i] || 0;
     var ev = (stages[i] && stages[i].latest_event) || {};
-    var dotc = sc === 2 ? '#34c759' : sc === 1 ? '#ff9f0a' : sc === 3 ? '#ff3b30' : sc === 4 ? '#86868b' : sc === 5 ? '#c7c7cc' : '#86868b';
+    var dotc = sc === 2 ? '#34c759' : sc === 1 ? '#0071e3' : sc === 3 ? '#ff3b30' : sc === 4 ? '#86868b' : sc === 5 ? '#c7c7cc' : '#86868b';
     var color = (_TAG_COLORS[tag] || agentColors[i % agentColors.length]).replace('var(--pk)','#ff2d92').replace('var(--r)','#ff3b30').replace('var(--a)','#0071e3').replace('var(--pu)','#af52de').replace('var(--or)','#ff9f0a').replace('var(--sk)','#0c92d4');
     var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
     var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;
@@ -189,7 +189,7 @@ function renderPipeline(data) {
       var tag = node.tag || node.id;
       var sc = statuses[i] || 0;
       var ev = (stages[i] && stages[i].latest_event) || {};
-      var dotc = sc === 2 ? '#34c759' : sc === 1 ? '#ff9f0a' : sc === 3 ? '#ff3b30' : sc === 4 ? '#86868b' : sc === 5 ? '#c7c7cc' : '#86868b';
+      var dotc = sc === 2 ? '#34c759' : sc === 1 ? '#0071e3' : sc === 3 ? '#ff3b30' : sc === 4 ? '#86868b' : sc === 5 ? '#c7c7cc' : '#86868b';
       var color = (_TAG_COLORS[tag] || agentColors[i % agentColors.length]).replace('var(--pk)','#ff2d92').replace('var(--r)','#ff3b30').replace('var(--a)','#0071e3').replace('var(--pu)','#af52de').replace('var(--or)','#ff9f0a').replace('var(--sk)','#0c92d4');
       var label = (node.id || tag).charAt(0).toUpperCase() + (node.id || tag).slice(1);
       var modeIcon = _MODE_ICONS[node.mode] || _MODE_ICONS.emit;

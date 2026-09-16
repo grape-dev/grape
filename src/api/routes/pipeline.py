@@ -138,7 +138,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
         except Exception:
             pass
     # 统一计算节点状态（与任务详情页共享同一套逻辑）
-    from src.api.pipeline_status import compute_node_statuses, NODE_COMPLETED
+    from src.api.pipeline_status import compute_node_statuses, STATUS_COMPLETED
     from src.api.session_store import get_issue_stage, get_issue_scene
     from src.api.pipeline_config import get_pipeline_config
 
@@ -166,7 +166,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
             _latest_event = None
         stages.append({"agent": n.get("id", ""), "latest_event": _latest_event})
 
-    all_done = all(s == NODE_COMPLETED for s in stage_statuses)
+    all_done = all(s == STATUS_COMPLETED for s in stage_statuses)
     any_failed = any(s == 3 for s in stage_statuses)
     any_running = any(s == 1 for s in stage_statuses)
 
