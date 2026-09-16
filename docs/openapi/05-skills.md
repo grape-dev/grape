@@ -7,6 +7,7 @@
 ## GET /api/skills — 技能列表
 
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills list`（operation_id=`skills_list`，命令名 ≠ 路径，见 README「CLI 命令映射」）。
 
 | Query | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|:---:|------|
@@ -47,6 +48,7 @@
 
 ## GET /api/skills/stats — 技能统计
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills stats`。
 
 | 出参 | `{skill_name: {scene_count: N, repo_count: N}}`（scene_skill_ref 聚合） |
 | 返回 | 200 |
@@ -55,6 +57,7 @@
 
 ## GET /api/skills/search — 搜索技能
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills search`。
 
 | Query | `q`（必填） |
 | 出参 | `[{skill_id, name, display_name, description, match_reason}]`（先 skill_name 精准，再 description+display_name+agent_type 模糊） |
@@ -82,6 +85,7 @@
 
 ## POST /api/skills/upload — 上传技能
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills upload`（命令路径即端点，见 README「CLI 命令映射」）。
 
 请求头：`multipart/form-data`，字段：
 

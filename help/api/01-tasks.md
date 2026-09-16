@@ -40,6 +40,8 @@
 
 ## POST /api/tasks/complete — 任务自报完成（grape CLI tasks complete，Event 执行实例）
 
+> CLI：`grape tasks complete`（operation_id=`tasks_complete`，命令名 ≠ 路径，见 README「CLI 命令映射」）。
+
 请求头：`Content-Type: application/json`
 
 请求体（TaskSelfCompleteBody）：
@@ -77,6 +79,8 @@
 ---
 
 ## GET /api/tasks/current — 获取当前任务详情（Agent 执行期自省）
+
+> CLI：`grape tasks current`（operation_id=`tasks_current`）。
 
 > 调用方：Agent 执行期（`$GRAPE_SESSION_TOKEN`）。认证：**仅 `tk_` 会话 token**（scope=session_only）；
 > `grape_` API Key / WebUI JWT → **403**。`session_key` 自动定位当前执行实例，客户端零入参。

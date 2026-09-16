@@ -8,6 +8,7 @@
 ## GET /api/scenes — 场景列表
 
 > scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）。
+> CLI：`grape scenes list`（operation_id=`scenes_list`，命令名 ≠ 路径，见 README「CLI 命令映射」）。
 
 | Query | `repo`（可选；带 repo 时返回仓库级场景，否则 official） |
 | 出参 | 可用场景数组 |

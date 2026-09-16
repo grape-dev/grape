@@ -14,6 +14,7 @@
 | **时间格式** | 一律 ISO 8601 UTC（如 `2026-09-16T08:00:00Z`） |
 | **ID 前缀口径** | `t_` = Agent 执行实例 / task_id；`tk_` = 会话 token；`grape_` = 用户级 API Key；`rta_` = 运行时凭据；`seq` = 事件序号；`{issue_id}` = 内部 id（操作入参）vs `{number}` = 平台编号 |
 | **repo_key 口径** | 统一表达式 `[gitcode:|github:]owner/repo`；对外入参写 `owner/repo`（无前缀）时由服务端按托管记录判定前缀 |
+| **CLI 命令映射** | CLI 命令名由契约 `operation_id` 派生（`<tag> <verb>`，如 `scenes_list` → `grape scenes list`），**并非 HTTP 路径字面量**；`grape <cmd> --help` 可查实际对应路径 |
 | **SSE** | 事件格式 `data: {…}\n\n`；流终止固定 `data: {"done": true}`；异常 `data: {"error": {"code", "message"}}`；请求头 `Accept: text/event-stream` |
 | **限流/重试** | 429 时先 1s 退避，最多重试 3 次；幂等操作可无惧重放 |
 

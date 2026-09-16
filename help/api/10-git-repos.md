@@ -8,6 +8,8 @@
 > `grape_` API Key / Web JWT → **403**。写操作需授权。
 > Base：`{{SERVER_URL}}/api/git-repo`
 > 出参结构为 **gitcode 平台实际结构**（与技能 `gitcode-api-reference.md` 一致）；github/gitlab 未来映射。
+> CLI：`grape git-repo <子资源>`（如 `grape git-repo branches` 对应 `GET /api/git-repo/{owner}/{repo}/branches`；
+> `owner`/`repo` 由 CLI 参数传入，**命令名 ≠ 路径**，见 README「CLI 命令映射」）。
 
 ## 后端区分（Git Provider 判定）
 

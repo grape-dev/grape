@@ -28,6 +28,8 @@
 
 ## GET /api/issues/mine — 我的需求列表（需求中心·个人维度）
 
+> CLI：`grape issues mine`（operation_id=`issues_mine`）。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **user_only**（`grape_` API Key / JWT；`tk_` → 403） |
@@ -41,6 +43,8 @@
 ---
 
 ## GET /api/issues/{owner}/{repo} — 仓库 Issue 列表（含阶段/状态/富化聚合）
+
+> CLI：`grape issues list`（operation_id=`issues_list`，仓库参数由 CLI `--owner/--repo` 传入）。
 
 > 归一：仓库「全部」视图的**唯一入口**（收编原 `/api/issues/repo/{owner}/{repo}`，见 `issues-list-merge-design.md`）。
 
@@ -79,6 +83,7 @@ Issue 对象字段：
 ## POST /api/issues/{owner}/{repo} — 创建 Issue（对外统一创建入口）
 
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> CLI：`grape issues create`（operation_id=`issues_create`；**并非 `/api/issues/create`**，见 README「CLI 命令映射」）。
 > 创建 GitCode Issue + 建档 + 触发 pipeline（创建人 = 调用者本人，故 session token 不适用）。
 
 请求头：`Content-Type: application/json`
@@ -185,6 +190,8 @@ Issue 对象字段：
 
 ## Issue 操作（按 `{issue_id}` 定位）
 
+> CLI：`grape issues <动词>`（`grape issues start / status / confirm-done / cancel / resume / clarify ...`，
+> 由 operation_id 派生，见 README「CLI 命令映射」）。
 > `{issue_id}` = `issue.id`（需求中心列表返回的 `id` 字段）。
 > scope：`status 读（GET）` = **dual**；`start` / `status 写（PUT）` / `attachments 读` = **user_only**；
 > `confirm-done` / `cancel` / `resume` / `pipeline` / `clarifications` / `clarify` / `attachments 写` = **user_only**（`tk_` → 403）。
