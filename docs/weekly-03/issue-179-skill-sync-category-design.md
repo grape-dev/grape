@@ -38,9 +38,11 @@ scene_sync.py 已有：
 from src.storage.scene_sync import _download_repo_zip, _get_sync_token
 ```
 
-#### 2.1.2 新增 `sync_official_skills_from_remote()` 函数
+#### 2.1.2 新增 `sync_official_skills()` 函数
 
 位置：`src/storage/skill_sync.py`
+
+统一同步：远程下载 → DB 同步 → OBS 同步。每步独立 try/except。
 
 执行步骤：
 
@@ -59,7 +61,7 @@ from src.storage.scene_sync import _download_repo_zip, _get_sync_token
 7. finally: 清理临时目录（shutil.rmtree，保存 _download_repo_zip 返回的路径）
 ```
 
-> DB 同步不在本函数内执行 — 统一由 `_skill_sync_worker` 在远程同步之后、OBS 同步之前调 `_sync_skills_to_db()` 执行一次，避免重复调用。
+> DB 同步在 `sync_official_skills()` 内部执行（第 2 步），不单独拆函数。
 > `_download_repo_zip` 需要 `httpx.AsyncClient` 参数，参考 scene_sync.py:315 的用法在函数内创建上下文。
 > 临时目录清理：保存 `_download_repo_zip` 返回的路径，在 finally 中 `shutil.rmtree` 清理。
 > 目录同步用分布式锁（`skill_remote_sync` key，TTL 300s）保护，多实例部署时避免并发 rmtree+copytree 导致目录损坏。每处理一个 skill 续期一次锁。
@@ -84,29 +86,13 @@ from src.storage.scene_sync import _download_repo_zip, _get_sync_token
 
 `start_skill_sync_scheduler()`：
 - 删除 `if get_storage() is None: return`
-- `_skill_sync_worker` 三步独立 try/except，任一步失败不阻塞后续：
+- `_skill_sync_worker` 调用 `sync_official_skills()` 一行完成：
 
 ```python
 async def _skill_sync_worker(interval: float = 1800.0):
     while True:
         try:
-            # 1. 远程同步：失败不阻塞后续
-            try:
-                await sync_official_skills_from_remote()
-            except Exception:
-                logger.exception("skill remote sync failed, continuing")
-
-            # 2. DB 同步：统一在此处执行一次（_sync_skills_to_db 提取为独立函数）
-            try:
-                json_path = os.path.join(CONFIG_DIR, "skill-description.json")
-                if os.path.exists(json_path):
-                    with open(json_path) as f:
-                        _sync_skills_to_db(json.load(f))
-            except Exception:
-                logger.exception("skill DB sync failed, continuing")
-
-            # 3. OBS 同步
-            await sync_official_skills_to_obs()
+            await sync_official_skills()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -114,7 +100,7 @@ async def _skill_sync_worker(interval: float = 1800.0):
         await asyncio.sleep(interval)
 ```
 
-> `_sync_skills_to_db(data: dict) -> int`：从 skill-description.json 同步元信息到 DB，含 category_id。被三处复用：worker、db_setup._sync_official_skills、db_setup._insert_seed_data。
+> `_sync_skills_to_db(data: dict) -> int`：从 skill-description.json 同步元信息到 DB，含 category_id。唯一调用方：`sync_official_skills()`。
 > DB 同步采用逐字段变更检测 — 只在实际数据变更时才 UPDATE + 刷新 updated_at，避免 blanket UPDATE 架空 sort=latest。
 > per-skill try/except + INSERT OR IGNORE：单个 skill SQL 失败不中止整批。
 > `sync_official_skills_to_obs` 内部不再调 `_sync_skills_to_db`（由 worker 统一调）。
@@ -208,12 +194,11 @@ skill 表同时保留 `sub_scene`（英文 slug）和 `category_id`（数字 ID�
 > 原有 `db_setup._sync_official_skills()` 和 `_insert_seed_data` skill 补种已删除。
 
 > `_sync_skills_to_db` 内部构建 slug→category_id 缓存（cat_map），sub_scene 非空但 category_id=0 时打 warning 日志。
-> `_seed_from_json` 补种分支也独立构建 cat_map 写 category_id（不依赖 _sync_skills_to_db）。
 > DB 缺失 skill 时自动补入：`_sync_skills_to_db` 遍历 JSON 每个 skill，SELECT 查 DB → 有则逐字段比对 UPDATE → 无则 INSERT OR IGNORE（含 category_id）。已验证：删除 DB 中的 skill 后重新同步，skill 自动补回且 category_id 正确。
 
 #### 2.2.6 数据回填执行时机
 
-回填逻辑放在 init_db 流程中，`_init_skill_category_data()` 之后、`_sync_official_skills()` 之前执行。作为幂等步骤（`WHERE category_id=0`），每次启动都会执行，但只有首次或新增分类时才实际命中。
+回填逻辑放在 init_db 流程中，`_init_skill_category_data()` 之后执行。作为幂等步骤（`WHERE category_id=0`），每次启动都会执行，但只有首次或新增分类时才实际命中。
 
 ```python
 def _backfill_skill_category_id():
@@ -234,7 +219,7 @@ def _backfill_skill_category_id():
         log.warning(f"Backfill skill category_id failed: {e}")
 ```
 
-调用位置：init_db 流程，`_init_skill_category_data()` → `_backfill_skill_category_id()` → `_sync_official_skills()`。
+调用位置：init_db 流程，`_init_skill_category_data()` → `_backfill_skill_category_id()`。skill 数据同步由 worker 异步完成。
 
 ### 2.3 Part 3：后端 API 适配
 
@@ -264,10 +249,7 @@ category_name 通过查 skill_category 表获得（批量查，避免 N+1）。
 
 #### 2.3.3 `agent-stats` 接口改动
 
-当前返回 `sub_scenes: [{id, label}]`（从 `SELECT DISTINCT sub_scene` 查）。
-改为返回 `categories: [{id, name, slug, icon, order_num}]`（从 skill_category 表查）。
-
-直接替换，不保留 `sub_scenes` 字段。前端后端同步改、同步部署。
+agent-stats 只返回 `{total, agents: [{agent_type, count}]}`，不再返回 categories。分类列表由 `/api/skills/categories` 独立获取（前端 `renderSkills()` 初始化时调用）。
 
 #### 2.3.4 `upload` 接口改动
 
@@ -309,7 +291,7 @@ category_name 通过查 skill_category 表获得（批量查，避免 N+1）。
 | # | 函数 | 改动 |
 |---|------|------|
 | 1 | `renderSkills()` | 初始化时调 `/api/skills/categories` 获取分类列表，缓存到 `_skillCategories` |
-| 2 | `_loadAgentStats()` | `agent-stats` 返回的 `categories` 写入 `_skillCategories`（替代 `_allSubScenes`） |
+| 2 | `_loadAgentStats()` | 只读 `agents` + `total`，不再读 categories（从 `/api/skills/categories` 获取） |
 | 3 | `_renderTagFilters()` | 从 `_skillCategories` 渲染标签（id + name + icon），替代 `_allSubScenes` |
 | 4 | `_switchTagFilter(label, id)` | API 传 `category_id=数字ID`，替代 `sub_scene=英文slug` |
 | 5 | `_reloadSkills()` | 请求参数 `sub_scene=` 改为 `category_id=` |
@@ -332,12 +314,7 @@ category_name 通过查 skill_category 表获得（批量查，避免 N+1）。
 | 仓库技能 | repo | 上传时选分类，upsert_skill_obs 写入 category_id | ✅ 可用 |
 | 个人技能 | user | 上传时选分类，upsert_skill_obs 写入 category_id | ✅ 可用 |
 
-agent-stats 接口的 `categories` 查询条件随 scope 变化：
-- official：查 `SELECT DISTINCT category_id FROM skill WHERE scope='official'`
-- repo：查 `SELECT DISTINCT category_id FROM skill WHERE scope='repo' AND owner_id=?`
-- user：查 `SELECT DISTINCT category_id FROM skill WHERE scope='user' AND owner_id=?`
-
-再关联 skill_category 表返回分类详情。category_id=0 不返回（未分类不展示为筛选标签）。
+分类标签固定展示全量 11 个（来自 `/api/skills/categories`），不随 scope/agent 变化。agent-stats 不再返回 categories。
 
 ### 2.5 Part 5：Admin 后端适配（本期延后）
 
@@ -353,7 +330,7 @@ Admin 后端（SkillRo / SkillService / SkillManage）本期不做，后续迭�
 | `src/api/routes/skills.py` | list_skills 加 category_id 过滤 + cat_map 移到 db_lock 外（cursor 修复）+ agent-stats 改查 skill_category + 新增 /categories 接口 + upload 加 category_id + detail 加 category_id + convert_skill 补传 category_id + featured 加 category_id/category_name + search 加 category_id/category_name + sort=latest 改 updated_at DESC + 删除 _SUB_SCENE_LABELS |
 | `src/user/db.py` | 新增 list_skill_categories() / get_skill_category() + upsert_skill_obs 加 category_id + list_skills 加 category_id + get_featured_skills 加 category_id |
 | `src/api/static/js/pages/skills.js` | 13 处前端适配（见 2.4.1） |
-| `src/api/static/index.html` | skills.js?v=41 |
+| `src/api/static/index.html` | skills.js?v=43 |
 | `src/api/static/locales/zh/skills.json` | 新增 upload.category + upload.uncategorized |
 | `src/api/static/locales/en/skills.json` | 新增 upload.category + upload.uncategorized |
 | `src/api/main.py` | 无改动（启动顺序已正确） |
@@ -402,7 +379,7 @@ SELECT scope, category_id, COUNT(*) FROM skill WHERE scope IN ('user','repo') GR
 10. repo/user 技能支持分类：上传表单可选分类，DB 写入 category_id，前端标签筛选对三 Tab 一致
 11. skill 远程同步在 scene_sync 之前执行（main.py 启动顺序已保证），场景同步预检时 skill 表已有数据
 12. 远程覆盖本地策略：远程 skill-description.json 新增/变更同步到本地，本地自定义 skill 保留
-13. agent-stats 直接替换 sub_scenes 为 categories，无兼容期
+13. agent-stats 只返回 {total, agents}，categories 由 /api/skills/categories 独立获取
 14. sort=latest 改为 ORDER BY updated_at DESC，_sync_skills_to_db 逐字段变更检测避免架空排序
 15. worker 三步独立 try/except：远程同步/DB 同步/OBS 同步任一失败不阻塞后续
 16. 多实例目录同步用分布式锁保护（skill_remote_sync key，TTL 300s，per-skill 续期）
