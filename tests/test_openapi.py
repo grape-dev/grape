@@ -257,8 +257,6 @@ EXPECTED_PUBLIC = {
     "issues_upload_attachment": ("post", "/api/issues/{issue_id}/attachments"),
     "issues_list_attachments": ("get", "/api/issues/{issue_id}/attachments"),
     "issues_delete_attachment": ("delete", "/api/issues/{issue_id}/attachments/{filename}"),
-    "gitrepo_git_credential": ("get", "/api/git-repo/{owner}/{repo}/git-credential"),
-    "gitrepo_workspace": ("get", "/api/git-repo/{owner}/{repo}/workspace"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
@@ -380,8 +378,6 @@ def test_x_token_scope_consistency():
     # 4) session_only 样例（需求 §四验收）
     session_samples = {"/api/git-repo/{owner}/{repo}/branches": "get",
                        "/api/tasks/current": "get",
-                       "/api/git-repo/{owner}/{repo}/git-credential": "get",
-                       "/api/git-repo/{owner}/{repo}/workspace": "get",
                        "/api/repos/{owner}/{repo}/git-credential": "get",
                        "/api/repos/{owner}/{repo}/workspace": "get"}
     for path, method in session_samples.items():
