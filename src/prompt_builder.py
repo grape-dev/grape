@@ -780,14 +780,6 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
     # 角色特定的 A2A 交办规则（按 agent_type 注入，指引何时 A2A 给哪个 Agent）
     _a2a_role_rules = {
-        "vod": (
-            "\n### VOD Agent A2A 交办规则\n"
-            "需求审视完成后，根据当前场景的 pipeline 节点顺序确定 A2A 目标：\n"
-            "- 查看 prompt 中的「Issue Pipeline」信息，确认当前场景的流水线节点顺序\n"
-            "- A2A 目标 = 当前 vod 节点的 next 节点 tag（如 pipeline 为 vod→sre，则 A2A 给 `sre`；如 pipeline 为 vod→issue，则 A2A 给 `issue`）\n"
-            "- A2A 时 `pr_number` 不传（VOD 阶段无 PR），context 写明「需求审视完成」+ 结构化需求摘要\n"
-            "⚠️ 不要写死 A2A 目标为 issue——部署流水线（vod→sre）中 VOD 直接 A2A 给 sre 是正常行为。\n"
-        ),
         "qa": (
             "\n### QA Agent A2A 交办规则\n"
             "PR 审查完成后，根据审查结果决定 A2A 目标：\n"
