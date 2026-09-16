@@ -259,7 +259,9 @@ function loadTasks() {
         _openBoardDetail(pid);
       }
     } else if (!window._pendingIssueNumber) {
-      // Issue #175: 普通列表刷新时清除详情页状态，防止 _withTaskLoading 误判在详情页
+      // Issue #175: 普通列表刷新时清除详情页状态，防止 _withTaskLoading 误判在详情页。
+      // 安全前提：_openBoardDetail 进入详情页时会 clearInterval 停止轮询（L325），
+      // 所以轮询触发的 loadTasks 不会在详情页期间执行此清除。如未来改为详情页也保持轮询，需同步调整此处。
       window._currentDetailTask = null;
     }
   }).catch(e => {
