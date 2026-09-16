@@ -1,8 +1,7 @@
 # Skills 技能接口（/api/skills）
 
 > 对外公开，认证：`get_current_user_or_api_key`。
-> scope（x-token-scope）：全部 = **user_only**（`grape_` API Key / JWT；`tk_` → 403），
-> 仅 `GET /agent-stats` = **dual**（三通道）。
+> scope（x-token-scope）：全部 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 
 ## GET /api/skills — 技能列表
 
@@ -28,7 +27,8 @@
 
 ## GET /api/skills/agent-stats — Agent 维度技能统计
 
-> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills agent-stats`。
 
 | Query | `scope`（可选）、`repo`（可选；过滤规则与列表一致） |
 | 出参 | 技能总数 + 各 agent_type 的技能数量 |

@@ -363,7 +363,9 @@ def test_x_token_scope_consistency():
                          "/api/issues/mine": "get", "/api/issues/{owner}/{repo}": "post",
                          # 用户操作类：状态写/会话预检禁止 tk_（避免 Agent 干扰 pipeline）
                          "/api/issues/{issue_id}/status": "put",
-                         "/api/issues/{issue_id}/start": "post"}
+                         "/api/issues/{issue_id}/start": "post",
+                         # skills agent-stats：仅 Web UI/用户级消费，禁 session
+                         "/api/skills/agent-stats": "get", "/api/skills/stats": "get"}
     for path, method in user_only_samples.items():
         assert s["paths"][path][method]["x-token-scope"] == "user_only", \
             f"期望 user_only: {method} {path}"
