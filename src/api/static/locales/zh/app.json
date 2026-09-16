@@ -39,6 +39,7 @@
   "login": {
     "gitcode_login": "使用 GitCode 登录",
     "github_login": "使用 GitHub 登录",
+    "beta_apply": "申请内测",
     "pwd_login": "← 用户名密码登录",
     "username": "用户名",
     "password": "密码",
