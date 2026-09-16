@@ -391,6 +391,10 @@ function _switchTagFilter(label, id) {
   }
 }
 
+function _escapeHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 function _renderTagFilters() {
   var container = document.getElementById('tag-filters');
   if (!container) return;
@@ -421,7 +425,7 @@ function _renderTagFilters() {
   html += '<a class="skill-tag-filter' + (allOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'all\',\'\')" style="padding:5px 12px;font-size:11px;color:' + (allOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (allOn?'var(--a)':'var(--b)') + ';background:' + (allOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">全部</a>';
   tags.forEach(function(t) {
     var isOn = _activeTagFilterId === t.id;
-    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'' + t.label.replace(/'/g, "\\'") + '\',\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + (t.icon ? '<span style="margin-right:3px">' + t.icon + '</span>' : '') + t.label + '</a>';
+    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'' + _escapeHtml(t.label).replace(/'/g, "\\'") + '\',\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + (t.icon ? '<span style="margin-right:3px">' + _escapeHtml(t.icon) + '</span>' : '') + _escapeHtml(t.label) + '</a>';
   });
   container.innerHTML = html;
 }
@@ -528,7 +532,7 @@ function _renderSkillCard(s, fixedWidth) {
     <div class="rh">
       <span style="font-size:14px">${meta.icon||''}</span>
       <span class="tg ${tagClass}" style="font-size:9px">${meta.label||at}</span>
-      ${s.category_name ? `<span class="tg" style="font-size:9px;background:rgba(49,104,224,0.08);color:var(--a)">${s.category_name}</span>` : ''}
+      ${s.category_name ? `<span class="tg" style="font-size:9px;background:rgba(49,104,224,0.08);color:var(--a)">${_escapeHtml(s.category_name)}</span>` : ''}
       <span class="rn">${s.display_name || s.name}</span>
       ${featuredBadge}
     </div>
@@ -615,7 +619,7 @@ function renderSkillDetail(data) {
       </div>
       <div class="info-grid">
         <div class="info-cell"><div class="il">${I18N.t('skills.info_scenes')||'场景'}</div><div class="iv">${scenesStr}</div></div>
-        <div class="info-cell"><div class="il">${I18N.t('skills.info_tags')||'子场景'}</div><div class="iv">${tagsStr}</div></div>
+        <div class="info-cell"><div class="il">${I18N.t('skills.info_tags')||'分类'}</div><div class="iv">${_escapeHtml(tagsStr)}</div></div>
         <div class="info-cell"><div class="il">${I18N.t('skills.info_version')||'版本'}</div><div class="iv">${version}</div></div>
       </div>
     </div>`;

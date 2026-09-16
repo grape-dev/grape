@@ -1030,7 +1030,7 @@ def _seed_from_json():
                             sub_scene = info.get("sub_scene", "")
                             category_id = cat_map.get(sub_scene, 0)
                             c.execute(
-                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?)",
+                                "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?)",
                                 (skill_name, display_name, description, agent_type, skill_path, sub_scene, category_id)
                             )
                             log.info(f"Seeded missing official skill: {skill_name}")

@@ -16,9 +16,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
-os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
-    os.path.dirname(__file__), "..", "data", "test_issue179.db"))
+os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_issue179.db")
 
 import json
 import pytest
@@ -37,10 +37,20 @@ def _jwt(user_id, username="test"):
 
 @pytest.fixture(scope="module", autouse=True)
 def _setup():
-    """初始化测试 DB"""
+    """初始化测试 DB，结束时清理测试数据"""
     from src.api.db_setup import init_database
     init_database()
     yield
+    # 清理测试用户和技能
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("DELETE FROM skill WHERE skill_name='test-skill-179' AND scope='user'")
+            c.execute("DELETE FROM user_accounts WHERE username='test_issue179'")
+            db.commit()
+        except Exception:
+            pass
 
 
 class TestSkillCategoryTable:
