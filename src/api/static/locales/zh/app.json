@@ -84,5 +84,18 @@
     "loading": "加载中...",
     "iframe_title": "Grape 使用帮助"
   },
+  "feedback": {
+    "title": "问题反馈",
+    "link_text": "反馈",
+    "category_bug": "Bug 缺陷",
+    "category_suggestion": "功能建议",
+    "category_question": "使用疑问",
+    "category_other": "其他",
+    "placeholder_title": "一句话概述问题",
+    "placeholder_desc": "请详细描述遇到的问题、复现步骤、期望行为...",
+    "submit": "提交反馈",
+    "success": "反馈已提交，感谢您的反馈！",
+    "failed": "反馈提交失败，请稍后重试"
+  },
   "back_home": "← 返回主页"
 }

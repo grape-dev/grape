@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -300,7 +300,7 @@ function loadAgentTypes() {
       return;
     }
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -454,6 +454,20 @@ function loadAgentTypes() {
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
       renderSettings(param || 'credentials');
+    } else if (view === 'my-feedback') {
+      title.textContent = '我的反馈';
+      if (typeof renderMyFeedback === 'function') {
+        renderMyFeedback();
+      } else {
+        pc.innerHTML = '<div class="error">反馈页面加载失败，请刷新重试</div>';
+      }
+    } else if (view === 'my-feedback-detail') {
+      title.textContent = '反馈详情';
+      if (typeof renderMyFeedbackDetail === 'function') {
+        renderMyFeedbackDetail(param);
+      } else {
+        pc.innerHTML = '<div class="error">详情页面加载失败，请刷新重试</div>';
+      }
     } else if (view === 'skills') {
       title.textContent = I18N.t('app.current_project');
       renderSkills();
@@ -510,7 +524,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local'];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail'];
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {
@@ -664,7 +678,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '25');
+      localStorage.setItem('app_cache_ver', '26');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -691,13 +705,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '25') {
+    if (localStorage.getItem('app_cache_ver') !== '26') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '25');
+      localStorage.setItem('app_cache_ver', '26');
     }
 
     const token = localStorage.getItem('token');
@@ -711,7 +725,7 @@ function loadAgentTypes() {
         const view = parts[0];
         const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
         // Views that don't require a repo
-        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail'];
+        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'my-feedback', 'my-feedback-detail'];
         if (noRepoViews.includes(view) || currentRepo()) {
           nav(view, param);
         } else {

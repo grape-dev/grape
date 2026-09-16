@@ -84,5 +84,18 @@
     "loading": "Loading...",
     "iframe_title": "Grape Help"
   },
+  "feedback": {
+    "title": "Feedback",
+    "link_text": "Feedback",
+    "category_bug": "Bug",
+    "category_suggestion": "Feature Suggestion",
+    "category_question": "Usage Question",
+    "category_other": "Other",
+    "placeholder_title": "Briefly describe the issue",
+    "placeholder_desc": "Please describe the problem, steps to reproduce, expected behavior...",
+    "submit": "Submit Feedback",
+    "success": "Feedback submitted, thank you!",
+    "failed": "Feedback submission failed, please try again later"
+  },
   "back_home": "← Back"
 }

@@ -1,10 +1,15 @@
 """Codex Runtime 实现（OpenAI Codex CLI 执行引擎）。
 
 调用形态（codex exec 非交互模式）：
-    codex exec --json --sandbox workspace-write <prompt>
+    codex exec --json --sandbox danger-full-access <prompt>
 
 --json: 输出 JSONL 事件流（每行一个 JSON 对象，含 type 字段）
---sandbox workspace-write: 允许 agent 写工作区文件（对齐 opencode --dangerously-skip-permissions）
+--sandbox danger-full-access: 允许 agent 读写工作区文件并访问网络
+
+    workspace-write 模式默认禁止网络，导致 agent 调 GitCode API / git fetch
+    时被拦截（CODEX_SANDBOX_NETWORK_DISABLED=1），任务失败。改用
+    danger-full-access 放开网络限制。后续通过独立 issue 以网络白名单
+    策略收紧（方案 B/C）。
 
 输出协议（JSONL 事件流，见 codex-rs/exec/src/exec_events.rs）：
   顶层事件 type：
@@ -46,11 +51,11 @@ class CodexRuntime(AgentRuntime):
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         """构建 codex exec 参数。
 
-        codex exec --json --sandbox workspace-write <prompt>
-        --sandbox workspace-write: 允许写工作区（对齐 opencode 自动执行模式）
+        codex exec --json --sandbox danger-full-access <prompt>
+        --sandbox danger-full-access: 允许读写工作区 + 网络访问（对齐 opencode 自动执行模式）
         session_id 暂不启用——codex resume 与 opencode --session 形态不同，首期不做。
         """
-        args = ["exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check"]
+        args = ["exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check"]
         if prompt:
             args.append(prompt)
         return args
