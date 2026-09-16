@@ -211,6 +211,7 @@ skill 表同时保留 `sub_scene`（英文 slug）和 `category_id`（数字 ID�
 
 > `_sync_skills_to_db` 内部构建 slug→category_id 缓存（cat_map），sub_scene 非空但 category_id=0 时打 warning 日志。
 > `_seed_from_json` 补种分支也独立构建 cat_map 写 category_id（不依赖 _sync_skills_to_db）。
+> DB 缺失 skill 时自动补入：`_sync_skills_to_db` 遍历 JSON 每个 skill，SELECT 查 DB → 有则逐字段比对 UPDATE → 无则 INSERT OR IGNORE（含 category_id）。已验证：删除 DB 中的 skill 后重新同步，skill 自动补回且 category_id 正确。
 
 #### 2.2.6 数据回填执行时机
 
