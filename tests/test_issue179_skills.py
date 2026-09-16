@@ -301,3 +301,47 @@ class TestApiEndpoints:
         s = data["skills"][0]
         assert "category_id" in s
         assert "category_name" in s
+
+
+class TestUploadCategoryValidation:
+    """upload category_id 存在性校验"""
+
+    def _headers(self):
+        from src.user.db import create_user, get_user_by_username
+        uid = create_user("test_issue179", "test123")
+        if not uid:
+            user = get_user_by_username("test_issue179")
+            uid = int(user["id"]) if user else 1
+        uid = int(uid)
+        from src.api.jwt_utils import create_access_token
+        from src.user.db import get_token_version
+        token = create_access_token(uid, "test_issue179", get_token_version(uid))
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_upload_invalid_category_id(self):
+        """category_id=9999 不存在 -> 400"""
+        import io, zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr("test-skill-179/SKILL.md", "---\nname: test-skill-179\ndescription: test\n---\n# Test")
+        buf.seek(0)
+        headers = self._headers()
+        r = client.post(
+            "/api/skills/upload",
+            headers=headers,
+            files={"file": ("test-skill-179.zip", buf, "application/zip")},
+            data={"scope": "user", "agent_type": "coding", "category_id": "9999"},
+        )
+        assert r.status_code == 400
+        assert "9999" in r.json()["detail"]["message"]
+
+
+class TestConvertSkillCategory:
+    """convert_skill category_id 传递"""
+
+    def test_list_skills_returns_category_id_for_convert(self):
+        """list_skills 返回 category_id 字段（convert_skill 依赖）"""
+        from src.user.db import list_skills
+        skills = list_skills(2)
+        if skills:
+            assert "category_id" in skills[0], "list_skills missing category_id field"
