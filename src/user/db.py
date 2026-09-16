@@ -1045,8 +1045,8 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
 def list_skills(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, skill_name, agent_type, description, scope, owner_id, file_path FROM skill WHERE scope='user' AND owner_id=? ORDER BY id", (str(user_id),))
-        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "file_path": r[6] or "", "created_at": ""} for r in c.fetchall()]
+        c.execute("SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id FROM skill WHERE scope='user' AND owner_id=? ORDER BY id", (str(user_id),))
+        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "file_path": r[6] or "", "category_id": r[7] or 0, "created_at": ""} for r in c.fetchall()]
 
 
 def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:

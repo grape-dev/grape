@@ -101,12 +101,12 @@ def _sync_skills_to_db(data: dict) -> int:
                 ).fetchone()
                 if _fp:
                     c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
                         (display_name, description, agent_type, sub_scene, category_id, skill_name)
                     )
                 else:
                     c.execute(
-                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=? WHERE skill_name=? AND scope='official'",
+                        "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
                         (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
                     )
             else:
@@ -313,12 +313,18 @@ async def _skill_sync_worker(interval: float = 1800.0):
     """
     while True:
         try:
-            await sync_official_skills_from_remote()
+            # 远程同步：失败不阻塞后续 DB + OBS 同步
+            try:
+                await sync_official_skills_from_remote()
+            except Exception:
+                logger.exception("skill remote sync failed, continuing to DB+OBS sync")
+
             # DB 同步统一在此处执行，避免远程同步和 OBS 同步重复调
             json_path = os.path.join(CONFIG_DIR, "skill-description.json")
             if os.path.exists(json_path):
                 with open(json_path, "r", encoding="utf-8") as f:
                     _sync_skills_to_db(json.load(f))
+
             await sync_official_skills_to_obs()
         except asyncio.CancelledError:
             logger.info("skill sync worker cancelled")

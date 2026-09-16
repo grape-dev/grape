@@ -116,7 +116,7 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
         params.append(category_id)
 
     # 排序
-    order_by = "ORDER BY like_count DESC" if sort == "hot" else "ORDER BY agent_type, skill_name"
+    order_by = "ORDER BY updated_at DESC" if sort == "latest" else "ORDER BY like_count DESC" if sort == "hot" else "ORDER BY agent_type, skill_name"
 
     where_sql = " WHERE " + " AND ".join(conditions)
 

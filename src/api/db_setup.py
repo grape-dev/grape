@@ -1013,6 +1013,13 @@ def _seed_from_json():
                 if seed_key == "skill_official":
                     with open(filepath, "r", encoding="utf-8") as f:
                         data = json.load(f)
+                    # 构建 slug → category_id 缓存
+                    cat_map = {}
+                    try:
+                        for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
+                            cat_map[row[0]] = row[1]
+                    except Exception:
+                        pass
                     for skill_name, info in data.items():
                         existing = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=?", (skill_name,)).fetchone()
                         if existing and existing[0] == 0:
@@ -1021,9 +1028,10 @@ def _seed_from_json():
                             agent_type = info.get("agent_type", "")
                             skill_path = info.get("path", skill_name)
                             sub_scene = info.get("sub_scene", "")
+                            category_id = cat_map.get(sub_scene, 0)
                             c.execute(
-                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene) VALUES (?,?,?,?,?,'official','',?)",
-                                (skill_name, display_name, description, agent_type, skill_path, sub_scene)
+                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene, category_id) VALUES (?,?,?,?,?,'official','',?,?)",
+                                (skill_name, display_name, description, agent_type, skill_path, sub_scene, category_id)
                             )
                             log.info(f"Seeded missing official skill: {skill_name}")
                     db.commit()
