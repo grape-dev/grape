@@ -10,7 +10,7 @@ from src.api.time_utils import normalize_event_time
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
-@router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)")
+@router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)", description="Event detail with payload/agent_logs/result for a seq.")
 def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
     from src.session_manager import db, db_lock
     with db_lock:
@@ -1241,7 +1241,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     yield ("done", {"reply": final_text, "messages": _list_thread(anchor_seq)})
 
 
-@router.get("/{seq}/thread", operation_id="events_thread", summary="Event conversation thread")
+@router.get("/{seq}/thread", operation_id="events_thread", summary="Event conversation thread", description="Returns the event conversation thread messages.")
 def get_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
     from src.api.knowledge import read_knowledge, _issue_num_from
@@ -1326,7 +1326,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     return {"ok": True, "scope": scope, "message": "知识已删除"}
 
 
-@router.post("/{seq}/chat", operation_id="events_chat_send", summary="Send event conversation")
+@router.post("/{seq}/chat", operation_id="events_chat_send", summary="Send event conversation", description="Sends a message into the event conversation (non-streaming).")
 async def send_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
     gate = _thread_gate(evt["repo_key"], evt["issue_id"])
@@ -1688,7 +1688,7 @@ def flow_reset(seq: int, body: FlowResetBody, request: Request):
     return {"ok": True, "stage": to_stage, "cancelled": cancelled}
 
 
-@router.get("/{owner}/{repo}", operation_id="events_list", summary="List repository events")
+@router.get("/{owner}/{repo}", operation_id="events_list", summary="List repository events", description="Paged event list for a repository with optional filters.")
 def list_events(owner: str, repo: str,
                       page: int = Query(1, ge=1),
                       page_size: int = Query(20, ge=1, le=100),

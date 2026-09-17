@@ -97,7 +97,7 @@ def list_agent_types():
     } for r in rows]}
 
 
-@router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Get agent config")
+@router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Get agent config", description="Returns the agent session config (runtime/skill/engine bindings) for name/owner/repo.")
 def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                      keyword: str = Query("", description="事件关键词搜索（seq/issue_id/event_type/title/summary/actor）"),
                      page: int = Query(1, ge=1, description="页码，从 1 开始"),
@@ -348,7 +348,7 @@ def clean_agent_session(name: str, owner: str, repo: str,
     return {"message": "Agent 会话已清理（runtime_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
 
 
-@router.put("/{name}/{owner}/{repo}", operation_id="agents_update", summary="Update agent config")
+@router.put("/{name}/{owner}/{repo}", operation_id="agents_update", summary="Update agent config", description="Updates the agent session config (engine/skill/IM bindings).")
 async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfig,
                               user: dict = Depends(require_no_session_token)):
     if name not in AGENT_TYPES:

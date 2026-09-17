@@ -793,7 +793,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     return await create_task_via_issue(b, user)
 
 
-@router.get("/{owner}/{repo}/{number}", operation_id="issues_detail", summary="Issue detail (stage+events+pipeline)")
+@router.get("/{owner}/{repo}/{number}", operation_id="issues_detail", summary="Issue detail (stage+events+pipeline)", description="Single issue detail: base fields + events (seq asc) + pipeline segments.")
 def get_issue_detail(owner: str, repo: str, number: int,
                      user: dict = Depends(get_current_user_or_api_key)):
     repo_key = _repo_key_of(owner, repo)
@@ -810,7 +810,7 @@ def get_issue_detail(owner: str, repo: str, number: int,
     return {**base, "events": events, "pipeline": pipeline}
 
 
-@router.get("/{owner}/{repo}/{number}/events", operation_id="issues_events", summary="Issue events list")
+@router.get("/{owner}/{repo}/{number}/events", operation_id="issues_events", summary="Issue events list", description="Event list of an issue (paged, seq asc).")
 def get_issue_events(owner: str, repo: str, number: int,
                      user: dict = Depends(get_current_user_or_api_key)):
     repo_key = _repo_key_of(owner, repo)
@@ -826,7 +826,7 @@ def get_issue_events(owner: str, repo: str, number: int,
     return {"events": events, "total": len(events)}
 
 
-@router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap")
+@router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap", description="Pipeline roadmap of an issue: issue + summary + status + segments.")
 def get_issue_pipeline(owner: str, repo: str, number: int,
                        user: dict = Depends(get_current_user_or_api_key)):
     repo_key = _repo_key_of(owner, repo)

@@ -31,7 +31,7 @@ def _resolve_repo_key(owner_repo: str) -> str:
 
 # ====== Credentials ======
 
-@router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status")
+@router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (gitcode/github/huawei-cloud/codearts) for the current user.")
 def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
     acc = user_db.get_user_account(user["username"]) or {}
     return {
@@ -85,7 +85,7 @@ def _is_placeholder(value: str) -> bool:
     return "xxxx" in v.lower()
 
 
-@router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials")
+@router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected.")
 def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_session_token)):
     acc = user_db.get_user_account(user["username"]) or {}
     if body.huawei_cloud_ak and not _is_placeholder(body.huawei_cloud_ak):
@@ -186,7 +186,7 @@ def revoke_api_key(key_id: int, user: dict = Depends(require_no_session_token)):
 
 # ====== Notifications ======
 
-@router.get("/notifications", operation_id="settings_notifications_get", summary="Get notification preferences")
+@router.get("/notifications", operation_id="settings_notifications_get", summary="Get notification preferences", description="Returns notification preferences.")
 def get_notifications(user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
     with db_lock:
@@ -217,7 +217,7 @@ class NotificationPrefs(BaseModel):
     notifications_enabled: bool = True
 
 
-@router.put("/notifications", operation_id="settings_notifications_update", summary="Update notification preferences")
+@router.put("/notifications", operation_id="settings_notifications_update", summary="Update notification preferences", description="Updates notification preferences.")
 def update_notifications(body: NotificationPrefs, user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
     with db_lock:
@@ -233,7 +233,7 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(require_n
 
 # ====== GitCode Repo ======
 
-@router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config")
+@router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
 def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     from src.user.db import get_bot_token_by_repo
     from src.repo_key import to_repo_key
@@ -258,7 +258,7 @@ class GitCodeRepoConfig(BaseModel):
     bot_username: str = "devops-bot"
 
 
-@router.put("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_update", summary="Update repo GitCode config")
+@router.put("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_update", summary="Update repo GitCode config", description="Updates GitCode config for a specific repo.")
 def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                                      user: dict = Depends(require_no_session_token)):
     # 将 Bot Token / Bot Username 存储到 managed_repos（webhook_token 由托管流程自动维护）
@@ -273,7 +273,7 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
 
 # ====== OAuth 凭据（管理员配置）======
 
-@router.get("/oauth", operation_id="settings_oauth_get", summary="Get GitCode OAuth config")
+@router.get("/oauth", operation_id="settings_oauth_get", summary="Get GitCode OAuth config", description="Returns whether GitCode OAuth is configured (client id/redirect uri; secret masked).")
 def get_oauth_config(user: dict = Depends(require_no_session_token)):
     from src.user.db import get_meta_value
     return {
@@ -288,7 +288,7 @@ class OAuthConfig(BaseModel):
     gitcode_oauth_redirect_uri: str = ""
 
 
-@router.put("/oauth", operation_id="settings_oauth_update", summary="Update GitCode OAuth config")
+@router.put("/oauth", operation_id="settings_oauth_update", summary="Update GitCode OAuth config", description="Updates the GitCode OAuth client config.")
 def update_oauth_config(body: OAuthConfig, user: dict = Depends(require_no_session_token)):
     from src.user.db import set_meta_value
     if body.gitcode_oauth_client_id:
@@ -306,7 +306,7 @@ class GitHubOAuthConfig(BaseModel):
     github_oauth_redirect_uri: str = ""
 
 
-@router.get("/oauth-github", operation_id="settings_oauth_github_get", summary="Get GitHub OAuth config")
+@router.get("/oauth-github", operation_id="settings_oauth_github_get", summary="Get GitHub OAuth config", description="Returns GitHub OAuth configuration status (secret masked).")
 def get_github_oauth_config(user: dict = Depends(require_no_session_token)):
     from src.user.db import get_meta_value
     return {
@@ -315,7 +315,7 @@ def get_github_oauth_config(user: dict = Depends(require_no_session_token)):
     }
 
 
-@router.put("/oauth-github", operation_id="settings_oauth_github_update", summary="Update GitHub OAuth config")
+@router.put("/oauth-github", operation_id="settings_oauth_github_update", summary="Update GitHub OAuth config", description="Updates the GitHub OAuth client config.")
 def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(require_no_session_token)):
     from src.user.db import set_meta_value
     if body.github_oauth_client_id:
@@ -574,7 +574,7 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
     return "offline"
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
-@router.get("/backend-agents", operation_id="settings_backend_agents", summary="List backend agents (legacy alias)")
+@router.get("/backend-agents", operation_id="settings_backend_agents", summary="List backend agents (legacy alias)", description="Legacy alias for listing agent runtimes.")
 def get_backend_agents(user: dict = Depends(require_no_session_token)):
     cached = user_db_get_backend_agents_alias()
     return {"backends": cached}
@@ -620,7 +620,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_no_session_token)):
         raise HTTPException(status_code=503, detail=f"刷新引擎状态失败: {e}")
 
 # 兼容别名：旧路径 /backend-agents/refresh
-@router.post("/backend-agents/refresh", operation_id="settings_backend_agents_refresh", summary="Refresh backend agents (legacy alias)")
+@router.post("/backend-agents/refresh", operation_id="settings_backend_agents_refresh", summary="Refresh backend agents (legacy alias)", description="Legacy alias for refreshing agent runtimes.")
 async def refresh_backend_agents(user: dict = Depends(require_no_session_token)):
     return await refresh_agent_runtimes(user)
 
@@ -795,19 +795,19 @@ class ExecModeBody(BaseModel):
     mode: str
 
 
-@router.get("/execution-mode", operation_id="settings_execution_mode_get", summary="Get execution mode")
+@router.get("/execution-mode", operation_id="settings_execution_mode_get", summary="Get execution mode", description="Returns the current execution mode.")
 def get_execution_mode_api(user: dict = Depends(require_no_session_token)):
     from src.runtime.service import get_execution_mode
     return {"mode": get_execution_mode()}
 
 
-@router.get("/pipeline-mode", operation_id="settings_pipeline_mode_get", summary="Get pipeline mode")
+@router.get("/pipeline-mode", operation_id="settings_pipeline_mode_get", summary="Get pipeline mode", description="Returns the current pipeline mode.")
 def get_pipeline_mode_api(user: dict = Depends(require_no_session_token)):
     from src.api.event_pipeline import is_plugin_mode
     return {"mode": "plugin" if is_plugin_mode() else "legacy"}
 
 
-@router.put("/pipeline-mode", operation_id="settings_pipeline_mode_set", summary="Set pipeline mode")
+@router.put("/pipeline-mode", operation_id="settings_pipeline_mode_set", summary="Set pipeline mode", description="Sets the pipeline mode.")
 def set_pipeline_mode_api(body: dict, user: dict = Depends(require_no_session_token)):
     from src.user.db import set_meta_value
     mode = (body.get("mode") or "").strip().lower()
@@ -817,7 +817,7 @@ def set_pipeline_mode_api(body: dict, user: dict = Depends(require_no_session_to
     return {"message": f"管线模式已切换为 {'插件模式' if mode == 'plugin' else '传统模式'}", "mode": mode}
 
 
-@router.put("/execution-mode", operation_id="settings_execution_mode_set", summary="Set execution mode")
+@router.put("/execution-mode", operation_id="settings_execution_mode_set", summary="Set execution mode", description="Sets the execution mode.")
 def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(require_no_session_token)):
     from src.runtime.service import set_execution_mode
     if body.mode not in ("auto", "direct", "queue_remote"):

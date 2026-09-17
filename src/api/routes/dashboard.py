@@ -944,7 +944,7 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
         return ""
 
 
-@router.get("/{owner}/{repo}", operation_id="dashboard_repo", summary="Repository dashboard")
+@router.get("/{owner}/{repo}", operation_id="dashboard_repo", summary="Repository dashboard", description="Repository-scoped dashboard panel data for the current user.")
 def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")

@@ -489,7 +489,7 @@ def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: 
                 "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
 
 
-@router.post("/host", operation_id="repos_host", summary="Host repository")
+@router.post("/host", operation_id="repos_host", summary="Host repository", description="Registers an existing repository for hosting: creates the webhook and sets up the repo bot.")
 def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
@@ -762,7 +762,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
             "message": "托管已修复（bot 已加入成员，webhook 已就绪）"}
 
 
-@router.get("/managed", operation_id="repos_managed", summary="List managed repositories")
+@router.get("/managed", operation_id="repos_managed", summary="List managed repositories", description="Lists repositories hosted by the platform for the current user.")
 def list_managed_repos(user: dict = Depends(require_no_session_token)):
     repos = user_db.get_managed_repos(user["id"])
     return {"repos": [{
@@ -990,7 +990,7 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     return stats
 
 
-@router.post("/remove", operation_id="repos_remove", summary="Remove hosting")
+@router.post("/remove", operation_id="repos_remove", summary="Remove hosting", description="Removes hosting for a repository (unregisters webhook/bot bindings).")
 def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
@@ -1286,7 +1286,7 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
     }
 
 
-@router.get("/{owner}/{repo}/workspace", operation_id="repos_workspace", summary="Repository workspace path (local git via CLI)")
+@router.get("/{owner}/{repo}/workspace", operation_id="repos_workspace", summary="Repository workspace path (local git via CLI)", description="Returns the grape-managed local workspace path for the repository (CLI local git on the server). Session-only.")
 def get_repo_workspace(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                        p: str = Depends(_repo_provider)):
     ws = os.path.join(WORKSPACE_DIR, owner, repo)

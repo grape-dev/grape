@@ -147,7 +147,7 @@ def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")
     _mt = "image/jpeg" if fpath.lower().endswith((".jpg", ".jpeg")) else "image/png"
     return FileResponse(fpath, media_type=_mt, headers={"Cache-Control": "public, max-age=86400"})
 
-@router.get("/conversations", operation_id="chat_conversations", summary="List conversations")
+@router.get("/conversations", operation_id="chat_conversations", summary="List conversations", description="Lists conversations (optionally filtered by repo_key).")
 def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(require_no_session_token)):
     convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
@@ -157,13 +157,13 @@ class NewConversationBody(BaseModel):
     repo_key: str = ""
 
 
-@router.post("/conversations", operation_id="chat_conversations_create", summary="Create conversation")
+@router.post("/conversations", operation_id="chat_conversations_create", summary="Create conversation", description="Creates a new chat conversation for a repo_key.")
 def new_conversation(body: NewConversationBody, user: dict = Depends(require_no_session_token)):
     cid = create_conversation(user["id"], repo_key=body.repo_key)
     return {"conversation_id": cid}
 
 
-@router.delete("/conversations/{conv_id}", operation_id="chat_conversations_delete", summary="Delete conversation")
+@router.delete("/conversations/{conv_id}", operation_id="chat_conversations_delete", summary="Delete conversation", description="Deletes a conversation and its messages.")
 def remove_conversation(conv_id: str, user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
@@ -227,7 +227,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(re
 
 # ====== Messages ======
 
-@router.get("/messages/{conv_id}", operation_id="chat_messages", summary="List conversation messages")
+@router.get("/messages/{conv_id}", operation_id="chat_messages", summary="List conversation messages", description="Lists messages of a conversation (limit/before pagination).")
 def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
@@ -543,7 +543,7 @@ def _understand_video(video_data: str) -> str:
         return f"用户上传了视频，但分析出错: {e}"
 
 
-@router.post("/send", operation_id="chat_send", summary="Send message")
+@router.post("/send", operation_id="chat_send", summary="Send message", description="Sends a chat message and returns the full assistant reply (text/structured).")
 async def send_message(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
@@ -707,7 +707,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     return {"reply": reply, "conversation_id": conv_id}
 
 
-@router.post("/send/stream", operation_id="chat_send_stream", summary="Send message (SSE stream)")
+@router.post("/send/stream", operation_id="chat_send_stream", summary="Send message (SSE stream)", description="Sends a chat message over SSE: data:{delta} ... then data:{done}.")
 async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
@@ -1115,7 +1115,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
 
 # ====== Feedback ======
 
-@router.post("/feedback", operation_id="chat_feedback", summary="Submit feedback")
+@router.post("/feedback", operation_id="chat_feedback", summary="Submit feedback", description="Submits feedback on a chat turn (seq + type + comment).")
 def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
 
@@ -1158,7 +1158,7 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
 
 # ====== Config ======
 
-@router.get("/config", operation_id="chat_config_get", summary="Get chat config")
+@router.get("/config", operation_id="chat_config_get", summary="Get chat config", description="Returns chat config (backend/settings/personal engines).")
 def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = ""):
     cfg = _get_chat_config(user["id"])
     # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
@@ -1254,7 +1254,7 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     }
 
 
-@router.put("/config", operation_id="chat_config_update", summary="Update chat config")
+@router.put("/config", operation_id="chat_config_update", summary="Update chat config", description="Updates chat config.")
 async def update_chat_config(body: dict, user: dict = Depends(require_no_session_token), repo: str = ""):
     im = body.get("im", {})
     feishu = im.get("feishu", {})
