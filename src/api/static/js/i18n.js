@@ -231,6 +231,11 @@ var I18N = (function () {
     if (SUPPORTED.indexOf(lang) < 0) lang = DEFAULT_LANG;
     if (lang === _currentLang) return Promise.resolve({failed: 0, total: 0, skipped: true});
 
+    // 记录发起切换时的 view——loadPacks 完成后若用户已导航到其他页面，跳过整页重建
+    // 仅做 applyI18nToDOM 更新 data-i18n 元素，不打断用户在新页面的操作
+    var prevView = (window.history.state && window.history.state.view) || '';
+    var prevHash = window.location.hash || '';
+
     // 状态变更（_currentLang/localStorage/cookie/URL）放在 loadPacks 成功之后
     // 从源头避免"状态已改、视图未改"的中间态——全部失败时无需回滚
     return loadPacks(lang).then(function (result) {
@@ -242,7 +247,16 @@ var I18N = (function () {
         _setCookie(STORAGE_KEY, lang, 31536000, '/');
         _updateUrlLang(lang);
         applyI18nToDOM();   // 含 document.documentElement.lang 更新
-        _rerenderCurrentPage();
+
+        // 检查用户是否在 loadPacks 期间导航到其他页面
+        var curView = (window.history.state && window.history.state.view) || '';
+        var curHash = window.location.hash || '';
+        if (curView === prevView && curHash === prevHash) {
+          // 仍在原页面——安全重渲染
+          _rerenderCurrentPage();
+        }
+        // else: 用户已导航——跳过 _rerenderCurrentPage，不打断新页面操作
+        // 语言切换已通过 applyI18nToDOM 更新了 data-i18n 元素，新页面下次渲染时自然用新语言
       }
       // 全部失败：不提交任何状态变更，_currentLang/localStorage/cookie/URL 保持原值
       // DOM 不重建，旧按钮仍禁用，selectLang 手动恢复

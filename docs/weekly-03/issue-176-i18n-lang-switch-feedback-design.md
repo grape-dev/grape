@@ -335,11 +335,10 @@ Toast 文案 i18n 悖论处理：全部失败时 `_currentLang` 未变更（仍�
 
 ### 2.7 加载期间用户导航
 
-用户点击切换语言后 loadPacks 最长 15 秒，期间用户可能导航到其他页面。当前方案的风险：
-- `_langSwitching` 锁仍被持有，但 finally 会在 Promise 完成后释放——不会永久锁死
-- `_rerenderCurrentPage` 在 setLang 内调用，会根据 `window.history.state` 重新渲染当前视图。如果用户已导航到其他页面，`history.state.view` 是新页面的，`_rerenderCurrentPage` 会渲染新页面（带新语言）——这不是 bug，是正确行为（语言切换应全局生效）
-
-不引入切换 token——当前 `_rerenderCurrentPage` 读 `history.state` 的设计已经天然处理了导航场景。锁在 finally 释放，不会阻塞新页面操作。
+用户点击切换语言后 loadPacks 最长 15 秒，期间用户可能导航到其他页面。当前方案的风险与处理：
+- `_langSwitching` 锁仍被持有，但 `.finally()` 会在 Promise 完成后释放——不会永久锁死
+- `setLang` 在 loadPacks 发起前记录 `prevView`/`prevHash`，loadPacks 完成后比较当前 `history.state.view`/`hash`：一致则调 `_rerenderCurrentPage` 重建页面；不一致则跳过 rerender，仅靠 `applyI18nToDOM` 更新 `data-i18n` 元素——不打断用户在新页面的操作（如表单输入）
+- 语言状态（`_currentLang`/localStorage/cookie/URL）仍正常提交，新页面下次渲染时自然用新语言
 
 ### 2.8 语言包缓存恢复
 
@@ -373,15 +372,16 @@ fetch(base + mod + '.json' + ver)   // 如 /static/locales/zh/common.json?v=20
 
 | 位置 | 当前 | 改后 | 作用 |
 |------|------|------|------|
-| index.html `i18n.js?v=` | 1 | 2 | JS 文件缓存刷新 |
+| index.html `i18n.js?v=` | 1 | 3 | JS 文件缓存刷新（含导航 view 一致性检查） |
 | index.html `settings.js?v=` | 21 | 22 | JS 文件缓存刷新 |
+| index.html `app.js?v=` | 80 | 81 | JS 文件缓存刷新（showToast 无障碍属性） |
 | index.html `I18N.init('')` | 20 | 21 | 语言包 JSON 缓存刷新 |
 
 注意：`I18N.init` 的 cacheVer 也需要递增——虽然本次没改语言包 JSON 文件，但改了 i18n.js 自身逻辑，递增 cacheVer 是好习惯，确保用户拿到一致的 JS + JSON 版本。
 
 ### 2.10 setLang 调用方排查
 
-经全仓库 grep 确认：`I18N.setLang` 仅在 `settings.js:316` 的 `selectLang` 中被调用。`init()` 调的是 `loadPacks` 不走 `setLang`。无其他调用方，不存在未处理 Promise 的 unhandled rejection 风险。
+经全仓库 grep 确认：`I18N.setLang` 仅在 `settings.js` 的 `selectLang` 函数中被调用（行号随新增 `_langSwitching` 变量漂移，以 grep 结果为准）。`init()` 调的是 `loadPacks` 不走 `setLang`。无其他调用方，不存在未处理 Promise 的 unhandled rejection 风险。
 
 ## 3. 改动清单
 
