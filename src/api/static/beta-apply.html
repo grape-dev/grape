@@ -46,8 +46,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 .btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
 .toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:12px 24px;border-radius:10px;font-size:14px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.2);display:none}
 .toast.show{display:block}
-.success-overlay{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .3s}
-.success-overlay.show{opacity:1}
+.success-overlay{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:none;align-items:center;justify-content:center;opacity:0;transition:opacity .3s}
+.success-overlay.show{display:flex;opacity:1}
 .success-box{background:#fff;border-radius:20px;padding:40px;text-align:center;width:360px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25);transform:scale(.9);transition:transform .3s}
 .success-overlay.show .success-box{transform:scale(1)}
 .success-box .check{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#34c759,#30b8c0);margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:32px;color:#fff}
