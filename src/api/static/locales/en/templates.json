@@ -32,6 +32,8 @@
   "cancel": "Cancel",
   "creating": "Creating...",
   "repo_exists": "⚠️ Repository {{full_name}} already exists, please choose another name",
+  "repo_auto_renamed": "ℹ️ Repository name auto-changed to {{name}} (original name already exists)",
+  "repo_auto_rename_exhausted": "⚠️ Repository name {{base}} and suffixes -2~-21 all exist, please choose a different name",
   "create_success": "✅ {{msg}}",
   "create_success_default": "Created successfully",
   "create_failed": "Create failed: {{msg}}",

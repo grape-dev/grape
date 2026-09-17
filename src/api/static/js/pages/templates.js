@@ -562,45 +562,58 @@ function doCreateFromTemplate(templateId) {
   // 第一步立即显示
   setProgress(10, I18N.t('templates.progress_checking'));
 
-  API.get('/repos/check-name?name=' + encodeURIComponent(repoName))
-    .then(function(check) {
-      if (check.exists) {
-        clearInterval(_timer);
-        btn.disabled = false;
-        btn.textContent = I18N.t('templates.create_btn');
-        progressEl.innerHTML = '';
-        app.showToast(I18N.t('templates.repo_exists', {full_name: check.full_name}));
-        var input = document.getElementById('ptRepoName');
-        if (input) { input.focus(); input.select(); }
-        return;
-      }
-      setProgress(25, I18N.t('templates.progress_creating') || '正在创建仓库...');
-      API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}, 300000).then(function(r) {
-        clearInterval(_timer);
-        setProgress(100, I18N.t('templates.progress_done'));
-        var modal = document.getElementById('ptCreateModal');
-        if (modal) setTimeout(function() { modal.remove(); }, 800);
-        if (r.host_warning) {
-          app.showToast(r.host_warning, 10000);
+  // 自动探测可用仓库名：同名时加 -2/-3 后缀重试，最多 20 次
+  function findAvailableRepoName(baseName, attempt, maxAttempt, onFound, onError) {
+    var candidate = attempt === 0 ? baseName : baseName + '-' + (attempt + 1);
+    API.get('/repos/check-name?name=' + encodeURIComponent(candidate))
+      .then(function(check) {
+        if (!check.exists) {
+          onFound(candidate);
+        } else if (attempt < maxAttempt) {
+          findAvailableRepoName(baseName, attempt + 1, maxAttempt, onFound, onError);
         } else {
-          app.showToast(I18N.t('templates.create_success', {msg: r.message || I18N.t('templates.create_success_default')}));
+          onError(I18N.t('templates.repo_auto_rename_exhausted', {base: baseName}));
         }
-        var parts = (r.full_name || '').split('/');
-        var _rk = r.repo_key || ((r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name);
-        setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1], _rk); }, 900);
-      }).catch(function(e) {
-        clearInterval(_timer);
-        btn.disabled = false;
-        btn.textContent = I18N.t('templates.create_btn');
-        setProgress(0, I18N.t('templates.progress_failed', {msg: e.message}));
-        app.showToast(I18N.t('templates.create_failed', {msg: e.message}));
-      });
-    })
-    .catch(function(err) {
+      })
+      .catch(onError);
+  }
+
+  findAvailableRepoName(repoName, 0, 20, function(finalName) {
+    if (finalName !== repoName) {
+      // 仓库名被自动修改，提示用户
+      repoName = finalName;
+      var inputEl = document.getElementById('ptRepoName');
+      if (inputEl) inputEl.value = finalName;
+      app.showToast(I18N.t('templates.repo_auto_renamed', {name: finalName}));
+    }
+    setProgress(25, I18N.t('templates.progress_creating') || I18N.t('templates.progress_creating_repo'));
+    API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}, 300000).then(function(r) {
+      clearInterval(_timer);
+      setProgress(100, I18N.t('templates.progress_done'));
+      var modal = document.getElementById('ptCreateModal');
+      if (modal) setTimeout(function() { modal.remove(); }, 800);
+      if (r.host_warning) {
+        app.showToast(r.host_warning, 10000);
+      } else {
+        app.showToast(I18N.t('templates.create_success', {msg: r.message || I18N.t('templates.create_success_default')}));
+      }
+      var parts = (r.full_name || '').split('/');
+      var _rk = r.repo_key || ((r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name);
+      setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1], _rk); }, 900);
+    }).catch(function(e) {
       clearInterval(_timer);
       btn.disabled = false;
       btn.textContent = I18N.t('templates.create_btn');
-      progressEl.innerHTML = '';
-      app.showToast(I18N.t('templates.check_failed', {msg: err.message || err}));
+      setProgress(0, I18N.t('templates.progress_failed', {msg: e.message}));
+      app.showToast(I18N.t('templates.create_failed', {msg: e.message}));
     });
+  }, function(err) {
+    clearInterval(_timer);
+    btn.disabled = false;
+    btn.textContent = I18N.t('templates.create_btn');
+    progressEl.innerHTML = '';
+    app.showToast(err || I18N.t('templates.check_failed', {msg: ''}));
+    var input = document.getElementById('ptRepoName');
+    if (input) { input.focus(); input.select(); }
+  });
 }
