@@ -1,6 +1,6 @@
 # Grape Logo 更换方案
 
-> 设计方案 | 2026-09-17 | 涉及文件域：`src/api/static/` | 状态：✅ 已执行并二次替换（2026-09-17，源图 `D:\grape项目\logo\new_grape_logo\grape_logo2.jpg`）
+> 设计方案 | 2026-09-17 | 涉及文件域：`src/api/static/` | 状态：✅ 已执行并二次替换（2026-09-17，最终源图 `D:\grape项目\logo\new_grape_logo\grape_log1.png`）
 
 ## 1. 目标
 
@@ -16,7 +16,7 @@ Grape 自己的品牌 logo 共 **3 个文件**，全部位于 `src/api/static/`�
 | 2 | `src/api/static/logo-128.png` | 128×128 / 16.9KB → **已换 128×128 / 10.7KB** | 登录页 / 内测申请页 logo | `index.html:21`、`beta-apply.html:43` |
 | 3 | `src/api/static/logo-64.png` | 64×64 / 4.9KB → **已换 64×64 / 4.5KB** | favicon + 侧边栏 logo 小标 | `index.html:7,40`、`beta-apply.html:7`、`help_page_gen.py:369`（生成 `help.html:7`）|
 
-> 新源图 1996×2438（JPG，无透明通道，非正方形），三个目标均为正方形画布 contain-fit 居中生成，葡萄整体不变形不被裁切，左右留透明边。
+> 新源图 1889×2269（内容 1315×1895，非正方形），三个目标均为正方形画布 contain-fit 居中生成，葡萄整体不变形不被裁切。
 
 ### CSS 样式（无需改图，仅说明展示尺寸）
 
