@@ -235,7 +235,7 @@
     "agent_type": "issue",
     "sub_scene": "feedback-loop",
     "path": "issue/feedback-loop/iac-issue",
-    "description": "IaC Issue 高级运营：分类、标签管理、负责人指派、Spec 生成。通过 A2A 协议触发 Coding Agent 进行基础设施开发交付"
+    "description": "IaC Issue 高级运营：分类、标签管理、负责人指派、Spec 生成。涉及 IaC 变更的 Issue 通过华为云资源查询能力查询现有资源辅助 Spec 生成。通过 A2A 协议触发 Coding Agent 进行基础设施开发交付"
   },
   "blog-issue": {
     "name": "博客 Issue 运营",
@@ -249,14 +249,14 @@
     "agent_type": "coding",
     "sub_scene": "ai-coding-review",
     "path": "coding/ai-coding-review/iac-coding",
-    "description": "IaC 代码实现与 PR 创建：Terraform 配置编写、fmt/init/validate、提交 PR。禁止执行 terraform apply/destroy（SRE 职责）"
+    "description": "IaC 代码实现与 PR 创建：通过 TF 生成器生成 TF 配置，华为云资源查询能力验证资源规格，GitCode 推送能力创建 MR。禁止执行 terraform apply/destroy（SRE 职责）"
   },
   "iac-qa": {
     "name": "IaC 质量审查",
     "agent_type": "qa",
     "sub_scene": "code-quality",
     "path": "qa/code-quality/iac-qa",
-    "description": "IaC QA 审查：代码审查、terraform plan 审查、安全检查。通过 A2A 协议被 Coding Agent 调用执行审查"
+    "description": "IaC QA 审查：代码审查、terraform plan 审查、安全检查。通过华为云资源查询能力交叉验证资源规格。通过 A2A 协议被 Coding Agent 调用执行审查"
   },
   "iac-sre": {
     "name": "IaC 部署运维",

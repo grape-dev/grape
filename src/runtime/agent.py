@@ -1196,6 +1196,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
             user_token=user_token,
             agent_label=_agent_label,
+            repo_key=task.get("repo_key") or "",
         ):
             if evt_type == "done":
                 done = data
