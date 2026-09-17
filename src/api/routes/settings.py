@@ -1108,7 +1108,10 @@ class BetaApplyBody(BaseModel):
     accountType: str
     accountName: str
     email: str = ""
+    identityType: str = ""
+    phone: str = ""
     reason: str = ""
+    surveyData: dict = {}
 
 
 @router.post("/beta-apply/submit")
@@ -1124,8 +1127,15 @@ def beta_apply_submit(body: BetaApplyBody):
         resp = httpx.post(
             f"{ADMIN_CONSOLE_URL}/api/admin/beta-apply/submit",
             headers={"X-API-Key": ADMIN_BETA_APPLY_API_KEY, "Content-Type": "application/json"},
-            json={"accountType": body.accountType, "accountName": body.accountName,
-                  "email": body.email, "reason": body.reason},
+            json={
+                "accountType": body.accountType,
+                "accountName": body.accountName,
+                "email": body.email,
+                "identityType": body.identityType,
+                "phone": body.phone,
+                "reason": body.reason,
+                "surveyData": body.surveyData,
+            },
             timeout=10.0
         )
         return resp.json()
