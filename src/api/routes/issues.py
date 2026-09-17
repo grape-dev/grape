@@ -690,6 +690,49 @@ def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(r
         return {"ok": True, "message": "已删除"}
     raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
 
+# ===== 创建前临时附件（不进 OpenAPI 契约，前端内部调用）=====
+
+@router.post("/attachments/pre-upload", include_in_schema=False)
+async def pre_upload_attachment(file: UploadFile = File(...),
+                                repo_key: str = "",
+                                user: dict = Depends(require_no_session_token)):
+    """创建 Issue 前的临时附件上传。文件存到 pending 目录，创建时按 safe_name 列表精确关联。"""
+    from src.api.routes.tasks import _attach_save, _ATTACH_ALL_EXTS, _ATTACH_MAX_SIZE
+    from src.repo_key import to_repo_key, split_owner_repo
+    rk = to_repo_key(repo_key)
+    if not rk:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key 必填"})
+    owner, rname = split_owner_repo(rk)
+    original_name = file.filename or "unnamed"
+    ext = os.path.splitext(original_name)[1].lower()
+    if ext not in _ATTACH_ALL_EXTS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的文件类型: {ext}"})
+    content = await file.read()
+    if len(content) > _ATTACH_MAX_SIZE:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "文件大小超过 50MB 限制"})
+    import uuid
+    safe_name = f"{uuid.uuid4().hex}{ext}"
+    url = _attach_save(owner, rname, "pending", safe_name, content)
+    log.info(f"Pre-upload attachment: file={original_name} -> {safe_name} ({len(content)} bytes)")
+    return {"url": url, "filename": original_name, "safe_name": safe_name, "size": len(content)}
+
+
+@router.delete("/attachments/pre-upload/{filename}", include_in_schema=False)
+def pre_delete_attachment(filename: str, repo_key: str = "",
+                          user: dict = Depends(require_no_session_token)):
+    """删除 pending 里的临时附件。"""
+    from src.api.routes.tasks import _attach_delete
+    from src.repo_key import to_repo_key, split_owner_repo
+    import re
+    if not re.match(r'^[0-9a-f]{32}\.\w+$', filename):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法文件名"})
+    rk = to_repo_key(repo_key)
+    owner, rname = split_owner_repo(rk)
+    if _attach_delete(owner, rname, "pending", filename):
+        return {"ok": True, "message": "已删除"}
+    raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
+
+
 @router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)", description="My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses.")
 async def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|)?$"),
                     repo_key: str = Query("", description="按仓库过滤"),
@@ -789,6 +832,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
         assignee=_body.get("assignee", "") or "",
         scene_id=_body.get("scene_id", "") or "",
         is_subtask_mode=int(_body.get("is_subtask_mode") or 0),
+        attachments=_body.get("attachments") or [],
     )
     return await create_task_via_issue(b, user)
 

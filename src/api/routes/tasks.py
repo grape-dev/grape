@@ -594,6 +594,7 @@ class TaskCreateBody(BaseModel):
     assignee: str = ""
     scene_id: str = ""
     is_subtask_mode: int = 0
+    attachments: list[str] = []  # pre-upload 返回的 safe_name 列表，创建时按名单精确关联 pending 附件
 
 
 class TaskStatusBody(BaseModel):
@@ -898,9 +899,12 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                                      "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
                                                      "issue_number": issue_num})
     if issue_num is None:
-        # 拼接 Task Center 上传的附件到 issue body
+        # 拼接 Task Center 上传的附件到 issue body（按 attachments 名单精确读取，避免并发串附件）
         _desc_with_attach = (body.description or "").strip()
         _pending_attachments = _attach_list(owner, rname, "pending")
+        if body.attachments:
+            _want = set(body.attachments)
+            _pending_attachments = [a for a in _pending_attachments if a["filename"] in _want]
         if _pending_attachments:
             _attachments = []
             for _att in _pending_attachments:
@@ -932,6 +936,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         from src.storage import get_storage
         _storage = get_storage()
         _pending_atts = _attach_list(owner, rname, "pending")
+        if body.attachments:
+            _want = set(body.attachments)
+            _pending_atts = [a for a in _pending_atts if a["filename"] in _want]
         if _pending_atts:
             for _att in _pending_atts:
                 _fname = _att["filename"]

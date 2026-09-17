@@ -998,7 +998,66 @@ function _deleteTaskAttach(taskId, filename) {
   });
 }
 
-// ===== 创建弹窗附件上传（已移除：附件统一走 /api/issues/{issue_id}/attachments）=====
+// ===== 创建弹窗附件上传 =====
+let _createAttachments = [];
+
+function _onCreateAttachSelect(fileInput) {
+  if (!fileInput.files || !fileInput.files[0]) return;
+  var repo = app.currentRepo();
+  var repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
+  var file = fileInput.files[0];
+  var formData = new FormData();
+  formData.append('file', file);
+  var container = document.getElementById('tcCreateAttachments');
+  var loading = document.createElement('div');
+  loading.style.cssText = 'font-size:11px;color:#888;padding:4px 8px;background:rgba(0,113,227,.06);border-radius:6px';
+  loading.textContent = '上传中...';
+  container.appendChild(loading);
+  fetch('/api/issues/attachments/pre-upload?repo_key=' + encodeURIComponent(repoKey), {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+    body: formData
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    loading.remove();
+    if (d.error) { alert('上传失败: ' + d.error); return; }
+    _createAttachments.push({filename: d.filename, safe_name: d.safe_name, size: d.size, url: d.url});
+    _renderCreateAttachments();
+  }).catch(function(e) {
+    loading.remove();
+    alert('上传失败: ' + e.message);
+  });
+  fileInput.value = '';
+}
+
+function _renderCreateAttachments() {
+  var container = document.getElementById('tcCreateAttachments');
+  if (!container) return;
+  if (_createAttachments.length === 0) { container.innerHTML = ''; return; }
+  container.innerHTML = _createAttachments.map(function(a, i) {
+    return '<div style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;background:rgba(0,113,227,.06);border-radius:6px;font-size:11px">'
+      + '<span>📎 ' + a.filename + '</span>'
+      + '<span style="color:#888">' + _formatSize(a.size) + '</span>'
+      + '<button onclick="_removeCreateAttach(' + i + ')" style="margin-left:2px;color:#ff3b30;background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px">✕</button>'
+      + '</div>';
+  }).join('');
+}
+
+function _removeCreateAttach(idx) {
+  var a = _createAttachments[idx];
+  if (!a) return;
+  var repo = app.currentRepo();
+  var repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
+  fetch('/api/issues/attachments/pre-upload/' + a.safe_name + '?repo_key=' + encodeURIComponent(repoKey), {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
+  }).then(function() {
+    _createAttachments.splice(idx, 1);
+    _renderCreateAttachments();
+  }).catch(function() {
+    _createAttachments.splice(idx, 1);
+    _renderCreateAttachments();
+  });
+}
 
 function _renderTaskActionsInline(t) {
   const _status = t.status || '';
@@ -1168,6 +1227,7 @@ function openTaskCreateModal() {
   const repo = app.currentRepo();
   const defaultRepo = repo ? repo.fullName : '';
   if (_taskCreateModal) _taskCreateModal.remove();
+  _createAttachments = [];
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
   // 异步加载可用场景列表
@@ -1196,6 +1256,15 @@ function openTaskCreateModal() {
         <select id="tcCreateScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
       </label>
       <div style="font-size:11px;color:#888">${I18N.t('tasks.create.assignee_hint')}</div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333">
+        <span style="font-size:12px">附件 <span style="font-size:11px;color:#888">（可选，创建 Issue 时同步附加）</span></span>
+        <div id="tcCreateAttachments" style="display:flex;flex-wrap:wrap;gap:6px;min-height:30px"></div>
+        <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3;width:fit-content" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          添加附件
+          <input type="file" style="display:none" onchange="_onCreateAttachSelect(this)">
+        </label>
+      </div>
       <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
@@ -1255,7 +1324,8 @@ function createTaskSubmit() {
     _rname = _p[1] || '';
   }
   API.post('/issues/' + encodeURIComponent(_owner) + '/' + encodeURIComponent(_rname),
-           {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
+           {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId,
+            attachments: _createAttachments.map(function(a) { return a.safe_name; })})
     .then(d => {
       const ov = document.getElementById('taskCreateOverlay');
       if (ov) ov.remove();
