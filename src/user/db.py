@@ -2005,26 +2005,6 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
         return _rows_to_runtimes(c.fetchall())
 
 
-def get_agent_runtimes_paged(scope: str | None = "global", owner_id: str = "",
-                             page: int = 1, page_size: int = 20) -> tuple[list[dict], int]:
-    """带分页的 agent runtimes 查询（Issue #185）。
-
-    返回 (runtimes_list, total_count)。
-    scope=None 时查询全量（含 user/repo 个人行）。
-    """
-    offset = max((page - 1) * page_size, 0)
-    with db_lock:
-        c = db.cursor()
-        if scope is None:
-            c.execute("SELECT COUNT(*) FROM agent_runtimes")
-            total = c.fetchone()[0]
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes ORDER BY name LIMIT ? OFFSET ?", (page_size, offset))
-        else:
-            c.execute("SELECT COUNT(*) FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='')", (scope, owner_id))
-            total = c.fetchone()[0]
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name LIMIT ? OFFSET ?", (scope, owner_id, page_size, offset))
-        return _rows_to_runtimes(c.fetchall()), total
-
 
 def _rows_to_runtimes(rows) -> list[dict]:
     """将 DB 行列表转为 runtime dict 列表（供 get_agent_runtimes / paged 复用）。"""

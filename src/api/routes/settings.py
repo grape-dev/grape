@@ -343,7 +343,6 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
     因此先全量过滤再切片——total 为过滤后总数。
     """
     from src.user import db as user_db
-    from src.runtime.health import derive_runtime_health
     from src.runtime.instances import instance_name
     from src.session_manager import db, db_lock
 
@@ -361,29 +360,9 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
         except Exception:
             pass
 
-    # 凭据映射：id -> 派生所需字段
-    cred_map = {}
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip FROM runtime_credentials")
-        for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip = r
-            cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
-                             "owner_id": cowner_id or "", "owner_name": cowner_name or "",
-                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or ""}
-
-    def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
-        if not cid:                      # credential_id=0（历史本机引擎）
-            # 本机引擎行若有 owner_id，需确认对应用户仍存在
-            # 已删除用户的本地引擎不展示（用户删除后系统不会自动清理行）
-            return True
-        if cscope == "global":
-            return True
-        if cscope == "user":
-            return cowner_name == uname
-        if cscope == "repo":
-            return cowner_name == uname or cowner_id in user_repos
-        return False
+    # 凭据映射 + 可见性过滤（共享 helper，Issue #185 审查修复）
+    cred_map = _build_cred_map(db, db_lock)
+    _visible_credential = _make_visible_credential_fn(uname, user_repos)
 
     cached = user_db.get_agent_runtimes(scope=None)
     now = __import__("time").time()
@@ -443,104 +422,9 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
             rt["tags"] = []
         visible_runtimes.append(rt)
 
-    # 设备级视图（按 credential_id 分组：worker_name + 承载 CLI + 心跳）
-    devices = []
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
-        for (cid,) in c.fetchall():
-            cred = cred_map.get(cid) or {}
-            if not _visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
-                continue
-            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
-            runtimes = [
-                {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
-                 "installed": bool(x[4]),
-                 "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
-                 "health": derive_runtime_health(x[5], x[6], now),
-                 "local_skills": json.loads(x[7] or "[]") if x[7] else [],
-                 "skill_scan_result": json.loads(x[8] or "[]") if x[8] else []}
-                for x in c.fetchall()
-            ]
-            # tags from engine_capabilities
-            for rt in runtimes:
-                _tc2 = db.cursor()
-                _tc2.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
-                rt["agent_tags"] = [r[0] for r in _tc2.fetchall()]
-            devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
-                            "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
-                            "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
-                            "owner": cred.get("owner_name", ""),
-                            "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
-                            "runtimes": runtimes})
-    # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备，
-    # 不再单独创建"本机"设备行（主控机已在 runtime_credentials 中，如 ecs-grape-dev-build-0005）。
-    # 通过 host_name 匹配 runtime_credentials.device_name 找到对应设备。
-    import socket as _sock
-    _local_hostname = ""
-    try:
-        _local_hostname = _sock.gethostname()
-    except Exception:
-        pass
-    # 构建 device_name -> device 索引（已在 devices 列表中的设备）
-    _device_by_name = {d.get("device_name", ""): d for d in devices}
-    for rt in visible_runtimes:
-        if (rt.get("credential_id") or 0) != 0:
-            continue
-        # 本机引擎的 host_name 匹配 runtime_credentials 中的 device_name
-        _hn = rt.get("host_name") or _local_hostname or ""
-        target_device = _device_by_name.get(_hn)
-        if target_device:
-            # 关联到已有设备
-            target_device["runtimes"].append({
-                "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
-                "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
-                "instance_name": rt.get("instance_name", rt.get("name", "")),
-                "health": rt.get("health", "offline"),
-                "local_skills": rt.get("local_skills", []),
-                "skill_scan_result": rt.get("skill_scan_result", []),
-                "agent_tags": rt.get("agent_tags", []),
-                "scene_tags": rt.get("scene_tags", ["default"]),
-                "alias": rt.get("alias", "")})
-        else:
-            # 本机 hostname 未在 runtime_credentials 中注册 → 创建虚拟本机设备
-            _local_dev_key = "__local__"
-            if _local_dev_key not in _device_by_name:
-                _local_dev = {"credential_id": 0, "name": _hn or "本机直连",
-                    "device_name": _hn or "本机直连",
-                    "credential_status": "active", "last_seen_at": None,
-                    "worker_ip": "127.0.0.1", "scope": "local",
-                    "owner": "", "health": "online", "runtimes": []}
-                devices.append(_local_dev)
-                _device_by_name[_local_dev_key] = _local_dev
-            _device_by_name[_local_dev_key]["runtimes"].append({
-                "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
-                "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
-                "instance_name": rt.get("instance_name", rt.get("name", "")),
-                "health": rt.get("health", "offline"),
-                "local_skills": rt.get("local_skills", []),
-                "skill_scan_result": rt.get("skill_scan_result", []),
-                "agent_tags": rt.get("agent_tags", []),
-                "scene_tags": rt.get("scene_tags", ["default"]),
-                "alias": rt.get("alias", "")})
-    # AI Devspace 创建的凭据：worker 尚未上线注册时没有 agent_runtimes 行，
-    # 但用户需要在 Workers 列表看到这个待接入设备（凭据已生成，环境正在启动）。
-    # 保留没有承载引擎但凭据 active 的设备，health=offline 让用户知道还没接入。
-    # 主控机在 runtime_credentials 中的心跳记录（credential_id=130/131 但无 agent_runtimes 行绑定）
-    # 也保留，但 health 派生会正确反映其离线状态。
-    # 本机直连设备（credential_id=0）如果无引擎则过滤（本机探测应该有引擎才显示）。
-    devices = [d for d in devices if d.get("runtimes") or (d.get("credential_id", 0) > 0 and d.get("credential_status") == "active")]
-    # 本机设备的 health：主控机本身不会掉线，直接根据引擎 online 状态判断
-    # （不用心跳时间判断——主控机的 runtime_credentials 心跳可能未定期更新）
-    import socket as _sock2
-    _local_hn = ""
-    try:
-        _local_hn = _sock2.gethostname()
-    except Exception:
-        pass
-    for d in devices:
-        if d.get("device_name") == _local_hn:
-            d["health"] = "online" if any(rt.get("health") == "online" for rt in d.get("runtimes", [])) else "offline"
+    # 设备级视图（共享 helper，Issue #185 审查修复：消除重复代码）
+    devices = _build_runtime_devices(db, db_lock, cred_map, _visible_credential,
+                                     valid_users, cached, now)
 
     # Issue #185: 分页（page_size>0 时对 visible_runtimes 切片，total 为过滤后总数）
     total_runtimes = len(visible_runtimes)
@@ -589,6 +473,153 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
     return "offline"
 
 
+# ====== 共享 helper（Issue #185 审查修复：消除 agent-runtimes / runtime-devices 重复代码 + N+1 查询）======
+
+def _build_cred_map(db, db_lock) -> dict:
+    """构建 credential_id -> 凭据信息映射，两个端点共用。"""
+    cred_map = {}
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip FROM runtime_credentials")
+        for r in c.fetchall():
+            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip = r
+            cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
+                             "owner_id": cowner_id or "", "owner_name": cowner_name or "",
+                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or ""}
+    return cred_map
+
+
+def _make_visible_credential_fn(uname: str, user_repos: set):
+    """返回 _visible_credential 闭包，两个端点共用。
+    uname: 当前登录用户名
+    user_repos: 用户可访问的仓库 full_name 集合
+    """
+    def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
+        if not cid:                      # credential_id=0（历史本机引擎）
+            return True
+        if cscope == "global":
+            return True
+        if cscope == "user":
+            return cowner_name == uname
+        if cscope == "repo":
+            return cowner_name == uname or cowner_id in user_repos
+        return False
+    return _visible_credential
+
+
+def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_users: set,
+                           local_runtimes: list, now: float) -> list:
+    """构建设备级视图列表（按 credential_id 分组），agent-runtimes / runtime-devices 共用。
+
+    修复 N+1 查询：本机直连引擎（credential_id=0）直接从 local_runtimes 参数传入，
+    不再在 runtime-devices 端点中二次全量查询 get_agent_runtimes(scope=None)。
+
+    参数:
+      db / db_lock: session_manager 的 db 和 db_lock
+      cred_map: _build_cred_map 返回的凭据映射
+      visible_credential: _make_visible_credential_fn 返回的闭包
+      valid_users: 有效用户名集合（用于过滤已删除用户的本机引擎）
+      local_runtimes: credential_id=0 的本机引擎列表（get_agent_runtimes(scope=None) 的结果，
+                      两个端点均已查询，传入复用避免二次全量扫描）
+      now: 当前时间戳
+    """
+    from src.runtime.health import derive_runtime_health
+    from src.runtime.instances import instance_name
+    import json as _json
+
+    devices = []
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
+        for (cid,) in c.fetchall():
+            cred = cred_map.get(cid) or {}
+            if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
+                continue
+            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
+            runtimes = [
+                {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
+                 "installed": bool(x[4]),
+                 "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
+                 "health": derive_runtime_health(x[5], x[6], now),
+                 "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
+                 "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else []}
+                for x in c.fetchall()
+            ]
+            for rt in runtimes:
+                _tc = db.cursor()
+                _tc.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
+                rt["agent_tags"] = [r[0] for r in _tc.fetchall()]
+            devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
+                            "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
+                            "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
+                            "owner": cred.get("owner_name", ""),
+                            "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
+                            "runtimes": runtimes})
+
+    # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备
+    import socket as _sock
+    _local_hostname = ""
+    try:
+        _local_hostname = _sock.gethostname()
+    except Exception:
+        pass
+    _device_by_name = {d.get("device_name", ""): d for d in devices}
+
+    for rt in local_runtimes:
+        if (rt.get("credential_id") or 0) != 0:
+            continue
+        # 已删除用户的本地引擎不展示
+        rt_owner = (rt.get("owner_id") or "").strip()
+        if rt_owner and rt_owner not in valid_users:
+            continue
+        # 健康态 + instance_name 派生（本机引擎 cid=0 用 host_name 作为 device_name）
+        rt["health"] = _runtime_health(rt, now)
+        _hn = rt.get("host_name") or _local_hostname or ""
+        rt["instance_name"] = instance_name(rt["name"], _hn, 0)
+        target_device = _device_by_name.get(_hn)
+        if target_device:
+            target_device["runtimes"].append({
+                "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
+                "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
+                "instance_name": rt.get("instance_name", rt.get("name", "")),
+                "health": rt.get("health", "offline"),
+                "local_skills": rt.get("local_skills", []),
+                "skill_scan_result": rt.get("skill_scan_result", []),
+                "agent_tags": rt.get("agent_tags", []),
+                "scene_tags": rt.get("scene_tags", ["default"]),
+                "alias": rt.get("alias", "")})
+        else:
+            _local_dev_key = "__local__"
+            if _local_dev_key not in _device_by_name:
+                _local_dev = {"credential_id": 0, "name": _hn or "本机直连",
+                    "device_name": _hn or "本机直连",
+                    "credential_status": "active", "last_seen_at": None,
+                    "worker_ip": "127.0.0.1", "scope": "local",
+                    "owner": "", "health": "online", "runtimes": []}
+                devices.append(_local_dev)
+                _device_by_name[_local_dev_key] = _local_dev
+            _device_by_name[_local_dev_key]["runtimes"].append({
+                "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
+                "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
+                "instance_name": rt.get("instance_name", rt.get("name", "")),
+                "health": rt.get("health", "offline"),
+                "local_skills": rt.get("local_skills", []),
+                "skill_scan_result": rt.get("skill_scan_result", []),
+                "agent_tags": rt.get("agent_tags", []),
+                "scene_tags": rt.get("scene_tags", ["default"]),
+                "alias": rt.get("alias", "")})
+
+    # 过滤空设备（无引擎且非 active 凭据）
+    devices = [d for d in devices if d.get("runtimes") or (d.get("credential_id", 0) > 0 and d.get("credential_status") == "active")]
+
+    # 本机设备 health 修正
+    for d in devices:
+        if d.get("device_name") == _local_hostname:
+            d["health"] = "online" if any(rt.get("health") == "online" for rt in d.get("runtimes", [])) else "offline"
+
+    return devices
+
+
 # ====== Runtime Devices（设备级分页端点，Issue #185）======
 
 @router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size.")
@@ -599,8 +630,6 @@ def get_runtime_devices(user: dict = Depends(require_no_session_token), page: in
     可见性过滤与 agent-runtimes 端点一致（global + personal + repo-level）。
     """
     from src.user import db as user_db
-    from src.runtime.health import derive_runtime_health
-    from src.runtime.instances import instance_name
     from src.session_manager import db as _db, db_lock as _dl
     import time as _time
 
@@ -609,107 +638,26 @@ def get_runtime_devices(user: dict = Depends(require_no_session_token), page: in
     user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
     now = _time.time()
 
-    # 凭据映射
-    cred_map = {}
+    # 凭据映射 + 可见性过滤（共享 helper，Issue #185 审查修复）
+    cred_map = _build_cred_map(_db, _dl)
+    _visible_credential = _make_visible_credential_fn(uname, user_repos)
+
+    # 有效用户集合（用于过滤已删除用户的本机引擎）
+    valid_users = set()
     with _dl:
         c = _db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip FROM runtime_credentials")
-        for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip = r
-            cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
-                             "owner_id": cowner_id or "", "owner_name": cowner_name or "",
-                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or ""}
+        try:
+            c.execute("SELECT username FROM user_accounts")
+            valid_users = {r[0] for r in c.fetchall()}
+        except Exception:
+            pass
 
-    def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
-        if not cid:
-            return True
-        if cscope == "global":
-            return True
-        if cscope == "user":
-            return cowner_name == uname
-        if cscope == "repo":
-            return cowner_name == uname or cowner_id in user_repos
-        return False
-
-    # 构建设备列表
-    devices = []
-    with _dl:
-        c = _db.cursor()
-        c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
-        for (cid,) in c.fetchall():
-            cred = cred_map.get(cid) or {}
-            if not _visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
-                continue
-            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
-            runtimes = [
-                {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
-                 "installed": bool(x[4]),
-                 "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
-                 "health": derive_runtime_health(x[5], x[6], now),
-                 "local_skills": json.loads(x[7] or "[]") if x[7] else [],
-                 "skill_scan_result": json.loads(x[8] or "[]") if x[8] else []}
-                for x in c.fetchall()
-            ]
-            for rt in runtimes:
-                _tc = _db.cursor()
-                _tc.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
-                rt["agent_tags"] = [r[0] for r in _tc.fetchall()]
-            devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
-                            "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
-                            "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
-                            "owner": cred.get("owner_name", ""),
-                            "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
-                            "runtimes": runtimes})
-
-    # 过滤空设备（无引擎且非 active 凭据）
-    devices = [d for d in devices if d.get("runtimes") or (d.get("credential_id", 0) > 0 and d.get("credential_status") == "active")]
-
-    # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备
-    # （逻辑与 agent-runtimes 端点一致，见 settings.py:476-525）
+    # 本机引擎列表（一次性查询，传入 _build_runtime_devices 复用，消除 N+1 二次全量查询）
     _local_runtimes = user_db.get_agent_runtimes(scope=None)
-    for rt in _local_runtimes:
-        if (rt.get("credential_id") or 0) != 0:
-            continue
-        rt["health"] = _runtime_health(rt, now)
-        from src.runtime.instances import instance_name as _inst
-        _hn = rt.get("host_name") or ""
-        rt["instance_name"] = _inst(rt["name"], _hn, 0)
-        # 匹配已有设备（device_name == host_name）
-        target_device = None
-        for d in devices:
-            if d.get("device_name") == _hn:
-                target_device = d
-                break
-        if not target_device:
-            # 未匹配 → 创建虚拟本机设备
-            _dev_name = _hn or "本机直连"
-            target_device = {"credential_id": 0, "name": _dev_name,
-                "device_name": _dev_name,
-                "credential_status": "active", "last_seen_at": None,
-                "worker_ip": "127.0.0.1", "scope": "local",
-                "owner": "", "health": "online", "runtimes": []}
-            devices.append(target_device)
-        target_device["runtimes"].append({
-            "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
-            "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
-            "instance_name": rt.get("instance_name", rt.get("name", "")),
-            "health": rt.get("health", "offline"),
-            "local_skills": rt.get("local_skills", []),
-            "skill_scan_result": rt.get("skill_scan_result", []),
-            "agent_tags": rt.get("agent_tags", []),
-            "scene_tags": rt.get("scene_tags", ["default"]),
-            "alias": rt.get("alias", "")})
 
-    # 本机设备 health 修正
-    import socket as _sock
-    _local_hn = ""
-    try:
-        _local_hn = _sock.gethostname()
-    except Exception:
-        pass
-    for d in devices:
-        if d.get("device_name") == _local_hn:
-            d["health"] = "online" if any(rt.get("health") == "online" for rt in d.get("runtimes", [])) else "offline"
+    # 构建设备列表（共享 helper）
+    devices = _build_runtime_devices(_db, _dl, cred_map, _visible_credential,
+                                     valid_users, _local_runtimes, now)
 
     # 分页切片
     total = len(devices)

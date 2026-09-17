@@ -112,10 +112,15 @@ function _loadRuntimeDevices() {
   });
 }
 
-// Issue #185: tab 切换时渲染（Workers 首次已有 agent-runtimes 返回的全量 devices，
+// Issue #185: tab 切换时渲染（Workers 首次展示使用 agent-runtimes 返回的全量 devices，
 // 翻页时由 _rtDevGoPage 调 runtime-devices 端点加载分页数据）
+// 审查修复：tab 切换到 workers 时调用 _loadRuntimeDevices() 统一数据源，获取权威 total
 window._onRuntimeTabSwitch = function(tab) {
-  renderRuntimes(__runtimeData);
+  if (tab === 'workers') {
+    _loadRuntimeDevices();
+  } else {
+    renderRuntimes(__runtimeData);
+  }
 };
 
 // 健康状态排序：在线 → 刚失联 → 离线 → 待回收
@@ -235,9 +240,8 @@ function renderRuntimes(data) {
     : (data.runtimes || []).map(rt => ({ name: rt.worker_name || rt.name, device_name: I18N.t('runtimes.label.local'), health: rt.health || 'offline',
       scope: 'global', owner: rt.owner || '', worker_ip: rt.worker_ip || '', credential_id: 0, runtimes: [rt] }));
   __runtimeDevices = devices;
-  // Issue #185: Workers 分页 total 由 runtime-devices 端点提供（_rtDevTotal）
-  // 初始加载 agent-runtimes 返回全量 devices 时也同步更新 total
-  if (devices.length > _rtDevTotal) _rtDevTotal = devices.length;
+  // Issue #185 审查修复：_rtDevTotal 只由 runtime-devices 端点提供权威值，
+  // 不再从 agent-runtimes 返回的 devices 启发式更新（避免过滤不一致导致分页页数错误）
 
   const tabBtn = t => {
     const active = _runtimeTab === t;
@@ -248,8 +252,8 @@ function renderRuntimes(data) {
       <div class="sp"></div>
       <button class="bt bt-o" onclick="refreshRuntimes()">⟳ ${I18N.t('runtimes.refresh')}</button>
       <div style="display:flex;align-items:center;flex:1;max-width:300px">
-        <input id="runtimeSearchInput" placeholder="搜索名称、设备、标签..." value="${_runtimeSearch}" onkeyup="if(event.key==='Enter'){_runtimeSearch=this.value;renderRuntimes(__runtimeData)}" onchange="_runtimeSearch=this.value;renderRuntimes(__runtimeData)" style="flex:1;padding:7px 12px 7px 14px;border:1px solid var(--b);border-radius:10px 0 0 10px;font-size:13px;background:var(--bg);color:var(--t1);transition:border-color .2s;outline:none" onfocus="this.style.borderColor='#0071e3';this.style.background='var(--c)'" onblur="this.style.borderColor='var(--b)';this.style.background='var(--bg)'">
-        <button onclick="var i=document.getElementById('runtimeSearchInput');_runtimeSearch=i.value;renderRuntimes(__runtimeData)" style="padding:7px 14px;border:1px solid var(--b);border-left:none;border-radius:0 10px 10px 0;background:var(--bg);color:var(--t3);font-size:13px;cursor:pointer;flex-shrink:0;transition:all .15s" onmouseover="this.style.background='#0071e3';this.style.color='#fff'" onmouseout="this.style.background='var(--bg)';this.style.color='var(--t3)'"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></button>
+        <input id="runtimeSearchInput" placeholder="搜索名称、设备、标签..." value="${_runtimeSearch}" onkeyup="if(event.key==='Enter'){_runtimeSearch=this.value;_rtResetPageAndReload()}" onchange="_runtimeSearch=this.value;_rtResetPageAndReload()" style="flex:1;padding:7px 12px 7px 14px;border:1px solid var(--b);border-radius:10px 0 0 10px;font-size:13px;background:var(--bg);color:var(--t1);transition:border-color .2s;outline:none" onfocus="this.style.borderColor='#0071e3';this.style.background='var(--c)'" onblur="this.style.borderColor='var(--b)';this.style.background='var(--bg)'">
+        <button onclick="var i=document.getElementById('runtimeSearchInput');_runtimeSearch=i.value;_rtResetPageAndReload()" style="padding:7px 14px;border:1px solid var(--b);border-left:none;border-radius:0 10px 10px 0;background:var(--bg);color:var(--t3);font-size:13px;cursor:pointer;flex-shrink:0;transition:all .15s" onmouseover="this.style.background='#0071e3';this.style.color='#fff'" onmouseout="this.style.background='var(--bg)';this.style.color='var(--t3)'"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></button>
       </div>
       <button onclick="openAddDevicePanel()" style="margin-left:auto;display:inline-flex;align-items:center;gap:7px;padding:8px 18px;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 12px rgba(59,130,246,.35);transition:all .2s;position:relative;overflow:hidden" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 20px rgba(59,130,246,.45)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 2px 12px rgba(59,130,246,.35)'><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M12 5v14M5 12h14"/></svg>${I18N.t('runtimes.action.add_device')}</button>
     </div>`;
@@ -789,11 +793,11 @@ function openDeviceTasks(credId) {
 
 window._rtToggleType = function(t) {
   _rtFilterType = (_rtFilterType === t) ? '' : t;
-  renderRuntimes(__runtimeData);
+  _rtResetPageAndReload();
 };
 window._rtToggleScope = function(s) {
   _rtFilterScope = (_rtFilterScope === s) ? '' : s;
-  renderRuntimes(__runtimeData);
+  _rtResetPageAndReload();
 };
 window._rtClearFilters = function() {
   _rtFilterType = '';
@@ -801,19 +805,29 @@ window._rtClearFilters = function() {
   _rtFilterScene = [];
   _rtFilterTag = [];
   _runtimeSearch = '';
-  renderRuntimes(__runtimeData);
+  _rtResetPageAndReload();
 };
 window._rtToggleMulti = function(kind, val) {
   if (kind === 'scene') {
     var i = _rtFilterScene.indexOf(val);
     if (i >= 0) _rtFilterScene.splice(i, 1); else _rtFilterScene.push(val);
-    renderRuntimes(__runtimeData);
+    _rtResetPageAndReload();
   } else if (kind === 'tag') {
     var i = _rtFilterTag.indexOf(val);
     if (i >= 0) _rtFilterTag.splice(i, 1); else _rtFilterTag.push(val);
-    renderRuntimes(__runtimeData);
+    _rtResetPageAndReload();
   }
 };
+// Issue #185 审查修复 FYI：搜索/过滤时重置到第一页，避免前端二次过滤后当前页为空
+function _rtResetPageAndReload() {
+  if (_runtimeTab === 'engines') {
+    _rtPage = 1;
+    _loadRuntimesData();
+  } else {
+    _rtDevPage = 1;
+    _loadRuntimeDevices();
+  }
+}
 window._toggleFilterDropdown = function(id) {
   var el = document.getElementById(id);
   if (!el) return;
