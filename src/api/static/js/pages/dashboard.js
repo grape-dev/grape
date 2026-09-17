@@ -566,7 +566,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     .pl-stat .v{font-size:18px;font-weight:700;line-height:1.1}
     .pl-stat .l{font-size:10px;color:#86868b;margin-top:2px}
     .pl-table-card{background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;box-shadow:0 1px 4px rgba(0,0,0,.05);overflow:hidden}
-    .pl-table-wrap{overflow-y:auto;max-height:400px}
+    .pl-table-wrap{overflow:visible}
     .pl-table{width:100%;border-collapse:collapse;font-size:12px}
     .pl-table th{text-align:left;padding:10px 14px;font-weight:500;color:#86868b;border-bottom:1px solid rgba(0,0,0,.04);font-size:10px;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;background:rgba(255,255,255,.9);z-index:1}
     .pl-table td{padding:10px 14px;border-bottom:1px solid rgba(0,0,0,.03)}
