@@ -483,7 +483,8 @@ function loadAgentTypes() {
         window.location.reload();
         return;
       }
-      API.get('/settings/agent-runtimes').then(d => { if (window._currentView !== 'runtimes') return; renderRuntimes(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'runtimes') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      _rtPage = 1; _rtDevPage = 1;  // Issue #185: 切入页面重置分页
+      _loadRuntimesData();
     } else if (view === 'observability') {
       title.textContent = I18N.t('app.current_project');
       if (typeof renderObservability === 'function') renderObservability();

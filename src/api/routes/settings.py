@@ -329,12 +329,18 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
 
 # ====== Agent Runtimes ======
 
-@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to.")
-def get_agent_runtimes(user: dict = Depends(require_no_session_token)):
+@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params.")
+def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 0):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
     可见性（按当前登录用户）：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级（仓库所有成员可见，不只 owner）。
     派生字段：instance_name / worker_name / worker_ip / scope / owner（见 runtime-admin-two-view-design.md §7）。
+
+    分页（Issue #185）：page/page_size 为可选参数。
+    - page_size=0 或不传 → 返回全量（向后兼容旧调用方）
+    - page_size>0 → 返回 {runtimes: [...page slice...], total: N, page: P, page_size: S}
+    可见性过滤在应用层完成（依赖 credential scope + 用户仓库列表），无法纯 SQL 分页，
+    因此先全量过滤再切片——total 为过滤后总数。
     """
     from src.user import db as user_db
     from src.runtime.health import derive_runtime_health
@@ -535,7 +541,16 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token)):
     for d in devices:
         if d.get("device_name") == _local_hn:
             d["health"] = "online" if any(rt.get("health") == "online" for rt in d.get("runtimes", [])) else "offline"
-    return {"runtimes": visible_runtimes, "devices": devices}
+
+    # Issue #185: 分页（page_size>0 时对 visible_runtimes 切片，total 为过滤后总数）
+    total_runtimes = len(visible_runtimes)
+    if page_size and page_size > 0:
+        _page = max(page, 1)
+        _offset = (_page - 1) * page_size
+        paged_runtimes = visible_runtimes[_offset:_offset + page_size]
+        return {"runtimes": paged_runtimes, "devices": devices,
+                "total": total_runtimes, "page": _page, "page_size": page_size}
+    return {"runtimes": visible_runtimes, "devices": devices, "total": total_runtimes}
 
 
 def _runtime_health(rt: dict, now: float) -> str:
@@ -572,6 +587,137 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
     if offline_for > 6 * 24 * 3600:
         return "about_to_gc"
     return "offline"
+
+
+# ====== Runtime Devices（设备级分页端点，Issue #185）======
+
+@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size.")
+def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20):
+    """设备级视图：按 credential_id 分组，返回每个设备及其承载的引擎列表。
+
+    分页（Issue #185）：page/page_size 参数对设备列表切片，total 为过滤后设备总数。
+    可见性过滤与 agent-runtimes 端点一致（global + personal + repo-level）。
+    """
+    from src.user import db as user_db
+    from src.runtime.health import derive_runtime_health
+    from src.runtime.instances import instance_name
+    from src.session_manager import db as _db, db_lock as _dl
+    import time as _time
+
+    uid = user.get("id") or 0
+    uname = user.get("username") or ""
+    user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
+    now = _time.time()
+
+    # 凭据映射
+    cred_map = {}
+    with _dl:
+        c = _db.cursor()
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip FROM runtime_credentials")
+        for r in c.fetchall():
+            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip = r
+            cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
+                             "owner_id": cowner_id or "", "owner_name": cowner_name or "",
+                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or ""}
+
+    def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
+        if not cid:
+            return True
+        if cscope == "global":
+            return True
+        if cscope == "user":
+            return cowner_name == uname
+        if cscope == "repo":
+            return cowner_name == uname or cowner_id in user_repos
+        return False
+
+    # 构建设备列表
+    devices = []
+    with _dl:
+        c = _db.cursor()
+        c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
+        for (cid,) in c.fetchall():
+            cred = cred_map.get(cid) or {}
+            if not _visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
+                continue
+            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
+            runtimes = [
+                {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
+                 "installed": bool(x[4]),
+                 "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
+                 "health": derive_runtime_health(x[5], x[6], now),
+                 "local_skills": json.loads(x[7] or "[]") if x[7] else [],
+                 "skill_scan_result": json.loads(x[8] or "[]") if x[8] else []}
+                for x in c.fetchall()
+            ]
+            for rt in runtimes:
+                _tc = _db.cursor()
+                _tc.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
+                rt["agent_tags"] = [r[0] for r in _tc.fetchall()]
+            devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
+                            "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
+                            "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
+                            "owner": cred.get("owner_name", ""),
+                            "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
+                            "runtimes": runtimes})
+
+    # 过滤空设备（无引擎且非 active 凭据）
+    devices = [d for d in devices if d.get("runtimes") or (d.get("credential_id", 0) > 0 and d.get("credential_status") == "active")]
+
+    # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备
+    # （逻辑与 agent-runtimes 端点一致，见 settings.py:476-525）
+    _local_runtimes = user_db.get_agent_runtimes(scope=None)
+    for rt in _local_runtimes:
+        if (rt.get("credential_id") or 0) != 0:
+            continue
+        rt["health"] = _runtime_health(rt, now)
+        from src.runtime.instances import instance_name as _inst
+        _hn = rt.get("host_name") or ""
+        rt["instance_name"] = _inst(rt["name"], _hn, 0)
+        # 匹配已有设备（device_name == host_name）
+        target_device = None
+        for d in devices:
+            if d.get("device_name") == _hn:
+                target_device = d
+                break
+        if not target_device:
+            # 未匹配 → 创建虚拟本机设备
+            _dev_name = _hn or "本机直连"
+            target_device = {"credential_id": 0, "name": _dev_name,
+                "device_name": _dev_name,
+                "credential_status": "active", "last_seen_at": None,
+                "worker_ip": "127.0.0.1", "scope": "local",
+                "owner": "", "health": "online", "runtimes": []}
+            devices.append(target_device)
+        target_device["runtimes"].append({
+            "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
+            "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
+            "instance_name": rt.get("instance_name", rt.get("name", "")),
+            "health": rt.get("health", "offline"),
+            "local_skills": rt.get("local_skills", []),
+            "skill_scan_result": rt.get("skill_scan_result", []),
+            "agent_tags": rt.get("agent_tags", []),
+            "scene_tags": rt.get("scene_tags", ["default"]),
+            "alias": rt.get("alias", "")})
+
+    # 本机设备 health 修正
+    import socket as _sock
+    _local_hn = ""
+    try:
+        _local_hn = _sock.gethostname()
+    except Exception:
+        pass
+    for d in devices:
+        if d.get("device_name") == _local_hn:
+            d["health"] = "online" if any(rt.get("health") == "online" for rt in d.get("runtimes", [])) else "offline"
+
+    # 分页切片
+    total = len(devices)
+    _page = max(page, 1)
+    _offset = (_page - 1) * page_size
+    paged_devices = devices[_offset:_offset + page_size]
+    return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size}
+
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
 @router.get("/backend-agents", operation_id="settings_backend_agents", summary="List backend agents (legacy alias)", description="Legacy alias for listing agent runtimes.")

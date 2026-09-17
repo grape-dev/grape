@@ -135,6 +135,7 @@ EXPECTED_PUBLIC = {
     "settings_gitcode_repo_get": ("get", "/api/settings/gitcode-repo/{owner}/{repo}"),
     "settings_gitcode_repo_update": ("put", "/api/settings/gitcode-repo/{owner}/{repo}"),
     "settings_agent_runtimes": ("get", "/api/settings/agent-runtimes"),
+    "settings_runtime_devices": ("get", "/api/settings/runtime-devices"),
     "settings_backend_agents": ("get", "/api/settings/backend-agents"),
     "settings_agent_runtimes_refresh": ("post", "/api/settings/agent-runtimes/refresh"),
     "settings_backend_agents_refresh": ("post", "/api/settings/backend-agents/refresh"),
