@@ -13,7 +13,7 @@ function renderSelectionShell(tab, innerHtml) {
   const html = `<div class="lobby">
     <header class="lobby-head">
       <div class="lobby-brand">
-        <img class="lobby-logo" src="/static/logo-64.png" alt="Grape">
+        <img class="lobby-logo" src="/static/logo-64.png?v=3" alt="Grape">
         <span class="lobby-brand-name">Grape</span>
         <span class="lobby-brand-sub">${I18N.t('repos.brand_sub')}</span>
       </div>
