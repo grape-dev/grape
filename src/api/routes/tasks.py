@@ -206,13 +206,20 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             # 如果传入的 assignee 与现有不同，更新 assignee 并关闭旧 assignee 的任务
             # （#15 修复：复用已有任务时同步 assignee，防止 assignee 与新建 Issue 不匹配）
             _existing_assignee = ""
+            _existing_user_id = 0
             try:
-                c.execute("SELECT assignee FROM issue WHERE id=?", (task_id,))
+                c.execute("SELECT assignee, user_id FROM issue WHERE id=?", (task_id,))
                 _r2 = c.fetchone()
                 if _r2:
                     _existing_assignee = _r2[0] or ""
+                    _existing_user_id = _r2[1] or 0
             except Exception:
                 pass
+            # 归属回补：历史/先行建档行 user_id=0 且 assignee 现可映射 → 修正（issues-mine-user-id-zero-fix-design.md）
+            if not _existing_user_id and target:
+                _uid_now = _get_user_id_by_gitcode(target) or 0
+                if _uid_now:
+                    c.execute("UPDATE issue SET user_id=? WHERE id=?", (_uid_now, task_id))
             if target and _existing_assignee and target != _existing_assignee:
                 c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
                 try:
