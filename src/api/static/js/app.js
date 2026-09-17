@@ -721,13 +721,19 @@ function loadAgentTypes() {
   }
   var _baIdentity = '';
   function baToggleOther(el) {
-    var label = el.parentElement;
-    var txt = label.querySelector('.ba-other-text');
-    if (!txt) return;
     if (el.type === 'radio') {
-      txt.style.display = el.checked && (el.value === '其他' || el.value === 'Other') ? 'inline-block' : 'none';
-      if (el.value !== '其他' && el.value !== 'Other') txt.value = '';
+      var group = document.querySelectorAll('input[name="' + el.name + '"]');
+      group.forEach(function(r) {
+        var t = r.parentElement.querySelector('.ba-other-text');
+        if (t) { t.style.display = 'none'; if (r.value !== '其他' && r.value !== 'Other') t.value = ''; }
+      });
+      if (el.checked && (el.value === '其他' || el.value === 'Other')) {
+        var txt = el.parentElement.querySelector('.ba-other-text');
+        if (txt) txt.style.display = 'inline-block';
+      }
     } else {
+      var txt = el.parentElement.querySelector('.ba-other-text');
+      if (!txt) return;
       txt.style.display = el.checked ? 'inline-block' : 'none';
       if (!el.checked) txt.value = '';
     }

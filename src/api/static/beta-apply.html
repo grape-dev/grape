@@ -239,13 +239,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 var _identity = '';
 
 function toggleOtherInput(el) {
-  var label = el.parentElement;
-  var txt = label.querySelector('.other-text');
-  if (!txt) return;
   if (el.type === 'radio') {
-    txt.style.display = el.checked && el.value === '其他' ? 'inline-block' : 'none';
-    if (el.value !== '其他') txt.value = '';
+    // 隐藏同组所有other-text
+    var group = document.querySelectorAll('input[name="' + el.name + '"]');
+    group.forEach(function(r) {
+      var t = r.parentElement.querySelector('.other-text');
+      if (t) { t.style.display = 'none'; if (r.value !== '其他') t.value = ''; }
+    });
+    // 显示当前选中的
+    if (el.checked && el.value === '其他') {
+      var txt = el.parentElement.querySelector('.other-text');
+      if (txt) txt.style.display = 'inline-block';
+    }
   } else {
+    var txt = el.parentElement.querySelector('.other-text');
+    if (!txt) return;
     txt.style.display = el.checked ? 'inline-block' : 'none';
     if (!el.checked) txt.value = '';
   }
