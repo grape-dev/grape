@@ -852,6 +852,55 @@ class TestSettings:
         assert r_old.status_code == 200
         assert "backends" in r_old.json()
 
+    def test_agent_runtimes_pagination(self):
+        """Issue #185: agent-runtimes 分页参数与 total 返回验证"""
+        # 不带分页参数 → 全量返回（向后兼容），total 存在
+        r = client.get("/api/settings/agent-runtimes", headers=_headers)
+        assert r.status_code == 200
+        d = r.json()
+        assert "total" in d
+        assert d["total"] == len(d["runtimes"])
+
+        # 带分页参数 page=1&page_size=2
+        r2 = client.get("/api/settings/agent-runtimes?page=1&page_size=2", headers=_headers)
+        assert r2.status_code == 200
+        d2 = r2.json()
+        assert "runtimes" in d2
+        assert "total" in d2
+        assert "page" in d2
+        assert "page_size" in d2
+        assert d2["page"] == 1
+        assert d2["page_size"] == 2
+        # 分页结果不超过 page_size
+        assert len(d2["runtimes"]) <= 2
+        # total 与全量一致
+        assert d2["total"] == d["total"]
+
+        # page=2 应返回第二页
+        if d2["total"] > 2:
+            r3 = client.get("/api/settings/agent-runtimes?page=2&page_size=2", headers=_headers)
+            assert r3.status_code == 200
+            d3 = r3.json()
+            assert d3["page"] == 2
+            assert len(d3["runtimes"]) <= 2
+            # 第一页和第二页不应有重复
+            ids_p1 = {rt["id"] for rt in d2["runtimes"]}
+            ids_p2 = {rt["id"] for rt in d3["runtimes"]}
+            assert not (ids_p1 & ids_p2), "分页结果不应有重复项"
+
+    def test_runtime_devices_endpoint(self):
+        """Issue #185: runtime-devices 分页端点验证"""
+        r = client.get("/api/settings/runtime-devices?page=1&page_size=10", headers=_headers)
+        assert r.status_code == 200
+        d = r.json()
+        assert "devices" in d
+        assert "total" in d
+        assert "page" in d
+        assert "page_size" in d
+        assert d["page"] == 1
+        assert d["page_size"] == 10
+        assert len(d["devices"]) <= 10
+
 
 # ===================== 10. Skills =====================
 class TestSkills:
