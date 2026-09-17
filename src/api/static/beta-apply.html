@@ -89,19 +89,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
   <div class="field">
     <label>您的身份是？ <span class="req">*</span></label>
     <div class="id-grid">
-      <div class="id-card" onclick="selectIdentity('student')">
+      <div class="id-card" onclick="selectIdentity('student', this)">
         <span class="icon">🎓</span>
         <div class="info"><div class="title">学生</div><div class="desc">在校学生用户</div></div>
       </div>
-      <div class="id-card" onclick="selectIdentity('enterprise')">
+      <div class="id-card" onclick="selectIdentity('enterprise', this)">
         <span class="icon">🏢</span>
         <div class="info"><div class="title">企业</div><div class="desc">企业团队用户</div></div>
       </div>
-      <div class="id-card" onclick="selectIdentity('opc')">
+      <div class="id-card" onclick="selectIdentity('opc', this)">
         <span class="icon">💼</span>
         <div class="info"><div class="title">OPC</div><div class="desc">独立开发者/创作者</div></div>
       </div>
-      <div class="id-card" onclick="selectIdentity('other')">
+      <div class="id-card" onclick="selectIdentity('other', this)">
         <span class="icon">📋</span>
         <div class="info"><div class="title">其他</div><div class="desc">其他身份</div></div>
       </div>
@@ -238,10 +238,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 <script>
 var _identity = '';
 
-function selectIdentity(type) {
+function selectIdentity(type, el) {
   _identity = type;
   document.querySelectorAll('.id-card').forEach(function(c) { c.classList.remove('selected'); });
-  event.currentTarget.classList.add('selected');
+  el.classList.add('selected');
   document.querySelectorAll('.branch').forEach(function(b) { b.classList.remove('show'); });
   var branch = document.getElementById('branch' + type.charAt(0).toUpperCase() + type.slice(1));
   if (branch) branch.classList.add('show');
