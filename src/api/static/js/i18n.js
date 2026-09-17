@@ -253,7 +253,12 @@ var I18N = (function () {
         var curHash = window.location.hash || '';
         if (curView === prevView && curHash === prevHash) {
           // 仍在原页面——安全重渲染
-          _rerenderCurrentPage();
+          var rendered = _rerenderCurrentPage();
+          if (!rendered) {
+            // rerender 失败——DOM 未更新，状态已提交（_currentLang 已切换）
+            // 返回部分失败而非全部成功，让 selectLang 弹警告而非成功 Toast
+            return {failed: 1, total: result.total, rerenderFailed: true};
+          }
         }
         // else: 用户已导航——跳过 _rerenderCurrentPage，不打断新页面操作
         // 语言切换已通过 applyI18nToDOM 更新了 data-i18n 元素，新页面下次渲染时自然用新语言
@@ -288,6 +293,7 @@ var I18N = (function () {
   }
 
   // ── _rerenderCurrentPage(): re-navigate to current view after lang switch ──
+  // 返回 true 表示成功重渲染，false 表示渲染失败（异常被 try/catch 吞掉）
   function _rerenderCurrentPage() {
     // Recover current view from history state or hash
     var state = window.history.state;
@@ -303,7 +309,7 @@ var I18N = (function () {
         param = parts[1] ? decodeURIComponent(parts[1]) : null;
       }
     }
-    if (!view || typeof app === 'undefined' || !app.nav) return;
+    if (!view || typeof app === 'undefined' || !app.nav) return true;  // 无视图不算失败
 
     // For settings page, preserve the active sub-tab across re-render
     if (view === 'settings' && typeof renderSettings === 'function') {
@@ -312,11 +318,18 @@ var I18N = (function () {
         var tabId = activeTab ? (activeTab.getAttribute('onclick') || '').match(/'([^']+)'/) : null;
         var savedTab = tabId ? tabId[1] : null;
         renderSettings(savedTab || 'credentials');
-        return;
-      } catch (e) {}
+        return true;
+      } catch (e) {
+        console.warn('[i18n] _rerenderCurrentPage renderSettings failed:', e.message);
+        return false;
+      }
     }
 
-    try { app.nav(view, param); } catch (e) {}
+    try { app.nav(view, param); return true; }
+    catch (e) {
+      console.warn('[i18n] _rerenderCurrentPage app.nav failed:', e.message);
+      return false;
+    }
   }
 
   // ── _setCookie(name, value, maxAge, path) ──
