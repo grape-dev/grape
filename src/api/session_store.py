@@ -138,21 +138,15 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
 
     Phase C3：**只写 `issue` 单表**（权威），不再写 issue_state（已由 B2 收编 + 孤儿清理后数据对齐）。
     建档由 `_sync_issue_fields` 的 ensure_row 保证（无卡片行建最小行）。
+    scene_id 初始为空，由 Task Center set_issue_scene 或智能推荐写入。
     """
-    _init_scene = ""
-    with db_lock:
-        try:
-            from src.user.db import get_repo_scene
-            _init_scene = get_repo_scene(repo_key) or ""
-        except Exception:
-            pass
     # Phase C3：写 issue 单表（无卡片行则建档最小行）
     _sync_issue_fields(repo_key, issue_id, {
         "stage": stage, "owner_agent": owner_agent, "assignee": assignee or "",
         "a2a_seq": a2a_seq,
     }, ensure_row=True, assignee=assignee)
     from src.config import log
-    log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee} scene={_init_scene}")
+    log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee}")
 
     # Issue #85: stage 推进时同步 task.status（不覆盖 awaiting_input/completed/cancelled）
     _STAGE_TO_TASK_STATUS = {
@@ -194,21 +188,18 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
 
 
 def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
-    """读取 Issue 级开发场景。空则回退到仓库默认场景（managed_repos.dev_scene）。
+    """读取 Issue 级开发场景。issue_state.scene_id 为空时返回 ("", 0)。
 
-    方案 B：无「default」场景，仓库无场景时返回 ("", 0)。
+    不再回退到仓库级 dev_scene——新架构下每个 Issue 独立选场景（用户手选 / 智能推荐），
+    仓库级默认场景已退役。
     返回 (scene_id, scene_user_id)：
     - issue_state.scene_id 非空 → 用该值 + scene_user_id
-    - 否则回退 managed_repos.dev_scene（scene_user_id=0）
+    - 否则返回 ("", 0)，由调用方决定走智能推荐
     """
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
-    try:
-        from src.user.db import get_repo_scene
-        return get_repo_scene(repo_key) or "", 0
-    except Exception:
-        return "", 0
+    return "", 0
 
 
 def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int = 0):
