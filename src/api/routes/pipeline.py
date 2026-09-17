@@ -269,7 +269,7 @@ def _running_issue_ids(repo_keys) -> set[str]:
         return set()
 
 
-@router.get("/{owner}/{repo}")
+@router.get("/{owner}/{repo}", operation_id="pipeline_get", summary="Repository pipeline roadmap", description="Repository pipeline roadmap (stage/nodes/events) for the current user.")
 def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"

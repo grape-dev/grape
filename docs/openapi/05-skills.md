@@ -25,6 +25,16 @@
 
 ---
 
+## GET /api/skills/categories — 技能分类
+
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills categories`（operation_id=`skills_categories`）。
+
+| 出参 | `{categories: [...]}`（Issue #179 skill-sync-category） |
+| 返回 | 200 |
+
+---
+
 ## GET /api/skills/agent-stats — Agent 维度技能统计
 
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）

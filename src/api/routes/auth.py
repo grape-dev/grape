@@ -396,7 +396,7 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     return resp
 
 
-@router.get("/profile")
+@router.get("/profile", operation_id="auth_profile", summary="Get current user profile", description="Returns the current user profile. Supports JWT session, user API Key (grape_) or session token (tk_).")
 def get_profile(user: dict = Depends(require_no_session_token)):
     """用户信息——支持 JWT 会话 / grape_ API Key / tk_ 会话 token（Issue #69）。"""
     acc = user_db.get_user_account(user["username"]) or {}
@@ -413,7 +413,7 @@ def get_profile(user: dict = Depends(require_no_session_token)):
     }
 
 
-@router.post("/logout")
+@router.post("/logout", operation_id="auth_logout", summary="Logout (revoke all tokens)", description="Logs out: increments token_version to revoke all tokens and clears the refresh cookie.")
 def logout(user: dict = Depends(require_no_session_token), response: Response = None):
     """登出——token_version+1 撤销所有 token + 清 cookie。"""
     user_db.increment_token_version(user["id"])

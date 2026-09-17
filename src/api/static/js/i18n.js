@@ -131,14 +131,26 @@ var I18N = (function () {
   }
 
   // ── loadPacks(lang): async fetch 15 JSON packs for a language ──
+  // 注意：hotfix简化实现，部分包失败时标记语言未加载
+  // 用户切换到其他语言再切回来时重拉全部15个包；或点击当前语言按钮触发重试（selectLang 早退判断检查 isLangLoaded）
+  // 不做单包增量重试；存在极端场景：某个包永久404会反复触发全量请求，后续迭代可优化
   function loadPacks(lang) {
     if (!SUPPORTED.indexOf || SUPPORTED.indexOf(lang) < 0) lang = DEFAULT_LANG;
-    if (_loadedLangs[lang]) return Promise.resolve();
+    if (_loadedLangs[lang]) return Promise.resolve({failed: 0, total: 0, cached: true});
 
     var base = '/static/locales/' + lang + '/';
     var ver = _cacheVer ? '?v=' + _cacheVer : '';
+    var failedCount = 0;
+    var total = MODULES.length;
+
     var promises = MODULES.map(function (mod) {
-      return fetch(base + mod + '.json' + ver)
+      // 每个 fetch 加 15 秒超时——弱网下不让单个请求无限挂起
+      var controller = new AbortController();
+      var timer = setTimeout(function() {
+        controller.abort();
+      }, 15000);
+
+      return fetch(base + mod + '.json' + ver, { signal: controller.signal })
         .then(function (r) {
           if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + mod);
           return r.json();
@@ -148,15 +160,27 @@ var I18N = (function () {
           _packs[lang][mod] = data;
         })
         .catch(function (e) {
-          // Module load failed — keep inline pack if present, log warning
+          // 覆盖所有失败路径：fetch reject(网络错误)、!r.ok(HTTP 4xx/5xx)、r.json() parse 失败、超时 abort
+          failedCount++;
           console.warn('[i18n] Failed to load pack: ' + lang + '/' + mod + '.json', e.message);
+        })
+        .finally(function () {
+          // 无论成功或失败，都清理定时器——与 api.js _fetchWithTimeout 模式一致
+          clearTimeout(timer);
         });
     });
 
     return Promise.all(promises).then(function () {
-      _loadedLangs[lang] = true;
+      // 只有全部成功才标记为已加载——部分失败保持 false，下次切回会重试缺失包
+      if (failedCount === 0) {
+        _loadedLangs[lang] = true;
+      }
       // Re-apply DOM translations after full packs load
       applyI18nToDOM();
+      if (failedCount > 0) {
+        console.warn('[i18n] lang=' + lang + ' load packs partial failed ' + failedCount + '/' + total);
+      }
+      return {failed: failedCount, total: total};
     });
   }
 
@@ -205,22 +229,44 @@ var I18N = (function () {
   // ── setLang(lang): switch language in-place (no page reload) ──
   function setLang(lang) {
     if (SUPPORTED.indexOf(lang) < 0) lang = DEFAULT_LANG;
-    if (lang === _currentLang) return;
-    _currentLang = lang;
+    if (lang === _currentLang && _loadedLangs[lang]) return Promise.resolve({failed: 0, total: 0, skipped: true});
 
-    // Dual-write: localStorage + cookie
-    try { localStorage.setItem(STORAGE_KEY, lang); } catch (e) {}
-    _setCookie(STORAGE_KEY, lang, 31536000, '/');
+    // 记录发起切换时的 view——loadPacks 完成后若用户已导航到其他页面，跳过整页重建
+    // 仅做 applyI18nToDOM 更新 data-i18n 元素，不打断用户在新页面的操作
+    var prevView = (window.history.state && window.history.state.view) || '';
+    var prevHash = window.location.hash || '';
 
-    // Update URL prefix without reload (replaceState preserves hash + state)
-    _updateUrlLang(lang);
+    // 状态变更（_currentLang/localStorage/cookie/URL）放在 loadPacks 成功之后
+    // 从源头避免"状态已改、视图未改"的中间态——全部失败时无需回滚
+    return loadPacks(lang).then(function (result) {
+      // 全部成功(failed<total)、部分成功(failed<total)、缓存命中(cached) 都提交状态
+      // 全部失败(failed===total && !cached) 不提交
+      if (result.failed < result.total || result.cached) {
+        _currentLang = lang;
+        try { localStorage.setItem(STORAGE_KEY, lang); } catch (e) {}
+        _setCookie(STORAGE_KEY, lang, 31536000, '/');
+        _updateUrlLang(lang);
+        applyI18nToDOM();   // 含 document.documentElement.lang 更新
 
-    // Load new language packs, then re-apply DOM + re-render current page
-    _loadedLangs[lang] = false;
-    loadPacks(lang).then(function () {
-      applyI18nToDOM();
-      _rerenderCurrentPage();
-    }).catch(function () {});
+        // 检查用户是否在 loadPacks 期间导航到其他页面
+        var curView = (window.history.state && window.history.state.view) || '';
+        var curHash = window.location.hash || '';
+        if (curView === prevView && curHash === prevHash) {
+          // 仍在原页面——安全重渲染
+          var rendered = _rerenderCurrentPage();
+          if (!rendered) {
+            // rerender 失败——DOM 未更新，状态已提交（_currentLang 已切换）
+            // 返回部分失败而非全部成功，让 selectLang 弹警告而非成功 Toast
+            return {failed: 1, total: result.total, rerenderFailed: true};
+          }
+        }
+        // else: 用户已导航——跳过 _rerenderCurrentPage，不打断新页面操作
+        // 语言切换已通过 applyI18nToDOM 更新了 data-i18n 元素，新页面下次渲染时自然用新语言
+      }
+      // 全部失败：不提交任何状态变更，_currentLang/localStorage/cookie/URL 保持原值
+      // DOM 不重建，旧按钮仍禁用，selectLang 手动恢复
+      return result;
+    });
   }
 
   // ── _updateUrlLang(lang): adjust URL prefix without reload ──
@@ -247,6 +293,7 @@ var I18N = (function () {
   }
 
   // ── _rerenderCurrentPage(): re-navigate to current view after lang switch ──
+  // 返回 true 表示成功重渲染，false 表示渲染失败（异常被 try/catch 吞掉）
   function _rerenderCurrentPage() {
     // Recover current view from history state or hash
     var state = window.history.state;
@@ -262,7 +309,7 @@ var I18N = (function () {
         param = parts[1] ? decodeURIComponent(parts[1]) : null;
       }
     }
-    if (!view || typeof app === 'undefined' || !app.nav) return;
+    if (!view || typeof app === 'undefined' || !app.nav) return true;  // 无视图不算失败
 
     // For settings page, preserve the active sub-tab across re-render
     if (view === 'settings' && typeof renderSettings === 'function') {
@@ -271,11 +318,18 @@ var I18N = (function () {
         var tabId = activeTab ? (activeTab.getAttribute('onclick') || '').match(/'([^']+)'/) : null;
         var savedTab = tabId ? tabId[1] : null;
         renderSettings(savedTab || 'credentials');
-        return;
-      } catch (e) {}
+        return true;
+      } catch (e) {
+        console.warn('[i18n] _rerenderCurrentPage renderSettings failed:', e.message);
+        return false;
+      }
     }
 
-    try { app.nav(view, param); } catch (e) {}
+    try { app.nav(view, param); return true; }
+    catch (e) {
+      console.warn('[i18n] _rerenderCurrentPage app.nav failed:', e.message);
+      return false;
+    }
   }
 
   // ── _setCookie(name, value, maxAge, path) ──
@@ -397,6 +451,11 @@ var I18N = (function () {
     _setCookie(STORAGE_KEY, _currentLang, 31536000, '/');
   }
 
+  // ── isLangLoaded(lang): check if language packs are fully loaded ──
+  function isLangLoaded(lang) {
+    return !!_loadedLangs[lang];
+  }
+
   // ── Public API ──
   return {
     t: t,
@@ -405,6 +464,7 @@ var I18N = (function () {
     init: init,
     detectLang: detectLang,
     applyI18nToDOM: applyI18nToDOM,
+    isLangLoaded: isLangLoaded,
     SUPPORTED: SUPPORTED,
     DEFAULT_LANG: DEFAULT_LANG
   };

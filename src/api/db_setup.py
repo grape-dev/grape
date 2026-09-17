@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS skill (
     updated_by VARCHAR(64) DEFAULT '',
     is_active INTEGER DEFAULT 1,
     sub_scene TEXT DEFAULT '',
+    category_id INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (skill_name, scope, owner_id)
@@ -609,6 +610,21 @@ CREATE TABLE IF NOT EXISTS scene_category (
 )
 """
 
+_SKILL_CATEGORY_DDL = """
+CREATE TABLE IF NOT EXISTS skill_category (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    slug        VARCHAR(64) NOT NULL,
+    icon        TEXT DEFAULT '',
+    order_num   INTEGER DEFAULT 0,
+    is_active   INTEGER DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (name),
+    UNIQUE (slug)
+)
+"""
+
 _SCENE_MARKET_DDL = """
 CREATE TABLE IF NOT EXISTS scene_market (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -746,6 +762,7 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("scene_likes", _SCENE_LIKES_DDL),
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
+    ("skill_category", _SKILL_CATEGORY_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
     ("distributed_locks", _DISTRIBUTED_LOCKS_DDL),
     ("api_latency_log", _API_LATENCY_LOG_DDL),
@@ -838,7 +855,6 @@ _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 # (seed_key, json_filename, actual_table_name)
 _SEED_FILES = [
     ("agent_type", "agent-description.json", "agent_type"),
-    ("skill_official", "skill-description.json", "skill"),
 ]
 
 
@@ -942,6 +958,7 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_uploaded_files_ref ON uploaded_files(ref_table, ref_id, is_active)",
         "CREATE INDEX IF NOT EXISTS idx_scene_skill_ref_skill_name ON scene_skill_ref(skill_name)",
         "CREATE INDEX IF NOT EXISTS idx_skill_is_featured ON skill(is_featured)",
+        "CREATE INDEX IF NOT EXISTS idx_skill_category_id ON skill(category_id)",
         "CREATE INDEX IF NOT EXISTS idx_market_scene_id ON devops_pipeline_scene(market_scene_id)",
         # ===== API 慢请求监控索引 =====
         "CREATE INDEX IF NOT EXISTS idx_latency_log_created ON api_latency_log(created_at)",
@@ -971,11 +988,9 @@ def _seed_from_json():
         seeded_keys = set(row[0].split(",")) if row and row[0] else set()
 
     for seed_key, json_file, db_table in _SEED_FILES:
-        if seed_key in seeded_keys and seed_key != "agent_type":
-            # 已 seed 过:skill_official 仍需幂等补种缺失技能;其余跳过
-            if seed_key != "skill_official":
-                log.info(f"Seed key '{seed_key}' already run, skip")
-                continue
+        if seed_key in seeded_keys:
+            log.info(f"Seed key '{seed_key}' already run, skip")
+            continue
 
         filepath = os.path.join(_CONFIG_DIR, json_file)
         if not os.path.exists(filepath):
@@ -984,31 +999,10 @@ def _seed_from_json():
 
         with db_lock:
             c = db.cursor()
-            if seed_key == "skill_official":
-                # 官方技能:scope='official' 行
-                c.execute("SELECT COUNT(*) FROM skill WHERE scope='official'")
-            else:
-                c.execute(f"SELECT COUNT(*) FROM {db_table}")
+            c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
             if count > 0 and db_table != "agent_type":
-                # 表已有数据:跳过全量 seed,但对 skill-description.json 中缺失的官方技能幂等补种
-                if seed_key == "skill_official":
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    for skill_name, info in data.items():
-                        existing = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=?", (skill_name,)).fetchone()
-                        if existing and existing[0] == 0:
-                            display_name = info.get("name", skill_name)
-                            description = info.get("description", "")
-                            agent_type = info.get("agent_type", "")
-                            skill_path = info.get("path", skill_name)
-                            sub_scene = info.get("sub_scene", "")
-                            c.execute(
-                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene) VALUES (?,?,?,?,?,'official','',?)",
-                                (skill_name, display_name, description, agent_type, skill_path, sub_scene)
-                            )
-                            log.info(f"Seeded missing official skill: {skill_name}")
-                    db.commit()
+                # 表已有数据，跳过 seed
                 continue
 
         with open(filepath, "r", encoding="utf-8") as f:
@@ -1109,19 +1103,6 @@ def _insert_seed_data(table: str, data: dict):
                     (agent_type, display_name, description, icon, order_num, subscribe_events, enable)
                 )
 
-        elif table == "skill_official":
-            # skill-description.json: {"skill_name": {"name": "...", "agent_type": "...", "path": "...", ...}}
-            for skill_name, info in data.items():
-                display_name = info.get("name", skill_name)
-                description = info.get("description", "")
-                agent_type = info.get("agent_type", "")
-                skill_path = info.get("path", skill_name)
-                sub_scene = info.get("sub_scene", "")
-                c.execute(
-                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, sub_scene) VALUES (?,?,?,?,?,'official','',?)",
-                    (skill_name, display_name, description, agent_type, skill_path, sub_scene)
-                )
-
         elif table == "agent_registry":
             # agent-routing.json 已废弃(agent_registry 表移除),backend 统一用 backend_agents
             pass
@@ -1190,6 +1171,64 @@ def _init_scene_category_data():
         log.info("Seeded scene_category with 6 categories")
     except Exception as e:
         log.warning(f"Init scene_category data failed: {e}")
+
+
+def _init_skill_category_data():
+    """初始化 skill_category 表的 11 条分类数据（幂等）。
+
+    Issue #179: 技能分类表独立化，对齐 scene_category 模式。
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        if get_meta_value("skill_category_seeded") == "1":
+            return
+        categories = [
+            ("AI辅助编码与评审", "ai-coding-review", "🤖", 1),
+            ("应用发布", "app-release", "📦", 2),
+            ("自动化测试", "auto-testing", "🧪", 3),
+            ("持续集成CI", "ci", "🔧", 4),
+            ("代码质量与安全", "code-quality", "🛡️", 5),
+            ("容器与集群部署", "container-deploy", "☸️", 6),
+            ("反馈闭环", "feedback-loop", "🔄", 7),
+            ("IM", "im", "💬", 8),
+            ("日志与诊断", "log-diagnostics", "🔍", 9),
+            ("可观测性", "observability", "📊", 10),
+            ("环境与脚手架", "scaffolding", "🏗️", 11),
+        ]
+        with db_lock:
+            c = db.cursor()
+            for name, slug, icon, order_num in categories:
+                c.execute(
+                    "INSERT OR IGNORE INTO skill_category (name, slug, icon, order_num, is_active) VALUES (?,?,?,?,1)",
+                    (name, slug, icon, order_num),
+                )
+            db.commit()
+        set_meta_value("skill_category_seeded", "1")
+        log.info("Seeded skill_category with 11 categories")
+    except Exception as e:
+        log.warning(f"Init skill_category data failed: {e}")
+
+
+def _backfill_skill_category_id():
+    """一次性回填：sub_scene → category_id（幂等）。
+
+    Issue #179: 已有 official 技能的 sub_scene 有值，通过 slug 关联 skill_category 获取 category_id。
+    user/repo 技能 sub_scene 为空，category_id 保持 0。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE skill SET category_id = "
+                "(SELECT sc.id FROM skill_category sc WHERE sc.slug = skill.sub_scene) "
+                "WHERE sub_scene != '' AND category_id = 0"
+            )
+            updated = c.rowcount
+            db.commit()
+        if updated:
+            log.info(f"Backfilled skill category_id: {updated} rows")
+    except Exception as e:
+        log.warning(f"Backfill skill category_id failed: {e}")
 
 
 def _init_scene_market_data():
@@ -1374,7 +1413,6 @@ def init_database():
                 _create_indexes()
                 _seed_from_json()
                 _seed_event_action_filter()
-                _sync_official_skills()
                 _align_agent_enable()
                 _cleanup_stale_meta()
                 _cleanup_chat_shared_worker_runtime()
@@ -1385,6 +1423,9 @@ def init_database():
                 _init_scene_market_data()
                 _init_scene_skill_ref()
                 _init_skill_featured()
+                # ===== Issue #179: skill 分类表初始化 + category_id 回填 =====
+                _init_skill_category_data()
+                _backfill_skill_category_id()
                 # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
                 try:
                     _backfill_scene_display_names()
@@ -1405,7 +1446,6 @@ def init_database():
         _create_indexes()
         _seed_from_json()
         _seed_event_action_filter()
-        _sync_official_skills()
         _align_agent_enable()
         _cleanup_stale_meta()
         _cleanup_chat_shared_worker_runtime()
@@ -1416,6 +1456,9 @@ def init_database():
         _init_scene_market_data()
         _init_scene_skill_ref()
         _init_skill_featured()
+        # ===== Issue #179: skill 分类表初始化 + category_id 回填 =====
+        _init_skill_category_data()
+        _backfill_skill_category_id()
         # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
         try:
             _backfill_scene_display_names()
@@ -1611,66 +1654,6 @@ def _migrate_knowledge_issue67():
             log.warning(f"[Issue #67] MySQL native DDL failed: {e}")
 
     log.info("[Issue #67] knowledge migration done")
-
-
-def _sync_official_skills():
-    """启动时从 configs/skill-description.json 同步官方技能到 skill 表(幂等).
-
-    与 skill_sync.sync_official_skills_to_obs 逻辑一致:新增 INSERT + 已有 UPDATE 元信息
-   (display_name/description/agent_type)._seed_from_json 只补种缺失技能,
-    不更新已有技能的元信息--配置文件中改名/改描述后需要此步骤同步.
-    """
-    try:
-        import json as _json
-        config_dir = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
-        json_path = os.path.join(config_dir, "skill-description.json")
-        if not os.path.exists(json_path):
-            return
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-        added = 0
-        updated = 0
-        with db_lock:
-            c = db.cursor()
-            for skill_name, info in data.items():
-                display_name = info.get("name", skill_name)
-                description = info.get("description", "")
-                agent_type = info.get("agent_type", "")
-                skill_path = info.get("path", skill_name)
-                sub_scene = info.get("sub_scene", "")
-                existed = c.execute(
-                    "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'",
-                    (skill_name,)
-                ).fetchone()[0]
-                if existed:
-                    # 更新元信息；本地（非 OBS 集群模式，file_path 为空）同时刷新 skill_path，
-                    # 保证目录按 agent_type 分组后（skills/<agent_type>/<skill>/）DB 路径与磁盘一致。
-                    _fp = c.execute(
-                        "SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''",
-                        (skill_name,)
-                    ).fetchone()
-                    if _fp:
-                        c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, sub_scene, skill_name)
-                        )
-                    else:
-                        c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_path, sub_scene, skill_name)
-                        )
-                    updated += 1
-                else:
-                    c.execute(
-                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene) VALUES (?,?,?,?,?,'official','',?,?)",
-                        (skill_name, display_name, description, agent_type, skill_path, "", sub_scene)
-                    )
-                    added += 1
-            db.commit()
-        if added or updated:
-            log.info(f"Official skills synced: +{added} added, {updated} updated")
-    except Exception as e:
-        log.warning(f"Sync official skills failed: {e}")
 
 
 def _cleanup_stale_meta():
@@ -2175,27 +2158,7 @@ def _migrate_tables():
             log.info("Migrated backend -> backend_id across agent tables")
     except Exception as e:
         log.warning(f"Migrate backend->backend_id failed: {e}")
-    # 同步 skill 归属:从 skill-description.json 更新 skill 表 agent_type(确保 pr->qa 等归属一致)
-    try:
-        _skill_desc_path = os.path.join(_CONFIG_DIR, "skill-description.json")
-        if os.path.exists(_skill_desc_path):
-            with open(_skill_desc_path, "r", encoding="utf-8") as _f:
-                _skill_desc = json.load(_f)
-            with db_lock:
-                c = db.cursor()
-                _updated = 0
-                for _sn, _info in _skill_desc.items():
-                    _at = (_info or {}).get("agent_type", "")
-                    if _sn and _at:
-                        _cur = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=?", (_sn,)).fetchone()
-                        if _cur and _cur[0] > 0:
-                            c.execute("UPDATE skill SET agent_type=? WHERE skill_name=?", (_at, _sn))
-                            _updated += c.rowcount
-                db.commit()
-                if _updated:
-                    log.info(f"Synced {_updated} skill agent_type mappings from skill-description.json")
-    except Exception as e:
-        log.warning(f"Sync skill agent_type failed: {e}")
+    # skill agent_type 同步由 worker 的 _sync_skills_to_db 变更检测覆盖，init_database 不做
     # backend_agents 大小写去重(合并为小写 name,保留最小 id,更新引用)
     try:
         with db_lock:
@@ -2619,6 +2582,15 @@ def _migrate_tables():
             log.info("Added managed_repos.host_status column")
     except Exception as e:
         log.warning(f"Add managed_repos.host_status column failed: {e}")
+    # ===== Issue #179: skill 表加 category_id 列（老库升级） =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "skill", "category_id", "INTEGER DEFAULT 0")
+            db.commit()
+            log.info("Added skill.category_id column")
+    except Exception as e:
+        log.warning(f"Add skill.category_id column failed: {e}")
     # ===== devops_pipeline_scene 高级选项列（场景级工作分支 + 自定义 key:value）=====
     try:
         with db_lock:

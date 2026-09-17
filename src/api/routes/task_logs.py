@@ -26,7 +26,7 @@ def _require_task_exists(task_id: str):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
 
 
-@router.get("/{task_id}/info")
+@router.get("/{task_id}/info", operation_id="task_logs_info", summary="Task runtime info", description="Task runtime info: agent/device/machine + received context (prompt).")
 def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_token)):
     """任务关联的执行引擎/机器信息 + 接收上下文（prompt）。
 
@@ -83,7 +83,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     }
 
 
-@router.get("/{task_id}/messages")
+@router.get("/{task_id}/messages", operation_id="task_logs_messages", summary="Task messages", description="Incremental messages: everything after `since` (monotonic seq).")
 def get_task_messages(task_id: str, user: dict = Depends(require_no_session_token),
                             since: int = Query(0, ge=0)):
     """增量拉取：since 之后的消息（seq 单调递增）。"""
@@ -91,7 +91,7 @@ def get_task_messages(task_id: str, user: dict = Depends(require_no_session_toke
     return list_task_messages(task_id, since=since)
 
 
-@router.get("/{task_id}/stream")
+@router.get("/{task_id}/stream", operation_id="task_logs_stream", summary="Task message stream (SSE)", description="SSE live stream: buffered messages after `since`, then a live subscription with heartbeat.")
 async def stream_task_messages(task_id: str, request: Request,
                                user: dict = Depends(require_no_session_token),
                                since: int = Query(0, ge=0)):
