@@ -112,9 +112,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
     <div class="field">
       <label>您目前的学历是？ <span class="req">*</span></label>
       <div class="radio-group" data-name="education">
-        <label class="radio-item"><input type="radio" name="education" value="本科生"> 本科生</label>
-        <label class="radio-item"><input type="radio" name="education" value="硕士研究生"> 硕士研究生</label>
-        <label class="radio-item"><input type="radio" name="education" value="博士研究生"> 博士研究生</label>
+        <label class="radio-item"><input type="radio" name="education" value="本科生" onchange="toggleOtherInput(this)"> 本科生</label>
+        <label class="radio-item"><input type="radio" name="education" value="硕士研究生" onchange="toggleOtherInput(this)"> 硕士研究生</label>
+        <label class="radio-item"><input type="radio" name="education" value="博士研究生" onchange="toggleOtherInput(this)"> 博士研究生</label>
         <label class="radio-item"><input type="radio" name="education" value="其他" onchange="toggleOtherInput(this)"> 其他 <input type="text" class="other-text" placeholder="请输入" style="display:none;width:180px;padding:6px 10px;border:1px solid #e3e6ee;border-radius:6px;font-size:13px;outline:none;margin-left:4px"></label>
       </div>
     </div>
@@ -136,21 +136,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
     <div class="field">
       <label>您所在企业的规模？ <span class="req">*</span></label>
       <div class="radio-group" data-name="companySize">
-        <label class="radio-item"><input type="radio" name="companySize" value="1-10人"> 1-10人</label>
-        <label class="radio-item"><input type="radio" name="companySize" value="11-50人"> 11-50人</label>
-        <label class="radio-item"><input type="radio" name="companySize" value="51-200人"> 51-200人</label>
-        <label class="radio-item"><input type="radio" name="companySize" value="201-1000人"> 201-1000人</label>
-        <label class="radio-item"><input type="radio" name="companySize" value="1000人以上"> 1000人以上</label>
+        <label class="radio-item"><input type="radio" name="companySize" value="1-10人" onchange="toggleOtherInput(this)"> 1-10人</label>
+        <label class="radio-item"><input type="radio" name="companySize" value="11-50人" onchange="toggleOtherInput(this)"> 11-50人</label>
+        <label class="radio-item"><input type="radio" name="companySize" value="51-200人" onchange="toggleOtherInput(this)"> 51-200人</label>
+        <label class="radio-item"><input type="radio" name="companySize" value="201-1000人" onchange="toggleOtherInput(this)"> 201-1000人</label>
+        <label class="radio-item"><input type="radio" name="companySize" value="1000人以上" onchange="toggleOtherInput(this)"> 1000人以上</label>
       </div>
     </div>
     <div class="field">
       <label>您在企业中的角色？ <span class="req">*</span></label>
       <div class="radio-group" data-name="role">
-        <label class="radio-item"><input type="radio" name="role" value="开发人员"> 开发人员</label>
-        <label class="radio-item"><input type="radio" name="role" value="技术负责人/架构师"> 技术负责人/架构师</label>
-        <label class="radio-item"><input type="radio" name="role" value="产品经理"> 产品经理</label>
-        <label class="radio-item"><input type="radio" name="role" value="项目经理"> 项目经理</label>
-        <label class="radio-item"><input type="radio" name="role" value="管理人员"> 管理人员</label>
+        <label class="radio-item"><input type="radio" name="role" value="开发人员" onchange="toggleOtherInput(this)"> 开发人员</label>
+        <label class="radio-item"><input type="radio" name="role" value="技术负责人/架构师" onchange="toggleOtherInput(this)"> 技术负责人/架构师</label>
+        <label class="radio-item"><input type="radio" name="role" value="产品经理" onchange="toggleOtherInput(this)"> 产品经理</label>
+        <label class="radio-item"><input type="radio" name="role" value="项目经理" onchange="toggleOtherInput(this)"> 项目经理</label>
+        <label class="radio-item"><input type="radio" name="role" value="管理人员" onchange="toggleOtherInput(this)"> 管理人员</label>
         <label class="radio-item"><input type="radio" name="role" value="其他" onchange="toggleOtherInput(this)"> 其他 <input type="text" class="other-text" placeholder="请输入" style="display:none;width:180px;padding:6px 10px;border:1px solid #e3e6ee;border-radius:6px;font-size:13px;outline:none;margin-left:4px"></label>
       </div>
     </div>
@@ -172,12 +172,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
     <div class="field">
       <label>您目前主要从事什么？ <span class="req">*</span></label>
       <div class="radio-group" data-name="occupation">
-        <label class="radio-item"><input type="radio" name="occupation" value="软件/IT"> 软件/IT</label>
-        <label class="radio-item"><input type="radio" name="occupation" value="AI/Agent"> AI/Agent</label>
-        <label class="radio-item"><input type="radio" name="occupation" value="电商"> 电商</label>
-        <label class="radio-item"><input type="radio" name="occupation" value="内容创作"> 内容创作</label>
-        <label class="radio-item"><input type="radio" name="occupation" value="SaaS"> SaaS</label>
-        <label class="radio-item"><input type="radio" name="occupation" value="咨询/服务"> 咨询/服务</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="软件/IT" onchange="toggleOtherInput(this)"> 软件/IT</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="AI/Agent" onchange="toggleOtherInput(this)"> AI/Agent</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="电商" onchange="toggleOtherInput(this)"> 电商</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="内容创作" onchange="toggleOtherInput(this)"> 内容创作</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="SaaS" onchange="toggleOtherInput(this)"> SaaS</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="咨询/服务" onchange="toggleOtherInput(this)"> 咨询/服务</label>
         <label class="radio-item"><input type="radio" name="occupation" value="其他" onchange="toggleOtherInput(this)"> 其他 <input type="text" class="other-text" placeholder="请输入" style="display:none;width:180px;padding:6px 10px;border:1px solid #e3e6ee;border-radius:6px;font-size:13px;outline:none;margin-left:4px"></label>
       </div>
     </div>
