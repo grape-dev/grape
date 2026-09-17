@@ -102,12 +102,19 @@ def verify_session_token_for_repo(token: str, repo_key: str) -> dict | None:
     return None
 
 
+SESSION_TOKEN_REVOKE_GRACE = 180  # 任务终态后延迟撤销秒数（agent complete → A2A 仍需 token）
+
 def revoke_session_token(session_key: str) -> bool:
-    """会话结束即失效：按 session_key 删除对应 token（不误删并发同类会话）。"""
+    """会话结束延迟失效：把 expires_at 缩短到 SESSION_TOKEN_REVOKE_GRACE 秒后过期，
+    而非立即 DELETE。agent complete 后仍需调 A2A（token mismatch 根因，seq#5613），
+    宽限期内 verify_session_token 仍通过，过期后由 purge_expired_session_tokens 清理。"""
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM session_api_tokens WHERE session_key=?", (session_key,))
+            c.execute(
+                "UPDATE session_api_tokens SET expires_at=? WHERE session_key=?",
+                (str(_now() + SESSION_TOKEN_REVOKE_GRACE), session_key),
+            )
             db.commit()
             return c.rowcount > 0
     except Exception as e:
