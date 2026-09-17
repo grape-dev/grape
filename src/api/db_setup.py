@@ -567,10 +567,11 @@ CREATE TABLE IF NOT EXISTS featured_templates (
 _LOGIN_WHITELIST_DDL = """
 CREATE TABLE IF NOT EXISTS login_whitelist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    gitcode_username VARCHAR(64) NOT NULL,
+    gitcode_username VARCHAR(64) DEFAULT NULL,
     remark VARCHAR(128) DEFAULT '',
     created_by VARCHAR(64) DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
+    github_username TEXT DEFAULT '',
     UNIQUE (gitcode_username)
 )
 """
