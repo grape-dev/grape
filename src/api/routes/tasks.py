@@ -213,7 +213,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                     _existing_assignee = _r2[0] or ""
             except Exception:
                 pass
-            if target and _existing_assignee and target != _existing_assignee:
+            if target and target != _existing_assignee:
                 c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
                 try:
                     _close_other_assignee_tasks(repo_key, issue_number, keep_assignee=target)
