@@ -378,10 +378,31 @@ window._jumpFromScenePipeline = function(issueNum, sceneId, latestSeq) {
   app.nav('tasks');
 };
 
-// 构建相关流水线 HTML（从 pipeData 提取当前场景的流水线统计+表格）
+// 构建相关流水线 HTML（从 pipeData 提取当前场景的流水线统计+表格，支持分页）
+var _scenePipePage = 0;
+var _scenePipeSize = 10;
+var _scenePipeCache = { pipes: [], sceneId: '', dashData: null };
+
 function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
   const allPipesRaw = (pipeData.active ? [pipeData.active] : []).concat(pipeData.history || []);
   const scenePipes = allPipesRaw.filter(p => p.scene_id === sceneId);
+
+  // 缓存供分页使用
+  _scenePipeCache = { pipes: scenePipes, sceneId: sceneId, dashData: dashData };
+  _scenePipePage = 0;
+
+  return _renderScenePipelinePage();
+}
+
+function _renderScenePipelinePage() {
+  const scenePipes = _scenePipeCache.pipes;
+  const sceneId = _scenePipeCache.sceneId;
+  const dashData = _scenePipeCache.dashData;
+  const totalPages = Math.max(1, Math.ceil(scenePipes.length / _scenePipeSize));
+  if (_scenePipePage >= totalPages) _scenePipePage = totalPages - 1;
+  if (_scenePipePage < 0) _scenePipePage = 0;
+  const pagePipes = scenePipes.slice(_scenePipePage * _scenePipeSize, (_scenePipePage + 1) * _scenePipeSize);
+
   const _stageLabel = function(stage) { var map = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',done:I18N.t('pipeline.stage_done')||'完成'}; return map[stage] ? map[stage] : stage; };
   const sceneActiveCount = scenePipes.filter(p => p.executing).length;
   const sceneFailedCount = scenePipes.filter(p => p.statuses && p.statuses.some(s => s === 3)).length;
@@ -400,8 +421,8 @@ function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
     html += `<div style="text-align:center;padding:24px;color:#86868b;font-size:13px">${I18N.t('pipeline.no_issues')||'暂无 Issue'}</div>`;
   } else {
     const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
-    html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap" style="max-height:320px"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
-    scenePipes.forEach(p => {
+    html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
+    pagePipes.forEach(p => {
       const _issueNum = String(p.issue_id || '').replace(/^#/, '');
       const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
       const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
@@ -437,6 +458,18 @@ function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
       </tr>`;
     });
     html += `</table></div></div>`;
+
+    // 分页
+    if (totalPages > 1) {
+      var pageInfo = I18N.t('pipeline.page_info', {cur: _scenePipePage + 1, total: totalPages});
+      var prevLabel = I18N.t('pipeline.prev_page');
+      var nextLabel = I18N.t('pipeline.next_page');
+      html += '<div style="display:flex;align-items:center;gap:12px;padding:10px 0;font-size:12px;color:#86868b">' +
+        '<span>' + pageInfo + '</span>' +
+        '<button class="bt bt-o bt-s" ' + (_scenePipePage <= 0 ? 'disabled style="opacity:.4"' : '') + ' onclick="_scenePipePage--;document.getElementById(\'relatedPipelineSection\').outerHTML=_renderScenePipelinePage();">' + prevLabel + '</button>' +
+        '<button class="bt bt-o bt-s" ' + (_scenePipePage >= totalPages - 1 ? 'disabled style="opacity:.4"' : '') + ' onclick="_scenePipePage++;document.getElementById(\'relatedPipelineSection\').outerHTML=_renderScenePipelinePage();">' + nextLabel + '</button>' +
+        '</div>';
+    }
   }
   html += `</div>`;
   return html;
@@ -533,7 +566,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     .pl-stat .v{font-size:18px;font-weight:700;line-height:1.1}
     .pl-stat .l{font-size:10px;color:#86868b;margin-top:2px}
     .pl-table-card{background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;box-shadow:0 1px 4px rgba(0,0,0,.05);overflow:hidden}
-    .pl-table-wrap{overflow-y:auto;max-height:400px}
+    .pl-table-wrap{overflow:visible}
     .pl-table{width:100%;border-collapse:collapse;font-size:12px}
     .pl-table th{text-align:left;padding:10px 14px;font-weight:500;color:#86868b;border-bottom:1px solid rgba(0,0,0,.04);font-size:10px;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;background:rgba(255,255,255,.9);z-index:1}
     .pl-table td{padding:10px 14px;border-bottom:1px solid rgba(0,0,0,.03)}
