@@ -1173,12 +1173,19 @@ function openTaskCreateModal() {
   // 异步加载可用场景列表
   let _sceneOptions = '<option value="">' + I18N.t('tasks.create.scene_vod_auto') + '</option>';
 
+  // Issue #178: 创建人只读字段——当前登录用户
+  let _currentUsername = '';
+  try {
+    _currentUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || '';
+  } catch(e) { _currentUsername = ''; }
+
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
     <h3 style="margin:0 0 14px;font-size:15px;color:#111">${I18N.t('tasks.create.modal_title')}</h3>
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
+      <div style="font-size:11px;color:#555">${I18N.t('tasks.create.creator_label')}<b>${esc(_currentUsername) || '—'}</b></div>
       <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span> <span style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</span>
         <input id="tcCreateTitle" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="${I18N.t('tasks.create.title_placeholder')}">
       </label>

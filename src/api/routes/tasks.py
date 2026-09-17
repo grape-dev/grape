@@ -51,14 +51,23 @@ class TaskCloseBody(BaseModel):
 
 
 def _get_user_id_by_gitcode(gitcode_user: str) -> int | None:
-    """按 GitCode 用户名查平台 user_id（unified_user_mapping.user_id）"""
+    """按 GitCode 用户名查平台 user_id（unified_user_mapping.user_id）。
+
+    查找失败（未注册或异常）时记录 warning 日志，便于追溯（Issue #178）。
+    """
+    if not gitcode_user:
+        return None
     with db_lock:
         c = db.cursor()
         try:
             c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1", (gitcode_user,))
             row = c.fetchone()
-            return row[0] if row else None
-        except Exception:
+            if row:
+                return row[0]
+            log.warning(f"_get_user_id_by_gitcode: gitcode_user='{gitcode_user}' not found in unified_user_mapping (user_id will be 0)")
+            return None
+        except Exception as e:
+            log.warning(f"_get_user_id_by_gitcode: query failed for '{gitcode_user}': {e}")
             return None
 
 
@@ -137,10 +146,14 @@ def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
 def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       description: str = "", assignee: str = "",
                       event_type: str = "",
-                      subtask_mode: int = -1) -> int | None:
+                      subtask_mode: int = -1,
+                      sender: str = "") -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
-    - assignee 优先 → 对应平台 user_id；assignee 为空 → 仓库 owner
+    - assignee 优先 → 对应平台 user_id
+    - assignee 为空 → issue_state 已存 assignee
+    - 仍为空 → webhook 操作用户（sender，Issue #178：创建人应为操作用户而非 owner）
+    - 最后降级 → 仓库 owner（+ warning 日志）
     - assignee/owner 未注册平台（无 unified_user_mapping）→ user_id=0 落库；
       任务中心 mine 查询 `user_id=? OR user_id=0` 展示（P2 拍板修订：展示，不隐藏）
     - 幂等：同一 issue 已存在 active/processing 任务则复用（2026-09-03 修复#15：不再按 assignee 区分，
@@ -152,7 +165,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         owner = split_owner_repo(repo_key)[0] or ""
     except Exception:
         owner = ""
-    # Issue #49: assignee 为空时，优先从 issue_state 读取 assignee，再 fallback 到 owner
+    # Issue #49: assignee 为空时，优先从 issue_state 读取 assignee
     if not assignee:
         try:
             from src.api.session_store import get_issue_stage
@@ -161,6 +174,14 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 assignee = _st["assignee"]
         except Exception:
             pass
+    # Issue #178: assignee 仍为空 → 使用 webhook 操作用户（sender），最后降级 owner
+    if not assignee:
+        if sender:
+            assignee = sender
+        else:
+            assignee = owner or ""
+            if owner:
+                log.warning(f"ensure_issue_task: no assignee/sender for #{issue_number} repo={repo_key}, fallback to owner '{owner}'")
     target = assignee or owner or ""
     user_id = _get_user_id_by_gitcode(target) if target else 0
     if user_id is None:
