@@ -2246,6 +2246,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=task_id or f"d_{seq}",
                 repo_key=repo_key, agent_type=agent_type, user_id=0)
+            # CLI 命令按 token 作用域过滤：agent 持 tk_ 会话 token → 只暴露 dual+session_only 命令
+            # （见 grape-cli-mode-filter-design.md；避免 agent 打 user_only 接口 403 重试）
+            env_extra["GRAPE_CLI_MODE"] = "WORKER"
     except Exception as e:
         log.warning(f"Exec agent: issue session token failed: {e}")
 
