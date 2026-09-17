@@ -115,7 +115,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <label class="radio-item"><input type="radio" name="education" value="本科生"> 本科生</label>
         <label class="radio-item"><input type="radio" name="education" value="硕士研究生"> 硕士研究生</label>
         <label class="radio-item"><input type="radio" name="education" value="博士研究生"> 博士研究生</label>
-        <label class="radio-item"><input type="radio" name="education" value="其他"> 其他</label>
+        <label class="radio-item"><input type="radio" name="education" value="其他" onchange="toggleOtherInput(this)"> 其他</label>
+            <input type="text" class="other-input" data-for="education" placeholder="请输入" style="display:none;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;font-size:13px;outline:none">
       </div>
     </div>
     <div class="field">
@@ -127,7 +128,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <label class="checkbox-item"><input type="checkbox" value="电子/自动化"> 电子/自动化</label>
         <label class="checkbox-item"><input type="checkbox" value="其他理工科"> 其他理工科</label>
         <label class="checkbox-item"><input type="checkbox" value="经管/商科"> 经管/商科</label>
-        <label class="checkbox-item"><input type="checkbox" value="其他"> 其他</label>
+        <label class="checkbox-item"><input type="checkbox" value="其他" onchange="toggleOtherInput(this)"> 其他</label>
+            <input type="text" class="other-input" data-for-checkbox placeholder="请输入" style="display:none;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;font-size:13px;outline:none">
       </div>
     </div>
   </div>
@@ -151,7 +153,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <label class="radio-item"><input type="radio" name="role" value="产品经理"> 产品经理</label>
         <label class="radio-item"><input type="radio" name="role" value="项目经理"> 项目经理</label>
         <label class="radio-item"><input type="radio" name="role" value="管理人员"> 管理人员</label>
-        <label class="radio-item"><input type="radio" name="role" value="其他"> 其他</label>
+        <label class="radio-item"><input type="radio" name="role" value="其他" onchange="toggleOtherInput(this)"> 其他</label>
+            <input type="text" class="other-input" data-for="role" placeholder="请输入" style="display:none;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;font-size:13px;outline:none">
       </div>
     </div>
     <div class="field">
@@ -163,7 +166,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <label class="checkbox-item"><input type="checkbox" value="企业内部工具"> 企业内部工具</label>
         <label class="checkbox-item"><input type="checkbox" value="数据分析"> 数据分析</label>
         <label class="checkbox-item"><input type="checkbox" value="运维 / DevOps"> 运维 / DevOps</label>
-        <label class="checkbox-item"><input type="checkbox" value="其他"> 其他</label>
+        <label class="checkbox-item"><input type="checkbox" value="其他" onchange="toggleOtherInput(this)"> 其他</label>
+            <input type="text" class="other-input" data-for-checkbox placeholder="请输入" style="display:none;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;font-size:13px;outline:none">
       </div>
     </div>
   </div>
@@ -178,7 +182,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <label class="radio-item"><input type="radio" name="occupation" value="内容创作"> 内容创作</label>
         <label class="radio-item"><input type="radio" name="occupation" value="SaaS"> SaaS</label>
         <label class="radio-item"><input type="radio" name="occupation" value="咨询/服务"> 咨询/服务</label>
-        <label class="radio-item"><input type="radio" name="occupation" value="其他"> 其他</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="其他" onchange="toggleOtherInput(this)"> 其他</label>
+            <input type="text" class="other-input" data-for="occupation" placeholder="请输入" style="display:none;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;font-size:13px;outline:none">
       </div>
     </div>
     <div class="field">
@@ -191,7 +196,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <label class="checkbox-item"><input type="checkbox" value="内容生产"> 内容生产</label>
         <label class="checkbox-item"><input type="checkbox" value="数据处理/分析"> 数据处理/分析</label>
         <label class="checkbox-item"><input type="checkbox" value="运营"> 运营</label>
-        <label class="checkbox-item"><input type="checkbox" value="其他"> 其他</label>
+        <label class="checkbox-item"><input type="checkbox" value="其他" onchange="toggleOtherInput(this)"> 其他</label>
+            <input type="text" class="other-input" data-for-checkbox placeholder="请输入" style="display:none;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;font-size:13px;outline:none">
       </div>
     </div>
   </div>
@@ -211,7 +217,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <label class="checkbox-item"><input type="checkbox" value="内容创作"> 内容创作</label>
         <label class="checkbox-item"><input type="checkbox" value="数据分析"> 数据分析</label>
         <label class="checkbox-item"><input type="checkbox" value="自动化"> 自动化</label>
-        <label class="checkbox-item"><input type="checkbox" value="其他"> 其他</label>
+        <label class="checkbox-item"><input type="checkbox" value="其他" onchange="toggleOtherInput(this)"> 其他</label>
+            <input type="text" class="other-input" data-for-checkbox placeholder="请输入" style="display:none;width:100%;margin-top:4px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;font-size:13px;outline:none">
       </div>
     </div>
   </div>
@@ -238,6 +245,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 <script>
 var _identity = '';
 
+function toggleOtherInput(el) {
+  var container = el.closest('.field') || el.parentElement.parentElement;
+  var otherInput = container.querySelector('.other-input');
+  if (!otherInput) return;
+  if (el.type === 'radio') {
+    otherInput.style.display = el.checked && el.value === '其他' ? 'block' : 'none';
+  } else {
+    otherInput.style.display = el.checked ? 'block' : 'none';
+    if (!el.checked) otherInput.value = '';
+  }
+}
+
 function selectIdentity(type, el) {
   _identity = type;
   document.querySelectorAll('.id-card').forEach(function(c) { c.classList.remove('selected'); });
@@ -254,7 +273,15 @@ function getRadioValue(name) {
 
 function getCheckboxValues(container) {
   var vals = [];
-  container.querySelectorAll('input[type=checkbox]:checked').forEach(function(cb) { vals.push(cb.value); });
+  container.querySelectorAll('input[type=checkbox]:checked').forEach(function(cb) {
+    if (cb.value === '其他') {
+      var oi = container.parentElement.querySelector('.other-input[data-for-checkbox]');
+      var txt = oi && oi.value.trim() ? oi.value.trim() : '其他';
+      vals.push(txt);
+    } else {
+      vals.push(cb.value);
+    }
+  });
   return vals;
 }
 
@@ -268,17 +295,20 @@ function showToast(msg) {
 function buildSurveyData() {
   if (_identity === 'student') {
     var edu = getRadioValue('education');
+    if (edu === '其他') { var oi = document.querySelector('.other-input[data-for="education"]'); edu = oi && oi.value.trim() ? oi.value.trim() : ''; if (!edu) return null; }
     var major = getCheckboxValues(document.querySelector('[data-name="major"]'));
     if (!edu || major.length === 0) return null;
     return { identity: 'student', education: edu, major: major };
   } else if (_identity === 'enterprise') {
-    var size = getRadioValue('companySize');
+    
     var role = getRadioValue('role');
+    if (role === '其他') { var oi = document.querySelector('.other-input[data-for="role"]'); role = oi && oi.value.trim() ? oi.value.trim() : ''; if (!role) return null; }
     var cases = getCheckboxValues(document.querySelector('[data-name="entUseCases"]'));
     if (!size || !role || cases.length === 0) return null;
     return { identity: 'enterprise', companySize: size, role: role, useCases: cases };
   } else if (_identity === 'opc') {
     var occ = getRadioValue('occupation');
+    if (occ === '其他') { var oi = document.querySelector('.other-input[data-for="occupation"]'); occ = oi && oi.value.trim() ? oi.value.trim() : ''; if (!occ) return null; }
     var cases = getCheckboxValues(document.querySelector('[data-name="opcUseCases"]'));
     if (!occ || cases.length === 0) return null;
     return { identity: 'opc', occupation: occ, useCases: cases };
