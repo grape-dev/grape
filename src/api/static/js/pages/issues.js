@@ -635,7 +635,6 @@ function _render() {
   const _statusOpts = [
     {k:'pending', lbl: I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g,'') : '待处理'},
     {k:'in_progress', lbl: I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g,'') : '处理中'},
-    {k:'awaiting_input', lbl: I18N.t('tasks.status.tag_awaiting_input')||'待澄清'},
     {k:'pending_review', lbl: I18N.t('tasks.status.tag_pending_review')||'待审核'},
     {k:'done', lbl: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成'},
     {k:'cancelled', lbl: I18N.t('tasks.status.tag_cancelled')||'已取消'},
