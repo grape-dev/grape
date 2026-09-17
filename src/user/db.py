@@ -2076,20 +2076,26 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
             c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes ORDER BY name")
         else:
             c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
-        return [
-            {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
-             "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
-             "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
-             "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
-             "local_skills": json.loads(r[14] or "[]") if r[14] else [],
-             "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
-             "agent_tags": json.loads(r[16]) if r[16] else [],
-             "host_name": r[17] or "",
-             "max_concurrent": r[18] or 20,
-             "scene_tags": json.loads(r[19]) if r[19] else ["default"],
-             "alias": r[20] or ""}
-            for r in c.fetchall()
-        ]
+        return _rows_to_runtimes(c.fetchall())
+
+
+
+def _rows_to_runtimes(rows) -> list[dict]:
+    """将 DB 行列表转为 runtime dict 列表（供 get_agent_runtimes / paged 复用）。"""
+    return [
+        {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
+         "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
+         "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
+         "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
+         "local_skills": json.loads(r[14] or "[]") if r[14] else [],
+         "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
+         "agent_tags": json.loads(r[16]) if r[16] else [],
+         "host_name": r[17] or "",
+         "max_concurrent": r[18] or 20,
+         "scene_tags": json.loads(r[19]) if r[19] else ["default"],
+         "alias": r[20] or ""}
+        for r in rows
+    ]
 
 
 def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
