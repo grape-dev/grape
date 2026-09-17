@@ -17,15 +17,15 @@ let _skillPageTotal = 0;      // 当前分页查询的总数（来自 list 接�
 let _allSkills = [];         // 当前页技能缓存
 let _featuredSkills = [];    // 精选技能（独立加载，不受搜索影响）
 let _agentStats = {};        // {agent_type: count} 来自 agent-stats 接口
-let _allSubScenes = [];      // 全量子场景列表 [{id, label}] 来自 agent-stats 接口
+let _skillCategories = [];   // 技能分类列表 [{id, name, slug, icon, order_num}] 来自 /api/skills/categories 接口
 let _agentList = ['vod','issue','coding','qa','sre','chat'];  // 固定顺序
 let _activeAgentIdx = -1;    // -1=无选中(显示全部), 0+=第N个agent
 let _activeTagFilter = 'all';  // 当前标签筛选（中文 label 用于显示）
-let _activeTagFilterId = '';  // 当前标签筛选英文 ID（用于 API 查询）
+let _activeTagFilterId = '';  // 当前标签筛选 ID（用于 API 查询和客户端过滤）
 
-// 技能标签分类定义（二级筛选）—— 从接口返回的 sub_scene 动态渲染
+// 技能分类定义（二级筛选）—— 从 agent-stats 接口返回的 categories 动态渲染
 
-// _getSkillTags 已废弃——sub_scene 由接口返回，直接匹配
+// _getSkillTags 已废弃——分类由接口返回，直接匹配
 
 // 精选技能卡片渐变色（按 agent_type）
 const _FEAT_GRADIENT = {
@@ -124,6 +124,11 @@ function renderSkills() {
     window._skillMarketSearchInit = null;
   }
 
+  // 加载全量分类列表（固定缓存，不随 scope/agent/数据变化）
+  API.get('/skills/categories').then(d => {
+    _skillCategories = d.categories || [];
+    _renderTagFilters();
+  }).catch(() => {});
   // 并行加载：agent-stats + 技能列表 + 精选技能(official)
   _loadAgentStats();
   _loadSkills(searchInit);
@@ -145,7 +150,6 @@ function _loadAgentStats() {
   API.get('/skills/agent-stats?' + params.join('&')).then(d => {
     _agentStats = {};
     (d.agents || []).forEach(a => { _agentStats[a.agent_type] = a.count; });
-    _allSubScenes = d.sub_scenes || [];
     _skillTotal = d.total || 0;
     _renderAgentSidebar();
     _renderTagFilters();
@@ -172,9 +176,9 @@ function _reloadSkills(searchInit) {
   if (_activeAgentIdx >= 0 && _agentList[_activeAgentIdx]) {
     params.push('agent_type=' + _agentList[_activeAgentIdx]);
   }
-  // sub_scene 作为 API 入参：仅未选中 agent 时（全量查询场景）
-  if (_activeAgentIdx < 0 && _activeTagFilterId) {
-    params.push('sub_scene=' + encodeURIComponent(_activeTagFilterId));
+  // category_id 作为 API 入参：不管是否选中 agent 都传
+  if (_activeTagFilterId) {
+    params.push('category_id=' + encodeURIComponent(_activeTagFilterId));
   }
   params.push('page=' + _skillPage);
   params.push('page_size=' + _skillPageSize);
@@ -381,35 +385,20 @@ function _switchTagFilter(label, id) {
   _activeTagFilter = label;
   _activeTagFilterId = id || '';
   _renderTagFilters();
-  if (_activeAgentIdx === -1) {
-    // 未选中 agent：作为 API 入参查询
-    _skillPage = 1;
-    _reloadSkills();
-  } else {
-    // 选中 agent：客户端过滤当前页
-    _renderAgentSkills();
-  }
+  // 统一走 API 查询（不管是否选中 agent）
+  _skillPage = 1;
+  _reloadSkills();
+}
+
+function _escapeHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function _renderTagFilters() {
   var container = document.getElementById('tag-filters');
   if (!container) return;
-  var tags = [];
-  if (_activeAgentIdx === -1) {
-    // 未选中 agent：全量展示（来自 agent-stats）
-    tags = _allSubScenes.map(function(s) { return {label: s.label, id: s.id}; });
-  } else {
-    // 选中 agent：仅展示当前页数据的 sub_scene
-    var seen = {};
-    _allSkills.forEach(function(s) {
-      var label = s.sub_scene || '';
-      var id = s.sub_scene_id || '';
-      if (label && id && !seen[id]) {
-        seen[id] = 1;
-        tags.push({label: label, id: id});
-      }
-    });
-  }
+  // 固定展示全量分类标签（来自 _skillCategories），不随数据动态变化
+  var tags = _skillCategories.map(function(c) { return {label: c.name, id: String(c.id), icon: c.icon||''}; });
   // 当前选中的 tag 不在列表中时重置为 all
   if (_activeTagFilter !== 'all' && tags.every(function(t) { return t.id !== _activeTagFilterId; })) {
     _activeTagFilter = 'all';
@@ -418,10 +407,10 @@ function _renderTagFilters() {
   var html = '';
   // "全部" 始终第一个
   var allOn = _activeTagFilter === 'all';
-  html += '<a class="skill-tag-filter' + (allOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'all\',\'\')" style="padding:5px 12px;font-size:11px;color:' + (allOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (allOn?'var(--a)':'var(--b)') + ';background:' + (allOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">全部</a>';
+  html += '<a class="skill-tag-filter' + (allOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'all\',\'\')" style="padding:5px 12px;font-size:11px;color:' + (allOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (allOn?'var(--a)':'var(--b)') + ';background:' + (allOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + (I18N.t('skills.all_categories')||'全部') + '</a>';
   tags.forEach(function(t) {
     var isOn = _activeTagFilterId === t.id;
-    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'' + t.label.replace(/'/g, "\\'") + '\',\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + t.label + '</a>';
+    html += '<a class="skill-tag-filter' + (isOn?' ac':'') + '" href="javascript:void(0)" onclick="_switchTagFilter(\'' + _escapeHtml(t.label).replace(/'/g, "\\'") + '\',\'' + t.id + '\')" style="padding:5px 12px;font-size:11px;color:' + (isOn?'var(--a)':'var(--t2)') + ';border:1px solid ' + (isOn?'var(--a)':'var(--b)') + ';background:' + (isOn?'rgba(49,104,224,0.06)':'var(--c)') + ';cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none">' + (t.icon ? '<span style="margin-right:3px">' + _escapeHtml(t.icon) + '</span>' : '') + _escapeHtml(t.label) + '</a>';
   });
   container.innerHTML = html;
 }
@@ -443,11 +432,8 @@ function _renderAgentSidebar() {
 function _renderAgentSkills() {
   const container = document.getElementById('all-skills');
   if (!container) return;
-  // 二级标签筛选——客户端过滤当前页数据
+  // 分类筛选统一走 API 查询，这里只渲染当前页数据
   let skills = _allSkills;
-  if (_activeTagFilter !== 'all') {
-    skills = skills.filter(s => (s.sub_scene_id || '') === _activeTagFilterId);
-  }
   if (!skills.length) {
     container.innerHTML = `<div class="ts t3" style="padding:20px;text-align:center">${I18N.t('skills.empty.no_skills')||'暂无技能'}</div>`;
     return;
@@ -528,6 +514,7 @@ function _renderSkillCard(s, fixedWidth) {
     <div class="rh">
       <span style="font-size:14px">${meta.icon||''}</span>
       <span class="tg ${tagClass}" style="font-size:9px">${meta.label||at}</span>
+      ${s.category_name ? `<span class="tg" style="font-size:9px;background:rgba(49,104,224,0.08);color:var(--a)">${_escapeHtml(s.category_name)}</span>` : ''}
       <span class="rn">${s.display_name || s.name}</span>
       ${featuredBadge}
     </div>
@@ -585,7 +572,7 @@ function renderSkillDetail(data) {
   const isUserDetail = data.scope === 'user';
   const scenesArr = (data.scenes || []).map(sc => sc.display_name || sc.name || sc);
   const scenesStr = scenesArr.length > 0 ? scenesArr.join('、') : '—';
-  const tagsStr = data.sub_scene || '—';
+  const tagsStr = data.category_name || '—';
   const likeCount = data.like_count || 0;
   const likedIcon = data.liked_by_me ? '❤️' : '🤍';
   const rawContent = data.content || '';
@@ -614,7 +601,7 @@ function renderSkillDetail(data) {
       </div>
       <div class="info-grid">
         <div class="info-cell"><div class="il">${I18N.t('skills.info_scenes')||'场景'}</div><div class="iv">${scenesStr}</div></div>
-        <div class="info-cell"><div class="il">${I18N.t('skills.info_tags')||'子场景'}</div><div class="iv">${tagsStr}</div></div>
+        <div class="info-cell"><div class="il">${I18N.t('skills.info_tags')||'分类'}</div><div class="iv">${_escapeHtml(tagsStr)}</div></div>
         <div class="info-cell"><div class="il">${I18N.t('skills.info_version')||'版本'}</div><div class="iv">${version}</div></div>
       </div>
     </div>`;
@@ -644,6 +631,11 @@ function showSkillUpload() {
         ${AGENT_OPTS.map(o=>`<option value="${o.v}">${o.label}</option>`).join('')}
       </select>
     </div>
+    <div class="srow" style="margin-bottom:10px"><label>${I18N.t('skills.upload.category')||'分类'}</label>
+      <select id="skillCategoryId" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">
+        <option value="0">${I18N.t('skills.upload.uncategorized')||'未分类'}</option>
+      </select>
+    </div>
     <div style="margin-bottom:14px">
       <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">${I18N.t('skills.upload.file_label')||'技能 ZIP 包'}</label>
       <input type="file" id="skillFile" accept=".zip" style="font-size:12px">
@@ -661,6 +653,17 @@ function showSkillUpload() {
     </div>
   </div>`;
   document.body.appendChild(modal);
+  // 异步加载分类列表（不依赖 agent-stats 缓存，确保列表不为空）
+  API.get('/skills/categories').then(d => {
+    const sel = document.getElementById('skillCategoryId');
+    if (!sel) return;
+    (d.categories || []).forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = (c.icon || '') + ' ' + c.name;
+      sel.appendChild(opt);
+    });
+  }).catch(() => {});
 }
 
 function downloadSkillTemplate() {
@@ -695,10 +698,12 @@ function doSkillUpload() {
   }
   const scope = _skillTab;
   const repo = _currentRepo();
+  const categoryId = parseInt(document.getElementById('skillCategoryId')?.value || '0', 10);
   const fd = new FormData();
   fd.append('file', fileInput.files[0]);
   fd.append('scope', scope);
   fd.append('agent_type', agentType);
+  fd.append('category_id', String(categoryId));
   if (scope === 'repo' && repo) fd.append('repo', repo);
   _setSkillUploadProgress(0, false);
   API.upload('/skills/upload', fd, (pct) => _setSkillUploadProgress(pct, false)).then(r => {
