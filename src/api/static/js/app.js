@@ -568,52 +568,229 @@ function loadAgentTypes() {
     var isZh = I18N.getLang() === 'zh';
     var overlay = document.createElement('div');
     overlay.id = 'betaApplyModal';
-    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;overflow-y:auto;padding:20px';
+    var z = isZh;
     overlay.innerHTML = `
-      <div style="background:var(--c,#fff);border-radius:16px;padding:32px;width:440px;max-width:90vw;box-shadow:0 12px 48px rgba(0,0,0,0.15)">
+      <div style="background:var(--c,#fff);border-radius:16px;padding:32px;width:480px;max-width:90vw;box-shadow:0 12px 48px rgba(0,0,0,0.15);max-height:90vh;overflow-y:auto">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-          <h2 style="font-size:20px;font-weight:600">${isZh ? '申请内测' : 'Beta Apply'}</h2>
+          <h2 style="font-size:20px;font-weight:600">${z?'申请内测':'Beta Apply'}</h2>
           <span onclick="document.getElementById('betaApplyModal').remove()" style="cursor:pointer;font-size:20px;color:var(--t3,#86868b);line-height:1">×</span>
         </div>
-        <div style="display:flex;flex-direction:column;gap:14px">
+        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${z?'基础信息':'Basic Info'}</div>
+        <div style="display:flex;flex-direction:column;gap:12px">
           <div>
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${isZh ? '平台 <span style="color:var(--r,#dc2828)">*</span>' : 'Platform <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'平台 <span style="color:var(--r,#dc2828)">*</span>':'Platform <span style="color:var(--r,#dc2828)">*</span>'}</label>
             <select id="betaPlatform" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
               <option value="gitcode">GitCode</option>
               <option value="github">GitHub</option>
             </select>
           </div>
           <div>
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${isZh ? '用户名 <span style="color:var(--r,#dc2828)">*</span>' : 'Username <span style="color:var(--r,#dc2828)">*</span>'}</label>
-            <input id="betaAccountName" type="text" placeholder="${isZh ? 'GitCode 或 GitHub 用户名' : 'GitCode or GitHub username'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'用户名 <span style="color:var(--r,#dc2828)">*</span>':'Username <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <input id="betaAccountName" type="text" placeholder="${z?'GitCode 或 GitHub 用户名':'GitCode or GitHub username'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
           </div>
           <div>
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${isZh ? '联系方式 <span style="color:var(--r,#dc2828)">*</span>' : 'Contact <span style="color:var(--r,#dc2828)">*</span>'}</label>
-            <input id="betaEmail" type="text" placeholder="${isZh ? '邮箱或手机号' : 'Email or phone'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'邮箱 <span style="color:var(--r,#dc2828)">*</span>':'Email <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <input id="betaEmail" type="email" placeholder="user@example.com" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
           </div>
           <div>
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${isZh ? '申请理由' : 'Reason'}</label>
-            <textarea id="betaReason" rows="3" placeholder="${isZh ? '选填' : 'Optional'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;resize:vertical;font-family:inherit"></textarea>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'手机号':'Phone'} <span style="font-size:10px;color:var(--t3,#a0a0a0)">(${z?'选填':'optional'})</span></label>
+            <input id="betaPhone" type="text" placeholder="${z?'选填':'Optional'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
           </div>
-          <button id="betaSubmitBtn" onclick="app.submitBetaApply()" style="width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px">${isZh ? '提交申请' : 'Submit'}</button>
         </div>
+        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${z?'身份选择':'Identity'}</div>
+        <div>
+          <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:8px">${z?'您的身份是？ <span style="color:var(--r,#dc2828)">*</span>':'Your identity? <span style="color:var(--r,#dc2828)">*</span>'}</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div class="ba-id-card" onclick="baSelectIdentity('student')" data-id="student" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">🎓</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${z?'学生':'Student'}</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'在校学生':'In school'}</div></div></div>
+            <div class="ba-id-card" onclick="baSelectIdentity('enterprise')" data-id="enterprise" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">🏢</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${z?'企业':'Enterprise'}</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'企业团队':'Company team'}</div></div></div>
+            <div class="ba-id-card" onclick="baSelectIdentity('opc')" data-id="opc" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">💼</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">OPC</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'独立开发者':'Independent'}</div></div></div>
+            <div class="ba-id-card" onclick="baSelectIdentity('other')" data-id="other" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">📋</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${z?'其他':'Other'}</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'其他身份':'Other identity'}</div></div></div>
+          </div>
+        </div>
+        <div id="baBranchStudent" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
+          <div style="margin-top:12px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'学历 <span style="color:var(--r,#dc2828)">*</span>':'Education <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div id="baEdu" style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baEdu" value="${z?'本科生':'Undergraduate'}"> ${z?'本科生':'Undergraduate'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baEdu" value="${z?'硕士研究生':'Master'}"> ${z?'硕士研究生':'Master'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baEdu" value="${z?'博士研究生':'PhD'}"> ${z?'博士研究生':'PhD'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baEdu" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'专业方向 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Major <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'计算机/软件工程':'CS/SE'}"> ${z?'计算机/软件工程':'CS/SE'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'人工智能':'AI'}"> ${z?'人工智能':'AI'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'数据科学':'Data Science'}"> ${z?'数据科学':'Data Science'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'电子/自动化':'EE/Automation'}"> ${z?'电子/自动化':'EE'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'其他理工科':'Other STEM'}"> ${z?'其他理工科':'Other STEM'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'经管/商科':'Business'}"> ${z?'经管/商科':'Business'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+            </div>
+          </div>
+        </div>
+        <div id="baBranchEnterprise" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
+          <div style="margin-top:12px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'企业规模 <span style="color:var(--r,#dc2828)">*</span>':'Company Size <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div id="baSize" style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baSize" value="1-10人"> 1-10人</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baSize" value="11-50人"> 11-50人</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baSize" value="51-200人"> 51-200人</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baSize" value="201-1000人"> 201-1000人</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baSize" value="1000人以上"> 1000人+</label>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'角色 <span style="color:var(--r,#dc2828)">*</span>':'Role <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div id="baRole" style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'开发人员':'Developer'}"> ${z?'开发人员':'Developer'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'技术负责人/架构师':'Tech Lead'}"> ${z?'技术负责人/架构师':'Tech Lead'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'产品经理':'PM'}"> ${z?'产品经理':'PM'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'项目经理':'Project Manager'}"> ${z?'项目经理':'Project Manager'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'管理人员':'Manager'}"> ${z?'管理人员':'Manager'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'使用场景 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Use Cases <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'软件开发':'Software Dev'}"> ${z?'软件开发':'Software Dev'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'AI Agent / Agent 开发':'AI Agent'}"> ${z?'AI Agent / Agent 开发':'AI Agent'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'自动化办公':'Automation'}"> ${z?'自动化办公':'Automation'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'企业内部工具':'Internal Tools'}"> ${z?'企业内部工具':'Internal Tools'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'数据分析':'Data Analysis'}"> ${z?'数据分析':'Data Analysis'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'运维 / DevOps':'DevOps'}"> ${z?'运维 / DevOps':'DevOps'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+            </div>
+          </div>
+        </div>
+        <div id="baBranchOpc" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
+          <div style="margin-top:12px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'主要从事 <span style="color:var(--r,#dc2828)">*</span>':'Occupation <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div id="baOcc" style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="${z?'软件/IT':'Software/IT'}"> ${z?'软件/IT':'Software/IT'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="AI/Agent"> AI/Agent</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="${z?'电商':'E-commerce'}"> ${z?'电商':'E-commerce'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="${z?'内容创作':'Content Creation'}"> ${z?'内容创作':'Content'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="SaaS"> SaaS</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="${z?'咨询/服务':'Consulting'}"> ${z?'咨询/服务':'Consulting'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'解决问题 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Use Cases <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'产品开发':'Product Dev'}"> ${z?'产品开发':'Product Dev'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'编程开发':'Coding'}"> ${z?'编程开发':'Coding'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'Agent 开发':'Agent Dev'}"> ${z?'Agent 开发':'Agent Dev'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'自动化任务':'Automation'}"> ${z?'自动化任务':'Automation'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'内容生产':'Content'}"> ${z?'内容生产':'Content'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'数据处理/分析':'Data'}"> ${z?'数据处理/分析':'Data'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'运营':'Operations'}"> ${z?'运营':'Operations'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+            </div>
+          </div>
+        </div>
+        <div id="baBranchOther" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
+          <div style="margin-top:12px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'身份/职业描述 <span style="color:var(--r,#dc2828)">*</span>':'Description <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <input id="baOtherDesc" type="text" placeholder="${z?'如：自由职业者、研究者':'e.g. Freelancer, Researcher'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'使用场景 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Use Cases <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'学习':'Learning'}"> ${z?'学习':'Learning'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'工作':'Work'}"> ${z?'工作':'Work'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'编程':'Coding'}"> ${z?'编程':'Coding'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'创业':'Startup'}"> ${z?'创业':'Startup'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'内容创作':'Content'}"> ${z?'内容创作':'Content'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'数据分析':'Data'}"> ${z?'数据分析':'Data'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'自动化':'Automation'}"> ${z?'自动化':'Automation'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${z?'申请理由':'Reason'} <span style="font-size:10px;color:var(--t3,#a0a0a0)">(${z?'选填':'optional'})</span></div>
+        <textarea id="betaReason" rows="2" placeholder="${z?'选填':'Optional'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;resize:vertical;font-family:inherit"></textarea>
+        <button id="betaSubmitBtn" onclick="app.submitBetaApply()" style="width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px">${z?'提交申请':'Submit'}</button>
       </div>`;
     document.body.appendChild(overlay);
     overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+  }
+  var _baIdentity = '';
+  function baSelectIdentity(type) {
+    _baIdentity = type;
+    var modal = document.getElementById('betaApplyModal');
+    if (!modal) return;
+    modal.querySelectorAll('.ba-id-card').forEach(function(c) {
+      c.style.borderColor = c.dataset.id === type ? '#3168e0' : 'var(--b,#e3e6ee)';
+      c.style.background = c.dataset.id === type ? 'rgba(49,104,224,0.04)' : 'transparent';
+    });
+    ['Student','Enterprise','Opc','Other'].forEach(function(s) {
+      var el = document.getElementById('baBranch' + s);
+      if (el) { el.style.maxHeight = '0'; el.style.opacity = '0'; }
+    });
+    var key = type.charAt(0).toUpperCase() + type.slice(1);
+    var branch = document.getElementById('baBranch' + key);
+    if (branch) { branch.style.maxHeight = '600px'; branch.style.opacity = '1'; }
+  }
+  function _baRadio(name) {
+    var c = document.querySelector('input[name="' + name + '"]:checked');
+    return c ? c.value : '';
+  }
+  function _baChecks(cls) {
+    var vals = [];
+    document.querySelectorAll('.' + cls + ':checked').forEach(function(cb) { vals.push(cb.value); });
+    return vals;
   }
   function submitBetaApply() {
     var isZh = I18N.getLang() === 'zh';
     var accountType = document.getElementById('betaPlatform').value;
     var accountName = document.getElementById('betaAccountName').value.trim();
     var email = document.getElementById('betaEmail').value.trim();
+    var phone = (document.getElementById('betaPhone')||{}).value ? document.getElementById('betaPhone').value.trim() : '';
     var reason = document.getElementById('betaReason').value.trim();
     if (!accountName) { showToast(isZh ? '请填写用户名' : 'Username is required'); return; }
-    if (!email) { showToast(isZh ? '请填写联系方式' : 'Contact is required'); return; }
+    if (!email) { showToast(isZh ? '请填写邮箱' : 'Email is required'); return; }
+    if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) { showToast(isZh ? '邮箱格式不正确' : 'Invalid email'); return; }
+    if (!_baIdentity) { showToast(isZh ? '请选择身份' : 'Please select identity'); return; }
+    var survey = null;
+    if (_baIdentity === 'student') {
+      var edu = _baRadio('baEdu'), major = _baChecks('baMajor');
+      if (!edu || major.length === 0) { showToast(isZh ? '请完成学历和专业方向' : 'Complete education & major'); return; }
+      survey = { identity: 'student', education: edu, major: major };
+    } else if (_baIdentity === 'enterprise') {
+      var size = _baRadio('baSize'), role = _baRadio('baRole'), cases = _baChecks('baEntCase');
+      if (!size || !role || cases.length === 0) { showToast(isZh ? '请完成企业信息' : 'Complete company info'); return; }
+      survey = { identity: 'enterprise', companySize: size, role: role, useCases: cases };
+    } else if (_baIdentity === 'opc') {
+      var occ = _baRadio('baOcc'), cases2 = _baChecks('baOpcCase');
+      if (!occ || cases2.length === 0) { showToast(isZh ? '请完成OPC信息' : 'Complete OPC info'); return; }
+      survey = { identity: 'opc', occupation: occ, useCases: cases2 };
+    } else if (_baIdentity === 'other') {
+      var desc = (document.getElementById('baOtherDesc')||{}).value ? document.getElementById('baOtherDesc').value.trim() : '';
+      var cases3 = _baChecks('baOtherCase');
+      if (!desc || cases3.length === 0) { showToast(isZh ? '请完成描述和场景' : 'Complete description & cases'); return; }
+      survey = { identity: 'other', description: desc, useCases: cases3 };
+    }
     var btn = document.getElementById('betaSubmitBtn');
     btn.disabled = true; btn.textContent = isZh ? '提交中...' : 'Submitting...';
-    API.post('/settings/beta-apply/submit', { accountType: accountType, accountName: accountName, email: email, reason: reason }).then(function(d) {
-      showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
-      document.getElementById('betaApplyModal').remove();
+    API.post('/settings/beta-apply/submit', {
+      accountType: accountType, accountName: accountName, email: email,
+      identityType: _baIdentity, phone: phone, reason: reason, surveyData: survey
+    }).then(function(d) {
+      if (d.success) {
+        showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        document.getElementById('betaApplyModal').remove();
+      } else if (d.error) {
+        showToast(d.error);
+        btn.disabled = false; btn.textContent = isZh ? '提交申请' : 'Submit';
+      } else {
+        showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        document.getElementById('betaApplyModal').remove();
+      }
     }).catch(function(e) {
       showToast((isZh ? '提交失败: ' : 'Failed: ') + (e.message || e));
       btn.disabled = false; btn.textContent = isZh ? '提交申请' : 'Submit';

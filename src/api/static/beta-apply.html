@@ -7,124 +7,347 @@
 <link rel="icon" type="image/png" href="/static/logo-64.png">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:radial-gradient(ellipse at 20% 50%,#162240 0%,#0c1222 60%);min-height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:#fff;border-radius:20px;padding:40px;width:440px;max-width:90vw;box-shadow:0 12px 48px rgba(0,0,0,0.2)}
-.logo{text-align:center;margin-bottom:28px}
-.logo img{width:72px;height:72px;border-radius:18px}
-.logo h1{color:#1d1d1f;font-size:22px;font-weight:700;margin-top:12px}
-.logo p{color:#86868b;font-size:13px;margin-top:4px}
-.field{margin-bottom:16px}
-.field label{display:block;font-size:12px;color:#5b667b;margin-bottom:6px;font-weight:500}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:radial-gradient(ellipse at 20% 50%,#162240 0%,#0c1222 60%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#fff;border-radius:20px;padding:36px;width:480px;max-width:100vw;box-shadow:0 12px 48px rgba(0,0,0,0.2);max-height:95vh;overflow-y:auto}
+.logo{text-align:center;margin-bottom:24px}
+.logo img{width:64px;height:64px;border-radius:16px}
+.logo h1{color:#1d1d1f;font-size:20px;font-weight:700;margin-top:10px}
+.logo p{color:#86868b;font-size:12px;margin-top:4px}
+.step-title{font-size:13px;font-weight:600;color:#5b667b;margin:20px 0 10px;padding-bottom:6px;border-bottom:1px solid #f0f1f5}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12px;color:#5b667b;margin-bottom:5px;font-weight:500}
 .field .req{color:#dc2828}
-.field input,.field select,.field textarea{width:100%;padding:11px 14px;border:1px solid #e3e6ee;border-radius:10px;font-size:14px;background:#fff;color:#1d1d1f;outline:none;transition:border-color .2s;font-family:inherit}
+.field input,.field select,.field textarea{width:100%;padding:10px 14px;border:1px solid #e3e6ee;border-radius:10px;font-size:14px;background:#fff;color:#1d1d1f;outline:none;transition:border-color .2s;font-family:inherit}
 .field input:focus,.field select:focus,.field textarea:focus{border-color:#3168e0}
-.field textarea{resize:vertical;min-height:80px}
-.btn{width:100%;padding:14px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px;transition:transform .15s}
+.field textarea{resize:vertical;min-height:60px}
+.field .hint{font-size:10px;color:#a0a0a0;margin-top:3px}
+.id-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.id-card{display:flex;align-items:center;gap:10px;padding:12px;border:2px solid #e3e6ee;border-radius:12px;cursor:pointer;transition:all .15s;background:#fff}
+.id-card:hover{border-color:#b8c4d8}
+.id-card.selected{border-color:#3168e0;background:rgba(49,104,224,0.04)}
+.id-card .icon{font-size:22px;flex-shrink:0}
+.id-card .info{min-width:0}
+.id-card .title{font-size:13px;font-weight:600;color:#1d1d1f}
+.id-card .desc{font-size:10px;color:#86868b;margin-top:1px}
+.branch{overflow:hidden;max-height:0;transition:max-height .3s ease,opacity .3s ease;opacity:0}
+.branch.show{max-height:600px;opacity:1}
+.radio-group{display:flex;flex-direction:column;gap:8px}
+.radio-item{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;cursor:pointer;font-size:13px;color:#1d1d1f;transition:all .15s}
+.radio-item:hover{border-color:#b8c4d8}
+.radio-item.selected{border-color:#3168e0;background:rgba(49,104,224,0.04)}
+.radio-item input{margin:0}
+.checkbox-group{display:flex;flex-wrap:wrap;gap:8px}
+.checkbox-item{display:flex;align-items:center;gap:6px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;cursor:pointer;font-size:13px;color:#1d1d1f;transition:all .15s;white-space:nowrap}
+.checkbox-item:hover{border-color:#b8c4d8}
+.checkbox-item.selected{border-color:#3168e0;background:rgba(49,104,224,0.04)}
+.checkbox-item input{margin:0}
+.btn{width:100%;padding:14px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:12px;transition:transform .15s}
 .btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,0.3)}
 .btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
 .toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:12px 24px;border-radius:10px;font-size:14px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.2);display:none}
 .toast.show{display:block}
 .success-overlay{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .3s}
 .success-overlay.show{opacity:1}
-.success-box{background:#fff;border-radius:20px;padding:40px;text-align:center;width:380px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25);transform:scale(.9);transition:transform .3s}
+.success-box{background:#fff;border-radius:20px;padding:40px;text-align:center;width:360px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25);transform:scale(.9);transition:transform .3s}
 .success-overlay.show .success-box{transform:scale(1)}
-.success-icon{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#34c759,#30d158);margin:0 auto 20px;display:flex;align-items:center;justify-content:center}
-.success-icon svg{width:32px;height:32px;fill:#fff}
+.success-box .check{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#34c759,#30b8c0);margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:32px;color:#fff}
 .success-box h2{font-size:20px;font-weight:700;color:#1d1d1f;margin-bottom:8px}
-.success-box p{font-size:14px;color:#86868b;line-height:1.6;margin-bottom:24px}
-.success-box .count{font-size:13px;color:#86868b;margin-bottom:20px}
-.success-btn{width:100%;padding:13px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:transform .15s}
-.success-btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,0.3)}
+.success-box p{font-size:14px;color:#86868b;margin-bottom:16px}
+.success-box .countdown{font-size:12px;color:#a0a0a0}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="logo">
-    <img src="/static/logo-128.png" alt="Grape">
-    <h1>Grape</h1>
-    <p>Multi-Agent DevOps · 申请内测</p>
+    <img src="/static/logo-64.png" alt="Grape">
+    <h1>申请内测</h1>
+    <p>加入 Grape 早期体验计划</p>
   </div>
+
+  <div class="step-title">基础信息</div>
   <div class="field">
     <label>平台 <span class="req">*</span></label>
-    <select id="platform">
+    <select id="fAccountType">
       <option value="gitcode">GitCode</option>
       <option value="github">GitHub</option>
     </select>
   </div>
   <div class="field">
     <label>用户名 <span class="req">*</span></label>
-    <input id="accountName" type="text" placeholder="GitCode 或 GitHub 用户名">
+    <input id="fAccountName" type="text" placeholder="GitCode 或 GitHub 用户名">
   </div>
   <div class="field">
-    <label>联系方式 <span class="req">*</span></label>
-    <input id="email" type="text" placeholder="邮箱或手机号">
+    <label>邮箱 <span class="req">*</span></label>
+    <input id="fEmail" type="email" placeholder="user@example.com">
   </div>
   <div class="field">
-    <label>申请理由</label>
-    <textarea id="reason" rows="3" placeholder="选填"></textarea>
+    <label>手机号</label>
+    <input id="fPhone" type="text" placeholder="选填">
   </div>
+
+  <div class="step-title">身份选择</div>
+  <div class="field">
+    <label>您的身份是？ <span class="req">*</span></label>
+    <div class="id-grid">
+      <div class="id-card" onclick="selectIdentity('student')">
+        <span class="icon">🎓</span>
+        <div class="info"><div class="title">学生</div><div class="desc">在校学生用户</div></div>
+      </div>
+      <div class="id-card" onclick="selectIdentity('enterprise')">
+        <span class="icon">🏢</span>
+        <div class="info"><div class="title">企业</div><div class="desc">企业团队用户</div></div>
+      </div>
+      <div class="id-card" onclick="selectIdentity('opc')">
+        <span class="icon">💼</span>
+        <div class="info"><div class="title">OPC</div><div class="desc">独立开发者/创作者</div></div>
+      </div>
+      <div class="id-card" onclick="selectIdentity('other')">
+        <span class="icon">📋</span>
+        <div class="info"><div class="title">其他</div><div class="desc">其他身份</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="branch" id="branchStudent">
+    <div class="field">
+      <label>您目前的学历是？ <span class="req">*</span></label>
+      <div class="radio-group" data-name="education">
+        <label class="radio-item"><input type="radio" name="education" value="本科生"> 本科生</label>
+        <label class="radio-item"><input type="radio" name="education" value="硕士研究生"> 硕士研究生</label>
+        <label class="radio-item"><input type="radio" name="education" value="博士研究生"> 博士研究生</label>
+        <label class="radio-item"><input type="radio" name="education" value="其他"> 其他</label>
+      </div>
+    </div>
+    <div class="field">
+      <label>您的专业方向是？ <span class="req">*</span>（多选）</label>
+      <div class="checkbox-group" data-name="major">
+        <label class="checkbox-item"><input type="checkbox" value="计算机/软件工程"> 计算机/软件工程</label>
+        <label class="checkbox-item"><input type="checkbox" value="人工智能"> 人工智能</label>
+        <label class="checkbox-item"><input type="checkbox" value="数据科学"> 数据科学</label>
+        <label class="checkbox-item"><input type="checkbox" value="电子/自动化"> 电子/自动化</label>
+        <label class="checkbox-item"><input type="checkbox" value="其他理工科"> 其他理工科</label>
+        <label class="checkbox-item"><input type="checkbox" value="经管/商科"> 经管/商科</label>
+        <label class="checkbox-item"><input type="checkbox" value="其他"> 其他</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="branch" id="branchEnterprise">
+    <div class="field">
+      <label>您所在企业的规模？ <span class="req">*</span></label>
+      <div class="radio-group" data-name="companySize">
+        <label class="radio-item"><input type="radio" name="companySize" value="1-10人"> 1-10人</label>
+        <label class="radio-item"><input type="radio" name="companySize" value="11-50人"> 11-50人</label>
+        <label class="radio-item"><input type="radio" name="companySize" value="51-200人"> 51-200人</label>
+        <label class="radio-item"><input type="radio" name="companySize" value="201-1000人"> 201-1000人</label>
+        <label class="radio-item"><input type="radio" name="companySize" value="1000人以上"> 1000人以上</label>
+      </div>
+    </div>
+    <div class="field">
+      <label>您在企业中的角色？ <span class="req">*</span></label>
+      <div class="radio-group" data-name="role">
+        <label class="radio-item"><input type="radio" name="role" value="开发人员"> 开发人员</label>
+        <label class="radio-item"><input type="radio" name="role" value="技术负责人/架构师"> 技术负责人/架构师</label>
+        <label class="radio-item"><input type="radio" name="role" value="产品经理"> 产品经理</label>
+        <label class="radio-item"><input type="radio" name="role" value="项目经理"> 项目经理</label>
+        <label class="radio-item"><input type="radio" name="role" value="管理人员"> 管理人员</label>
+        <label class="radio-item"><input type="radio" name="role" value="其他"> 其他</label>
+      </div>
+    </div>
+    <div class="field">
+      <label>您计划将产品用于什么场景？ <span class="req">*</span>（多选）</label>
+      <div class="checkbox-group" data-name="entUseCases">
+        <label class="checkbox-item"><input type="checkbox" value="软件开发"> 软件开发</label>
+        <label class="checkbox-item"><input type="checkbox" value="AI Agent / Agent 开发"> AI Agent / Agent 开发</label>
+        <label class="checkbox-item"><input type="checkbox" value="自动化办公"> 自动化办公</label>
+        <label class="checkbox-item"><input type="checkbox" value="企业内部工具"> 企业内部工具</label>
+        <label class="checkbox-item"><input type="checkbox" value="数据分析"> 数据分析</label>
+        <label class="checkbox-item"><input type="checkbox" value="运维 / DevOps"> 运维 / DevOps</label>
+        <label class="checkbox-item"><input type="checkbox" value="其他"> 其他</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="branch" id="branchOpc">
+    <div class="field">
+      <label>您目前主要从事什么？ <span class="req">*</span></label>
+      <div class="radio-group" data-name="occupation">
+        <label class="radio-item"><input type="radio" name="occupation" value="软件/IT"> 软件/IT</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="AI/Agent"> AI/Agent</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="电商"> 电商</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="内容创作"> 内容创作</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="SaaS"> SaaS</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="咨询/服务"> 咨询/服务</label>
+        <label class="radio-item"><input type="radio" name="occupation" value="其他"> 其他</label>
+      </div>
+    </div>
+    <div class="field">
+      <label>您目前主要使用产品解决什么问题？ <span class="req">*</span>（多选）</label>
+      <div class="checkbox-group" data-name="opcUseCases">
+        <label class="checkbox-item"><input type="checkbox" value="产品开发"> 产品开发</label>
+        <label class="checkbox-item"><input type="checkbox" value="编程开发"> 编程开发</label>
+        <label class="checkbox-item"><input type="checkbox" value="Agent 开发"> Agent 开发</label>
+        <label class="checkbox-item"><input type="checkbox" value="自动化任务"> 自动化任务</label>
+        <label class="checkbox-item"><input type="checkbox" value="内容生产"> 内容生产</label>
+        <label class="checkbox-item"><input type="checkbox" value="数据处理/分析"> 数据处理/分析</label>
+        <label class="checkbox-item"><input type="checkbox" value="运营"> 运营</label>
+        <label class="checkbox-item"><input type="checkbox" value="其他"> 其他</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="branch" id="branchOther">
+    <div class="field">
+      <label>请简单描述您的身份/职业 <span class="req">*</span></label>
+      <input id="fOtherDesc" type="text" placeholder="如：自由职业者、研究者等">
+    </div>
+    <div class="field">
+      <label>您目前主要使用 AI 产品解决什么问题？ <span class="req">*</span>（多选）</label>
+      <div class="checkbox-group" data-name="otherUseCases">
+        <label class="checkbox-item"><input type="checkbox" value="学习"> 学习</label>
+        <label class="checkbox-item"><input type="checkbox" value="工作"> 工作</label>
+        <label class="checkbox-item"><input type="checkbox" value="编程"> 编程</label>
+        <label class="checkbox-item"><input type="checkbox" value="创业"> 创业</label>
+        <label class="checkbox-item"><input type="checkbox" value="内容创作"> 内容创作</label>
+        <label class="checkbox-item"><input type="checkbox" value="数据分析"> 数据分析</label>
+        <label class="checkbox-item"><input type="checkbox" value="自动化"> 自动化</label>
+        <label class="checkbox-item"><input type="checkbox" value="其他"> 其他</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="step-title">申请理由</div>
+  <div class="field">
+    <textarea id="fReason" rows="3" placeholder="选填，告诉我们您为什么想加入内测"></textarea>
+  </div>
+
   <button class="btn" id="submitBtn" onclick="submitForm()">提交申请</button>
 </div>
+
 <div class="toast" id="toast"></div>
-<div class="success-overlay" id="successOverlay" style="display:none">
+
+<div class="success-overlay" id="successOverlay">
   <div class="success-box">
-    <div class="success-icon">
-      <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-    </div>
+    <div class="check">✓</div>
     <h2>申请已提交</h2>
-    <p>您的内测申请已成功提交，请等待审核。</p>
-    <div class="count" id="redirectCount">3 秒后自动跳转到 Grape 主页...</div>
-    <button class="success-btn" onclick="window.location.href='/'">立即进入 Grape</button>
+    <p id="successMsg">请等待审核，我们将在 1-3 个工作日内通过邮箱回复您</p>
+    <p class="countdown" id="countdown">3 秒后跳转到主页...</p>
   </div>
 </div>
+
 <script>
+var _identity = '';
+
+function selectIdentity(type) {
+  _identity = type;
+  document.querySelectorAll('.id-card').forEach(function(c) { c.classList.remove('selected'); });
+  event.currentTarget.classList.add('selected');
+  document.querySelectorAll('.branch').forEach(function(b) { b.classList.remove('show'); });
+  var branch = document.getElementById('branch' + type.charAt(0).toUpperCase() + type.slice(1));
+  if (branch) branch.classList.add('show');
+}
+
+function getRadioValue(name) {
+  var checked = document.querySelector('input[name="' + name + '"]:checked');
+  return checked ? checked.value : '';
+}
+
+function getCheckboxValues(container) {
+  var vals = [];
+  container.querySelectorAll('input[type=checkbox]:checked').forEach(function(cb) { vals.push(cb.value); });
+  return vals;
+}
+
 function showToast(msg) {
   var t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
   setTimeout(function() { t.classList.remove('show'); }, 3000);
 }
-function showSuccess() {
-  var overlay = document.getElementById('successOverlay');
-  overlay.style.display = 'flex';
-  setTimeout(function() { overlay.classList.add('show'); }, 10);
-  var count = 3;
-  var countEl = document.getElementById('redirectCount');
-  var timer = setInterval(function() {
-    count--;
-    if (count <= 0) {
-      clearInterval(timer);
-      window.location.href = '/';
-    } else {
-      countEl.textContent = count + ' 秒后自动跳转到 Grape 主页...';
-    }
-  }, 1000);
+
+function buildSurveyData() {
+  if (_identity === 'student') {
+    var edu = getRadioValue('education');
+    var major = getCheckboxValues(document.querySelector('[data-name="major"]'));
+    if (!edu || major.length === 0) return null;
+    return { identity: 'student', education: edu, major: major };
+  } else if (_identity === 'enterprise') {
+    var size = getRadioValue('companySize');
+    var role = getRadioValue('role');
+    var cases = getCheckboxValues(document.querySelector('[data-name="entUseCases"]'));
+    if (!size || !role || cases.length === 0) return null;
+    return { identity: 'enterprise', companySize: size, role: role, useCases: cases };
+  } else if (_identity === 'opc') {
+    var occ = getRadioValue('occupation');
+    var cases = getCheckboxValues(document.querySelector('[data-name="opcUseCases"]'));
+    if (!occ || cases.length === 0) return null;
+    return { identity: 'opc', occupation: occ, useCases: cases };
+  } else if (_identity === 'other') {
+    var desc = document.getElementById('fOtherDesc').value.trim();
+    var cases = getCheckboxValues(document.querySelector('[data-name="otherUseCases"]'));
+    if (!desc || cases.length === 0) return null;
+    return { identity: 'other', description: desc, useCases: cases };
+  }
+  return null;
 }
+
 function submitForm() {
-  var accountType = document.getElementById('platform').value;
-  var accountName = document.getElementById('accountName').value.trim();
-  var email = document.getElementById('email').value.trim();
-  var reason = document.getElementById('reason').value.trim();
+  var accountType = document.getElementById('fAccountType').value;
+  var accountName = document.getElementById('fAccountName').value.trim();
+  var email = document.getElementById('fEmail').value.trim();
+  var phone = document.getElementById('fPhone').value.trim();
+  var reason = document.getElementById('fReason').value.trim();
+
   if (!accountName) { showToast('请填写用户名'); return; }
-  if (!email) { showToast('请填写联系方式'); return; }
+  if (!email) { showToast('请填写邮箱'); return; }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast('邮箱格式不正确'); return; }
+  if (!_identity) { showToast('请选择身份'); return; }
+
+  var surveyData = buildSurveyData();
+  if (!surveyData) { showToast('请完成身份相关的必填问题'); return; }
+
   var btn = document.getElementById('submitBtn');
   btn.disabled = true; btn.textContent = '提交中...';
+
+  var payload = {
+    accountType: accountType,
+    accountName: accountName,
+    email: email,
+    identityType: _identity,
+    phone: phone,
+    reason: reason,
+    surveyData: surveyData
+  };
+
   fetch('/api/settings/beta-apply/submit', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({accountType: accountType, accountName: accountName, email: email, reason: reason})
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
   }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.detail && d.detail.message) {
+    if (d.success) {
+      document.getElementById('successOverlay').classList.add('show');
+      var count = 3;
+      var timer = setInterval(function() {
+        count--;
+        if (count <= 0) {
+          clearInterval(timer);
+          window.location.href = '/';
+        } else {
+          document.getElementById('countdown').textContent = count + ' 秒后跳转到主页...';
+        }
+      }, 1000);
+    } else if (d.error) {
+      showToast(d.error);
+      btn.disabled = false; btn.textContent = '提交申请';
+    } else if (d.detail && d.detail.message) {
       showToast(d.detail.message);
       btn.disabled = false; btn.textContent = '提交申请';
-    } else if (d.success || d.id) {
-      showSuccess();
     } else {
-      showToast(d.message || '申请已提交');
+      showToast('提交失败，请稍后重试');
       btn.disabled = false; btn.textContent = '提交申请';
     }
   }).catch(function(e) {
-    showToast('提交失败: ' + e);
+    showToast('网络错误: ' + e);
     btn.disabled = false; btn.textContent = '提交申请';
   });
 }
