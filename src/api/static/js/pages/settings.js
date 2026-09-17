@@ -322,6 +322,10 @@ function selectLang(lang) {
 
   _langSwitching = true;
 
+  // 判断是重试（当前语言但包未完整加载）还是切换
+  var isRetry = (lang === I18N.getLang() && !I18N.isLangLoaded(lang));
+  var isZh = I18N.getLang() === 'zh';
+
   // 禁用两个语言按钮 + 文案变更（UI 层反馈，非互斥手段）
   var buttons = document.querySelectorAll('[onclick^="selectLang"]');
   var origTexts = [];
@@ -330,7 +334,9 @@ function selectLang(lang) {
     btn.disabled = true;
     btn.style.opacity = '0.5';
     btn.style.cursor = 'wait';
-    btn.textContent = I18N.getLang() === 'zh' ? '切换中…' : 'Switching…';
+    btn.textContent = isRetry
+      ? (isZh ? '重新加载中…' : 'Reloading…')
+      : (isZh ? '切换中…' : 'Switching…');
   });
 
   function restoreButtons() {
@@ -354,13 +360,16 @@ function selectLang(lang) {
       } else if (result.failed === 0) {
         // 全部成功：_rerenderCurrentPage 已在 setLang 内同步完成 DOM 重建
         if (typeof app !== 'undefined' && app.showToast) {
-          app.showToast(I18N.t('common.success'));
+          // 重试成功用不同文案，避免用户困惑"我没切换为什么弹切换成功"
+          app.showToast(isRetry
+            ? (isZh ? '语言包已重新加载' : 'Language packs reloaded')
+            : I18N.t('common.success'));
         }
       } else if (result.failed < result.total) {
         // 部分成功：DOM 已重建，部分文案靠 t() fallback
         if (typeof app !== 'undefined' && app.showToast) {
-          var isZh = I18N.getLang() === 'zh';
-          app.showToast(I18N.t('common.success') + ' (' + result.failed + '/' + result.total + (isZh ? ' 个加载失败)' : ' failed)'));
+          var curZh = I18N.getLang() === 'zh';
+          app.showToast(I18N.t('common.success') + ' (' + result.failed + '/' + result.total + (curZh ? ' 个加载失败)' : ' failed)'));
         }
       } else {
         // 全部失败：setLang 未提交状态变更，_currentLang 仍为旧语言
