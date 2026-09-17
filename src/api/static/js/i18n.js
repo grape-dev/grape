@@ -131,7 +131,8 @@ var I18N = (function () {
   }
 
   // ── loadPacks(lang): async fetch 15 JSON packs for a language ──
-  // 注意：hotfix简化实现，部分包失败时标记语言未加载，下次切换重拉全部15个包
+  // 注意：hotfix简化实现，部分包失败时标记语言未加载
+  // 用户切换到其他语言再切回来时重拉全部15个包；或点击当前语言按钮触发重试（selectLang 早退判断检查 isLangLoaded）
   // 不做单包增量重试；存在极端场景：某个包永久404会反复触发全量请求，后续迭代可优化
   function loadPacks(lang) {
     if (!SUPPORTED.indexOf || SUPPORTED.indexOf(lang) < 0) lang = DEFAULT_LANG;
@@ -146,7 +147,6 @@ var I18N = (function () {
       // 每个 fetch 加 15 秒超时——弱网下不让单个请求无限挂起
       var controller = new AbortController();
       var timer = setTimeout(function() {
-        controller._timedOut = true;
         controller.abort();
       }, 15000);
 
@@ -229,7 +229,7 @@ var I18N = (function () {
   // ── setLang(lang): switch language in-place (no page reload) ──
   function setLang(lang) {
     if (SUPPORTED.indexOf(lang) < 0) lang = DEFAULT_LANG;
-    if (lang === _currentLang) return Promise.resolve({failed: 0, total: 0, skipped: true});
+    if (lang === _currentLang && _loadedLangs[lang]) return Promise.resolve({failed: 0, total: 0, skipped: true});
 
     // 记录发起切换时的 view——loadPacks 完成后若用户已导航到其他页面，跳过整页重建
     // 仅做 applyI18nToDOM 更新 data-i18n 元素，不打断用户在新页面的操作
@@ -451,6 +451,11 @@ var I18N = (function () {
     _setCookie(STORAGE_KEY, _currentLang, 31536000, '/');
   }
 
+  // ── isLangLoaded(lang): check if language packs are fully loaded ──
+  function isLangLoaded(lang) {
+    return !!_loadedLangs[lang];
+  }
+
   // ── Public API ──
   return {
     t: t,
@@ -459,6 +464,7 @@ var I18N = (function () {
     init: init,
     detectLang: detectLang,
     applyI18nToDOM: applyI18nToDOM,
+    isLangLoaded: isLangLoaded,
     SUPPORTED: SUPPORTED,
     DEFAULT_LANG: DEFAULT_LANG
   };

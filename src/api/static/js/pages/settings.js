@@ -316,7 +316,8 @@ function selectThemeMode(mode) {
 var _langSwitching = false;
 
 function selectLang(lang) {
-  if (lang === I18N.getLang()) return;  // 点击当前语言，直接退出
+  // 点击当前语言：如果包已完整加载则直接退出；如果部分包失败（_loadedLangs=false）则继续触发重试
+  if (lang === I18N.getLang() && I18N.isLangLoaded(lang)) return;
   if (_langSwitching) return;  // 全局锁，防并发切换
 
   _langSwitching = true;
