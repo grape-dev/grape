@@ -470,7 +470,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
         log.warning(f"Task notify _run_notify error: {e}")
 
 
-@router.post("/notify", operation_id="tasks_notify", summary="任务分配/通知（Agent 执行期）")
+@router.post("/notify", operation_id="tasks_notify", summary="Task assign/notify (Agent runtime)")
 async def notify_task(body: TaskNotifyBody, request: Request,
                       user: dict = Depends(get_current_user_or_api_key)):
     """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 静态模板通知 + 飞书通知（不触发 ChatAgent）
@@ -1153,7 +1153,7 @@ class TaskSelfCompleteBody(BaseModel):
     issue_summary: str = ""
 
 
-@router.post("/complete", operation_id="tasks_complete", summary="任务自报完成（grape CLI tasks complete）")
+@router.post("/complete", operation_id="tasks_complete", summary="Self-report task complete")
 def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_current_user_or_api_key)):
     """Agent 动作收尾后显式自报完成（issue-45-task-complete-endpoint-design.md）。
 
@@ -1210,7 +1210,7 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
     return {"ok": True, "task_id": task_id, "status": "completed"}
 
 
-@router.get("/current", operation_id="tasks_current", summary="获取当前任务详情（Agent 执行期自省）")
+@router.get("/current", operation_id="tasks_current", summary="Get current task detail (Agent runtime)")
 def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
     """Agent 执行期自省接口：通过本次会话 token（tk_）获取当前执行实例详情。
 

@@ -10,6 +10,8 @@
 > 特例：`api-keys` 子资源命名避免 `api_` 子串（`settings_keys`/`settings_key_create`/`settings_key_delete`），
 > 防 CLI 朴素子串过滤误杀。回归：test_openapi/test_api_docs_sync/help 106 passed；`check_api_docs --strict` 零缺口；
 > devstage_filter 6 个失败为预存基线，与本次无关。
+> **补充（2026-09-16）**：全量 219 个 `summary` 英文化（CLI `--help` 首行=summary，`openapi.en.json` 只覆盖部分
+> opId，回落是中文；`description` 因非 ASCII 被 CLI 丢弃而 summary 不丢，故 summary 必须英文）。契约 0 个非 ASCII summary。
 
 ---
 

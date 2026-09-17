@@ -147,7 +147,7 @@ def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")
     _mt = "image/jpeg" if fpath.lower().endswith((".jpg", ".jpeg")) else "image/png"
     return FileResponse(fpath, media_type=_mt, headers={"Cache-Control": "public, max-age=86400"})
 
-@router.get("/conversations", operation_id="chat_conversations", summary="会话列表")
+@router.get("/conversations", operation_id="chat_conversations", summary="List conversations")
 def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(require_no_session_token)):
     convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
@@ -157,13 +157,13 @@ class NewConversationBody(BaseModel):
     repo_key: str = ""
 
 
-@router.post("/conversations", operation_id="chat_conversations_create", summary="新建会话")
+@router.post("/conversations", operation_id="chat_conversations_create", summary="Create conversation")
 def new_conversation(body: NewConversationBody, user: dict = Depends(require_no_session_token)):
     cid = create_conversation(user["id"], repo_key=body.repo_key)
     return {"conversation_id": cid}
 
 
-@router.delete("/conversations/{conv_id}", operation_id="chat_conversations_delete", summary="删除会话")
+@router.delete("/conversations/{conv_id}", operation_id="chat_conversations_delete", summary="Delete conversation")
 def remove_conversation(conv_id: str, user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
@@ -178,7 +178,7 @@ class EnsureIssueConvBody(BaseModel):
     issue_number: int
 
 
-@router.post("/conversations/ensure-issue", operation_id="chat_conversations_ensure_issue", summary="确保 Issue 会话")
+@router.post("/conversations/ensure-issue", operation_id="chat_conversations_ensure_issue", summary="Ensure issue conversation")
 def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(require_no_session_token)):
     """基于 repo_key + issue_number 查找或新建任务会话（Task Center 跳转用）。
 
@@ -227,7 +227,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(re
 
 # ====== Messages ======
 
-@router.get("/messages/{conv_id}", operation_id="chat_messages", summary="会话消息列表")
+@router.get("/messages/{conv_id}", operation_id="chat_messages", summary="List conversation messages")
 def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
@@ -543,7 +543,7 @@ def _understand_video(video_data: str) -> str:
         return f"用户上传了视频，但分析出错: {e}"
 
 
-@router.post("/send", operation_id="chat_send", summary="发送消息（普通）")
+@router.post("/send", operation_id="chat_send", summary="Send message")
 async def send_message(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
@@ -707,7 +707,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     return {"reply": reply, "conversation_id": conv_id}
 
 
-@router.post("/send/stream", operation_id="chat_send_stream", summary="发送消息（SSE 流式）")
+@router.post("/send/stream", operation_id="chat_send_stream", summary="Send message (SSE stream)")
 async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
@@ -1115,7 +1115,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
 
 # ====== Feedback ======
 
-@router.post("/feedback", operation_id="chat_feedback", summary="提交反馈")
+@router.post("/feedback", operation_id="chat_feedback", summary="Submit feedback")
 def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
 
@@ -1158,7 +1158,7 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
 
 # ====== Config ======
 
-@router.get("/config", operation_id="chat_config_get", summary="获取 Chat 配置")
+@router.get("/config", operation_id="chat_config_get", summary="Get chat config")
 def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = ""):
     cfg = _get_chat_config(user["id"])
     # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
@@ -1254,7 +1254,7 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     }
 
 
-@router.put("/config", operation_id="chat_config_update", summary="更新 Chat 配置")
+@router.put("/config", operation_id="chat_config_update", summary="Update chat config")
 async def update_chat_config(body: dict, user: dict = Depends(require_no_session_token), repo: str = ""):
     im = body.get("im", {})
     feishu = im.get("feishu", {})
@@ -1400,7 +1400,7 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
 
 # ===== Chat Agent v2: submit/stream 分离（学习 Admin AI AiTaskManager）=====
 
-@router.post("/submit", operation_id="chat_submit", summary="提交（任务场景）")
+@router.post("/submit", operation_id="chat_submit", summary="Submit (task scenario)")
 async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     """提交 chat 查询 → 立即返回 {task_id, conversation_id, status}。
 
@@ -1652,7 +1652,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     return {"task_id": chat_task_id, "conversation_id": conv_id, "status": "running"}
 
 
-@router.get("/task/{task_id}/stream", operation_id="chat_task_stream", summary="异步任务流式结果")
+@router.get("/task/{task_id}/stream", operation_id="chat_task_stream", summary="Async task stream")
 async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session_token)):
     """SSE 订阅任务输出 — 先重放缓冲，再实时追加（学习 Admin AI subscribe）。
 
@@ -1756,7 +1756,7 @@ def _chat_task_cleanup():
             _chat_tasks.pop(tid, None)
 
 
-@router.post("/send/async", operation_id="chat_send_async", summary="异步发送消息")
+@router.post("/send/async", operation_id="chat_send_async", summary="Send message (async)")
 async def send_message_async(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     """异步发送消息：所有同步 DB/引擎操作在 run_in_executor 中执行，不阻塞 event loop。
 
@@ -2028,7 +2028,7 @@ def _execute_chat_task(task_id: str):
         log.warning(f"Chat task {task_id} failed: {e}")
 
 
-@router.get("/task/{task_id}/status", operation_id="chat_task_status", summary="异步任务状态")
+@router.get("/task/{task_id}/status", operation_id="chat_task_status", summary="Async task status")
 def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """查询 chat 任务状态（跨机器可查，对齐 Admin AI getTaskFinalStatus）。
 

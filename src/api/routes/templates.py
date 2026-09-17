@@ -57,14 +57,14 @@ def _load_global_bot_config(provider: str = "gitcode") -> tuple[str, str]:
     return bot_token, bot_username
 
 
-@router.get("", operation_id="project_templates_list", summary="模板分类列表")
+@router.get("", operation_id="project_templates_list", summary="List template categories")
 def list_templates(user: dict = Depends(require_no_session_token)):
     """返回配置化的模板分类与模板列表"""
     data = _load_templates()
     return {"categories": data.get("categories", [])}
 
 
-@router.get("/{template_id}/readme", operation_id="project_template_readme", summary="模板 README")
+@router.get("/{template_id}/readme", operation_id="project_template_readme", summary="Get template README")
 def get_template_readme(template_id: str, user: dict = Depends(require_no_session_token)):
     """获取模板 README 内容（本地优先，git 来源从 GitCode/GitHub API 拉取）"""
     ctx = _find_template(template_id)
@@ -123,7 +123,7 @@ def get_template_readme(template_id: str, user: dict = Depends(require_no_sessio
     return {"content": "", "source": "git"}
 
 
-@router.get("/{template_id}/preview", operation_id="project_template_preview", summary="模板预览 HTML")
+@router.get("/{template_id}/preview", operation_id="project_template_preview", summary="Get template preview HTML")
 def get_template_preview(template_id: str, user: dict = Depends(require_no_session_token)):
     """获取模板预览图 HTML（本地模板读取 examples/{id}/preview.html）"""
     ctx = _find_template(template_id)
@@ -148,7 +148,7 @@ class CreateTemplateRequest(BaseModel):
     repo_name: str = ""
 
 
-@router.post("/create", operation_id="project_template_create", summary="一键创建项目")
+@router.post("/create", operation_id="project_template_create", summary="Create project from template")
 async def create_from_template(body: CreateTemplateRequest,
                                user: dict = Depends(require_no_session_token)):
     """一键创建：建仓库 → 写模板代码 → 自动托管 → 应用开发场景"""

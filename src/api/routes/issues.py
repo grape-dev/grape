@@ -220,7 +220,7 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
 # 迁移自 /api/tasks/{task_id}/...：`{issue_id}` 即原 `{task_id}`（= issue.id），定位/逻辑零改动。
 
 
-@router.post("/{issue_id}/start", operation_id="issues_start", summary="打开 Issue 会话")
+@router.post("/{issue_id}/start", operation_id="issues_start", summary="Open issue session")
 async def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """打开 Issue 会话（"去对话"）——仅校验归属并返回当前状态，不翻转状态。
 
@@ -239,7 +239,7 @@ async def start_issue(issue_id: int, user: dict = Depends(require_no_session_tok
         return {"status": row[1]}
 
 
-@router.get("/{issue_id}/status", operation_id="issues_status_get", summary="查询 Issue 状态（轮询 wait 用）")
+@router.get("/{issue_id}/status", operation_id="issues_status_get", summary="Query issue status (polling)")
 def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """返回 Issue 当前状态（含 repo/issue 上下文），供 CLI `grape issues wait` 轮询至终态。"""
     from src.session_manager import db, db_lock
@@ -263,7 +263,7 @@ class _IssueStatusBody(BaseModel):
     status: str = ""
 
 
-@router.put("/{issue_id}/status", operation_id="issues_status", summary="更新 Issue 状态")
+@router.put("/{issue_id}/status", operation_id="issues_status", summary="Update issue status")
 def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depends(require_no_session_token)):
     """Issue 状态迁移（active/processing/awaiting_input/pending_review/completed/cancelled 流转规则）。
 
@@ -302,7 +302,7 @@ class _IssueConfirmBody(BaseModel):
     confirmation: str = "user_confirmed"
 
 
-@router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="确认 Issue 完成")
+@router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="Confirm issue done")
 async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
     """开发者确认需求完成：status→completed、stage→done（任意阶段可确认，终态幂等）。"""
     from src.api.session_store import set_issue_stage
@@ -329,7 +329,7 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
     return {"ok": True, "issue_id": issue_id, "status": "completed", "stage": "done"}
 
 
-@router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="取消 Issue（停流水线）")
+@router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
     from src.session_manager import db, db_lock
@@ -382,7 +382,7 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
     return {"ok": True, "issue_id": issue_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
 
 
-@router.post("/{issue_id}/resume", operation_id="issues_resume", summary="恢复已取消的 Issue")
+@router.post("/{issue_id}/resume", operation_id="issues_resume", summary="Resume cancelled issue")
 async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """恢复已取消的需求：回到取消前 stage 继续流转。"""
     from src.api.session_store import get_issue_stage
@@ -451,7 +451,7 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
 
 
-@router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline 路线图（按 issue.id）")
+@router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)")
 async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
     """获取需求关联的流水线信息和事件历史（详情页展示）。"""
     from src.api.event_store import get_events
@@ -487,7 +487,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     }
 
 
-@router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue 澄清历史")
+@router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue clarification history")
 async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
     """拉取 agent 在该 Issue 上的澄清消息。"""
     from src.api.routes.tasks import _get_task_issue_info, _find_agent_task_ids
@@ -532,7 +532,7 @@ class _IssueClarifyBody(BaseModel):
     message: str = ""
 
 
-@router.post("/{issue_id}/clarify", operation_id="issues_clarify", summary="回复 Issue 澄清")
+@router.post("/{issue_id}/clarify", operation_id="issues_clarify", summary="Reply issue clarification")
 async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Depends(require_no_session_token)):
     """开发者在需求中心回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。"""
     from src.api.routes.tasks import _get_task_issue_info, _gitcode_api_with_refresh, _is_gitcode_401
@@ -617,7 +617,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     return {"ok": True, "message": "澄清已发送到 Issue 并同步到任务会话"}
 
 
-@router.post("/{issue_id}/attachments", operation_id="issues_upload_attachment", summary="上传 Issue 附件")
+@router.post("/{issue_id}/attachments", operation_id="issues_upload_attachment", summary="Upload issue attachment")
 async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
                                   user: dict = Depends(require_no_session_token)):
     """上传附件到需求关联的附件目录。"""
@@ -647,7 +647,7 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
     return {"url": url, "filename": original_name, "size": len(content)}
 
 
-@router.get("/{issue_id}/attachments", operation_id="issues_list_attachments", summary="列出 Issue 附件")
+@router.get("/{issue_id}/attachments", operation_id="issues_list_attachments", summary="List issue attachments")
 def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """列出需求关联的附件文件列表。"""
     from src.api.routes.tasks import _attach_list
@@ -667,7 +667,7 @@ def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_
     return {"attachments": attachments}
 
 
-@router.delete("/{issue_id}/attachments/{filename}", operation_id="issues_delete_attachment", summary="删除 Issue 附件")
+@router.delete("/{issue_id}/attachments/{filename}", operation_id="issues_delete_attachment", summary="Delete issue attachment")
 def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(require_no_session_token)):
     """删除指定附件文件。filename 为 UUID 文件名。"""
     from src.api.routes.tasks import _attach_delete
@@ -690,7 +690,7 @@ def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(r
         return {"ok": True, "message": "已删除"}
     raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
 
-@router.get("/mine", operation_id="issues_mine", summary="我的 Issue 列表（需求中心·个人维度）")
+@router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)")
 async def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|)?$"),
                     repo_key: str = Query("", description="按仓库过滤"),
                     sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
@@ -725,7 +725,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     return {"issues": issues_out, "sort_order": sort_order, "mode": mode}
 
 
-@router.get("/{owner}/{repo}", operation_id="issues_list", summary="仓库 Issue 列表（含阶段/状态/富化聚合）")
+@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)")
 def list_repo_issues(owner: str, repo: str,
                      status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
                      sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
@@ -772,7 +772,7 @@ def list_repo_issues(owner: str, repo: str,
     return {"issues": issues, "total": len(issues)}
 
 
-@router.post("/{owner}/{repo}", operation_id="issues_create", summary="创建 Issue（对外唯一创建入口）")
+@router.post("/{owner}/{repo}", operation_id="issues_create", summary="Create issue (unified entry)")
 async def create_issue(owner: str, repo: str, body: dict = None,
                        user: dict = Depends(require_no_session_token)):
     """创建 Issue（对外唯一创建入口）：建 GitCode Issue + 建档 + 触发 pipeline。
@@ -793,7 +793,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     return await create_task_via_issue(b, user)
 
 
-@router.get("/{owner}/{repo}/{number}", operation_id="issues_detail", summary="单个 Issue 详情（阶段+事件+pipeline）")
+@router.get("/{owner}/{repo}/{number}", operation_id="issues_detail", summary="Issue detail (stage+events+pipeline)")
 def get_issue_detail(owner: str, repo: str, number: int,
                      user: dict = Depends(get_current_user_or_api_key)):
     repo_key = _repo_key_of(owner, repo)
@@ -810,7 +810,7 @@ def get_issue_detail(owner: str, repo: str, number: int,
     return {**base, "events": events, "pipeline": pipeline}
 
 
-@router.get("/{owner}/{repo}/{number}/events", operation_id="issues_events", summary="该 Issue 的事件列表")
+@router.get("/{owner}/{repo}/{number}/events", operation_id="issues_events", summary="Issue events list")
 def get_issue_events(owner: str, repo: str, number: int,
                      user: dict = Depends(get_current_user_or_api_key)):
     repo_key = _repo_key_of(owner, repo)
@@ -826,7 +826,7 @@ def get_issue_events(owner: str, repo: str, number: int,
     return {"events": events, "total": len(events)}
 
 
-@router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline 路线图")
+@router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap")
 def get_issue_pipeline(owner: str, repo: str, number: int,
                        user: dict = Depends(get_current_user_or_api_key)):
     repo_key = _repo_key_of(owner, repo)

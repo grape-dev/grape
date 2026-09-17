@@ -97,7 +97,7 @@ def list_agent_types():
     } for r in rows]}
 
 
-@router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Agent 会话配置查看")
+@router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Get agent config")
 def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                      keyword: str = Query("", description="事件关键词搜索（seq/issue_id/event_type/title/summary/actor）"),
                      page: int = Query(1, ge=1, description="页码，从 1 开始"),
@@ -322,7 +322,7 @@ class AgentConfig(BaseModel):
     im_app_secret: str = ""
 
 
-@router.post("/{name}/{owner}/{repo}/clean", operation_id="agents_clean", summary="清理 Agent 会话")
+@router.post("/{name}/{owner}/{repo}/clean", operation_id="agents_clean", summary="Clean agent session")
 def clean_agent_session(name: str, owner: str, repo: str,
                               user: dict = Depends(require_no_session_token)):
     """清理 Agent 会话：将 devops_agent_session.runtime_session_id 置空。
@@ -348,7 +348,7 @@ def clean_agent_session(name: str, owner: str, repo: str,
     return {"message": "Agent 会话已清理（runtime_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
 
 
-@router.put("/{name}/{owner}/{repo}", operation_id="agents_update", summary="更新 Agent 配置")
+@router.put("/{name}/{owner}/{repo}", operation_id="agents_update", summary="Update agent config")
 async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfig,
                               user: dict = Depends(require_no_session_token)):
     if name not in AGENT_TYPES:
