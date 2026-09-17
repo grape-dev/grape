@@ -619,15 +619,15 @@ function loadAgentTypes() {
             </div>
           </div>
           <div style="margin-top:10px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'专业方向 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Major <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
-            <div style="display:flex;flex-wrap:wrap;gap:6px">
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baMajor" value="${z?'计算机/软件工程':'CS/SE'}"> ${z?'计算机/软件工程':'CS/SE'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baMajor" value="${z?'人工智能':'AI'}"> ${z?'人工智能':'AI'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baMajor" value="${z?'数据科学':'Data Science'}"> ${z?'数据科学':'Data Science'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baMajor" value="${z?'电子/自动化':'EE/Automation'}"> ${z?'电子/自动化':'EE'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baMajor" value="${z?'其他理工科':'Other STEM'}"> ${z?'其他理工科':'Other STEM'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baMajor" value="${z?'经管/商科':'Business'}"> ${z?'经管/商科':'Business'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baMajor" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'专业方向 <span style="color:var(--r,#dc2828)">*</span>':'Major <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baMajor" value="${z?'计算机/软件工程':'CS/SE'}" onchange="app.baToggleOther(this)"> ${z?'计算机/软件工程':'CS/SE'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'人工智能':'AI'}" onchange="app.baToggleOther(this)"> ${z?'人工智能':'AI'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'数据科学':'Data Science'}" onchange="app.baToggleOther(this)"> ${z?'数据科学':'Data Science'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'电子/自动化':'EE/Automation'}" onchange="app.baToggleOther(this)"> ${z?'电子/自动化':'EE'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'其他理工科':'Other STEM'}" onchange="app.baToggleOther(this)"> ${z?'其他理工科':'Other STEM'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'经管/商科':'Business'}" onchange="app.baToggleOther(this)"> ${z?'经管/商科':'Business'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
         </div>
@@ -781,9 +781,10 @@ function loadAgentTypes() {
     if (!_baIdentity) { showToast(isZh ? '请选择身份' : 'Please select identity'); return; }
     var survey = null;
     if (_baIdentity === 'student') {
-      var edu = _baRadio('baEdu'), major = _baChecks('baMajor');
+      var edu = _baRadio('baEdu'), major = _baRadio('baMajor');
       if (edu === '其他' || edu === 'Other') { var _t = document.querySelector('input[name="baEdu"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); edu = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!edu) { showToast(isZh ? '请输入学历' : 'Enter education'); return; } }
-      if (!edu || major.length === 0) { showToast(isZh ? '请完成学历和专业方向' : 'Complete education & major'); return; }
+      if (!edu || !major) { showToast(isZh ? '请完成学历和专业方向' : 'Complete education & major'); return; }
+      if (major === '其他' || major === 'Other') { var _t2 = document.querySelector('input[name="baMajor"]:checked'); if (_t2) { var _tt2 = _t2.parentElement.querySelector('.ba-other-text'); major = _tt2 && _tt2.value.trim() ? _tt2.value.trim() : ''; } if (!major) { showToast(isZh ? '请输入专业方向' : 'Enter major'); return; } }
       survey = { identity: 'student', education: edu, major: major };
     } else if (_baIdentity === 'enterprise') {
       var size = _baRadio('baSize'), role = _baRadio('baRole'), cases = _baChecks('baEntCase');

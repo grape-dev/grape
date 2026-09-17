@@ -119,15 +119,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
       </div>
     </div>
     <div class="field">
-      <label>您的专业方向是？ <span class="req">*</span>（多选）</label>
-      <div class="checkbox-group" data-name="major">
-        <label class="checkbox-item"><input type="checkbox" value="计算机/软件工程"> 计算机/软件工程</label>
-        <label class="checkbox-item"><input type="checkbox" value="人工智能"> 人工智能</label>
-        <label class="checkbox-item"><input type="checkbox" value="数据科学"> 数据科学</label>
-        <label class="checkbox-item"><input type="checkbox" value="电子/自动化"> 电子/自动化</label>
-        <label class="checkbox-item"><input type="checkbox" value="其他理工科"> 其他理工科</label>
-        <label class="checkbox-item"><input type="checkbox" value="经管/商科"> 经管/商科</label>
-        <label class="checkbox-item"><input type="checkbox" value="其他" onchange="toggleOtherInput(this)"> 其他 <input type="text" class="other-text" placeholder="请输入" style="display:none;width:180px;padding:6px 10px;border:1px solid #e3e6ee;border-radius:6px;font-size:13px;outline:none;margin-left:4px"></label>
+      <label>您的专业方向是？ <span class="req">*</span></label>
+      <div class="radio-group" data-name="major">
+        <label class="radio-item"><input type="radio" name="major" value="计算机/软件工程" onchange="toggleOtherInput(this)"> 计算机/软件工程</label>
+        <label class="radio-item"><input type="radio" name="major" value="人工智能" onchange="toggleOtherInput(this)"> 人工智能</label>
+        <label class="radio-item"><input type="radio" name="major" value="数据科学" onchange="toggleOtherInput(this)"> 数据科学</label>
+        <label class="radio-item"><input type="radio" name="major" value="电子/自动化" onchange="toggleOtherInput(this)"> 电子/自动化</label>
+        <label class="radio-item"><input type="radio" name="major" value="其他理工科" onchange="toggleOtherInput(this)"> 其他理工科</label>
+        <label class="radio-item"><input type="radio" name="major" value="经管/商科" onchange="toggleOtherInput(this)"> 经管/商科</label>
+        <label class="radio-item"><input type="radio" name="major" value="其他" onchange="toggleOtherInput(this)"> 其他 <input type="text" class="other-text" placeholder="请输入" style="display:none;width:180px;padding:6px 10px;border:1px solid #e3e6ee;border-radius:6px;font-size:13px;outline:none;margin-left:4px"></label>
       </div>
     </div>
   </div>
@@ -298,8 +298,9 @@ function buildSurveyData() {
   if (_identity === 'student') {
     var edu = getRadioValue('education');
     if (edu === '其他') { var oi = document.querySelector('input[name="education"]:checked'); if (oi) { var t = oi.parentElement.querySelector('.other-text'); edu = t && t.value.trim() ? t.value.trim() : ''; } if (!edu) return null; }
-    var major = getCheckboxValues(document.querySelector('[data-name="major"]'));
-    if (!edu || major.length === 0) return null;
+    var major = getRadioValue('major');
+    if (!edu || !major) return null;
+    if (major === '其他') { var oi = document.querySelector('input[name="major"]:checked'); if (oi) { var t = oi.parentElement.querySelector('.other-text'); major = t && t.value.trim() ? t.value.trim() : ''; } if (!major) return null; }
     return { identity: 'student', education: edu, major: major };
   } else if (_identity === 'enterprise') {
     
