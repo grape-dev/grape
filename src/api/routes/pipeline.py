@@ -144,7 +144,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
 
     _st = get_issue_stage(repo_key, issue_id) or {}
     _stage = _st.get("stage", "")
-    _scene_id = (_st.get("scene_id") if _st else "") or get_issue_scene(repo_key, issue_id) or ""
+    # get_issue_scene 返回 (scene_id, scene_user_id) tuple，取 [0]；与第 212 行保持一致
+    _scene_id = (_st.get("scene_id") if _st else "") or (get_issue_scene(repo_key, issue_id) or ("", 0))[0]
     _pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key) if _scene_id else None
     _scene_nodes = (_pipe_cfg or {}).get("nodes", []) or [{"id": a, "tag": a} for a in AGENT_ORDER]
 
@@ -208,8 +209,9 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
 
     # 生命周期阶段（issue_state.stage）：vod/issue/coding/qa/sre/done；无记录默认 vod
     stage = (_st.get("stage") if _st else "") or "vod"
-    # Issue 级开发场景（VOD 判定，空=仓库默认）
-    scene_id = (_st.get("scene_id") if _st else "") or ""
+    # Issue 级开发场景（VOD 判定，空=仓库默认）：回退到 get_issue_scene 仓库默认场景
+    # get_issue_scene 返回 (scene_id, scene_user_id) tuple，取 [0]
+    scene_id = (_st.get("scene_id") if _st else "") or (get_issue_scene(repo_key, issue_id) or ("", 0))[0]
     # 解析场景名称（内置 + 成员自定义）
     scene_name = ""
     issue_pipeline_config = None
@@ -363,6 +365,7 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
         "history": history,
         "active_count": 1 if active and active["result"] in ("Processing", "Pending") else 0,
         "today_count": len(pipelines),
+        "failed_count": len([p for p in pipelines if p["result"] == "Failed"]),
         "scene_id": scene_id,
         "pipeline_config": pipeline_config,
         "tasks_without_events": tasks_without_events,

@@ -401,7 +401,7 @@ function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
   } else {
     const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
     html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap" style="max-height:320px"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
-    scenePipes.slice(0, 20).forEach(p => {
+    scenePipes.forEach(p => {
       const _issueNum = String(p.issue_id || '').replace(/^#/, '');
       const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
       const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
