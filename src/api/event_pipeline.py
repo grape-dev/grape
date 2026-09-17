@@ -684,7 +684,7 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         _sub_iss_num = str(issue_id).lstrip("#")
         if _sub_iss_num and _sub_iss_num.isdigit():
             try:
-                from src.api.routes.tasks import _get_issue_title
+                from src.api.issues_center import _get_issue_title
                 _sub_title = _get_issue_title(repo_key, int(_sub_iss_num)) or ""
             except Exception:
                 pass
@@ -811,21 +811,21 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             if _issue_num and _issue_num.isdigit():
                 _issue_num_int = int(_issue_num)
                 if any(kw in _note_lower for kw in ["/done", "完成任务", "任务完成", "确认完成"]):
-                    from src.api.routes.tasks import confirm_issue_done
+                    from src.api.issues_center import confirm_issue_done
                     confirm_issue_done(repo_key, _issue_num_int, confirmed_by="issue_comment")
                     log.info(f"Issue #{_issue_num} confirmed done via issue comment")
                     from src.api.event_store import append_skipped_event
                     append_skipped_event(repo_key, event_type, "user_confirm_done")
                     return result
                 elif any(kw in _note_lower for kw in ["/cancel", "取消任务"]):
-                    from src.api.routes.tasks import cancel_issue_task
+                    from src.api.issues_center import cancel_issue_task
                     cancel_issue_task(repo_key, _issue_num_int)
                     log.info(f"Issue #{_issue_num} cancelled via issue comment")
                     from src.api.event_store import append_skipped_event
                     append_skipped_event(repo_key, event_type, "user_cancel")
                     return result
                 elif any(kw in _note_lower for kw in ["/resume", "恢复任务"]):
-                    from src.api.routes.tasks import resume_issue_task
+                    from src.api.issues_center import resume_issue_task
                     resume_issue_task(repo_key, _issue_num_int)
                     log.info(f"Issue #{_issue_num} resumed via issue comment")
                     from src.api.event_store import append_skipped_event
@@ -865,7 +865,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             # 执行副作用后短路：close → close_issue_tasks
             if _d.get("side_effect") == "close_issue_tasks":
                 try:
-                    from src.api.routes.tasks import close_issue_tasks
+                    from src.api.issues_center import close_issue_tasks
                     _ce_id = (evt.get("payload", {}) or {}).get("object_attributes", {}) or {}
                     _ce_num = str(_ce_id.get("iid") or _ce_id.get("number") or "").lstrip("#")
                     if _ce_num.isdigit() and int(_ce_num) > 0:
@@ -979,7 +979,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # Issue 事件幂等建档；closed 动作自动完成对应任务（P5 webhook 兜底）。
     # 旁路：失败仅告警，不阻塞事件处理。
     try:
-        from src.api.routes.tasks import ensure_issue_task, close_issue_tasks
+        from src.api.issues_center import ensure_issue_task, close_issue_tasks
         _iid3 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "") or ""
         if _iid3:
             _num3 = str(_iid3).lstrip("#")
@@ -2804,7 +2804,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     _title = ""
     _issue_num = str(issue_id).lstrip("#")
     try:
-        from src.api.routes.tasks import _get_issue_title
+        from src.api.issues_center import _get_issue_title
         _title = _get_issue_title(repo_key, int(_issue_num)) or ""
     except Exception:
         pass

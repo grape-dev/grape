@@ -271,7 +271,7 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
     设置（高优先级覆盖）；若放行 tk_ 会话 token，Agent 执行期可随意改状态，与 pipeline 驱动的 stage
     脱钩→冲突/不一致，干扰任务执行。故仅用户（JWT / grape_）可改；读（GET /status，轮询 wait 用）保持 dual。
     """
-    from src.api.routes.tasks import _TASK_STATUS_FLOWS
+    from src.api.issues_center import _TASK_STATUS_FLOWS
     from src.session_manager import db, db_lock
     ns = (body.status or "").strip()
     if ns not in _TASK_STATUS_FLOWS:
@@ -490,7 +490,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
 @router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue clarification history", description="Fetches the agent's clarification messages for the Issue.")
 async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
     """拉取 agent 在该 Issue 上的澄清消息。"""
-    from src.api.routes.tasks import _get_task_issue_info, _find_agent_task_ids
+    from src.api.issues_center import _get_task_issue_info, _find_agent_task_ids
     from src.session_manager import db, db_lock
     info = _get_task_issue_info(issue_id)
     if not info:
@@ -535,7 +535,7 @@ class _IssueClarifyBody(BaseModel):
 @router.post("/{issue_id}/clarify", operation_id="issues_clarify", summary="Reply issue clarification", description="Developer replies to an agent clarification: posts a GitCode issue comment and writes to the task conversation.")
 async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Depends(require_no_session_token)):
     """开发者在需求中心回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。"""
-    from src.api.routes.tasks import _get_task_issue_info, _gitcode_api_with_refresh, _is_gitcode_401
+    from src.api.issues_center import _get_task_issue_info, _gitcode_api_with_refresh, _is_gitcode_401
     from src.session_manager import db, db_lock
     msg = (body.message or "").strip()
     if not msg:
@@ -621,7 +621,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
 async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
                                   user: dict = Depends(require_no_session_token)):
     """上传附件到需求关联的附件目录。"""
-    from src.api.routes.tasks import (_attach_save, _ATTACH_ALL_EXTS, _ATTACH_MAX_SIZE)
+    from src.api.issues_center import (_attach_save, _ATTACH_ALL_EXTS, _ATTACH_MAX_SIZE)
     from src.repo_key import split_owner_repo
     from src.session_manager import db, db_lock
     with db_lock:
@@ -650,7 +650,7 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
 @router.get("/{issue_id}/attachments", operation_id="issues_list_attachments", summary="List issue attachments", description="Lists attachments of an issue.")
 def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """列出需求关联的附件文件列表。"""
-    from src.api.routes.tasks import _attach_list
+    from src.api.issues_center import _attach_list
     from src.repo_key import split_owner_repo
     from src.session_manager import db, db_lock
     with db_lock:
@@ -670,7 +670,7 @@ def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_
 @router.delete("/{issue_id}/attachments/{filename}", operation_id="issues_delete_attachment", summary="Delete issue attachment", description="Deletes an attachment file by UUID filename.")
 def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(require_no_session_token)):
     """删除指定附件文件。filename 为 UUID 文件名。"""
-    from src.api.routes.tasks import _attach_delete
+    from src.api.issues_center import _attach_delete
     from src.repo_key import split_owner_repo
     from src.session_manager import db, db_lock
     import re
@@ -703,7 +703,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     返回当前用户的需求（Issue 卡片行，user_id 过滤）+ 富化
     （scene/stage/is_running/agent_statuses）。
     """
-    from src.api.routes.tasks import _query_tasks, _build_assignee_filter
+    from src.api.issues_center import _query_tasks, _build_assignee_filter
     from src.repo_key import to_repo_key
     if repo_key:
         repo_key = to_repo_key(repo_key)
@@ -738,7 +738,7 @@ def list_repo_issues(owner: str, repo: str,
     - 排序按 created_at + 状态优先级（mode 可切换纯时间序）
     - 行为对齐原 issues_list（仓库 public 读聚合，无显式仓库权限门禁）
     """
-    from src.api.routes.tasks import _query_tasks, _build_assignee_filter
+    from src.api.issues_center import _query_tasks, _build_assignee_filter
     repo_key = _repo_key_of(owner, repo)
     clauses = ["repo_key=?"]
     params: list = [repo_key]
@@ -780,7 +780,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     body: {repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode?}
     repo_key 可选（缺省按 {owner}/{repo} 拼）。返回 {ok, issue_number, task_id, created, ...}
     """
-    from src.api.routes.tasks import TaskCreateBody, create_task_via_issue
+    from src.api.issues_center import TaskCreateBody, create_task_via_issue
     _body = body or {}
     b = TaskCreateBody(
         repo_key=_body.get("repo_key") or f"{owner}/{repo}",

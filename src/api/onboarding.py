@@ -262,7 +262,7 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     - 完成层自愈：仅创建 `onboarded_task:{repo}:{type}` 未完成的任务；全部成功后置位总闸
     - 全部任务同步创建（同请求内完成），每个任务仅 1 条任务上下文消息
     """
-    from src.api.routes.tasks import create_standard_task
+    from src.api.issues_center import create_standard_task
     from src.repo_key import parse_repo_key
     _provider, _, _ = parse_repo_key(repo_key)
     task_defs = _load_onboarding_template(repo_key, template_id=template_id)
@@ -329,7 +329,7 @@ def retry_onboarding_task(repo_key: str, owner: str, task_type: str) -> dict:
         return {"ok": True, "reason": "task already complete, no retry needed"}
     from src.repo_key import parse_repo_key
     _provider, _, _ = parse_repo_key(repo_key)
-    from src.api.routes.tasks import create_standard_task
+    from src.api.issues_center import create_standard_task
     if _provider == "github":
         from src.user.db import get_github_token
         bot_token = get_github_token(repo_key=repo_key) or ""
