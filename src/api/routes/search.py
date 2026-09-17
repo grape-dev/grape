@@ -6,7 +6,7 @@ from src.user import db as user_db
 router = APIRouter(prefix="/api/search", tags=["search"])
 
 
-@router.get("")
+@router.get("", operation_id="search_global", summary="Global search", description="Global search across events/repos/agents within the current user's accessible repos.")
 def global_search(q: str = Query("", min_length=1),
                         type: str = Query("all", pattern="^(all|event|repo|agent)$"),
                         user: dict = Depends(require_no_session_token)):

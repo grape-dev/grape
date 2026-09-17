@@ -10,7 +10,7 @@ from src.api.time_utils import normalize_event_time
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
-@router.get("/detail/{seq}", operation_id="events_detail", summary="事件详情（结果/日志）")
+@router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)", description="Event detail with payload/agent_logs/result for a seq.")
 def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
     from src.session_manager import db, db_lock
     with db_lock:
@@ -199,7 +199,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     return result
 
 
-@router.post("/{seq}/terminate")
+@router.post("/{seq}/terminate", operation_id="events_terminate", summary="Terminate event", description="Forcefully terminates a running event task. Worker mode cancels the task (cancelled); direct mode fail_task + cancels the subprocess. The event is marked failed.")
 def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     """强行终止正在运行的事件任务。
 
@@ -302,7 +302,7 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     return {"message": f"事件 {seq} 终止请求已发送", "cancelled": cancelled}
 
 
-@router.post("/{seq}/redispatch")
+@router.post("/{seq}/redispatch", operation_id="events_redispatch", summary="Redispatch event", description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")
 def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(require_no_session_token)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
 
@@ -1241,7 +1241,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     yield ("done", {"reply": final_text, "messages": _list_thread(anchor_seq)})
 
 
-@router.get("/{seq}/thread")
+@router.get("/{seq}/thread", operation_id="events_thread", summary="Event conversation thread", description="Returns the event conversation thread messages.")
 def get_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
     from src.api.knowledge import read_knowledge, _issue_num_from
@@ -1257,7 +1257,7 @@ def get_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     }
 
 
-@router.delete("/{seq}/chat")
+@router.delete("/{seq}/chat", operation_id="events_chat_delete", summary="Delete event conversation thread", description="Clears the event conversation thread records.")
 def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     """Issue #100: 清理事件关联的对话消息（event_thread 记录）。"""
     evt = _load_event(seq)
@@ -1271,7 +1271,7 @@ def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)
     return {"ok": True, "message": "对话已清理"}
 
 
-@router.delete("/{seq}/knowledge/{scope}")
+@router.delete("/{seq}/knowledge/{scope}", operation_id="events_knowledge_delete", summary="Delete issue knowledge", description="Deletes agent knowledge produced for the event (file + DB + refs).")
 def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no_session_token)):
     """Issue #100: 删除事件关联的 agent 沉淀知识（文件 + DB + ref）。"""
     evt = _load_event(seq)
@@ -1326,7 +1326,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     return {"ok": True, "scope": scope, "message": "知识已删除"}
 
 
-@router.post("/{seq}/chat")
+@router.post("/{seq}/chat", operation_id="events_chat_send", summary="Send event conversation", description="Sends a message into the event conversation (non-streaming).")
 async def send_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
     gate = _thread_gate(evt["repo_key"], evt["issue_id"])
@@ -1341,7 +1341,7 @@ async def send_conversation(seq: int, body: ConversationMessage, user: dict = De
     return final
 
 
-@router.post("/{seq}/chat/stream")
+@router.post("/{seq}/chat/stream", operation_id="events_chat_stream", summary="Event conversation SSE", description="SSE streaming conversation. Direct mode streams live; queue mode returns a single done.")
 async def stream_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     """SSE 流式对话（direct 模式；队列模式为一次性 done）。"""
     from fastapi.responses import StreamingResponse
@@ -1385,7 +1385,7 @@ def _cleanup_conv_tasks():
             _conv_tasks.pop(tid, None)
 
 
-@router.post("/{seq}/chat/submit")
+@router.post("/{seq}/chat/submit", operation_id="events_chat_submit", summary="Submit event conversation (async)", description="Submits a conversation query and immediately returns a task_id; the agent executes in the background.")
 async def submit_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     """提交对话查询 → 立即返回 task_id。后台异步执行 agent。"""
     _cleanup_conv_tasks()
@@ -1557,7 +1557,7 @@ def _push_conv_event(task_id: str, evt_type: str, data):
                 t["result"] = (t.get("result", "") or "") + (data if isinstance(data, str) else str(data))
 
 
-@router.get("/chat/task/{task_id}/status")
+@router.get("/chat/task/{task_id}/status", operation_id="events_chat_task_status", summary="Event conversation async status", description="Queries conversation task status (memory first, DB fallback).")
 def conv_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """查询对话任务状态（内存优先 → DB 兜底）。"""
     # 1. 内存
@@ -1587,7 +1587,7 @@ def conv_task_status(task_id: str, user: dict = Depends(require_no_session_token
     return {"task_id": task_id, "status": "not_found"}
 
 
-@router.get("/chat/task/{task_id}/stream")
+@router.get("/chat/task/{task_id}/stream", operation_id="events_chat_task_stream", summary="Event conversation async stream", description="Subscribes to conversation task SSE output (buffered replay + live append).")
 async def conv_task_stream(task_id: str, user: dict = Depends(require_no_session_token)):
     """订阅对话任务 SSE 输出（重放缓冲 + 实时追加）。"""
     from fastapi.responses import StreamingResponse
@@ -1688,7 +1688,7 @@ def flow_reset(seq: int, body: FlowResetBody, request: Request):
     return {"ok": True, "stage": to_stage, "cancelled": cancelled}
 
 
-@router.get("/{owner}/{repo}")
+@router.get("/{owner}/{repo}", operation_id="events_list", summary="List repository events", description="Paged event list for a repository with optional filters.")
 def list_events(owner: str, repo: str,
                       page: int = Query(1, ge=1),
                       page_size: int = Query(20, ge=1, le=100),
