@@ -461,11 +461,14 @@ function _renderScenePipelinePage() {
 
     // 分页
     if (totalPages > 1) {
-      html += `<div style="display:flex;align-items:center;gap:12px;padding:10px 0;font-size:12px;color:#86868b">
-        <span>${I18N.t('pipeline.page_info',{cur:_scenePipePage+1,total:totalPages}) || ('\u7b2c '+(_scenePipePage+1)+' / '+totalPages+' \u9875')}</span>
-        <button class="bt bt-o bt-s" ${_scenePipePage<=0?'disabled style="opacity:.4"':''} onclick="_scenePipePage--;document.getElementById('relatedPipelineSection').outerHTML=_renderScenePipelinePage();">${I18N.t('pipeline.prev_page')||'\u4e0a\u4e00\u9875'}</button>
-        <button class="bt bt-o bt-s" ${_scenePipePage>=totalPages-1?'disabled style="opacity:.4"':''} onclick="_scenePipePage++;document.getElementById('relatedPipelineSection').outerHTML=_renderScenePipelinePage();">${I18N.t('pipeline.next_page')||'\u4e0b\u4e00\u9875'}</button>
-      </div>`;
+      var pageInfo = I18N.t('pipeline.page_info', {cur: _scenePipePage + 1, total: totalPages});
+      var prevLabel = I18N.t('pipeline.prev_page');
+      var nextLabel = I18N.t('pipeline.next_page');
+      html += '<div style="display:flex;align-items:center;gap:12px;padding:10px 0;font-size:12px;color:#86868b">' +
+        '<span>' + pageInfo + '</span>' +
+        '<button class="bt bt-o bt-s" ' + (_scenePipePage <= 0 ? 'disabled style="opacity:.4"' : '') + ' onclick="_scenePipePage--;document.getElementById(\'relatedPipelineSection\').outerHTML=_renderScenePipelinePage();">' + prevLabel + '</button>' +
+        '<button class="bt bt-o bt-s" ' + (_scenePipePage >= totalPages - 1 ? 'disabled style="opacity:.4"' : '') + ' onclick="_scenePipePage++;document.getElementById(\'relatedPipelineSection\').outerHTML=_renderScenePipelinePage();">' + nextLabel + '</button>' +
+        '</div>';
     }
   }
   html += `</div>`;

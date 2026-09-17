@@ -48,5 +48,8 @@
   "tasks_without_events_hint": "Some tasks have not generated pipeline events yet",
   "search_placeholder": "Search issue, title, owner…",
   "status_cancelled": "Cancelled",
-  "status_skipped": "Skipped"
+  "status_skipped": "Skipped",
+  "page_info": "Page {{cur}} / {{total}}",
+  "prev_page": "Previous",
+  "next_page": "Next"
 }
