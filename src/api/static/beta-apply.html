@@ -32,15 +32,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 .branch{display:none}
 .branch.show{display:block}
 .radio-group{display:flex;flex-direction:column;gap:8px}
-.radio-item{display:block;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;cursor:pointer;font-size:13px;color:#1d1d1f;transition:all .15s}
+.radio-item{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;cursor:pointer;font-size:13px;color:#1d1d1f;transition:all .15s}
 .radio-item:hover{border-color:#b8c4d8}
 .radio-item.selected{border-color:#3168e0;background:rgba(49,104,224,0.04)}
-.radio-item input{margin-right:6px;vertical-align:middle}
+.radio-item input{margin:0;flex-shrink:0;width:16px;height:16px;min-width:16px}
 .checkbox-group{display:flex;flex-wrap:wrap;gap:8px}
-.checkbox-item{display:inline-block;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;cursor:pointer;font-size:13px;color:#1d1d1f;transition:all .15s;white-space:nowrap}
+.checkbox-item{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border:1px solid #e3e6ee;border-radius:8px;cursor:pointer;font-size:13px;color:#1d1d1f;transition:all .15s;white-space:nowrap}
 .checkbox-item:hover{border-color:#b8c4d8}
 .checkbox-item.selected{border-color:#3168e0;background:rgba(49,104,224,0.04)}
-.checkbox-item input{margin-right:4px;vertical-align:middle}
+.checkbox-item input{margin:0;flex-shrink:0;width:16px;height:16px;min-width:16px}
 .btn{width:100%;padding:14px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:12px;transition:transform .15s}
 .btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,0.3)}
 .btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
