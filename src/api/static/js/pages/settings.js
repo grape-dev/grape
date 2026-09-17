@@ -358,7 +358,8 @@ function selectLang(lang) {
       } else if (result.failed < result.total) {
         // 部分成功：DOM 已重建，部分文案靠 t() fallback
         if (typeof app !== 'undefined' && app.showToast) {
-          app.showToast(I18N.t('common.success') + ' (' + result.failed + '/' + result.total + ' failed)');
+          var isZh = I18N.getLang() === 'zh';
+          app.showToast(I18N.t('common.success') + ' (' + result.failed + '/' + result.total + (isZh ? ' 个加载失败)' : ' failed)'));
         }
       } else {
         // 全部失败：setLang 未提交状态变更，_currentLang 仍为旧语言
@@ -375,16 +376,17 @@ function selectLang(lang) {
       if (typeof app !== 'undefined' && app.showToast) {
         app.showToast(I18N.t('common.error') + ': ' + (e && e.message ? e.message : ''));
       }
+    }).finally(function() {
+      // Promise 完成后才释放全局锁——避免 fetch 飞行期间锁被提前释放
+      _langSwitching = false;
     });
   } catch(e) {
     // setLang 同步异常（如 _updateUrlLang 抛出）
     restoreButtons();
+    _langSwitching = false;
     if (typeof app !== 'undefined' && app.showToast) {
       app.showToast(I18N.t('common.error') + ': ' + (e && e.message ? e.message : ''));
     }
-  } finally {
-    // 无论如何释放全局锁——避免锁死
-    _langSwitching = false;
   }
 }
 
