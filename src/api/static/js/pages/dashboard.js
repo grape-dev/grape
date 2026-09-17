@@ -378,10 +378,31 @@ window._jumpFromScenePipeline = function(issueNum, sceneId, latestSeq) {
   app.nav('tasks');
 };
 
-// 构建相关流水线 HTML（从 pipeData 提取当前场景的流水线统计+表格）
+// 构建相关流水线 HTML（从 pipeData 提取当前场景的流水线统计+表格，支持分页）
+var _scenePipePage = 0;
+var _scenePipeSize = 10;
+var _scenePipeCache = { pipes: [], sceneId: '', dashData: null };
+
 function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
   const allPipesRaw = (pipeData.active ? [pipeData.active] : []).concat(pipeData.history || []);
   const scenePipes = allPipesRaw.filter(p => p.scene_id === sceneId);
+
+  // 缓存供分页使用
+  _scenePipeCache = { pipes: scenePipes, sceneId: sceneId, dashData: dashData };
+  _scenePipePage = 0;
+
+  return _renderScenePipelinePage();
+}
+
+function _renderScenePipelinePage() {
+  const scenePipes = _scenePipeCache.pipes;
+  const sceneId = _scenePipeCache.sceneId;
+  const dashData = _scenePipeCache.dashData;
+  const totalPages = Math.max(1, Math.ceil(scenePipes.length / _scenePipeSize));
+  if (_scenePipePage >= totalPages) _scenePipePage = totalPages - 1;
+  if (_scenePipePage < 0) _scenePipePage = 0;
+  const pagePipes = scenePipes.slice(_scenePipePage * _scenePipeSize, (_scenePipePage + 1) * _scenePipeSize);
+
   const _stageLabel = function(stage) { var map = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',done:I18N.t('pipeline.stage_done')||'完成'}; return map[stage] ? map[stage] : stage; };
   const sceneActiveCount = scenePipes.filter(p => p.executing).length;
   const sceneFailedCount = scenePipes.filter(p => p.statuses && p.statuses.some(s => s === 3)).length;
@@ -400,8 +421,8 @@ function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
     html += `<div style="text-align:center;padding:24px;color:#86868b;font-size:13px">${I18N.t('pipeline.no_issues')||'暂无 Issue'}</div>`;
   } else {
     const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
-    html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap" style="max-height:320px"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
-    scenePipes.forEach(p => {
+    html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
+    pagePipes.forEach(p => {
       const _issueNum = String(p.issue_id || '').replace(/^#/, '');
       const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
       const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
@@ -437,6 +458,15 @@ function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
       </tr>`;
     });
     html += `</table></div></div>`;
+
+    // 分页
+    if (totalPages > 1) {
+      html += `<div style="display:flex;align-items:center;gap:12px;padding:10px 0;font-size:12px;color:#86868b">
+        <span>${I18N.t('pipeline.page_info',{cur:_scenePipePage+1,total:totalPages}) || ('\u7b2c '+(_scenePipePage+1)+' / '+totalPages+' \u9875')}</span>
+        <button class="bt bt-o bt-s" ${_scenePipePage<=0?'disabled style="opacity:.4"':''} onclick="_scenePipePage--;document.getElementById('relatedPipelineSection').outerHTML=_renderScenePipelinePage();">${I18N.t('pipeline.prev_page')||'\u4e0a\u4e00\u9875'}</button>
+        <button class="bt bt-o bt-s" ${_scenePipePage>=totalPages-1?'disabled style="opacity:.4"':''} onclick="_scenePipePage++;document.getElementById('relatedPipelineSection').outerHTML=_renderScenePipelinePage();">${I18N.t('pipeline.next_page')||'\u4e0b\u4e00\u9875'}</button>
+      </div>`;
+    }
   }
   html += `</div>`;
   return html;
