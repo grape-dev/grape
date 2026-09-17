@@ -57,10 +57,19 @@ def _resolve_feishu_name(gitcode_user: str) -> str:
             return gitcode_user
 
 
-def _get_issue_pipeline(repo_key: str, issue_id: str, events: list, title_map: dict = None) -> dict:
+def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
+                        title_map: dict = None, stage_map: dict = None,
+                        pipe_cfg_cache: dict = None, get_pipe_cfg=None,
+                        bot_usernames: set = None, feishu_name_cache: dict = None) -> dict:
     """根据 issue_id 下的事件列表构建单个 Pipeline
 
-    参数 title_map: 批量查出的 issue 标题映射，优先使用，避免 N+1 查询
+    参数:
+        title_map: 批量查出的 issue 标题映射（消除标题 N+1）
+        stage_map: 批量查出的 issue stage/scene/assignee 映射（消除 get_issue_stage N+1）
+        pipe_cfg_cache: 场景配置缓存 {scene_id: config}（消除 get_pipeline_config N+1）
+        get_pipe_cfg: 获取场景配置的回调函数（带缓存）
+        bot_usernames: 仓库的 bot_username 集合（消除 get_all_bot_usernames N+1）
+        feishu_name_cache: 飞书用户名缓存 {gitcode_user: feishu_name}（消除 _resolve_feishu_name N+1）
     """
     issue_events = [e for e in events if e.get("issue_id") == issue_id]
     if not issue_events:
@@ -150,14 +159,17 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list, title_map: d
             pass
     # 统一计算节点状态（与任务详情页共享同一套逻辑）
     from src.api.pipeline_status import compute_node_statuses, STATUS_COMPLETED
-    from src.api.session_store import get_issue_stage, get_issue_scene
-    from src.api.pipeline_config import get_pipeline_config
 
-    _st = get_issue_stage(repo_key, issue_id) or {}
+    # 优先从批量 stage_map 取（消除 get_issue_stage/get_issue_scene N+1）
+    _st = (stage_map or {}).get(issue_id) or {}
     _stage = _st.get("stage", "")
-    # get_issue_scene 返回 (scene_id, scene_user_id) tuple，取 [0]；与第 212 行保持一致
-    _scene_id = (_st.get("scene_id") if _st else "") or (get_issue_scene(repo_key, issue_id) or ("", 0))[0]
-    _pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key) if _scene_id else None
+    _scene_id = _st.get("scene_id", "")
+    _pipe_cfg = get_pipe_cfg(_scene_id) if _scene_id and get_pipe_cfg else None
+    if not _pipe_cfg and _scene_id:
+        from src.api.pipeline_config import get_pipeline_config
+        _pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
+        if pipe_cfg_cache is not None:
+            pipe_cfg_cache[_scene_id] = _pipe_cfg
     _scene_nodes = (_pipe_cfg or {}).get("nodes", []) or [{"id": a, "tag": a} for a in AGENT_ORDER]
 
     _nodes, stage_statuses = compute_node_statuses(_scene_nodes, issue_events, _stage)
@@ -196,13 +208,23 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list, title_map: d
     # 责任人：优先 Issue assignee（issue_state.assignee，GitCode 真实指派，可为 grape_bot 或用户），
     # 回退从事件 actor 推断（_get_latest_assignee 已因 payload 不含 assignee 而基本失效，保留兜底）。
     current_owner = ""
-    # _st 已在上方统一计算中获取
+    # _st 已在上方从 stage_map 获取
+    def _resolve_feishu_name_cached(name):
+        if not name:
+            return ""
+        if feishu_name_cache is not None and name in feishu_name_cache:
+            return feishu_name_cache[name]
+        result = _resolve_feishu_name(name)
+        if feishu_name_cache is not None:
+            feishu_name_cache[name] = result
+        return result
+
     if _st and _st.get("assignee"):
-        current_owner = _resolve_feishu_name(_st["assignee"])
+        current_owner = _resolve_feishu_name_cached(_st["assignee"])
     else:
         assignee = _get_latest_assignee(issue_events)
         if assignee:
-            current_owner = _resolve_feishu_name(assignee)
+            current_owner = _resolve_feishu_name_cached(assignee)
         else:
             for i in range(len(stage_statuses) - 1, -1, -1):
                 if stage_statuses[i] > 0:
@@ -210,8 +232,11 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list, title_map: d
                     latest = stages[i].get("latest_event") or {}
                     actor = latest.get("actor", "")
                     if actor:
-                        from src.user.db import get_all_bot_usernames
-                        if actor in get_all_bot_usernames():
+                        _bots = bot_usernames if bot_usernames is not None else set()
+                        if not _bots:
+                            from src.user.db import get_all_bot_usernames
+                            _bots = get_all_bot_usernames()
+                        if actor in _bots:
                             from src.api.event_pipeline import get_agent_display_name
                             current_owner = get_agent_display_name(agent)
                         else:
@@ -220,15 +245,16 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list, title_map: d
 
     # 生命周期阶段（issue_state.stage）：vod/issue/coding/qa/sre/done；无记录默认 vod
     stage = (_st.get("stage") if _st else "") or "vod"
-    # Issue 级开发场景（VOD 判定，空=仓库默认）：回退到 get_issue_scene 仓库默认场景
-    # get_issue_scene 返回 (scene_id, scene_user_id) tuple，取 [0]
-    scene_id = (_st.get("scene_id") if _st else "") or (get_issue_scene(repo_key, issue_id) or ("", 0))[0]
-    # 解析场景名称（内置 + 成员自定义）
+    # Issue 级开发场景（从 stage_map 取，不再回退 get_issue_scene）
+    scene_id = (_st.get("scene_id") if _st else "") or _scene_id or ""
+    # 解析场景名称（内置 + 成员自定义）——使用缓存回调
     scene_name = ""
     issue_pipeline_config = None
     if scene_id:
-        from src.api.pipeline_config import get_pipeline_config
-        _cfg = get_pipeline_config(scene_id, repo_key=repo_key)
+        _cfg = get_pipe_cfg(scene_id) if get_pipe_cfg else None
+        if not _cfg:
+            from src.api.pipeline_config import get_pipeline_config
+            _cfg = get_pipeline_config(scene_id, repo_key=repo_key)
         if _cfg:
             scene_name = _cfg.get("name", scene_id)
             issue_pipeline_config = _cfg
@@ -324,6 +350,8 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
 
     # 批量查标题（消除 N+1：182 次 DB 查询 → 1 次）
     _title_map = {}
+    # 批量查 issue stage/scene/assignee（消除 _get_issue_pipeline 内部 get_issue_stage/get_issue_scene N+1）
+    _stage_map = {}
     if issue_ids:
         _iss_nums = []
         for iid in issue_ids:
@@ -334,23 +362,59 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
             try:
                 with db_lock:
                     c = db.cursor()
+                    # 一次查询同时获取 title + stage + scene_id + assignee 等
                     c.execute(
-                        "SELECT issue_number, title FROM issue WHERE repo_key IN ({}) AND issue_number IN ({})".format(
+                        "SELECT issue_number, title, stage, owner_agent, assignee, "
+                        "scene_id, parent_issue_id, is_subtask_mode "
+                        "FROM issue WHERE repo_key IN ({}) AND issue_number IN ({})".format(
                             ",".join("?" * len(_repo_keys)),
                             ",".join("?" * len(_iss_nums))
                         ),
                         (*_repo_keys, *_iss_nums)
                     )
                     for r in c.fetchall():
-                        _title_map[f"#{r[0]}"] = r[1] or ""
+                        _iid = f"#{r[0]}"
+                        _title_map[_iid] = r[1] or ""
+                        _stage_map[_iid] = {
+                            "stage": r[2] or "", "owner_agent": r[3] or "",
+                            "assignee": r[4] or "", "scene_id": r[5] or "",
+                            "parent_issue_id": r[6] or "", "is_subtask_mode": r[7] or 0,
+                        }
             except Exception:
                 pass
+
+    # 场景配置缓存（同仓库内 scene_id 去重，消除 get_pipeline_config N+1）
+    _pipe_cfg_cache = {}
+    from src.api.pipeline_config import get_pipeline_config
+    def _get_pipe_cfg(scene_id):
+        if scene_id not in _pipe_cfg_cache:
+            _pipe_cfg_cache[scene_id] = get_pipeline_config(scene_id, repo_key=repo_key) if scene_id else None
+        return _pipe_cfg_cache[scene_id]
+
+    # 一次性查 bot_usernames（消除 get_all_bot_usernames N+1）
+    _bot_usernames = set()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT bot_username FROM managed_repos WHERE repo_key IN ({}) AND bot_username!=''".format(
+                ",".join("?" * len(_repo_keys))
+            ), _repo_keys)
+            _bot_usernames = {r[0] for r in c.fetchall() if r[0]}
+    except Exception:
+        pass
+
+    # 飞书用户名缓存（请求级，消除 _resolve_feishu_name N+1）
+    _feishu_name_cache = {}
 
     # 预建 issue_id → events 列表索引（避免 _get_issue_pipeline 内部反复遍历全量 events）
     _events_by_issue = {}
     for e in events:
         _events_by_issue.setdefault(e["issue_id"], []).append(e)
-    pipelines = [_get_issue_pipeline(repo_key, iid, _events_by_issue.get(iid, []), _title_map) for iid in issue_ids]
+    pipelines = [_get_issue_pipeline(
+        repo_key, iid, _events_by_issue.get(iid, []),
+        _title_map, _stage_map, _pipe_cfg_cache, _get_pipe_cfg,
+        _bot_usernames, _feishu_name_cache
+    ) for iid in issue_ids]
     pipelines = [p for p in pipelines if p is not None]
 
     # Issue #89: 检测 tasks 有记录但 events 无记录的 Issue（数据一致性差异）
