@@ -1245,12 +1245,12 @@ function openTaskCreateModal() {
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.creator_label')}<b>${esc(_currentUsername) || '—'}</b></div>
-      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span> <span style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</span>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</div>
         <input id="tcCreateTitle" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="${I18N.t('tasks.create.title_placeholder')}">
-      </label>
-      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span> <span style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</div>
         <textarea id="tcCreateDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="${I18N.t('tasks.create.desc_placeholder')}"></textarea>
-      </label>
+      </div>
       <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.scene_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.scene_hint')}</span>
         <select id="tcCreateScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
       </label>
