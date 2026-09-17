@@ -57,14 +57,22 @@ def _resolve_feishu_name(gitcode_user: str) -> str:
             return gitcode_user
 
 
-def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
-    """根据 issue_id 下的事件列表构建单个 Pipeline"""
+def _get_issue_pipeline(repo_key: str, issue_id: str, events: list, title_map: dict = None) -> dict:
+    """根据 issue_id 下的事件列表构建单个 Pipeline
+
+    参数 title_map: 批量查出的 issue 标题映射，优先使用，避免 N+1 查询
+    """
     issue_events = [e for e in events if e.get("issue_id") == issue_id]
     if not issue_events:
         return None
 
-    title = issue_events[0].get("title", "") or issue_id
-    # 优先从 tasks 表获取 Issue 真实标题（event title 常为 issue_opened 等类型名或 A2A 占位标题）
+    # 优先从批量 title_map 取标题（消除 N+1 查询）
+    title = ""
+    if title_map:
+        title = title_map.get(issue_id, "")
+    if not title:
+        title = issue_events[0].get("title", "") or issue_id
+    # 如果 title_map 提供了标题且非占位符，直接使用（跳过 N+1 DB 查询）
     _EVENT_TYPE_NAMES = {
         "issue_opened", "issue_updated", "issue_comment", "issue_labeled",
         "issue_closed", "push", "tag_created", "release_created",
@@ -75,17 +83,20 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list) -> dict:
     def _is_placeholder(t):
         """判断 title 是否为占位符（事件类型名或 A2A 占位标题），不是 Issue 真实标题"""
         return not t or t in _EVENT_TYPE_NAMES or t.startswith("A2A:") or t.startswith("A2A (订阅):")
-    try:
-        from src.session_manager import db as _db, db_lock as _dl
-        _iss_num = int(str(issue_id).lstrip("#"))
-        with _dl:
-            _c = _db.cursor()
-            _c.execute("SELECT title FROM issue WHERE repo_key=? AND issue_number=?", (repo_key, _iss_num))
-            _t = _c.fetchone()
-            if _t and _t[0] and not _is_placeholder(_t[0]):
-                title = _t[0]
-    except Exception:
-        pass
+
+    # title_map 已提供有效标题时跳过 DB 查询；否则回退到 DB 查询（兼容无 title_map 的调用）
+    if not title_map or _is_placeholder(title):
+        try:
+            from src.session_manager import db as _db, db_lock as _dl
+            _iss_num = int(str(issue_id).lstrip("#"))
+            with _dl:
+                _c = _db.cursor()
+                _c.execute("SELECT title FROM issue WHERE repo_key=? AND issue_number=?", (repo_key, _iss_num))
+                _t = _c.fetchone()
+                if _t and _t[0] and not _is_placeholder(_t[0]):
+                    title = _t[0]
+        except Exception:
+            pass
     # events 表中找一条非占位符标题做兜底
     if _is_placeholder(title):
         for _e in issue_events:
@@ -291,7 +302,9 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, created_at, actor, payload, duration, repo_key FROM events WHERE repo_key IN ({}) AND issue_id != '' ORDER BY seq ASC".format(
+                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
+                "created_at, actor, duration, repo_key "
+                "FROM events WHERE repo_key IN ({}) AND issue_id != '' ORDER BY seq ASC".format(
                     ",".join("?" * len(_repo_keys))
                 ),
                 _repo_keys
@@ -302,17 +315,42 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
 
     events = [
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
-         "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": r[9] or "",
-         "duration": r[10], "repo_key": r[11] if len(r) > 11 else repo_key}
+         "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": "",
+         "duration": r[9], "repo_key": r[10] if len(r) > 10 else repo_key}
         for r in rows
     ]
 
     issue_ids = list(dict.fromkeys(e["issue_id"] for e in events if e["issue_id"]))
+
+    # 批量查标题（消除 N+1：182 次 DB 查询 → 1 次）
+    _title_map = {}
+    if issue_ids:
+        _iss_nums = []
+        for iid in issue_ids:
+            _n = str(iid).lstrip("#")
+            if _n.isdigit():
+                _iss_nums.append(int(_n))
+        if _iss_nums:
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT issue_number, title FROM issue WHERE repo_key IN ({}) AND issue_number IN ({})".format(
+                            ",".join("?" * len(_repo_keys)),
+                            ",".join("?" * len(_iss_nums))
+                        ),
+                        (*_repo_keys, *_iss_nums)
+                    )
+                    for r in c.fetchall():
+                        _title_map[f"#{r[0]}"] = r[1] or ""
+            except Exception:
+                pass
+
     # 预建 issue_id → events 列表索引（避免 _get_issue_pipeline 内部反复遍历全量 events）
     _events_by_issue = {}
     for e in events:
         _events_by_issue.setdefault(e["issue_id"], []).append(e)
-    pipelines = [_get_issue_pipeline(repo_key, iid, _events_by_issue.get(iid, [])) for iid in issue_ids]
+    pipelines = [_get_issue_pipeline(repo_key, iid, _events_by_issue.get(iid, []), _title_map) for iid in issue_ids]
     pipelines = [p for p in pipelines if p is not None]
 
     # Issue #89: 检测 tasks 有记录但 events 无记录的 Issue（数据一致性差异）
