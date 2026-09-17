@@ -9,7 +9,7 @@ import asyncio
 import os
 from datetime import datetime
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key
