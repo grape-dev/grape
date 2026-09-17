@@ -70,7 +70,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
     return buf.getvalue()
 
 
-@router.get("", operation_id="skills_list", summary="List skills")
+@router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
 def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
                 agent_type: str = "", sub_scene: str = "",
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
@@ -203,7 +203,7 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
 
 # ===== Skill Market API（技能市场）=====
 
-@router.post("/{skill_id}/like", operation_id="skills_like_toggle", summary="Toggle skill like")
+@router.post("/{skill_id}/like", operation_id="skills_like_toggle", summary="Toggle skill like", description="Toggles a skill like.")
 def toggle_skill_like(skill_id: int, user: dict = Depends(require_no_session_token)):
     """点赞 toggle：已赞→取消，未赞→点赞"""
     from src.session_manager import db, db_lock
@@ -220,7 +220,7 @@ def toggle_skill_like(skill_id: int, user: dict = Depends(require_no_session_tok
     return {"liked": liked, "like_count": like_count}
 
 
-@router.get("/featured", operation_id="skills_featured", summary="List featured skills")
+@router.get("/featured", operation_id="skills_featured", summary="List featured skills", description="Featured skills: is_featured=1 official skills ordered by like_count desc (default limit 5).")
 def list_featured_skills(user: dict = Depends(require_no_session_token), limit: int = 0):
     """精选技能：is_featured=1 的 official 技能，按 like_count 降序。limit=0 时默认 5"""
     from src.user.db import (get_featured_skills, batch_skill_liked,
@@ -247,7 +247,7 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
     return {"skills": skills}
 
 
-@router.get("/agent-stats", operation_id="skills_agent_stats", summary="Skill stats (total + by agent_type)")
+@router.get("/agent-stats", operation_id="skills_agent_stats", summary="Skill stats (total + by agent_type)", description="Skill total + per agent_type counts; scope/repo filters match list_skills. User-only (web UI stats).")
 def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str = "", repo: str = ""):
     """返回技能总数 + 每个 agent_type 的技能数量。
 
@@ -310,7 +310,7 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
     return {"total": total, "agents": agents, "sub_scenes": sub_scenes}
 
 
-@router.get("/stats", operation_id="skills_stats", summary="Skill usage stats (scene/repo aggregation)")
+@router.get("/stats", operation_id="skills_stats", summary="Skill usage stats (scene/repo aggregation)", description="Skill usage stats aggregated from scene_skill_ref: {skill_name: {scene_count, repo_count}}.")
 def get_skill_stats(user: dict = Depends(require_no_session_token)):
     """技能使用统计（通过 scene_skill_ref 关联表 SQL 聚合）。
 
@@ -320,7 +320,7 @@ def get_skill_stats(user: dict = Depends(require_no_session_token)):
     return {"stats": get_skill_usage_stats()}
 
 
-@router.get("/search", operation_id="skills_search", summary="Search skills")
+@router.get("/search", operation_id="skills_search", summary="Search skills", description="Skill lookup for a task description: exact skill_name match first, then keyword match on description/display_name/agent_type.")
 def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
     """技能查找：根据任务描述推荐相关技能。
 
@@ -433,7 +433,7 @@ def download_skill_template():
     )
 
 
-@router.get("/by-id/{skill_id}/download", operation_id="skills_download", summary="Download skill ZIP")
+@router.get("/by-id/{skill_id}/download", operation_id="skills_download", summary="Download skill ZIP", description="Downloads a skill package zip with a short-lived signed URL; OBS mode returns {url, expires_in}.")
 def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
                                    repo: str = ""):
     """下载技能包 zip（点击时动态签发，见 obs-skill-storage-design.md N8 下载模式）。
@@ -497,7 +497,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
                     headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
 
 
-@router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)")
+@router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller.")
 def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
                                  repo: str = ""):
     """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
@@ -610,7 +610,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_sessio
     }
 
 
-@router.post("/upload", operation_id="skills_upload", summary="Upload skill (user personal / repo)")
+@router.post("/upload", operation_id="skills_upload", summary="Upload skill (user personal / repo)", description="Uploads a skill ZIP. scope=user stores a personal skill; scope=repo requires repo. agent_type is required.")
 async def upload_skill(file: UploadFile = File(...), user: dict = Depends(require_no_session_token),
                        scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form("")):
     """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。"""
@@ -742,7 +742,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(requir
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-@router.delete("/by-id/{skill_id}", operation_id="skills_delete", summary="Delete skill")
+@router.delete("/by-id/{skill_id}", operation_id="skills_delete", summary="Delete skill", description="Deletes a skill by id after an ownership check. official undeletable; user=owner; repo=managed by caller.")
 def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
                         scope: str = "user", repo: str = ""):
     """删除技能——按主键 id 精确查询，查到后做归属校验，再删除。
@@ -827,7 +827,7 @@ class ConvertSkillRequest(BaseModel):
     repo: str  # 目标仓库 repo_key（如 Jason7602/skill-evaluator）
 
 
-@router.post("/convert", operation_id="skills_convert", summary="Convert skill (cross scope)")
+@router.post("/convert", operation_id="skills_convert", summary="Convert skill (cross scope)", description="Copies a personal skill (scope=user) into a repo skill (scope=repo); the original record and directory are kept.")
 def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_session_token)):
     """将个人技能（scope=user）复制为仓库技能（scope=repo）。
 
@@ -908,7 +908,7 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
     return {"message": f"技能 {skill_name} 已复制到仓库 {repo}", "skill_name": skill_name, "scope": "repo", "repo": repo}
 
 
-@router.get("/{skill_id}/sub", operation_id="skills_sub_list", summary="List sub-skills of a skill package")
+@router.get("/{skill_id}/sub", operation_id="skills_sub_list", summary="List sub-skills of a skill package", description="Lists a skill package's sub-skills from the references/ directory.")
 def list_sub_skills(skill_id: int, user: dict = Depends(require_no_session_token)):
     """返回技能包的子技能列表（从 skill_path 的 references/ 目录读取）"""
     from src.session_manager import db, db_lock
@@ -971,7 +971,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(require_no_session_token
     return {"skill_name": skill_name, "sub_skills": subs}
 
 
-@router.get("/{skill_id}/sub/{sub_name}", operation_id="skills_sub_get", summary="Read sub-skill SKILL.md")
+@router.get("/{skill_id}/sub/{sub_name}", operation_id="skills_sub_get", summary="Read sub-skill SKILL.md", description="Reads a sub-skill's SKILL.md content.")
 def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
     """读取技能包子技能的 SKILL.md 内容"""
     from src.session_manager import db, db_lock
@@ -1021,7 +1021,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no
     return {"name": sub_name, "content": content, "references": refs}
 
 
-@router.get("/package-sub/{pkg_id}/{sub_name}", operation_id="skills_package_sub_get", summary="Get sub-skill detail from package")
+@router.get("/package-sub/{pkg_id}/{sub_name}", operation_id="skills_package_sub_get", summary="Get sub-skill detail from package", description="Returns a sub-skill detail from a package (same shape as skill detail).")
 def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
     """返回技能包子技能详情（格式与 skill detail 一致，支持导航到独立详情页）"""
     from src.session_manager import db, db_lock

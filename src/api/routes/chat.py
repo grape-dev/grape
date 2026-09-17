@@ -178,7 +178,7 @@ class EnsureIssueConvBody(BaseModel):
     issue_number: int
 
 
-@router.post("/conversations/ensure-issue", operation_id="chat_conversations_ensure_issue", summary="Ensure issue conversation")
+@router.post("/conversations/ensure-issue", operation_id="chat_conversations_ensure_issue", summary="Ensure issue conversation", description="Finds or creates an Issue-scoped conversation by repo_key + issue_number (used by task-center jump). Rebuilds a deleted 'Issue #N' conversation with task context.")
 def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(require_no_session_token)):
     """基于 repo_key + issue_number 查找或新建任务会话（Task Center 跳转用）。
 
@@ -1400,7 +1400,7 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
 
 # ===== Chat Agent v2: submit/stream 分离（学习 Admin AI AiTaskManager）=====
 
-@router.post("/submit", operation_id="chat_submit", summary="Submit (task scenario)")
+@router.post("/submit", operation_id="chat_submit", summary="Submit (task scenario)", description="Submits a chat query and immediately returns {task_id, conversation_id, status}; the agent runs in the background.")
 async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     """提交 chat 查询 → 立即返回 {task_id, conversation_id, status}。
 
@@ -1652,7 +1652,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     return {"task_id": chat_task_id, "conversation_id": conv_id, "status": "running"}
 
 
-@router.get("/task/{task_id}/stream", operation_id="chat_task_stream", summary="Async task stream")
+@router.get("/task/{task_id}/stream", operation_id="chat_task_stream", summary="Async task stream", description="SSE subscribe to task output: replays the buffer then appends live events; DB fallback for finished tasks.")
 async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session_token)):
     """SSE 订阅任务输出 — 先重放缓冲，再实时追加（学习 Admin AI subscribe）。
 
@@ -1756,7 +1756,7 @@ def _chat_task_cleanup():
             _chat_tasks.pop(tid, None)
 
 
-@router.post("/send/async", operation_id="chat_send_async", summary="Send message (async)")
+@router.post("/send/async", operation_id="chat_send_async", summary="Send message (async)", description="Async message send: DB/engine work runs in executors. Local engines return a fallback stream; remote engines return task_id.")
 async def send_message_async(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     """异步发送消息：所有同步 DB/引擎操作在 run_in_executor 中执行，不阻塞 event loop。
 
@@ -2028,7 +2028,7 @@ def _execute_chat_task(task_id: str):
         log.warning(f"Chat task {task_id} failed: {e}")
 
 
-@router.get("/task/{task_id}/status", operation_id="chat_task_status", summary="Async task status")
+@router.get("/task/{task_id}/status", operation_id="chat_task_status", summary="Async task status", description="Queries chat task status (cross-machine; memory -> legacy cache -> DB fallback).")
 def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """查询 chat 任务状态（跨机器可查，对齐 Admin AI getTaskFinalStatus）。
 

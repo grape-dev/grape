@@ -196,7 +196,7 @@ def list_commits(owner: str, repo: str, per_page: int = Query(20, ge=1, le=100),
                     _repo_token(owner, repo, user, p))
 
 
-@router.get("/{owner}/{repo}/tree", operation_id="gitrepo_tree", summary="Repository tree (single-level; GitHub recursive)")
+@router.get("/{owner}/{repo}/tree", operation_id="gitrepo_tree", summary="Repository tree (single-level; GitHub recursive)", description="Repository directory tree. Single-level (default) proxies git/trees/{ref}; depth=recursive is GitHub-only (GitCode rejects it). ref empty resolves the default branch.")
 def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分支/引用，空=默认分支"),
                   depth: str = Query("single", description="single(单层，默认)/recursive(递归，仅 GitHub)"),
                   user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
@@ -266,7 +266,7 @@ def _github_tree_sha(owner: str, repo: str, ref: str, user: dict) -> str:
     return ref
 
 
-@router.get("/{owner}/{repo}/contents", operation_id="gitrepo_contents_root", summary="Repository contents: root directory listing")
+@router.get("/{owner}/{repo}/contents", operation_id="gitrepo_contents_root", summary="Repository contents: root directory listing", description="Repository root directory listing (empty path returns the GitCode root array).")
 def list_root_contents(owner: str, repo: str, ref: str = Query("", description="分支/引用"),
                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     """取仓库根目录条目列表（空 path → GitCode contents 返回根目录数组）。"""

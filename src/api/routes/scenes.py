@@ -38,7 +38,7 @@ def _load_scenes() -> dict:
     return data.get("scenes", {})
 
 
-@router.get("", operation_id="scenes_list", summary="List scenes")
+@router.get("", operation_id="scenes_list", summary="List scenes", description="Lists all available scenes for a repo (repo-scoped, non-official).")
 def list_scenes(user: dict = Depends(get_current_user_or_api_key), repo: str = ""):
     """返回所有可用场景列表（repo，不含 official）"""
     from src.api.pipeline_config import get_scenes
@@ -56,7 +56,7 @@ def list_scenes(user: dict = Depends(get_current_user_or_api_key), repo: str = "
     return {"scenes": scenes}
 
 
-@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline")
+@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query.")
 def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = ""):
     """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）。
     
@@ -149,14 +149,14 @@ def _parse_scene_skills(nodes_json: str) -> list[str]:
     return [n.get("skill", "") for n in nodes if n.get("skill")]
 
 
-@router.get("/market/categories", operation_id="scenes_market_categories", summary="List scene market categories")
+@router.get("/market/categories", operation_id="scenes_market_categories", summary="List scene market categories", description="Scene categories ordered by order_num; only is_active=1.")
 def list_scene_categories(user: dict = Depends(require_no_session_token)):
     """场景分类列表：按 order_num 排序，只返回 is_active=1 的"""
     from src.user.db import list_scene_categories as _list_cats
     return {"categories": _list_cats()}
 
 
-@router.get("/market", operation_id="scenes_market_list", summary="List scene market")
+@router.get("/market", operation_id="scenes_market_list", summary="List scene market", description="Scene market list with search/category/sort/featured/paging/scope filters. limit>0 skips paging.")
 def list_scenes_market(user: dict = Depends(require_no_session_token),
                        q: str = "", category_id: int = 0, sort: str = "latest",
                        scope: str = "", repo: str = "",
@@ -217,7 +217,7 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
     return {"scenes": result, "total": total, "page": page, "page_size": page_size}
 
 
-@router.get("/market/{market_id}", operation_id="scenes_market_detail", summary="Get market scene detail")
+@router.get("/market/{market_id}", operation_id="scenes_market_detail", summary="Get market scene detail", description="Scene market detail: full intro + skill chain + recommended template + used repo list.")
 def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_session_token)):
     """场景详情：完整介绍 + 技能链路详解 + 推荐模板 + 在用仓库列表"""
     from src.user.db import (get_scene_market_by_id, is_scene_liked,
@@ -332,7 +332,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
     }
 
 
-@router.get("/market/{market_id}/applied", operation_id="scenes_market_applied", summary="Check market scene applied")
+@router.get("/market/{market_id}/applied", operation_id="scenes_market_applied", summary="Check market scene applied", description="Checks whether a market scene is already applied to the current repo: {applied, scene_name}.")
 def check_market_scene_applied(market_id: int, user: dict = Depends(require_no_session_token),
                                 owner: str = "", repo: str = ""):
     """检查市场场景是否已应用到当前仓库。
@@ -358,7 +358,7 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(require_no_s
     return {"applied": bool(row), "scene_name": row[0] if row else ""}
 
 
-@router.post("/market/{market_id}/apply", operation_id="scenes_market_apply", summary="Apply market scene")
+@router.post("/market/{market_id}/apply", operation_id="scenes_market_apply", summary="Apply market scene", description="Applies a market scene to the repo-level pipeline scene. Idempotent per market_scene_id + repo_key.")
 def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_token),
                        owner: str = "", repo: str = "", repo_key: str = ""):
     """应用场景：从市场复制配置到仓库级 devops_pipeline_scene。
@@ -473,7 +473,7 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id}
 
 
-@router.get("/market/{market_id}/experience-check", operation_id="scenes_market_experience_check", summary="Market scene experience pre-check")
+@router.get("/market/{market_id}/experience-check", operation_id="scenes_market_experience_check", summary="Market scene experience pre-check", description="Pre-check before experiencing: {repo_exists, scene_applied, full_name, scene_name}.")
 async def check_market_scene_experience(market_id: int, user: dict = Depends(require_no_session_token)):
     """体验前检查：项目仓库是否已存在 + 是否已应用过此场景。
 
@@ -546,7 +546,7 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
             "full_name": full_name, "scene_name": scene_name}
 
 
-@router.post("/market/{market_id}/experience", operation_id="scenes_market_experience", summary="Experience market scene")
+@router.post("/market/{market_id}/experience", operation_id="scenes_market_experience", summary="Experience market scene", description="Experiences a scene: creates/reuses the recommended-template project and applies the scene.")
 async def experience_market_scene(market_id: int, user: dict = Depends(require_no_session_token)):
     """体验场景：基于场景关联的推荐模板创建/复用项目并应用场景。
 
@@ -719,7 +719,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
             "already_exists": already_exists, "message": msg}
 
 
-@router.post("/market/{market_id}/like", operation_id="scenes_market_like_toggle", summary="Toggle scene like")
+@router.post("/market/{market_id}/like", operation_id="scenes_market_like_toggle", summary="Toggle scene like", description="Toggles a scene like.")
 def toggle_scene_like(market_id: int, user: dict = Depends(require_no_session_token)):
     """场景点赞 toggle：已赞→取消，未赞→点赞"""
     from src.user.db import toggle_scene_like as _toggle, get_scene_market_by_id
@@ -769,7 +769,7 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
     return "gitcode"
 
 
-@router.get("/branches/{owner}/{repo}", operation_id="scenes_branches", summary="List repo branches")
+@router.get("/branches/{owner}/{repo}", operation_id="scenes_branches", summary="List repo branches", description="Lists all repo branches (for the advanced-options work-branch picker).")
 def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """列出仓库所有分支（供高级选项工作分支选择）"""
     from src.user.repo_manager import _req, _github_req
@@ -845,7 +845,7 @@ def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_se
     return {"branches": branches}
 
 
-@router.post("/branches/{owner}/{repo}", operation_id="scenes_branch_create", summary="Create repo branch")
+@router.post("/branches/{owner}/{repo}", operation_id="scenes_branch_create", summary="Create repo branch", description="Creates a new branch in the repo.")
 def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
                         user: dict = Depends(require_no_session_token)):
     """在仓库中创建新分支"""
@@ -954,7 +954,7 @@ class CreateMarketSceneRequest(BaseModel):
     recommended_template: str = ""
 
 
-@router.post("/market", operation_id="scenes_market_create", summary="Create market scene")
+@router.post("/market", operation_id="scenes_market_create", summary="Create market scene", description="Creates a user custom scene in scene_market. scope=repo: repo scene visible to all repo users.")
 def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(require_no_session_token),
                         repo: str = ""):
     """创建用户自定义场景（写入 scene_market 表）。
@@ -1047,7 +1047,7 @@ class UpdateMarketSceneRequest(BaseModel):
     recommended_template: str = ""
 
 
-@router.put("/market/{market_id}", operation_id="scenes_market_update", summary="Update market scene")
+@router.put("/market/{market_id}", operation_id="scenes_market_update", summary="Update market scene", description="Updates a custom market scene (scope != official).")
 def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
                         user: dict = Depends(require_no_session_token)):
     """更新用户自定义场景（scope != 'official'）。"""
@@ -1110,7 +1110,7 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     return {"message": "场景更新成功"}
 
 
-@router.delete("/market/{market_id}", operation_id="scenes_market_delete", summary="Delete market scene")
+@router.delete("/market/{market_id}", operation_id="scenes_market_delete", summary="Delete market scene", description="Hard-deletes a custom market scene (scope != official).")
 def delete_market_scene(market_id: int, user: dict = Depends(require_no_session_token)):
     """硬删除用户自定义场景（scope != 'official'）。"""
     from src.user.db import (delete_scene_market, get_scene_market_by_id,
@@ -1134,7 +1134,7 @@ def delete_market_scene(market_id: int, user: dict = Depends(require_no_session_
     log.info(f"Market scene deleted: id={market_id} by user={user.get('id')}")
     return {"message": "场景已删除"}
 
-@router.get("/check-name", operation_id="scenes_check_name", summary="Check scene name availability")
+@router.get("/check-name", operation_id="scenes_check_name", summary="Check scene name availability", description="Checks scene name uniqueness within the same scope/user/repo.")
 def check_scene_name(name: str, scope: str, user: dict = Depends(require_no_session_token),
                      repo: str = "", exclude_id: int = 0):
     """检查场景名称是否重复（同 scope 同用户同仓库下名称唯一）。"""
@@ -1159,7 +1159,7 @@ def check_scene_name(name: str, scope: str, user: dict = Depends(require_no_sess
     return {"exists": exists}
 
 
-@router.post("/market/icon-upload", operation_id="scenes_market_icon_upload", summary="Upload scene icon")
+@router.post("/market/icon-upload", operation_id="scenes_market_icon_upload", summary="Upload scene icon", description="Uploads a scene icon (temporary file). Allowed jpg/png/webp/gif/svg <= 2MB. Returns {file_id, icon, obs_icon_key}.")
 async def upload_scene_icon(file: UploadFile = File(...),
                             user: dict = Depends(require_no_session_token)):
     """上传场景图标（临时文件，保存时落定）。
@@ -1290,7 +1290,7 @@ def _delete_scene_icon_file(file_key: str):
             log.warning(f"Scene icon delete (local): {e}")
 
 
-@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail")
+@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info.")
 def get_scene_detail(scene_id: str, user: dict = Depends(require_no_session_token)):
     """返回场景详情（nodes + engine 信息）"""
     from src.api.pipeline_config import get_pipeline_config
@@ -1308,7 +1308,7 @@ def get_scene_detail(scene_id: str, user: dict = Depends(require_no_session_toke
     return {"id": scene_id, "name": cfg["name"], "nodes": cfg["nodes"], "onboarding": cfg.get("onboarding", "")}
 
 
-@router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type")
+@router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging).")
 def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_session_token),
                           q: str = "", scope: str = "", repo: str = "",
                           page: int = 1, page_size: int = 20):
@@ -1446,7 +1446,7 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str):
                         "message": f"节点 {tag} 的引擎 {_eid} 没有该角色能力标签（{tag}），请重新选择"})
 
 
-@router.post("", operation_id="scenes_create", summary="Create scene")
+@router.post("", operation_id="scenes_create", summary="Create scene", description="Creates a custom scene (associated only with the repo, no user-level).")
 def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """创建自定义场景（方案 B：场景只与仓库关联，无 user 级）"""
     from src.api.pipeline_config import create_custom_scene
@@ -1491,7 +1491,7 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     return {"scene_id": scene_id, "db_id": db_id, "message": "场景创建成功"}
 
 
-@router.put("/{scene_id}", operation_id="scenes_update", summary="Update scene")
+@router.put("/{scene_id}", operation_id="scenes_update", summary="Update scene", description="Updates a scene (repo/user scope directly; official immutable).")
 def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """更新场景（repo/user scope 直接更新，official 不可修改）"""
     from src.api.pipeline_config import update_custom_scene, _query_scene_by_id
@@ -1523,7 +1523,7 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     return {"message": "场景更新成功"}
 
 
-@router.delete("/{scene_id}", operation_id="scenes_delete", summary="Delete scene")
+@router.delete("/{scene_id}", operation_id="scenes_delete", summary="Delete scene", description="Deletes a custom scene (soft delete; official undeletable).")
 def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
     """删除自定义场景（软删除，官方场景不可删除）"""
     from src.api.pipeline_config import delete_custom_scene, _query_scene_by_id
@@ -1550,7 +1550,7 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
     return {"message": "场景已删除"}
 
 
-@router.post("/apply/{owner}/{repo}", operation_id="scenes_apply", summary="Apply scene to repository")
+@router.post("/apply/{owner}/{repo}", operation_id="scenes_apply", summary="Apply scene to repository", description="Applies a scene to a repository.")
 def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                       user: dict = Depends(require_no_session_token)):
     """为仓库应用指定场景"""
@@ -1647,7 +1647,7 @@ class AdvancedOptionsRequest(BaseModel):
     custom_fields: list = []   # [{key: str, value: str}]
 
 
-@router.get("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_get", summary="Get scene advanced options")
+@router.get("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_get", summary="Get scene advanced options", description="Reads scene advanced options (work branch + custom key:value).")
 def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
     """读取场景高级选项（工作分支 + 自定义 key:value）"""
     from src.repo_key import to_repo_key
@@ -1683,7 +1683,7 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
     return {"work_branch": "main", "custom_fields": []}
 
 
-@router.put("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_set", summary="Save scene advanced options")
+@router.put("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_set", summary="Save scene advanced options", description="Saves scene advanced options (work branch + custom key:value).")
 def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
                           user: dict = Depends(require_no_session_token), repo: str = ""):
     """保存场景高级选项（工作分支 + 自定义 key:value）"""

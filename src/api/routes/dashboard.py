@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 # ===== 运维可观察性端点（必须在 /{owner}/{repo} 之前注册，否则被通配路由拦截）=====
 
 
-@router.get("/ops/overview", operation_id="dashboard_ops_overview", summary="Ops overview")
+@router.get("/ops/overview", operation_id="dashboard_ops_overview", summary="Ops overview", description="Real-time ops overview: task queue depth, running count, stuck detection and runtime online status.")
 def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_token)):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
 

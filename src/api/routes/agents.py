@@ -322,7 +322,7 @@ class AgentConfig(BaseModel):
     im_app_secret: str = ""
 
 
-@router.post("/{name}/{owner}/{repo}/clean", operation_id="agents_clean", summary="Clean agent session")
+@router.post("/{name}/{owner}/{repo}/clean", operation_id="agents_clean", summary="Clean agent session", description="Cleans an agent session by clearing runtime_session_id; a new session is created on the next event.")
 def clean_agent_session(name: str, owner: str, repo: str,
                               user: dict = Depends(require_no_session_token)):
     """清理 Agent 会话：将 devops_agent_session.runtime_session_id 置空。

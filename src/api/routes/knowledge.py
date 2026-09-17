@@ -259,7 +259,7 @@ def _check_repo_member(user: dict, repo_key: str):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "权限校验失败"})
 
 
-@router.get("", operation_id="knowledge_list", summary="List knowledge (paged)")
+@router.get("", operation_id="knowledge_list", summary="List knowledge (paged)", description="Unified knowledge list: paged rows from DB only (stats live in a separate endpoint).")
 def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          repo: str = Query("", description="repo_key"),
                          source: str = Query("", description="按来源筛选：system/agent/manual"),
@@ -363,7 +363,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
     }
 
 
-@router.get("/stats", operation_id="knowledge_stats", summary="Knowledge stats")
+@router.get("/stats", operation_id="knowledge_stats", summary="Knowledge stats", description="Knowledge counts grouped by system/agent/manual/unlinked.")
 def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
                      repo: str = Query("")):
     """独立统计接口——返回 system/agent/manual/unlinked 数量。"""
@@ -391,7 +391,7 @@ def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
     }
 
 
-@router.get("/content", operation_id="knowledge_content", summary="Read knowledge content")
+@router.get("/content", operation_id="knowledge_content", summary="Read knowledge content", description="Reads a single knowledge full text from the workspace repo dir or via obs_key from OBS.")
 def read_knowledge_content(repo: str = Query(""),
                                  file: str = Query(""),
                                  obs_key: str = Query(""),
@@ -425,7 +425,7 @@ def read_knowledge_content(repo: str = Query(""),
     return {"repo_key": repo_key, "file": _file, "content": _read_file(repo_key, _file)}
 
 
-@router.get("/context", operation_id="knowledge_context", summary="Build merged injection context")
+@router.get("/context", operation_id="knowledge_context", summary="Build merged injection context", description="Builds merged injection context: project-info summary + shared knowledge + member docs.")
 def knowledge_context(repo: str = Query(""),
                             agent_type: str = "",
                             issue_num: int = 0,
@@ -456,7 +456,7 @@ def knowledge_context(repo: str = Query(""),
     return {"repo_key": repo_key, "context": "\n\n".join(lines)}
 
 
-@router.delete("", operation_id="knowledge_files_delete", summary="Delete member-uploaded doc")
+@router.delete("", operation_id="knowledge_files_delete", summary="Delete member-uploaded doc", description="Deletes a member-uploaded knowledge doc (owner-only).")
 def delete_knowledge(repo: str = Query(""),
                            file: str = Query(""),
                            user: dict = Depends(require_no_session_token)):
@@ -705,7 +705,7 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
 
 # ===== CRUD API（固定路径在 {id} 之前） =====
 
-@router.post("/entry", operation_id="knowledge_entry_create", summary="Create knowledge entry")
+@router.post("/entry", operation_id="knowledge_entry_create", summary="Create knowledge entry", description="Creates a knowledge entry from plain text (source=manual).")
 def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(require_no_session_token)):
     """用户直接输入文本创建知识条目（source=manual）。"""
     if not (body.name or "").strip():
@@ -765,7 +765,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
 
 # ===== {id} 路由 =====
 
-@router.get("/{knowledge_id}", operation_id="knowledge_detail", summary="Knowledge detail")
+@router.get("/{knowledge_id}", operation_id="knowledge_detail", summary="Knowledge detail", description="Returns a single knowledge full text by id.")
 def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """按 id 查询单条知识全文。"""
     row = _get_knowledge_by_id(knowledge_id)
@@ -823,7 +823,7 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
     }
 
 
-@router.put("/{knowledge_id}", operation_id="knowledge_update", summary="Update knowledge")
+@router.put("/{knowledge_id}", operation_id="knowledge_update", summary="Update knowledge", description="Edits knowledge content (only source=manual).")
 def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
                      user: dict = Depends(require_no_session_token)):
     """编辑知识内容，仅 source=manual 可编辑。"""
@@ -872,7 +872,7 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
     return {"ok": True, "message": "知识已更新"}
 
 
-@router.delete("/{knowledge_id}", operation_id="knowledge_delete", summary="Delete knowledge entry")
+@router.delete("/{knowledge_id}", operation_id="knowledge_delete", summary="Delete knowledge entry", description="Deletes a source=manual knowledge entry.")
 def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(require_no_session_token)):
     """删除 source=manual 的知识条目。"""
     row = _get_knowledge_by_id(knowledge_id)
@@ -887,7 +887,7 @@ def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(require_no_se
     return {"ok": True, "message": "知识已删除"}
 
 
-@router.put("/{knowledge_id}/archive", operation_id="knowledge_archive", summary="Archive/unarchive knowledge")
+@router.put("/{knowledge_id}/archive", operation_id="knowledge_archive", summary="Archive/unarchive knowledge", description="Archives/unarchives knowledge (body.archived true/false).")
 def archive_knowledge(knowledge_id: int, body: ArchiveBody,
                       user: dict = Depends(require_no_session_token)):
     """标记/取消归档。body.archived=true 标记归档，false 取消归档。"""
@@ -917,7 +917,7 @@ def archive_knowledge(knowledge_id: int, body: ArchiveBody,
 
 # ===== 关联管理 API =====
 
-@router.get("/{knowledge_id}/refs", operation_id="knowledge_refs_list", summary="List knowledge refs")
+@router.get("/{knowledge_id}/refs", operation_id="knowledge_refs_list", summary="List knowledge refs", description="Lists all refs of a knowledge item.")
 def get_knowledge_refs(knowledge_id: int, user: dict = Depends(require_no_session_token)):
     """获取知识的所有关联关系。"""
     _check_ref_permission(knowledge_id, user)
@@ -933,7 +933,7 @@ def get_knowledge_refs(knowledge_id: int, user: dict = Depends(require_no_sessio
                        for r in rows]}
 
 
-@router.post("/{knowledge_id}/refs", operation_id="knowledge_ref_create", summary="Add knowledge ref")
+@router.post("/{knowledge_id}/refs", operation_id="knowledge_ref_create", summary="Add knowledge ref", description="Adds a scene/agent ref to a knowledge item.")
 def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
                       user: dict = Depends(require_no_session_token)):
     """为知识新增场景/Agent 关联。"""
@@ -993,7 +993,9 @@ def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
     return {"ok": True}
 
 
-@router.post("/{knowledge_id}/refs/batch", operation_id="knowledge_add_refs_batch")
+@router.post("/{knowledge_id}/refs/batch", operation_id="knowledge_add_refs_batch",
+             summary="Add knowledge refs (batch)",
+             description="Batch-adds scene/agent refs to a knowledge item (idempotent, skips existing).")
 def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
                               user: dict = Depends(require_no_session_token)):
     """批量新增场景/Agent 关联（幂等，跳过已存在的）。"""
@@ -1029,7 +1031,7 @@ def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
     return {"ok": True, "added": added}
 
 
-@router.put("/ref/{ref_id}", operation_id="knowledge_ref_update", summary="Update knowledge ref")
+@router.put("/ref/{ref_id}", operation_id="knowledge_ref_update", summary="Update knowledge ref", description="Toggles a ref's enabled switch.")
 def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
                          user: dict = Depends(require_no_session_token)):
     """修改关联的 enabled 开关。"""
@@ -1053,7 +1055,7 @@ def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
     return {"ok": True}
 
 
-@router.delete("/ref/{ref_id}", operation_id="knowledge_ref_delete", summary="Delete knowledge ref")
+@router.delete("/ref/{ref_id}", operation_id="knowledge_ref_delete", summary="Delete knowledge ref", description="Deletes a ref of a knowledge item.")
 def delete_knowledge_ref(ref_id: int, user: dict = Depends(require_no_session_token)):
     """删除知识的某条关联。"""
     from src.session_manager import db, db_lock

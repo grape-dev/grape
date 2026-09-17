@@ -125,7 +125,7 @@ class CreateApiKeyBody(BaseModel):
     name: str = ""
 
 
-@router.post("/api-keys", operation_id="settings_key_create", summary="Create API key")
+@router.post("/api-keys", operation_id="settings_key_create", summary="Create API key", description="Generates a grape_-prefixed API key. Plaintext is returned exactly once; the DB stores the SHA-256 hash.")
 def create_api_key(body: CreateApiKeyBody, user: dict = Depends(require_no_session_token)):
     """生成 grape_ 前缀 API key——明文仅返回一次，DB 存 SHA-256 hash。
 
@@ -153,7 +153,7 @@ def create_api_key(body: CreateApiKeyBody, user: dict = Depends(require_no_sessi
     }
 
 
-@router.get("/api-keys", operation_id="settings_keys", summary="List API keys")
+@router.get("/api-keys", operation_id="settings_keys", summary="List API keys", description="Lists the current user's API keys without plaintext (name + status + timestamps only).")
 def list_api_keys(user: dict = Depends(require_no_session_token)):
     """列出当前用户的所有 API key（不含明文，仅展示名称+状态+时间）。"""
     from src.api.auth_token import list_api_tokens, API_KEY_PREFIX
@@ -171,7 +171,7 @@ def list_api_keys(user: dict = Depends(require_no_session_token)):
     ]}
 
 
-@router.delete("/api-keys/{key_id}", operation_id="settings_key_delete", summary="Revoke API key")
+@router.delete("/api-keys/{key_id}", operation_id="settings_key_delete", summary="Revoke API key", description="Revokes an API key (soft delete, revoked=1); takes effect immediately and keeps audit.")
 def revoke_api_key(key_id: int, user: dict = Depends(require_no_session_token)):
     """吊销 API key——软删除（revoked=1），立即失效，保审计。"""
     from src.api.auth_token import revoke_api_token
@@ -329,7 +329,7 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
 
 # ====== Agent Runtimes ======
 
-@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes")
+@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to.")
 def get_agent_runtimes(user: dict = Depends(require_no_session_token)):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
@@ -585,7 +585,7 @@ def user_db_get_backend_agents_alias():
     return user_db.get_backend_agents()
 
 
-@router.post("/agent-runtimes/refresh", operation_id="settings_agent_runtimes_refresh", summary="Refresh agent runtimes")
+@router.post("/agent-runtimes/refresh", operation_id="settings_agent_runtimes_refresh", summary="Refresh agent runtimes", description="Manually refreshes executors: discovers local engines, child-process probe, and persists to DB.")
 def refresh_agent_runtimes(user: dict = Depends(require_no_session_token)):
     """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）
 
@@ -643,7 +643,7 @@ def _normalize_scope(scope: str) -> str:
     return s
 
 
-@router.post("/runtime-credentials", operation_id="settings_runtime_credential_create", summary="Create runtime credential")
+@router.post("/runtime-credentials", operation_id="settings_runtime_credential_create", summary="Create runtime credential", description="Creates an rta_ credential; plaintext shown once, DB stores sha256. owner = current user (not selectable); scope defaults to personal.")
 def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
     """生成 rta_ token：仅展示一次明文，DB 存 sha256。owner=当前登录用户（不可选），scope 默认个人。"""
     import hashlib, secrets
@@ -683,7 +683,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     return {"token": token, "id": cred_id, "name": name, "scope": scope, "owner": owner, "message": "token 仅展示一次，请立即保存"}
 
 
-@router.put("/runtime-credentials/{cid}", operation_id="settings_runtime_credential_rename", summary="Rename runtime credential")
+@router.put("/runtime-credentials/{cid}", operation_id="settings_runtime_credential_rename", summary="Rename runtime credential", description="Renames a credential (worker name); globally unique, duplicates rejected. owner/scope unchanged.")
 def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
     """改名凭据（worker 名）：全局唯一，重名拒绝。owner/scope 不可改。"""
     from src.session_manager import db, db_lock
@@ -717,7 +717,7 @@ class CredScopeBody(BaseModel):
     repo_key: str = ""
 
 
-@router.put("/runtime-credentials/{cid}/scope", operation_id="settings_runtime_credential_scope", summary="Change credential scope")
+@router.put("/runtime-credentials/{cid}/scope", operation_id="settings_runtime_credential_scope", summary="Change credential scope", description="Switches a credential scope (repo/personal). Owner-only, active-only; global is not allowed.")
 def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(require_no_session_token)):
     """切换凭据 scope（仓库/个人）。仅 owner 可操作，仅 active 凭据可改。不允许设为 global。"""
     from src.session_manager import db, db_lock
@@ -745,7 +745,7 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
     return {"scope": scope, "repo_key": repo_key}
 
 
-@router.get("/runtime-credentials", operation_id="settings_runtime_credentials", summary="List runtime credentials")
+@router.get("/runtime-credentials", operation_id="settings_runtime_credentials", summary="List runtime credentials", description="Lists runtime credentials without token_hash/plaintext.")
 def list_runtime_credentials(user: dict = Depends(require_no_session_token)):
     """凭据列表（不含 token_hash / 明文）"""
     from src.session_manager import db, db_lock
@@ -759,7 +759,7 @@ def list_runtime_credentials(user: dict = Depends(require_no_session_token)):
         ]}
 
 
-@router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential")
+@router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes; runtime_session bindings are reset.")
 def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_token)):
     """吊销并删除 worker 记录：删 runtime_credentials 行 + 级联删其 agent_runtimes 行。
 
@@ -849,7 +849,7 @@ def _sync_agent_tags(rid: int, cursor):
     cursor.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), rid))
 
 
-@router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags")
+@router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags", description="Lists an engine's tags.")
 def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     """获取引擎的标签列表"""
     from src.session_manager import db, db_lock
@@ -871,7 +871,7 @@ def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     ]}
 
 
-@router.post("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tag_create", summary="Add engine tag")
+@router.post("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tag_create", summary="Add engine tag", description="Adds an engine tag (idempotent: updates if present).")
 def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_no_session_token)):
     """为引擎添加标签（幂等：已有则更新）"""
     from src.session_manager import db, db_lock
@@ -914,7 +914,7 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
     return {"message": f"标签 {tag} 已添加", "tag": tag}
 
 
-@router.put("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_update", summary="Update engine tag")
+@router.put("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_update", summary="Update engine tag", description="Updates an engine tag configuration.")
 def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
                             user: dict = Depends(require_no_session_token)):
     """修改引擎标签配置"""
@@ -942,7 +942,7 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
     return {"message": f"标签 {tag} 已更新"}
 
 
-@router.delete("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_delete", summary="Delete engine tag")
+@router.delete("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_delete", summary="Delete engine tag", description="Deletes an engine tag.")
 def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_session_token)):
     """删除引擎标签"""
     from src.session_manager import db, db_lock
@@ -988,7 +988,7 @@ class EventActionFilterUpdateBody(BaseModel):
     enabled: int | None = None
 
 
-@router.get("/event-action-filters", operation_id="settings_event_action_filters", summary="List event action filter rules")
+@router.get("/event-action-filters", operation_id="settings_event_action_filters", summary="List event action filter rules", description="Lists all event action filter rules (hot-reloadable).")
 def list_event_action_filters(user: dict = Depends(require_no_session_token)):
     """查看全部事件 action 过滤规则（可配置热生效）。"""
     from src.session_manager import db, db_lock
@@ -1014,7 +1014,7 @@ def list_event_action_filters(user: dict = Depends(require_no_session_token)):
     ]}
 
 
-@router.post("/event-action-filters", operation_id="settings_event_action_rule_create", summary="Add event action filter rule")
+@router.post("/event-action-filters", operation_id="settings_event_action_rule_create", summary="Add event action filter rule", description="Adds an event action filter rule (idempotent: skips an existing event_type x action combo).")
 def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(require_no_session_token)):
     """新增事件 action 过滤规则（幂等：同 event_type×action 已存在则跳过）。"""
     from src.session_manager import db, db_lock
@@ -1040,7 +1040,7 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(requ
     return {"message": "规则已添加", "event_type": body.event_type, "action": body.action}
 
 
-@router.put("/event-action-filters/{rule_id}", operation_id="settings_event_action_rule_update", summary="Update event action filter rule")
+@router.put("/event-action-filters/{rule_id}", operation_id="settings_event_action_rule_update", summary="Update event action filter rule", description="Updates an event action filter rule (allow/actor/changes/side-effect/priority/enabled; hot within 30s).")
 def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
                              user: dict = Depends(require_no_session_token)):
     """修改事件 action 过滤规则（改 allow/actor/changes/副作用/优先级/启用，热生效 ≤30s）。"""
@@ -1079,7 +1079,7 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
     return {"message": "规则已更新"}
 
 
-@router.delete("/event-action-filters/{rule_id}", operation_id="settings_event_action_rule_delete", summary="Delete event action filter rule")
+@router.delete("/event-action-filters/{rule_id}", operation_id="settings_event_action_rule_delete", summary="Delete event action filter rule", description="Deletes an event action filter rule (no rules = allow all).")
 def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_session_token)):
     """删除事件 action 过滤规则（删除后无规则=放行）。"""
     from src.session_manager import db, db_lock
