@@ -161,9 +161,18 @@
 
 > scope：user_only
 
-> 从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名。可见性：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级。
+> 从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名。可见性：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级。支持分页参数 page/page_size（Issue #185）。
 
-| 出参 | `[{id, name, instance_name, worker_name, worker_ip, scope, owner, status, ...}]` |
+| 出参 | `{runtimes: [...], devices: [...], total: N, page?: P, page_size?: S}` |
+| 返回 | 200 |
+
+### GET /api/settings/runtime-devices — 设备列表（分页）
+
+> scope：user_only
+
+> 按 credential_id 分组返回设备列表及其承载引擎。支持分页参数 page/page_size（Issue #185）。
+
+| 出参 | `{devices: [...], total: N, page: P, page_size: S}` |
 | 返回 | 200 |
 
 ### POST /api/settings/agent-runtimes/refresh — 手动刷新引擎
