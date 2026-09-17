@@ -21,7 +21,8 @@ class TestPipelineSceneIdFallback:
                 result = get_issue_scene("gitcode:test/repo", "#123")
                 assert isinstance(result, tuple)
                 assert len(result) == 2
-                assert result[0] == "default-scene"
+                # dev_scene 已退役，issue 无场景返回空（走智能推荐）
+                assert result[0] == ""
                 assert result[1] == 0
 
     def test_get_issue_scene_returns_empty_tuple(self):
@@ -34,21 +35,20 @@ class TestPipelineSceneIdFallback:
                 assert result == ("", 0)
 
     def test_pipeline_scene_id_fallback_to_repo_default(self):
-        """缺陷1：Issue 未显式设置 scene_id 时，pipeline 返回仓库默认场景"""
+        """缺陷1：Issue 未显式设置 scene_id 时，返回空走智能推荐（dev_scene 已退役）"""
         from src.api.session_store import get_issue_scene
 
-        # 模拟 issue_state 无 scene_id，仓库默认场景为 "dev-scene"
+        # 模拟 issue_state 无 scene_id，仓库有 dev_scene 但不再回退
         with patch("src.api.session_store.get_issue_stage", return_value=None):
             with patch("src.user.db.get_repo_scene", return_value="dev-scene"):
-                # 验证 get_issue_scene 回退逻辑
+                # 验证 get_issue_scene 不再回退到 dev_scene
                 scene_tuple = get_issue_scene("gitcode:test/repo", "#123")
-                assert scene_tuple[0] == "dev-scene"
+                assert scene_tuple[0] == ""
 
-                # 验证 _get_issue_pipeline 中 scene_id 回退（line 214 逻辑）
-                # scene_id = (_st.get("scene_id") if _st else "") or (get_issue_scene(...) or ("",0))[0]
+                # 验证 _get_issue_pipeline 中 scene_id 回退逻辑
                 _st = {"stage": "vod", "scene_id": "", "assignee": "", "parent_issue_id": ""}
                 scene_id = (_st.get("scene_id") if _st else "") or (get_issue_scene("gitcode:test/repo", "#123") or ("", 0))[0]
-                assert scene_id == "dev-scene"
+                assert scene_id == ""
 
 
 class TestPipelineFailedCount:
