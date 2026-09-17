@@ -43,6 +43,7 @@ EXPECTED_PUBLIC = {
     "chat_conversations": ("get", "/api/chat/conversations"),
     "chat_messages": ("get", "/api/chat/messages/{conv_id}"),
     "skills_list": ("get", "/api/skills"),
+    "skills_categories": ("get", "/api/skills/categories"),
     "skills_detail": ("get", "/api/skills/by-id/{skill_id}"),
     "scenes_list": ("get", "/api/scenes"),
     "knowledge_list": ("get", "/api/knowledge"),

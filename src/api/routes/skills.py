@@ -309,14 +309,16 @@ def get_skill_stats(user: dict = Depends(require_no_session_token)):
     return {"stats": get_skill_usage_stats()}
 
 
-@router.get("/categories", operation_id="skills_categories", summary="技能分类列表")
+@router.get("/categories", operation_id="skills_categories", summary="List skill categories",
+            description="Lists skill categories (Issue #179 skill-sync-category).")
 def list_categories(user: dict = Depends(require_no_session_token)):
     """返回技能分类列表（Issue #179）。"""
     from src.user.db import list_skill_categories
     return {"categories": list_skill_categories()}
 
 
-@router.get("/search")
+@router.get("/search", operation_id="skills_search", summary="Search skills",
+            description="Skill lookup for a task description: exact skill_name match first, then keyword match on description/display_name/agent_type.")
 def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
     """技能查找：根据任务描述推荐相关技能。
 
