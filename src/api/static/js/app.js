@@ -777,7 +777,7 @@ function loadAgentTypes() {
     var reason = document.getElementById('betaReason').value.trim();
     if (!accountName) { showToast(isZh ? '请填写用户名' : 'Username is required'); return; }
     if (!email) { showToast(isZh ? '请填写邮箱' : 'Email is required'); return; }
-    if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) { showToast(isZh ? '邮箱格式不正确' : 'Invalid email'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast(isZh ? '邮箱格式不正确' : 'Invalid email'); return; }
     if (!_baIdentity) { showToast(isZh ? '请选择身份' : 'Please select identity'); return; }
     var survey = null;
     if (_baIdentity === 'student') {
