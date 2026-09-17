@@ -32,6 +32,8 @@
   "cancel": "取消",
   "creating": "创建中...",
   "repo_exists": "⚠️ 仓库 {{full_name}} 已存在，请更换仓库名",
+  "repo_auto_renamed": "ℹ️ 仓库名已自动改为 {{name}}（原名已存在）",
+  "repo_auto_rename_exhausted": "⚠️ 仓库名 {{base}} 及其 -2~-21 后缀均已存在，请手动更换仓库名",
   "create_success": "✅ {{msg}}",
   "create_success_default": "创建成功",
   "create_failed": "创建失败: {{msg}}",
