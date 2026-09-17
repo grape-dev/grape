@@ -615,7 +615,7 @@ function loadAgentTypes() {
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baEdu" value="${z?'本科生':'Undergraduate'}"> ${z?'本科生':'Undergraduate'}</label>
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baEdu" value="${z?'硕士研究生':'Master'}"> ${z?'硕士研究生':'Master'}</label>
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baEdu" value="${z?'博士研究生':'PhD'}"> ${z?'博士研究生':'PhD'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baEdu" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baEdu" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
           <div style="margin-top:10px">
@@ -627,7 +627,7 @@ function loadAgentTypes() {
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'电子/自动化':'EE/Automation'}"> ${z?'电子/自动化':'EE'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'其他理工科':'Other STEM'}"> ${z?'其他理工科':'Other STEM'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'经管/商科':'Business'}"> ${z?'经管/商科':'Business'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baMajor" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
         </div>
@@ -650,7 +650,7 @@ function loadAgentTypes() {
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'产品经理':'PM'}"> ${z?'产品经理':'PM'}</label>
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'项目经理':'Project Manager'}"> ${z?'项目经理':'Project Manager'}</label>
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'管理人员':'Manager'}"> ${z?'管理人员':'Manager'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baRole" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
           <div style="margin-top:10px">
@@ -662,7 +662,7 @@ function loadAgentTypes() {
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'企业内部工具':'Internal Tools'}"> ${z?'企业内部工具':'Internal Tools'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'数据分析':'Data Analysis'}"> ${z?'数据分析':'Data Analysis'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'运维 / DevOps':'DevOps'}"> ${z?'运维 / DevOps':'DevOps'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baEntCase" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
         </div>
@@ -676,7 +676,7 @@ function loadAgentTypes() {
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="${z?'内容创作':'Content Creation'}"> ${z?'内容创作':'Content'}</label>
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="SaaS"> SaaS</label>
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="${z?'咨询/服务':'Consulting'}"> ${z?'咨询/服务':'Consulting'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input type="radio" name="baOcc" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
           <div style="margin-top:10px">
@@ -689,7 +689,7 @@ function loadAgentTypes() {
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'内容生产':'Content'}"> ${z?'内容生产':'Content'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'数据处理/分析':'Data'}"> ${z?'数据处理/分析':'Data'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'运营':'Operations'}"> ${z?'运营':'Operations'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOpcCase" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
         </div>
@@ -708,7 +708,7 @@ function loadAgentTypes() {
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'内容创作':'Content'}"> ${z?'内容创作':'Content'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'数据分析':'Data'}"> ${z?'数据分析':'Data'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'自动化':'Automation'}"> ${z?'自动化':'Automation'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'其他':'Other'}"> ${z?'其他':'Other'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input type="checkbox" class="baOtherCase" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
         </div>
@@ -720,6 +720,18 @@ function loadAgentTypes() {
     overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
   }
   var _baIdentity = '';
+  function baToggleOther(el) {
+    var label = el.parentElement;
+    var txt = label.querySelector('.ba-other-text');
+    if (!txt) return;
+    if (el.type === 'radio') {
+      txt.style.display = el.checked && (el.value === '其他' || el.value === 'Other') ? 'inline-block' : 'none';
+      if (el.value !== '其他' && el.value !== 'Other') txt.value = '';
+    } else {
+      txt.style.display = el.checked ? 'inline-block' : 'none';
+      if (!el.checked) txt.value = '';
+    }
+  }
   function baSelectIdentity(type) {
     _baIdentity = type;
     var modal = document.getElementById('betaApplyModal');
@@ -742,7 +754,12 @@ function loadAgentTypes() {
   }
   function _baChecks(cls) {
     var vals = [];
-    document.querySelectorAll('.' + cls + ':checked').forEach(function(cb) { vals.push(cb.value); });
+    document.querySelectorAll('.' + cls + ':checked').forEach(function(cb) {
+      if (cb.value === '其他' || cb.value === 'Other') {
+        var t = cb.parentElement.querySelector('.ba-other-text');
+        vals.push(t && t.value.trim() ? t.value.trim() : cb.value);
+      } else { vals.push(cb.value); }
+    });
     return vals;
   }
   function submitBetaApply() {
@@ -759,14 +776,17 @@ function loadAgentTypes() {
     var survey = null;
     if (_baIdentity === 'student') {
       var edu = _baRadio('baEdu'), major = _baChecks('baMajor');
+      if (edu === '其他' || edu === 'Other') { var _t = document.querySelector('input[name="baEdu"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); edu = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!edu) { showToast(isZh ? '请输入学历' : 'Enter education'); return; } }
       if (!edu || major.length === 0) { showToast(isZh ? '请完成学历和专业方向' : 'Complete education & major'); return; }
       survey = { identity: 'student', education: edu, major: major };
     } else if (_baIdentity === 'enterprise') {
       var size = _baRadio('baSize'), role = _baRadio('baRole'), cases = _baChecks('baEntCase');
+      if (role === '其他' || role === 'Other') { var _t = document.querySelector('input[name="baRole"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); role = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!role) { showToast(isZh ? '请输入角色' : 'Enter role'); return; } }
       if (!size || !role || cases.length === 0) { showToast(isZh ? '请完成企业信息' : 'Complete company info'); return; }
       survey = { identity: 'enterprise', companySize: size, role: role, useCases: cases };
     } else if (_baIdentity === 'opc') {
       var occ = _baRadio('baOcc'), cases2 = _baChecks('baOpcCase');
+      if (occ === '其他' || occ === 'Other') { var _t = document.querySelector('input[name="baOcc"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); occ = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!occ) { showToast(isZh ? '请输入职业' : 'Enter occupation'); return; } }
       if (!occ || cases2.length === 0) { showToast(isZh ? '请完成OPC信息' : 'Complete OPC info'); return; }
       survey = { identity: 'opc', occupation: occ, useCases: cases2 };
     } else if (_baIdentity === 'other') {
@@ -1004,7 +1024,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
+  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
