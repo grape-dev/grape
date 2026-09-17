@@ -752,7 +752,7 @@ function loadAgentTypes() {
     });
     var key = type.charAt(0).toUpperCase() + type.slice(1);
     var branch = document.getElementById('baBranch' + key);
-    if (branch) { branch.style.maxHeight = '600px'; branch.style.opacity = '1'; }
+    if (branch) { branch.style.maxHeight = '1000px'; branch.style.opacity = '1'; }
   }
   function _baRadio(name) {
     var c = document.querySelector('input[name="' + name + '"]:checked');
