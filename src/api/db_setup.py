@@ -941,7 +941,7 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_app_id ON bot_seen_messages(app_id)",
         "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_seen_at ON bot_seen_messages(seen_at)",
         "CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status)",
-        "CREATE INDEX IF NOT EXISTS idx_tasks_repo_issue ON tasks(repo_key, issue_number)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_repo_issue ON issue(repo_key, issue_number)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_runtime ON agent_tasks(runtime_id)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(agent_session_id)",
@@ -978,6 +978,27 @@ def _create_indexes():
                 db.commit()
         except Exception as e:
             log.warning(f"Create index failed: {e}")
+
+    # idx_tasks_repo_issue 升级为唯一索引（防止 issue 表重复行）
+    # 已有同名普通索引时，先 DROP 再 CREATE UNIQUE
+    try:
+        with db_lock:
+            c = db.cursor()
+            _need_upgrade = False
+            try:
+                c.execute("SELECT NON_UNIQUE FROM information_schema.statistics "
+                          "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' AND INDEX_NAME='idx_tasks_repo_issue' LIMIT 1")
+                row = c.fetchone()
+                _need_upgrade = bool(row and row[0] == 1)
+            except Exception:
+                pass  # SQLite 无 information_schema，跳过升级检查
+            if _need_upgrade:
+                c.execute("DROP INDEX idx_tasks_repo_issue ON issue")
+                c.execute("CREATE UNIQUE INDEX idx_tasks_repo_issue ON issue (repo_key, issue_number)")
+                db.commit()
+                log.info("Upgraded idx_tasks_repo_issue to UNIQUE")
+    except Exception as e:
+        log.warning(f"Upgrade idx_tasks_repo_issue to UNIQUE failed: {e}")
 
 
 def _seed_from_json():

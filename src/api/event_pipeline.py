@@ -2512,27 +2512,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             except Exception as _e:
                 log.warning(f"Exec agent: sync to task conversation failed: {_e}")
 
-    # 执行完成 → 同步 tasks 表状态（agent 完成后 tasks.status 自动更新）
-    if new_status == "completed" and issue_id:
-        _issue_num = _issue_num_from(issue_id)
-        if _issue_num:
-            try:
-                from src.session_manager import db as _db, db_lock as _dl
-                from src.repo_key import to_repo_key as _to_rk
-                _rk = _to_rk(repo_key)
-                with _dl:
-                    _c = _db.cursor()
-                    _c.execute(
-                        "UPDATE issue SET status='completed', completed_reason='agent_completed', "
-                        "completed_at=datetime('now') "
-                        "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','cancelled')",
-                        (_rk, _issue_num))
-                    _n = _c.rowcount
-                    if _n:
-                        log.info(f"Exec agent: tasks table synced -> completed (issue #{_issue_num}, {_n} row(s))")
-            except Exception as _e:
-                log.warning(f"Exec agent: sync tasks table status failed: {_e}")
-
     # 执行完成 → 从 GitCode Issue 拉取 agent 发的评论，同步到任务会话
     # （agent 通过技能 curl 直接在 Issue 上发的澄清追问等评论，上面 result_text 同步的是
     #   结构化输出摘要，不含 Issue 上的实际评论内容；此处补拉 Issue 评论去重写入会话）
