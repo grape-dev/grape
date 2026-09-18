@@ -779,3 +779,18 @@ async saveCreate() {
 | F16 | 前端 | saveCreate 合并为一次 API 调用 | body 带 scene_ids / agent_types |
 | F17 | 前端 | 删除 createdKid 防重复逻辑 | 事务保证回滚，非超时失败留创建页可安全重试 |
 | I2 | i18n | 删除 create_ok_bind_failed key | 事务保证不会出现"条目已创建但绑定失败" |
+
+## 9. 后续优化项（不属于本次 Issue 范围）
+
+### 9.1 DB 连接池优化
+
+**现状**：整个系统 201 处模块统一使用 `from src.session_manager import db, db_lock`，SQLite 和 MySQL 模式都是单连接 + 应用层 threading.Lock 串行化。没有连接池。
+
+- SQLite 模式：单连接合理（SQLite 写操作锁文件，多连接写会 `database is locked`）
+- MySQL 模式：MySQLCompatDB 用 pymysql 单连接 + db_lock 串行化，所有 DB 操作（含读）排队执行。MySQL 本身支持多连接并发，但当前架构没有利用
+
+**问题**：MySQL 模式下单连接 + 全局锁成为并发瓶颈。高并发场景下所有 DB 操作串行排队，吞吐量受限。
+
+**建议**：MySQL 模式下引入连接池（如 dbutils.PooledDB 或 PyMySQL + SQLAlchemy QueuePool），保留 db_lock 用于写操作串行化（防止同一行竞争），读操作不加锁走连接池并发执行。SQLite 模式保持单连接不变。
+
+**前提条件**：需要梳理 201 处 `db, db_lock` 使用点，区分纯读操作和写操作，逐步迁移。工作量较大，建议独立 Issue 推进。
