@@ -468,12 +468,15 @@ function renderKnowledge() {
         event.target.value = '';
       },
       scrollSceneTrack(delta) {
-        const el = this.$refs.sceneTrack;
+        const ref = this.$refs.sceneTrack;
+        if (!ref) return;
+        const el = ref.$el || ref;
         if (el) el.scrollBy({ left: delta, behavior: 'smooth' });
       },
       updateSceneScrollBtns() {
-        const el = this.$refs.sceneTrack;
-        if (!el) return;
+        const ref = this.$refs.sceneTrack;
+        if (!ref) return;
+        const el = ref.$el || ref;
         this.sceneScrollLeft = el.scrollLeft > 5;
         this.sceneScrollRight = el.scrollLeft + el.clientWidth < el.scrollWidth - 5;
       },
