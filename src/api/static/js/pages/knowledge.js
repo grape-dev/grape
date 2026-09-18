@@ -502,6 +502,8 @@ function renderKnowledge() {
         } catch (e) {
           if (e.name === 'AbortError' && !e.silent) {
             app.showToast(this.t('save_timeout'));
+            await this._refreshDetailFull();
+            this.editMode = false;
           } else if (e.name === 'AbortError' && e.silent) {
             // 导航/切 tab 导致的取消，静默
           } else {
