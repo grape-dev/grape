@@ -495,3 +495,188 @@ class TestOrphanRefCleanup:
             db.commit()
             after = c.execute("SELECT COUNT(*) FROM scene_knowledge_ref WHERE knowledge_id < 0").fetchone()[0]
         assert after == 0
+
+
+class TestDeriveKnowledgeName:
+    """derive_knowledge_name 各 scope 推导规则"""
+
+    def test_baseline_project_graph(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("baseline", file_path="gitcode/test/repo/project-info/project-graph.md") == "项目结构图谱"
+
+    def test_baseline_project_capabilities(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("baseline", file_path="gitcode/test/repo/project-info/project-capabilities.md") == "项目能力清单"
+
+    def test_baseline_metadata(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("baseline", file_path="gitcode/test/repo/project-info/.metadata.json") == "项目元数据"
+
+    def test_baseline_unknown_file(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("baseline", file_path="gitcode/test/repo/project-info/unknown.md") == "项目基线分析"
+
+    def test_baseline_empty_file_path(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("baseline", file_path="") == "项目基线分析"
+
+    def test_baseline_from_obs_key(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("baseline", file_path="", ) == "项目基线分析"
+
+    def test_member_normal_filename(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("member", file_path="gitcode/test/repo/project-info/member/user/blog-config.md") == "blog-config"
+
+    def test_member_system_filename(self):
+        from src.api.knowledge import derive_knowledge_name
+        result = derive_knowledge_name("member", file_path="gitcode/test/repo/project-info/member/user/entry_17891041_abc.md")
+        assert result == "entry_17891041_abc"
+
+    def test_member_empty_file_path(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("member", file_path="") == "未命名知识"
+
+    def test_project_with_agent(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("project", agent_type="vod") == "项目知识 - VOD"
+        assert derive_knowledge_name("project", agent_type="coding") == "项目知识 - Coding"
+
+    def test_project_no_agent(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("project") == "项目知识"
+
+    def test_issue(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("issue", issue_num=42) == "Issue #42 知识"
+
+    def test_issue_agent(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("issue_agent", agent_type="coding", issue_num=42) == "Issue #42 - Coding 知识"
+
+    def test_issue_agent_unknown_agent(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("issue_agent", agent_type="custom", issue_num=5) == "Issue #5 - custom 知识"
+
+    def test_unknown_scope(self):
+        from src.api.knowledge import derive_knowledge_name
+        assert derive_knowledge_name("unknown") == "未命名知识"
+
+
+class TestLocalfs:
+    """localfs 原子写入 + 路径安全"""
+
+    def test_write_text_roundtrip(self, tmp_path):
+        from src.localfs import write_text, read_text
+        p = str(tmp_path / "test.md")
+        write_text(p, "hello world")
+        assert read_text(p) == "hello world"
+
+    def test_write_text_overwrite(self, tmp_path):
+        from src.localfs import write_text, read_text
+        p = str(tmp_path / "test.md")
+        write_text(p, "old content")
+        write_text(p, "new content")
+        assert read_text(p) == "new content"
+
+    def test_write_text_creates_dir(self, tmp_path):
+        from src.localfs import write_text, read_text
+        p = str(tmp_path / "subdir" / "nested" / "test.md")
+        write_text(p, "nested")
+        assert read_text(p) == "nested"
+
+    def test_write_bytes_roundtrip(self, tmp_path):
+        from src.localfs import write_bytes, read_bytes
+        p = str(tmp_path / "test.bin")
+        write_bytes(p, b"\x00\x01\x02")
+        assert read_bytes(p) == b"\x00\x01\x02"
+
+    def test_read_text_missing_file(self, tmp_path):
+        from src.localfs import read_text
+        assert read_text(str(tmp_path / "nonexistent.md")) is None
+
+    def test_read_bytes_missing_file(self, tmp_path):
+        from src.localfs import read_bytes
+        assert read_bytes(str(tmp_path / "nonexistent.bin")) is None
+
+    def test_append_text(self, tmp_path):
+        from src.localfs import append_text, read_text
+        p = str(tmp_path / "log.md")
+        append_text(p, "line1\n")
+        append_text(p, "line2\n")
+        assert read_text(p) == "line1\nline2\n"
+
+    def test_safe_join_valid(self):
+        from src.localfs import safe_join
+        p = safe_join("gitcode:test/repo", "project-info", "test.md")
+        assert p.endswith("test/repo/project-info/test.md")
+
+    def test_safe_workspace_path_valid(self):
+        from src.localfs import safe_workspace_path
+        p = safe_workspace_path("gitcode/test/repo/project-info/test.md")
+        assert p.endswith("gitcode/test/repo/project-info/test.md")
+
+    def test_safe_workspace_path_traversal_blocked(self):
+        from src.localfs import safe_workspace_path
+        import pytest
+        with pytest.raises(ValueError, match="traversal"):
+            safe_workspace_path("../../etc/passwd")
+
+
+class TestRejectedDedupNameCondition:
+    """rejected 查重加 name 条件——同 repo 不同 name 的 baseline 不互斥"""
+
+    def setup_method(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key='test-rejected-1'")
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id IN (SELECT id FROM agent_shared_knowledge WHERE repo_key='test-rejected-1')")
+            db.commit()
+
+    def teardown_method(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key='test-rejected-1'")
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id IN (SELECT id FROM agent_shared_knowledge WHERE repo_key='test-rejected-1')")
+            db.commit()
+
+    def test_different_name_not_blocked(self):
+        """同 repo 同 scope 不同 name 的两条记录都能 INSERT"""
+        with db_lock:
+            c = db.cursor()
+            # 第一条：name='项目结构图谱'
+            c.execute(
+                "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, status, name, source) "
+                "VALUES ('baseline', 'test-rejected-1', '', 0, 'test/project-graph.md', 'rejected', '项目结构图谱', 'system')")
+            db.commit()
+            # 模拟 rejected 查重：加 name 条件
+            existing = c.execute(
+                "SELECT id FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND name=?",
+                ("test-rejected-1", "baseline", "", 0, "项目能力清单")
+            ).fetchone()
+            assert existing is None, "不同 name 不应匹配到已有记录"
+            # 第二条：name='项目能力清单' 应该能 INSERT
+            c.execute(
+                "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, status, name, source) "
+                "VALUES ('baseline', 'test-rejected-1', '', 0, 'test/project-capabilities.md', 'rejected', '项目能力清单', 'system')")
+            db.commit()
+            count = c.execute(
+                "SELECT COUNT(*) FROM agent_shared_knowledge WHERE repo_key='test-rejected-1' AND scope='baseline'"
+            ).fetchone()[0]
+        assert count == 2
+
+    def test_same_name_blocked(self):
+        """同 repo 同 scope 同 name 的第二条被跳过"""
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, status, name, source) "
+                "VALUES ('baseline', 'test-rejected-1', '', 0, 'test/project-graph.md', 'rejected', '项目结构图谱', 'system')")
+            db.commit()
+            existing = c.execute(
+                "SELECT id FROM agent_shared_knowledge "
+                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND name=?",
+                ("test-rejected-1", "baseline", "", 0, "项目结构图谱")
+            ).fetchone()
+            assert existing is not None, "同 name 应匹配到已有记录"
