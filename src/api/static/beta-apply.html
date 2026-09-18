@@ -238,6 +238,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 <script>
 var _identity = '';
 
+// 从URL参数自动填充平台和用户名
+(function() {
+  var params = new URLSearchParams(window.location.search);
+  var platform = params.get('platform');
+  var username = params.get('username');
+  if (platform) {
+    var sel = document.getElementById('fAccountType');
+    if (sel) sel.value = platform;
+  }
+  if (username) {
+    var inp = document.getElementById('fAccountName');
+    if (inp) inp.value = username;
+  }
+})();
+
 function toggleOtherInput(el) {
   if (el.type === 'radio') {
     // 隐藏同组所有other-text
@@ -303,7 +318,7 @@ function buildSurveyData() {
     if (major === '其他') { var oi = document.querySelector('input[name="major"]:checked'); if (oi) { var t = oi.parentElement.querySelector('.other-text'); major = t && t.value.trim() ? t.value.trim() : ''; } if (!major) return null; }
     return { identity: 'student', education: edu, major: major };
   } else if (_identity === 'enterprise') {
-    
+    var size = getRadioValue('companySize');
     var role = getRadioValue('role');
     if (role === '其他') { var oi = document.querySelector('input[name="role"]:checked'); if (oi) { var t = oi.parentElement.querySelector('.other-text'); role = t && t.value.trim() ? t.value.trim() : ''; } if (!role) return null; }
     var cases = getCheckboxValues(document.querySelector('[data-name="entUseCases"]'));
