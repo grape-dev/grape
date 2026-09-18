@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.knowledge import read_entry_content
 from src.config import log, WORKSPACE_DIR
+from src.localfs import write_text as _atomic_write
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -301,17 +302,14 @@ def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
     """更新知识内容：写文件 + OBS + DB content_hash + updated_at。"""
     repo_key = row["repo_key"]
     file_path = row["file_path"]
-    from src.config import WORKSPACE_DIR
     from src.repo_key import workspace_repo_dir
-    full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
-    if not os.path.isdir(os.path.dirname(full)):
-        # 兼容旧格式 file_path（不含 provider/owner/repo 前缀）
+    from src.localfs import safe_workspace_path
+    try:
+        full = safe_workspace_path(file_path)
+    except ValueError:
+        # 旧格式 file_path 不含 provider/owner/repo 前缀
         full = os.path.normpath(os.path.join(workspace_repo_dir(repo_key), file_path))
-    if full != WORKSPACE_DIR and not full.startswith(WORKSPACE_DIR + os.sep):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
-    os.makedirs(os.path.dirname(full), exist_ok=True)
-    with open(full, "w", encoding="utf-8") as f:
-        f.write(new_content)
+    _atomic_write(full, new_content)
 
     obs_key = row.get("obs_key", "")
     content_hash = ""
@@ -352,11 +350,12 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
 
     file_path = row.get("file_path", "")
     if file_path:
-        from src.config import WORKSPACE_DIR
         from src.repo_key import workspace_repo_dir
-        full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
-        if not os.path.isfile(full):
-            # 兼容旧格式 file_path
+        from src.localfs import safe_workspace_path
+        try:
+            full = safe_workspace_path(file_path)
+        except ValueError:
+            # 旧格式 file_path 不含 provider/owner/repo 前缀
             full = os.path.normpath(os.path.join(workspace_repo_dir(row.get("repo_key", "")), file_path))
         if os.path.isfile(full):
             try:
@@ -395,10 +394,8 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
     username = str(user.get("username") or user.get("id") or "user")
     filename = f"entry_{int(time.time())}_{uuid.uuid4().hex[:6]}.md"
     member_dir = os.path.join(base, "project-info", "member", username)
-    os.makedirs(member_dir, exist_ok=True)
     file_path = os.path.join(member_dir, filename)
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(body.content.strip())
+    _atomic_write(file_path, body.content.strip())
 
     rel = os.path.relpath(file_path, WORKSPACE_DIR)
     content_hash = hashlib.sha256(body.content.encode("utf-8")).hexdigest()

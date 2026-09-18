@@ -10,7 +10,8 @@
 """
 import json, os, shutil, subprocess, hashlib
 from src.config import log, WORKSPACE_DIR
-from src.repo_key import split_owner_repo, BASELINE_NAME_MAP, knowledge_obs_prefix
+from src.localfs import write_text as _atomic_write
+from src.repo_key import split_owner_repo, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, knowledge_obs_prefix
 
 _ANALYSIS_SUBDIR = "codegraph-repo"
 _GRAPH_FILE = "project-graph.md"
@@ -95,9 +96,7 @@ def _read_meta(repo_key: str) -> dict:
 def _write_meta(repo_key: str, meta: dict):
     try:
         p = os.path.join(_pi_dir(repo_key), _META_FILE)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
         _write_to_obs(repo_key, _META_FILE, json.dumps(meta, ensure_ascii=False))
     except Exception as e:
         log.warning(f"project-info meta write failed {repo_key}: {e}")
@@ -106,9 +105,7 @@ def _write_meta(repo_key: str, meta: dict):
 def _write_file(repo_key: str, name: str, content: str):
     try:
         p = os.path.join(_pi_dir(repo_key), name)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(content)
+        _atomic_write(p, content)
         _write_to_obs(repo_key, name, content)
     except Exception as e:
         log.warning(f"project-info write failed {repo_key}/{name}: {e}")
@@ -126,7 +123,7 @@ def _write_to_obs(repo_key: str, name: str, content: str):
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
         file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)
         # Issue #95/#190：name 映射为中文展示名（统一常量）
-        display_name = BASELINE_NAME_MAP.get(name, name)
+        display_name = BASELINE_NAME_MAP.get(name, BASELINE_NAME_FALLBACK)
         storage_key = ""
         if storage:
             # Issue #190：OBS key 含 provider 前缀，避免跨 provider 同名仓库冲突
@@ -145,22 +142,24 @@ def _write_to_obs(repo_key: str, name: str, content: str):
             if existing:
                 # 已存在 → UPDATE（保留原 id，ref 不失效）
                 kid = existing[0]
+                _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
                 c.execute(
                     "UPDATE agent_shared_knowledge SET "
                     "status='accepted', obs_key=?, content_hash=?, created_by='system', "
                     "source='system', name=?, description=? "
                     "WHERE id=?",
                     (storage_key, content_hash, display_name,
-                     "codegraph 自动生成的项目基线知识", kid)
+                     _desc, kid)
                 )
             else:
                 # 不存在 → INSERT
+                _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
                 c.execute(
                     "INSERT INTO agent_shared_knowledge "
                     "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, name, description) "
                     "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'system', 'system', ?, ?)",
                     (repo_key, file_path, storage_key, content_hash, display_name,
-                     "codegraph 自动生成的项目基线知识")
+                     _desc)
                 )
                 kid = c.lastrowid
             db.commit()
@@ -338,9 +337,7 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         meta["note"] = "build aborted: distributed lock lost"
         try:
             p = os.path.join(_pi_dir(repo_key), _META_FILE)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+            _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
         except Exception:
             pass
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
@@ -352,9 +349,7 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         meta["note"] = "build aborted: distributed lock lost"
         try:
             p = os.path.join(_pi_dir(repo_key), _META_FILE)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+            _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
         except Exception:
             pass
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
