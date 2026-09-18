@@ -1545,16 +1545,14 @@ def _migrate_knowledge_dedup_and_ref():
         ).fetchall()
         _updates = []
         for _rid, _scope, _source, _agent_type, _issue_num, _cur_name, _fp, _obs, _cur_desc in _rows:
+            # source="manual" 是用户上传的，name 和 description 都由用户填写，不回填
+            if _source == "manual":
+                continue
             _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
             _needs_name = (_cur_name != _new_name)
-            # source="manual" 是用户上传的，description 由用户填写，不回填
-            if _source == "manual":
-                _needs_desc = False
-                _final_desc = _cur_desc or ""
-            else:
-                _new_desc = derive_knowledge_description(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
-                _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC) and bool(_new_desc)
-                _final_desc = _new_desc if _needs_desc else (_cur_desc or "")
+            _new_desc = derive_knowledge_description(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+            _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC) and bool(_new_desc)
+            _final_desc = _new_desc if _needs_desc else (_cur_desc or "")
             if _needs_name or _needs_desc:
                 _updates.append((_new_name, _final_desc, _rid))
         if _updates:
