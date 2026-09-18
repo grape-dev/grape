@@ -493,8 +493,9 @@ function renderKnowledge() {
             name: this.editForm.name.trim()
           }, 15000);
           app.showToast(this.t('knowledge_updated'));
-          // Issue #199: 保存成功后返回列表
-          this.backToList();
+          // Issue #199: 保存成功后刷新详情页，退出编辑模式
+          await this._refreshDetailFull();
+          this.editMode = false;
         } catch (e) {
           if (e.name === 'AbortError' && !e.silent) {
             app.showToast(this.t('save_timeout'));
