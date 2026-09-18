@@ -10,7 +10,7 @@
 """
 import json, os, shutil, subprocess, hashlib
 from src.config import log, WORKSPACE_DIR
-from src.repo_key import split_owner_repo
+from src.repo_key import split_owner_repo, BASELINE_NAME_MAP
 
 _ANALYSIS_SUBDIR = "codegraph-repo"
 _GRAPH_FILE = "project-graph.md"
@@ -126,13 +126,8 @@ def _write_to_obs(repo_key: str, name: str, content: str):
         storage = get_storage()
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
         file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)
-        # Issue #95：name 映射为中文展示名
-        _name_map = {
-            _GRAPH_FILE: "项目结构图谱",
-            _CAP_FILE: "项目能力清单",
-            _META_FILE: "项目元数据",
-        }
-        display_name = _name_map.get(name, name)
+        # Issue #95/#190：name 映射为中文展示名（统一常量）
+        display_name = BASELINE_NAME_MAP.get(name, name)
         storage_key = ""
         if storage:
             # Issue #190：OBS key 含 provider 前缀，避免跨 provider 同名仓库冲突

@@ -20,6 +20,7 @@ import threading
 from datetime import datetime, timedelta
 from src.config import log, WORKSPACE_DIR
 from src.lock import acquire_lock, release_lock, renew_lock
+from src.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP
 from src.session_manager import db, db_lock
 
 
@@ -136,7 +137,6 @@ def knowledge_storage_key(repo_key: str, scope: str, agent_type: str = "", issue
     - scope=issue       → knowledge/{provider}/{owner}/{repo}/issues/{n}/knowledge.md
     - scope=issue_agent → knowledge/{provider}/{owner}/{repo}/issues/{n}/{agent}/knowledge.md
     """
-    from src.repo_key import knowledge_obs_prefix
     prefix = knowledge_obs_prefix(repo_key)
     if scope == "project":
         return f"{prefix}/project/knowledge.md"
@@ -713,7 +713,10 @@ def cleanup_archived_knowledge():
             if file_path:
                 try:
                     from src.config import WORKSPACE_DIR
+                    from src.repo_key import workspace_repo_dir
                     full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
+                    if not os.path.isfile(full):
+                        full = os.path.normpath(os.path.join(workspace_repo_dir(repo_key), file_path))
                     if os.path.isfile(full):
                         os.remove(full)
                 except Exception:
@@ -942,7 +945,6 @@ async def knowledge_sync_loop():
                             content = f.read()
                         if content:
                             # Issue #190：按 scope 生成 storage_key（含 provider 前缀）
-                            from src.repo_key import knowledge_obs_prefix
                             _obs_prefix = knowledge_obs_prefix(repo_key)
                             if scope == "member":
                                 # Issue #190：从 file_path 提取 member/ 或 agent/ 后的相对路径
@@ -1090,26 +1092,17 @@ def _sync_baseline_files():
                         with db_lock:
                             c = db.cursor()
                             # Issue #95：UPDATE 补 source/name/description（COALESCE 空值不覆盖）
-                            _bn = {"project-graph.md": "项目结构图谱", "project-capabilities.md": "项目能力清单", ".metadata.json": "项目元数据"}.get(fname, fname)
                             c.execute(
                                 "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
                                 "source=COALESCE(NULLIF(source, ''), 'system'), "
                                 "name=COALESCE(NULLIF(name, ''), ?) "
                                 "WHERE id=?",
-                                (storage_key, content_hash, _bn, row[0])
+                                (storage_key, content_hash, _baseline_name, row[0])
                             )
                             db.commit()
                     else:  # DB 无记录 → INSERT
-                        _baseline_desc = {
-                            "project-graph.md": "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）",
-                            "project-capabilities.md": "VOD 基线分析：项目能力清单（功能特性/支持能力）",
-                            ".metadata.json": "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）",
-                        }.get(fname, "VOD 基线分析自动生成")
-                        _baseline_name = {
-                            "project-graph.md": "项目结构图谱",
-                            "project-capabilities.md": "项目能力清单",
-                            ".metadata.json": "项目元数据",
-                        }.get(fname, "项目基线分析")
+                        _baseline_desc = BASELINE_DESC_MAP.get(fname, "VOD 基线分析自动生成")
+                        _baseline_name = BASELINE_NAME_MAP.get(fname, "项目基线分析")
                         with db_lock:
                             c = db.cursor()
                             c.execute(
