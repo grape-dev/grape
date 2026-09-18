@@ -134,14 +134,28 @@ member：无去重逻辑，每次 INSERT，目前无重复。但 obs_key 有路�
 | read_entry_content（并发读取） | 无锁（只读） | 安全：迁移批量 commit 前旧 obs_key 仍有效（旧 OBS 对象在 commit 后才删除）；file_path 旧格式走兼容逻辑兜底 |
 | _knowledge_cache（内存缓存） | `_knowledge_cache_lock` | 安全：缓存 key 是 obs_key，迁移更新 obs_key 后旧缓存 key 自然 miss → 重新从 OBS 拉取 |
 
-### 3.2.1 迁移期间 obs_key 不一致窗口
+### 3.2.1 迁移期间不需要 503 的时序分析
 
-迁移 Step 2 批量 UPDATE obs_key（单次 commit），存在一个短暂窗口：commit 前所有记录的 DB obs_key 仍为旧值。此期间：
+迁移期间应用正常接流量，不返回 503。理由是每一步的操作时序都保证"并发读请求读到的数据始终有效"：
 
-- _sync_baseline_files 查到记录（ORDER BY id DESC），obs_key 仍为旧格式 → 检测到非新格式 → 走写入逻辑重新写 OBS + UPDATE。迁移 commit 后 obs_key 更新为新格式，下次 sync 跳过。
-- read_entry_content 用 DB 中的旧 obs_key 读取 OBS → 旧 OBS 对象尚未删除（删除在 commit 后）→ 读取成功。
-- 批量 commit 将窗口缩短为单次事务（毫秒级）。
-- 旧 OBS 对象在 DB commit 成功后删除，此时 DB 已指向新 key，旧 key 删除不影响读取。
+**步骤 1（baseline 去重 DELETE）**：
+- DELETE 在 `db_lock` 内事务执行。并发读操作看到的是 commit 前的完整数据（SQLite/MySQL 隔离级别保证）。
+- commit 后重复行被删除，但保留的行（MAX id）数据完整，读请求自然只读到保留行。
+
+**步骤 2（obs_key UPDATE + OBS 对象迁移）**：
+- 时序：`save_bytes(new_key)` → `executemany UPDATE DB` → `commit` → `delete_object(old_key)`
+- commit 前：DB 里 obs_key 仍是旧值，旧 OBS 对象还在 → 读请求走旧 key 读到旧对象 → 安全
+- commit 后、删旧对象前：DB 里 obs_key 已是新值，新 OBS 对象已写入 → 读请求走新 key 读到新对象 → 安全
+- 删旧对象后：DB 已指向新 key，旧 key 被删 → 读请求走新 key → 安全
+- 缓存：`_knowledge_cache` key 是 obs_key。commit 后旧缓存 key 自然 miss，重新从 DB 拿到新 obs_key → 安全
+
+**步骤 3（file_path UPDATE）**：
+- 纯 DB UPDATE，在 `db_lock` 内批量 commit。
+- `read_entry_content` 本地兜底用 `workspace_repo_dir(repo_key)` 构建完整路径，迁移前后的 file_path 都能正确解析。
+- commit 前：file_path 是旧格式 → `os.path.join(WORKSPACE_DIR, file_path)` 如果命中则直接读；如果没命中走 `workspace_repo_dir` 兜底 → 安全
+- commit 后：file_path 是新格式 → 直接 `os.path.join(WORKSPACE_DIR, file_path)` 命中 → 安全
+
+结论：不需要 503。迁移期间所有读路径都能读到有效数据。
 
 ### 3.3 与 Issue #67 去重的关系
 
