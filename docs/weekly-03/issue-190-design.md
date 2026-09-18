@@ -248,7 +248,7 @@ if file_path:
 
 #### 幂等控制 + 失败重试
 
-通过 meta 表 `issue190_migrate_done` 标记控制。**仅在所有步骤成功时才写标记**——每个步骤用 `_stepN_ok` 布尔值追踪成功/失败，三个步骤都成功才 `set_meta_value("issue190_migrate_done", "1")`，否则下次启动重试。
+通过 meta 表 `knowledge_migrate_done` 标记控制。**仅在所有步骤成功时才写标记**——每个步骤用 `_stepN_ok` 布尔值追踪成功/失败，三个步骤都成功才 `set_meta_value("knowledge_migrate_done", "1")`，否则下次启动重试。
 
 每个步骤自身幂等：
 

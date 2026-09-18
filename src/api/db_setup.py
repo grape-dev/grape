@@ -1716,7 +1716,7 @@ def _migrate_knowledge_issue67():
 def _migrate_issue190():
     """Issue #190：baseline 去重 + obs_key 归一化 + file_path 归一化。
 
-    幂等：通过 meta 表 issue190_migrate_done 标记控制，已执行则跳过。
+    幂等：通过 meta 表 knowledge_migrate_done 标记控制，已执行则跳过。
     异步执行：由 main.py lifespan() 内 daemon thread 调用，不阻塞启动。
     分布式锁：acquire_lock 防多实例并发执行迁移。
     最终一致性：迁移期间旧格式数据仍可用，迁移完成后切换到新格式。
@@ -1731,7 +1731,7 @@ def _migrate_issue190():
     _is_mysql = get_db_backend() == "mysql"
 
     # 幂等检查
-    if get_meta_value("issue190_migrate_done") == "1":
+    if get_meta_value("knowledge_migrate_done") == "1":
         log.info("[Issue #190] migration already done, skip")
         return
 
@@ -1892,7 +1892,7 @@ def _migrate_issue190():
 
     # ===== 标记完成（仅在所有步骤成功时）=====
     if _step1_ok and _step2_ok and _step3_ok:
-        set_meta_value("issue190_migrate_done", "1")
+        set_meta_value("knowledge_migrate_done", "1")
         log.info("[Issue #190] migration done")
     else:
         log.warning("[Issue #190] migration incomplete, will retry on next startup")
