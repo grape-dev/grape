@@ -475,8 +475,8 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
         c = db.cursor()
         existing = c.execute(
             "SELECT id FROM agent_shared_knowledge "
-            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND archived=0",
-            (repo_key, scope, agent_type, issue_num)
+            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND name=? AND archived=0",
+            (repo_key, scope, agent_type, issue_num, name)
         ).fetchone()
         if existing:
             c.execute(
