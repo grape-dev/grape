@@ -10,7 +10,7 @@
 """
 import json, os, shutil, subprocess, hashlib
 from src.config import log, WORKSPACE_DIR
-from src.repo_key import split_owner_repo, BASELINE_NAME_MAP
+from src.repo_key import split_owner_repo, BASELINE_NAME_MAP, knowledge_obs_prefix
 
 _ANALYSIS_SUBDIR = "codegraph-repo"
 _GRAPH_FILE = "project-graph.md"
@@ -122,7 +122,6 @@ def _write_to_obs(repo_key: str, name: str, content: str):
     import hashlib
     try:
         from src.storage import get_storage
-        from src.repo_key import knowledge_obs_prefix
         storage = get_storage()
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
         file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)

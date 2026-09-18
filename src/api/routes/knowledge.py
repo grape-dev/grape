@@ -18,8 +18,6 @@ from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-
 
 def _repo_base(repo_key: str) -> str:
     from src.repo_key import workspace_repo_dir

@@ -379,7 +379,7 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
     with db_lock:
         existing = db.cursor().execute(
             "SELECT id, content_hash FROM agent_shared_knowledge "
-            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND archived=0",
             (repo_key, scope, agent_type, issue_num)
         ).fetchone()
         if existing:
@@ -445,7 +445,7 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
         c = db.cursor()
         existing = c.execute(
             "SELECT id FROM agent_shared_knowledge "
-            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND archived=0",
             (repo_key, scope, agent_type, issue_num)
         ).fetchone()
         if existing:
@@ -1024,7 +1024,7 @@ def _sync_baseline_files():
     Issue #103：加分布式锁保护，防止多实例同时写 baseline。
     """
     import hashlib as _hl
-    from src.repo_key import split_owner_repo, knowledge_obs_prefix
+    from src.repo_key import split_owner_repo
     from src.storage import get_storage
 
     storage = get_storage()
