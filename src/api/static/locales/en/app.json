@@ -136,7 +136,8 @@
     "delete_confirm_title": "Delete Feedback",
     "delete_confirm_msg": "Are you sure you want to delete this feedback? This cannot be undone.",
     "delete_failed": "Delete failed: {msg}",
-    "delete_success": "Feedback deleted"
+    "delete_success": "Feedback deleted",
+    "view_my_feedback": "View My Feedback →"
   },
   "back_home": "← Back",
   "pipeline": {
