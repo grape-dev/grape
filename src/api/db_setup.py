@@ -1527,51 +1527,41 @@ def _migrate_knowledge_dedup_and_ref():
             "UPDATE agent_shared_knowledge SET source = 'manual' "
             "WHERE scope = 'member' AND (source IS NULL OR source = '')")
 
-        # 1.5 回填 baseline 空 name + 统一 description（必须在去重之前）
-        # 老代码 INSERT 时没有 name 字段 → DEFAULT ''，去重时同 repo 的 3 条
-        # baseline 会被合并为 1 条。另外 description 硬编码统一值，无法区分。
-        # 幂等：COALESCE 空值不覆盖，统一值只在匹配时替换。
+        # 1.5 回填空 name + 统一 description（所有 scope，必须在去重之前）
+        # 老代码部分 INSERT 路径没有 name 字段或自动生成逻辑不存在 → DEFAULT ''。
+        # baseline 去重按 (repo_key, name) GROUP BY，name 为空时同 repo 的 3 条
+        # 会被合并为 1 条丢失数据。description 硬编码统一值无法区分。
+        # 用 derive_knowledge_name 统一推导，所有 scope 共用同一逻辑。
+        from src.api.knowledge import derive_knowledge_name
         from src.repo_key import (BASELINE_NAME_MAP, BASELINE_DESC_MAP,
                                   BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK)
         _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值，勿改
-        _bl_rows = c.execute(
-            "SELECT id, name, file_path, obs_key, description "
-            "FROM agent_shared_knowledge WHERE scope='baseline' "
-            "AND (name IS NULL OR name = '' OR name = ? "
-            "OR description = ? OR description IS NULL OR description = '')",
+        _rows = c.execute(
+            "SELECT id, scope, agent_type, issue_num, name, file_path, obs_key, description "
+            "FROM agent_shared_knowledge "
+            "WHERE name IS NULL OR name = '' OR name = ? "
+            "OR description = ? OR description IS NULL OR description = ''",
             (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
         ).fetchall()
-        _bl_updates = []
-        for _rid, _cur_name, _fp, _obs, _cur_desc in _bl_rows:
-            _fname = ""
-            for _src in (_fp, _obs):
-                if not _src:
-                    continue
-                for _bn in ("project-capabilities.md", "project-graph.md", ".metadata.json"):
-                    if _bn in _src:
-                        _fname = _bn
-                        break
-                if _fname:
-                    break
-            _new_name = _cur_name
-            _needs_name = False
-            if not _cur_name:
-                _new_name = BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
-                _needs_name = bool(_new_name)
-            elif _cur_name == BASELINE_NAME_FALLBACK and _fname:
-                _mapped = BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
-                if _mapped != _cur_name:
-                    _new_name = _mapped
-                    _needs_name = True
-            _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC)
+        _updates = []  # [(name, desc, id), ...]
+        for _rid, _scope, _agent_type, _issue_num, _cur_name, _fp, _obs, _cur_desc in _rows:
+            _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+            _needs_name = (_cur_name != _new_name)
+            _needs_desc = False
+            _new_desc = _cur_desc or ""
+            if _scope == "baseline":
+                _new_desc = BASELINE_DESC_MAP.get(
+                    next((_bn for _bn in ("project-capabilities.md", "project-graph.md", ".metadata.json")
+                          if _bn in (_fp or _obs or "")), ""),
+                    BASELINE_DESC_FALLBACK)
+                _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC)
             if _needs_name or _needs_desc:
-                _new_desc = BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
-                _bl_updates.append((_new_name, _new_desc, _rid))
-        if _bl_updates:
+                _updates.append((_new_name, _new_desc, _rid))
+        if _updates:
             c.executemany(
                 "UPDATE agent_shared_knowledge SET name=?, description=? WHERE id=?",
-                _bl_updates)
-            log.info(f"[issue67] backfilled name/description for {len(_bl_updates)} baseline rows")
+                _updates)
+            log.info(f"[issue67] backfilled name/description for {len(_updates)} rows")
 
         # 2. 重复记录去重——每类 scope 只保留最新一条
         #    baseline：按 (repo_key, scope, name) 去重

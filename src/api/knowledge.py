@@ -23,6 +23,49 @@ from src.lock import acquire_lock, release_lock, renew_lock
 from src.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK
 from src.session_manager import db, db_lock
 
+_AGENT_NAME_MAP = {
+    "vod": "VOD", "issue": "Issue", "coding": "Coding",
+    "qa": "QA", "sre": "SRE", "chat": "Chat",
+}
+
+
+def derive_knowledge_name(scope: str, agent_type: str = "",
+                          issue_num: int = 0, file_path: str = "") -> str:
+    """按 scope 规则推导知识 name。
+
+    写入时自动生成和存量数据回填补偿共用，避免多处重复相同逻辑。
+
+    baseline：按 file_path 中的文件名查 BASELINE_NAME_MAP，fallback 用 BASELINE_NAME_FALLBACK
+    member：用 file_path 文件名（去扩展名），fallback "未命名知识"
+    project：项目知识 - {Agent}
+    issue：Issue #{n} 知识
+    issue_agent：Issue #{n} - {Agent} 知识
+    """
+    import os
+    if scope == "baseline":
+        _fname = ""
+        for _src in (file_path, ""):
+            if not _src:
+                continue
+            for _bn in ("project-capabilities.md", "project-graph.md", ".metadata.json"):
+                if _bn in _src:
+                    _fname = _bn
+                    break
+            if _fname:
+                break
+        return BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
+    if scope == "member":
+        return os.path.splitext(os.path.basename(file_path or ""))[0] or "未命名知识"
+    if scope == "project":
+        _an = _AGENT_NAME_MAP.get(agent_type or "")
+        return f"项目知识 - {_an}" if _an else "项目知识"
+    if scope == "issue":
+        return f"Issue #{issue_num or 0} 知识"
+    if scope == "issue_agent":
+        _an = _AGENT_NAME_MAP.get(agent_type or "", agent_type or "Agent")
+        return f"Issue #{issue_num or 0} - {_an} 知识"
+    return "未命名知识"
+
 
 # ===== 内存缓存（hash 比对——不用 TTL，全实例立即一致） =====
 _knowledge_cache: dict[str, tuple[str, str]] = {}  # storage_key -> (content, content_hash)
@@ -272,20 +315,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
 
     # 自动生成 name（system/agent；manual 由调用方传入）
     if not name and source != "manual":
-        _agent_name = {
-            "vod": "VOD", "issue": "Issue", "coding": "Coding",
-            "qa": "QA", "sre": "SRE", "chat": "Chat",
-        }
-        if scope == "baseline":
-            name = BASELINE_NAME_FALLBACK
-        elif scope == "project":
-            _an = _agent_name.get(agent_type)
-            name = f"项目知识 - {_an}" if _an else "项目知识"
-        elif scope == "issue":
-            name = f"Issue #{issue_num} 知识"
-        elif scope == "issue_agent":
-            _an = _agent_name.get(agent_type, agent_type or "Agent")
-            name = f"Issue #{issue_num} - {_an} 知识"
+        name = derive_knowledge_name(scope, agent_type or "", issue_num or 0, "")
 
     # 1. 入队（生产者）
     task_id = _enqueue_knowledge_write(
