@@ -69,6 +69,9 @@ VERSION
 *.swp
 *.swo
 
+# 本地开发启动脚本（不进仓库）
+start-dev.sh
+
 # === 临时调试脚本/备份（不进仓库）===
 _tmp_*.py
 query_*.py

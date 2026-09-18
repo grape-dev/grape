@@ -125,7 +125,14 @@ function _switchSceneTab(tab) {
 function _loadSceneMarket() {
   const el = document.getElementById('sceneMarketList');
   if (!el) return;
-  el.innerHTML = '<div class="loading">' + (I18N.t('common.loading')||'加载中...') + '</div>';
+  // Issue #196: 立即渲染页面骨架（搜索栏/分类 tab/网格容器），避免全量 loading 清空导致闪烁
+  _sceneMarketScenes = [];
+  _sceneMarketTotal = 0;
+  _sceneMarketFeatured = [];
+  _renderSceneMarketPage();
+  // 网格区域显示 loading spinner（不销毁已有 DOM 结构）
+  var gridEl = document.getElementById('officialSceneGrid');
+  if (gridEl) gridEl.innerHTML = '<div class="scn-loading"><span class="scn-spinner"></span></div>';
   // 分类列表非阻塞加载（加载完就重新渲染分类 tab）
   if (!_sceneMarketCats.length) {
     API.get('/scenes/market/categories').then(catData => {
@@ -144,14 +151,11 @@ function _loadSceneMarket() {
       }
     }).catch(() => {});
   }
-  // 精选场景非阻塞加载（加载完后重绘页面以显示精选区）
+  // 精选场景非阻塞加载（局部更新精选区，不再全量重建页面）
   API.get('/scenes/market?sort=latest&limit=5&featured_only=1&scope=official').then(featData => {
     _sceneMarketFeatured = featData.scenes || [];
-    // 精选数据晚于列表数据到达时，重绘页面以显示精选区
-    if (_sceneTab === 'official' && document.getElementById('officialSceneGrid')) {
-      _renderSceneMarketPage();
-    }
-  }).catch(() => { _sceneMarketFeatured = []; });
+    if (_sceneTab === 'official') _renderFeaturedSection();
+  }).catch(() => { _sceneMarketFeatured = []; _renderFeaturedSection(); });
   // 列表直接加载（不等精选和分类）
   _loadSceneMarketList();
 }
@@ -178,7 +182,12 @@ function _loadSceneMarketList() {
   }).catch(e => {
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
     if (window._currentView !== 'scene-market:official') return;  // stale guard
-    el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + (e.message||'') + '</div>';
+    // Issue #196: 错误只更新网格区域，不破坏页面结构
+    if (gridEl) {
+      gridEl.innerHTML = '<div class="error" style="padding:20px;text-align:center">' + I18N.t('common.load_failed') + ': ' + (e.message||'') + '</div>';
+    } else {
+      el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + (e.message||'') + '</div>';
+    }
   });
 }
 
@@ -376,7 +385,7 @@ function _renderSceneMarketPage() {
 
   // 精选场景横向滚动
   if (featured.length > 0) {
-    html += `<div class="apple-card">
+    html += `<div id="sceneMarketFeatured" class="apple-card">
       <div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>
       <div class="scn-scroll-wrap">
         <div id="featured-scenes" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-scenes')">
@@ -390,7 +399,7 @@ function _renderSceneMarketPage() {
   }
 
   // 全部场景
-  html += `<div class="apple-card">`;
+  html += `<div id="sceneMarketAllScenes" class="apple-card">`;
   html += `<div class="cd-h apple-search" style="justify-content:flex-start">
     <h2>${I18N.t('skills.all_scenes')||'全部场景'} <span id="sceneMarketTotalCount" style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${_sceneMarketTotal}</span></h2>
     <input id="sceneMarketSearch" placeholder="${I18N.t('skills.search_placeholder')||'搜索场景名称或描述'}" value="${_sceneMarketQ}" onkeyup="if(event.key==='Enter'){_sceneMarketQ=this.value;_sceneMarketPage=1;_loadSceneMarketList()}">
@@ -437,6 +446,43 @@ function _renderSceneMarketPage() {
   html += `</div>`; // 关闭 apple-card
 
   el.innerHTML = html;
+}
+
+// Issue #196: 精选区局部刷新（不重建整个页面）
+function _renderFeaturedSection() {
+  const featured = _sceneMarketFeatured;
+  const existing = document.getElementById('sceneMarketFeatured');
+  const allScenesCard = document.getElementById('sceneMarketAllScenes');
+  const container = document.getElementById('sceneMarketList');
+  if (!container) return;
+
+  // 无精选数据 → 移除已有精选区
+  if (featured.length === 0) {
+    if (existing) existing.remove();
+    return;
+  }
+
+  const innerHtml = `<div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>
+    <div class="scn-scroll-wrap">
+      <div id="featured-scenes" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-scenes')">
+        ${featured.map(s => _renderSceneCard(s)).join('')}
+      </div>
+      <button class="scn-scroll-btn scn-scroll-prev" id="featured-scenes-prev" onclick="document.getElementById('featured-scenes').scrollBy({left:-314,behavior:'smooth'})">◀</button>
+      <button class="scn-scroll-btn scn-scroll-next" id="featured-scenes-next" onclick="document.getElementById('featured-scenes').scrollBy({left:314,behavior:'smooth'})">▶</button>
+    </div>`;
+
+  if (existing) {
+    // 已有精选区 → 仅更新内容
+    existing.innerHTML = innerHtml;
+  } else if (allScenesCard) {
+    // 无精选区 → 在「全部场景」卡片前插入
+    const wrapper = document.createElement('div');
+    wrapper.id = 'sceneMarketFeatured';
+    wrapper.className = 'apple-card';
+    wrapper.innerHTML = innerHtml;
+    container.insertBefore(wrapper, allScenesCard);
+  }
+  setTimeout(() => _updateScrollBtns('featured-scenes'), 100);
 }
 
 // 精选区滚动按钮动态显示/隐藏
