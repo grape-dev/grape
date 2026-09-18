@@ -447,3 +447,39 @@ baseline 按 `(repo_key, scope, name)` 分组（和 Issue #190 去重维度一�
 **问题**：`_migrate_knowledge` 里有 baseline dedup 步骤，与 `_migrate_knowledge_dedup_and_ref` 的 step 2 重复（后者每次启动执行）。
 
 **修复**：删除 `_migrate_knowledge` 里的 dedup 步骤和 `_dedup_ok` 变量。`_migrate_knowledge` 现在只做：恢复归档 → obs_key 归一化 → file_path 归一化。
+
+### 10.15 normal-path 查重加 name 条件
+
+**问题**：`_do_write_knowledge` normal 路径（非 rejected）查重用 `(repo_key, scope, agent_type, issue_num)`，不含 name。baseline scope（agent_type='', issue_num=0）的 3 个不同文件会匹配同一条记录互相覆盖。
+
+**修复**：加 `AND name=?`，和 rejected 路径一致。
+
+### 10.16 derive_knowledge_description 抽取 + 非 baseline description 回填
+
+**问题**：回填 `_needs_desc` 只对 baseline scope 设 True，非 baseline（project/issue/issue_agent）的空 description 永远不会被回填。write_knowledge 里 description 生成逻辑也和迁移重复。
+
+**修复**：抽取 `derive_knowledge_description(scope, agent_type, issue_num, file_path)` 放在 `src/api/knowledge.py`，和 `derive_knowledge_name` 对称。write_knowledge 和迁移回填共用。回填现在对所有 scope 生成 description。
+
+### 10.17 source=manual 记录不回填 description
+
+**问题**：回填对 member scope 记录生成 description 时，derive_knowledge_description("member") 返回空字符串，隐式跳过。但如果 member name 为空需要回填 name 时，UPDATE 会把 description 也设为空字符串——清空用户已填的 description。
+
+**修复**：基于 source 字段判断——source="manual" 的记录不碰 description，保持用户填的原值。只有 system/agent 记录才回填 description。
+
+### 10.18 孤儿 ref 清理用 EXISTS 替代 COUNT
+
+**问题**：孤儿 ref 清理用 `SELECT COUNT(*) ... NOT IN (SELECT id ...)` 全表扫描计数。
+
+**修复**：改为 `SELECT EXISTS(SELECT 1 ...)`，命中第一行即返回，无孤儿时跳过 DELETE。
+
+### 10.19 localfs.write_text 加 fsync 目录
+
+**问题**：os.replace 后如果不 fsync 目录，掉电时 rename 元数据可能未落盘，文件名存在但 inode 丢失。
+
+**修复**：os.replace 后 `os.open(dir, O_RDONLY)` → `os.fsync(dir_fd)` → `os.close(dir_fd)`，OSError 兜底防 tmpfs 等不支持目录 fsync 的文件系统。
+
+### 10.20 localfs 注释修正
+
+**问题**：docstring 写"原子写入文本文件"，不准确——只有 os.replace 是原子的，写入本身不是。
+
+**修复**：改为"同目录临时文件 + os.replace 原子替换目标文件，避免进程崩溃时目标文件处于半写/截断状态"。
