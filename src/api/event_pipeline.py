@@ -2532,6 +2532,15 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
     """
     if not repository or not issue_number or not bot_token:
         return
+    # 跳过场景推荐结果（借 VOD 身份做的推荐，非真正工作产出，不应发到 Issue）
+    try:
+        import json as _json
+        _parsed = _json.loads(result_text)
+        if isinstance(_parsed, dict) and _parsed.get("scene_id") and _parsed.get("reason") and not _parsed.get("conclusion"):
+            log.info(f"Skip posting scene recommendation result to issue {issue_number}")
+            return
+    except Exception:
+        pass
     # 过滤：优先提取结构化 conclusion，避免思考过程/JSON 块泄漏到 Issue 评论
     _conclusion = ""
     try:

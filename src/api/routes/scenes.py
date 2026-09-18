@@ -457,7 +457,8 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
         db_id = create_custom_scene(
             scene_id=new_scene_id, name=scene["display_name"] or new_scene_id,
             description=scene["description"] or "",
-            repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding")
+            repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding",
+            created_by=user.get("username", ""))
         scene_id = new_scene_id
         # 回写 market_scene_id 关联
         try:

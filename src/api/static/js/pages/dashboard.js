@@ -112,6 +112,16 @@ function renderDashboard(data) {
         </div>
       </div>
     </div>
+    <div class="apple-card" style="margin-bottom:16px;background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;box-shadow:0 1px 4px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:center;gap:12px;padding:10px 20px">
+        <div style="font-size:32px;flex-shrink:0">🏪</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:14px;font-weight:600;color:#1d1d1f;margin-bottom:4px">${I18N.t('dashboard.market_intro_title')||'探索场景中心'}</div>
+          <div style="font-size:12px;color:#86868b;line-height:1.5">${I18N.t('dashboard.market_intro_desc')||'场景中心提供官方场景模板，涵盖云原生、IaC、Agent 开发等多种场景，一键应用到你的项目'}</div>
+        </div>
+        <button class="ap-btn" onclick="app.nav('scene-market')">${I18N.t('dashboard.goto_market')||'前往场景中心'} →</button>
+      </div>
+    </div>
     <div class="ap-empty-card">
       <div class="ap-empty-icon">📋</div>
       <div class="ap-empty-title">${I18N.t('dashboard.no_scene_title')}</div>

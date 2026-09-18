@@ -606,7 +606,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_sessio
 
 
 @router.post("/upload", operation_id="skills_upload", summary="Upload skill (user personal / repo)", description="Uploads a skill ZIP. scope=user stores a personal skill; scope=repo requires repo. agent_type is required.")
-async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_current_user_or_api_key),
+async def upload_skill(file: UploadFile = File(...), user: dict = Depends(require_no_session_token),
                        scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form(""),
                        category_id: int = Form(0)):
     """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。category_id 可选（分类ID，Issue #179）。"""
