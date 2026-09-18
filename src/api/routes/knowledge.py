@@ -91,16 +91,16 @@ def _member_docs(repo_key: str) -> list[dict]:
             if not file_path or file_path in seen:
                 continue
             seen.add(file_path)
-            # Issue #190：kind 从 project-info/ 后路径段解析，owner 始终从 DB 字段取
-            fp_norm = file_path.replace("\\", "/")
-            if "project-info/" in fp_norm:
-                rel = fp_norm.split("project-info/", 1)[1]
-                rel_parts = rel.split("/")
-                kind = rel_parts[0] if rel_parts else "member"  # "member" 或 "agent"
+            # Issue #190：kind 和 owner 均从 DB 字段取，不从 file_path 解析
+            # scope='member' 涵盖 member 和 agent 两种文档：
+            # agent_type 非空 → agent 生成，kind="agent"，owner=agent_type
+            # agent_type 为空 → 用户上传，kind="member"，owner=created_by
+            if agent_type:
+                kind = "agent"
+                owner = agent_type
             else:
                 kind = "member"
-            # owner 从 DB 字段取（created_by 或 agent_type），不从 file_path 路径段解析
-            owner = created_by if kind == "member" else (agent_type or "")
+                owner = created_by or ""
             name = os.path.basename(file_path)
             docs.append({
                 "name": name,

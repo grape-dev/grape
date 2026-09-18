@@ -243,24 +243,24 @@ if len(parts) >= 4 and parts[0] == "project-info":
     owner = parts[2]
 
 # 改为：
-fp_norm = file_path.replace("\\", "/")
-if "project-info/" in fp_norm:
-    rel = fp_norm.split("project-info/", 1)[1]  # member/user/file.md 或 agent/coding/file.md
-    rel_parts = rel.split("/")
-    kind = rel_parts[0] if rel_parts else "member"  # "member" 或 "agent"
+# kind 和 owner 均从 DB 字段取，不从 file_path 解析
+# scope='member' 涵盖 member 和 agent 两种文档：
+#   agent_type 非空 → agent 生成的文档，kind="agent"，owner=agent_type
+#   agent_type 为空 → 用户上传的文档，kind="member"，owner=created_by
+if agent_type:
+    kind = "agent"
+    owner = agent_type
 else:
     kind = "member"
-# owner 始终从 DB 字段取，不从 file_path 路径段解析
-owner = created_by if kind == "member" else (agent_type or "")
+    owner = created_by or ""
 ```
 
-kind 从 file_path 的 project-info/ 后路径段解析（区分 member/agent 目录），
-owner 始终从 DB 字段取（created_by 或 agent_type），不从 file_path 路径段解析。
+kind 和 owner 均从 DB 字段取（agent_type / created_by），不从 file_path 路径段解析。
 
-理由：file_path 中的 username 段与 created_by 不一定一致（管理员代传、路径迁移等情况），
-created_by 是 DB 记录的实际创建者，是权威来源。
+理由：file_path 中的路径段与 DB 记录的实际属性不一定一致（管理员代传、路径迁移、格式变化等情况）。
+DB 的 agent_type 字段是记录写入时的权威值，是区分 member/agent 文档的准确依据。
 
-兼容所有三种 file_path 格式（OLD/PARTIAL/NEW）。
+兼容所有三种 file_path 格式（OLD/PARTIAL/NEW）——不再依赖 file_path 格式。
 
 ### 4.4 删除废弃接口
 
