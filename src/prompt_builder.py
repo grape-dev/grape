@@ -780,6 +780,16 @@ context 是传给下一个 Agent 的接力说明，应包含：
 
     # 角色特定的 A2A 交办规则（按 agent_type 注入，指引何时 A2A 给哪个 Agent）
     _a2a_role_rules = {
+        "vod": (
+            "\n### VOD Agent A2A 交办规则\n"
+            "需求分析完成后，根据需求类型决定 A2A 目标：\n"
+            "- **部署类需求**（关键词：部署/deploy/上线/发布/运行服务/启动应用/云资源/ECS/容器等）→ A2A 给 `sre`，context 写明「部署」+ 资源需求摘要\n"
+            "- **开发类需求**（关键词：开发/实现/新增/修改/优化/bug修复/feature等）→ A2A 给 `issue`，context 写明需求摘要和引导结论，触发需求细化\n"
+            "- **资源释放类需求**（关键词：销毁/释放/删除资源/回收等）→ A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\n"
+            "⚠️ 部署类需求直接 A2A 给 `sre` 是正常行为（跳过 issue/coding/qa 中间环节），不算「跨阶段跳过」。\n"
+            "⚠️ 开发类需求必须先 A2A 给 `issue` 走完整开发流程（issue→coding→qa→sre），不要直接跳到 `sre` 或 `coding`。\n"
+            "⚠️ A2A 时 `pr_number` 不需要传入（VOD 阶段尚无 PR）。`issue_number` 必填。\n"
+        ),
         "qa": (
             "\n### QA Agent A2A 交办规则\n"
             "PR 审查完成后，根据审查结果决定 A2A 目标：\n"
