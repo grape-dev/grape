@@ -895,6 +895,9 @@ async def knowledge_sync_loop():
                                         break
                                 else:
                                     _rel = os.path.basename(file_path)
+                                # agent/ 归一化为 member/
+                                if _rel.startswith("agent/"):
+                                    _rel = "member/" + _rel[len("agent/"):]
                                 storage_key = f"{_obs_prefix}/{_rel}"
                             elif scope == "baseline":
                                 _fname = os.path.basename(file_path)
