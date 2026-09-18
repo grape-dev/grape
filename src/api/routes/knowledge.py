@@ -416,7 +416,6 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
         from src.storage import get_storage
         storage = get_storage()
         if storage is not None:
-            owner, rname = _owner_repo(repo_key)
             obs_key = f"{knowledge_obs_prefix(repo_key)}/member/{username}/{filename}"
             with open(file_path, "rb") as f:
                 storage.save_bytes(obs_key, f.read())

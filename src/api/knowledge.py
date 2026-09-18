@@ -97,9 +97,8 @@ def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash
                 with open(full, "r", encoding="utf-8") as f:
                     return f.read()
             # Issue #190：兼容旧格式 file_path（不含 provider 前缀）
-            from src.repo_key import parse_repo_key
-            provider, _, _ = parse_repo_key(repo_key)
-            alt = os.path.join(WORKSPACE_DIR, provider or 'gitcode', file_path)
+            from src.repo_key import workspace_repo_dir
+            alt = os.path.join(workspace_repo_dir(repo_key), file_path)
             if os.path.isfile(alt):
                 with open(alt, "r", encoding="utf-8") as f:
                     return f.read()
@@ -1032,7 +1031,7 @@ def _sync_baseline_files():
     Issue #103：加分布式锁保护，防止多实例同时写 baseline。
     """
     import hashlib as _hl
-    from src.repo_key import split_owner_repo
+    from src.repo_key import split_owner_repo, knowledge_obs_prefix
     from src.storage import get_storage
 
     storage = get_storage()
@@ -1079,20 +1078,19 @@ def _sync_baseline_files():
                     ).fetchone()
 
                 if row and row[1]:  # DB 有记录且 obs_key 非空
-                    # Issue #95：检测旧格式 obs_key（project-info/ 前缀但不含 knowledge/）→ 强制更新
+                    # Issue #190：检测旧格式 obs_key → 强制更新
                     _old_obs = row[1] or ""
-                    if _old_obs.startswith("project-info/") and not _old_obs.startswith("knowledge/"):
-                        # 旧格式 → 重新写 OBS + UPDATE
-                        pass  # 不 continue，走下面的写入逻辑
-                    else:
-                        continue  # 新格式或本地模式 → 跳过
+                    _new_prefix = knowledge_obs_prefix(repo_key)
+                    if _old_obs.startswith(_new_prefix):
+                        continue  # 已是新格式 → 跳过
+                    # OLD_A（project-info/ 前缀）或 OLD_B（knowledge/ 缺 provider）→ 走写入逻辑
+                    # 不 continue，走下面的写入逻辑
 
                 # 写 OBS + DB
                 try:
                     with open(fpath, "rb") as f:
                         content_bytes = f.read()
                     # Issue #190：OBS key 含 provider 前缀
-                    from src.repo_key import knowledge_obs_prefix
                     storage_key = f"{knowledge_obs_prefix(repo_key)}/project-info/{fname}"
                     storage.save_bytes(storage_key, content_bytes)
                     content_hash = _hl.sha256(content_bytes).hexdigest()[:64]

@@ -1735,6 +1735,10 @@ def _migrate_issue190():
 
     log.info("[Issue #190] migration started")
 
+    _step1_ok = False
+    _step2_ok = False
+    _step3_ok = False
+
     # ===== 步骤 1：清理 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
     try:
         with db_lock:
@@ -1763,6 +1767,7 @@ def _migrate_issue190():
                     "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
                     "WHERE scope='baseline' GROUP BY repo_key, name)")
             db.commit()
+        _step1_ok = True
         log.info("[Issue #190] step 1: baseline dedup done")
     except Exception as e:
         log.warning(f"[Issue #190] step 1 failed: {e}")
@@ -1831,6 +1836,7 @@ def _migrate_issue190():
                     "UPDATE agent_shared_knowledge SET obs_key=? WHERE id=?",
                     updates)
                 db.commit()
+        _step2_ok = True
         log.info(f"[Issue #190] step 2: obs_key normalization done ({len(updates)} rows)")
     except Exception as e:
         log.warning(f"[Issue #190] step 2 failed: {e}")
@@ -1864,13 +1870,17 @@ def _migrate_issue190():
                     "UPDATE agent_shared_knowledge SET file_path=? WHERE id=?",
                     updates)
                 db.commit()
+        _step3_ok = True
         log.info(f"[Issue #190] step 3: file_path normalization done ({len(updates)} rows)")
     except Exception as e:
         log.warning(f"[Issue #190] step 3 failed: {e}")
 
-    # ===== 标记完成 =====
-    set_meta_value("issue190_migrate_done", "1")
-    log.info("[Issue #190] migration done")
+    # ===== 标记完成（仅在所有步骤成功时）=====
+    if _step1_ok and _step2_ok and _step3_ok:
+        set_meta_value("issue190_migrate_done", "1")
+        log.info("[Issue #190] migration done")
+    else:
+        log.warning("[Issue #190] migration incomplete, will retry on next startup")
 
 
 def _cleanup_stale_meta():
