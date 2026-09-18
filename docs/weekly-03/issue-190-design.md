@@ -118,6 +118,27 @@ Issue #67 按 `(repo_key, scope, agent_type, issue_num, file_path)` 五字段去
 
 Issue #67 的去重逻辑已同步修正：baseline 按 `(repo_key, scope, name)` 分组，其他 scope 仍按五字段分组。同时补充 scene_knowledge_ref 关联记录清理。
 
+### 3.4 归档逻辑移除
+
+归档机制（Issue #67 设计）已移除。原因：
+- 手动归档接口（PUT /archive）前端 UI 已移除，无调用方
+- Issue 关闭自动归档导致 agent 读不到知识（Issue reopen 后无法读取之前沉淀的知识）
+- archived=0 维护成本高，20+ 处查询需记得加，漏加就出 bug
+- issue_num 过滤已隔离不同 Issue 的知识，归档"避免干扰"的理由不成立
+
+移除内容：
+- 删除 `_archive_issue_knowledge()` 函数 + event_pipeline 调用
+- 删除 `cleanup_archived_knowledge()` 函数 + main.py 定时任务
+- 迁移函数步骤 0：`UPDATE archived=0 WHERE archived=1`（恢复现有归档记录）
+- 迁移函数步骤 1 去重改回简单 MAX(id)（步骤 0 后无 archived=1 记录）
+
+保留不动：
+- `archived=0` 查询条件全部保留（所有记录都是 archived=0，查询自然命中）
+- `archived` 字段保留在表结构中（向后兼容）
+- `show_archived` 参数保留（无实际效果但不影响功能）
+
+详见 `docs/weekly-03/issue-190-remove-archive.md`
+
 ## 4. 修复方案
 
 ### 4.1 统一 obs_key 生成函数
