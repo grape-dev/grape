@@ -330,7 +330,8 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
 # ====== Agent Runtimes ======
 
 @router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params.")
-def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 0):
+def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 0,
+                       scope: str = ""):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
     可见性（按当前登录用户）：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级（仓库所有成员可见，不只 owner）。
@@ -426,6 +427,20 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
     devices = _build_runtime_devices(db, db_lock, cred_map, _visible_credential,
                                      valid_users, cached, now)
 
+    # scope 筛选（服务端过滤）
+    if scope:
+        if scope == "local":
+            visible_runtimes = [rt for rt in visible_runtimes if rt.get("is_local")]
+        else:
+            visible_runtimes = [rt for rt in visible_runtimes
+                                if (rt.get("scope") or "global") == scope]
+
+    # 返回所有可见引擎的 scope 分布（供前端生成筛选标签，不依赖当前页数据）
+    _avail_scopes = list(set(
+        ("local" if rt.get("is_local") else (rt.get("scope") or "global"))
+        for rt in visible_runtimes
+    ))
+
     # Issue #185: 分页（page_size>0 时对 visible_runtimes 切片，total 为过滤后总数）
     total_runtimes = len(visible_runtimes)
     if page_size and page_size > 0:
@@ -433,8 +448,10 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
         _offset = (_page - 1) * page_size
         paged_runtimes = visible_runtimes[_offset:_offset + page_size]
         return {"runtimes": paged_runtimes, "devices": devices,
-                "total": total_runtimes, "page": _page, "page_size": page_size}
-    return {"runtimes": visible_runtimes, "devices": devices, "total": total_runtimes}
+                "total": total_runtimes, "page": _page, "page_size": page_size,
+                "avail_scopes": _avail_scopes}
+    return {"runtimes": visible_runtimes, "devices": devices, "total": total_runtimes,
+            "avail_scopes": _avail_scopes}
 
 
 def _runtime_health(rt: dict, now: float) -> str:

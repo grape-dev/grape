@@ -460,14 +460,20 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
-                  (issue_id, user["id"]))
+        # 仓库全部视图下，用户可以看到其他人的 Issue
+        # 按 id 查出 Issue，再校验用户是否有该仓库的访问权限
+        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?",
+                  (issue_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
         repo_key, issue_number = row[0], row[1]
+    # 校验仓库访问权限（与"仓库全部"列表接口一致）
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
     issue_key = f"#{issue_number}" if issue_number else ""
-    _scene_id = get_issue_scene(repo_key, issue_key) or "default"
+    _scene_tuple = get_issue_scene(repo_key, issue_key)
+    _scene_id = (_scene_tuple[0] if _scene_tuple and _scene_tuple[0] else "") or "default"
     _stage_info = get_issue_stage(repo_key, issue_key) if issue_key else None
     _current_stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
     pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)

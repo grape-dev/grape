@@ -81,6 +81,7 @@ window._rtDevGoPage = function(p) {
 // Issue #185: Engines 分页加载
 function _loadRuntimesData() {
   var qs = '?page=' + _rtPage + '&page_size=' + _rtPageSize;
+  if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
   API.get('/settings/agent-runtimes' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtTotal = d.total || 0;
@@ -268,10 +269,9 @@ function renderRuntimes(data) {
   }).filter(Boolean))];
   const _allScopes = ['local','user','repo','global'];
   const _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
-  const _hasScope = (sc) => {
-    const list = _runtimeTab === 'engines' ? (data.runtimes||[]) : devices;
-    return list.some(e => (e.scope || (e.is_local ? 'local' : 'global')) === sc || (sc === 'local' && e.is_local));
-  };
+  // 筛选标签从后端返回的 avail_scopes 生成（不再依赖当前页数据）
+  const _availScopes = data.avail_scopes || [];
+  const _hasScope = (sc) => _availScopes.includes(sc);
   const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
   // 收集可用场景和标签（从引擎数据提取）
   const _allRuntimes = (data.runtimes || []);
@@ -324,10 +324,7 @@ function renderEngines(data, devices) {
       const ename = (rt.instance_name || rt.name || '').toLowerCase();
       if (!ename.includes(_rtFilterType)) return false;
     }
-    if (_rtFilterScope) {
-      const sc = rt.is_local ? 'local' : (rt.scope || 'global');
-      if (sc !== _rtFilterScope) return false;
-    }
+    // scope 筛选已由后端处理，前端不再过滤
     if (_rtFilterScene.length > 0) {
       const tags = rt.scene_tags || [];
       if (!_rtFilterScene.some(s => tags.includes(s))) return false;
