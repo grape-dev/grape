@@ -864,7 +864,7 @@ function loadAgentTypes() {
         '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">您的' + platName + (username ? ' 账号 <b>' + username + '</b>' : ' 账号') + '尚未获得内测权限。</p>' +
         '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:24px">请先申请内测，审核通过后即可登录。</p>' +
         '<div style="display:flex;gap:8px;justify-content:center">' +
-          '<button onclick="window.location.href=\'/static/beta-apply.html\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">申请内测</button>' +
+          '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + platform + '&username=' + encodeURIComponent(username) + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">申请内测</button>' +
           '<button onclick="document.getElementById(\'whitelistModal\').remove()" style="padding:12px 24px;border:1px solid var(--b,#e3e6ee);border-radius:12px;background:transparent;color:var(--t,#1d1d1f);font-size:14px;font-weight:500;cursor:pointer">关闭</button>' +
         '</div>' +
       '</div>';
