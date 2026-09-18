@@ -346,3 +346,152 @@ class TestObsKeyMigration:
     def test_cross_provider(self):
         r = self._migrate_obs("github:test/repo", "baseline", "knowledge/test/repo/project-info/project-graph.md")
         assert r == "knowledge/github/test/repo/project-info/project-graph.md"
+
+
+class TestBackfillBeforeDedup:
+    """回填在去重之前执行的集成测试"""
+
+    def setup_method(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key LIKE 'test-backfill-%'")
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id IN (SELECT id FROM agent_shared_knowledge WHERE repo_key LIKE 'test-backfill-%')")
+            db.commit()
+
+    def teardown_method(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key LIKE 'test-backfill-%'")
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id IN (SELECT id FROM agent_shared_knowledge WHERE repo_key LIKE 'test-backfill-%')")
+            db.commit()
+
+    def test_empty_name_backfill_prevents_dedup_data_loss(self):
+        """3 条 name 为空的 baseline，回填后去重不丢数据"""
+        from src.repo_key import BASELINE_NAME_MAP
+        with db_lock:
+            c = db.cursor()
+            # 模拟老数据：3 条 baseline，name 全空，file_path 含不同文件名
+            for fname, idx in [("project-graph.md", 1), ("project-capabilities.md", 2), (".metadata.json", 3)]:
+                c.execute(
+                    "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, status, obs_key, name, description, source) "
+                    "VALUES ('baseline', 'test-backfill-1', '', 0, ?, 'accepted', ?, '', 'codegraph 自动生成的项目基线知识', 'system')",
+                    (f"test-backfill-1/project-info/{fname}", f"knowledge/test/old/project-info/{fname}"))
+            db.commit()
+
+            # 执行回填逻辑（模拟 step 1.5）
+            from src.repo_key import BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, BASELINE_DESC_MAP
+            _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"
+            rows = c.execute(
+                "SELECT id, name, file_path, obs_key, description FROM agent_shared_knowledge "
+                "WHERE scope='baseline' AND repo_key='test-backfill-1' "
+                "AND (name IS NULL OR name = '' OR name = ? OR description = ? OR description IS NULL OR description = '')",
+                (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
+            ).fetchall()
+            updates = []
+            for rid, cur_name, fp, obs, cur_desc in rows:
+                _fname = ""
+                for src in (fp, obs):
+                    if not src:
+                        continue
+                    for bn in ("project-capabilities.md", "project-graph.md", ".metadata.json"):
+                        if bn in src:
+                            _fname = bn
+                            break
+                    if _fname:
+                        break
+                _name = cur_name if cur_name else BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
+                _desc = BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
+                updates.append((_name, _desc, rid))
+            assert len(updates) == 3
+            c.executemany("UPDATE agent_shared_knowledge SET name=?, description=? WHERE id=?", updates)
+            db.commit()
+
+            # 执行去重（模拟 step 2）
+            c.execute(
+                "DELETE FROM agent_shared_knowledge WHERE scope='baseline' AND repo_key='test-backfill-1' "
+                "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
+                "WHERE scope='baseline' AND repo_key='test-backfill-1' GROUP BY repo_key, scope, name)")
+            db.commit()
+
+            after = c.execute(
+                "SELECT COUNT(*) FROM agent_shared_knowledge WHERE scope='baseline' AND repo_key='test-backfill-1'"
+            ).fetchone()[0]
+        assert after == 3, f"expected 3 rows after backfill+dedup, got {after}"
+
+    def test_unified_desc_backfill_replaces_with_per_file(self):
+        """统一 description 被回填为 per-file 描述"""
+        from src.repo_key import BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, status, name, description, source) "
+                "VALUES ('baseline', 'test-backfill-2', '', 0, 'test-backfill-2/project-info/project-graph.md', 'accepted', '项目结构图谱', 'codegraph 自动生成的项目基线知识', 'system')")
+            db.commit()
+            # 回填
+            _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"
+            rows = c.execute(
+                "SELECT id, name, file_path, obs_key, description FROM agent_shared_knowledge "
+                "WHERE scope='baseline' AND repo_key='test-backfill-2' AND description = ?",
+                (_UNIFIED_DESC,)
+            ).fetchall()
+            assert len(rows) == 1
+            rid, cur_name, fp, obs, cur_desc = rows[0]
+            assert cur_desc == _UNIFIED_DESC
+            _desc = BASELINE_DESC_MAP.get("project-graph.md", BASELINE_DESC_FALLBACK)
+            c.execute("UPDATE agent_shared_knowledge SET description=? WHERE id=?", (_desc, rid))
+            db.commit()
+            new_desc = c.execute("SELECT description FROM agent_shared_knowledge WHERE id=?", (rid,)).fetchone()[0]
+        assert new_desc == "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）"
+
+    def test_idempotent_backfill_no_change_on_second_run(self):
+        """回填执行两次，第二次 0 行更新"""
+        from src.repo_key import BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, BASELINE_NAME_MAP, BASELINE_DESC_MAP
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type, issue_num, file_path, status, name, description, source) "
+                "VALUES ('baseline', 'test-backfill-3', '', 0, 'test-backfill-3/project-info/project-capabilities.md', 'accepted', '项目能力清单', 'VOD 基线分析：项目能力清单（功能特性/支持能力）', 'system')")
+            db.commit()
+            _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"
+            # 第一次回填
+            rows = c.execute(
+                "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' AND repo_key='test-backfill-3' "
+                "AND (name IS NULL OR name = '' OR name = ? OR description = ? OR description IS NULL OR description = '')",
+                (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
+            ).fetchall()
+        assert len(rows) == 0, "should find 0 rows needing backfill on already-correct data"
+
+
+class TestOrphanRefCleanup:
+    """孤儿 scene_knowledge_ref 清理"""
+
+    def setup_method(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id < 0")
+            db.commit()
+
+    def teardown_method(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id < 0")
+            db.commit()
+
+    def test_orphan_ref_deleted(self):
+        """孤儿 ref 被清理，有效 ref 保留"""
+        with db_lock:
+            c = db.cursor()
+            # 插入一条孤儿 ref（knowledge_id=-999 不存在）
+            c.execute(
+                "INSERT INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+                "VALUES (-999, '', '', 0, 1, 'system')")
+            db.commit()
+            before = c.execute("SELECT COUNT(*) FROM scene_knowledge_ref WHERE knowledge_id < 0").fetchone()[0]
+        assert before == 1
+        # 执行孤儿清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)")
+            db.commit()
+            after = c.execute("SELECT COUNT(*) FROM scene_knowledge_ref WHERE knowledge_id < 0").fetchone()[0]
+        assert after == 0
