@@ -1799,7 +1799,6 @@ def _migrate_issue190():
                     new_obs_key = f"{new_prefix}/project-info/{_fname}"
                 else:
                     try:
-                        new_obs_key = knowledge_obs_prefix(repo_key)
                         from src.api.knowledge import knowledge_storage_key
                         new_obs_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
                     except Exception:

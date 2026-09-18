@@ -81,6 +81,7 @@ def _member_docs(repo_key: str) -> list[dict]:
                 "FROM agent_shared_knowledge "
                 "WHERE repo_key=? AND scope='member' "
                 "AND obs_key!='' AND obs_key IS NOT NULL "
+                "AND archived=0 "
                 "ORDER BY id DESC",
                 (repo_key,)
             )
