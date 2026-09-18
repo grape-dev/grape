@@ -180,10 +180,10 @@ def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
     with db_lock:
         stats_row = db.cursor().execute(
             "SELECT "
-            "SUM(CASE WHEN source='system' AND archived=0 THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN source='agent' AND archived=0 THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN source='manual' AND archived=0 THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN archived=0 AND id NOT IN (SELECT DISTINCT knowledge_id FROM scene_knowledge_ref WHERE enabled=1) THEN 1 ELSE 0 END) "
+            "SUM(CASE WHEN source='system' THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN source='agent' THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN source='manual' THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN id NOT IN (SELECT DISTINCT knowledge_id FROM scene_knowledge_ref WHERE enabled=1) THEN 1 ELSE 0 END) "
             "FROM agent_shared_knowledge WHERE repo_key=?",
             (repo_key,)
         ).fetchone()
