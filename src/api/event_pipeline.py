@@ -909,9 +909,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     log.warning(f"Pipeline: issue_opened scene check failed: {_re}")
                     break
         # project-info 后台刷新（服务端 codegraph 生成基线，不阻塞 webhook；见 codegraph-builder-plan.md）
+        # Issue #200: 传入 bot token，私有仓库 git fetch 需认证 header
         try:
             from src.project_info.builder import maybe_refresh_project_info
-            threading.Thread(target=maybe_refresh_project_info, args=(repo_key,), daemon=True).start()
+            from src.repo import Repo
+            _pi_token = Repo(repo_key).bot_token
+            threading.Thread(target=maybe_refresh_project_info, args=(repo_key, _pi_token), daemon=True).start()
         except Exception as e:
             log.warning(f"Pipeline: project-info refresh trigger failed: {e}")
     else:
@@ -1993,14 +1996,8 @@ def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
         if _num:
             _token = ""
             try:
-                from src.repo_key import parse_repo_key
-                _provider, _, _ = parse_repo_key(repo_key)
-                if _provider == "github":
-                    from src.user.db import get_github_token
-                    _token = get_github_token(repo_key=repo_key) or ""
-                else:
-                    from src.user.db import get_gitcode_token
-                    _token = get_gitcode_token(repo_key=repo_key) or ""
+                from src.repo import Repo
+                _token = Repo(repo_key).bot_token
             except Exception:
                 pass
             repogit.remove_issue_worktree_if_pushed(repo_key, agent_type, _num, token=_token)
