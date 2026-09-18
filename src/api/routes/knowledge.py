@@ -407,15 +407,16 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
     repo_key = _resolve_repo_key(body.repo)
     _check_repo_member(user, repo_key)
 
-    # 校验 scene_ids 存在性（批量查，不循环）——读操作无需显式锁
+    # 校验 scene_ids 存在性（批量查，不循环）
     if scene_ids:
-        from src.session_manager import db
-        placeholders = ",".join("?" * len(scene_ids))
-        valid_rows = db.cursor().execute(
-            f"SELECT scene_id FROM devops_pipeline_scene "
-            f"WHERE is_active=1 AND repo_key=? AND scene_id IN ({placeholders})",
-            [repo_key] + scene_ids
-        ).fetchall()
+        from src.session_manager import db, db_lock
+        with db_lock:
+            placeholders = ",".join("?" * len(scene_ids))
+            valid_rows = db.cursor().execute(
+                f"SELECT scene_id FROM devops_pipeline_scene "
+                f"WHERE is_active=1 AND repo_key=? AND scene_id IN ({placeholders})",
+                [repo_key] + scene_ids
+            ).fetchall()
         valid_ids = {r[0] for r in valid_rows}
         invalid = [sid for sid in scene_ids if sid not in valid_ids]
         if invalid:
