@@ -1742,27 +1742,27 @@ def _migrate_knowledge():
 
     log.info("[knowledge_migrate] migration started")
 
-    _step0_ok = False
-    _step05_ok = False
-    _step1_ok = False
-    _step2_ok = False
-    _step3_ok = False
+    _restore_ok = False       # 恢复归档记录
+    _backfill_name_ok = False  # 回填 baseline 空 name
+    _dedup_ok = False          # 去重 baseline 重复记录
+    _obs_key_ok = False        # 归一化 obs_key
+    _file_path_ok = False      # 归一化 file_path
 
-    # ===== 步骤 0：恢复归档记录（archived=1 → archived=0）=====
+    # ===== 恢复归档记录（archived=1 → archived=0）=====
     # 归档逻辑已移除，现有归档记录恢复为活跃，防止成为孤儿数据
     try:
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE agent_shared_knowledge SET archived=0 WHERE archived=1")
             db.commit()
-        _step0_ok = True
-        log.info("[knowledge_migrate] step 0: restore archived records done")
+        _restore_ok = True
+        log.info("[knowledge_migrate] restore archived records done")
     except Exception as e:
-        log.warning(f"[knowledge_migrate] step 0 failed: {e}")
+        log.warning(f"[knowledge_migrate] restore archived failed: {e}")
 
-    # ===== 步骤 0.5：回填 baseline 记录的 name（防止 step 1 去重丢数据）=====
-    # 老代码（f4731618）INSERT 时没有 name 字段 → DEFAULT ''。如果 step 1 按
-    # repo_key + name GROUP BY 时 name 都是 ''，同 repo 的 3 条 baseline
+    # ===== 回填 baseline 空 name（必须在去重之前，否则数据丢失）=====
+    # 老代码（f4731618）INSERT 时没有 name 字段 → DEFAULT ''。如果去重时按
+    # repo_key + name GROUP BY，name 都是 '' 的同 repo 3 条 baseline
     # （graph/capabilities/metadata）会被分到同一组，只保留 MAX(id)，丢失 2 条。
     # 先通过 file_path / obs_key 中的文件名推导 name，回填空值。
     try:
@@ -1795,14 +1795,14 @@ def _migrate_knowledge():
                     "UPDATE agent_shared_knowledge SET name=? WHERE id=?",
                     updates)
                 db.commit()
-            log.info(f"[knowledge_migrate] step 0.5: backfilled name for {len(updates)} baseline rows")
+            log.info(f"[knowledge_migrate] backfilled name for {len(updates)} baseline rows")
         else:
-            log.info("[knowledge_migrate] step 0.5: no empty-name baseline rows (0)")
-        _step05_ok = True
+            log.info("[knowledge_migrate] no empty-name baseline rows")
+        _backfill_name_ok = True
     except Exception as e:
-        log.warning(f"[knowledge_migrate] step 0.5 failed: {e}")
+        log.warning(f"[knowledge_migrate] backfill name failed: {e}")
 
-    # ===== 步骤 1：清理 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
+    # ===== 去重 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
     try:
         with db_lock:
             c = db.cursor()
@@ -1830,12 +1830,12 @@ def _migrate_knowledge():
                     "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
                     "WHERE scope='baseline' GROUP BY repo_key, name)")
             db.commit()
-        _step1_ok = True
-        log.info("[knowledge_migrate] step 1: baseline dedup done")
+        _dedup_ok = True
+        log.info("[knowledge_migrate] baseline dedup done")
     except Exception as e:
-        log.warning(f"[knowledge_migrate] step 1 failed: {e}")
+        log.warning(f"[knowledge_migrate] baseline dedup failed: {e}")
 
-    # ===== 步骤 2：更新 obs_key 为新格式（含 provider）=====
+    # ===== 归一化 obs_key（新格式含 provider 前缀）=====
     try:
         from src.storage import get_storage
         _storage = get_storage()
@@ -1914,12 +1914,12 @@ def _migrate_knowledge():
                         _storage.delete_object(_old_key)
                     except Exception as e:
                         log.warning(f"[knowledge_migrate] OBS old key delete failed {_old_key}: {e}")
-        _step2_ok = True
-        log.info(f"[knowledge_migrate] step 2: obs_key normalization done ({len(updates)} rows)")
+        _obs_key_ok = True
+        log.info(f"[knowledge_migrate] obs_key normalization done ({len(updates)} rows)")
     except Exception as e:
-        log.warning(f"[knowledge_migrate] step 2 failed: {e}")
+        log.warning(f"[knowledge_migrate] obs_key normalization failed: {e}")
 
-    # ===== 步骤 3：更新 file_path 为新格式（含 provider 前缀）=====
+    # ===== 归一化 file_path（新格式含 provider 前缀）=====
     try:
         with db_lock:
             rows = db.cursor().execute(
@@ -1948,14 +1948,14 @@ def _migrate_knowledge():
                     "UPDATE agent_shared_knowledge SET file_path=? WHERE id=?",
                     updates)
                 db.commit()
-        _step3_ok = True
-        log.info(f"[knowledge_migrate] step 3: file_path normalization done ({len(updates)} rows)")
+        _file_path_ok = True
+        log.info(f"[knowledge_migrate] file_path normalization done ({len(updates)} rows)")
     except Exception as e:
-        log.warning(f"[knowledge_migrate] step 3 failed: {e}")
+        log.warning(f"[knowledge_migrate] file_path normalization failed: {e}")
 
     # ===== 标记完成 + 释放锁（finally 保证锁一定释放）=====
     try:
-        if _step0_ok and _step05_ok and _step1_ok and _step2_ok and _step3_ok:
+        if _restore_ok and _backfill_name_ok and _dedup_ok and _obs_key_ok and _file_path_ok:
             set_meta_value("knowledge_migrate_done", "1")
             log.info("[knowledge_migrate] migration done")
         else:
