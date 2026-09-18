@@ -355,9 +355,9 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
                 return
             db.cursor().execute(
                 "INSERT INTO agent_shared_knowledge "
-                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (scope, repo_key, agent_type, issue_num, rel_path, "", "", status, source_seq, created_by, source)
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description, name) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (scope, repo_key, agent_type, issue_num, rel_path, "", "", status, source_seq, created_by, source, description, name)
             )
             db.commit()
         return
