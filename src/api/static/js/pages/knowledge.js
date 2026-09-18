@@ -603,6 +603,7 @@ function renderKnowledge() {
           this.createForm.sceneSelected = [...this.createSceneTempSelected];
         }
         this.createScenePopover = false;
+        this.$nextTick(() => this.updateSceneScrollBtns());
       },
       cancelCreate() {
         this.createForm = null;
@@ -617,6 +618,7 @@ function renderKnowledge() {
         // 场景列表里的 X 删除（直接删）
         const idx = this.createForm.sceneSelected.indexOf(sceneId);
         if (idx >= 0) this.createForm.sceneSelected.splice(idx, 1);
+        this.$nextTick(() => this.updateSceneScrollBtns());
       },
       toggleCreateSceneTemp(sceneId) {
         // 弹出层里切换临时选中
