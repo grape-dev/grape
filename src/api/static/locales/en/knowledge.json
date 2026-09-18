@@ -96,6 +96,7 @@
   "ref_search_scenes": "Search scene name or ID...",
   "ref_selected_count": "{{count}} selected",
   "ref_added_count": "Added {{count}} scenes",
+  "ref_agents_added_count": "Added {{count}} agents",
   "confirm": "Confirm",
   "detail_content_title": "Content",
   "ref_no_agents_linked": "No agents linked yet",
@@ -119,5 +120,16 @@
   "file_imported": "File imported",
   "reset": "Revert",
   "reset_tip": "Discard all changes, restore to original content",
-  "scenes_unit": "scenes"
+  "scenes_unit": "scenes",
+  "ref_bind_ok": "Bound successfully",
+  "ref_unbind_ok": "Unbound successfully",
+  "ref_bind_agent_ok": "Agent bound successfully",
+  "ref_unbind_agent_ok": "Agent unbound successfully",
+  "ref_bind_scene_ok": "Scene bound successfully",
+  "ref_unbind_scene_ok": "Scene unbound successfully",
+  "ref_timeout_refresh": "Operation timed out, refreshing latest state",
+  "ref_failed_refresh": "Operation failed, refreshing latest state",
+  "refresh_failed": "Refresh failed, please reload the page",
+  "save_timeout": "Save timed out, please reload to verify",
+  "create_timeout": "Create timed out, please reload to verify"
 }

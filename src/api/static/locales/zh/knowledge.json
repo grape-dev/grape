@@ -96,6 +96,7 @@
   "ref_search_scenes": "搜索场景名称或 ID...",
   "ref_selected_count": "已选 {{count}} 个",
   "ref_added_count": "已添加 {{count}} 个场景",
+  "ref_agents_added_count": "已添加 {{count}} 个 Agent",
   "confirm": "确认",
   "detail_content_title": "知识内容",
   "ref_no_agents_linked": "暂未关联任何 Agent",
@@ -119,5 +120,16 @@
   "file_imported": "文件已导入",
   "reset": "还原",
   "reset_tip": "放弃本次所有修改，恢复到进入编辑时的内容",
-  "scenes_unit": "场景"
+  "scenes_unit": "场景",
+  "ref_bind_ok": "绑定成功",
+  "ref_unbind_ok": "解绑成功",
+  "ref_bind_agent_ok": "绑定 Agent 成功",
+  "ref_unbind_agent_ok": "解绑 Agent 成功",
+  "ref_bind_scene_ok": "绑定场景成功",
+  "ref_unbind_scene_ok": "解绑场景成功",
+  "ref_timeout_refresh": "操作超时，正在刷新最新状态",
+  "ref_failed_refresh": "操作失败，正在刷新最新状态",
+  "refresh_failed": "刷新失败，请手动刷新页面",
+  "save_timeout": "保存超时，请刷新页面确认最新状态",
+  "create_timeout": "创建超时，请刷新页面确认是否创建成功"
 }
