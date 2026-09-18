@@ -1761,8 +1761,6 @@ def _migrate_knowledge():
 
     # ===== 步骤 1：清理 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
     try:
-        from src.storage import get_storage
-        _storage = get_storage()
         with db_lock:
             c = db.cursor()
             if _is_mysql:
@@ -1770,11 +1768,6 @@ def _migrate_knowledge():
                     "CREATE TEMPORARY TABLE IF NOT EXISTS _keep190 AS "
                     "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
                     "WHERE scope='baseline' GROUP BY repo_key, name")
-                # 先查被删记录的 obs_key（删 DB 后就查不到了）
-                dup_obs_keys = c.execute(
-                    "SELECT obs_key FROM agent_shared_knowledge WHERE scope='baseline' "
-                    "AND obs_key!='' AND obs_key IS NOT NULL "
-                    "AND id NOT IN (SELECT keep_id FROM _keep190)").fetchall()
                 c.execute(
                     "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
                     "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
@@ -1784,12 +1777,6 @@ def _migrate_knowledge():
                     "AND id NOT IN (SELECT keep_id FROM _keep190)")
                 c.execute("DROP TEMPORARY TABLE IF EXISTS _keep190")
             else:
-                # 先查被删记录的 obs_key
-                dup_obs_keys = c.execute(
-                    "SELECT obs_key FROM agent_shared_knowledge WHERE scope='baseline' "
-                    "AND obs_key!='' AND obs_key IS NOT NULL "
-                    "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
-                    "WHERE scope='baseline' GROUP BY repo_key, name)").fetchall()
                 c.execute(
                     "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
                     "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
@@ -1800,15 +1787,8 @@ def _migrate_knowledge():
                     "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
                     "WHERE scope='baseline' GROUP BY repo_key, name)")
             db.commit()
-        # 删被去重记录的 OBS 对象
-        if _storage and dup_obs_keys:
-            for (obs_key,) in dup_obs_keys:
-                try:
-                    _storage.delete_object(obs_key)
-                except Exception as e:
-                    log.warning(f"[knowledge_migrate] dedup OBS delete failed {obs_key}: {e}")
         _step1_ok = True
-        log.info(f"[knowledge_migrate] step 1: baseline dedup done ({len(dup_obs_keys)} OBS objects cleaned)")
+        log.info("[knowledge_migrate] step 1: baseline dedup done")
     except Exception as e:
         log.warning(f"[knowledge_migrate] step 1 failed: {e}")
 
