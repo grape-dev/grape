@@ -658,9 +658,17 @@ if agent_types:
 
 ### 8.4 事务保证
 
-创建条目 + 校验 + 绑定关联全部在同一个 db_lock 内，同一次 db.commit()。校验失败时 raise HTTPException，不执行 commit，SQLite 自动回滚——条目不会残留。绑定 INSERT 失败时异常传播，同样不 commit，自动回滚。
+创建条目 + 绑定关联在同一个 db_lock 内，同一次 db.commit()。校验在 db_lock 外独立执行——校验是只读操作，不需要和 INSERT 共享锁块，分开反而减少锁持有时间。校验失败时 raise HTTPException，不执行 commit，无副作用。绑定 INSERT 失败时异常传播，db.rollback() 回滚，自动清理。
 
-事务边界：
+事务流程：
+
+```
+校验 agent_types（内存，不查 DB）
+  → 校验 scene_ids（独立 db_lock 块，批量 SELECT）
+  → 写本地文件 + OBS
+  → db_lock 内：INSERT 条目 → 循环 INSERT ref → commit
+  → 失败：db.rollback() + 删本地文件 + 删 OBS 对象
+```
 
 ```python
 from src.session_manager import db, db_lock
@@ -718,11 +726,29 @@ return {"ok": True, "message": "知识已创建", "id": kid}
 
 ### 8.5 异常处理策略
 
+**saveCreate（创建知识）**
+
 | 异常类型 | 后端状态 | 前端处理 | 用户看到 |
 |---------|---------|---------|---------|
 | 超时（AbortError） | 不确定——请求可能已到后端，条目可能已创建也可能没创建 | 提示"创建超时" + 清空表单 + 跳回列表 + loadList 刷新 | 列表里有条目=成功，没有=未创建 |
 | 非超时（400/500/网络错误） | 确定失败——事务回滚，条目不存在 | 提示错误信息 + 留在创建页 | 可安全重试，不会重复创建 |
 | 导航取消（AbortError + e.silent） | 不确定 | 静默 | 无提示 |
+
+**saveEdit（编辑知识）**
+
+| 异常类型 | 前端处理 | 用户看到 |
+|---------|---------|---------|
+| 超时（AbortError） | 提示"保存超时" + _refreshDetailFull 刷新详情 + 退出编辑模式 | 看到最新详情内容，确认是否保存成功 |
+| 非超时 | 提示错误信息 + 留在编辑页 | 可安全重试 |
+| 导航取消 | 静默 | 无提示 |
+
+**绑定/解绑操作（toggleAgentRef/removeSceneRef/confirmAddScenes）**
+
+| 异常类型 | 前端处理 | 用户看到 |
+|---------|---------|---------|
+| 超时（AbortError） | 提示"操作超时，正在刷新最新状态" + _refreshDetailFull 全量重载 | 页面恢复到后端真实状态 |
+| 非超时 | 提示错误信息 + _refreshDetailFull 全量重载 | 页面恢复到后端真实状态 |
+| 导航取消 | 静默 | 无提示 |
 
 **不需要 createdKid 防重复逻辑**——非超时失败已回滚可安全重试，超时跳回列表用户自行确认。
 
