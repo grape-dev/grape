@@ -188,10 +188,7 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     # 白名单校验：所有用户（含已存在）都必须在白名单内，踢出白名单后立即无法登录
     from src.config import is_gitcode_user_allowed
     if not is_gitcode_user_allowed(gitcode_login):
-        raise HTTPException(status_code=403, detail={
-            "code": 403,
-            "message": "您的 GitCode 账号不在白名单内，无法登录本系统。请联系统管理员。"
-        })
+        return _oauth_error_redirect(request, f"WHITELIST:gitcode:{gitcode_login}")
 
     # 新用户才创建
     if not local_user:
@@ -347,7 +344,7 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     # 白名单校验
     from src.config import is_github_user_allowed
     if not is_github_user_allowed(github_login):
-        return _oauth_error_redirect(request, "您的 GitHub 账号不在白名单内，无法登录本系统。请联系统管理员。")
+        return _oauth_error_redirect(request, f"WHITELIST:github:{github_login}")
 
     # 新用户才创建
     if not local_user:

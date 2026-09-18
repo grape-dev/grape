@@ -1056,13 +1056,14 @@ def _sync_baseline_files():
 
                 file_path = os.path.relpath(fpath, WORKSPACE_DIR)
 
-                # 查 DB 是否已有 baseline 记录
+                # 查 DB 是否已有 baseline 记录（按文件名匹配，兼容 file_path 格式变更）
                 with db_lock:
                     row = db.cursor().execute(
                         "SELECT id, obs_key FROM agent_shared_knowledge "
-                        "WHERE repo_key=? AND scope='baseline' AND file_path=? "
+                        "WHERE repo_key=? AND scope='baseline' "
+                        "AND SUBSTRING_INDEX(file_path, '/', -1)=? "
                         "ORDER BY id DESC LIMIT 1",
-                        (repo_key, file_path)
+                        (repo_key, fname)
                     ).fetchone()
 
                 if row and row[1]:  # DB 有记录且 obs_key 非空
