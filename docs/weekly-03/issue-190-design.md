@@ -158,6 +158,14 @@ member：无去重逻辑，每次 INSERT，目前无重复。但 obs_key 有路�
 
 结论：现有锁机制已覆盖所有并发路径，不需要新增锁。最终一致性保证：迁移完成后所有记录统一为新格式，迁移期间旧格式仍可用。
 
+### 3.2.1 迁移期间 obs_key 不一致窗口
+
+迁移 Step 2 批量 UPDATE obs_key（单次 commit），存在一个短暂窗口：commit 前部分记录已计算新 obs_key 但 DB 仍未更新。此期间：
+
+- _sync_baseline_files 查到记录（ORDER BY id DESC），obs_key 仍为旧格式 → 发现非空 → 跳过。迁移 commit 后 obs_key 更新为新格式，下次 sync 时若内容未变仍跳过。
+- read_entry_content 用 DB 中的旧 obs_key 读取 OBS → 旧 OBS 对象未删除 → 读取成功。
+- 批量 commit 将窗口缩短为单次事务（毫秒级），非逐行 commit 的秒级窗口。
+
 ### 3.3 与 Issue #67 去重的关系
 
 Issue #67 按 `repo_key, scope, agent_type, issue_num, file_path` 五字段去重。Issue #190 按 `repo_key, name` 两字段去重（仅 baseline scope）。

@@ -1776,6 +1776,7 @@ def _migrate_issue190():
                 "SELECT id, repo_key, scope, agent_type, issue_num, obs_key, file_path "
                 "FROM agent_shared_knowledge WHERE obs_key != '' AND obs_key IS NOT NULL"
             ).fetchall()
+        updates = []  # [(new_obs_key, id), ...]
         for rid, repo_key, scope, agent_type, issue_num, obs_key, file_path in rows:
             provider, owner, repo = parse_repo_key(repo_key)
             new_prefix = knowledge_obs_prefix(repo_key)
@@ -1820,13 +1821,17 @@ def _migrate_issue190():
                         _storage.save_bytes(new_obs_key, _data)
                 except Exception as e:
                     log.warning(f"[Issue #190] OBS migrate failed id={rid}: {e}")
-            # UPDATE DB
+            updates.append((new_obs_key, rid))
+
+        # 批量 UPDATE，一次 commit
+        if updates:
             with db_lock:
-                db.cursor().execute(
+                c = db.cursor()
+                c.executemany(
                     "UPDATE agent_shared_knowledge SET obs_key=? WHERE id=?",
-                    (new_obs_key, rid))
+                    updates)
                 db.commit()
-        log.info("[Issue #190] step 2: obs_key normalization done")
+        log.info(f"[Issue #190] step 2: obs_key normalization done ({len(updates)} rows)")
     except Exception as e:
         log.warning(f"[Issue #190] step 2 failed: {e}")
 
@@ -1837,11 +1842,11 @@ def _migrate_issue190():
                 "SELECT id, repo_key, file_path FROM agent_shared_knowledge "
                 "WHERE file_path != '' AND file_path IS NOT NULL"
             ).fetchall()
+        updates = []  # [(new_file_path, id), ...]
         for rid, repo_key, file_path in rows:
             provider, owner, repo = parse_repo_key(repo_key)
             full_prefix = f"{provider}/{owner}/{repo}/"
             partial_prefix = f"{owner}/{repo}/"
-            new_fp = file_path
             if file_path.startswith(full_prefix):
                 continue  # 已是 NEW 格式
             elif file_path.startswith(partial_prefix):
@@ -1850,12 +1855,16 @@ def _migrate_issue190():
                 new_fp = f"{full_prefix}{file_path}"  # 补完整前缀
             else:
                 continue  # 未知格式，跳过
+            updates.append((new_fp, rid))
+
+        if updates:
             with db_lock:
-                db.cursor().execute(
+                c = db.cursor()
+                c.executemany(
                     "UPDATE agent_shared_knowledge SET file_path=? WHERE id=?",
-                    (new_fp, rid))
+                    updates)
                 db.commit()
-        log.info("[Issue #190] step 3: file_path normalization done")
+        log.info(f"[Issue #190] step 3: file_path normalization done ({len(updates)} rows)")
     except Exception as e:
         log.warning(f"[Issue #190] step 3 failed: {e}")
 
