@@ -154,13 +154,13 @@ async def lifespan(app: FastAPI):
 
     # Issue #190：知识库 obs_key/file_path 归一化迁移（异步，不阻塞启动）
     try:
-        from src.api.db_setup import _migrate_issue190
+        from src.api.db_setup import _migrate_knowledge
         import threading
-        _t190 = threading.Thread(target=_migrate_issue190, daemon=True)
-        _t190.start()
-        log.info("Issue #190 migration started (async)")
+        _knowledge_migrate_thread = threading.Thread(target=_migrate_knowledge, daemon=True)
+        _knowledge_migrate_thread.start()
+        log.info("knowledge_migrate started (async)")
     except Exception as e:
-        log.warning(f"Issue #190 migration start failed: {e}")
+        log.warning(f"knowledge_migrate start failed: {e}")
 
     # Issue #67: 归档知识定时清理——每天清理超过 90 天的归档知识
     try:

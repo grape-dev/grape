@@ -1713,7 +1713,7 @@ def _migrate_knowledge_issue67():
     log.info("[Issue #67] knowledge migration done")
 
 
-def _migrate_issue190():
+def _migrate_knowledge():
     """Issue #190：baseline 去重 + obs_key 归一化 + file_path 归一化。
 
     幂等：通过 meta 表 knowledge_migrate_done 标记控制，已执行则跳过。
@@ -1732,16 +1732,16 @@ def _migrate_issue190():
 
     # 幂等检查
     if get_meta_value("knowledge_migrate_done") == "1":
-        log.info("[Issue #190] migration already done, skip")
+        log.info("[knowledge_migrate] migration already done, skip")
         return
 
     # 分布式锁：防多实例同时迁移
     _lock_key = "knowledge_migrate"
     if not acquire_lock(_lock_key, ttl=600):
-        log.info("[Issue #190] migration lock contention, another instance is running, skip")
+        log.info("[knowledge_migrate] migration lock contention, another instance is running, skip")
         return
 
-    log.info("[Issue #190] migration started")
+    log.info("[knowledge_migrate] migration started")
 
     _step1_ok = False
     _step2_ok = False
@@ -1776,9 +1776,9 @@ def _migrate_issue190():
                     "WHERE scope='baseline' GROUP BY repo_key, name)")
             db.commit()
         _step1_ok = True
-        log.info("[Issue #190] step 1: baseline dedup done")
+        log.info("[knowledge_migrate] step 1: baseline dedup done")
     except Exception as e:
-        log.warning(f"[Issue #190] step 1 failed: {e}")
+        log.warning(f"[knowledge_migrate] step 1 failed: {e}")
 
     # ===== 步骤 2：更新 obs_key 为新格式（含 provider）=====
     try:
@@ -1833,7 +1833,7 @@ def _migrate_issue190():
                     if _data:
                         _storage.save_bytes(new_obs_key, _data)
                 except Exception as e:
-                    log.warning(f"[Issue #190] OBS migrate failed id={rid}: {e}")
+                    log.warning(f"[knowledge_migrate] OBS migrate failed id={rid}: {e}")
             updates.append((new_obs_key, rid, obs_key))  # 记录旧 key 供清理
 
         # 批量 UPDATE，一次 commit
@@ -1850,11 +1850,11 @@ def _migrate_issue190():
                     try:
                         _storage.delete_object(_old_key)
                     except Exception as e:
-                        log.warning(f"[Issue #190] OBS old key delete failed {_old_key}: {e}")
+                        log.warning(f"[knowledge_migrate] OBS old key delete failed {_old_key}: {e}")
         _step2_ok = True
-        log.info(f"[Issue #190] step 2: obs_key normalization done ({len(updates)} rows)")
+        log.info(f"[knowledge_migrate] step 2: obs_key normalization done ({len(updates)} rows)")
     except Exception as e:
-        log.warning(f"[Issue #190] step 2 failed: {e}")
+        log.warning(f"[knowledge_migrate] step 2 failed: {e}")
 
     # ===== 步骤 3：更新 file_path 为新格式（含 provider 前缀）=====
     try:
@@ -1886,16 +1886,16 @@ def _migrate_issue190():
                     updates)
                 db.commit()
         _step3_ok = True
-        log.info(f"[Issue #190] step 3: file_path normalization done ({len(updates)} rows)")
+        log.info(f"[knowledge_migrate] step 3: file_path normalization done ({len(updates)} rows)")
     except Exception as e:
-        log.warning(f"[Issue #190] step 3 failed: {e}")
+        log.warning(f"[knowledge_migrate] step 3 failed: {e}")
 
     # ===== 标记完成（仅在所有步骤成功时）=====
     if _step1_ok and _step2_ok and _step3_ok:
         set_meta_value("knowledge_migrate_done", "1")
-        log.info("[Issue #190] migration done")
+        log.info("[knowledge_migrate] migration done")
     else:
-        log.warning("[Issue #190] migration incomplete, will retry on next startup")
+        log.warning("[knowledge_migrate] migration incomplete, will retry on next startup")
 
     # 释放分布式锁
     release_lock(_lock_key)
