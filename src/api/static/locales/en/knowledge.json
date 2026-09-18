@@ -131,6 +131,5 @@
   "ref_failed_refresh": "Operation failed, refreshing latest state",
   "refresh_failed": "Refresh failed, please reload the page",
   "save_timeout": "Save timed out, please reload to verify",
-  "create_timeout": "Create timed out, please reload to verify",
-  "create_ok_bind_failed": "Knowledge created, but binding failed. Please bind manually in the detail page"
+  "create_timeout": "Create timed out, please reload to verify"
 }

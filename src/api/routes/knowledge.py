@@ -204,6 +204,8 @@ class KnowledgeEntryBody(BaseModel):
     agent_type: str = ""
     description: str = ""
     name: str = ""
+    scene_ids: list[str] = []
+    agent_types: list[str] = []
 
 class KnowledgeUpdateBody(BaseModel):
     content: str = ""
@@ -213,6 +215,7 @@ class KnowledgeUpdateBody(BaseModel):
 MAX_NAME_LEN = 50
 MAX_DESC_LEN = 200
 MAX_CONTENT_BYTES = 10 * 1024
+VALID_AGENT_TYPES = {'vod', 'issue', 'coding', 'qa', 'sre', 'chat'}
 
 # name 是展示名，不强制唯一——用 id 做唯一标识
 # 如需重名警告，前端可查列表对比提示，后端不拦截
@@ -373,7 +376,11 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
 
 @router.post("/entry", operation_id="knowledge_entry_create", summary="Create knowledge entry", description="Creates a knowledge entry from plain text (source=manual).")
 def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(require_no_session_token)):
-    """用户直接输入文本创建知识条目（source=manual）。"""
+    """用户直接输入文本创建知识条目（source=manual）。
+
+    Issue #199：支持 scene_ids / agent_types 参数，创建条目 + 绑定关联在同一个事务内完成。
+    校验在 INSERT 之前——校验失败不 commit，自动回滚，无副作用。
+    """
     if not (body.name or "").strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "name 必填"})
     if len(body.name.strip()) > MAX_NAME_LEN:
@@ -387,8 +394,34 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
     if not body.repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
 
+    scene_ids = body.scene_ids or []
+    agent_types = body.agent_types or []
+
+    # 校验 agent_types（内存比对，不查 DB）
+    if agent_types:
+        invalid = [at for at in agent_types if at not in VALID_AGENT_TYPES]
+        if invalid:
+            raise HTTPException(status_code=400,
+                detail={"code": 400, "message": f"不支持的 Agent 类型: {invalid}"})
+
     repo_key = _resolve_repo_key(body.repo)
     _check_repo_member(user, repo_key)
+
+    # 校验 scene_ids 存在性（批量查，不循环）
+    if scene_ids:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            placeholders = ",".join("?" * len(scene_ids))
+            valid_rows = db.cursor().execute(
+                f"SELECT scene_id FROM devops_pipeline_scene "
+                f"WHERE is_active=1 AND repo_key=? AND scene_id IN ({placeholders})",
+                [repo_key] + scene_ids
+            ).fetchall()
+        valid_ids = {r[0] for r in valid_rows}
+        invalid = [sid for sid in scene_ids if sid not in valid_ids]
+        if invalid:
+            raise HTTPException(status_code=400,
+                detail={"code": 400, "message": f"场景不存在: {invalid}"})
 
     base = _repo_base(repo_key)
     username = str(user.get("username") or user.get("id") or "user")
@@ -411,17 +444,58 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
     except Exception as e:
         log.warning(f"[knowledge] entry OBS save failed: {e}")
 
+    # 构建关联列表
+    items = [(sid, "") for sid in scene_ids] + [("", at) for at in agent_types]
+
     from src.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "INSERT INTO agent_shared_knowledge "
-            "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description, name) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("member", repo_key, body.agent_type or "", 0, rel, obs_key, content_hash, "accepted", 0, username, "manual", body.description or "", body.name.strip())
-        )
-        kid = c.lastrowid
-        db.commit()
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 1. INSERT 条目
+            c.execute(
+                "INSERT INTO agent_shared_knowledge "
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description, name) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("member", repo_key, body.agent_type or "", 0, rel, obs_key, content_hash, "accepted", 0, username, "manual", body.description or "", body.name.strip())
+            )
+            kid = c.lastrowid
+
+            # 2. 绑定关联（幂等，跳过已存在）
+            for scene_id, agent_type in items:
+                if not scene_id and not agent_type:
+                    continue
+                existing = c.execute(
+                    "SELECT id FROM scene_knowledge_ref "
+                    "WHERE knowledge_id=? AND scene_id=? AND agent_type=?",
+                    (kid, scene_id, agent_type)
+                ).fetchone()
+                if not existing:
+                    c.execute(
+                        "INSERT INTO scene_knowledge_ref "
+                        "(knowledge_id, scene_id, agent_type, enabled, created_by) "
+                        "VALUES (?, ?, ?, 1, ?)",
+                        (kid, scene_id, agent_type, username)
+                    )
+
+            # 3. 全部成功才 commit
+            db.commit()
+    except Exception as e:
+        # DB 失败——清理本地文件 + OBS 对象，避免残留
+        try:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
+        if obs_key:
+            try:
+                from src.storage import get_storage
+                storage = get_storage()
+                if storage is not None:
+                    storage.delete_object(obs_key)
+            except Exception:
+                pass
+        log.warning(f"[knowledge] entry create failed, cleaned up {file_path}: {e}")
+        raise
 
     return {"ok": True, "message": "知识已创建", "file_path": rel, "id": kid}
 
