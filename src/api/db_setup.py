@@ -1718,6 +1718,7 @@ def _migrate_issue190():
 
     幂等：通过 meta 表 issue190_migrate_done 标记控制，已执行则跳过。
     异步执行：由 main.py lifespan() 内 daemon thread 调用，不阻塞启动。
+    分布式锁：acquire_lock 防多实例并发执行迁移。
     最终一致性：迁移期间旧格式数据仍可用，迁移完成后切换到新格式。
     """
     import hashlib as _hl
@@ -1725,12 +1726,19 @@ def _migrate_issue190():
     from src.mysql_compat import get_db_backend
     from src.user.db import get_meta_value, set_meta_value
     from src.repo_key import parse_repo_key, knowledge_obs_prefix
+    from src.lock import acquire_lock, release_lock
 
     _is_mysql = get_db_backend() == "mysql"
 
     # 幂等检查
     if get_meta_value("issue190_migrate_done") == "1":
         log.info("[Issue #190] migration already done, skip")
+        return
+
+    # 分布式锁：防多实例同时迁移
+    _lock_key = "knowledge_migrate"
+    if not acquire_lock(_lock_key, ttl=600):
+        log.info("[Issue #190] migration lock contention, another instance is running, skip")
         return
 
     log.info("[Issue #190] migration started")
@@ -1881,6 +1889,9 @@ def _migrate_issue190():
         log.info("[Issue #190] migration done")
     else:
         log.warning("[Issue #190] migration incomplete, will retry on next startup")
+
+    # 释放分布式锁
+    release_lock(_lock_key)
 
 
 def _cleanup_stale_meta():
