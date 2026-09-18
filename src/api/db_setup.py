@@ -1827,13 +1827,17 @@ def _migrate_knowledge():
                 continue
 
             # OBS 对象迁移：旧 key 读取内容 → 写入新 key → 删旧 key
+            # 读不到内容时跳过（不更新 DB、不删旧对象），下次启动重试
             if _storage:
                 try:
                     _data = _storage.read_bytes(obs_key)
-                    if _data:
-                        _storage.save_bytes(new_obs_key, _data)
+                    if not _data:
+                        log.warning(f"[knowledge_migrate] OBS read empty for id={rid} old_key={obs_key}, skip")
+                        continue
+                    _storage.save_bytes(new_obs_key, _data)
                 except Exception as e:
                     log.warning(f"[knowledge_migrate] OBS migrate failed id={rid}: {e}")
+                    continue
             updates.append((new_obs_key, rid, obs_key))  # 记录旧 key 供清理
 
         # 批量 UPDATE，一次 commit
