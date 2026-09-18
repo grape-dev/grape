@@ -101,7 +101,10 @@
     "hello-world": {
       "name": "Hello World 部署",
       "nodes": [
-        {"id": "vod", "tag": "vod", "skill": "vod-strict", "mode": "emit", "next": "sre", "handoff": "a2a"},
+        {"id": "vod", "tag": "vod", "skill": "vod-strict", "mode": "emit", "next": "issue", "handoff": "a2a"},
+        {"id": "issue", "tag": "issue", "skill": "issue-advance", "mode": "emit", "next": "coding", "handoff": "a2a"},
+        {"id": "coding", "tag": "coding", "skill": "implementation", "mode": "emit", "next": "qa", "handoff": "a2a"},
+        {"id": "qa", "tag": "qa", "skill": "pr", "mode": "emit", "next": "sre", "handoff": "a2a"},
         {"id": "sre", "tag": "sre", "skill": "devbridge-deploy", "mode": "emit", "next": "done", "handoff": "complete"}
       ],
       "onboarding": "repo-onboarding"

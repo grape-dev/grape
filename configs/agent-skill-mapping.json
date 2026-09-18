@@ -94,6 +94,9 @@
         "name": "Hello World 部署",
         "mapping": {
             "vod": "vod-strict",
+            "issue": "issue-advance",
+            "coding": "implementation",
+            "qa": "pr",
             "sre": "devbridge-deploy"
         }
     }
