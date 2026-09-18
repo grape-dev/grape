@@ -231,8 +231,6 @@ class KnowledgeRefBatchBody(BaseModel):
 class KnowledgeRefUpdateBody(BaseModel):
     enabled: bool = True
 
-class ArchiveBody(BaseModel):
-    archived: bool = True
 
 
 def _build_ref_summary(refs: list) -> str:
@@ -559,32 +557,6 @@ def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(require_no_se
     return {"ok": True, "message": "知识已删除"}
 
 
-@router.put("/{knowledge_id}/archive", operation_id="knowledge_archive", summary="Archive/unarchive knowledge", description="Archives/unarchives knowledge (body.archived true/false).")
-def archive_knowledge(knowledge_id: int, body: ArchiveBody,
-                      user: dict = Depends(require_no_session_token)):
-    """标记/取消归档。body.archived=true 标记归档，false 取消归档。"""
-    row = _get_knowledge_by_id(knowledge_id)
-    if not row:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
-
-    # 权限：manual 仅创建者，system/agent 仓库托管者（当前先放行）
-    if row["source"] == "manual" and row["created_by"] != user.get("username"):
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可操作"})
-
-    archived = 1 if body.archived else 0
-    from src.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "UPDATE agent_shared_knowledge SET archived=? WHERE id=?",
-            (archived, knowledge_id)
-        )
-        c.execute(
-            "UPDATE scene_knowledge_ref SET enabled=?, updated_by=? WHERE knowledge_id=?",
-            (0 if archived else 1, str(user.get("username") or ""), knowledge_id)
-        )
-        db.commit()
-    return {"ok": True, "archived": archived}
 
 
 # ===== 关联管理 API =====

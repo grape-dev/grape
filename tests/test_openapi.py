@@ -172,7 +172,6 @@ EXPECTED_PUBLIC = {
     "knowledge_entry_create": ("post", "/api/knowledge/entry"),
     "knowledge_delete": ("delete", "/api/knowledge/{knowledge_id}"),
     "knowledge_update": ("put", "/api/knowledge/{knowledge_id}"),
-    "knowledge_archive": ("put", "/api/knowledge/{knowledge_id}/archive"),
     "knowledge_refs_list": ("get", "/api/knowledge/{knowledge_id}/refs"),
     "knowledge_ref_create": ("post", "/api/knowledge/{knowledge_id}/refs"),
     "knowledge_add_refs_batch": ("post", "/api/knowledge/{knowledge_id}/refs/batch"),
