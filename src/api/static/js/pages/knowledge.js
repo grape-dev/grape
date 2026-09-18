@@ -632,6 +632,7 @@ function renderKnowledge() {
         if (new Blob([this.createForm.content]).size > 10240) { app.showToast(this.t('content_too_large')); return; }
         if (this.submitting) return;
         this.submitting = true;
+        let createdKid = null;
         try {
           const d = await API.post('/knowledge/entry', {
             repo: this.currentRepo(),
@@ -640,9 +641,9 @@ function renderKnowledge() {
             description: this.createForm.description || '',
             name: this.createForm.name.trim()
           }, 15000);
-          const kid = d.id || d.knowledge_id;
-          if (kid && (this.createForm.agentSelected.length > 0 || this.createForm.sceneSelected.length > 0)) {
-            await API.post('/knowledge/' + kid + '/refs/batch', {
+          createdKid = d.id || d.knowledge_id;
+          if (createdKid && (this.createForm.agentSelected.length > 0 || this.createForm.sceneSelected.length > 0)) {
+            await API.post('/knowledge/' + createdKid + '/refs/batch', {
               scene_ids: this.createForm.sceneSelected,
               agent_types: this.createForm.agentSelected
             }, 15000);
@@ -650,7 +651,6 @@ function renderKnowledge() {
           app.showToast(this.t('knowledge_created'));
           this.createForm = null;
           this.view = 'list';
-          // Issue #199: loadStats + loadList 并行
           await Promise.all([this.loadStats(), this.loadList()]);
         } catch (e) {
           if (e.name === 'AbortError' && !e.silent) {
@@ -660,6 +660,12 @@ function renderKnowledge() {
             await this.loadList();
           } else if (e.name === 'AbortError' && e.silent) {
             // 导航/切 tab 导致的取消，静默
+          } else if (createdKid) {
+            // 知识条目已创建但关联失败——不能留在创建页否则重试会重复创建
+            app.showToast(this.t('create_ok_bind_failed') || '知识已创建，但关联绑定失败，请在详情页手动关联');
+            this.createForm = null;
+            this.view = 'list';
+            await this.loadList();
           } else {
             app.showToast(e.message || I18N.t('common.load_failed'));
           }

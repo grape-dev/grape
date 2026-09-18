@@ -131,5 +131,6 @@
   "ref_failed_refresh": "操作失败，正在刷新最新状态",
   "refresh_failed": "刷新失败，请手动刷新页面",
   "save_timeout": "保存超时，请刷新页面确认最新状态",
-  "create_timeout": "创建超时，请刷新页面确认是否创建成功"
+  "create_timeout": "创建超时，请刷新页面确认是否创建成功",
+  "create_ok_bind_failed": "知识已创建，但关联绑定失败，请在详情页手动关联"
 }
