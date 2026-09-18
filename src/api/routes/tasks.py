@@ -587,7 +587,7 @@ async def notify_task(body: TaskNotifyBody, request: Request,
     if body.assignee in get_all_bot_usernames():
         closed = _close_issue_tasks_bot_takeover(body.repo_key, body.issue_number)
         log.info(f"Task notify: bot_takeover assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} closed={closed} (task_id=0)")
-        return {"ok": True, "task_id": 0, "conversation_id": "",
+        return {"ok": True, "issue_id": 0, "task_id": 0, "conversation_id": "",
                 "message": f"任务已由 {body.assignee} 接管" + (f"（关闭 {closed} 条待处理任务）" if closed else "（无待处理任务）")}
 
     # 解析 user_id
@@ -630,7 +630,7 @@ async def notify_task(body: TaskNotifyBody, request: Request,
     asyncio.create_task(_run_notify(ctx, api, user_id, conv_id, open_id,
                                     body.task_description, body.repo_key, body.issue_number, cfg))
 
-    return {"ok": True, "task_id": task_id, "conversation_id": conv_id,
+    return {"ok": True, "issue_id": task_id, "task_id": task_id, "conversation_id": conv_id,
             "message": "任务已创建并通知责任人"}
 
 

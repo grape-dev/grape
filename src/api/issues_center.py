@@ -782,7 +782,9 @@ def create_standard_task(repo_key: str, title: str, description: str,
                                 assignee=assignee, event_type="onboarding")
     if not task_id:
         return {"ok": False, "code": 500, "message": "任务建档失败"}
-    return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
+    # task_id 语义 = 需求卡片 issue.id（issues_center P2：主字段 issue_id，兼容保留 task_id）
+    return {"ok": True, "issue_id": task_id, "task_id": task_id,
+            "issue_number": issue_num, "created": created,
             "message": "任务已创建（Issue 已同步）" if created else "任务已创建（复用已有 Issue）"}
 
 
@@ -965,7 +967,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             from src.config import log as _log
             _log.warning(f"create_task: sync pipeline trigger failed: {_e}")
 
-    return {"ok": True, "task_id": task_id, "issue_number": issue_num, "created": created,
+    # task_id 语义 = 需求卡片 issue.id（issues_center P2：主字段 issue_id，兼容保留 task_id）
+    return {"ok": True, "issue_id": task_id, "task_id": task_id,
+            "issue_number": issue_num, "created": created,
             "assignee": assignee, "is_subtask_mode": _auto_subtask_mode,
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 

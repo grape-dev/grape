@@ -34,8 +34,10 @@
 出参：
 
 ```json
-{"ok": true, "task_id": 5, "conversation_id": "uuid", "message": "任务已创建并通知责任人"}
+{"ok": true, "issue_id": 5, "task_id": 5, "conversation_id": "uuid", "message": "任务已创建并通知责任人"}
 ```
+
+> `issue_id`（=`task_id` 兼容别名）为需求卡片 id（issue.id）；bot_takeover 返回 `{"ok":true,"issue_id":0,"task_id":0,...}`。
 
 返回：200；400 责任人未注册平台；401 未认证/无效 token（契约依赖层）；**403 非 `GRAPE_SESSION_TOKEN` 或仓库作用域不匹配（含 `BOT_GITCODE_TOKEN`）**；404 仓库未托管；bot_takeover 场景返回 `{"ok":true,"task_id":0,"message":"任务已由 ... 接管"}`。
 
