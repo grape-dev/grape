@@ -25,8 +25,8 @@ from src.config import WORKSPACE_DIR
 def write_text(path: str, content: str, encoding: str = "utf-8") -> None:
     """原子写入文本文件。
 
-    写 .tmp → os.replace（原子 rename），保证文件要么是完整的新内容，
-    要么是原来的旧内容，不会出现写入中途崩溃导致的截断文件。
+    写 .tmp → flush+fsync → os.replace（原子 rename），保证文件要么是
+    完整的新内容，要么是原来的旧内容，不会出现写入中途崩溃导致的截断文件。
     """
     _dir = os.path.dirname(path)
     os.makedirs(_dir, exist_ok=True)
@@ -34,6 +34,8 @@ def write_text(path: str, content: str, encoding: str = "utf-8") -> None:
     try:
         with os.fdopen(_fd, "w", encoding=encoding) as f:
             f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(_tmp, path)
     except Exception:
         try:
@@ -51,6 +53,8 @@ def write_bytes(path: str, data: bytes) -> None:
     try:
         with os.fdopen(_fd, "wb") as f:
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(_tmp, path)
     except Exception:
         try:
