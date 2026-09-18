@@ -192,13 +192,12 @@ def _run(cmd: list, cwd: str = None, timeout: int = 300) -> tuple[int, str, str]
 def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
     """确保分析副本为非 bare 工作目录（从 bare mirror checkout 最新 main/master）。"""
     base = _repo_base_dir(repo_key)
-    # bare mirror 不存在 → 主动建立（修复仅 VOD/Issue 仓库永不建 codebase 导致 project-info 永远 degraded 的缺陷）
-    if not os.path.isdir(base):
-        try:
-            from src.runtime.repogit import ensure_repo_base
-            base = ensure_repo_base(repo_key, token or "")
-        except Exception as e:
-            log.warning(f"project-info ensure_repo_base failed {repo_key}: {e}")
+    # Issue #200: 每次都刷新 bare mirror refs（ensure_repo_base 内部幂等：已存在只 fetch）
+    try:
+        from src.runtime.repogit import ensure_repo_base
+        base = ensure_repo_base(repo_key, token or "")
+    except Exception as e:
+        log.warning(f"project-info ensure_repo_base failed {repo_key}: {e}")
     if not base or not os.path.isdir(base):
         return None
     work = _analysis_dir(repo_key)
@@ -217,9 +216,12 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
             if code != 0:
                 log.warning(f"project-info analysis worktree add failed {repo_key}: {err[:200]}")
                 return None
-        # 刷新 main/master 到最新
+        # 刷新 main/master 到最新（私有仓库需 token 认证；Issue #200）
+        from src.runtime.repogit import _run_git
         for br in ("origin/main", "origin/master"):
-            _run(["git", "-C", work, "fetch", "origin", br], timeout=300)
+            _r = _run_git(["-C", work, "fetch", "origin", br], token=token, timeout=300)
+            if _r and _r.returncode != 0:
+                log.warning(f"project-info worktree fetch {br} failed {repo_key}: {(_r.stderr or '')[:200]}")
         # codegraph 索引初始化（幂等：已存在则跳过；索引持久化于分析副本 .codegraph/）
         if not os.path.isdir(os.path.join(work, ".codegraph")):
             code, out, err = _run(["codegraph", "init"], cwd=work, timeout=600)
@@ -290,16 +292,10 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
     # 获取 main HEAD sha（用于刷新判定）
     try:
         import urllib.request
-        from src.repo_key import parse_repo_key
-        _provider, _, _ = parse_repo_key(repo_key)
-        if _provider == "github":
-            from src.user.db import get_github_token
-            tok = token or get_github_token(repo_key=repo_key) or ""
-            _api_base = "https://api.github.com"
-        else:
-            from src.user.db import get_gitcode_token
-            tok = token or get_gitcode_token(repo_key=repo_key) or ""
-            _api_base = "https://gitcode.com/api/v5"
+        from src.repo import Repo
+        _repo = Repo(repo_key)
+        tok = token or _repo.bot_token
+        _api_base = _repo.api_base
         if tok:
             req = urllib.request.Request(
                 f"{_api_base}/repos/{owner}/{rname}/commits?per_page=1",
@@ -380,16 +376,11 @@ def should_refresh(repo_key: str) -> bool:
     if last_sha:
         try:
             import urllib.request, json as _json
-            from src.repo_key import split_owner_repo, parse_repo_key
-            _provider, _, _ = parse_repo_key(repo_key)
-            if _provider == "github":
-                from src.user.db import get_github_token
-                tok = get_github_token(repo_key=repo_key) or ""
-                _api_base = "https://api.github.com"
-            else:
-                from src.user.db import get_gitcode_token
-                tok = get_gitcode_token(repo_key=repo_key) or ""
-                _api_base = "https://gitcode.com/api/v5"
+            from src.repo_key import split_owner_repo
+            from src.repo import Repo
+            _repo = Repo(repo_key)
+            tok = _repo.bot_token
+            _api_base = _repo.api_base
             if tok:
                 owner, rname = split_owner_repo(repo_key)
                 req = urllib.request.Request(
