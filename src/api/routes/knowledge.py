@@ -480,7 +480,11 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
             # 3. 全部成功才 commit
             db.commit()
     except Exception as e:
-        # DB 失败——清理本地文件 + OBS 对象，避免残留
+        # DB 失败——回滚事务 + 清理本地文件 + OBS 对象，避免残留
+        try:
+            db.rollback()
+        except Exception:
+            pass
         try:
             if os.path.isfile(file_path):
                 os.remove(file_path)
