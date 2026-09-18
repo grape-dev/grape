@@ -32,11 +32,12 @@
 
 | 层 | 文件 | 改动内容 |
 |----|------|----------|
-| 后端 | src/api/routes/knowledge.py | get_knowledge_detail 批量查 pipeline_config（消除 N+1） |
-| 前端 JS | src/api/static/js/pages/knowledge.js | 重写 toggleAgentRef / removeSceneRef / confirmAddScenes / saveEdit / saveCreate 的请求-反馈逻辑；删除死代码 loadScenes / loadRefs |
-| 前端 CSS | src/api/static/css/app.css | 新增绑定操作的 loading 态 + 进出场动画 |
+| 后端 | src/api/routes/knowledge.py | get_knowledge_detail JOIN nodes_json 消除 N+1 |
+| 前端 JS | src/api/static/js/pages/knowledge.js | 重写 toggleAgentRef / removeSceneRef / confirmAddScenes / saveEdit / saveCreate；删除死代码 loadScenes / loadRefs / removeAgentRef / addAgentByType / addSceneById / openAgentPopover / toggleAgentSelect / confirmAddAgents；清理 data 残留字段 scenes / agentSelected / addAgentPopover |
+| 前端 JS | src/api/static/js/app.js | showToast 去重 + 淡入淡出过渡 |
+| 前端 CSS | src/api/static/css/app.css | 新增 loading 态 + 进出场动画 |
 | 前端 HTML | src/api/static/index.html | JS 版本号递增 |
-| i18n | src/api/static/js/i18n.js 或语言包 | 新增 7 个文案 key |
+| i18n | locales/zh/knowledge.json + locales/en/knowledge.json | 新增 11 个文案 key |
 
 **后端 POST /refs/batch 和 DELETE /ref/{id} 不改**——前端操作成功/超时/失败后统一调 GET /knowledge/{id} 详情接口刷新。
 
@@ -44,51 +45,35 @@
 
 ### 3.1 后端改动
 
-#### 3.1.1 get_knowledge_detail 批量查 pipeline_config（修复 N+1）
+#### 3.1.1 get_knowledge_detail JOIN nodes_json 消除 N+1
 
-**当前**（knowledge.py:452-462）：
-```python
-scene_ids = [r[9] for r in refs if r[9] and row["repo_key"]]
-pipeline_map = {}
-for sid in scene_ids:  # N 次循环
-    pc = get_pipeline_config(sid, repo_key=row["repo_key"])
-    ...
-```
+**原代码**逐个 scene 调 get_pipeline_config（N 次循环 DB 查询）。
 
-**改为**：一次 SQL 查出所有 scene 的 nodes_json
+**实际实现**比设计文档原方案更简洁——不新增 _batch_query_pipeline_config 函数，直接在 LEFT JOIN 中查出 s.nodes_json，循环内 json.loads 解析：
 
 ```python
-def _batch_query_pipeline_config(scene_ids: list[str], repo_key: str) -> dict[str, str]:
-    """批量查多个 scene 的 pipeline 链，返回 {scene_id: "node1 → node2 → ..."}"""
-    if not scene_ids or not repo_key:
-        return {}
-    from src.session_manager import db, db_lock
-    placeholders = ",".join("?" * len(scene_ids))
-    with db_lock:
-        rows = db.cursor().execute(
-            f"SELECT scene_id, nodes_json FROM devops_pipeline_scene "
-            f"WHERE is_active=1 AND repo_key=? AND scene_id IN ({placeholders})",
-            [repo_key] + scene_ids
-        ).fetchall()
-    result = {}
-    for sid, nodes_json in rows:
-        nodes = json.loads(nodes_json or "[]") if nodes_json else []
-        chain = " → ".join(n.get("tag", n.get("id", "")) for n in nodes if n.get("enabled", True))
-        result[sid] = chain
-    return result
+# knowledge.py get_knowledge_detail 内
+refs = db.cursor().execute(
+    "SELECT r.id, r.scene_id, r.agent_type, r.enabled, r.created_by, r.created_at, "
+    "s.name, s.description, s.display_name, s.scene_id, s.nodes_json "
+    "FROM scene_knowledge_ref r "
+    "LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? AND s.is_active=1 "
+    "WHERE r.knowledge_id = ? ORDER BY r.id",
+    (row["repo_key"], knowledge_id)
+).fetchall()
+
+# 直接解析 JOIN 结果中的 nodes_json
+for r in refs:
+    pipeline_chain = ""
+    if r[10]:
+        try:
+            nodes = json.loads(r[10])
+            pipeline_chain = " → ".join(n.get("tag", n.get("id", "")) for n in nodes if n.get("enabled", True))
+        except Exception:
+            pass
 ```
 
-get_knowledge_detail 中替换循环：
-```python
-scene_ids = [r[9] for r in refs if r[9] and row["repo_key"]]
-pipeline_map = _batch_query_pipeline_config(scene_ids, row["repo_key"])
-```
-
-`get_knowledge_detail` 中替换循环：
-```python
-scene_ids = [r[9] for r in refs if r[9] and row["repo_key"]]
-pipeline_map = _batch_query_pipeline_config(scene_ids, row["repo_key"])
-```
+0 次额外 DB 查询，原 N+1 循环和 get_pipeline_config 调用全部删除。
 
 #### 3.1.2 后端接口不改
 
@@ -102,11 +87,12 @@ POST /refs/batch 和 DELETE /ref/{id} 保持返回 {ok: true}，不改响应格�
 
 ```
 用户点击
-  → 立即设置 loading 态（标签/卡片显示 spinner，禁用其他操作）
-  → 发起请求（30s 超时）
-  → 成功：用响应中的 refs 更新本地状态 + Toast 提示"绑定成功"/"解绑成功" + 动画过渡
-  → 超时：Toast 提示"操作超时，正在刷新最新状态" + 主动调 GET /knowledge/{id} 全量重载
+  → 立即设置 loading 态（标签/卡片/按钮显示 spinner，禁用其他操作）
+  → 发起请求（API 层传 timeout=15000，15s 超时）
+  → 成功：调 GET /knowledge/{id} 刷新详情 + Toast 提示 + 动画过渡
+  → 超时（15s）：Toast 提示"操作超时，正在刷新最新状态" + 主动调 GET /knowledge/{id} 全量重载
   → 失败（非超时）：Toast 提示错误信息 + 主动调 GET /knowledge/{id} 全量重载确保一致性
+  → 导航/切 tab 取消（AbortError + e.silent）：静默，不提示
 ```
 
 关键设计：
@@ -114,7 +100,8 @@ POST /refs/batch 和 DELETE /ref/{id} 保持返回 {ok: true}，不改响应格�
 - 请求期间有明确 loading 态（spinner 覆盖在标签/卡片/按钮上）
 - 成功后调 GET /knowledge/{id} 刷新详情（含 refs），不再调 loadRefs
 - 超时/失败后同样调 GET /knowledge/{id} 全量重载，保证页面与后端一致
-- 所有操作超时统一 15s（API 层传 timeout=15000）
+- 所有操作超时统一 15s（API 层 _fetchWithTimeout 第三参数传 15000）
+- AbortError 区分：!e.silent = 超时（提示+重载），e.silent = 导航取消（静默）
 
 #### 3.2.2 toggleAgentRef 改造
 
@@ -122,45 +109,39 @@ POST /refs/batch 和 DELETE /ref/{id} 保持返回 {ok: true}，不改响应格�
 async toggleAgentRef(agentType) {
   if (this.submitting) return;
   this.submitting = true;
-  this.pendingAgentType = agentType;  // 记录正在操作的 agent，用于显示 loading
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
-
+  this.pendingAgentType = agentType;
   try {
     const kid = this.detail.id;
     if (this.isAgentSelected(agentType)) {
-      // 解绑
       const ref = this.detail.refs.find(r => r.agent_type === agentType && r.scene_id === '' && r.enabled);
       if (ref) {
-        await API.del('/knowledge/ref/' + ref.id);
-        await this._refreshDetailFull();  // 调详情接口刷新
-        app.showToast(this.t('ref_unbind_ok') || '解绑成功');
+        await API.del('/knowledge/ref/' + ref.id, 15000);
+        await this._refreshDetailFull();
+        app.showToast(this.t('ref_unbind_agent_ok'));
       }
     } else {
-      // 绑定
-      await API.post('/knowledge/' + kid + '/refs/batch', {
-        scene_ids: [], agent_types: [agentType]
-      });
-      await this._refreshDetailFull();  // 调详情接口刷新
-      app.showToast(this.t('ref_bind_ok') || '绑定成功');
+      await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [agentType] }, 15000);
+      await this._refreshDetailFull();
+      app.showToast(this.t('ref_bind_agent_ok'));
     }
   } catch (e) {
-    if (e.name === 'AbortError') {
-      // 超时
-      app.showToast(this.t('ref_timeout_refresh') || '操作超时，正在刷新最新状态');
-      await this._refreshDetailFull();  // 主动全量重载
+    if (e.name === 'AbortError' && !e.silent) {
+      app.showToast(this.t('ref_timeout_refresh'));
+      await this._refreshDetailFull();
+    } else if (e.name === 'AbortError' && e.silent) {
+      // 导航/切 tab 导致的取消，静默
     } else {
-      app.showToast(e.message || '操作失败，正在刷新最新状态');
-      await this._refreshDetailFull();  // 失败也全量重载确保一致
+      app.showToast(e.message || this.t('ref_failed_refresh'));
+      await this._refreshDetailFull();
     }
   } finally {
-    clearTimeout(timer);
     this.submitting = false;
     this.pendingAgentType = null;
   }
 },
 ```
+
+超时通过 API 层 `_fetchWithTimeout(url, opts, timeout)` 第三参数控制，不需要前端创建 AbortController。API 层内部 15s 后 abort 并设 `controller._timedOut = true`，catch 里 `e.name === 'AbortError' && !e.silent` 区分超时，`e.silent` 区分导航取消。
 
 #### 3.2.3 新增 _refreshDetailFull 方法
 
@@ -191,24 +172,21 @@ async removeSceneRef(tag) {
   if (this.submitting) return;
   this.submitting = true;
   this.pendingSceneId = tag.sceneId;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
-
   try {
-    await API.del('/knowledge/ref/' + tag.ref.id);
-    await this._refreshDetailFull();  // 调详情接口刷新
-    app.showToast(this.t('ref_unbind_ok') || '解绑成功');
+    await API.del('/knowledge/ref/' + tag.ref.id, 15000);
+    await this._refreshDetailFull();
+    app.showToast(this.t('ref_unbind_scene_ok'));
   } catch (e) {
-    if (e.name === 'AbortError') {
-      app.showToast(this.t('ref_timeout_refresh') || '操作超时，正在刷新最新状态');
+    if (e.name === 'AbortError' && !e.silent) {
+      app.showToast(this.t('ref_timeout_refresh'));
       await this._refreshDetailFull();
+    } else if (e.name === 'AbortError' && e.silent) {
+      // 导航/切 tab 导致的取消，静默
     } else {
-      app.showToast(e.message || '操作失败，正在刷新最新状态');
+      app.showToast(e.message || this.t('ref_failed_refresh'));
       await this._refreshDetailFull();
     }
   } finally {
-    clearTimeout(timer);
     this.submitting = false;
     this.pendingSceneId = null;
   }
@@ -221,29 +199,24 @@ async removeSceneRef(tag) {
 async confirmAddScenes() {
   if (this.submitting || this.sceneSelected.length === 0) return;
   this.submitting = true;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
-
   const kid = this.detail.id;
   try {
-    await API.post('/knowledge/' + kid + '/refs/batch', {
-      scene_ids: this.sceneSelected, agent_types: []
-    });
-    await this._refreshDetailFull();  // 调详情接口刷新
+    await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: this.sceneSelected, agent_types: [] }, 15000);
+    await this._refreshDetailFull();
     app.showToast(this.t('ref_added_count', { count: this.sceneSelected.length }));
     this.addScenePopover = false;
     this.sceneSelected = [];
   } catch (e) {
-    if (e.name === 'AbortError') {
-      app.showToast(this.t('ref_timeout_refresh') || '操作超时，正在刷新最新状态');
+    if (e.name === 'AbortError' && !e.silent) {
+      app.showToast(this.t('ref_timeout_refresh'));
       await this._refreshDetailFull();
+    } else if (e.name === 'AbortError' && e.silent) {
+      // 导航/切 tab 导致的取消，静默
     } else {
-      app.showToast(e.message || '操作失败，正在刷新最新状态');
+      app.showToast(e.message || this.t('ref_failed_refresh'));
       await this._refreshDetailFull();
     }
   } finally {
-    clearTimeout(timer);
     this.submitting = false;
   }
 },
@@ -338,6 +311,8 @@ async saveCreate() {
   } catch (e) {
     if (e.name === 'AbortError' && !e.silent) {
       app.showToast(this.t('create_timeout'));
+      this.createForm = null;
+      this.view = 'list';
       await this.loadList();
     } else if (e.name === 'AbortError' && e.silent) {
       // 导航/切 tab 导致的取消，静默
@@ -346,7 +321,7 @@ async saveCreate() {
     }
   } finally {
     this.submitting = false;
-  }
+  },
 },
 ```
 
@@ -484,17 +459,32 @@ CSS：
 
 ### 3.4 i18n 文案
 
-需要新增的 i18n key（中英文）：
+新增的 i18n key（中英文）：
 
 | key | 中文 | 英文 |
 |-----|------|------|
 | knowledge.ref_bind_ok | 绑定成功 | Bound successfully |
 | knowledge.ref_unbind_ok | 解绑成功 | Unbound successfully |
+| knowledge.ref_bind_agent_ok | 绑定 Agent 成功 | Agent bound successfully |
+| knowledge.ref_unbind_agent_ok | 解绑 Agent 成功 | Agent unbound successfully |
+| knowledge.ref_bind_scene_ok | 绑定场景成功 | Scene bound successfully |
+| knowledge.ref_unbind_scene_ok | 解绑场景成功 | Scene unbound successfully |
+| knowledge.ref_agents_added_count | 已添加 {{count}} 个 Agent | Added {{count}} agents |
 | knowledge.ref_timeout_refresh | 操作超时，正在刷新最新状态 | Operation timed out, refreshing latest state |
 | knowledge.ref_failed_refresh | 操作失败，正在刷新最新状态 | Operation failed, refreshing latest state |
 | knowledge.refresh_failed | 刷新失败，请手动刷新页面 | Refresh failed, please reload the page |
 | knowledge.save_timeout | 保存超时，请刷新页面确认最新状态 | Save timed out, please reload to verify |
 | knowledge.create_timeout | 创建超时，请刷新页面确认是否创建成功 | Create timed out, please reload to verify |
+
+### 3.5 Toast 优化（app.js）
+
+showToast 全局改进（影响所有页面，不只是知识页）：
+
+- **去重**：新 Toast 出现前先移除已有 Toast（`[role="status"].app-toast`），避免连续操作时多个 Toast 叠加
+- **淡入淡出**：`opacity:0 → 1` + `translateY(10px) → 0`，0.25s cubic-bezier 过渡
+- **点击关闭**：点击 Toast 提前关闭
+- **默认时长**：2500ms（原 3000ms），淡出动画 300ms 在计时结束前触发
+- **圆角**：10px（原 8px），字号 13px（原 12px），阴影更深
 
 ## 4. 改动点清单
 
@@ -502,8 +492,8 @@ CSS：
 
 | # | 改动 | 说明 |
 |---|------|------|
-| B1 | 新增 `_batch_query_pipeline_config(scene_ids, repo_key)` | 批量查 pipeline，替换 N+1 循环 |
-| B2 | get_knowledge_detail 调用 B1 | 消除 N+1 |
+| B1 | get_knowledge_detail SQL 加 `s.nodes_json` 列 + `s.is_active=1` 过滤 | LEFT JOIN 直接查出 nodes_json |
+| B2 | 循环内 json.loads 解析 nodes_json 生成 pipeline_chain | 替换原 N+1 循环调 get_pipeline_config |
 
 ### 4.2 前端 JS (src/api/static/js/pages/knowledge.js)
 
@@ -511,19 +501,29 @@ CSS：
 |---|------|------|
 | F1 | 新增 data: pendingAgentType, pendingSceneId | loading 态标记 |
 | F2 | 新增 _refreshDetailFull() | 成功/超时/失败后调 GET /knowledge/{id} 刷新详情 |
-| F3 | 重写 toggleAgentRef | 15s 超时 + loading + 成功调详情接口刷新 + 超时全量重载 + Toast |
-| F4 | 重写 removeSceneRef | 同 F3 |
+| F3 | 重写 toggleAgentRef | 15s 超时 + loading + 成功调详情接口刷新 + 超时全量重载 + Toast 区分 Agent |
+| F4 | 重写 removeSceneRef | 同 F3，Toast 区分场景 |
 | F5 | 重写 confirmAddScenes | 同 F3 |
 | F6 | 重写 saveEdit | 15s 超时 + loading + 成功后返回列表 + Toast |
-| F7 | 重写 saveCreate | 15s 超时 + loading + Promise.all 并行 loadStats+loadList + Toast |
-| F8 | 删除 loadRefs 方法 | 不再需要，统一走 _refreshDetailFull |
-| F9 | 删除 loadScenes 方法 + 调用处 | 死代码清理 |
-| F10 | 模板：Agent 标签加 :class kb-agent-pending | loading 态绑定 |
-| F11 | 模板：场景卡片加 :class kb-scene-pending | loading 态绑定 |
-| F12 | 模板：场景卡片列表用 <transition-group> 包裹 | 进出场动画 |
-| F13 | 模板：确认按钮加 :class kb-btn-loading | loading 态绑定 |
+| F7 | 重写 saveCreate | 15s 超时 + loading + Promise.all 并行 + 超时后清空 createForm 切回 list |
+| F8 | 删除 loadRefs / loadScenes | 死代码，统一走 _refreshDetailFull |
+| F9 | 删除 removeAgentRef / addAgentByType / addSceneById | 死代码，模板未调用 |
+| F10 | 删除 openAgentPopover / toggleAgentSelect / confirmAddAgents | 死代码，弹层模板不存在 |
+| F11 | 清理 data 残留字段 scenes / agentSelected / addAgentPopover | 无引用 |
+| F12 | 模板：Agent 标签加 :class kb-agent-pending | loading 态绑定 |
+| F13 | 模板：场景卡片加 :class kb-scene-pending | loading 态绑定 |
+| F14 | 模板：详情页 + 新增页场景卡片用 <transition-group> 包裹 | 进出场动画 |
+| F15 | 模板：saveEdit / saveCreate / confirmAddScenes 按钮加 :class kb-btn-loading | loading 态绑定 |
 
-### 4.3 前端 CSS (src/api/static/css/app.css)
+### 4.3 前端 JS (src/api/static/js/app.js)
+
+| # | 改动 | 说明 |
+|---|------|------|
+| A1 | showToast 去重 | 新 Toast 替换旧 Toast，避免叠加 |
+| A2 | showToast 淡入淡出 | opacity + translateY 过渡，0.25s |
+| A3 | showToast 点击关闭 | 点击 Toast 提前移除 |
+
+### 4.4 前端 CSS (src/api/static/css/app.css)
 
 | # | 改动 | 说明 |
 |---|------|------|
@@ -532,17 +532,17 @@ CSS：
 | C3 | .kb-scene-enter/leave/move | 场景卡片进出场动画 |
 | C4 | .kb-btn-loading | 按钮 loading 态 + spinner |
 
-### 4.4 前端 HTML (src/api/static/index.html)
+### 4.5 前端 HTML (src/api/static/index.html)
 
 | # | 改动 | 说明 |
 |---|------|------|
 | H1 | knowledge.js 版本号递增 | 缓存失效 |
 
-### 4.5 i18n
+### 4.6 i18n
 
 | # | 改动 | 说明 |
 |---|------|------|
-| I1 | 新增 7 个 i18n key | 绑定/解绑/超时/失败提示文案 |
+| I1 | 新增 11 个 i18n key（zh + en） | 绑定/解绑 Agent/场景区分文案 + 超时/失败提示 |
 
 ## 5. 用户体验流程
 
