@@ -23,12 +23,12 @@ from src.config import WORKSPACE_DIR
 
 
 def write_text(path: str, content: str, encoding: str = "utf-8") -> None:
-    """原子写入文本文件。
+    """同目录临时文件 + os.replace 原子替换目标文件。
 
-    写 .tmp → flush+fsync → os.replace（原子 rename），保证文件要么是
-    完整的新内容，要么是原来的旧内容，不会出现写入中途崩溃导致的截断文件。
+    避免进程崩溃时目标文件处于半写/截断状态。配合 fsync(tmp) 提高掉电
+    持久性；防掉电还需 fsync 目录（下方已补）。多写者需额外加锁。
     """
-    _dir = os.path.dirname(path)
+    _dir = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(_dir, exist_ok=True)
     _fd, _tmp = tempfile.mkstemp(dir=_dir, suffix=".tmp", prefix=".atomic_")
     try:
@@ -37,17 +37,29 @@ def write_text(path: str, content: str, encoding: str = "utf-8") -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(_tmp, path)
+        # fsync 目录：确保 rename 元数据落盘，防掉电后文件名存在但 inode 丢失
+        _dir_fd = os.open(_dir, os.O_RDONLY)
+        try:
+            os.fsync(_dir_fd)
+        except OSError:
+            pass  # 某些文件系统（如 tmpfs）不支持目录 fsync
+        finally:
+            os.close(_dir_fd)
     except Exception:
         try:
             os.unlink(_tmp)
-        except OSError:
+        except FileNotFoundError:
             pass
         raise
 
 
 def write_bytes(path: str, data: bytes) -> None:
-    """原子写入二进制文件。"""
-    _dir = os.path.dirname(path)
+    """同目录临时文件 + os.replace 原子替换目标文件。
+
+    避免进程崩溃时目标文件处于半写/截断状态。配合 fsync 提高掉电持久性。
+    多写者需额外加锁。
+    """
+    _dir = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(_dir, exist_ok=True)
     _fd, _tmp = tempfile.mkstemp(dir=_dir, suffix=".tmp", prefix=".atomic_")
     try:
@@ -56,10 +68,17 @@ def write_bytes(path: str, data: bytes) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(_tmp, path)
+        _dir_fd = os.open(_dir, os.O_RDONLY)
+        try:
+            os.fsync(_dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(_dir_fd)
     except Exception:
         try:
             os.unlink(_tmp)
-        except OSError:
+        except FileNotFoundError:
             pass
         raise
 
