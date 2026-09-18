@@ -10,6 +10,7 @@
 """
 import json, os, shutil, subprocess, hashlib
 from src.config import log, WORKSPACE_DIR
+from src.localfs import write_text as _atomic_write
 from src.repo_key import split_owner_repo, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, knowledge_obs_prefix
 
 _ANALYSIS_SUBDIR = "codegraph-repo"
@@ -95,9 +96,7 @@ def _read_meta(repo_key: str) -> dict:
 def _write_meta(repo_key: str, meta: dict):
     try:
         p = os.path.join(_pi_dir(repo_key), _META_FILE)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
         _write_to_obs(repo_key, _META_FILE, json.dumps(meta, ensure_ascii=False))
     except Exception as e:
         log.warning(f"project-info meta write failed {repo_key}: {e}")
@@ -106,9 +105,7 @@ def _write_meta(repo_key: str, meta: dict):
 def _write_file(repo_key: str, name: str, content: str):
     try:
         p = os.path.join(_pi_dir(repo_key), name)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(content)
+        _atomic_write(p, content)
         _write_to_obs(repo_key, name, content)
     except Exception as e:
         log.warning(f"project-info write failed {repo_key}/{name}: {e}")
@@ -340,9 +337,7 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         meta["note"] = "build aborted: distributed lock lost"
         try:
             p = os.path.join(_pi_dir(repo_key), _META_FILE)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+            _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
         except Exception:
             pass
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
@@ -354,9 +349,7 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         meta["note"] = "build aborted: distributed lock lost"
         try:
             p = os.path.join(_pi_dir(repo_key), _META_FILE)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+            _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
         except Exception:
             pass
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
