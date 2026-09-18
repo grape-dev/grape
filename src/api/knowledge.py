@@ -20,7 +20,7 @@ import threading
 from datetime import datetime, timedelta
 from src.config import log, WORKSPACE_DIR
 from src.lock import acquire_lock, release_lock, renew_lock
-from src.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP
+from src.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK
 from src.session_manager import db, db_lock
 
 
@@ -258,7 +258,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             "chat": "Chat Agent：对话交互、知识沉淀、流程控制",
         }
         if scope == "baseline":
-            description = "VOD 基线分析自动生成"
+            description = BASELINE_DESC_FALLBACK
         elif scope == "project":
             _role = _agent_desc.get(agent_type, "Agent")
             description = f"{_role} 沉淀的项目级经验"
@@ -277,7 +277,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
             "qa": "QA", "sre": "SRE", "chat": "Chat",
         }
         if scope == "baseline":
-            name = "项目基线分析"
+            name = BASELINE_NAME_FALLBACK
         elif scope == "project":
             _an = _agent_name.get(agent_type)
             name = f"项目知识 - {_an}" if _an else "项目知识"
@@ -1000,7 +1000,7 @@ def _sync_baseline_files():
                 file_path = os.path.relpath(fpath, WORKSPACE_DIR)
 
                 # Issue #190：查重改用 name（不受 file_path 格式变化影响）
-                _baseline_name = BASELINE_NAME_MAP.get(fname, fname)
+                _baseline_name = BASELINE_NAME_MAP.get(fname, BASELINE_NAME_FALLBACK)
                 with db_lock:
                     row = db.cursor().execute(
                         "SELECT id, obs_key FROM agent_shared_knowledge "
@@ -1040,8 +1040,8 @@ def _sync_baseline_files():
                             )
                             db.commit()
                     else:  # DB 无记录 → INSERT
-                        _baseline_desc = BASELINE_DESC_MAP.get(fname, "VOD 基线分析自动生成")
-                        _baseline_name = BASELINE_NAME_MAP.get(fname, "项目基线分析")
+                        _baseline_desc = BASELINE_DESC_MAP.get(fname, BASELINE_DESC_FALLBACK)
+                        _baseline_name = BASELINE_NAME_MAP.get(fname, BASELINE_NAME_FALLBACK)
                         with db_lock:
                             c = db.cursor()
                             c.execute(

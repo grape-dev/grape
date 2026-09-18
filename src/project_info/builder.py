@@ -10,7 +10,7 @@
 """
 import json, os, shutil, subprocess, hashlib
 from src.config import log, WORKSPACE_DIR
-from src.repo_key import split_owner_repo, BASELINE_NAME_MAP, BASELINE_DESC_MAP, knowledge_obs_prefix
+from src.repo_key import split_owner_repo, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_DESC_FALLBACK, knowledge_obs_prefix
 
 _ANALYSIS_SUBDIR = "codegraph-repo"
 _GRAPH_FILE = "project-graph.md"
@@ -145,7 +145,7 @@ def _write_to_obs(repo_key: str, name: str, content: str):
             if existing:
                 # 已存在 → UPDATE（保留原 id，ref 不失效）
                 kid = existing[0]
-                _desc = BASELINE_DESC_MAP.get(name, "codegraph 自动生成的项目基线知识")
+                _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
                 c.execute(
                     "UPDATE agent_shared_knowledge SET "
                     "status='accepted', obs_key=?, content_hash=?, created_by='system', "
@@ -156,7 +156,7 @@ def _write_to_obs(repo_key: str, name: str, content: str):
                 )
             else:
                 # 不存在 → INSERT
-                _desc = BASELINE_DESC_MAP.get(name, "codegraph 自动生成的项目基线知识")
+                _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
                 c.execute(
                     "INSERT INTO agent_shared_knowledge "
                     "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, name, description) "

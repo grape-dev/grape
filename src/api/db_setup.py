@@ -1769,16 +1769,16 @@ def _migrate_knowledge():
     # 通过 file_path / obs_key 中的文件名推导 name + description，回填空 name
     # 和统一 description。
     try:
-        from src.repo_key import BASELINE_NAME_MAP, BASELINE_DESC_MAP
+        from src.repo_key import BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_DESC_FALLBACK, BASELINE_NAME_FALLBACK
         _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值
         with db_lock:
             c = db.cursor()
             rows = c.execute(
                 "SELECT id, name, file_path, obs_key, description "
                 "FROM agent_shared_knowledge WHERE scope='baseline' "
-                "AND (name IS NULL OR name = '' OR name = '项目基线分析' "
+                "AND (name IS NULL OR name = '' OR name = ? "
                 "OR description = ? OR description IS NULL OR description = '')",
-                (_UNIFIED_DESC,)
+                (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
             ).fetchall()
         updates = []  # [(name, desc, id), ...]
         for rid, cur_name, file_path, obs_key, cur_desc in rows:
@@ -1793,11 +1793,11 @@ def _migrate_knowledge():
                 if _fname:
                     break
             _name = cur_name if cur_name else BASELINE_NAME_MAP.get(_fname, "")
-            _desc = BASELINE_DESC_MAP.get(_fname, "VOD 基线分析自动生成")
+            _desc = BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
             # name="项目基线分析"是 write_knowledge 的旧默认值，如果 file_path
             # 能匹配到具体文件，用 BASELINE_NAME_MAP 的精确名替换
-            _needs_name_fix = (cur_name == "项目基线分析" and _fname and
-                               BASELINE_NAME_MAP.get(_fname, "") != cur_name)
+            _needs_name_fix = (cur_name == BASELINE_NAME_FALLBACK and _fname and
+                               BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK) != cur_name)
             if _needs_name_fix:
                 _name = BASELINE_NAME_MAP.get(_fname, cur_name)
             _needs_desc_fix = (not cur_desc or cur_desc == _UNIFIED_DESC)

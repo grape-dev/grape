@@ -79,3 +79,6 @@ BASELINE_DESC_MAP = {
     "project-capabilities.md": "VOD 基线分析：项目能力清单（功能特性/支持能力）",
     ".metadata.json": "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）",
 }
+# fallback：文件名不在 MAP 中时使用
+BASELINE_NAME_FALLBACK = "项目基线分析"
+BASELINE_DESC_FALLBACK = "VOD 基线分析自动生成"
