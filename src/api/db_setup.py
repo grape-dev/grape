@@ -1678,6 +1678,158 @@ def _migrate_knowledge_issue67():
     log.info("[Issue #67] knowledge migration done")
 
 
+def _migrate_issue190():
+    """Issue #190：baseline 去重 + obs_key 归一化 + file_path 归一化。
+
+    幂等：通过 meta 表 issue190_migrate_done 标记控制，已执行则跳过。
+    异步执行：由 main.py lifespan() 内 daemon thread 调用，不阻塞启动。
+    最终一致性：迁移期间旧格式数据仍可用，迁移完成后切换到新格式。
+    """
+    import hashlib as _hl
+    from src.session_manager import db, db_lock
+    from src.mysql_compat import get_db_backend
+    from src.user.db import get_meta_value, set_meta_value
+    from src.repo_key import parse_repo_key, knowledge_obs_prefix
+
+    _is_mysql = get_db_backend() == "mysql"
+
+    # 幂等检查
+    if get_meta_value("issue190_migrate_done") == "1":
+        log.info("[Issue #190] migration already done, skip")
+        return
+
+    log.info("[Issue #190] migration started")
+
+    # ===== 步骤 1：清理 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            if _is_mysql:
+                c.execute(
+                    "CREATE TEMPORARY TABLE IF NOT EXISTS _keep190 AS "
+                    "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+                    "WHERE scope='baseline' GROUP BY repo_key, name")
+                c.execute(
+                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+                    "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
+                    "AND id NOT IN (SELECT keep_id FROM _keep190))")
+                c.execute(
+                    "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
+                    "AND id NOT IN (SELECT keep_id FROM _keep190)")
+                c.execute("DROP TEMPORARY TABLE IF EXISTS _keep190")
+            else:
+                c.execute(
+                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+                    "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
+                    "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
+                    "WHERE scope='baseline' GROUP BY repo_key, name))")
+                c.execute(
+                    "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
+                    "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
+                    "WHERE scope='baseline' GROUP BY repo_key, name)")
+            db.commit()
+        log.info("[Issue #190] step 1: baseline dedup done")
+    except Exception as e:
+        log.warning(f"[Issue #190] step 1 failed: {e}")
+
+    # ===== 步骤 2：更新 obs_key 为新格式（含 provider）=====
+    try:
+        from src.storage import get_storage
+        _storage = get_storage()
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT id, repo_key, scope, agent_type, issue_num, obs_key, file_path "
+                "FROM agent_shared_knowledge WHERE obs_key != '' AND obs_key IS NOT NULL"
+            ).fetchall()
+        for rid, repo_key, scope, agent_type, issue_num, obs_key, file_path in rows:
+            provider, owner, repo = parse_repo_key(repo_key)
+            new_prefix = knowledge_obs_prefix(repo_key)
+            new_obs_key = obs_key
+            if obs_key.startswith(new_prefix):
+                continue  # 已是新格式
+            elif scope == "member":
+                # member：提取 member/ 或 agent/ 后的相对路径
+                for marker in ("member/", "agent/"):
+                    idx = obs_key.find(marker)
+                    if idx >= 0:
+                        _rel = obs_key[idx:]
+                        break
+                else:
+                    _rel = os.path.basename(obs_key)
+                new_obs_key = f"{new_prefix}/{_rel}"
+            elif obs_key.startswith("project-info/"):
+                # OLD_A 格式：完全重写
+                _fname = os.path.basename(obs_key)
+                if scope == "baseline":
+                    new_obs_key = f"{new_prefix}/project-info/{_fname}"
+                else:
+                    try:
+                        new_obs_key = knowledge_obs_prefix(repo_key)
+                        from src.api.knowledge import knowledge_storage_key
+                        new_obs_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
+                    except Exception:
+                        continue
+            elif obs_key.startswith(f"knowledge/{owner}/{repo}"):
+                # OLD_B 格式：在 knowledge/ 后插入 provider/
+                new_obs_key = f"knowledge/{provider}/{obs_key[len('knowledge/'):]}"
+            else:
+                continue  # 未知格式，跳过
+
+            if new_obs_key == obs_key:
+                continue
+
+            # OBS 对象迁移：旧 key 读取内容 → 写入新 key
+            if _storage:
+                try:
+                    _data = _storage.read_bytes(obs_key)
+                    if _data:
+                        _storage.save_bytes(new_obs_key, _data)
+                except Exception as e:
+                    log.warning(f"[Issue #190] OBS migrate failed id={rid}: {e}")
+            # UPDATE DB
+            with db_lock:
+                db.cursor().execute(
+                    "UPDATE agent_shared_knowledge SET obs_key=? WHERE id=?",
+                    (new_obs_key, rid))
+                db.commit()
+        log.info("[Issue #190] step 2: obs_key normalization done")
+    except Exception as e:
+        log.warning(f"[Issue #190] step 2 failed: {e}")
+
+    # ===== 步骤 3：更新 file_path 为新格式（含 provider 前缀）=====
+    try:
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT id, repo_key, file_path FROM agent_shared_knowledge "
+                "WHERE file_path != '' AND file_path IS NOT NULL"
+            ).fetchall()
+        for rid, repo_key, file_path in rows:
+            provider, owner, repo = parse_repo_key(repo_key)
+            full_prefix = f"{provider}/{owner}/{repo}/"
+            partial_prefix = f"{owner}/{repo}/"
+            new_fp = file_path
+            if file_path.startswith(full_prefix):
+                continue  # 已是 NEW 格式
+            elif file_path.startswith(partial_prefix):
+                new_fp = f"{provider}/{file_path}"  # 只补 provider
+            elif file_path.startswith("project-info/"):
+                new_fp = f"{full_prefix}{file_path}"  # 补完整前缀
+            else:
+                continue  # 未知格式，跳过
+            with db_lock:
+                db.cursor().execute(
+                    "UPDATE agent_shared_knowledge SET file_path=? WHERE id=?",
+                    (new_fp, rid))
+                db.commit()
+        log.info("[Issue #190] step 3: file_path normalization done")
+    except Exception as e:
+        log.warning(f"[Issue #190] step 3 failed: {e}")
+
+    # ===== 标记完成 =====
+    set_meta_value("issue190_migrate_done", "1")
+    log.info("[Issue #190] migration done")
+
+
 def _cleanup_stale_meta():
     """删除单 bot 时代遗留的全局 meta.ws_feishu_app_id.
 

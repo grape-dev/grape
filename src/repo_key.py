@@ -57,3 +57,12 @@ def workspace_repo_dir(repo_key: str) -> str:
     from src.config import WORKSPACE_DIR
     provider, owner, repo = parse_repo_key(repo_key)
     return os.path.join(WORKSPACE_DIR, provider or "gitcode", owner, repo)
+
+
+def knowledge_obs_prefix(repo_key: str) -> str:
+    """生成 OBS key 前缀：knowledge/{provider}/{owner}/{repo}
+
+    Issue #190：统一 obs_key 生成，含 provider 前缀，避免跨 provider 同名仓库冲突。
+    """
+    provider, owner, repo = parse_repo_key(repo_key)
+    return f"knowledge/{provider or 'gitcode'}/{owner}/{repo}"

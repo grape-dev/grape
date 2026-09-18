@@ -96,6 +96,13 @@ def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash
             if os.path.isfile(full):
                 with open(full, "r", encoding="utf-8") as f:
                     return f.read()
+            # Issue #190：兼容旧格式 file_path（不含 provider 前缀）
+            from src.repo_key import parse_repo_key
+            provider, _, _ = parse_repo_key(repo_key)
+            alt = os.path.join(WORKSPACE_DIR, provider or 'gitcode', file_path)
+            if os.path.isfile(alt):
+                with open(alt, "r", encoding="utf-8") as f:
+                    return f.read()
         except Exception as e:
             log.warning(f"Local read failed for {repo_key}/{file_path}: {e}")
     return ""
@@ -133,23 +140,21 @@ def knowledge_path(repo_key: str, scope: str, agent_type: str = "", issue_num: i
 def knowledge_storage_key(repo_key: str, scope: str, agent_type: str = "", issue_num: int = 0) -> str:
     """生成 OBS 存储 key（不依赖 rel_path，只依赖 repo_key + scope + filename）。
 
-    格式：knowledge/{owner}/{repo}/{scope_path}/{filename}
-    - scope=project     → knowledge/{owner}/{repo}/project/knowledge.md
-    - scope=issue       → knowledge/{owner}/{repo}/issues/{n}/knowledge.md
-    - scope=issue_agent → knowledge/{owner}/{repo}/issues/{n}/{agent}/knowledge.md
+    Issue #190：含 provider 前缀，避免跨 provider 同名仓库冲突。
+    格式：knowledge/{provider}/{owner}/{repo}/{scope_path}/{filename}
+    - scope=project     → knowledge/{provider}/{owner}/{repo}/project/knowledge.md
+    - scope=issue       → knowledge/{provider}/{owner}/{repo}/issues/{n}/knowledge.md
+    - scope=issue_agent → knowledge/{provider}/{owner}/{repo}/issues/{n}/{agent}/knowledge.md
     """
-    owner, rname = _owner_repo(repo_key)
-    parts = ["knowledge", owner, rname]
+    from src.repo_key import knowledge_obs_prefix
+    prefix = knowledge_obs_prefix(repo_key)
     if scope == "project":
-        parts.append("project")
-    elif scope == "issue":
-        parts.extend(["issues", str(issue_num)])
-    elif scope == "issue_agent":
-        parts.extend(["issues", str(issue_num), agent_type or "agent"])
-    else:
-        raise ValueError(f"unknown knowledge scope: {scope}")
-    parts.append("knowledge.md")
-    return "/".join(parts)
+        return f"{prefix}/project/knowledge.md"
+    if scope == "issue":
+        return f"{prefix}/issues/{issue_num}/knowledge.md"
+    if scope == "issue_agent":
+        return f"{prefix}/issues/{issue_num}/{agent_type or 'agent'}/knowledge.md"
+    raise ValueError(f"unknown knowledge scope: {scope}")
 
 
 def _query_knowledge_obs(repo_key: str, scope: str, agent_type: str, issue_num: int) -> tuple[str, str]:
@@ -946,16 +951,23 @@ async def knowledge_sync_loop():
                         with open(full_path, encoding="utf-8") as f:
                             content = f.read()
                         if content:
-                            # 按 scope 生成 storage_key——member/baseline 不走 knowledge_storage_key
-                            from src.repo_key import split_owner_repo
-                            owner, rname = split_owner_repo(repo_key)
+                            # Issue #190：按 scope 生成 storage_key（含 provider 前缀）
+                            from src.repo_key import knowledge_obs_prefix
+                            _obs_prefix = knowledge_obs_prefix(repo_key)
                             if scope == "member":
-                                # member 文档：用 file_path 生成 storage_key
-                                storage_key = f"knowledge/{owner}/{rname}/{file_path.replace('project-info/', '', 1)}"
+                                # Issue #190：从 file_path 提取 member/ 或 agent/ 后的相对路径
+                                # 不用 replace（file_path 含 owner/repo 时会导致路径重复）
+                                for marker in ("member/", "agent/"):
+                                    idx = file_path.find(marker)
+                                    if idx >= 0:
+                                        _rel = file_path[idx:]
+                                        break
+                                else:
+                                    _rel = os.path.basename(file_path)
+                                storage_key = f"{_obs_prefix}/{_rel}"
                             elif scope == "baseline":
-                                # Issue #95：基线文件 OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
                                 _fname = os.path.basename(file_path)
-                                storage_key = f"knowledge/{owner}/{rname}/project-info/{_fname}"
+                                storage_key = f"{_obs_prefix}/project-info/{_fname}"
                             else:
                                 # 共享知识：project/issue/issue_agent
                                 storage_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
@@ -1056,14 +1068,14 @@ def _sync_baseline_files():
 
                 file_path = os.path.relpath(fpath, WORKSPACE_DIR)
 
-                # 查 DB 是否已有 baseline 记录（按文件名匹配，兼容 file_path 格式变更）
+                # Issue #190：查重改用 name（不受 file_path 格式变化影响）
+                _baseline_name = BASELINE_NAME_MAP.get(fname, fname)
                 with db_lock:
                     row = db.cursor().execute(
                         "SELECT id, obs_key FROM agent_shared_knowledge "
-                        "WHERE repo_key=? AND scope='baseline' "
-                        "AND SUBSTRING_INDEX(file_path, '/', -1)=? "
+                        "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0 "
                         "ORDER BY id DESC LIMIT 1",
-                        (repo_key, fname)
+                        (repo_key, _baseline_name)
                     ).fetchone()
 
                 if row and row[1]:  # DB 有记录且 obs_key 非空
@@ -1079,9 +1091,9 @@ def _sync_baseline_files():
                 try:
                     with open(fpath, "rb") as f:
                         content_bytes = f.read()
-                    # Issue #95：OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
-                    _owner, _rname = _owner_repo(repo_key)
-                    storage_key = f"knowledge/{_owner}/{_rname}/project-info/{fname}"
+                    # Issue #190：OBS key 含 provider 前缀
+                    from src.repo_key import knowledge_obs_prefix
+                    storage_key = f"{knowledge_obs_prefix(repo_key)}/project-info/{fname}"
                     storage.save_bytes(storage_key, content_bytes)
                     content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
 

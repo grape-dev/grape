@@ -122,7 +122,7 @@ def _write_to_obs(repo_key: str, name: str, content: str):
     import hashlib
     try:
         from src.storage import get_storage
-        from src.repo_key import split_owner_repo
+        from src.repo_key import knowledge_obs_prefix
         storage = get_storage()
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
         file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)
@@ -135,19 +135,18 @@ def _write_to_obs(repo_key: str, name: str, content: str):
         display_name = _name_map.get(name, name)
         storage_key = ""
         if storage:
-            # Issue #95：OBS key 格式统一为 knowledge/{owner}/{repo}/project-info/{name}
-            owner, rname = split_owner_repo(repo_key)
-            storage_key = f"knowledge/{owner}/{rname}/project-info/{name}"
+            # Issue #190：OBS key 含 provider 前缀，避免跨 provider 同名仓库冲突
+            storage_key = f"{knowledge_obs_prefix(repo_key)}/project-info/{name}"
             storage.save_bytes(storage_key, content.encode("utf-8"))
         # 无论 OBS 是否启用，都写 DB
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            # Issue #95：先查有没有已存在记录（避免 INSERT OR REPLACE 删旧 id 导致 ref 失效）
+            # Issue #190：查重改用 name（不受 file_path 格式变化影响）
             existing = c.execute(
                 "SELECT id FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='baseline' AND file_path=?",
-                (repo_key, file_path)
+                "WHERE repo_key=? AND scope='baseline' AND name=?",
+                (repo_key, display_name)
             ).fetchone()
             if existing:
                 # 已存在 → UPDATE（保留原 id，ref 不失效）

@@ -152,6 +152,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Upload cleanup scheduler start failed: {e}")
 
+    # Issue #190：知识库 obs_key/file_path 归一化迁移（异步，不阻塞启动）
+    try:
+        from src.api.db_setup import _migrate_issue190
+        import threading
+        _t190 = threading.Thread(target=_migrate_issue190, daemon=True)
+        _t190.start()
+        log.info("Issue #190 migration started (async)")
+    except Exception as e:
+        log.warning(f"Issue #190 migration start failed: {e}")
+
     # Issue #67: 归档知识定时清理——每天清理超过 90 天的归档知识
     try:
         from src.api.knowledge import cleanup_archived_knowledge

@@ -47,8 +47,7 @@ EXPECTED_PUBLIC = {
     "skills_detail": ("get", "/api/skills/by-id/{skill_id}"),
     "scenes_list": ("get", "/api/scenes"),
     "knowledge_list": ("get", "/api/knowledge"),
-    "knowledge_content": ("get", "/api/knowledge/content"),
-    "knowledge_context": ("get", "/api/knowledge/context"),
+    "knowledge_detail": ("get", "/api/knowledge/{knowledge_id}"),
     "events_detail": ("get", "/api/events/detail/{seq}"),
     # ===== Issue-45 M3：Git 仓库统一接口（/api/git-repo 平台透传；git-credential/workspace 归 /api/repos 平台）=====
     "gitrepo_repo": ("get", "/api/git-repo/{owner}/{repo}"),
@@ -171,7 +170,6 @@ EXPECTED_PUBLIC = {
     "agents_update": ("put", "/api/agents/{name}/{owner}/{repo}"),
     "agents_clean": ("post", "/api/agents/{name}/{owner}/{repo}/clean"),
     "knowledge_entry_create": ("post", "/api/knowledge/entry"),
-    "knowledge_files_delete": ("delete", "/api/knowledge"),
     "knowledge_delete": ("delete", "/api/knowledge/{knowledge_id}"),
     "knowledge_update": ("put", "/api/knowledge/{knowledge_id}"),
     "knowledge_archive": ("put", "/api/knowledge/{knowledge_id}/archive"),

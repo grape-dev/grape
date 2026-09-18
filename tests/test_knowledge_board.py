@@ -145,28 +145,15 @@ class TestKnowledgeDetail:
         _clean()
 
     def test_read_markdown(self):
-        _write_pi("project-graph.md", "## Architecture Overview\nhello")
-        r = client.get(f"/api/knowledge/content?repo={_REPO}&file=project-info/project-graph.md", headers=_headers)
+        """Issue #190：废弃 GET /content 接口已删除，改用 GET /{id} 读知识详情。"""
+        kid = _seed_knowledge(scope="issue", issue_num=1, content="## Architecture Overview\nhello")
+        r = client.get(f"/api/knowledge/{kid}", headers=_headers)
         assert r.status_code == 200, r.text
         assert "Architecture Overview" in r.json()["content"]
 
-    def test_read_json_meta(self):
-        _write_pi(".metadata.json", json.dumps({"degraded": True}))
-        r = client.get(f"/api/knowledge/content?repo={_REPO}&file=project-info/.metadata.json", headers=_headers)
-        assert r.status_code == 200, r.text
-        assert json.loads(r.json()["content"])["degraded"] is True
-
-    def test_path_traversal_blocked(self):
-        r = client.get(f"/api/knowledge/content?repo={_REPO}&file=../../../../etc/passwd", headers=_headers)
-        assert r.status_code in (400, 404)
-
-    def test_not_found(self):
-        r = client.get(f"/api/knowledge/content?repo={_REPO}&file=project-info/nope.md", headers=_headers)
+    def test_read_not_found(self):
+        r = client.get("/api/knowledge/999999", headers=_headers)
         assert r.status_code == 404
-
-    def test_forbidden_ext(self):
-        r = client.get(f"/api/knowledge/content?repo={_REPO}&file=project-info/x.py", headers=_headers)
-        assert r.status_code == 400
 
 
 class TestKnowledgeEntry:
@@ -227,44 +214,7 @@ class TestKnowledgeEntry:
         assert r3.status_code == 404
 
 
-class TestKnowledgeContext:
-    def setup_method(self):
-        _clean()
-
-    def teardown_method(self):
-        _clean()
-
-    def test_context_merges_scopes(self):
-        _seed_knowledge(scope="project", content="PR 走内部评审")
-        _seed_knowledge(scope="issue", content="验收 = 可跑通")
-        _seed_knowledge(scope="issue_agent", agent="vod", content="VOD 不删原文")
-        r = client.get(f"/api/knowledge/context?repo={_REPO}&agent_type=vod&issue_num=5", headers=_headers)
-        assert r.status_code == 200, r.text
-        ctx = r.json()["context"]
-        assert "内部评审" in ctx and "可跑通" in ctx and "不删原文" in ctx
-
-    def test_context_empty(self):
-        r = client.get(f"/api/knowledge/context?repo={_REPO}", headers=_headers)
-        assert r.status_code == 200, r.text
-        assert isinstance(r.json()["context"], str)
-
-    def test_context_includes_member_docs(self):
-        """Issue #95: member 知识不再内联到 context（_build_agent_knowledge_section 只查 source='agent'）。
-        member 知识走 member_files_pi 物化，不内联到 prompt。context 只显示 member 文档列表。"""
-        r = client.post("/api/knowledge/entry", json={
-            "name": "部署规范", "content": "部署走灰度发布", "description": "部署规范", "repo": _REPO
-        }, headers=_headers)
-        assert r.status_code == 200, r.text
-        kid = r.json()["id"]
-        r2 = client.post(f"/api/knowledge/{kid}/refs/batch", json={
-            "agent_types": ["vod"]
-        }, headers=_headers)
-        assert r2.status_code == 200, r2.text
-        r3 = client.get(f"/api/knowledge/context?repo={_REPO}&agent_type=vod", headers=_headers)
-        assert r3.status_code == 200, r3.text
-        # Issue #95: member 知识不再内联到 context（_build_agent_knowledge_section source='agent'）
-        # 但 member 文档列表仍然显示
-        assert "entry_" in r3.json()["context"]  # 文档列表里有文件名
+# Issue #190：GET /knowledge/context 接口已废弃删除，context 相关测试移除。
 
 
 class TestInjection:
