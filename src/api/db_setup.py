@@ -1743,30 +1743,28 @@ def _migrate_knowledge():
 
     log.info("[knowledge_migrate] migration started")
 
+    _step0_ok = False
     _step1_ok = False
     _step2_ok = False
     _step3_ok = False
+
+    # ===== 步骤 0：恢复归档记录（archived=1 → archived=0）=====
+    # 归档逻辑已移除，现有归档记录恢复为活跃，防止成为孤儿数据
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE agent_shared_knowledge SET archived=0 WHERE archived=1")
+            db.commit()
+        _step0_ok = True
+        log.info("[knowledge_migrate] step 0: restore archived records done")
+    except Exception as e:
+        log.warning(f"[knowledge_migrate] step 0 failed: {e}")
 
     # ===== 步骤 1：清理 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
     try:
         with db_lock:
             c = db.cursor()
             if _is_mysql:
-                # 优先保留 archived=0（活跃优先于归档），同状态内保留 MAX(id)
-                # 先删归档记录（如果有同 name 的活跃记录存在）
-                c.execute(
-                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-                    "SELECT a.id FROM agent_shared_knowledge a "
-                    "WHERE a.scope='baseline' AND a.archived=1 "
-                    "AND EXISTS (SELECT 1 FROM agent_shared_knowledge b "
-                    "WHERE b.repo_key=a.repo_key AND b.name=a.name AND b.archived=0))")
-                c.execute(
-                    "DELETE FROM agent_shared_knowledge WHERE scope='baseline' AND archived=1 "
-                    "AND id IN (SELECT a.id FROM agent_shared_knowledge a "
-                    "WHERE a.scope='baseline' AND a.archived=1 "
-                    "AND EXISTS (SELECT 1 FROM agent_shared_knowledge b "
-                    "WHERE b.repo_key=a.repo_key AND b.name=a.name AND b.archived=0))")
-                # 再按 MAX(id) 去重剩余记录
                 c.execute(
                     "CREATE TEMPORARY TABLE IF NOT EXISTS _keep190 AS "
                     "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
@@ -1780,20 +1778,6 @@ def _migrate_knowledge():
                     "AND id NOT IN (SELECT keep_id FROM _keep190)")
                 c.execute("DROP TEMPORARY TABLE IF EXISTS _keep190")
             else:
-                # 先删归档记录（如果有同 name 的活跃记录存在）
-                c.execute(
-                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-                    "SELECT a.id FROM agent_shared_knowledge a "
-                    "WHERE a.scope='baseline' AND a.archived=1 "
-                    "AND EXISTS (SELECT 1 FROM agent_shared_knowledge b "
-                    "WHERE b.repo_key=a.repo_key AND b.name=a.name AND b.archived=0))")
-                c.execute(
-                    "DELETE FROM agent_shared_knowledge WHERE scope='baseline' AND archived=1 "
-                    "AND id IN (SELECT a.id FROM agent_shared_knowledge a "
-                    "WHERE a.scope='baseline' AND a.archived=1 "
-                    "AND EXISTS (SELECT 1 FROM agent_shared_knowledge b "
-                    "WHERE b.repo_key=a.repo_key AND b.name=a.name AND b.archived=0))")
-                # 再按 MAX(id) 去重剩余记录
                 c.execute(
                     "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
                     "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
@@ -1924,7 +1908,7 @@ def _migrate_knowledge():
         log.warning(f"[knowledge_migrate] step 3 failed: {e}")
 
     # ===== 标记完成（仅在所有步骤成功时）=====
-    if _step1_ok and _step2_ok and _step3_ok:
+    if _step0_ok and _step1_ok and _step2_ok and _step3_ok:
         set_meta_value("knowledge_migrate_done", "1")
         log.info("[knowledge_migrate] migration done")
     else:
