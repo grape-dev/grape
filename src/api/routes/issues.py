@@ -467,7 +467,8 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
         repo_key, issue_number = row[0], row[1]
     issue_key = f"#{issue_number}" if issue_number else ""
-    _scene_id = get_issue_scene(repo_key, issue_key) or "default"
+    _scene_tuple = get_issue_scene(repo_key, issue_key)
+    _scene_id = (_scene_tuple[0] if _scene_tuple else "") or "default"
     _stage_info = get_issue_stage(repo_key, issue_key) if issue_key else None
     _current_stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
     pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
