@@ -1,12 +1,12 @@
 # Knowledge 知识接口（/api/knowledge）
 
 > 对外公开，认证：`get_current_user_or_api_key`。
-> scope（x-token-scope）：读接口 `list/stats/detail/content/context` = **dual**；写操作
-> （entry/archive/refs/delete/update）= **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> scope（x-token-scope）：读接口 `list/stats/detail` = **dual**；写操作
+> （entry/refs/delete/update）= **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 > 概念：知识 = 仓库/场景/Agent 注入的说明文档。**文件型**（`source=system/agent`，按 repo+file 落 OBS/工作区）
 > 与**条目型**（`source=manual`，用户 Web 直接录入，以 `knowledge_id` 定位）两类并存。
 
-## 读取（list / stats / content / context）
+## 读取（list / stats / detail）
 
 ### GET /api/knowledge — 知识清单（统一列表 + 分页）
 
@@ -17,7 +17,6 @@
 | `repo` | string | ✅ | repo_key（无前缀亦接受） |
 | `source` | string | 否 | system / agent / manual |
 | `page` / `page_size` | int | 否 | 分页，默认 1 / 50 |
-| `show_archived` | bool | 否 | 是否包含归档知识 |
 | `sort` | string | 否 | `latest` = 按更新时间倒序 |
 | `q` | string | 否 | 关键字（匹配 name/description） |
 
@@ -32,21 +31,13 @@
 | 出参 | 按 source（system/agent/manual/unlinked）分类的统计计数 |
 | 返回 | 200；400 缺 repo |
 
-### GET /api/knowledge/content — 读取单个知识全文
+### GET /api/knowledge/{knowledge_id} — 知识详情
 
 > scope（x-token-scope）：**dual**（三通道）。
 
-| Query | `repo`（必填）、`file`（可选，与 `obs_key` 二选一）、`obs_key`（可选） |
-| 出参 | `{repo_key, file, content}` 或 `{repo_key, obs_key, content}` |
-| 返回 | 200；400 缺 repo 或 file/obs_key 均缺 |
-
-### GET /api/knowledge/context — 获取合并注入上下文
-
-> scope（x-token-scope）：**dual**（三通道）。
-
-| Query | `repo`（必填）、`agent_type`（可选）、`issue_num`（可选）、`scene_id`（可选） |
-| 出参 | `{repo_key, context}`（project-info 摘要 + 仓库知识 + 成员文档合并文本） |
-| 返回 | 200；400 缺 repo |
+| Path | `{knowledge_id}` int |
+| 出参 | 知识完整对象（含 content、refs 摘要） |
+| 返回 | 200；404 不存在 |
 
 ---
 
@@ -71,14 +62,6 @@
 | 出参 | `{"ok": true, "message", "file_path", "id"}` |
 | 返回 | 200；400 缺 name/content/repo 或超长 |
 
-### GET /api/knowledge/{knowledge_id} — 知识详情
-
-> scope（x-token-scope）：**dual**（三通道）。
-
-| Path | `{knowledge_id}` int |
-| 出参 | 知识完整对象（含 content、refs 摘要） |
-| 返回 | 200；404 不存在 |
-
 ### PUT /api/knowledge/{knowledge_id} — 编辑知识
 
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）。
@@ -95,15 +78,6 @@
 | Path | `{knowledge_id}` int |
 | 出参 | `{"ok": true, "message": "知识已删除"}` |
 | 返回 | 200；403 系统生成不可删除/非创建者；404 |
-
-### PUT /api/knowledge/{knowledge_id}/archive — 归档/取消归档
-
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）。
-
-| Path | `{knowledge_id}` int |
-| 请求体（ArchiveBody） | `{archived: true}`（false=取消归档） |
-| 出参 | `{"ok": true, "archived": bool}` |
-| 返回 | 200；403 非创建者；404 |
 
 ---
 
@@ -154,26 +128,12 @@
 
 ---
 
-## 文件型知识（legacy）
-
-### DELETE /api/knowledge — 删除成员上传文档
-
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）。
-
-| Query | `repo`（必填）、`file`（必填） |
-| 出参 | `{"message": "已删除 <文件名>"}` |
-| 返回 | 200；400 缺 repo/file 或非法路径；403 非成员/非本人上传；404 文件不存在；500 OBS 失败 |
-
-> 仅可删除成员上传的文档（`source=manual` 删除走 `DELETE /{knowledge_id}`）。
-
----
-
 ## 错误返回（全端点通用）
 
 | 码 | message（英文） | 场景 |
 |----|--------------|------|
 | 400 | Bad Request / Invalid parameter | 缺 repo / 参数校验失败 |
-| 401 | Unauthorized | 未认证 / token 失败 |
+| 401 | Unauthorized | 未认证 / token 失效 |
 | 403 | Forbidden | 越权（`tk_` 不适用、非创建者、系统生成不可编辑/删除） |
 | 404 | Not Found | 知识/关联不存在 |
 | 409 | Conflict | 关联已存在 |

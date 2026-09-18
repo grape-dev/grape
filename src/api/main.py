@@ -152,24 +152,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Upload cleanup scheduler start failed: {e}")
 
-    # Issue #67: 归档知识定时清理——每天清理超过 90 天的归档知识
+    # Issue #190：知识库 obs_key/file_path 归一化迁移（异步，不阻塞启动）
     try:
-        from src.api.knowledge import cleanup_archived_knowledge
-        import threading, time as _t
+        async def _knowledge_migrate_wrapper():
+            from src.api.db_setup import _migrate_knowledge
+            await asyncio.to_thread(_migrate_knowledge)
+        _migrate_task = asyncio.create_task(_knowledge_migrate_wrapper())
 
-        def _knowledge_cleanup_loop():
-            while True:
-                _t.sleep(86400)  # 24 小时
-                try:
-                    cleanup_archived_knowledge()
-                except Exception as _e:
-                    log.warning(f"Knowledge cleanup failed: {_e}")
-
-        _t2 = threading.Thread(target=_knowledge_cleanup_loop, daemon=True)
-        _t2.start()
-        log.info("Knowledge cleanup scheduler started (daily)")
+        def _on_migrate_done(task: asyncio.Task):
+            if task.exception():
+                log.error(f"knowledge_migrate task failed: {task.exception()}", exc_info=task.exception())
+        _migrate_task.add_done_callback(_on_migrate_done)
+        app.state.knowledge_migrate_task = _migrate_task
+        log.info("knowledge_migrate started (async)")
     except Exception as e:
-        log.warning(f"Knowledge cleanup scheduler start failed: {e}")
+        log.warning(f"knowledge_migrate start failed: {e}")
 
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
@@ -291,6 +288,15 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.wait_for(_knowledge_write_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    # knowledge_migrate：shutdown 时尝试等待完成（不 cancel，因为迁移中断不如跑完）
+    _migrate_task = getattr(app.state, "knowledge_migrate_task", None)
+    if _migrate_task and not _migrate_task.done():
+        try:
+            await asyncio.wait_for(_migrate_task, timeout=10)
+        except asyncio.TimeoutError:
+            log.warning("knowledge_migrate shutdown wait timeout, task continues in background")
+        except Exception:
             pass
     # 官方技能 OBS 同步：优雅关闭定时任务
     try:

@@ -45,7 +45,7 @@
 | [06 Scenes](06-scenes.md) | `GET /api/scenes`（VOD 技能用 session，有意例外） | dual |
 | | 其余 | user_only |
 | [07 Knowledge](07-knowledge.md) | `list/stats/detail/content/context` | dual |
-| | 写操作（entry/archive/refs/delete/update） | user_only |
+| | 写操作（entry/refs/delete/update） | user_only |
 | [08 Events](08-events.md) | `GET /api/events/detail/{seq}` | dual |
 | | 操作类（terminate/redispatch/thread/chat/knowledge） | user_only |
 | [09 TaskLogs](09-task-logs.md) | 全部 | user_only |
