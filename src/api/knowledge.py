@@ -348,8 +348,8 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
         with db_lock:
             existing = db.cursor().execute(
                 "SELECT id FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-                (repo_key, scope, agent_type, issue_num)
+                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND name=?",
+                (repo_key, scope, agent_type, issue_num, name)
             ).fetchone()
             if existing:
                 return
@@ -885,6 +885,8 @@ async def knowledge_sync_loop():
                         if content:
                             # Issue #190：按 scope 生成 storage_key（含 provider 前缀）
                             _obs_prefix = knowledge_obs_prefix(repo_key)
+                            _sync_name = ""
+                            _sync_desc = ""
                             if scope == "member":
                                 # Issue #190：从 file_path 提取 member/ 或 agent/ 后的相对路径
                                 # 不用 replace（file_path 含 owner/repo 时会导致路径重复）
@@ -899,6 +901,8 @@ async def knowledge_sync_loop():
                             elif scope == "baseline":
                                 _fname = os.path.basename(file_path)
                                 storage_key = f"{_obs_prefix}/project-info/{_fname}"
+                                _sync_name = BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
+                                _sync_desc = BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
                             else:
                                 # 共享知识：project/issue/issue_agent
                                 storage_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
@@ -906,7 +910,7 @@ async def knowledge_sync_loop():
                             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
                             with db_lock:
                                 c2 = db.cursor()
-                                # Issue #95：UPDATE 补 source（COALESCE 空值不覆盖）
+                                # UPDATE 补 source/name/description（COALESCE 空值不覆盖）
                                 c2.execute(
                                     "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
                                     "source=COALESCE(NULLIF(source, ''), CASE WHEN scope='baseline' THEN 'system' "
@@ -915,8 +919,8 @@ async def knowledge_sync_loop():
                                     "description=COALESCE(NULLIF(description, ''), ?) "
                                     "WHERE id=?",
                                     (storage_key, content_hash,
-                                     BASELINE_NAME_FALLBACK if scope == "baseline" else "",
-                                     BASELINE_DESC_FALLBACK if scope == "baseline" else "",
+                                     _sync_name,
+                                     _sync_desc,
                                      rid)
                                 )
                                 db.commit()
@@ -1037,14 +1041,20 @@ def _sync_baseline_files():
                     if row:  # DB 有记录但 obs_key 为空 → UPDATE
                         with db_lock:
                             c = db.cursor()
-                            # Issue #95：UPDATE 补 source/name/description（COALESCE 空值不覆盖）
+                            # 补 source/name/description
+                            # name: 空值或 fallback 值 → 替换为精确映射
+                            # description: 空值或统一值 → 替换为精确映射
+                            _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"
                             c.execute(
                                 "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
                                 "source=COALESCE(NULLIF(source, ''), 'system'), "
-                                "name=COALESCE(NULLIF(name, ''), ?), "
-                                "description=COALESCE(NULLIF(description, ''), ?) "
+                                "name=COALESCE(NULLIF(NULLIF(name, ''), ?), ?), "
+                                "description=COALESCE(NULLIF(NULLIF(NULLIF(description, ''), ?), ?), ?) "
                                 "WHERE id=?",
-                                (storage_key, content_hash, _baseline_name, _baseline_desc, row[0])
+                                (storage_key, content_hash,
+                                 BASELINE_NAME_FALLBACK, _baseline_name,
+                                 _UNIFIED_DESC, BASELINE_DESC_FALLBACK, _baseline_desc,
+                                 row[0])
                             )
                             db.commit()
                     else:  # DB 无记录 → INSERT
