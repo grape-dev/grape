@@ -574,6 +574,7 @@ function renderKnowledge() {
         };
         this.view = 'create';
         this.loadRepoScenes();
+        this.$nextTick(() => this.updateSceneScrollBtns());
       },
       getSceneName(sid) {
         const s = (this.repoScenes || []).find(x => x.id === sid);
@@ -967,7 +968,8 @@ function renderKnowledge() {
             </div>
             <div v-if="createForm.sceneSelected.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
             <div v-else class="scn-scroll-wrap">
-              <transition-group name="kb-scene" tag="div" class="scn-scroll-track">
+              <button class="scn-scroll-btn scn-scroll-prev" :class="{ show: sceneScrollLeft }" @click="scrollSceneTrack(-314)">◀</button>
+              <transition-group name="kb-scene" tag="div" class="scn-scroll-track" ref="sceneTrack" @scroll="updateSceneScrollBtns">
                 <div v-for="sid in createForm.sceneSelected" :key="sid" class="scn-card" style="flex-shrink:0;width:300px;position:relative">
                   <button class="kb-scene-x" style="z-index:5" @click="toggleCreateScene(sid)">×</button>
                   <div class="scn-card-bar bg-default"></div>
@@ -986,6 +988,7 @@ function renderKnowledge() {
                   </div>
                 </div>
               </transition-group>
+              <button class="scn-scroll-btn scn-scroll-next" :class="{ show: sceneScrollRight }" @click="scrollSceneTrack(314)">▶</button>
             </div>
           </div>
 
