@@ -7,7 +7,7 @@
 - PUT  /api/knowledge/{id}    更新知识内容
 - DEL  /api/knowledge/{id}    删除知识条目（按 id）
 """
-import os, time, uuid, hashlib
+import os, time, uuid, hashlib, json
 from src.repo_key import knowledge_obs_prefix
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
@@ -441,33 +441,30 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
     content = read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""), row.get("content_hash", ""))
 
     from src.session_manager import db, db_lock
-    from src.api.pipeline_config import get_pipeline_config
     with db_lock:
         refs = db.cursor().execute(
             "SELECT r.id, r.scene_id, r.agent_type, r.enabled, r.created_by, r.created_at, "
-            "s.name, s.description, s.display_name, s.scene_id "
+            "s.name, s.description, s.display_name, s.scene_id, s.nodes_json "
             "FROM scene_knowledge_ref r "
-            "LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? "
+            "LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? AND s.is_active=1 "
             "WHERE r.knowledge_id = ? ORDER BY r.id",
             (row["repo_key"], knowledge_id)
         ).fetchall()
 
-    # 为每个场景关联补充 pipeline 信息（批量查，不循环加锁）
+    # Issue #199: 批量查 pipeline 信息（消除 N+1——原来逐个调 get_pipeline_config）
     ref_list = []
-    scene_ids = [r[9] for r in refs if r[9] and row["repo_key"]]
-    pipeline_map = {}
-    for sid in scene_ids:
-        try:
-            pc = get_pipeline_config(sid, repo_key=row["repo_key"])
-            if pc and pc.get("nodes"):
-                pipeline_map[sid] = " → ".join(n.get("tag", n.get("id", "")) for n in pc["nodes"] if n.get("enabled", True))
-        except Exception:
-            pass
     for r in refs:
         scene_name = r[6] or ""
         scene_description = r[7] or ""
         scene_display_name = r[8] or scene_name
-        pipeline_chain = pipeline_map.get(r[9], "")
+        # nodes_json 已在 JOIN 中查出，直接解析
+        pipeline_chain = ""
+        if r[10]:
+            try:
+                nodes = json.loads(r[10])
+                pipeline_chain = " → ".join(n.get("tag", n.get("id", "")) for n in nodes if n.get("enabled", True))
+            except Exception:
+                pass
         ref_list.append({
             "id": r[0], "scene_id": r[1], "agent_type": r[2], "enabled": r[3],
             "created_by": r[4], "created_at": r[5],

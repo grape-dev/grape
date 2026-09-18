@@ -767,3 +767,24 @@
 .chat-picker-pop.show{opacity:1;transform:translateY(0) scale(1)}
 .chat-picker-item:hover{background:var(--bg)}
 .chat-picker-item.active:hover{background:var(--a)22}
+
+/* ===== Issue #199: 知识绑定操作 loading 态 + 进出场动画 ===== */
+/* Agent 标签 loading */
+.kb-agent-tag.kb-agent-pending{pointer-events:none;opacity:.6}
+.kb-agent-tag.kb-agent-pending::after{content:'';position:absolute;top:50%;left:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border:2px solid var(--b);border-top-color:var(--a);border-radius:50%;animation:kb-spin .6s linear infinite;z-index:2}
+
+/* 场景卡片 loading */
+.scn-card.kb-scene-pending{pointer-events:none;opacity:.5}
+.scn-card.kb-scene-pending .kb-scene-x{display:none}
+.scn-card.kb-scene-pending::after{content:'';position:absolute;top:50%;left:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border:2px solid var(--b);border-top-color:var(--a);border-radius:50%;animation:kb-spin .6s linear infinite;z-index:5}
+
+/* 场景卡片进出场动画 */
+.kb-scene-enter-active{transition:opacity .3s ease,transform .3s cubic-bezier(.25,.1,.25,1)}
+.kb-scene-enter-from{opacity:0;transform:translateY(12px) scale(.95)}
+.kb-scene-leave-active{transition:opacity .25s ease,transform .25s cubic-bezier(.25,.1,.25,1);position:absolute}
+.kb-scene-leave-to{opacity:0;transform:scale(.9)}
+.kb-scene-move{transition:transform .3s cubic-bezier(.25,.1,.25,1)}
+
+/* 确认按钮 loading */
+.bt.kb-btn-loading{pointer-events:none;opacity:.7}
+.bt.kb-btn-loading::after{content:'';display:inline-block;width:12px;height:12px;margin-left:6px;border:1.5px solid currentColor;border-top-color:transparent;border-radius:50%;animation:kb-spin .6s linear infinite;vertical-align:middle}

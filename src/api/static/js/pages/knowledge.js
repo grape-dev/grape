@@ -62,6 +62,8 @@ function renderKnowledge() {
         marketTotal: 0,
         marketPageSize: 12,
         repoScenes: [],
+        pendingAgentType: null,
+        pendingSceneId: null,
       };
     },
     computed: {
@@ -244,7 +246,6 @@ function renderKnowledge() {
           if (window._currentView !== 'knowledge') return;
           this.detail = d;
           this.view = 'detail';
-          await this.loadScenes();
           this.$nextTick(() => this.updateSceneScrollBtns());
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
@@ -257,29 +258,16 @@ function renderKnowledge() {
         this.detail = null;
         this.loadList();
       },
-      async loadScenes() {
+      async _refreshDetailFull() {
+        if (!this.detail) return;
         try {
-          const repo = this.currentRepo();
-          const d = await API.get('/scenes?repo=' + encodeURIComponent(repo));
+          const d = await API.get('/knowledge/' + this.detail.id);
           if (window._currentView !== 'knowledge') return;
-          this.scenes = (d.scenes || []).map(s => ({
-            id: String(s.id || s.scene_id || ''),
-            name: s.display_name || s.name || s.id || '',
-          }));
+          this.detail = d;
+          this.$nextTick(() => this.updateSceneScrollBtns());
         } catch (e) {
-          this.scenes = [];
-        }
-      },
-      async loadRefs(kid) {
-        // 刷新详情以获取完整 refs（含 scene_name/pipeline 等）
-        try {
-          const d = await API.get('/knowledge/' + kid);
-          if (this.detail && this.detail.id === kid) {
-            this.detail = d;
-            this.$nextTick(() => this.updateSceneScrollBtns());
-          }
-        } catch (e) {
-          // ignore
+          if (e.name === 'AbortError' && e.silent) return;
+          app.showToast(this.t('refresh_failed') || '刷新失败，请手动刷新页面');
         }
       },
 
@@ -293,24 +281,41 @@ function renderKnowledge() {
         return at ? at.label : agentType;
       },
       async toggleAgentRef(agentType) {
-        if (this.submitting) return; this.submitting = true;
-        const _t = setTimeout(() => this.submitting = false, 10000);
+        if (this.submitting) return;
+        this.submitting = true;
+        this.pendingAgentType = agentType;
         try {
-        const kid = this.detail.id;
-        if (this.isAgentSelected(agentType)) {
-          const ref = this.detail.refs.find(r => r.agent_type === agentType && r.scene_id === '' && r.enabled);
-          if (ref) {
-            try { await API.del('/knowledge/ref/' + ref.id); } catch(e) { app.showToast(e.message); }
+          const kid = this.detail.id;
+          if (this.isAgentSelected(agentType)) {
+            const ref = this.detail.refs.find(r => r.agent_type === agentType && r.scene_id === '' && r.enabled);
+            if (ref) {
+              await API.del('/knowledge/ref/' + ref.id, 15000);
+              await this._refreshDetailFull();
+              app.showToast(this.t('ref_unbind_agent_ok'));
+            }
+          } else {
+            await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [agentType] }, 15000);
+            await this._refreshDetailFull();
+            app.showToast(this.t('ref_bind_agent_ok'));
           }
-        } else {
-          try { await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [agentType] }); } catch(e) { app.showToast(e.message); }
+        } catch (e) {
+          if (e.name === 'AbortError' && !e.silent) {
+            app.showToast(this.t('ref_timeout_refresh'));
+            await this._refreshDetailFull();
+          } else if (e.name === 'AbortError' && e.silent) {
+            // 导航/切 tab 导致的取消，静默
+          } else {
+            app.showToast(e.message || this.t('ref_failed_refresh'));
+            await this._refreshDetailFull();
+          }
+        } finally {
+          this.submitting = false;
+          this.pendingAgentType = null;
         }
-        await this.loadRefs(kid);
-        } finally { clearTimeout(_t); this.submitting = false; }
       },
       async removeAgentRef(tag) {
         try {
-          await API.del('/knowledge/ref/' + tag.ref.id);
+          await API.del('/knowledge/ref/' + tag.ref.id, 15000);
           tag.ref.enabled = false;
         } catch (e) {
           app.showToast(e.message);
@@ -319,33 +324,48 @@ function renderKnowledge() {
       async addAgentByType(agentType) {
         const kid = this.detail.id;
         try {
-          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [agentType] });
-          await this.loadRefs(kid);
-          app.showToast(this.t('ref_add'));
+          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [agentType] }, 15000);
+          await this._refreshDetailFull();
+          app.showToast(this.t('ref_bind_agent_ok'));
         } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
+          app.showToast(e.message || this.t('ref_failed_refresh'));
+          await this._refreshDetailFull();
         }
       },
 
       // 场景标签操作
       async removeSceneRef(tag) {
-        if (this.submitting) return; this.submitting = true;
-        const _t = setTimeout(() => this.submitting = false, 10000);
+        if (this.submitting) return;
+        this.submitting = true;
+        this.pendingSceneId = tag.sceneId;
         try {
-          await API.del('/knowledge/ref/' + tag.ref.id);
-          tag.ref.enabled = false;
+          await API.del('/knowledge/ref/' + tag.ref.id, 15000);
+          await this._refreshDetailFull();
+          app.showToast(this.t('ref_unbind_scene_ok'));
         } catch (e) {
-          app.showToast(e.message);
-        } finally { clearTimeout(_t); this.submitting = false; }
+          if (e.name === 'AbortError' && !e.silent) {
+            app.showToast(this.t('ref_timeout_refresh'));
+            await this._refreshDetailFull();
+          } else if (e.name === 'AbortError' && e.silent) {
+            // 导航/切 tab 导致的取消，静默
+          } else {
+            app.showToast(e.message || this.t('ref_failed_refresh'));
+            await this._refreshDetailFull();
+          }
+        } finally {
+          this.submitting = false;
+          this.pendingSceneId = null;
+        }
       },
       async addSceneById(sceneId) {
         const kid = this.detail.id;
         try {
-          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [sceneId], agent_types: [] });
-          await this.loadRefs(kid);
-          app.showToast(this.t('ref_add'));
+          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [sceneId], agent_types: [] }, 15000);
+          await this._refreshDetailFull();
+          app.showToast(this.t('ref_bind_scene_ok'));
         } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
+          app.showToast(e.message || this.t('ref_failed_refresh'));
+          await this._refreshDetailFull();
         }
       },
       openScenePopover(e) {
@@ -413,18 +433,28 @@ function renderKnowledge() {
         }
       },
       async confirmAddScenes() {
-        if (this.submitting) return; this.submitting = true;
-        const _t = setTimeout(() => this.submitting = false, 10000);
+        if (this.submitting || this.sceneSelected.length === 0) return;
+        this.submitting = true;
         const kid = this.detail.id;
         try {
-          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: this.sceneSelected, agent_types: [] });
-          await this.loadRefs(kid);
+          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: this.sceneSelected, agent_types: [] }, 15000);
+          await this._refreshDetailFull();
           app.showToast(this.t('ref_added_count', { count: this.sceneSelected.length }));
+          this.addScenePopover = false;
+          this.sceneSelected = [];
         } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
-        } finally { clearTimeout(_t); this.submitting = false; }
-        this.addScenePopover = false;
-        this.sceneSelected = [];
+          if (e.name === 'AbortError' && !e.silent) {
+            app.showToast(this.t('ref_timeout_refresh'));
+            await this._refreshDetailFull();
+          } else if (e.name === 'AbortError' && e.silent) {
+            // 导航/切 tab 导致的取消，静默
+          } else {
+            app.showToast(e.message || this.t('ref_failed_refresh'));
+            await this._refreshDetailFull();
+          }
+        } finally {
+          this.submitting = false;
+        }
       },
 
       // Agent 多选
@@ -441,16 +471,28 @@ function renderKnowledge() {
         }
       },
       async confirmAddAgents() {
+        if (this.submitting || this.agentSelected.length === 0) return;
+        this.submitting = true;
         const kid = this.detail.id;
         try {
-          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: this.agentSelected });
-          await this.loadRefs(kid);
-          app.showToast(this.t('ref_added_count', { count: this.agentSelected.length }));
+          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: this.agentSelected }, 15000);
+          await this._refreshDetailFull();
+          app.showToast(this.t('ref_agents_added_count', { count: this.agentSelected.length }));
+          this.addAgentPopover = false;
+          this.agentSelected = [];
         } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
+          if (e.name === 'AbortError' && !e.silent) {
+            app.showToast(this.t('ref_timeout_refresh'));
+            await this._refreshDetailFull();
+          } else if (e.name === 'AbortError' && e.silent) {
+            // 导航/切 tab 导致的取消，静默
+          } else {
+            app.showToast(e.message || this.t('ref_failed_refresh'));
+            await this._refreshDetailFull();
+          }
+        } finally {
+          this.submitting = false;
         }
-        this.addAgentPopover = false;
-        this.agentSelected = [];
       },
 
       // 编辑
@@ -513,20 +555,28 @@ function renderKnowledge() {
         if (this.editForm.description.length > 200) { app.showToast(this.t('desc_too_long')); return; }
         if (!this.editForm.content.trim()) { app.showToast(this.t('content_required')); return; }
         if (new Blob([this.editForm.content]).size > 10240) { app.showToast(this.t('content_too_large')); return; }
-        if (this.submitting) return; this.submitting = true;
-        const _t = setTimeout(() => this.submitting = false, 10000);
+        if (this.submitting) return;
+        this.submitting = true;
         try {
           await API.put('/knowledge/' + this.detail.id, {
             content: this.editForm.content || '',
             description: this.editForm.description || '',
             name: this.editForm.name.trim()
-          });
+          }, 15000);
           app.showToast(this.t('knowledge_updated'));
-          this.editMode = false;
-          await this.viewContent({ id: this.detail.id });
+          // Issue #199: 保存成功后返回列表
+          this.backToList();
         } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
-        } finally { clearTimeout(_t); this.submitting = false; }
+          if (e.name === 'AbortError' && !e.silent) {
+            app.showToast(this.t('save_timeout'));
+          } else if (e.name === 'AbortError' && e.silent) {
+            // 导航/切 tab 导致的取消，静默
+          } else {
+            app.showToast(e.message || I18N.t('common.load_failed'));
+          }
+        } finally {
+          this.submitting = false;
+        }
       },
 
       // 删除
@@ -578,7 +628,6 @@ function renderKnowledge() {
           sceneSelected: []
         };
         this.view = 'create';
-        this.loadScenes();
         this.loadRepoScenes();
       },
       getSceneName(sid) {
@@ -631,8 +680,8 @@ function renderKnowledge() {
         if (this.createForm.description.length > 200) { app.showToast(this.t('desc_too_long')); return; }
         if (!this.createForm.content.trim()) { app.showToast(this.t('content_required')); return; }
         if (new Blob([this.createForm.content]).size > 10240) { app.showToast(this.t('content_too_large')); return; }
-        if (this.submitting) return; this.submitting = true;
-        const _t = setTimeout(() => this.submitting = false, 10000);
+        if (this.submitting) return;
+        this.submitting = true;
         try {
           const d = await API.post('/knowledge/entry', {
             repo: this.currentRepo(),
@@ -640,24 +689,31 @@ function renderKnowledge() {
             agent_type: '',
             description: this.createForm.description || '',
             name: this.createForm.name.trim()
-          });
+          }, 15000);
           const kid = d.id || d.knowledge_id;
           if (kid && (this.createForm.agentSelected.length > 0 || this.createForm.sceneSelected.length > 0)) {
-            try {
-              await API.post('/knowledge/' + kid + '/refs/batch', {
-                scene_ids: this.createForm.sceneSelected,
-                agent_types: this.createForm.agentSelected
-              });
-            } catch(e) {}
+            await API.post('/knowledge/' + kid + '/refs/batch', {
+              scene_ids: this.createForm.sceneSelected,
+              agent_types: this.createForm.agentSelected
+            }, 15000);
           }
           app.showToast(this.t('knowledge_created'));
           this.createForm = null;
           this.view = 'list';
-          await this.loadStats();
-          await this.loadList();
+          // Issue #199: loadStats + loadList 并行
+          await Promise.all([this.loadStats(), this.loadList()]);
         } catch (e) {
-          app.showToast(e.message || I18N.t('common.load_failed'));
-        } finally { clearTimeout(_t); this.submitting = false; }
+          if (e.name === 'AbortError' && !e.silent) {
+            app.showToast(this.t('create_timeout'));
+            await this.loadList();
+          } else if (e.name === 'AbortError' && e.silent) {
+            // 导航/切 tab 导致的取消，静默
+          } else {
+            app.showToast(e.message || I18N.t('common.load_failed'));
+          }
+        } finally {
+          this.submitting = false;
+        }
       },
 
       // 文件过大提示
@@ -828,7 +884,7 @@ function renderKnowledge() {
               </div>
               <div style="display:flex;flex-wrap:wrap;gap:8px">
                 <div v-for="at in agentTypes.filter(a => a.value)" :key="at.value"
-                  class="kb-agent-tag" :class="{ 'kb-agent-selected': isAgentSelected(at.value) }"
+                  class="kb-agent-tag" :class="{ 'kb-agent-selected': isAgentSelected(at.value), 'kb-agent-pending': pendingAgentType === at.value }"
                   @click="toggleAgentRef(at.value)">
                   <div class="kb-agent-check"><span class="kb-check-yes">✓</span></div>
                   <div class="kb-agent-name">{{ at.label }}</div>
@@ -846,8 +902,8 @@ function renderKnowledge() {
               <div v-if="selectedSceneTags.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
               <div v-else class="scn-scroll-wrap">
                 <button class="scn-scroll-btn scn-scroll-prev" :class="{ show: sceneScrollLeft }" @click="scrollSceneTrack(-314)">◀</button>
-                <div class="scn-scroll-track" ref="sceneTrack" @scroll="updateSceneScrollBtns">
-                  <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="scn-card" style="flex-shrink:0;width:300px;position:relative">
+                <transition-group name="kb-scene" tag="div" class="scn-scroll-track" ref="sceneTrack" @scroll="updateSceneScrollBtns">
+                  <div v-for="tag in selectedSceneTags" :key="tag.sceneId" class="scn-card" :class="{ 'kb-scene-pending': pendingSceneId === tag.sceneId }" style="flex-shrink:0;width:300px;position:relative">
                     <button class="kb-scene-x" style="z-index:5" @click="removeSceneRef(tag)">×</button>
                     <div class="scn-card-bar" :class="sourceBarClass(detail.source)"></div>
                     <div class="scn-card-body">
@@ -864,7 +920,7 @@ function renderKnowledge() {
                       </div>
                     </div>
                   </div>
-                </div>
+                </transition-group>
                 <button class="scn-scroll-btn scn-scroll-next" :class="{ show: sceneScrollRight }" @click="scrollSceneTrack(314)">▶</button>
               </div>
             </div>
@@ -906,7 +962,7 @@ function renderKnowledge() {
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--b)">
               <button class="bt bt-o bt-s" @click="cancelEdit">{{ t('cancel') }}</button>
-              <button class="bt bt-p bt-s" :disabled="submitting" @click="saveEdit">{{ t('confirm') }}</button>
+              <button class="bt bt-p bt-s" :class="{ 'kb-btn-loading': submitting }" :disabled="submitting" @click="saveEdit">{{ t('confirm') }}</button>
             </div>
           </div>
         </template>
@@ -964,7 +1020,7 @@ function renderKnowledge() {
             </div>
             <div v-if="createForm.sceneSelected.length === 0" class="ts t2" style="padding:12px 0">{{ t('ref_no_scenes_linked') }}</div>
             <div v-else class="scn-scroll-wrap">
-              <div class="scn-scroll-track">
+              <transition-group name="kb-scene" tag="div" class="scn-scroll-track">
                 <div v-for="sid in createForm.sceneSelected" :key="sid" class="scn-card" style="flex-shrink:0;width:300px;position:relative">
                   <button class="kb-scene-x" style="z-index:5" @click="toggleCreateScene(sid)">×</button>
                   <div class="scn-card-bar bg-default"></div>
@@ -982,13 +1038,13 @@ function renderKnowledge() {
                     </div>
                   </div>
                 </div>
-              </div>
+              </transition-group>
             </div>
           </div>
 
           <div style="display:flex;gap:8px;justify-content:flex-end">
             <button class="bt bt-o bt-s" @click="cancelCreate">{{ t('cancel') }}</button>
-            <button class="bt bt-p bt-s" :disabled="submitting" @click="saveCreate">{{ t('confirm') }}</button>
+            <button class="bt bt-p bt-s" :class="{ 'kb-btn-loading': submitting }" :disabled="submitting" @click="saveCreate">{{ t('confirm') }}</button>
           </div>
         </template>
 
@@ -1018,7 +1074,7 @@ function renderKnowledge() {
               <span style="font-size:11px;color:var(--t3)">{{ t('ref_selected_count', { count: sceneSelected.length }) }}</span>
               <div style="display:flex;gap:8px">
                 <button class="bt bt-o bt-s" @click="addScenePopover = false">{{ t('cancel') }}</button>
-                <button class="bt bt-p bt-s" :disabled="submitting || sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
+                <button class="bt bt-p bt-s" :class="{ 'kb-btn-loading': submitting }" :disabled="submitting || sceneSelected.length === 0" @click="confirmAddScenes">{{ t('confirm') }}</button>
               </div>
             </div>
           </div>
