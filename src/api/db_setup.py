@@ -1453,9 +1453,9 @@ def init_database():
                     _backfill_scene_display_names()
                 except Exception as _e:
                     log.warning(f"Scene display_name backfill failed: {_e}")
-                # ===== Issue #67: 知识库优化迁移 =====
+                # ===== 知识库去重 + ref 迁移（每次启动执行，幂等）=====
                 try:
-                    _migrate_knowledge_issue67()
+                    _migrate_knowledge_dedup_and_ref()
                 except Exception as _e:
                     log.warning(f"Issue #67 knowledge migration failed: {_e}")
             finally:
@@ -1488,16 +1488,16 @@ def init_database():
             log.warning(f"Scene display_name backfill failed: {_e}")
         # ===== Issue #67: 知识库优化迁移 =====
         try:
-            _migrate_knowledge_issue67()
+            _migrate_knowledge_dedup_and_ref()
         except Exception as _e:
             log.warning(f"Issue #67 knowledge migration failed: {_e}")
     # MySQL with session_manager
 
-def _migrate_knowledge_issue67():
-    """Issue #67 知识库优化迁移 + Issue #95 修复：source 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。
+def _migrate_knowledge_dedup_and_ref():
+    """知识库 source 回填 + name/description 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。
 
-    Issue #95：加幂等标记——#95 修复（member ref 清理 + rejected 修复）跑一次后跳过。
-    #67 基础迁移仍每次执行（幂等，开销微量）。
+    每次启动执行（幂等）。issue95 修复部分有独立幂等标记。
+    步骤顺序：source 回填 → name/description 回填 → 去重 → ref 迁移 → 孤儿 ref 清理。
     """
     from src.mysql_compat import get_db_backend
     _is_mysql = get_db_backend() == "mysql"
@@ -1526,6 +1526,52 @@ def _migrate_knowledge_issue67():
         c.execute(
             "UPDATE agent_shared_knowledge SET source = 'manual' "
             "WHERE scope = 'member' AND (source IS NULL OR source = '')")
+
+        # 1.5 回填 baseline 空 name + 统一 description（必须在去重之前）
+        # 老代码 INSERT 时没有 name 字段 → DEFAULT ''，去重时同 repo 的 3 条
+        # baseline 会被合并为 1 条。另外 description 硬编码统一值，无法区分。
+        # 幂等：COALESCE 空值不覆盖，统一值只在匹配时替换。
+        from src.repo_key import (BASELINE_NAME_MAP, BASELINE_DESC_MAP,
+                                  BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK)
+        _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值，勿改
+        _bl_rows = c.execute(
+            "SELECT id, name, file_path, obs_key, description "
+            "FROM agent_shared_knowledge WHERE scope='baseline' "
+            "AND (name IS NULL OR name = '' OR name = ? "
+            "OR description = ? OR description IS NULL OR description = '')",
+            (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
+        ).fetchall()
+        _bl_updates = []
+        for _rid, _cur_name, _fp, _obs, _cur_desc in _bl_rows:
+            _fname = ""
+            for _src in (_fp, _obs):
+                if not _src:
+                    continue
+                for _bn in ("project-capabilities.md", "project-graph.md", ".metadata.json"):
+                    if _bn in _src:
+                        _fname = _bn
+                        break
+                if _fname:
+                    break
+            _new_name = _cur_name
+            _needs_name = False
+            if not _cur_name:
+                _new_name = BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
+                _needs_name = bool(_new_name)
+            elif _cur_name == BASELINE_NAME_FALLBACK and _fname:
+                _mapped = BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
+                if _mapped != _cur_name:
+                    _new_name = _mapped
+                    _needs_name = True
+            _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC)
+            if _needs_name or _needs_desc:
+                _new_desc = BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
+                _bl_updates.append((_new_name, _new_desc, _rid))
+        if _bl_updates:
+            c.executemany(
+                "UPDATE agent_shared_knowledge SET name=?, description=? WHERE id=?",
+                _bl_updates)
+            log.info(f"[issue67] backfilled name/description for {len(_bl_updates)} baseline rows")
 
         # 2. 重复记录去重——每类 scope 只保留最新一条
         #    baseline：按 (repo_key, scope, name) 去重（Issue #190：file_path 格式变化会导致按 file_path 分组查不出重复）
@@ -1680,6 +1726,21 @@ def _migrate_knowledge_issue67():
         except Exception as _e:
             log.warning(f"[migrate] content_hash backfill failed: {_e}")
 
+        # 5. 清理孤儿 scene_knowledge_ref（knowledge_id 指向已删除的知识记录）
+        # 去重删除 knowledge 记录时已先删 ref，但历史迁移轮次可能残留
+        try:
+            _orphan_count = c.execute(
+                "SELECT COUNT(*) FROM scene_knowledge_ref "
+                "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)"
+            ).fetchone()[0]
+            if _orphan_count:
+                c.execute(
+                    "DELETE FROM scene_knowledge_ref "
+                    "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)")
+                log.info(f"[issue67] cleaned {_orphan_count} orphan scene_knowledge_ref")
+        except Exception as _e:
+            log.warning(f"[issue67] orphan ref cleanup failed: {_e}")
+
         db.commit()
 
     # 4. MySQL 原生 DDL——scene_knowledge_ref 表用原生 MySQL DDL 重建（如果翻译层产出不够严谨）
@@ -1743,7 +1804,6 @@ def _migrate_knowledge():
     log.info("[knowledge_migrate] migration started")
 
     _restore_ok = False       # 恢复归档记录
-    _backfill_name_ok = False  # 回填 baseline 空 name
     _dedup_ok = False          # 去重 baseline 重复记录
     _obs_key_ok = False        # 归一化 obs_key
     _file_path_ok = False      # 归一化 file_path
@@ -1760,62 +1820,10 @@ def _migrate_knowledge():
     except Exception as e:
         log.warning(f"[knowledge_migrate] restore archived failed: {e}")
 
-    # ===== 回填 baseline 空 name 和统一 description（必须在去重之前）=====
-    # 老代码两个问题：
-    # 1. f4731618 INSERT 时没有 name 字段 → DEFAULT ''。去重时按 repo_key + name
-    #    GROUP BY，name 都是 '' 的 3 条 baseline 会被合并为 1 条，丢失 2 条。
-    # 2. d061facd 起 INSERT/UPDATE 硬编码 description 为同一个字符串，三个不同
-    #    知识条目展示的注释完全一样，用户无法区分。
-    # 通过 file_path / obs_key 中的文件名推导 name + description，回填空 name
-    # 和统一 description。
-    try:
-        from src.repo_key import BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_DESC_FALLBACK, BASELINE_NAME_FALLBACK
-        _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值
-        with db_lock:
-            c = db.cursor()
-            rows = c.execute(
-                "SELECT id, name, file_path, obs_key, description "
-                "FROM agent_shared_knowledge WHERE scope='baseline' "
-                "AND (name IS NULL OR name = '' OR name = ? "
-                "OR description = ? OR description IS NULL OR description = '')",
-                (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
-            ).fetchall()
-        updates = []  # [(name, desc, id), ...]
-        for rid, cur_name, file_path, obs_key, cur_desc in rows:
-            _fname = ""
-            for _key_src in (file_path, obs_key):
-                if not _key_src:
-                    continue
-                for _basename in ("project-capabilities.md", "project-graph.md", ".metadata.json"):
-                    if _basename in _key_src:
-                        _fname = _basename
-                        break
-                if _fname:
-                    break
-            _name = cur_name if cur_name else BASELINE_NAME_MAP.get(_fname, "")
-            _desc = BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
-            # name="项目基线分析"是 write_knowledge 的旧默认值，如果 file_path
-            # 能匹配到具体文件，用 BASELINE_NAME_MAP 的精确名替换
-            _needs_name_fix = (cur_name == BASELINE_NAME_FALLBACK and _fname and
-                               BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK) != cur_name)
-            if _needs_name_fix:
-                _name = BASELINE_NAME_MAP.get(_fname, cur_name)
-            _needs_desc_fix = (not cur_desc or cur_desc == _UNIFIED_DESC)
-            if _name and (_needs_name_fix or _needs_desc_fix or not cur_name):
-                updates.append((_name, _desc, rid))
-        if updates:
-            with db_lock:
-                c = db.cursor()
-                c.executemany(
-                    "UPDATE agent_shared_knowledge SET name=?, description=? WHERE id=?",
-                    updates)
-                db.commit()
-            log.info(f"[knowledge_migrate] backfilled name/description for {len(updates)} baseline rows")
-        else:
-            log.info("[knowledge_migrate] no baseline rows need backfill")
-        _backfill_name_ok = True
-    except Exception as e:
-        log.warning(f"[knowledge_migrate] backfill name/description failed: {e}")
+    # NOTE: baseline name/description 回填已移至 _migrate_knowledge_dedup_and_ref()
+    # step 1.5（每次启动执行，在去重之前）。此处不再重复——_migrate_knowledge
+    # 受 knowledge_migrate_done 标记控制，首次执行后跳过，无法保证回填在
+    # 去重之前完成。
 
     # ===== 去重 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
     try:
@@ -1970,7 +1978,7 @@ def _migrate_knowledge():
 
     # ===== 标记完成 + 释放锁（finally 保证锁一定释放）=====
     try:
-        if _restore_ok and _backfill_name_ok and _dedup_ok and _obs_key_ok and _file_path_ok:
+        if _restore_ok and _dedup_ok and _obs_key_ok and _file_path_ok:
             set_meta_value("knowledge_migrate_done", "1")
             log.info("[knowledge_migrate] migration done")
         else:
