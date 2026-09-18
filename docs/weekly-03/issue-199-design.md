@@ -656,25 +656,42 @@ if agent_types:
 
 **幂等**：同一 scene_id + agent_type 跳过已存在的（复用已有逻辑）。
 
-### 8.4 后端实现
+### 8.4 事务保证
 
-create_knowledge_entry 中创建条目拿到 kid 后，同一个 db_lock 内循环 INSERT ref：
+创建条目 + 校验 + 绑定关联全部在同一个 db_lock 内，同一次 db.commit()。校验失败时 raise HTTPException，不执行 commit，SQLite 自动回滚——条目不会残留。绑定 INSERT 失败时异常传播，同样不 commit，自动回滚。
+
+事务边界：
 
 ```python
-# 创建条目
+from src.session_manager import db, db_lock
 with db_lock:
     c = db.cursor()
+    # 1. 校验 scene_ids（批量查，不循环）
+    if scene_ids:
+        placeholders = ",".join("?" * len(scene_ids))
+        valid_rows = c.execute(
+            f"SELECT scene_id FROM devops_pipeline_scene "
+            f"WHERE is_active=1 AND repo_key=? AND scene_id IN ({placeholders})",
+            [repo_key] + scene_ids
+        ).fetchall()
+        valid_ids = {r[0] for r in valid_rows}
+        invalid = [sid for sid in scene_ids if sid not in valid_ids]
+        if invalid:
+            raise HTTPException(status_code=400,
+                detail={"code": 400, "message": f"场景不存在: {invalid}"})
+
+    # 2. 校验 agent_types（内存比对，不查 DB）
+    if agent_types:
+        invalid = [at for at in agent_types if at not in VALID_AGENT_TYPES]
+        if invalid:
+            raise HTTPException(status_code=400,
+                detail={"code": 400, "message": f"不支持的 Agent 类型: {invalid}"})
+
+    # 3. INSERT 条目
     c.execute("INSERT INTO agent_shared_knowledge ...", (...))
     kid = c.lastrowid
 
-    # 校验 + 绑定关联（同一个锁内）
-    if scene_ids:
-        # 批量校验存在性
-        ...
-    if agent_types:
-        # 内存校验合法性
-        ...
-    # 循环 INSERT（幂等，跳过已存在）
+    # 4. 绑定关联（幂等，跳过已存在）
     for scene_id, agent_type in items:
         if not scene_id and not agent_type:
             continue
@@ -690,14 +707,28 @@ with db_lock:
                 "VALUES (?, ?, ?, 1, ?)",
                 (kid, scene_id, agent_type, username)
             )
+
+    # 5. 全部成功才 commit
     db.commit()
 
 return {"ok": True, "message": "知识已创建", "id": kid}
 ```
 
-### 8.5 前端改动
+校验在 INSERT 之前——校验失败时条目还没创建，raise 后不 commit，无副作用。
 
-saveCreate 合并为一次调用：
+### 8.5 异常处理策略
+
+| 异常类型 | 后端状态 | 前端处理 | 用户看到 |
+|---------|---------|---------|---------|
+| 超时（AbortError） | 不确定——请求可能已到后端，条目可能已创建也可能没创建 | 提示"创建超时" + 清空表单 + 跳回列表 + loadList 刷新 | 列表里有条目=成功，没有=未创建 |
+| 非超时（400/500/网络错误） | 确定失败——事务回滚，条目不存在 | 提示错误信息 + 留在创建页 | 可安全重试，不会重复创建 |
+| 导航取消（AbortError + e.silent） | 不确定 | 静默 | 无提示 |
+
+**不需要 createdKid 防重复逻辑**——非超时失败已回滚可安全重试，超时跳回列表用户自行确认。
+
+### 8.6 前端改动
+
+saveCreate 合并为一次调用，非超时失败留在创建页可安全重试：
 
 ```javascript
 async saveCreate() {
@@ -720,13 +751,15 @@ async saveCreate() {
     await Promise.all([this.loadStats(), this.loadList()]);
   } catch (e) {
     if (e.name === 'AbortError' && !e.silent) {
+      // 超时——不确定结果，跳回列表让用户自行确认
       app.showToast(this.t('create_timeout'));
       this.createForm = null;
       this.view = 'list';
       await this.loadList();
     } else if (e.name === 'AbortError' && e.silent) {
-      // 静默
+      // 导航/切 tab 导致的取消，静默
     } else {
+      // 非超时——事务已回滚，留在创建页可安全重试
       app.showToast(e.message || I18N.t('common.load_failed'));
     }
   } finally {
@@ -735,9 +768,7 @@ async saveCreate() {
 },
 ```
 
-不再需要 createdKid 防重复逻辑——单接口要么全成功要么全失败。
-
-### 8.6 改动点
+### 8.7 改动点
 
 | # | 层 | 改动 | 说明 |
 |---|---|------|------|
@@ -746,5 +777,5 @@ async saveCreate() {
 | B5 | 后端 | create_knowledge_entry 内加 agent_types 内存校验 | 常量集合比对 |
 | B6 | 后端 | create_knowledge_entry 内循环 INSERT ref | 幂等，复用已有逻辑 |
 | F16 | 前端 | saveCreate 合并为一次 API 调用 | body 带 scene_ids / agent_types |
-| F17 | 前端 | 删除 createdKid 防重复逻辑 | 单接口不需要 |
-| I2 | i18n | 删除 create_ok_bind_failed key | 不再出现此场景 |
+| F17 | 前端 | 删除 createdKid 防重复逻辑 | 事务保证回滚，非超时失败留创建页可安全重试 |
+| I2 | i18n | 删除 create_ok_bind_failed key | 事务保证不会出现"条目已创建但绑定失败" |
