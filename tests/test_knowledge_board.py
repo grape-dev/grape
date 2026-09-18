@@ -71,8 +71,15 @@ def _write_pi(file_name: str, content: str):
 
 def _seed_knowledge(scope="issue_agent", agent="vod", issue_num=5, content="验收标准 = 接口可跑通"):
     from src.api.knowledge import write_knowledge
-    return write_knowledge(repo_key=_REPO_KEY, scope=scope, content=content,
-                           agent_type=agent, issue_num=issue_num, source_seq=99, created_by="agent")
+    from src.session_manager import db, db_lock
+    write_knowledge(repo_key=_REPO_KEY, scope=scope, content=content,
+                    agent_type=agent, issue_num=issue_num, source_seq=99, created_by="agent")
+    # write_knowledge 返回 task_id 非 knowledge_id，查 DB 拿真实 id
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT id FROM agent_shared_knowledge WHERE repo_key=? ORDER BY id DESC LIMIT 1",
+            (_REPO_KEY,)).fetchone()
+    return row[0] if row else 0
 
 
 class TestKnowledgeList:

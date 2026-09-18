@@ -279,24 +279,6 @@ class TestKnowledgeList:
                 assert "ref_summary" in k
 
 
-class TestArchive:
-    """归档 API 测试"""
-
-    def test_archive_knowledge(self, auth_headers, test_knowledge):
-        r = client.put(f"/api/knowledge/{test_knowledge['agent_id']}/archive",
-                       json={"archived": True}, headers=auth_headers)
-        assert r.status_code == 200
-        assert r.json()["archived"] in (1, True)
-
-    def test_unarchive_knowledge(self, auth_headers, test_knowledge):
-        client.put(f"/api/knowledge/{test_knowledge['agent_id']}/archive",
-                   json={"archived": True}, headers=auth_headers)
-        r = client.put(f"/api/knowledge/{test_knowledge['agent_id']}/archive",
-                       json={"archived": False}, headers=auth_headers)
-        assert r.status_code == 200
-        assert r.json()["archived"] in (0, False)
-
-
 class TestPromptBuilder:
     """prompt_builder 注入逻辑测试"""
 

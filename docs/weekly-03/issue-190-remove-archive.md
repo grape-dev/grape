@@ -65,7 +65,7 @@ UPDATE agent_shared_knowledge SET archived=0 WHERE archived=1
 - `archived=0` 查询条件全部保留（13 处，不动——所有记录都是 archived=0，查询自然命中）
 - `archived` 字段保留在表 DDL 中（向后兼容）
 - `list_knowledge` 和 `knowledge_detail` 返回值仍包含 `archived` 字段（前端 knowledge.js 用 `k.archived` 做样式和按钮显隐，值永远 0，`!k.archived` 为 true 按钮正常显示）
-- `stats` 查询里的 `archived=0` 条件保留（永远 true，不影响功能）
+- `stats` 查询里的 `archived=0` 已删除（和 list_knowledge 一致，所有记录 archived=0，条件无实际效果）
 - `SELECT` 语句仍查 `archived` 列（不改 SQL 结构）
 
 ## 影响
