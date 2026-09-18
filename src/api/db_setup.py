@@ -1760,21 +1760,28 @@ def _migrate_knowledge():
     except Exception as e:
         log.warning(f"[knowledge_migrate] restore archived failed: {e}")
 
-    # ===== 回填 baseline 空 name（必须在去重之前，否则数据丢失）=====
-    # 老代码（f4731618）INSERT 时没有 name 字段 → DEFAULT ''。如果去重时按
-    # repo_key + name GROUP BY，name 都是 '' 的同 repo 3 条 baseline
-    # （graph/capabilities/metadata）会被分到同一组，只保留 MAX(id)，丢失 2 条。
-    # 先通过 file_path / obs_key 中的文件名推导 name，回填空值。
+    # ===== 回填 baseline 空 name 和统一 description（必须在去重之前）=====
+    # 老代码两个问题：
+    # 1. f4731618 INSERT 时没有 name 字段 → DEFAULT ''。去重时按 repo_key + name
+    #    GROUP BY，name 都是 '' 的 3 条 baseline 会被合并为 1 条，丢失 2 条。
+    # 2. d061facd 起 INSERT/UPDATE 硬编码 description 为同一个字符串，三个不同
+    #    知识条目展示的注释完全一样，用户无法区分。
+    # 通过 file_path / obs_key 中的文件名推导 name + description，回填空 name
+    # 和统一 description。
     try:
-        from src.repo_key import BASELINE_NAME_MAP
+        from src.repo_key import BASELINE_NAME_MAP, BASELINE_DESC_MAP
+        _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值
         with db_lock:
             c = db.cursor()
             rows = c.execute(
-                "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
-                "WHERE scope='baseline' AND (name IS NULL OR name = '')"
+                "SELECT id, name, file_path, obs_key, description "
+                "FROM agent_shared_knowledge WHERE scope='baseline' "
+                "AND (name IS NULL OR name = '' OR name = '项目基线分析' "
+                "OR description = ? OR description IS NULL OR description = '')",
+                (_UNIFIED_DESC,)
             ).fetchall()
-        updates = []
-        for rid, file_path, obs_key in rows:
+        updates = []  # [(name, desc, id), ...]
+        for rid, cur_name, file_path, obs_key, cur_desc in rows:
             _fname = ""
             for _key_src in (file_path, obs_key):
                 if not _key_src:
@@ -1785,22 +1792,30 @@ def _migrate_knowledge():
                         break
                 if _fname:
                     break
-            _name = BASELINE_NAME_MAP.get(_fname, "")
-            if _name:
-                updates.append((_name, rid))
+            _name = cur_name if cur_name else BASELINE_NAME_MAP.get(_fname, "")
+            _desc = BASELINE_DESC_MAP.get(_fname, "VOD 基线分析自动生成")
+            # name="项目基线分析"是 write_knowledge 的旧默认值，如果 file_path
+            # 能匹配到具体文件，用 BASELINE_NAME_MAP 的精确名替换
+            _needs_name_fix = (cur_name == "项目基线分析" and _fname and
+                               BASELINE_NAME_MAP.get(_fname, "") != cur_name)
+            if _needs_name_fix:
+                _name = BASELINE_NAME_MAP.get(_fname, cur_name)
+            _needs_desc_fix = (not cur_desc or cur_desc == _UNIFIED_DESC)
+            if _name and (_needs_name_fix or _needs_desc_fix or not cur_name):
+                updates.append((_name, _desc, rid))
         if updates:
             with db_lock:
                 c = db.cursor()
                 c.executemany(
-                    "UPDATE agent_shared_knowledge SET name=? WHERE id=?",
+                    "UPDATE agent_shared_knowledge SET name=?, description=? WHERE id=?",
                     updates)
                 db.commit()
-            log.info(f"[knowledge_migrate] backfilled name for {len(updates)} baseline rows")
+            log.info(f"[knowledge_migrate] backfilled name/description for {len(updates)} baseline rows")
         else:
-            log.info("[knowledge_migrate] no empty-name baseline rows")
+            log.info("[knowledge_migrate] no baseline rows need backfill")
         _backfill_name_ok = True
     except Exception as e:
-        log.warning(f"[knowledge_migrate] backfill name failed: {e}")
+        log.warning(f"[knowledge_migrate] backfill name/description failed: {e}")
 
     # ===== 去重 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
     try:
