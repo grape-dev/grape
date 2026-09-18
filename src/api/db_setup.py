@@ -1752,6 +1752,21 @@ def _migrate_knowledge():
         with db_lock:
             c = db.cursor()
             if _is_mysql:
+                # 优先保留 archived=0（活跃优先于归档），同状态内保留 MAX(id)
+                # 先删归档记录（如果有同 name 的活跃记录存在）
+                c.execute(
+                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+                    "SELECT a.id FROM agent_shared_knowledge a "
+                    "WHERE a.scope='baseline' AND a.archived=1 "
+                    "AND EXISTS (SELECT 1 FROM agent_shared_knowledge b "
+                    "WHERE b.repo_key=a.repo_key AND b.name=a.name AND b.archived=0))")
+                c.execute(
+                    "DELETE FROM agent_shared_knowledge WHERE scope='baseline' AND archived=1 "
+                    "AND id IN (SELECT a.id FROM agent_shared_knowledge a "
+                    "WHERE a.scope='baseline' AND a.archived=1 "
+                    "AND EXISTS (SELECT 1 FROM agent_shared_knowledge b "
+                    "WHERE b.repo_key=a.repo_key AND b.name=a.name AND b.archived=0))")
+                # 再按 MAX(id) 去重剩余记录
                 c.execute(
                     "CREATE TEMPORARY TABLE IF NOT EXISTS _keep190 AS "
                     "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
@@ -1765,6 +1780,20 @@ def _migrate_knowledge():
                     "AND id NOT IN (SELECT keep_id FROM _keep190)")
                 c.execute("DROP TEMPORARY TABLE IF EXISTS _keep190")
             else:
+                # 先删归档记录（如果有同 name 的活跃记录存在）
+                c.execute(
+                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+                    "SELECT a.id FROM agent_shared_knowledge a "
+                    "WHERE a.scope='baseline' AND a.archived=1 "
+                    "AND EXISTS (SELECT 1 FROM agent_shared_knowledge b "
+                    "WHERE b.repo_key=a.repo_key AND b.name=a.name AND b.archived=0))")
+                c.execute(
+                    "DELETE FROM agent_shared_knowledge WHERE scope='baseline' AND archived=1 "
+                    "AND id IN (SELECT a.id FROM agent_shared_knowledge a "
+                    "WHERE a.scope='baseline' AND a.archived=1 "
+                    "AND EXISTS (SELECT 1 FROM agent_shared_knowledge b "
+                    "WHERE b.repo_key=a.repo_key AND b.name=a.name AND b.archived=0))")
+                # 再按 MAX(id) 去重剩余记录
                 c.execute(
                     "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
                     "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
