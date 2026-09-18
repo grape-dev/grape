@@ -1574,56 +1574,33 @@ def _migrate_knowledge_dedup_and_ref():
             log.info(f"[issue67] backfilled name/description for {len(_bl_updates)} baseline rows")
 
         # 2. 重复记录去重——每类 scope 只保留最新一条
-        #    baseline：按 (repo_key, scope, name) 去重（Issue #190：file_path 格式变化会导致按 file_path 分组查不出重复）
-        #    其他 scope：按 (repo_key, scope, agent_type, issue_num, file_path) 去重（同一 scope 下多文件正常）
-        if _is_mysql:
-            # baseline 去重
-            c.execute(
-                "CREATE TEMPORARY TABLE IF NOT EXISTS _keep_bl AS "
-                "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-                "WHERE scope='baseline' GROUP BY repo_key, scope, name")
-            c.execute(
-                "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-                "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
-                "AND id NOT IN (SELECT keep_id FROM _keep_bl))")
-            c.execute(
-                "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
-                "AND id NOT IN (SELECT keep_id FROM _keep_bl)")
-            c.execute("DROP TEMPORARY TABLE IF EXISTS _keep_bl")
-            # 其他 scope 去重
-            c.execute(
-                "CREATE TEMPORARY TABLE IF NOT EXISTS _keep_ids AS "
-                "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-                "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path")
-            c.execute(
-                "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-                "SELECT id FROM agent_shared_knowledge WHERE scope != 'baseline' "
-                "AND id NOT IN (SELECT keep_id FROM _keep_ids))")
-            c.execute(
-                "DELETE FROM agent_shared_knowledge WHERE scope != 'baseline' "
-                "AND id NOT IN (SELECT keep_id FROM _keep_ids)")
-            c.execute("DROP TEMPORARY TABLE IF EXISTS _keep_ids")
-        else:
-            # baseline 去重
-            c.execute(
-                "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-                "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
-                "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
-                "WHERE scope='baseline' GROUP BY repo_key, scope, name))")
-            c.execute(
-                "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
-                "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
-                "WHERE scope='baseline' GROUP BY repo_key, scope, name)")
-            # 其他 scope 去重
-            c.execute(
-                "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-                "SELECT id FROM agent_shared_knowledge WHERE scope != 'baseline' "
-                "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
-                "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path))")
-            c.execute(
-                "DELETE FROM agent_shared_knowledge WHERE scope != 'baseline' "
-                "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
-                "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path)")
+        #    baseline：按 (repo_key, scope, name) 去重
+        #    其他 scope：按 (repo_key, scope, agent_type, issue_num, file_path) 去重
+        #    用派生表子查询包装避免 DELETE 自引用（MySQL 限制），SQLite/MySQL 通用
+        # baseline 去重
+        c.execute(
+            "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+            "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope='baseline' GROUP BY repo_key, scope, name) AS keep))")
+        c.execute(
+            "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope='baseline' GROUP BY repo_key, scope, name) AS keep)")
+        # 其他 scope 去重
+        c.execute(
+            "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+            "SELECT id FROM agent_shared_knowledge WHERE scope != 'baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path) AS keep))")
+        c.execute(
+            "DELETE FROM agent_shared_knowledge WHERE scope != 'baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path) AS keep)")
 
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
@@ -1783,12 +1760,9 @@ def _migrate_knowledge():
     最终一致性：迁移期间旧格式数据仍可用，迁移完成后切换到新格式。
     """
     from src.session_manager import db, db_lock
-    from src.mysql_compat import get_db_backend
     from src.user.db import get_meta_value, set_meta_value
     from src.repo_key import parse_repo_key, knowledge_obs_prefix
     from src.lock import acquire_lock, release_lock
-
-    _is_mysql = get_db_backend() == "mysql"
 
     # 幂等检查
     if get_meta_value("knowledge_migrate_done") == "1":
@@ -1829,29 +1803,17 @@ def _migrate_knowledge():
     try:
         with db_lock:
             c = db.cursor()
-            if _is_mysql:
-                c.execute(
-                    "CREATE TEMPORARY TABLE IF NOT EXISTS _keep190 AS "
-                    "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-                    "WHERE scope='baseline' GROUP BY repo_key, name")
-                c.execute(
-                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-                    "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
-                    "AND id NOT IN (SELECT keep_id FROM _keep190))")
-                c.execute(
-                    "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
-                    "AND id NOT IN (SELECT keep_id FROM _keep190)")
-                c.execute("DROP TEMPORARY TABLE IF EXISTS _keep190")
-            else:
-                c.execute(
-                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-                    "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
-                    "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
-                    "WHERE scope='baseline' GROUP BY repo_key, name))")
-                c.execute(
-                    "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
-                    "AND id NOT IN (SELECT MAX(id) FROM agent_shared_knowledge "
-                    "WHERE scope='baseline' GROUP BY repo_key, name)")
+            c.execute(
+                "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+                "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
+                "AND id NOT IN (SELECT keep.keep_id FROM ("
+                "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+                "WHERE scope='baseline' GROUP BY repo_key, name) AS keep))")
+            c.execute(
+                "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
+                "AND id NOT IN (SELECT keep.keep_id FROM ("
+                "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+                "WHERE scope='baseline' GROUP BY repo_key, name) AS keep)")
             db.commit()
         _dedup_ok = True
         log.info("[knowledge_migrate] baseline dedup done")
