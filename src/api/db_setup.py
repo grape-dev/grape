@@ -1695,16 +1695,17 @@ def _migrate_knowledge_dedup_and_ref():
 
         # 5. 清理孤儿 scene_knowledge_ref（knowledge_id 指向已删除的知识记录）
         # 去重删除 knowledge 记录时已先删 ref，但历史迁移轮次可能残留
+        # 先 EXISTS 快速检查，有孤儿才执行 DELETE
         try:
-            _orphan_count = c.execute(
-                "SELECT COUNT(*) FROM scene_knowledge_ref "
-                "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)"
+            _has_orphan = c.execute(
+                "SELECT EXISTS(SELECT 1 FROM scene_knowledge_ref "
+                "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge))"
             ).fetchone()[0]
-            if _orphan_count:
+            if _has_orphan:
                 c.execute(
                     "DELETE FROM scene_knowledge_ref "
                     "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)")
-                log.info(f"[issue67] cleaned {_orphan_count} orphan scene_knowledge_ref")
+                log.info("[issue67] cleaned orphan scene_knowledge_ref")
         except Exception as _e:
             log.warning(f"[issue67] orphan ref cleanup failed: {_e}")
 
