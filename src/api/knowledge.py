@@ -415,10 +415,10 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
     # 1. 文件追加（仅当文件没有此 content）
     if not file_has_content:
         try:
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            marker = f"- [seq {source_seq or 0} / {created_by or ''}] {content}"
-            with open(file_path, "a", encoding="utf-8") as f:
-                f.write(marker + "\n")
+            from src.localfs import read_text, write_text
+            marker = f"- [seq {source_seq or 0} / {created_by or ''}] {content}\n"
+            _existing = read_text(file_path) or ""
+            write_text(file_path, _existing + marker)
         except Exception as e:
             raise RuntimeError(f"write knowledge file failed: {e}") from e
 
