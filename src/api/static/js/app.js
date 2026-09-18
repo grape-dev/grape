@@ -843,7 +843,33 @@ function loadAgentTypes() {
       localStorage.setItem('user', JSON.stringify(d.user));
       API.scheduleProactiveRefresh();  // Issue #86: 启动主动刷新定时器
       showApp();
-    }).catch(e => showToast(I18N.t('app.login.failed') + ': ' + e.message));
+    }).catch(e => {
+      if (e.message && e.message.indexOf('白名单') >= 0) {
+        _showWhitelistGuidance('gitcode', u);
+      } else {
+        showToast(I18N.t('app.login.failed') + ': ' + e.message);
+      }
+    });
+  }
+
+  function _showWhitelistGuidance(platform, username) {
+    var overlay = document.createElement('div');
+    overlay.id = 'whitelistModal';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center';
+    var platName = platform === 'github' ? 'GitHub' : 'GitCode';
+    overlay.innerHTML =
+      '<div style="background:var(--c,#fff);border-radius:20px;padding:40px;text-align:center;width:400px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25)">' +
+        '<div style="font-size:48px;margin-bottom:16px">🔒</div>' +
+        '<h2 style="font-size:18px;font-weight:700;color:var(--t,#1d1d1f);margin-bottom:8px">账号尚未开通内测权限</h2>' +
+        '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">您的' + platName + (username ? ' 账号 <b>' + username + '</b>' : ' 账号') + '尚未获得内测权限。</p>' +
+        '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:24px">请先申请内测，审核通过后即可登录。</p>' +
+        '<div style="display:flex;gap:8px;justify-content:center">' +
+          '<button onclick="window.location.href=\'/static/beta-apply.html\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">申请内测</button>' +
+          '<button onclick="document.getElementById(\'whitelistModal\').remove()" style="padding:12px 24px;border:1px solid var(--b,#e3e6ee);border-radius:12px;background:transparent;color:var(--t,#1d1d1f);font-size:14px;font-weight:500;cursor:pointer">关闭</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
   }
 
   function logout() {
@@ -932,7 +958,16 @@ function loadAgentTypes() {
     // Check for OAuth error in URL (e.g. github.com timeout)
     const oauthError = p.get('oauth_error');
     if (oauthError) {
-      showToast(decodeURIComponent(oauthError), 6000);
+      const decoded = decodeURIComponent(oauthError);
+      if (decoded.startsWith('WHITELIST:')) {
+        // 白名单不通过——显示引导弹窗
+        var parts = decoded.split(':');
+        var platform = parts[1] || 'gitcode';
+        var username = parts[2] || '';
+        _showWhitelistGuidance(platform, username);
+      } else {
+        showToast(decoded, 6000);
+      }
       if (window.history.replaceState) {
         window.history.replaceState(null, '', window.location.pathname);
       }
