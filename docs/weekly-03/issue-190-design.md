@@ -354,5 +354,63 @@ baseline 按 `(repo_key, scope, name)` 分组（和 Issue #190 去重维度一�
 | knowledge.py sync member | `knowledge_obs_prefix` + 提取 member/agent 相对路径 | member obs_key |
 | knowledge.py sync baseline | `knowledge_obs_prefix` | baseline obs_key |
 | routes/knowledge.py upload | `knowledge_obs_prefix` | member obs_key |
-| routes/events.py delete | `knowledge_storage_key` | project/issue/issue_agent obs_key |
+| routes/events.py delete | 从 DB 取实际 obs_key | project/issue/issue_agent obs_key |
 | db_setup.py migrate | `knowledge_obs_prefix` / `knowledge_storage_key` | 迁移时生成新 key |
+
+## 10. 审查驱动的后续修复
+
+以下修复在初始设计完成后由外部 AI 审查驱动，逐轮发现并修复。
+
+### 10.1 name/description 回填移至每次启动路径
+
+**问题**：回填步骤原在 `_migrate_knowledge()`（受 `knowledge_migrate_done=1` 标记控制），已跑过旧迁移的环境永远不会执行回填。而 `_migrate_knowledge_dedup_and_ref()` 每次启动执行去重——去重按 `(repo_key, name)` GROUP BY，如果 name 为空或统一值，同 repo 的 3 条 baseline 会被合并为 1 条，丢失 2 条。
+
+**修复**：回填从 `_migrate_knowledge()` 移到 `_migrate_knowledge_dedup_and_ref()` step 1.5（source 回填之后、去重之前）。每次启动执行，幂等（COALESCE 空值不覆盖，统一值匹配时替换）。
+
+### 10.2 description 按文件区分
+
+**问题**：builder `_write_to_obs` 硬编码 `description="codegraph 自动生成的项目基线知识"`，三个不同文件用同一个注释，用户在列表页无法区分。
+
+**修复**：改为 `BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)`，每个文件有独立描述。迁移回填也同步修正统一 description。
+
+### 10.3 fallback 常量统一
+
+**问题**：builder / _sync_baseline_files / write_knowledge / 迁移函数各自硬编码 fallback 值，且不一致（builder 用 "codegraph 自动生成的项目基线知识"，sync 用 "VOD 基线分析自动生成"，查重用 fname，INSERT 用 "项目基线分析"）。
+
+**修复**：`repo_key.py` 新增 `BASELINE_NAME_FALLBACK` 和 `BASELINE_DESC_FALLBACK`，所有引用点统一。
+
+### 10.4 rejected INSERT 补 name+description
+
+**问题**：`_do_write_knowledge` rejected 分支的 INSERT 语句字段列表没有 name 和 description，写入后 name = DEFAULT ''。
+
+**修复**：补上 name + description 字段。5 个 INSERT 路径全部包含这两个字段（AST 扫描确认）。
+
+### 10.5 sync UPDATE 路径补 description
+
+**问题**：`knowledge_sync_loop` 和 `_sync_baseline_files` 的 UPDATE 路径只补 obs_key/content_hash/source，不碰 name/description。
+
+**修复**：两处 UPDATE 加 `name=COALESCE(NULLIF(name, ''), ?)` 和 `description=COALESCE(NULLIF(description, ''), ?)`，空值回填不覆盖已有值。
+
+### 10.6 孤儿 scene_knowledge_ref 清理
+
+**问题**：历史迁移轮次残留 53 条孤儿 ref（knowledge_id 指向已删除的知识记录）。
+
+**修复**：`_migrate_knowledge_dedup_and_ref()` 加 step 5，每次启动检查并清理 `WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)`。
+
+### 10.7 MySQL/SQLite 去重 SQL 统一
+
+**问题**：去重用 `DELETE ... NOT IN (SELECT MAX(id) FROM same_table)` 在 MySQL 报 "can't specify target table for update in FROM clause"。分了两套代码（MySQL 用 TEMPORARY TABLE，SQLite 用直接子查询）。
+
+**修复**：用标准派生表子查询 `NOT IN (SELECT keep.keep_id FROM (SELECT MAX(id) ...) AS keep)`，SQLite/MySQL 通用，删了 ~45 行重复代码。
+
+### 10.8 本地文件原子写入
+
+**问题**：6 处 `open(path, "w")` 非原子，写入中途崩溃会截断目标文件。
+
+**修复**：新建 `src/localfs.py` 模块，封装：
+- `write_text` / `write_bytes`：同目录临时文件 + flush + fsync(fd) + os.replace + fsync(dir)
+- `read_text` / `read_bytes`：安全读取
+- `append_text`：非原子追加
+- `safe_join` / `safe_workspace_path`：路径穿越校验
+
+6 处 open("w") 全部替换为 `localfs.write_text`。
