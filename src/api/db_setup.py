@@ -1532,7 +1532,7 @@ def _migrate_knowledge_dedup_and_ref():
         # baseline 去重按 (repo_key, name) GROUP BY，name 为空时同 repo 的 3 条
         # 会被合并为 1 条丢失数据。description 硬编码统一值无法区分。
         # 用 derive_knowledge_name 统一推导，所有 scope 共用同一逻辑。
-        from src.api.knowledge import derive_knowledge_name
+        from src.api.knowledge import derive_knowledge_name, derive_knowledge_description
         from src.repo_key import (BASELINE_NAME_MAP, BASELINE_DESC_MAP,
                                   BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK)
         _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值，勿改
@@ -1547,14 +1547,8 @@ def _migrate_knowledge_dedup_and_ref():
         for _rid, _scope, _agent_type, _issue_num, _cur_name, _fp, _obs, _cur_desc in _rows:
             _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
             _needs_name = (_cur_name != _new_name)
-            _needs_desc = False
-            _new_desc = _cur_desc or ""
-            if _scope == "baseline":
-                _new_desc = BASELINE_DESC_MAP.get(
-                    next((_bn for _bn in ("project-capabilities.md", "project-graph.md", ".metadata.json")
-                          if _bn in (_fp or _obs or "")), ""),
-                    BASELINE_DESC_FALLBACK)
-                _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC)
+            _new_desc = derive_knowledge_description(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+            _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC) and _new_desc
             if _needs_name or _needs_desc:
                 _updates.append((_new_name, _new_desc, _rid))
         if _updates:

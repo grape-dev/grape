@@ -680,3 +680,47 @@ class TestRejectedDedupNameCondition:
                 ("test-rejected-1", "baseline", "", 0, "项目结构图谱")
             ).fetchone()
             assert existing is not None, "同 name 应匹配到已有记录"
+
+
+class TestDeriveKnowledgeDescription:
+    """derive_knowledge_description 各 scope 推导规则"""
+
+    def test_baseline_project_graph(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("baseline", file_path="gitcode/test/repo/project-info/project-graph.md") == "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）"
+
+    def test_baseline_project_capabilities(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("baseline", file_path="gitcode/test/repo/project-info/project-capabilities.md") == "VOD 基线分析：项目能力清单（功能特性/支持能力）"
+
+    def test_baseline_metadata(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("baseline", file_path="gitcode/test/repo/project-info/.metadata.json") == "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）"
+
+    def test_baseline_unknown_file(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("baseline", file_path="unknown.md") == "VOD 基线分析自动生成"
+
+    def test_project_with_agent(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("project", agent_type="vod") == "VOD Agent：需求分析、拆解 Issue、规划开发路径 沉淀的项目级经验"
+
+    def test_project_no_agent(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("project") == "Agent 沉淀的项目级经验"
+
+    def test_issue(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("issue", issue_num=42) == "Issue #42 对话沉淀的经验"
+
+    def test_issue_agent(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("issue_agent", agent_type="coding", issue_num=5) == "Issue #5 Coding Agent：代码实现、修复缺陷、创建 PR 沉淀的经验"
+
+    def test_member(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("member") == ""
+
+    def test_unknown_scope(self):
+        from src.api.knowledge import derive_knowledge_description
+        assert derive_knowledge_description("unknown") == ""

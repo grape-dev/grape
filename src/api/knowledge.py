@@ -67,6 +67,52 @@ def derive_knowledge_name(scope: str, agent_type: str = "",
     return "未命名知识"
 
 
+_AGENT_DESC_MAP = {
+    "vod": "VOD Agent：需求分析、拆解 Issue、规划开发路径",
+    "coding": "Coding Agent：代码实现、修复缺陷、创建 PR",
+    "qa": "QA Agent：代码审查、测试验证、质量把关",
+    "sre": "SRE Agent：部署发布、监控告警、运维排障",
+    "chat": "Chat Agent：对话交互、知识沉淀、流程控制",
+}
+
+
+def derive_knowledge_description(scope: str, agent_type: str = "",
+                                 issue_num: int = 0, file_path: str = "") -> str:
+    """按 scope 规则推导知识 description。
+
+    和 derive_knowledge_name 对称，写入时自动生成和存量数据回填补偿共用。
+
+    baseline：按 file_path 查 BASELINE_DESC_MAP，fallback 用 BASELINE_DESC_FALLBACK
+    project：{Agent} 沉淀的项目级经验
+    issue：Issue #{n} 对话沉淀的经验
+    issue_agent：Issue #{n} {Agent} 沉淀的经验
+    member：空（用户手动填写）
+    """
+    if scope == "baseline":
+        _fname = ""
+        for _src in (file_path, ""):
+            if not _src:
+                continue
+            for _bn in ("project-capabilities.md", "project-graph.md", ".metadata.json"):
+                if _bn in _src:
+                    _fname = _bn
+                    break
+            if _fname:
+                break
+        return BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
+    if scope == "project":
+        _role = _AGENT_DESC_MAP.get(agent_type or "", "Agent")
+        return f"{_role} 沉淀的项目级经验"
+    if scope == "issue":
+        return f"Issue #{issue_num or 0} 对话沉淀的经验"
+    if scope == "issue_agent":
+        _role = _AGENT_DESC_MAP.get(agent_type or "", agent_type or "Agent")
+        return f"Issue #{issue_num or 0} {_role} 沉淀的经验"
+    if scope == "member":
+        return ""
+    return ""
+
+
 # ===== 内存缓存（hash 比对——不用 TTL，全实例立即一致） =====
 _knowledge_cache: dict[str, tuple[str, str]] = {}  # storage_key -> (content, content_hash)
 _knowledge_cache_lock = threading.Lock()
@@ -293,25 +339,7 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
 
     # 自动生成 description（如果调用方没传）
     if not description:
-        _agent_desc = {
-            "vod": "VOD Agent：需求分析、拆解 Issue、规划开发路径",
-            "coding": "Coding Agent：代码实现、修复缺陷、创建 PR",
-            "qa": "QA Agent：代码审查、测试验证、质量把关",
-            "sre": "SRE Agent：部署发布、监控告警、运维排障",
-            "chat": "Chat Agent：对话交互、知识沉淀、流程控制",
-        }
-        if scope == "baseline":
-            description = BASELINE_DESC_FALLBACK
-        elif scope == "project":
-            _role = _agent_desc.get(agent_type, "Agent")
-            description = f"{_role} 沉淀的项目级经验"
-        elif scope == "issue":
-            description = f"Issue #{issue_num} 对话沉淀的经验"
-        elif scope == "issue_agent":
-            _role = _agent_desc.get(agent_type, agent_type)
-            description = f"Issue #{issue_num} {_role} 沉淀的经验"
-        elif scope == "member":
-            description = ""  # 用户手动填写
+        description = derive_knowledge_description(scope, agent_type or "", issue_num or 0, "")
 
     # 自动生成 name（system/agent；manual 由调用方传入）
     if not name and source != "manual":
