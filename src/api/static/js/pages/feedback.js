@@ -105,6 +105,12 @@
       'style="padding:9px 24px;border-radius:10px;border:none;' +
       'background:#0071e3;font-size:13px;font-weight:600;color:#fff;' +
       'cursor:pointer;font-family:inherit;">' + (t('submit') || '提交反馈') + '</button>' +
+      '</div>' +
+      // 我的反馈入口链接
+      '<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--b,rgba(0,0,0,.08));text-align:center;">' +
+      '<a id="fbMyFeedback" style="font-size:12px;color:#0071e3;text-decoration:none;cursor:pointer;font-weight:500;">' +
+      (t('view_my_feedback') || '查看我的反馈 →') +
+      '</a>' +
       '</div>';
 
     overlay.appendChild(dlg);
@@ -132,6 +138,14 @@
     });
     // 取消按钮
     document.getElementById('fbCancel').onclick = _close;
+    // 我的反馈入口 — 关闭弹窗后跳转
+    var myFeedbackLink = document.getElementById('fbMyFeedback');
+    if (myFeedbackLink) {
+      myFeedbackLink.onclick = function () {
+        _close();
+        app.nav('my-feedback');
+      };
+    }
 
     // 类型选择
     var catBtns = dlg.querySelectorAll('.fb-cat-btn');
