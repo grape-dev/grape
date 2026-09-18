@@ -318,7 +318,7 @@ baseline 按 `(repo_key, scope, name)` 分组（和 Issue #190 去重维度一�
 | issue_agent | `knowledge/{provider}/{owner}/{repo}/issues/{n}/{agent}/knowledge.md` | `knowledge/gitcode/grape-dev/grape/issues/42/coding/knowledge.md` |
 | member（用户上传） | `knowledge/{provider}/{owner}/{repo}/member/{username}/{filename}` | `knowledge/gitcode/grape-dev/grape/member/xiaowu/entry_123.md` |
 
-> **历史遗留归一化**：旧代码 Agent 生成文档写到 `project-info/agent/{type}/` 目录，obs_key 和 file_path 含 `agent/` 路径。当前代码已统一为 `member/` 目录，不再产生新的 `agent/` 路径。迁移时将 `agent/` 归一化为 `member/`（obs_key 和 file_path 都改），与 `member_files_pi` 读取逻辑一致。
+> **历史遗留**：DB 中可能存在少量 `knowledge/{provider}/{owner}/{repo}/agent/{agent_type}/{filename}` 格式的 obs_key（旧代码 Agent 生成文档写到 `project-info/agent/` 目录）。当前代码已统一为 `member/` 目录，不再产生新的 `agent/` 路径。`member_files_pi` 读取时自动将 `agent/` 归一化为 `member/`。
 
 - `provider`：`gitcode` 或 `github`，从 `parse_repo_key(repo_key)` 获取，默认 `gitcode`
 - 跨 provider 同名仓库 obs_key 不同，不会互相覆盖
@@ -336,7 +336,7 @@ baseline 按 `(repo_key, scope, name)` 分组（和 Issue #190 去重维度一�
 | issue_agent | `{provider}/{owner}/{repo}/issues/{n}/{agent}/knowledge.md` | `gitcode/grape-dev/grape/issues/42/coding/knowledge.md` |
 | member（用户上传） | `{provider}/{owner}/{repo}/project-info/member/{username}/{filename}` | `gitcode/grape-dev/grape/project-info/member/xiaowu/entry_123.md` |
 
-> **历史遗留归一化**：同 obs_key，file_path 中的 `agent/` 在迁移时归一化为 `member/`。
+> **历史遗留**：同 obs_key，file_path 中也可能存在 `agent/{agent_type}/` 格式的旧数据，读取时自动归一化为 `member/`。
 
 - file_path 是 `WORKSPACE_DIR` 相对路径，`os.path.join(WORKSPACE_DIR, file_path)` 可直接拼出完整文件路径
 - 旧格式兼容：`read_entry_content` / `_update_knowledge_content` / `_delete_knowledge_full` 等路径拼接处都有 `workspace_repo_dir()` 兜底

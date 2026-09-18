@@ -1817,9 +1817,6 @@ def _migrate_knowledge():
                         break
                 else:
                     _rel = os.path.basename(obs_key)
-                # agent/ 归一化为 member/（和 member_files_pi 读取逻辑一致）
-                if _rel.startswith("agent/"):
-                    _rel = "member/" + _rel[len("agent/"):]
                 new_obs_key = f"{new_prefix}/{_rel}"
             elif obs_key.startswith("project-info/"):
                 # OLD_A 格式：完全重写
@@ -1895,9 +1892,6 @@ def _migrate_knowledge():
                 new_fp = f"{full_prefix}{file_path}"  # 补完整前缀
             else:
                 continue  # 未知格式，跳过
-            # agent/ 归一化为 member/（和 member_files_pi 读取逻辑一致）
-            if "/agent/" in new_fp:
-                new_fp = new_fp.replace("/agent/", "/member/", 1)
             updates.append((new_fp, rid))
 
         if updates:
