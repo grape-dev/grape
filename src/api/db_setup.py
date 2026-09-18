@@ -1743,6 +1743,7 @@ def _migrate_knowledge():
     log.info("[knowledge_migrate] migration started")
 
     _step0_ok = False
+    _step05_ok = False
     _step1_ok = False
     _step2_ok = False
     _step3_ok = False
@@ -1758,6 +1759,48 @@ def _migrate_knowledge():
         log.info("[knowledge_migrate] step 0: restore archived records done")
     except Exception as e:
         log.warning(f"[knowledge_migrate] step 0 failed: {e}")
+
+    # ===== 步骤 0.5：回填 baseline 记录的 name（防止 step 1 去重丢数据）=====
+    # 老代码（f4731618）INSERT 时没有 name 字段 → DEFAULT ''。如果 step 1 按
+    # repo_key + name GROUP BY 时 name 都是 ''，同 repo 的 3 条 baseline
+    # （graph/capabilities/metadata）会被分到同一组，只保留 MAX(id)，丢失 2 条。
+    # 先通过 file_path / obs_key 中的文件名推导 name，回填空值。
+    try:
+        from src.repo_key import BASELINE_NAME_MAP
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT id, file_path, obs_key FROM agent_shared_knowledge "
+                "WHERE scope='baseline' AND (name IS NULL OR name = '')"
+            ).fetchall()
+        updates = []
+        for rid, file_path, obs_key in rows:
+            _fname = ""
+            for _key_src in (file_path, obs_key):
+                if not _key_src:
+                    continue
+                for _basename in ("project-capabilities.md", "project-graph.md", ".metadata.json"):
+                    if _basename in _key_src:
+                        _fname = _basename
+                        break
+                if _fname:
+                    break
+            _name = BASELINE_NAME_MAP.get(_fname, "")
+            if _name:
+                updates.append((_name, rid))
+        if updates:
+            with db_lock:
+                c = db.cursor()
+                c.executemany(
+                    "UPDATE agent_shared_knowledge SET name=? WHERE id=?",
+                    updates)
+                db.commit()
+            log.info(f"[knowledge_migrate] step 0.5: backfilled name for {len(updates)} baseline rows")
+        else:
+            log.info("[knowledge_migrate] step 0.5: no empty-name baseline rows (0)")
+        _step05_ok = True
+    except Exception as e:
+        log.warning(f"[knowledge_migrate] step 0.5 failed: {e}")
 
     # ===== 步骤 1：清理 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
     try:
@@ -1912,7 +1955,7 @@ def _migrate_knowledge():
 
     # ===== 标记完成 + 释放锁（finally 保证锁一定释放）=====
     try:
-        if _step0_ok and _step1_ok and _step2_ok and _step3_ok:
+        if _step0_ok and _step05_ok and _step1_ok and _step2_ok and _step3_ok:
             set_meta_value("knowledge_migrate_done", "1")
             log.info("[knowledge_migrate] migration done")
         else:
