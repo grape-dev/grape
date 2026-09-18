@@ -1826,7 +1826,7 @@ def _migrate_issue190():
             if new_obs_key == obs_key:
                 continue
 
-            # OBS 对象迁移：旧 key 读取内容 → 写入新 key
+            # OBS 对象迁移：旧 key 读取内容 → 写入新 key → 删旧 key
             if _storage:
                 try:
                     _data = _storage.read_bytes(obs_key)
@@ -1834,7 +1834,7 @@ def _migrate_issue190():
                         _storage.save_bytes(new_obs_key, _data)
                 except Exception as e:
                     log.warning(f"[Issue #190] OBS migrate failed id={rid}: {e}")
-            updates.append((new_obs_key, rid))
+            updates.append((new_obs_key, rid, obs_key))  # 记录旧 key 供清理
 
         # 批量 UPDATE，一次 commit
         if updates:
@@ -1842,8 +1842,15 @@ def _migrate_issue190():
                 c = db.cursor()
                 c.executemany(
                     "UPDATE agent_shared_knowledge SET obs_key=? WHERE id=?",
-                    updates)
+                    [(u[0], u[1]) for u in updates])
                 db.commit()
+            # DB 更新成功后删除旧 OBS 对象
+            if _storage:
+                for _, _, _old_key in updates:
+                    try:
+                        _storage.delete_object(_old_key)
+                    except Exception as e:
+                        log.warning(f"[Issue #190] OBS old key delete failed {_old_key}: {e}")
         _step2_ok = True
         log.info(f"[Issue #190] step 2: obs_key normalization done ({len(updates)} rows)")
     except Exception as e:

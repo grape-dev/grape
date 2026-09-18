@@ -432,7 +432,7 @@ new_obs_key = f"{new_prefix}/{rel}"
 
 这样 member 的 obs_key 统一为 `knowledge/{provider}/{owner}/{repo}/member/{username}/{filename}`，同时修复路径重复问题。
 
-OBS 对象迁移：旧 key != 新 key 时，从 OBS 旧 key 读取内容 → 写入 OBS 新 key → UPDATE DB obs_key。不删除旧 OBS 对象。旧 key 读不到内容时只 UPDATE DB obs_key。
+OBS 对象迁移：旧 key != 新 key 时，从 OBS 旧 key 读取内容 → 写入 OBS 新 key → UPDATE DB obs_key → 删除旧 OBS 对象。旧 key 读不到内容时只 UPDATE DB obs_key，不删旧对象。
 
 并发安全：OBS 操作是幂等的（覆盖写）。DB UPDATE 在 `db_lock` 内。迁移期间并发读取可能走 `_knowledge_cache`——缓存 key 是 obs_key，迁移更新 obs_key 后旧缓存 key 自然 miss。
 
