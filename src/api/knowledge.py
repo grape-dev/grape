@@ -114,15 +114,6 @@ def _issue_num_from(issue_id) -> int:
     return int(m.group(1)) if m else 0
 
 
-def _owner_repo(repo_key: str) -> tuple[str, str]:
-    from src.repo_key import split_owner_repo
-    try:
-        owner, rname = split_owner_repo(repo_key)
-        return owner, rname
-    except Exception:
-        return "", ""
-
-
 def knowledge_path(repo_key: str, scope: str, agent_type: str = "", issue_num: int = 0) -> str:
     """按 scope 返回知识文件绝对路径（scope 见 3.1.1）。"""
     from src.repo_key import workspace_repo_dir
@@ -162,7 +153,7 @@ def _query_knowledge_obs(repo_key: str, scope: str, agent_type: str, issue_num: 
     返回 (obs_key, content_hash)；无记录或异常返回 ("", "")。
     """
     sql = ("SELECT obs_key, content_hash FROM agent_shared_knowledge "
-           "WHERE repo_key=? AND scope=? AND status='accepted'")
+           "WHERE repo_key=? AND scope=? AND status='accepted' AND archived=0")
     params: list = [repo_key, scope]
     if scope == "issue_agent":
         sql += " AND agent_type=?"

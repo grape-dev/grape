@@ -21,14 +21,6 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
-def _owner_repo(repo_key: str) -> tuple[str, str]:
-    from src.repo_key import split_owner_repo
-    try:
-        return split_owner_repo(repo_key)
-    except Exception:
-        return "", ""
-
-
 def _repo_base(repo_key: str) -> str:
     from src.repo_key import workspace_repo_dir
     return workspace_repo_dir(repo_key)

@@ -145,7 +145,7 @@ def _write_to_obs(repo_key: str, name: str, content: str):
             # Issue #190：查重改用 name（不受 file_path 格式变化影响）
             existing = c.execute(
                 "SELECT id FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='baseline' AND name=?",
+                "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0",
                 (repo_key, display_name)
             ).fetchone()
             if existing:
