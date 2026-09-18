@@ -297,5 +297,58 @@ baseline 按 `(repo_key, scope, name)` 分组（和 Issue #190 去重维度一�
 14. Issue #67 去重逻辑同步修正——确认
 15. 所有面向用户的查询加 archived=0——确认
 16. _sync_baseline_files 检测 OLD_B 格式（用 `startswith(new_prefix)` 判断）——确认
-17. BASELINE_NAME_MAP / BASELINE_DESC_MAP 放在 repo_key.py 共享——确认
-18. 函数/变量/日志用功能语义命名（非 issue 号）——确认
+17. 归档逻辑移除（不归档、不清理、不 show_archived），迁移步骤 0 恢复 archived=1→0——确认
+18. stats 查询和 list_knowledge 一致，均无 archived 过滤——确认
+19. BASELINE_NAME_MAP / BASELINE_DESC_MAP 放在 repo_key.py 共享——确认
+20. 函数/变量/日志用功能语义命名（非 issue 号）——确认
+
+## 9. 上线后的 obs_key 和 file_path 格式
+
+迁移完成后，所有 `agent_shared_knowledge` 记录的 obs_key 和 file_path 统一为新格式。
+
+### 9.1 obs_key 格式
+
+统一前缀：`knowledge/{provider}/{owner}/{repo}/...`
+
+| scope | obs_key 格式 | 示例 |
+|-------|-------------|------|
+| baseline | `knowledge/{provider}/{owner}/{repo}/project-info/{filename}` | `knowledge/gitcode/grape-dev/grape/project-info/project-graph.md` |
+| project | `knowledge/{provider}/{owner}/{repo}/project/knowledge.md` | `knowledge/gitcode/grape-dev/grape/project/knowledge.md` |
+| issue | `knowledge/{provider}/{owner}/{repo}/issues/{n}/knowledge.md` | `knowledge/gitcode/grape-dev/grape/issues/42/knowledge.md` |
+| issue_agent | `knowledge/{provider}/{owner}/{repo}/issues/{n}/{agent}/knowledge.md` | `knowledge/gitcode/grape-dev/grape/issues/42/coding/knowledge.md` |
+| member（用户上传） | `knowledge/{provider}/{owner}/{repo}/member/{username}/{filename}` | `knowledge/gitcode/grape-dev/grape/member/xiaowu/entry_123.md` |
+| member（Agent 生成） | `knowledge/{provider}/{owner}/{repo}/agent/{agent_type}/{filename}` | `knowledge/gitcode/grape-dev/grape/agent/coding/blog-config.json` |
+
+- `provider`：`gitcode` 或 `github`，从 `parse_repo_key(repo_key)` 获取，默认 `gitcode`
+- 跨 provider 同名仓库 obs_key 不同，不会互相覆盖
+- 统一生成函数：`knowledge_obs_prefix(repo_key)` 返回 `knowledge/{provider}/{owner}/{repo}`，各调用方拼接后续路径
+
+### 9.2 file_path 格式
+
+统一格式：`{provider}/{owner}/{repo}/project-info/...`
+
+| scope | file_path 格式 | 示例 |
+|-------|---------------|------|
+| baseline | `{provider}/{owner}/{repo}/project-info/{filename}` | `gitcode/grape-dev/grape/project-info/project-graph.md` |
+| project | `{provider}/{owner}/{repo}/project-info/knowledge.md` | `gitcode/grape-dev/grape/project-info/knowledge.md` |
+| issue | `{provider}/{owner}/{repo}/issues/{n}/knowledge.md` | `gitcode/grape-dev/grape/issues/42/knowledge.md` |
+| issue_agent | `{provider}/{owner}/{repo}/issues/{n}/{agent}/knowledge.md` | `gitcode/grape-dev/grape/issues/42/coding/knowledge.md` |
+| member（用户上传） | `{provider}/{owner}/{repo}/project-info/member/{username}/{filename}` | `gitcode/grape-dev/grape/project-info/member/xiaowu/entry_123.md` |
+| member（Agent 生成） | `{provider}/{owner}/{repo}/project-info/agent/{agent_type}/{filename}` | `gitcode/grape-dev/grape/project-info/agent/coding/blog-config.json` |
+
+- file_path 是 `WORKSPACE_DIR` 相对路径，`os.path.join(WORKSPACE_DIR, file_path)` 可直接拼出完整文件路径
+- 旧格式兼容：`read_entry_content` / `_update_knowledge_content` / `_delete_knowledge_full` 等路径拼接处都有 `workspace_repo_dir()` 兜底
+
+### 9.3 生成点一览
+
+所有 obs_key 生成走 `knowledge_obs_prefix(repo_key)` 或 `knowledge_storage_key(repo_key, scope, agent_type, issue_num)`，无直接拼接：
+
+| 生成点 | 函数 | 生成内容 |
+|--------|------|---------|
+| builder.py `_write_to_obs` | `knowledge_obs_prefix` | baseline obs_key |
+| knowledge.py `knowledge_storage_key` | `knowledge_obs_prefix` | project/issue/issue_agent obs_key |
+| knowledge.py sync member | `knowledge_obs_prefix` + 提取 member/agent 相对路径 | member obs_key |
+| knowledge.py sync baseline | `knowledge_obs_prefix` | baseline obs_key |
+| routes/knowledge.py upload | `knowledge_obs_prefix` | member obs_key |
+| routes/events.py delete | `knowledge_storage_key` | project/issue/issue_agent obs_key |
+| db_setup.py migrate | `knowledge_obs_prefix` / `knowledge_storage_key` | 迁移时生成新 key |
