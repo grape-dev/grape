@@ -526,7 +526,7 @@
 .scn-meta{font-size:10px;color:var(--t3)}
 .scn-card-btns{display:flex;gap:6px;margin-left:auto}
 .scn-scroll-wrap{position:relative}
-.scn-scroll-track{display:flex;gap:14px;overflow-x:auto;scroll-behavior:smooth;scrollbar-width:none;-ms-overflow-style:none}
+.scn-scroll-track{display:flex;gap:14px;overflow-x:auto;scroll-behavior:smooth;scrollbar-width:none;-ms-overflow-style:none;position:relative}
 .scn-scroll-track::-webkit-scrollbar{display:none}
 .scn-scroll-btn{position:absolute;top:50%;transform:translateY(-50%);z-index:10;width:32px;height:32px;border-radius:50%;border:1px solid var(--b);background:transparent;backdrop-filter:blur(8px);color:var(--t2);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;opacity:0;pointer-events:none}
 .scn-scroll-btn.show{opacity:1;pointer-events:auto}
