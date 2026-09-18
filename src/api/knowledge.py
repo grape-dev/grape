@@ -703,24 +703,36 @@ def cleanup_archived_knowledge():
 
         for kid, obs_key, file_path, repo_key in rows:
             if obs_key:
-                try:
-                    from src.storage import get_storage
-                    storage = get_storage()
-                    if storage is not None:
-                        storage.delete_object(obs_key)
-                except Exception:
-                    pass
+                # 检查是否有活跃记录引用同一 obs_key（归档后可能新记录复用了同一 key）
+                shared = c.execute(
+                    "SELECT 1 FROM agent_shared_knowledge WHERE obs_key=? AND archived=0 LIMIT 1",
+                    (obs_key,)
+                ).fetchone()
+                if not shared:
+                    try:
+                        from src.storage import get_storage
+                        storage = get_storage()
+                        if storage is not None:
+                            storage.delete_object(obs_key)
+                    except Exception:
+                        pass
             if file_path:
-                try:
-                    from src.config import WORKSPACE_DIR
-                    from src.repo_key import workspace_repo_dir
-                    full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
-                    if not os.path.isfile(full):
-                        full = os.path.normpath(os.path.join(workspace_repo_dir(repo_key), file_path))
-                    if os.path.isfile(full):
-                        os.remove(full)
-                except Exception:
-                    pass
+                # 同样检查 file_path 是否被活跃记录引用
+                shared_fp = c.execute(
+                    "SELECT 1 FROM agent_shared_knowledge WHERE file_path=? AND archived=0 LIMIT 1",
+                    (file_path,)
+                ).fetchone()
+                if not shared_fp:
+                    try:
+                        from src.config import WORKSPACE_DIR
+                        from src.repo_key import workspace_repo_dir
+                        full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
+                        if not os.path.isfile(full):
+                            full = os.path.normpath(os.path.join(workspace_repo_dir(repo_key), file_path))
+                        if os.path.isfile(full):
+                            os.remove(full)
+                    except Exception:
+                        pass
             c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id = ?", (kid,))
             c.execute("DELETE FROM agent_shared_knowledge WHERE id = ?", (kid,))
 
