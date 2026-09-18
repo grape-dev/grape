@@ -172,7 +172,9 @@ name 是固定中文展示名（"项目结构图谱"/"项目能力清单"/"项�
 | `_do_write_knowledge()` 内容去重 | 写入查重 | 新内容应创建新记录而非 UPDATE 归档记录 |
 | `_do_write_knowledge()` INSERT 查重 | 写入查重 | 同上 |
 
-不需要加 `archived=0` 的：rejected 查重（归档+rejected 都跳过）、disable refs（Issue 关闭时禁用所有含归档）、cleanup_archived_knowledge（专门查 archived=1）、events.py DELETE（删除操作）、list_knowledge（已有 show_archived 控制）。
+不需要加 `archived=0` 的：rejected 查重（查到已存在记录就跳过，归档了也跳过，行为正确）、disable refs（Issue 关闭时禁用所有含归档）、cleanup_archived_knowledge（已删除）、events.py DELETE（删除操作）、list_knowledge（已删 show_archived）、stats（已删 archived=0）。
+
+> **注**：归档逻辑移除后所有记录 archived=0，保留的 `archived=0` 条件永远为 true，不影响功能。rejected 分支不需要加——查到已存在记录就跳过，归档与否行为都正确。
 
 ### 4.4 全部 file_path 路径拼接兼容
 
