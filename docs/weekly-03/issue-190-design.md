@@ -247,16 +247,18 @@ fp_norm = file_path.replace("\\", "/")
 if "project-info/" in fp_norm:
     rel = fp_norm.split("project-info/", 1)[1]  # member/user/file.md 或 agent/coding/file.md
     rel_parts = rel.split("/")
-    if len(rel_parts) >= 2:
-        kind = rel_parts[0]  # "member" 或 "agent"
-        owner = rel_parts[1]
-    else:
-        kind = "member"
-        owner = created_by or ""
+    kind = rel_parts[0] if rel_parts else "member"  # "member" 或 "agent"
 else:
     kind = "member"
-    owner = created_by or ""
+# owner 始终从 DB 字段取，不从 file_path 路径段解析
+owner = created_by if kind == "member" else (agent_type or "")
 ```
+
+kind 从 file_path 的 project-info/ 后路径段解析（区分 member/agent 目录），
+owner 始终从 DB 字段取（created_by 或 agent_type），不从 file_path 路径段解析。
+
+理由：file_path 中的 username 段与 created_by 不一定一致（管理员代传、路径迁移等情况），
+created_by 是 DB 记录的实际创建者，是权威来源。
 
 兼容所有三种 file_path 格式（OLD/PARTIAL/NEW）。
 
