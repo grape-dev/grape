@@ -991,13 +991,6 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 if _closed:
                     _n3 = close_issue_tasks(repo_key, int(_num3))
                     log.info(f"Pipeline: issue closed -> complete tasks #{_num3} ({_n3} rows)")
-                    # Issue #67: 归档该 Issue 的知识
-                    try:
-                        from src.api.knowledge import _archive_issue_knowledge
-                        _archive_issue_knowledge(repo_key, int(_num3))
-                        log.info(f"Pipeline: issue closed -> archived knowledge #{_num3}")
-                    except Exception as _e:
-                        log.warning(f"Pipeline: archive issue knowledge failed: {_e}")
                 elif event_type in ISSUE_EVENT_TYPES:
                     _asg3 = ""
                     try:

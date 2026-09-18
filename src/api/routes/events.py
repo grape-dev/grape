@@ -1280,7 +1280,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     from src.api.routes.knowledge import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
 
-    from src.api.knowledge import knowledge_path, knowledge_storage_key, _issue_num_from
+    from src.api.knowledge import knowledge_path, _issue_num_from
     from src.session_manager import db, db_lock
     import os
 
@@ -1298,13 +1298,21 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     if os.path.isfile(file_path):
         os.remove(file_path)
 
-    # 2. 删 OBS 对象（如有）
+    # 2. 删 OBS 对象（从 DB 取实际 obs_key，不用 knowledge_storage_key 重新生成）
     try:
         from src.storage import get_storage
         storage = get_storage()
         if storage is not None:
-            obs_key = knowledge_storage_key(evt["repo_key"], scope, agent_type=_ag, issue_num=_in)
-            storage.delete_object(obs_key)
+            from src.session_manager import db, db_lock
+            with db_lock:
+                obs_rows = db.cursor().execute(
+                    "SELECT obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
+                    "AND obs_key!='' AND obs_key IS NOT NULL",
+                    (evt["repo_key"], scope, _ag, _in)
+                ).fetchall()
+            for (obs_key,) in obs_rows:
+                storage.delete_object(obs_key)
     except Exception:
         pass
 

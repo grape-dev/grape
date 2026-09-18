@@ -20,6 +20,7 @@ import threading
 from datetime import datetime, timedelta
 from src.config import log, WORKSPACE_DIR
 from src.lock import acquire_lock, release_lock, renew_lock
+from src.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP
 from src.session_manager import db, db_lock
 
 
@@ -96,6 +97,12 @@ def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash
             if os.path.isfile(full):
                 with open(full, "r", encoding="utf-8") as f:
                     return f.read()
+            # Issue #190：兼容旧格式 file_path（不含 provider 前缀）
+            from src.repo_key import workspace_repo_dir
+            alt = os.path.join(workspace_repo_dir(repo_key), file_path)
+            if os.path.isfile(alt):
+                with open(alt, "r", encoding="utf-8") as f:
+                    return f.read()
         except Exception as e:
             log.warning(f"Local read failed for {repo_key}/{file_path}: {e}")
     return ""
@@ -106,15 +113,6 @@ def _issue_num_from(issue_id) -> int:
     import re
     m = re.search(r"(\d+)", str(issue_id or ""))
     return int(m.group(1)) if m else 0
-
-
-def _owner_repo(repo_key: str) -> tuple[str, str]:
-    from src.repo_key import split_owner_repo
-    try:
-        owner, rname = split_owner_repo(repo_key)
-        return owner, rname
-    except Exception:
-        return "", ""
 
 
 def knowledge_path(repo_key: str, scope: str, agent_type: str = "", issue_num: int = 0) -> str:
@@ -133,23 +131,20 @@ def knowledge_path(repo_key: str, scope: str, agent_type: str = "", issue_num: i
 def knowledge_storage_key(repo_key: str, scope: str, agent_type: str = "", issue_num: int = 0) -> str:
     """生成 OBS 存储 key（不依赖 rel_path，只依赖 repo_key + scope + filename）。
 
-    格式：knowledge/{owner}/{repo}/{scope_path}/{filename}
-    - scope=project     → knowledge/{owner}/{repo}/project/knowledge.md
-    - scope=issue       → knowledge/{owner}/{repo}/issues/{n}/knowledge.md
-    - scope=issue_agent → knowledge/{owner}/{repo}/issues/{n}/{agent}/knowledge.md
+    Issue #190：含 provider 前缀，避免跨 provider 同名仓库冲突。
+    格式：knowledge/{provider}/{owner}/{repo}/{scope_path}/{filename}
+    - scope=project     → knowledge/{provider}/{owner}/{repo}/project/knowledge.md
+    - scope=issue       → knowledge/{provider}/{owner}/{repo}/issues/{n}/knowledge.md
+    - scope=issue_agent → knowledge/{provider}/{owner}/{repo}/issues/{n}/{agent}/knowledge.md
     """
-    owner, rname = _owner_repo(repo_key)
-    parts = ["knowledge", owner, rname]
+    prefix = knowledge_obs_prefix(repo_key)
     if scope == "project":
-        parts.append("project")
-    elif scope == "issue":
-        parts.extend(["issues", str(issue_num)])
-    elif scope == "issue_agent":
-        parts.extend(["issues", str(issue_num), agent_type or "agent"])
-    else:
-        raise ValueError(f"unknown knowledge scope: {scope}")
-    parts.append("knowledge.md")
-    return "/".join(parts)
+        return f"{prefix}/project/knowledge.md"
+    if scope == "issue":
+        return f"{prefix}/issues/{issue_num}/knowledge.md"
+    if scope == "issue_agent":
+        return f"{prefix}/issues/{issue_num}/{agent_type or 'agent'}/knowledge.md"
+    raise ValueError(f"unknown knowledge scope: {scope}")
 
 
 def _query_knowledge_obs(repo_key: str, scope: str, agent_type: str, issue_num: int) -> tuple[str, str]:
@@ -158,7 +153,7 @@ def _query_knowledge_obs(repo_key: str, scope: str, agent_type: str, issue_num: 
     返回 (obs_key, content_hash)；无记录或异常返回 ("", "")。
     """
     sql = ("SELECT obs_key, content_hash FROM agent_shared_knowledge "
-           "WHERE repo_key=? AND scope=? AND status='accepted'")
+           "WHERE repo_key=? AND scope=? AND status='accepted' AND archived=0")
     params: list = [repo_key, scope]
     if scope == "issue_agent":
         sql += " AND agent_type=?"
@@ -384,7 +379,7 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
     with db_lock:
         existing = db.cursor().execute(
             "SELECT id, content_hash FROM agent_shared_knowledge "
-            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND archived=0",
             (repo_key, scope, agent_type, issue_num)
         ).fetchone()
         if existing:
@@ -450,7 +445,7 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
         c = db.cursor()
         existing = c.execute(
             "SELECT id FROM agent_shared_knowledge "
-            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND archived=0",
             (repo_key, scope, agent_type, issue_num)
         ).fetchone()
         if existing:
@@ -671,64 +666,6 @@ def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str 
         db.commit()
 
 
-def _archive_issue_knowledge(repo_key: str, issue_num: int):
-    """Issue 关闭时归档该 Issue 的知识（Issue #67）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "UPDATE agent_shared_knowledge SET archived = 1 "
-            "WHERE repo_key = ? AND scope IN ('issue', 'issue_agent') "
-            "AND issue_num = ?",
-            (repo_key, issue_num)
-        )
-        c.execute(
-            "UPDATE scene_knowledge_ref SET enabled = 0, updated_by = 'system' "
-            "WHERE knowledge_id IN ("
-            "  SELECT id FROM agent_shared_knowledge "
-            "  WHERE repo_key = ? AND scope IN ('issue', 'issue_agent') AND issue_num = ?"
-            ")",
-            (repo_key, issue_num)
-        )
-        db.commit()
-    log.info(f"[knowledge] archived issue #{issue_num} knowledge for {repo_key}")
-
-
-def cleanup_archived_knowledge():
-    """清理超过 90 天的归档知识（Issue #67 定时任务调用）。"""
-    from datetime import datetime, timedelta
-    cutoff = (datetime.now() - timedelta(days=90)).isoformat()
-
-    with db_lock:
-        c = db.cursor()
-        rows = c.execute(
-            "SELECT id, obs_key, file_path, repo_key FROM agent_shared_knowledge "
-            "WHERE archived = 1 AND updated_at < ?",
-            (cutoff,)
-        ).fetchall()
-
-        for kid, obs_key, file_path, repo_key in rows:
-            if obs_key:
-                try:
-                    from src.storage import get_storage
-                    storage = get_storage()
-                    if storage is not None:
-                        storage.delete_object(obs_key)
-                except Exception:
-                    pass
-            if file_path:
-                try:
-                    from src.config import WORKSPACE_DIR
-                    full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
-                    if os.path.isfile(full):
-                        os.remove(full)
-                except Exception:
-                    pass
-            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id = ?", (kid,))
-            c.execute("DELETE FROM agent_shared_knowledge WHERE id = ?", (kid,))
-
-        db.commit()
-        if rows:
-            log.info(f"[knowledge] cleaned up {len(rows)} archived knowledge entries")
 
 
 def agent_knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> dict:
@@ -946,16 +883,22 @@ async def knowledge_sync_loop():
                         with open(full_path, encoding="utf-8") as f:
                             content = f.read()
                         if content:
-                            # 按 scope 生成 storage_key——member/baseline 不走 knowledge_storage_key
-                            from src.repo_key import split_owner_repo
-                            owner, rname = split_owner_repo(repo_key)
+                            # Issue #190：按 scope 生成 storage_key（含 provider 前缀）
+                            _obs_prefix = knowledge_obs_prefix(repo_key)
                             if scope == "member":
-                                # member 文档：用 file_path 生成 storage_key
-                                storage_key = f"knowledge/{owner}/{rname}/{file_path.replace('project-info/', '', 1)}"
+                                # Issue #190：从 file_path 提取 member/ 或 agent/ 后的相对路径
+                                # 不用 replace（file_path 含 owner/repo 时会导致路径重复）
+                                for marker in ("member/", "agent/"):
+                                    idx = file_path.find(marker)
+                                    if idx >= 0:
+                                        _rel = file_path[idx:]
+                                        break
+                                else:
+                                    _rel = os.path.basename(file_path)
+                                storage_key = f"{_obs_prefix}/{_rel}"
                             elif scope == "baseline":
-                                # Issue #95：基线文件 OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
                                 _fname = os.path.basename(file_path)
-                                storage_key = f"knowledge/{owner}/{rname}/project-info/{_fname}"
+                                storage_key = f"{_obs_prefix}/project-info/{_fname}"
                             else:
                                 # 共享知识：project/issue/issue_agent
                                 storage_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
@@ -1020,7 +963,7 @@ def _sync_baseline_files():
     Issue #103：加分布式锁保护，防止多实例同时写 baseline。
     """
     import hashlib as _hl
-    from src.repo_key import split_owner_repo
+    from src.repo_key import parse_repo_key
     from src.storage import get_storage
 
     storage = get_storage()
@@ -1041,7 +984,7 @@ def _sync_baseline_files():
             log.info(f"[knowledge] baseline sync: lock contention for {repo_key}, skipped")
             continue
         try:
-            owner, repo = split_owner_repo(repo_key)
+            _provider, owner, repo = parse_repo_key(repo_key)
             if not owner or not repo:
                 continue
             from src.repo_key import workspace_repo_dir
@@ -1056,32 +999,31 @@ def _sync_baseline_files():
 
                 file_path = os.path.relpath(fpath, WORKSPACE_DIR)
 
-                # 查 DB 是否已有 baseline 记录（按文件名匹配，兼容 file_path 格式变更）
+                # Issue #190：查重改用 name（不受 file_path 格式变化影响）
+                _baseline_name = BASELINE_NAME_MAP.get(fname, fname)
                 with db_lock:
                     row = db.cursor().execute(
                         "SELECT id, obs_key FROM agent_shared_knowledge "
-                        "WHERE repo_key=? AND scope='baseline' "
-                        "AND SUBSTRING_INDEX(file_path, '/', -1)=? "
+                        "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0 "
                         "ORDER BY id DESC LIMIT 1",
-                        (repo_key, fname)
+                        (repo_key, _baseline_name)
                     ).fetchone()
 
                 if row and row[1]:  # DB 有记录且 obs_key 非空
-                    # Issue #95：检测旧格式 obs_key（project-info/ 前缀但不含 knowledge/）→ 强制更新
+                    # Issue #190：检测旧格式 obs_key → 强制更新
                     _old_obs = row[1] or ""
-                    if _old_obs.startswith("project-info/") and not _old_obs.startswith("knowledge/"):
-                        # 旧格式 → 重新写 OBS + UPDATE
-                        pass  # 不 continue，走下面的写入逻辑
-                    else:
-                        continue  # 新格式或本地模式 → 跳过
+                    _new_prefix = knowledge_obs_prefix(repo_key)
+                    if _old_obs.startswith(_new_prefix):
+                        continue  # 已是新格式 → 跳过
+                    # OLD_A（project-info/ 前缀）或 OLD_B（knowledge/ 缺 provider）→ 走写入逻辑
+                    # 不 continue，走下面的写入逻辑
 
                 # 写 OBS + DB
                 try:
                     with open(fpath, "rb") as f:
                         content_bytes = f.read()
-                    # Issue #95：OBS key 统一为 knowledge/{owner}/{repo}/project-info/{fname}
-                    _owner, _rname = _owner_repo(repo_key)
-                    storage_key = f"knowledge/{_owner}/{_rname}/project-info/{fname}"
+                    # Issue #190：OBS key 含 provider 前缀
+                    storage_key = f"{knowledge_obs_prefix(repo_key)}/project-info/{fname}"
                     storage.save_bytes(storage_key, content_bytes)
                     content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
 
@@ -1089,26 +1031,17 @@ def _sync_baseline_files():
                         with db_lock:
                             c = db.cursor()
                             # Issue #95：UPDATE 补 source/name/description（COALESCE 空值不覆盖）
-                            _bn = {"project-graph.md": "项目结构图谱", "project-capabilities.md": "项目能力清单", ".metadata.json": "项目元数据"}.get(fname, fname)
                             c.execute(
                                 "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
                                 "source=COALESCE(NULLIF(source, ''), 'system'), "
                                 "name=COALESCE(NULLIF(name, ''), ?) "
                                 "WHERE id=?",
-                                (storage_key, content_hash, _bn, row[0])
+                                (storage_key, content_hash, _baseline_name, row[0])
                             )
                             db.commit()
                     else:  # DB 无记录 → INSERT
-                        _baseline_desc = {
-                            "project-graph.md": "VOD 基线分析：项目代码结构图谱（模块/依赖/技术栈）",
-                            "project-capabilities.md": "VOD 基线分析：项目能力清单（功能特性/支持能力）",
-                            ".metadata.json": "VOD 基线分析：项目元数据（分析时间/分支/提交哈希）",
-                        }.get(fname, "VOD 基线分析自动生成")
-                        _baseline_name = {
-                            "project-graph.md": "项目结构图谱",
-                            "project-capabilities.md": "项目能力清单",
-                            ".metadata.json": "项目元数据",
-                        }.get(fname, "项目基线分析")
+                        _baseline_desc = BASELINE_DESC_MAP.get(fname, "VOD 基线分析自动生成")
+                        _baseline_name = BASELINE_NAME_MAP.get(fname, "项目基线分析")
                         with db_lock:
                             c = db.cursor()
                             c.execute(

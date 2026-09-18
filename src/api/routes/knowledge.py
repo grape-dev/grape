@@ -2,12 +2,13 @@
 
 见 docs/new-version2/knowledge-board-design.md：
 - GET  /api/knowledge         聚合返回两类维度知识清单（项目级 + Agent 维度）
-- GET  /api/knowledge/content 读取单个知识全文（路径穿越防护）
-- GET  /api/knowledge/context 返回合并注入上下文文本
-- POST /api/knowledge         成员手动上传知识文档（md/txt/json，鉴权当前用户）
-- DEL  /api/knowledge         删除成员上传的知识
+- POST /api/knowledge/entry   成员手动上传知识文档（md/txt/json，鉴权当前用户）
+- GET  /api/knowledge/{id}    读取单个知识全文（按 id）
+- PUT  /api/knowledge/{id}    更新知识内容
+- DEL  /api/knowledge/{id}    删除知识条目（按 id）
 """
-import os, re, time, uuid, hashlib
+import os, time, uuid, hashlib
+from src.repo_key import knowledge_obs_prefix
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
@@ -16,18 +17,6 @@ from src.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
-
-ALLOWED_EXTS = {".md", ".txt", ".json"}
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-_SAFE_REL = re.compile(r"^[\w.\-/]+$")
-
-
-def _owner_repo(repo_key: str) -> tuple[str, str]:
-    from src.repo_key import split_owner_repo
-    try:
-        return split_owner_repo(repo_key)
-    except Exception:
-        return "", ""
 
 
 def _repo_base(repo_key: str) -> str:
@@ -61,187 +50,6 @@ def _resolve_repo_key(repo: str) -> str:
     return repo_key
 
 
-def _safe_rel(rel: str) -> str:
-    """白名单相对路径（防路径穿越，只读工作区仓库目录内）。"""
-    rel = (rel or "").replace("\\", "/").strip().lstrip("/")
-    if not rel or not _SAFE_REL.match(rel) or rel.startswith(".."):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
-    return rel
-
-
-def _read_file(repo_key: str, rel: str) -> str:
-    rel = _safe_rel(rel)
-    ext = os.path.splitext(rel)[1].lower()
-    if ext not in ALLOWED_EXTS:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"仅支持 {sorted(ALLOWED_EXTS)}"})
-
-    # OBS 分支：查 DB obs_key，非空走 storage.read_bytes
-    from src.session_manager import db, db_lock
-    try:
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT obs_key FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? "
-                "ORDER BY id DESC LIMIT 1",
-                (repo_key, rel)).fetchone()
-        if row and row[0]:
-            from src.storage import get_storage
-            storage = get_storage()
-            if storage is not None:
-                data = storage.read_bytes(row[0])
-                if data is not None:
-                    return data.decode("utf-8", errors="replace")
-    except Exception as e:
-        log.warning(f"OBS read failed for {repo_key}/{rel}: {e} — fallback to local")
-
-    # 本地模式（storage 为 None 或 OBS miss）
-    base = _repo_base(repo_key)
-    full = os.path.normpath(os.path.join(base, rel))
-    if full != base and not full.startswith(base + os.sep):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
-    if not os.path.isfile(full):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"文件不存在: {rel}"})
-    try:
-        with open(full, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
-
-
-def _read_ws_file(repo_key: str, ws_rel: str) -> str:
-    """读 WORKSPACE_DIR 相对路径（agent_shared_knowledge.file_path 语义，防路径穿越）。
-
-    OBS 模式：查 DB obs_key → OBS 读取（不依赖本地磁盘）。
-    本地模式：open 本地文件（保持原行为）。
-    """
-    from src.config import WORKSPACE_DIR
-    rel = _safe_rel(ws_rel)
-
-    # OBS 分支：查 DB obs_key → OBS 读取
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT obs_key FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? "
-                "ORDER BY id DESC LIMIT 1",
-                (repo_key, rel)).fetchone()
-        if row and row[0]:
-            from src.storage import get_storage
-            storage = get_storage()
-            if storage is not None:
-                data = storage.read_bytes(row[0])
-                if data is not None:
-                    return data.decode("utf-8", errors="replace")
-    except Exception as e:
-        log.warning(f"OBS read failed for {repo_key}/{rel}: {e} — fallback to local")
-
-    # 本地模式（OBS 未启用 / OBS miss）——基准 WORKSPACE_DIR，file_path 含 owner/repo 前缀
-    from src.config import WORKSPACE_DIR
-    full = os.path.normpath(os.path.join(WORKSPACE_DIR, rel))
-    if full != WORKSPACE_DIR and not full.startswith(WORKSPACE_DIR + os.sep):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
-    ext = os.path.splitext(rel)[1].lower()
-    if ext not in ALLOWED_EXTS:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"仅支持 {sorted(ALLOWED_EXTS)}"})
-    if not os.path.isfile(full):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"文件不存在: {rel}"})
-    try:
-        with open(full, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
-
-
-def _member_docs(repo_key: str) -> list[dict]:
-    """扫描成员上传目录 project-info/member/ 与 project-info/agent/，返回文档清单。
-
-    agent 文档带 agent_type 标注（§六：Agent 维度上传落盘 project-info/agent/{agent_type}/）。
-
-    OBS 模式：查 DB scope='member' 记录构建清单（不依赖本地磁盘）。
-    本地模式（OBS 未启用）：回退 os.listdir 扫描本地目录（保持原行为）。
-    """
-    from src.session_manager import db, db_lock
-    from src.storage import get_storage
-
-    storage = get_storage()
-    if storage is not None:
-        # OBS 模式：查 DB 构建清单
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT id, file_path, agent_type, created_by, created_at, obs_key "
-                "FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='member' "
-                "AND obs_key!='' AND obs_key IS NOT NULL "
-                "ORDER BY id DESC",
-                (repo_key,)
-            )
-            rows = c.fetchall()
-        docs = []
-        seen = set()  # file_path 去重（同文件多版本只展示最新）
-        for rid, file_path, agent_type, created_by, created_at, obs_key in rows:
-            if not file_path or file_path in seen:
-                continue
-            seen.add(file_path)
-            # 从 file_path 解析 kind 和 owner
-            # file_path 格式：project-info/member/{username}/{filename} 或 project-info/agent/{agent_type}/{filename}
-            parts = file_path.replace("\\", "/").split("/")
-            if len(parts) >= 4 and parts[0] == "project-info":
-                kind = parts[1]  # "member" 或 "agent"
-                owner = parts[2] if kind == "member" else (agent_type or parts[2])
-                name = parts[-1]
-            else:
-                kind = "member"
-                owner = created_by or ""
-                name = os.path.basename(file_path)
-            docs.append({
-                "name": name,
-                "owner": owner,
-                "path": file_path,
-                "obs_key": obs_key or "",
-                "size": 0,  # OBS 模式不查对象 size（列表展示不需要精确值）
-                "updated_at": normalize_event_time(created_at or ""),
-                "kind": kind,
-            })
-        return docs
-
-    # 本地模式（OBS 未启用）：保持原有 os.listdir 逻辑
-    docs = []
-    for sub in ("member", "agent"):
-        base = os.path.join(_repo_base(repo_key), "project-info", sub)
-        if not os.path.isdir(base):
-            continue
-        try:
-            for owner_dir in sorted(os.listdir(base)):
-                d = os.path.join(base, owner_dir)
-                if not os.path.isdir(d):
-                    continue
-                for f in sorted(os.listdir(d)):
-                    fp = os.path.join(d, f)
-                    if not os.path.isfile(fp):
-                        continue
-                    rel = os.path.relpath(fp, _repo_base(repo_key)).replace("\\", "/")
-                    docs.append({
-                        "name": f,
-                        "owner": owner_dir,
-                        "path": rel,
-                        "obs_key": "",
-                        "size": os.path.getsize(fp),
-                        "updated_at": _fmt_time(os.path.getmtime(fp)),
-                        "kind": sub,
-                    })
-        except Exception as e:
-            log.warning(f"member docs scan failed {repo_key} ({sub}): {e}")
-    return docs
-
-
-def _fmt_time(ts) -> str:
-    import datetime
-    try:
-        return datetime.datetime.fromtimestamp(ts, datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return ""
-
-
 def _check_repo_member(user: dict, repo_key: str):
     """校验用户是否是当前仓库的成员（托管者或已加入）。"""
     from src.user.db import get_user_repos
@@ -265,7 +73,6 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          source: str = Query("", description="按来源筛选：system/agent/manual"),
                          page: int = Query(1, description="页码，从1开始"),
                          page_size: int = Query(50, description="每页条数，默认50"),
-                         show_archived: bool = Query(False, description="是否包含归档知识"),
                          sort: str = Query("", description="排序：latest=按更新时间倒序"),
                          q: str = Query("", description="搜索关键词（匹配 name/description）")):
     """统一知识列表——只查 DB 返回分页列表（不含统计，统计走独立接口）。"""
@@ -279,8 +86,6 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
     # 构建 WHERE 条件
     where = "WHERE repo_key=?"
     params = [repo_key]
-    if not show_archived:
-        where += " AND archived=0"
     if source:
         where += " AND source=?"
         params.append(source)
@@ -298,7 +103,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
             f"SELECT id, scope, repo_key, agent_type, issue_num, file_path, status, "
             f"source_seq, created_by, created_at, obs_key, content_hash, updated_at, source, archived, description, name "
             f"FROM agent_shared_knowledge {where} "
-            f"ORDER BY archived ASC, {'updated_at DESC,' if sort == 'latest' else ''} id DESC LIMIT ? OFFSET ?",
+            f"ORDER BY {'updated_at DESC,' if sort == 'latest' else ''} id DESC LIMIT ? OFFSET ?",
             params + [page_size, offset]
         ).fetchall()
 
@@ -318,7 +123,6 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
             "created_at": normalize_event_time(r[9] or ""),
             "obs_key": r[10] or "",
             "source": r[13] or "",
-            "archived": r[14] or 0,
             "description": r[15] or "",
             "name": r[16] or "",
             "issue_tag": f"Issue #{r[4]}" if r[4] and r[1] in ("issue", "issue_agent") else "",
@@ -376,10 +180,10 @@ def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
     with db_lock:
         stats_row = db.cursor().execute(
             "SELECT "
-            "SUM(CASE WHEN source='system' AND archived=0 THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN source='agent' AND archived=0 THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN source='manual' AND archived=0 THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN archived=0 AND id NOT IN (SELECT DISTINCT knowledge_id FROM scene_knowledge_ref WHERE enabled=1) THEN 1 ELSE 0 END) "
+            "SUM(CASE WHEN source='system' THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN source='agent' THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN source='manual' THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN id NOT IN (SELECT DISTINCT knowledge_id FROM scene_knowledge_ref WHERE enabled=1) THEN 1 ELSE 0 END) "
             "FROM agent_shared_knowledge WHERE repo_key=?",
             (repo_key,)
         ).fetchone()
@@ -389,149 +193,6 @@ def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
         "manual": stats_row[2] or 0,
         "unlinked": stats_row[3] or 0,
     }
-
-
-@router.get("/content", operation_id="knowledge_content", summary="Read knowledge content", description="Reads a single knowledge full text from the workspace repo dir or via obs_key from OBS.")
-def read_knowledge_content(repo: str = Query(""),
-                                 file: str = Query(""),
-                                 obs_key: str = Query(""),
-                                 user: dict = Depends(get_current_user_or_api_key)):
-    """读取单个知识全文（相对工作区仓库目录）或通过 obs_key 直接读 OBS。"""
-    if not repo:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
-    if not file and not obs_key:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "file 或 obs_key 必填"})
-
-    # obs_key 模式：直接读 OBS，不需要反查 DB
-    if obs_key:
-        from src.storage import get_storage
-        storage = get_storage()
-        if storage is not None:
-            try:
-                data = storage.read_bytes(obs_key)
-                if data is not None:
-                    return {"repo_key": _resolve_repo_key(repo), "obs_key": obs_key,
-                            "content": data.decode("utf-8", errors="replace")}
-            except Exception as e:
-                log.warning(f"OBS read failed for obs_key={obs_key}: {e} — fallback to file")
-        # OBS miss → 回退走 _read_file（用 obs_key 值作为 file 参数，兼容本地文件模式）
-
-    # file 模式（原有逻辑，兼容非 OBS / OBS miss / 前端未传 file）
-    # 如果 file 为空但 obs_key 非空，用 obs_key 作为 file 回退
-    _file = file or obs_key
-    if not _file:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "file 或 obs_key 必填"})
-    repo_key = _resolve_repo_key(repo)
-    return {"repo_key": repo_key, "file": _file, "content": _read_file(repo_key, _file)}
-
-
-@router.get("/context", operation_id="knowledge_context", summary="Build merged injection context", description="Builds merged injection context: project-info summary + shared knowledge + member docs.")
-def knowledge_context(repo: str = Query(""),
-                            agent_type: str = "",
-                            issue_num: int = 0,
-                            scene_id: str = Query(""),
-                            user: dict = Depends(get_current_user_or_api_key)):
-    """返回合并注入上下文文本（project-info 摘要 + 共享知识 + 成员文档）。"""
-    if not repo:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "必须指定 repo"})
-    repo_key = _resolve_repo_key(repo)
-
-    lines = []
-    try:
-        from src.prompt_builder import _build_project_info_section, _build_agent_knowledge_section
-        pi = _build_project_info_section(repo_key, agent_type=agent_type,
-                                         issue_num=issue_num, scene_id=scene_id)
-        if pi:
-            lines.append(pi)
-        k, _ = _build_agent_knowledge_section(repo_key, agent_type=agent_type, issue_num=issue_num, scene_id=scene_id)
-        if k:
-            lines.append(k)
-    except Exception:
-        pass
-    # 成员文档摘要
-    docs = _member_docs(repo_key)
-    if docs:
-        lines.append("### 项目成员上传文档（member）\n" + "\n".join(
-            f"- [{d['name']}] {d['path']}（{d['owner']}，{d['updated_at']}）" for d in docs[:20]))
-    return {"repo_key": repo_key, "context": "\n\n".join(lines)}
-
-
-@router.delete("", operation_id="knowledge_files_delete", summary="Delete member-uploaded doc", description="Deletes a member-uploaded knowledge doc (owner-only).")
-def delete_knowledge(repo: str = Query(""),
-                           file: str = Query(""),
-                           user: dict = Depends(require_no_session_token)):
-    """删除成员上传的知识文档（仅限本人上传）。"""
-    if not repo or not file:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "repo 与 file 必填"})
-    from src.repo_key import from_repo_key
-    repo_key = _resolve_repo_key(repo)
-    rel = _safe_rel(file)
-    is_member = rel.startswith("project-info/member/")
-    is_agent = rel.startswith("project-info/agent/")
-    if not (is_member or is_agent):
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅可删除成员上传文档"})
-    base = _repo_base(repo_key)
-    full = os.path.normpath(os.path.join(base, rel))
-    if full != base and not full.startswith(base + os.sep):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
-
-    # OBS 模式：先查 DB obs_key，有 obs_key 时不依赖本地文件存在
-    obs_key = ""
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT obs_key FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? AND scope='member' "
-                "ORDER BY id DESC LIMIT 1",
-                (repo_key, rel)).fetchone()
-        if row:
-            obs_key = row[0] or ""
-    except Exception:
-        pass
-
-    from src.storage import get_storage
-    storage = get_storage()
-
-    # 本地模式（OBS 未启用）：检查本地文件存在
-    if storage is None:
-        if not os.path.isfile(full):
-            raise HTTPException(status_code=404, detail={"code": 404, "message": f"文件不存在: {rel}"})
-
-    # 成员目录按用户名子目录校验本人；Agent 目录为团队共享（agent_type 子目录），任一定向可见即可删
-    if is_member:
-        owner_part = rel.split("/")[2] if len(rel.split("/")) > 2 else ""
-        me = str(user.get("username") or user.get("id") or "")
-        if owner_part and owner_part != me:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅可删除本人上传的文档"})
-
-    # OBS 删除
-    if obs_key and storage is not None:
-        try:
-            if not storage.delete_object(obs_key):
-                raise HTTPException(status_code=500, detail={"code": 500, "message": "OBS 对象删除失败，已中止"})
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": f"OBS 删除失败: {e}"})
-
-    # 本地文件删除（OBS 模式下本地不存在只 warning 不中止）
-    try:
-        os.remove(full)
-    except Exception as e:
-        if obs_key and storage is not None:
-            log.warning(f"[knowledge] OBS 已删但本地文件删除失败: {full}: {e}")
-        else:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": f"删除失败: {e}"})
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key=? AND file_path=? AND scope='member'",
-                      (repo_key, rel))
-            db.commit()
-    except Exception:
-        pass
-    return {"message": f"已删除 {os.path.basename(rel)}"}
 
 
 # ===== Issue #67：知识 CRUD + 关联管理 + 归档 API =====
@@ -566,8 +227,6 @@ class KnowledgeRefBatchBody(BaseModel):
 class KnowledgeRefUpdateBody(BaseModel):
     enabled: bool = True
 
-class ArchiveBody(BaseModel):
-    archived: bool = True
 
 
 def _build_ref_summary(refs: list) -> str:
@@ -643,7 +302,11 @@ def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
     repo_key = row["repo_key"]
     file_path = row["file_path"]
     from src.config import WORKSPACE_DIR
+    from src.repo_key import workspace_repo_dir
     full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
+    if not os.path.isdir(os.path.dirname(full)):
+        # 兼容旧格式 file_path（不含 provider/owner/repo 前缀）
+        full = os.path.normpath(os.path.join(workspace_repo_dir(repo_key), file_path))
     if full != WORKSPACE_DIR and not full.startswith(WORKSPACE_DIR + os.sep):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
     os.makedirs(os.path.dirname(full), exist_ok=True)
@@ -690,7 +353,11 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
     file_path = row.get("file_path", "")
     if file_path:
         from src.config import WORKSPACE_DIR
+        from src.repo_key import workspace_repo_dir
         full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
+        if not os.path.isfile(full):
+            # 兼容旧格式 file_path
+            full = os.path.normpath(os.path.join(workspace_repo_dir(row.get("repo_key", "")), file_path))
         if os.path.isfile(full):
             try:
                 os.remove(full)
@@ -741,8 +408,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
         from src.storage import get_storage
         storage = get_storage()
         if storage is not None:
-            owner, rname = _owner_repo(repo_key)
-            obs_key = f"knowledge/{owner}/{rname}/member/{username}/{filename}"
+            obs_key = f"{knowledge_obs_prefix(repo_key)}/member/{username}/{filename}"
             with open(file_path, "rb") as f:
                 storage.save_bytes(obs_key, f.read())
     except Exception as e:
@@ -887,32 +553,6 @@ def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(require_no_se
     return {"ok": True, "message": "知识已删除"}
 
 
-@router.put("/{knowledge_id}/archive", operation_id="knowledge_archive", summary="Archive/unarchive knowledge", description="Archives/unarchives knowledge (body.archived true/false).")
-def archive_knowledge(knowledge_id: int, body: ArchiveBody,
-                      user: dict = Depends(require_no_session_token)):
-    """标记/取消归档。body.archived=true 标记归档，false 取消归档。"""
-    row = _get_knowledge_by_id(knowledge_id)
-    if not row:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
-
-    # 权限：manual 仅创建者，system/agent 仓库托管者（当前先放行）
-    if row["source"] == "manual" and row["created_by"] != user.get("username"):
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可操作"})
-
-    archived = 1 if body.archived else 0
-    from src.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "UPDATE agent_shared_knowledge SET archived=? WHERE id=?",
-            (archived, knowledge_id)
-        )
-        c.execute(
-            "UPDATE scene_knowledge_ref SET enabled=?, updated_by=? WHERE knowledge_id=?",
-            (0 if archived else 1, str(user.get("username") or ""), knowledge_id)
-        )
-        db.commit()
-    return {"ok": True, "archived": archived}
 
 
 # ===== 关联管理 API =====
