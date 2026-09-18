@@ -910,9 +910,14 @@ async def knowledge_sync_loop():
                                 c2.execute(
                                     "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
                                     "source=COALESCE(NULLIF(source, ''), CASE WHEN scope='baseline' THEN 'system' "
-                                    "WHEN scope='member' THEN 'manual' ELSE 'agent' END) "
+                                    "WHEN scope='member' THEN 'manual' ELSE 'agent' END), "
+                                    "name=COALESCE(NULLIF(name, ''), ?), "
+                                    "description=COALESCE(NULLIF(description, ''), ?) "
                                     "WHERE id=?",
-                                    (storage_key, content_hash, rid)
+                                    (storage_key, content_hash,
+                                     BASELINE_NAME_FALLBACK if scope == "baseline" else "",
+                                     BASELINE_DESC_FALLBACK if scope == "baseline" else "",
+                                     rid)
                                 )
                                 db.commit()
                     except Exception as e:
@@ -1026,6 +1031,8 @@ def _sync_baseline_files():
                     storage_key = f"{knowledge_obs_prefix(repo_key)}/project-info/{fname}"
                     storage.save_bytes(storage_key, content_bytes)
                     content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
+                    _baseline_name = BASELINE_NAME_MAP.get(fname, BASELINE_NAME_FALLBACK)
+                    _baseline_desc = BASELINE_DESC_MAP.get(fname, BASELINE_DESC_FALLBACK)
 
                     if row:  # DB 有记录但 obs_key 为空 → UPDATE
                         with db_lock:
@@ -1034,14 +1041,13 @@ def _sync_baseline_files():
                             c.execute(
                                 "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
                                 "source=COALESCE(NULLIF(source, ''), 'system'), "
-                                "name=COALESCE(NULLIF(name, ''), ?) "
+                                "name=COALESCE(NULLIF(name, ''), ?), "
+                                "description=COALESCE(NULLIF(description, ''), ?) "
                                 "WHERE id=?",
-                                (storage_key, content_hash, _baseline_name, row[0])
+                                (storage_key, content_hash, _baseline_name, _baseline_desc, row[0])
                             )
                             db.commit()
                     else:  # DB 无记录 → INSERT
-                        _baseline_desc = BASELINE_DESC_MAP.get(fname, BASELINE_DESC_FALLBACK)
-                        _baseline_name = BASELINE_NAME_MAP.get(fname, BASELINE_NAME_FALLBACK)
                         with db_lock:
                             c = db.cursor()
                             c.execute(
