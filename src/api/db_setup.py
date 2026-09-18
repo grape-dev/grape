@@ -1545,8 +1545,13 @@ def _migrate_knowledge_dedup_and_ref():
         ).fetchall()
         _updates = []
         for _rid, _scope, _source, _agent_type, _issue_num, _cur_name, _fp, _obs, _cur_desc in _rows:
-            # source="manual" 是用户上传的，name 和 description 都由用户填写，不回填
+            # source="manual" 是用户上传的：
+            # - name 非空时不覆盖（用户填的），name 为空时用 file_path 推导回填
+            # - description 永远不碰（用户行为，即使为空也不回填）
             if _source == "manual":
+                if not _cur_name:
+                    _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+                    _updates.append((_new_name, _cur_desc or "", _rid))
                 continue
             _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
             _needs_name = (_cur_name != _new_name)
