@@ -318,7 +318,7 @@ function buildSurveyData() {
     if (major === '其他') { var oi = document.querySelector('input[name="major"]:checked'); if (oi) { var t = oi.parentElement.querySelector('.other-text'); major = t && t.value.trim() ? t.value.trim() : ''; } if (!major) return null; }
     return { identity: 'student', education: edu, major: major };
   } else if (_identity === 'enterprise') {
-    
+    var size = getRadioValue('companySize');
     var role = getRadioValue('role');
     if (role === '其他') { var oi = document.querySelector('input[name="role"]:checked'); if (oi) { var t = oi.parentElement.querySelector('.other-text'); role = t && t.value.trim() ? t.value.trim() : ''; } if (!role) return null; }
     var cases = getCheckboxValues(document.querySelector('[data-name="entUseCases"]'));
