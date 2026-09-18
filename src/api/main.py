@@ -157,7 +157,13 @@ async def lifespan(app: FastAPI):
         async def _knowledge_migrate_wrapper():
             from src.api.db_setup import _migrate_knowledge
             await asyncio.to_thread(_migrate_knowledge)
-        asyncio.create_task(_knowledge_migrate_wrapper())
+        _migrate_task = asyncio.create_task(_knowledge_migrate_wrapper())
+
+        def _on_migrate_done(task: asyncio.Task):
+            if task.exception():
+                log.error(f"knowledge_migrate task failed: {task.exception()}", exc_info=task.exception())
+        _migrate_task.add_done_callback(_on_migrate_done)
+        app.state.knowledge_migrate_task = _migrate_task
         log.info("knowledge_migrate started (async)")
     except Exception as e:
         log.warning(f"knowledge_migrate start failed: {e}")
@@ -301,6 +307,15 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.wait_for(_knowledge_write_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    # knowledge_migrate：shutdown 时尝试等待完成（不 cancel，因为迁移中断不如跑完）
+    _migrate_task = getattr(app.state, "knowledge_migrate_task", None)
+    if _migrate_task and not _migrate_task.done():
+        try:
+            await asyncio.wait_for(_migrate_task, timeout=10)
+        except asyncio.TimeoutError:
+            log.warning("knowledge_migrate shutdown wait timeout, task continues in background")
+        except Exception:
             pass
     # 官方技能 OBS 同步：优雅关闭定时任务
     try:
