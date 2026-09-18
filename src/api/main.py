@@ -154,10 +154,10 @@ async def lifespan(app: FastAPI):
 
     # Issue #190：知识库 obs_key/file_path 归一化迁移（异步，不阻塞启动）
     try:
-        from src.api.db_setup import _migrate_knowledge
-        import threading
-        _knowledge_migrate_thread = threading.Thread(target=_migrate_knowledge, daemon=True)
-        _knowledge_migrate_thread.start()
+        async def _knowledge_migrate_wrapper():
+            from src.api.db_setup import _migrate_knowledge
+            await asyncio.to_thread(_migrate_knowledge)
+        asyncio.create_task(_knowledge_migrate_wrapper())
         log.info("knowledge_migrate started (async)")
     except Exception as e:
         log.warning(f"knowledge_migrate start failed: {e}")
