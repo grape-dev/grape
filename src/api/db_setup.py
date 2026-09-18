@@ -1537,20 +1537,26 @@ def _migrate_knowledge_dedup_and_ref():
                                   BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK)
         _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值，勿改
         _rows = c.execute(
-            "SELECT id, scope, agent_type, issue_num, name, file_path, obs_key, description "
+            "SELECT id, scope, source, agent_type, issue_num, name, file_path, obs_key, description "
             "FROM agent_shared_knowledge "
             "WHERE name IS NULL OR name = '' OR name = ? "
             "OR description = ? OR description IS NULL OR description = ''",
             (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
         ).fetchall()
-        _updates = []  # [(name, desc, id), ...]
-        for _rid, _scope, _agent_type, _issue_num, _cur_name, _fp, _obs, _cur_desc in _rows:
+        _updates = []
+        for _rid, _scope, _source, _agent_type, _issue_num, _cur_name, _fp, _obs, _cur_desc in _rows:
             _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
             _needs_name = (_cur_name != _new_name)
-            _new_desc = derive_knowledge_description(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
-            _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC) and _new_desc
+            # source="manual" 是用户上传的，description 由用户填写，不回填
+            if _source == "manual":
+                _needs_desc = False
+                _final_desc = _cur_desc or ""
+            else:
+                _new_desc = derive_knowledge_description(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+                _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC) and bool(_new_desc)
+                _final_desc = _new_desc if _needs_desc else (_cur_desc or "")
             if _needs_name or _needs_desc:
-                _updates.append((_new_name, _new_desc, _rid))
+                _updates.append((_new_name, _final_desc, _rid))
         if _updates:
             c.executemany(
                 "UPDATE agent_shared_knowledge SET name=?, description=? WHERE id=?",
