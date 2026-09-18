@@ -1860,9 +1860,13 @@ def _migrate_knowledge():
                     "UPDATE agent_shared_knowledge SET obs_key=? WHERE id=?",
                     [(u[0], u[1]) for u in updates])
                 db.commit()
-            # DB 更新成功后删除旧 OBS 对象
+            # DB 更新成功后删除旧 OBS 对象（去重防跨平台同名仓库共享同一旧 key）
             if _storage:
+                _deleted_keys = set()
                 for _, _, _old_key in updates:
+                    if _old_key in _deleted_keys:
+                        continue
+                    _deleted_keys.add(_old_key)
                     try:
                         _storage.delete_object(_old_key)
                     except Exception as e:
