@@ -49,13 +49,10 @@ function renderKnowledge() {
         pageSize: 20,
         total: 0,
         detail: null,
-        scenes: [],
         agentTypes: AGENT_TYPES,
-        addAgentPopover: false,
         addScenePopover: false,
         sceneSearch: '',
         sceneSelected: [],
-        agentSelected: [],
         sceneTab: 'market',
         marketScenes: [],
         marketPage: 1,
@@ -313,25 +310,6 @@ function renderKnowledge() {
           this.pendingAgentType = null;
         }
       },
-      async removeAgentRef(tag) {
-        try {
-          await API.del('/knowledge/ref/' + tag.ref.id, 15000);
-          tag.ref.enabled = false;
-        } catch (e) {
-          app.showToast(e.message);
-        }
-      },
-      async addAgentByType(agentType) {
-        const kid = this.detail.id;
-        try {
-          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: [agentType] }, 15000);
-          await this._refreshDetailFull();
-          app.showToast(this.t('ref_bind_agent_ok'));
-        } catch (e) {
-          app.showToast(e.message || this.t('ref_failed_refresh'));
-          await this._refreshDetailFull();
-        }
-      },
 
       // 场景标签操作
       async removeSceneRef(tag) {
@@ -355,17 +333,6 @@ function renderKnowledge() {
         } finally {
           this.submitting = false;
           this.pendingSceneId = null;
-        }
-      },
-      async addSceneById(sceneId) {
-        const kid = this.detail.id;
-        try {
-          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [sceneId], agent_types: [] }, 15000);
-          await this._refreshDetailFull();
-          app.showToast(this.t('ref_bind_scene_ok'));
-        } catch (e) {
-          app.showToast(e.message || this.t('ref_failed_refresh'));
-          await this._refreshDetailFull();
         }
       },
       openScenePopover(e) {
@@ -442,44 +409,6 @@ function renderKnowledge() {
           app.showToast(this.t('ref_added_count', { count: this.sceneSelected.length }));
           this.addScenePopover = false;
           this.sceneSelected = [];
-        } catch (e) {
-          if (e.name === 'AbortError' && !e.silent) {
-            app.showToast(this.t('ref_timeout_refresh'));
-            await this._refreshDetailFull();
-          } else if (e.name === 'AbortError' && e.silent) {
-            // 导航/切 tab 导致的取消，静默
-          } else {
-            app.showToast(e.message || this.t('ref_failed_refresh'));
-            await this._refreshDetailFull();
-          }
-        } finally {
-          this.submitting = false;
-        }
-      },
-
-      // Agent 多选
-      openAgentPopover() {
-        this.addAgentPopover = true;
-        this.agentSelected = [];
-      },
-      toggleAgentSelect(agentType) {
-        const idx = this.agentSelected.indexOf(agentType);
-        if (idx >= 0) {
-          this.agentSelected.splice(idx, 1);
-        } else {
-          this.agentSelected.push(agentType);
-        }
-      },
-      async confirmAddAgents() {
-        if (this.submitting || this.agentSelected.length === 0) return;
-        this.submitting = true;
-        const kid = this.detail.id;
-        try {
-          await API.post('/knowledge/' + kid + '/refs/batch', { scene_ids: [], agent_types: this.agentSelected }, 15000);
-          await this._refreshDetailFull();
-          app.showToast(this.t('ref_agents_added_count', { count: this.agentSelected.length }));
-          this.addAgentPopover = false;
-          this.agentSelected = [];
         } catch (e) {
           if (e.name === 'AbortError' && !e.silent) {
             app.showToast(this.t('ref_timeout_refresh'));
@@ -705,6 +634,8 @@ function renderKnowledge() {
         } catch (e) {
           if (e.name === 'AbortError' && !e.silent) {
             app.showToast(this.t('create_timeout'));
+            this.createForm = null;
+            this.view = 'list';
             await this.loadList();
           } else if (e.name === 'AbortError' && e.silent) {
             // 导航/切 tab 导致的取消，静默
