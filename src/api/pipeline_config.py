@@ -410,33 +410,6 @@ def delete_custom_scene(scene_id: str, repo_key: str):
         pass
 
 
-def _auto_fork_official_scenes_to_repo(repo_key: str, user_id: int = 0):
-    """[deprecated] 旧版：host_repo 自动 fork default 官方场景。
-
-    方案 B 后由 apply_default_scene_to_repo 替代（从 scene_market 复刻默认「通用开发」场景）。
-    保留兼容：若已有 old-scope 调用方，此处改为走新逻辑。
-    """
-    apply_default_scene_to_repo(repo_key, user_id)
-
-
-def apply_default_scene_to_repo(repo_key: str, user_id: int = 0) -> bool:
-    """应用默认场景到仓库：直接调 apply_market_scene 走场景中心应用逻辑。
-
-    默认场景名读 configs/default-scene.json（default_scene_market_name，默认 'default'=通用开发）。
-    配置为 '' 时不自动配置场景。
-    幂等：仓库已有同 market_scene_id 的场景则不重复创建。
-
-    与用户从场景中心手动应用走完全相同的逻辑：
-    skill 校验 → 幂等查重 → 创建/更新场景 + 回写 market_scene_id。
-    skill 缺失时抛 HTTPException(400)，托管流程应让异常冒出暴露给前端。
-    """
-    default_name = _get_default_scene_market_name()
-    if not default_name:
-        log.info(f"apply_default_scene_to_repo: default scene disabled ({repo_key})")
-        return False
-    return apply_market_scene_by_name(repo_key, default_name, user_id)
-
-
 def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0) -> bool:
     """按场景名从 scene_market 查 market_id 并应用到仓库。
 
@@ -473,49 +446,6 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
     result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
     log.info(f"apply_market_scene_by_name: applied market scene {market_id} ({scene_name}) to {repo_key}: {result}")
     return True
-
-
-def fork_official_scene(scene_id: str, user_id: int = 0, repo_key: str = "") -> bool:
-    """[deprecated] 旧版：fork 官方场景到 repo/user scope。
-
-    方案 B：官方场景走 scene_market，仓库应用即复刻为 repo 场景（scene_id 无前缀）。
-    """
-    if not repo_key:
-        return False
-    official = _load_official_scene_from_market(scene_id)
-    if not official:
-        log.warning(f"fork_official_scene: market scene '{scene_id}' not found for {repo_key}")
-        return False
-    if _query_scene_by_id(scene_id, repo_key=repo_key):
-        return False
-    try:
-        create_custom_scene(
-            scene_id=scene_id, name=official["name"] or scene_id,
-            display_name=official.get("display_name") or official["name"] or scene_id,
-            description=official.get("description", "") or "",
-            repo_key=repo_key, nodes=official.get("nodes") or [],
-            onboarding=official.get("onboarding", "repo-onboarding"))
-        log.info(f"Forked scene '{scene_id}' to repo {repo_key}")
-        return True
-    except Exception as e:
-        log.warning(f"fork_official_scene: create failed: {e}")
-        return False
-
-
-def _get_default_scene_market_name() -> str:
-    """读 configs/default-scene.json 的 default_scene_market_name（可被环境变量 DEFAULT_SCENE_MARKET_NAME 覆盖）。"""
-    env = os.environ.get("DEFAULT_SCENE_MARKET_NAME")
-    if env is not None:
-        return env.strip()
-    try:
-        _cfg_path = os.path.join(CONFIG_DIR, "default-scene.json")
-        if os.path.exists(_cfg_path):
-            with open(_cfg_path, "r", encoding="utf-8") as f:
-                _cfg = json.load(f)
-            return str(_cfg.get("default_scene_market_name", "default") or "").strip()
-    except Exception as e:
-        log.warning(f"default-scene.json load failed: {e}")
-    return "default"
 
 
 def _query_official_scene_ids() -> set[str]:

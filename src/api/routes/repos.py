@@ -547,13 +547,6 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
                                      bot_github_token=gh_bot_token, bot_username=gh_bot_username)
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             ensure_default_agent_sessions(repo_key)
-            try:
-                from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
-                _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
-            except HTTPException:
-                raise
-            except Exception as e:
-                log.warning(f"host_repo: auto-fork scenes failed: {e}")
             _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
             return {"message": "仓库托管成功", "webhook_id": hook_id, **_bot_result}
         except HTTPException:
@@ -657,13 +650,6 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
             _mark("")
-            try:
-                from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
-                _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
-            except HTTPException:
-                raise
-            except Exception as e:
-                log.warning(f"host_repo: auto-fork scenes failed: {e}")
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
         hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=webhook_token)
@@ -675,13 +661,6 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
         from src.api.session_store import ensure_default_agent_sessions
         ensure_default_agent_sessions(repo_key)
         _mark("")
-        try:
-            from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
-            _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
-        except HTTPException:
-            raise
-        except Exception as e:
-            log.warning(f"host_repo: auto-fork scenes failed: {e}")
         return {"message": "仓库托管成功", "webhook_id": hook_id}
     except HTTPException:
         raise
