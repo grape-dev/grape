@@ -455,7 +455,7 @@ function _renderPipelineSection(data) {
   let html = `<div style="${_cardStyle};cursor:pointer" onclick="_jumpToPipePage()">`;
   // 卡片标题：流水线 + 场景名
   html += `<div style="${_cardTitle}">`;
-  html += `<span>${I18N.t('tasks.pipeline_scene')||'流水线'} · ${data.scene_name || ''}</span>`;
+  html += `<span>${I18N.t('tasks.pipeline_scene')||'流水线'}</span>`;
   html += `</div>`;
   // 流水线节点进度条
   if (nodes.length > 0) {
