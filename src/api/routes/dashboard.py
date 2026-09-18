@@ -1109,6 +1109,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
                                      "status": derive_runtime_health(e["status"], e.get("last_seen_at"), _now),
                                      "tags": e.get("tags", []),
+                                     "scene_tags": e.get("scene_tags", ["default"]),
                                      "scope": e.get("scope", "global"),
                                      "scope_label": _scope_labels.get(e.get("scope", "global"), ""),
                                      "alias": e.get("alias", "")}
