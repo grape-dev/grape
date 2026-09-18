@@ -73,7 +73,6 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          source: str = Query("", description="按来源筛选：system/agent/manual"),
                          page: int = Query(1, description="页码，从1开始"),
                          page_size: int = Query(50, description="每页条数，默认50"),
-                         show_archived: bool = Query(False, description="是否包含归档知识"),
                          sort: str = Query("", description="排序：latest=按更新时间倒序"),
                          q: str = Query("", description="搜索关键词（匹配 name/description）")):
     """统一知识列表——只查 DB 返回分页列表（不含统计，统计走独立接口）。"""
@@ -87,8 +86,6 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
     # 构建 WHERE 条件
     where = "WHERE repo_key=?"
     params = [repo_key]
-    if not show_archived:
-        where += " AND archived=0"
     if source:
         where += " AND source=?"
         params.append(source)
@@ -106,7 +103,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
             f"SELECT id, scope, repo_key, agent_type, issue_num, file_path, status, "
             f"source_seq, created_by, created_at, obs_key, content_hash, updated_at, source, archived, description, name "
             f"FROM agent_shared_knowledge {where} "
-            f"ORDER BY archived ASC, {'updated_at DESC,' if sort == 'latest' else ''} id DESC LIMIT ? OFFSET ?",
+            f"ORDER BY {'updated_at DESC,' if sort == 'latest' else ''} id DESC LIMIT ? OFFSET ?",
             params + [page_size, offset]
         ).fetchall()
 
@@ -126,7 +123,6 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
             "created_at": normalize_event_time(r[9] or ""),
             "obs_key": r[10] or "",
             "source": r[13] or "",
-            "archived": r[14] or 0,
             "description": r[15] or "",
             "name": r[16] or "",
             "issue_tag": f"Issue #{r[4]}" if r[4] and r[1] in ("issue", "issue_agent") else "",
