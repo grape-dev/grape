@@ -513,12 +513,21 @@ function renderKnowledge() {
         const self = this;
         const kid = this.detail.id;
         _showAppleConfirm(this.t('delete_confirm'), async function() {
+          if (self.submitting) return; self.submitting = true;
           try {
-            await API.del('/knowledge/' + kid);
+            await API.del('/knowledge/' + kid, 15000);
             app.showToast(self.t('knowledge_deleted'));
             self.backToList();
           } catch (e) {
-            app.showToast(e.message || I18N.t('common.load_failed'));
+            if (e.name === 'AbortError' && !e.silent) {
+              app.showToast(self.t('ref_timeout_refresh'));
+            } else if (e.name === 'AbortError' && e.silent) {
+              // 静默
+            } else {
+              app.showToast(e.message || I18N.t('common.load_failed'));
+            }
+          } finally {
+            self.submitting = false;
           }
         });
       },
@@ -528,14 +537,21 @@ function renderKnowledge() {
         const self = this;
         _showAppleConfirm(this.t('delete_confirm'), async function() {
           if (self.submitting) return; self.submitting = true;
-          const _t = setTimeout(() => self.submitting = false, 10000);
           try {
-            await API.del('/knowledge/' + k.id);
+            await API.del('/knowledge/' + k.id, 15000);
             app.showToast(self.t('knowledge_deleted'));
             await self.loadList();
           } catch (e) {
-            app.showToast(e.message || I18N.t('common.load_failed'));
-          } finally { clearTimeout(_t); self.submitting = false; }
+            if (e.name === 'AbortError' && !e.silent) {
+              app.showToast(self.t('ref_timeout_refresh'));
+            } else if (e.name === 'AbortError' && e.silent) {
+              // 静默
+            } else {
+              app.showToast(e.message || I18N.t('common.load_failed'));
+            }
+          } finally {
+            self.submitting = false;
+          }
         });
       },
       quickEdit(k) {
