@@ -243,22 +243,23 @@ if len(parts) >= 4 and parts[0] == "project-info":
     owner = parts[2]
 
 # 改为：
-# kind 和 owner 均从 DB 字段取，不从 file_path 解析
-# scope='member' 涵盖 member 和 agent 两种文档：
-#   agent_type 非空 → agent 生成的文档，kind="agent"，owner=agent_type
-#   agent_type 为空 → 用户上传的文档，kind="member"，owner=created_by
-if agent_type:
+# kind 从 source 字段判断，owner 从 created_by 取
+# source='manual' → 用户上传，kind="member"
+# source='agent'  → Agent 生成，kind="agent"
+if source == "agent":
     kind = "agent"
-    owner = agent_type
 else:
     kind = "member"
-    owner = created_by or ""
+owner = created_by or ""
 ```
 
-kind 和 owner 均从 DB 字段取（agent_type / created_by），不从 file_path 路径段解析。
+kind 从 DB 的 source 字段判断（manual/agent），owner 从 created_by 取。
 
-理由：file_path 中的路径段与 DB 记录的实际属性不一定一致（管理员代传、路径迁移、格式变化等情况）。
-DB 的 agent_type 字段是记录写入时的权威值，是区分 member/agent 文档的准确依据。
+理由：
+- agent_type 字段在 scope='member' 时的含义是"关联的 agent 类型"（用户上传时可指定），不是"文档由 agent 生成"
+- source 字段才是区分文档来源的权威字段：source='manual' = 用户上传，source='agent' = Agent 生成
+- create_knowledge_entry 硬编码 scope="member" + source="manual"，文件物理路径始终在 project-info/member/ 下
+- created_by 是 DB 记录的实际创建者，是权威来源
 
 兼容所有三种 file_path 格式（OLD/PARTIAL/NEW）——不再依赖 file_path 格式。
 

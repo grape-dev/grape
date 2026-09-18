@@ -77,7 +77,7 @@ def _member_docs(repo_key: str) -> list[dict]:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id, file_path, agent_type, created_by, created_at, obs_key "
+                "SELECT id, file_path, agent_type, created_by, created_at, obs_key, source "
                 "FROM agent_shared_knowledge "
                 "WHERE repo_key=? AND scope='member' "
                 "AND obs_key!='' AND obs_key IS NOT NULL "
@@ -87,20 +87,18 @@ def _member_docs(repo_key: str) -> list[dict]:
             rows = c.fetchall()
         docs = []
         seen = set()  # file_path 去重（同文件多版本只展示最新）
-        for rid, file_path, agent_type, created_by, created_at, obs_key in rows:
+        for rid, file_path, agent_type, created_by, created_at, obs_key, source in rows:
             if not file_path or file_path in seen:
                 continue
             seen.add(file_path)
-            # Issue #190：kind 和 owner 均从 DB 字段取，不从 file_path 解析
-            # scope='member' 涵盖 member 和 agent 两种文档：
-            # agent_type 非空 → agent 生成，kind="agent"，owner=agent_type
-            # agent_type 为空 → 用户上传，kind="member"，owner=created_by
-            if agent_type:
+            # Issue #190：kind 从 source 字段判断，owner 从 created_by 取
+            # source='manual' → 用户上传，kind="member"
+            # source='agent'  → Agent 生成，kind="agent"
+            if source == "agent":
                 kind = "agent"
-                owner = agent_type
             else:
                 kind = "member"
-                owner = created_by or ""
+            owner = created_by or ""
             name = os.path.basename(file_path)
             docs.append({
                 "name": name,
