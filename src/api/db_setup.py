@@ -1768,7 +1768,6 @@ def _migrate_knowledge():
     log.info("[knowledge_migrate] migration started")
 
     _restore_ok = False       # 恢复归档记录
-    _dedup_ok = False          # 去重 baseline 重复记录
     _obs_key_ok = False        # 归一化 obs_key
     _file_path_ok = False      # 归一化 file_path
 
@@ -1788,27 +1787,8 @@ def _migrate_knowledge():
     # step 1.5（每次启动执行，在去重之前）。此处不再重复——_migrate_knowledge
     # 受 knowledge_migrate_done 标记控制，首次执行后跳过，无法保证回填在
     # 去重之前完成。
-
-    # ===== 去重 baseline 重复记录（按 repo_key + name 保留 MAX(id)）=====
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-                "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
-                "AND id NOT IN (SELECT keep.keep_id FROM ("
-                "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-                "WHERE scope='baseline' GROUP BY repo_key, name) AS keep))")
-            c.execute(
-                "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
-                "AND id NOT IN (SELECT keep.keep_id FROM ("
-                "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-                "WHERE scope='baseline' GROUP BY repo_key, name) AS keep)")
-            db.commit()
-        _dedup_ok = True
-        log.info("[knowledge_migrate] baseline dedup done")
-    except Exception as e:
-        log.warning(f"[knowledge_migrate] baseline dedup failed: {e}")
+    # NOTE: baseline 去重也已移至 _migrate_knowledge_dedup_and_ref() step 2
+    # （每次启动执行）。此处不再重复。
 
     # ===== 归一化 obs_key（新格式含 provider 前缀）=====
     try:
@@ -1930,7 +1910,7 @@ def _migrate_knowledge():
 
     # ===== 标记完成 + 释放锁（finally 保证锁一定释放）=====
     try:
-        if _restore_ok and _dedup_ok and _obs_key_ok and _file_path_ok:
+        if _restore_ok and _obs_key_ok and _file_path_ok:
             set_meta_value("knowledge_migrate_done", "1")
             log.info("[knowledge_migrate] migration done")
         else:
