@@ -963,7 +963,7 @@ def _sync_baseline_files():
     Issue #103：加分布式锁保护，防止多实例同时写 baseline。
     """
     import hashlib as _hl
-    from src.repo_key import split_owner_repo
+    from src.repo_key import parse_repo_key
     from src.storage import get_storage
 
     storage = get_storage()
@@ -984,7 +984,7 @@ def _sync_baseline_files():
             log.info(f"[knowledge] baseline sync: lock contention for {repo_key}, skipped")
             continue
         try:
-            owner, repo = split_owner_repo(repo_key)
+            _provider, owner, repo = parse_repo_key(repo_key)
             if not owner or not repo:
                 continue
             from src.repo_key import workspace_repo_dir

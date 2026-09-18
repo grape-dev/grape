@@ -1721,7 +1721,6 @@ def _migrate_knowledge():
     分布式锁：acquire_lock 防多实例并发执行迁移。
     最终一致性：迁移期间旧格式数据仍可用，迁移完成后切换到新格式。
     """
-    import hashlib as _hl
     from src.session_manager import db, db_lock
     from src.mysql_compat import get_db_backend
     from src.user.db import get_meta_value, set_meta_value
@@ -1907,15 +1906,15 @@ def _migrate_knowledge():
     except Exception as e:
         log.warning(f"[knowledge_migrate] step 3 failed: {e}")
 
-    # ===== 标记完成（仅在所有步骤成功时）=====
-    if _step0_ok and _step1_ok and _step2_ok and _step3_ok:
-        set_meta_value("knowledge_migrate_done", "1")
-        log.info("[knowledge_migrate] migration done")
-    else:
-        log.warning("[knowledge_migrate] migration incomplete, will retry on next startup")
-
-    # 释放分布式锁
-    release_lock(_lock_key)
+    # ===== 标记完成 + 释放锁（finally 保证锁一定释放）=====
+    try:
+        if _step0_ok and _step1_ok and _step2_ok and _step3_ok:
+            set_meta_value("knowledge_migrate_done", "1")
+            log.info("[knowledge_migrate] migration done")
+        else:
+            log.warning("[knowledge_migrate] migration incomplete, will retry on next startup")
+    finally:
+        release_lock(_lock_key)
 
 
 def _cleanup_stale_meta():
