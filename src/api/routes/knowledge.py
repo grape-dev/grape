@@ -747,26 +747,47 @@ def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
         items.append((sid, ""))
     for at in agent_types:
         items.append(("", at))
-    with db_lock:
-        c = db.cursor()
-        for scene_id, agent_type in items:
-            # 禁止空关联——scene_id 和 agent_type 不能同时为空（否则全局注入）
-            if not scene_id and not agent_type:
-                continue
-            existing = c.execute(
-                "SELECT id FROM scene_knowledge_ref "
-                "WHERE knowledge_id=? AND scene_id=? AND agent_type=?",
-                (knowledge_id, scene_id, agent_type)
-            ).fetchone()
-            if not existing:
-                c.execute(
-                    "INSERT INTO scene_knowledge_ref "
-                    "(knowledge_id, scene_id, agent_type, enabled, created_by) "
-                    "VALUES (?, ?, ?, 1, ?)",
-                    (knowledge_id, scene_id, agent_type, username)
-                )
-                added += 1
-        db.commit()
+    try:
+        with db_lock:
+            c = db.cursor()
+            for scene_id, agent_type in items:
+                # 禁止空关联——scene_id 和 agent_type 不能同时为空（否则全局注入）
+                if not scene_id and not agent_type:
+                    continue
+                existing = c.execute(
+                    "SELECT id FROM scene_knowledge_ref "
+                    "WHERE knowledge_id=? AND scene_id=? AND agent_type=?",
+                    (knowledge_id, scene_id, agent_type)
+                ).fetchone()
+                if not existing:
+                    c.execute(
+                        "INSERT INTO scene_knowledge_ref "
+                        "(knowledge_id, scene_id, agent_type, enabled, created_by) "
+                        "VALUES (?, ?, ?, 1, ?)",
+                        (knowledge_id, scene_id, agent_type, username)
+                    )
+                    added += 1
+            db.commit()
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        err_msg = str(e).upper()
+        if "UNIQUE" in err_msg or "DUPLICATE" in err_msg:
+            # 并发竞态：另一个请求已插入同一条记录，视为幂等成功
+            try:
+                with db_lock:
+                    count = db.cursor().execute(
+                        "SELECT COUNT(*) FROM scene_knowledge_ref "
+                        "WHERE knowledge_id=? AND enabled=1",
+                        (knowledge_id,)
+                    ).fetchone()[0]
+                return {"ok": True, "added": 0, "message": "关联已存在（并发去重）", "total": count}
+            except Exception:
+                raise HTTPException(status_code=409,
+                    detail={"code": 409, "message": "该知识已绑定此场景/Agent 类型"})
+        raise
     return {"ok": True, "added": added}
 
 
