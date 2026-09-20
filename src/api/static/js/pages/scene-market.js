@@ -602,7 +602,7 @@ function _toggleSceneLike(sceneId, el) {
   });
 }
 
-// ── 场景应用 ──
+// ── 场景应用（带高级选项弹窗） ──
 function _applyScene(sceneId) {
   const repo = _currentRepoFullName();
   if (!repo) {
@@ -612,51 +612,205 @@ function _applyScene(sceneId) {
   const parts = repo.split('/');
   const owner = encodeURIComponent(parts[0]);
   const repoName = encodeURIComponent(parts[1]);
-
+  // 先检查是否已应用过，然后统一弹高级选项弹窗
   API.get('/scenes/market/' + sceneId + '/applied?owner=' + owner + '&repo=' + repoName).then(check => {
-    if (check.applied) {
-      _showApplyConfirm(sceneId, owner, repoName, check.scene_name);
-    } else {
-      _doApplyScene(sceneId, owner, repoName);
-    }
+    _showApplyOptionsModal(sceneId, owner, repoName, check.applied, check.scene_name);
   }).catch(() => {
-    _doApplyScene(sceneId, owner, repoName);
+    _showApplyOptionsModal(sceneId, owner, repoName, false, '');
   });
 }
 
-function _showApplyConfirm(sceneId, owner, repoName, sceneName) {
+// 高级选项弹窗：工作分支 + 自定义配置项
+function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName) {
   var modal = document.createElement('div');
-  modal.id = 'applyConfirmModal';
+  modal.id = 'applyOptionsModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
-  modal.innerHTML = '<div class="cd" style="width:400px;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
-    '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:14px">' +
-      '<span style="font-size:22px;flex-shrink:0">⚠️</span>' +
-      '<div>' +
-        '<h3 style="font-size:15px;font-weight:600;margin-bottom:6px">' + (I18N.t('skills.apply_confirm_title')||'确认覆盖应用') + '</h3>' +
+
+  var title = isOverwrite
+    ? (I18N.t('skills.apply_confirm_title')||'确认覆盖应用')
+    : (I18N.t('skills.apply_scene')||'应用场景');
+  var warnHtml = isOverwrite
+    ? '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:16px;padding:12px 14px;background:rgba(255,59,48,.06);border-radius:12px">' +
+        '<span style="font-size:18px;flex-shrink:0">⚠️</span>' +
         '<div style="font-size:12px;color:var(--t2);line-height:1.6">' +
           (I18N.t('skills.apply_confirm_desc')||'当前仓库已应用过此场景') + (sceneName ? '（' + sceneName + '）' : '') + '，' +
           (I18N.t('skills.apply_confirm_warning')||'再次应用将覆盖更新已有的场景配置。') +
         '</div>' +
+      '</div>'
+    : '';
+
+  modal.innerHTML =
+    '<style>' +
+      '#applyOptionsModal .ap-btn{padding:7px 18px;border-radius:999px;font-size:12px;font-weight:500;cursor:pointer;transition:all .2s ease;background:transparent;border:1px solid rgba(0,113,227,.3);color:#0071e3}' +
+      '#applyOptionsModal .ap-btn:hover{background:#0071e3;border-color:#0071e3;color:#fff}' +
+      '#applyOptionsModal .ap-btn-d{border:1px solid rgba(255,59,48,.3);color:#ff3b30}' +
+      '#applyOptionsModal .ap-btn-d:hover{background:#ff3b30;border-color:#ff3b30;color:#fff}' +
+    '</style>' +
+    '<div class="cd" style="width:480px;max-height:85vh;overflow-y:auto;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
+      '<h3 style="font-size:15px;font-weight:600;margin-bottom:14px">' + title + '</h3>' +
+      warnHtml +
+      // 工作分支
+      '<div style="margin-bottom:16px">' +
+        '<div style="font-size:12px;font-weight:600;color:#86868b;margin-bottom:8px">' + (I18N.t('dashboard.work_branch')||'工作分支') + '</div>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<select id="applyAdvWorkBranch" style="flex:1;padding:8px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'"><option value="">' + (I18N.t('common.loading')||'加载中...') + '</option></select>' +
+          '<button class="ap-btn" onclick="_applyToggleNewBranch()">' + (I18N.t('dashboard.create_branch')||'新建分支') + '</button>' +
+        '</div>' +
+        '<div id="applyNewBranchInput" style="display:none;padding:8px 0 0">' +
+          '<div style="display:flex;gap:8px">' +
+            '<input id="applyNewBranchName" placeholder="' + (I18N.t('dashboard.branch_name')||'分支名') + '" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'">' +
+            '<select id="applyNewBranchRef" style="width:120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;background:#f5f5f7;outline:none;cursor:pointer"></select>' +
+            '<button class="ap-btn" onclick="_applyCreateNewBranch(\'' + owner + '\',\'' + repoName + '\')">' + (I18N.t('common.create')||'创建') + '</button>' +
+            '<button class="ap-btn" onclick="_applyToggleNewBranch()">' + (I18N.t('common.cancel')||'取消') + '</button>' +
+          '</div>' +
+        '</div>' +
       '</div>' +
-    '</div>' +
-    '<div style="display:flex;justify-content:flex-end;gap:8px">' +
-      '<button class="bt bt-o bt-s" id="applyCancelBtn">' + (I18N.t('common.cancel')||'取消') + '</button>' +
-      '<button class="bt bt-p bt-s" id="applyConfirmBtn">' + (I18N.t('skills.apply_confirm_btn')||'确认覆盖') + '</button>' +
-    '</div>' +
-  '</div>';
+      // 自定义配置项
+      '<div style="margin-bottom:16px">' +
+        '<div style="font-size:12px;font-weight:600;color:#86868b;margin-bottom:8px">' + (I18N.t('dashboard.custom_config')||'自定义配置') + '</div>' +
+        '<div id="applyAdvCustomFields" style="display:flex;flex-direction:column;gap:8px"></div>' +
+        '<button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_applyAddCustomField()">+ ' + (I18N.t('dashboard.add_config')||'添加配置项') + '</button>' +
+      '</div>' +
+      // 底部按钮
+      '<div style="display:flex;justify-content:flex-end;gap:8px;padding-top:8px;border-top:1px solid rgba(0,0,0,.06)">' +
+        '<button class="bt bt-o bt-s" id="applyCancelBtn">' + (I18N.t('common.cancel')||'取消') + '</button>' +
+        '<button class="bt bt-p bt-s" id="applyConfirmBtn">' + (isOverwrite ? (I18N.t('skills.apply_confirm_btn')||'确认覆盖') : (I18N.t('skills.apply_scene')||'应用')) + '</button>' +
+      '</div>' +
+    '</div>';
   document.body.appendChild(modal);
+
+  // 关闭
   document.getElementById('applyCancelBtn').onclick = function() { modal.remove(); };
+  // 点击遮罩关闭
+  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+  // 新建分支切换
+  window._applyToggleNewBranch = function() {
+    var el = document.getElementById('applyNewBranchInput');
+    if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  };
+
+  // 添加自定义配置项
+  window._applyAddCustomField = function(key, value) {
+    var container = document.getElementById('applyAdvCustomFields');
+    if (!container) return;
+    var row = document.createElement('div');
+    row.className = 'adv-kv';
+    row.style.cssText = 'display:flex;gap:8px;align-items:center';
+    row.innerHTML =
+      '<input class="adv-kv-key" placeholder="key" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (key || '') + '">' +
+      '<input class="adv-kv-val" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (value || '') + '">' +
+      '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>';
+    container.appendChild(row);
+  };
+
+  // 创建新分支
+  window._applyCreateNewBranch = function(o, n) {
+    var branchName = (document.getElementById('applyNewBranchName') || {}).value || '';
+    var refs = (document.getElementById('applyNewBranchRef') || {}).value || 'main';
+    if (!branchName.trim()) { app.showToast && app.showToast(I18N.t('dashboard.branch_name_empty')||'分支名不能为空'); return; }
+    API.post('/scenes/branches/' + o + '/' + n, { branch_name: branchName.trim(), refs: refs })
+      .then(function() {
+        app.showToast && app.showToast(I18N.t('dashboard.branch_created')||'分支已创建');
+        return API.get('/scenes/branches/' + o + '/' + n);
+      })
+      .then(function(b) {
+        var branches = (b && b.branches) || [];
+        var sel = document.getElementById('applyAdvWorkBranch');
+        if (!sel) return;
+        sel.innerHTML = branches.map(function(br) { var s = br.name === branchName.trim() ? ' selected' : ''; return '<option value="' + br.name + '"' + s + '>' + br.name + (br.protected ? ' 🔒' : '') + '</option>'; }).join('');
+        var refSel = document.getElementById('applyNewBranchRef');
+        if (refSel) refSel.innerHTML = branches.map(function(br) { return '<option value="' + br.name + '">' + br.name + '</option>'; }).join('');
+        document.getElementById('applyNewBranchName').value = '';
+        window._applyToggleNewBranch();
+      })
+      .catch(function(e) { app.showToast && app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '创建失败'); });
+  };
+
+  // 加载仓库分支列表
+  API.get('/scenes/branches/' + owner + '/' + repoName).then(function(b) {
+    var branches = (b && b.branches) || [];
+    var sel = document.getElementById('applyAdvWorkBranch');
+    if (!sel) return; // 弹窗可能已关闭
+    var defaultBranch = 'main';
+    if (branches.length) {
+      sel.innerHTML = branches.map(function(br) { var s = br.name === defaultBranch ? ' selected' : ''; return '<option value="' + br.name + '"' + s + '>' + br.name + (br.protected ? ' 🔒' : '') + '</option>'; }).join('');
+    } else {
+      sel.innerHTML = '<option value="main">main</option>';
+    }
+    var refSel = document.getElementById('applyNewBranchRef');
+    if (refSel) refSel.innerHTML = branches.map(function(br) { return '<option value="' + br.name + '">' + br.name + '</option>'; }).join('');
+  }).catch(function() {
+    var sel = document.getElementById('applyAdvWorkBranch');
+    if (sel) sel.innerHTML = '<option value="main">main</option>';
+  });
+
+  // 如果是覆盖应用，加载已有的高级选项数据回填
+  if (isOverwrite) {
+    var repoFull = decodeURIComponent(owner) + '/' + decodeURIComponent(repoName);
+    API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(repoFull)).then(function(pipeData) {
+      var scenes = (pipeData && pipeData.scenes) || [];
+      var target = sceneName ? scenes.find(function(s) { return s.name === sceneName || s.display_name === sceneName; }) : null;
+      if (!target) return;
+      var sceneIdLocal = target.id;
+      return API.get('/scenes/' + encodeURIComponent(sceneIdLocal) + '/advanced-options?repo=' + encodeURIComponent(repoFull));
+    }).then(function(d) {
+      if (!d) return;
+      var sel = document.getElementById('applyAdvWorkBranch');
+      if (sel && d.work_branch) {
+        var opts = sel.querySelectorAll('option');
+        var found = false;
+        opts.forEach(function(opt) { if (opt.value === d.work_branch) { opt.selected = true; found = true; } });
+        if (!found) {
+          var newOpt = document.createElement('option');
+          newOpt.value = d.work_branch;
+          newOpt.textContent = d.work_branch;
+          newOpt.selected = true;
+          sel.insertBefore(newOpt, sel.firstChild);
+        }
+      }
+      var fields = d.custom_fields || [];
+      fields.forEach(function(f) { window._applyAddCustomField(f.key, f.value); });
+    }).catch(function() {});
+  }
+
+  // 确认按钮
   document.getElementById('applyConfirmBtn').onclick = function() {
+    var workBranch = (document.getElementById('applyAdvWorkBranch') || {}).value || '';
+    if (!workBranch) { app.showToast && app.showToast(I18N.t('dashboard.branch_required')||'工作分支不能为空'); return; }
+    var fields = [];
+    document.querySelectorAll('#applyAdvCustomFields .adv-kv').forEach(function(row) {
+      var k = (row.querySelector('.adv-kv-key') || {}).value || '';
+      var v = (row.querySelector('.adv-kv-val') || {}).value || '';
+      if (k.trim()) fields.push({ key: k.trim(), value: v.trim() });
+    });
     modal.remove();
-    _doApplyScene(sceneId, owner, repoName);
+    _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, fields);
   };
 }
 
-function _doApplyScene(sceneId, owner, repoName) {
-  API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName).then(r => {
-    if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.apply_success')||'场景已应用');
-    app.nav('dash');
-  }).catch(e => {
+// 应用场景 + 保存高级选项
+function _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, customFields) {
+  var repoFull = decodeURIComponent(owner) + '/' + decodeURIComponent(repoName);
+  API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName).then(function(r) {
+    var sceneIdLocal = r.scene_id;
+    if (!sceneIdLocal) {
+      if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.apply_success')||'场景已应用');
+      app.nav('dash');
+      return;
+    }
+    return API.put('/scenes/' + encodeURIComponent(sceneIdLocal) + '/advanced-options?repo=' + encodeURIComponent(repoFull), {
+      work_branch: workBranch,
+      custom_fields: customFields
+    }).then(function() {
+      if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.apply_success')||'场景已应用');
+      app.nav('dash');
+    }).catch(function(e) {
+      console.warn('Advanced options save failed:', e);
+      if (app && app.showToast) app.showToast((r.message || I18N.t('skills.toast.apply_success')||'场景已应用') + '（高级选项保存失败）');
+      app.nav('dash');
+    });
+  }).catch(function(e) {
     if (e.status === 409) {
       _showSceneNameConflict(e.message);
     } else {

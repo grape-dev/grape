@@ -39,6 +39,7 @@ const app = (() => {
   }
 
   function showLogin() {
+    document.documentElement.removeAttribute('data-logged-in');
     $('loginView').classList.remove('hid');
     $('sidebar').style.display = 'none';
     $('mainView').style.display = 'none';
@@ -51,9 +52,13 @@ function loadAgentTypes() {
 }
 
   function showApp() {
+    document.documentElement.setAttribute('data-logged-in', '1');
     $('loginView').classList.add('hid');
+    // 工作台已由 CSS 显示，立即展示加载中状态
+    $('pageContent').innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
     loadAgentTypes();
-    loadProfile().then(() => loadRepos()).catch(() => loadRepos());
+    // profile 和 repos 并行拉取，不互相等待
+    Promise.all([loadProfile(), loadRepos()]).catch(() => {});
   }
 
   function loadProfile() {
@@ -300,7 +305,7 @@ function loadAgentTypes() {
       return;
     }
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail' && view !== 'autopilot' && view !== 'autopilot-detail') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -509,6 +514,12 @@ function loadAgentTypes() {
     } else if (view === 'scene-detail-local') {
       title.textContent = I18N.t('app.current_project');
       renderSceneDetailLocal(param);
+    } else if (view === 'autopilot') {
+      title.textContent = I18N.t('app.current_project');
+      if (typeof renderAutopilot === 'function') renderAutopilot();
+    } else if (view === 'autopilot-detail') {
+      title.textContent = I18N.t('app.current_project');
+      if (typeof renderAutopilotDetail === 'function') renderAutopilotDetail(param);
     }
   }
 
@@ -525,7 +536,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail'];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail'];
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {
@@ -686,7 +697,7 @@ function loadAgentTypes() {
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'产品开发':'Product Dev'}"> ${z?'产品开发':'Product Dev'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'编程开发':'Coding'}"> ${z?'编程开发':'Coding'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'Agent 开发':'Agent Dev'}"> ${z?'Agent 开发':'Agent Dev'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'自动化任务':'Automation'}"> ${z?'自动化任务':'Automation'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'自动化':'Automation'}"> ${z?'自动化':'Automation'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'内容生产':'Content'}"> ${z?'内容生产':'Content'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'数据处理/分析':'Data'}"> ${z?'数据处理/分析':'Data'}</label>
               <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'运营':'Operations'}"> ${z?'运营':'Operations'}</label>
