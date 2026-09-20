@@ -1364,7 +1364,7 @@ function openTaskCopyModal(taskId) {
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
-    <h3 style="margin:0 0 14px;font-size:15px;color:#111">${I18N.t('tasks.copy.modal_title')}</h3>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 14px"><h3 style="margin:0;font-size:15px;color:#111">${I18N.t('tasks.copy.modal_title')}</h3><button onclick="document.getElementById('taskCopyOverlay').remove()" style="background:none;border:none;font-size:18px;color:#8d97a8;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#8d97a8'">✕</button></div>
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.creator_label')}<b>${esc(_currentUsername) || '—'}</b></div>
@@ -1403,10 +1403,7 @@ function openTaskCopyModal(taskId) {
     });
   }).catch(function(){});
 
-  // 点击遮罩空白处关闭
-  let _modalDownOnOverlay = false;
-  ov.addEventListener('mousedown', e => { _modalDownOnOverlay = (e.target === ov); });
-  ov.addEventListener('click', e => { if (e.target === ov && _modalDownOnOverlay) ov.remove(); });
+  // 点击遮罩空白处不关闭——防止误触丢失内容，通过右上角✕或取消按钮关闭（与新建对话框一致）
 }
 
 function copyTaskSubmit() {
