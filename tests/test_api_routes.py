@@ -1508,3 +1508,98 @@ class TestKnowledge:
         finally:
             self._cleanup_kid(kid)
 
+    # ===== 边界校验测试 =====
+
+    def test_create_entry_name_too_long(self):
+        """name 超过 50 字符"""
+        r = self._create_entry(name="x" * 51)
+        assert r.status_code == 400
+        assert "name 不能超过" in r.json().get("detail", {}).get("message", "")
+
+    def test_create_entry_content_too_large(self):
+        """content 超过 10KB"""
+        r = self._create_entry(content="x" * 10241)
+        assert r.status_code == 400
+        assert "content 不能超过" in r.json().get("detail", {}).get("message", "")
+
+    def test_create_entry_desc_too_long(self):
+        """description 超过 200 字符"""
+        r = self._create_entry(description="x" * 201)
+        assert r.status_code == 400
+        assert "description 不能超过" in r.json().get("detail", {}).get("message", "")
+
+    # ===== batch 接口校验测试 =====
+
+    def test_batch_invalid_agent_type(self):
+        """batch 接口非法 agent_type 校验"""
+        r = self._create_entry()
+        kid = r.json().get("id")
+        try:
+            r = client.post(f"/api/knowledge/{kid}/refs/batch",
+                           json={"scene_ids": [], "agent_types": ["invalid_type"]},
+                           headers=_headers)
+            assert r.status_code == 400
+            assert "不支持的 Agent 类型" in r.json().get("detail", {}).get("message", "")
+        finally:
+            self._cleanup_kid(kid)
+
+    def test_batch_invalid_scene_id(self):
+        """batch 接口非法 scene_id 校验"""
+        r = self._create_entry()
+        kid = r.json().get("id")
+        try:
+            r = client.post(f"/api/knowledge/{kid}/refs/batch",
+                           json={"scene_ids": ["nonexistent-uuid"], "agent_types": []},
+                           headers=_headers)
+            assert r.status_code == 400
+            assert "场景不存在" in r.json().get("detail", {}).get("message", "")
+        finally:
+            self._cleanup_kid(kid)
+
+    def test_batch_idempotent_skip(self):
+        """batch 接口幂等跳过已存在"""
+        r = self._create_entry(agent_types=["vod"])
+        kid = r.json().get("id")
+        try:
+            # 再次绑定 vod，应该跳过
+            r = client.post(f"/api/knowledge/{kid}/refs/batch",
+                           json={"scene_ids": [], "agent_types": ["vod"]},
+                           headers=_headers)
+            assert r.status_code == 200
+            assert r.json().get("added") == 0
+        finally:
+            self._cleanup_kid(kid)
+
+    # ===== 404 测试 =====
+
+    def test_detail_not_found(self):
+        """查询不存在的知识"""
+        r = client.get("/api/knowledge/999999", headers=_headers)
+        assert r.status_code == 404
+
+    def test_delete_ref_not_found(self):
+        """删除不存在的关联记录"""
+        r = client.delete("/api/knowledge/ref/999999", headers=_headers)
+        assert r.status_code == 404
+
+    # ===== 权限测试 =====
+
+    def test_update_system_knowledge_forbidden(self):
+        """编辑系统知识返回 403"""
+        # 先查一条系统知识
+        r = client.get("/api/knowledge?repo=org/test&source=system", headers=_headers)
+        if r.status_code == 200 and r.json().get("knowledge"):
+            kid = r.json()["knowledge"][0]["id"]
+            r = client.put(f"/api/knowledge/{kid}", json={
+                "content": "hacked", "name": "hacked", "description": ""
+            }, headers=_headers)
+            assert r.status_code == 403
+
+    def test_delete_system_knowledge_forbidden(self):
+        """删除系统知识返回 403"""
+        r = client.get("/api/knowledge?repo=org/test&source=system", headers=_headers)
+        if r.status_code == 200 and r.json().get("knowledge"):
+            kid = r.json()["knowledge"][0]["id"]
+            r = client.delete(f"/api/knowledge/{kid}", headers=_headers)
+            assert r.status_code == 403
+

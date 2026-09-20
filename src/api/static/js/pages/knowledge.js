@@ -527,7 +527,7 @@ function renderKnowledge() {
           } catch (e) {
             if (e.name === 'AbortError' && !e.silent) {
               app.showToast(self.t('ref_timeout_refresh'));
-              await self._refreshDetailFull();
+              self.backToList();
             } else if (e.name === 'AbortError' && e.silent) {
               // 静默
             } else {
