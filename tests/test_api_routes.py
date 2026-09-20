@@ -1586,20 +1586,49 @@ class TestKnowledge:
 
     def test_update_system_knowledge_forbidden(self):
         """编辑系统知识返回 403"""
-        # 先查一条系统知识
-        r = client.get("/api/knowledge?repo=org/test&source=system", headers=_headers)
-        if r.status_code == 200 and r.json().get("knowledge"):
-            kid = r.json()["knowledge"][0]["id"]
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO agent_shared_knowledge "
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, "
+                "content_hash, status, source_seq, created_by, source, description, name) "
+                "VALUES ('project','gitcode:org/test','',0,'','','',"
+                "'accepted',0,'system','system','测试系统知识','sys-test-update')",
+            )
+            kid = c.lastrowid
+            db.commit()
+        try:
             r = client.put(f"/api/knowledge/{kid}", json={
                 "content": "hacked", "name": "hacked", "description": ""
             }, headers=_headers)
-            assert r.status_code == 403
+            assert r.status_code == 403, f"expected 403, got {r.status_code}: {r.text[:200]}"
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
+                db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE id=?", (kid,))
+                db.commit()
 
     def test_delete_system_knowledge_forbidden(self):
         """删除系统知识返回 403"""
-        r = client.get("/api/knowledge?repo=org/test&source=system", headers=_headers)
-        if r.status_code == 200 and r.json().get("knowledge"):
-            kid = r.json()["knowledge"][0]["id"]
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO agent_shared_knowledge "
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, "
+                "content_hash, status, source_seq, created_by, source, description, name) "
+                "VALUES ('project','gitcode:org/test','',0,'','','',"
+                "'accepted',0,'system','system','测试系统知识','sys-test-delete')",
+            )
+            kid = c.lastrowid
+            db.commit()
+        try:
             r = client.delete(f"/api/knowledge/{kid}", headers=_headers)
-            assert r.status_code == 403
+            assert r.status_code == 403, f"expected 403, got {r.status_code}: {r.text[:200]}"
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
+                db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE id=?", (kid,))
+                db.commit()
 
