@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback
+from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot
 
 
 bot_manager = None
@@ -151,6 +151,14 @@ async def lifespan(app: FastAPI):
         start_upload_cleanup_scheduler()
     except Exception as e:
         log.warning(f"Upload cleanup scheduler start failed: {e}")
+
+    # Autopilot 定时调度器：每分钟扫描到期任务，创建 Issue 触发流水线
+    try:
+        from src.runtime.scheduler import start_scheduler
+        asyncio.create_task(start_scheduler())
+        log.info("Autopilot scheduler started")
+    except Exception as e:
+        log.warning(f"Autopilot scheduler start failed: {e}")
 
     # Issue #190：知识库 obs_key/file_path 归一化迁移（异步，不阻塞启动）
     try:
@@ -340,6 +348,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Active user tracker start failed: {e}")
 
+    # Issue #150: Autopilot 定时调度引擎
+    try:
+        from src.runtime.scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        log.warning(f"Autopilot scheduler start failed: {e}")
+
     yield
 
     log.info("IM WS: stopping...")
@@ -389,6 +404,12 @@ async def lifespan(app: FastAPI):
     try:
         from src.runtime.health_scorer import stop_health_refresh_scheduler
         stop_health_refresh_scheduler()
+    except Exception:
+        pass
+    # Issue #150: 停止 Autopilot 调度器
+    try:
+        from src.runtime.scheduler import stop_scheduler
+        await stop_scheduler()
     except Exception:
         pass
     # 终止运行中的 agent 子进程（opencode），使 executor 线程尽快结束，
@@ -604,6 +625,7 @@ app.include_router(health.router)
 app.include_router(devstage.router)
 app.include_router(latency.router)
 app.include_router(feedback.router)
+app.include_router(autopilot.router)
 
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
