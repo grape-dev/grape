@@ -39,6 +39,7 @@ const app = (() => {
   }
 
   function showLogin() {
+    document.documentElement.removeAttribute('data-logged-in');
     $('loginView').classList.remove('hid');
     $('sidebar').style.display = 'none';
     $('mainView').style.display = 'none';
@@ -51,9 +52,13 @@ function loadAgentTypes() {
 }
 
   function showApp() {
+    document.documentElement.setAttribute('data-logged-in', '1');
     $('loginView').classList.add('hid');
+    // 工作台已由 CSS 显示，立即展示加载中状态
+    $('pageContent').innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
     loadAgentTypes();
-    loadProfile().then(() => loadRepos()).catch(() => loadRepos());
+    // profile 和 repos 并行拉取，不互相等待
+    Promise.all([loadProfile(), loadRepos()]).catch(() => {});
   }
 
   function loadProfile() {

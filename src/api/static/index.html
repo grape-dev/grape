@@ -12,11 +12,22 @@
 // Early theme application — prevents flash of unstyled content (FOUC).
 // Reads localStorage 'grapeTheme' before DOM renders. Default: Liquid Glass (apple).
 (function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
+// Early auth check — prevents login/workbench flash on page load.
+// Checks both localStorage (returning user) and URL ?token= (OAuth callback).
+(function(){if(localStorage.getItem('token')||new URLSearchParams(location.search).get('token'))document.documentElement.setAttribute('data-logged-in','1');})();
 </script>
+<style>
+/* Default: show login overlay, hide workbench (sidebar+mainView) */
+.sb,.mn{display:none}
+/* Logged-in: hide login overlay, show workbench */
+[data-logged-in="1"] .ln{opacity:0;pointer-events:none}
+[data-logged-in="1"] .sb{display:flex}
+[data-logged-in="1"] .mn{display:flex}
+</style>
 </head>
 <body>
 
-<div class="ln hid" id="loginView">
+<div class="ln" id="loginView">
 <div class="lbox">
 <img class="logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">
 <h1>Grape</h1>
