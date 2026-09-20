@@ -110,7 +110,19 @@
     "completed_at": "Completed",
     "no_description": "No requirement description.",
     "view_issue": "View Issue ↗",
-    "go_conversation": "Go to Conversation ↗"
+    "go_conversation": "Go to Conversation ↗",
+    "copy_task": "Copy Requirement"
+  },
+  "copy": {
+    "modal_title": "Copy Requirement",
+    "btn_copy": "Create & Run",
+    "btn_copying": "Creating…",
+    "title_suffix": " (Copy)",
+    "issue_link_label": "Original Issue Link",
+    "err_no_title": "Please fill in the requirement title",
+    "err_no_desc": "Please fill in the requirement description",
+    "err_create_failed": "Copy failed: {{msg}}",
+    "success_toast": "Requirement copied and started"
   },
   "search_placeholder": "Search tasks...",
   "change_status_failed": "Status update failed: {{msg}}",
