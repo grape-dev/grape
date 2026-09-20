@@ -138,7 +138,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                 ref_rows = db.cursor().execute(
                     f"SELECT r.knowledge_id, r.scene_id, r.agent_type, r.enabled, s.name "
                     f"FROM scene_knowledge_ref r "
-                    f"LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? "
+                    f"LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? AND s.is_active=1 "
                     f"WHERE r.knowledge_id IN ({placeholders})",
                     [repo_key] + kid_list
                 ).fetchall()
@@ -711,14 +711,41 @@ def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
 def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
                               user: dict = Depends(require_no_session_token)):
     """批量新增场景/Agent 关联（幂等，跳过已存在的）。"""
-    _check_ref_permission(knowledge_id, user)
+    row = _check_ref_permission(knowledge_id, user)
     username = str(user.get("username") or "")
     from src.session_manager import db, db_lock
+
+    scene_ids = body.scene_ids or []
+    agent_types = body.agent_types or []
+
+    # Issue #199: 校验 agent_types（内存比对，不查 DB）
+    if agent_types:
+        invalid = [at for at in agent_types if at not in VALID_AGENT_TYPES]
+        if invalid:
+            raise HTTPException(status_code=400,
+                detail={"code": 400, "message": f"不支持的 Agent 类型: {invalid}"})
+
+    # Issue #199: 校验 scene_ids 存在性（批量查，不循环）
+    repo_key = row.get("repo_key", "")
+    if scene_ids:
+        with db_lock:
+            placeholders = ",".join("?" * len(scene_ids))
+            valid_rows = db.cursor().execute(
+                f"SELECT scene_id FROM devops_pipeline_scene "
+                f"WHERE is_active=1 AND repo_key=? AND scene_id IN ({placeholders})",
+                [repo_key] + scene_ids
+            ).fetchall()
+        valid_ids = {r[0] for r in valid_rows}
+        invalid = [sid for sid in scene_ids if sid not in valid_ids]
+        if invalid:
+            raise HTTPException(status_code=400,
+                detail={"code": 400, "message": f"场景不存在: {invalid}"})
+
     added = 0
     items = []
-    for sid in (body.scene_ids or []):
+    for sid in scene_ids:
         items.append((sid, ""))
-    for at in (body.agent_types or []):
+    for at in agent_types:
         items.append(("", at))
     with db_lock:
         c = db.cursor()

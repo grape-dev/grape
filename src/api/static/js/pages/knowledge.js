@@ -527,10 +527,12 @@ function renderKnowledge() {
           } catch (e) {
             if (e.name === 'AbortError' && !e.silent) {
               app.showToast(self.t('ref_timeout_refresh'));
+              await self._refreshDetailFull();
             } else if (e.name === 'AbortError' && e.silent) {
               // 静默
             } else {
               app.showToast(e.message || I18N.t('common.load_failed'));
+              await self._refreshDetailFull();
             }
           } finally {
             self.submitting = false;
@@ -550,10 +552,12 @@ function renderKnowledge() {
           } catch (e) {
             if (e.name === 'AbortError' && !e.silent) {
               app.showToast(self.t('ref_timeout_refresh'));
+              await self.loadList();
             } else if (e.name === 'AbortError' && e.silent) {
               // 静默
             } else {
               app.showToast(e.message || I18N.t('common.load_failed'));
+              await self.loadList();
             }
           } finally {
             self.submitting = false;
