@@ -468,12 +468,15 @@ function renderKnowledge() {
         event.target.value = '';
       },
       scrollSceneTrack(delta) {
-        const el = this.$refs.sceneTrack;
+        const ref = this.$refs.sceneTrack;
+        if (!ref) return;
+        const el = ref.$el || ref;
         if (el) el.scrollBy({ left: delta, behavior: 'smooth' });
       },
       updateSceneScrollBtns() {
-        const el = this.$refs.sceneTrack;
-        if (!el) return;
+        const ref = this.$refs.sceneTrack;
+        if (!ref) return;
+        const el = ref.$el || ref;
         this.sceneScrollLeft = el.scrollLeft > 5;
         this.sceneScrollRight = el.scrollLeft + el.clientWidth < el.scrollWidth - 5;
       },
@@ -493,11 +496,14 @@ function renderKnowledge() {
             name: this.editForm.name.trim()
           }, 15000);
           app.showToast(this.t('knowledge_updated'));
-          // Issue #199: 保存成功后返回列表
-          this.backToList();
+          // Issue #199: 保存成功后刷新详情页，退出编辑模式
+          await this._refreshDetailFull();
+          this.editMode = false;
         } catch (e) {
           if (e.name === 'AbortError' && !e.silent) {
             app.showToast(this.t('save_timeout'));
+            await this._refreshDetailFull();
+            this.editMode = false;
           } else if (e.name === 'AbortError' && e.silent) {
             // 导航/切 tab 导致的取消，静默
           } else {
@@ -521,10 +527,12 @@ function renderKnowledge() {
           } catch (e) {
             if (e.name === 'AbortError' && !e.silent) {
               app.showToast(self.t('ref_timeout_refresh'));
+              self.backToList();
             } else if (e.name === 'AbortError' && e.silent) {
               // 静默
             } else {
               app.showToast(e.message || I18N.t('common.load_failed'));
+              await self._refreshDetailFull();
             }
           } finally {
             self.submitting = false;
@@ -544,10 +552,12 @@ function renderKnowledge() {
           } catch (e) {
             if (e.name === 'AbortError' && !e.silent) {
               app.showToast(self.t('ref_timeout_refresh'));
+              await self.loadList();
             } else if (e.name === 'AbortError' && e.silent) {
               // 静默
             } else {
               app.showToast(e.message || I18N.t('common.load_failed'));
+              await self.loadList();
             }
           } finally {
             self.submitting = false;
@@ -599,6 +609,7 @@ function renderKnowledge() {
           this.createForm.sceneSelected = [...this.createSceneTempSelected];
         }
         this.createScenePopover = false;
+        this.$nextTick(() => this.updateSceneScrollBtns());
       },
       cancelCreate() {
         this.createForm = null;
@@ -613,6 +624,7 @@ function renderKnowledge() {
         // 场景列表里的 X 删除（直接删）
         const idx = this.createForm.sceneSelected.indexOf(sceneId);
         if (idx >= 0) this.createForm.sceneSelected.splice(idx, 1);
+        this.$nextTick(() => this.updateSceneScrollBtns());
       },
       toggleCreateSceneTemp(sceneId) {
         // 弹出层里切换临时选中
@@ -629,27 +641,22 @@ function renderKnowledge() {
         if (this.submitting) return;
         this.submitting = true;
         try {
-          const d = await API.post('/knowledge/entry', {
+          await API.post('/knowledge/entry', {
             repo: this.currentRepo(),
             content: this.createForm.content,
             agent_type: '',
             description: this.createForm.description || '',
-            name: this.createForm.name.trim()
+            name: this.createForm.name.trim(),
+            scene_ids: this.createForm.sceneSelected,
+            agent_types: this.createForm.agentSelected
           }, 15000);
-          const kid = d.id || d.knowledge_id;
-          if (kid && (this.createForm.agentSelected.length > 0 || this.createForm.sceneSelected.length > 0)) {
-            await API.post('/knowledge/' + kid + '/refs/batch', {
-              scene_ids: this.createForm.sceneSelected,
-              agent_types: this.createForm.agentSelected
-            }, 15000);
-          }
           app.showToast(this.t('knowledge_created'));
           this.createForm = null;
           this.view = 'list';
-          // Issue #199: loadStats + loadList 并行
           await Promise.all([this.loadStats(), this.loadList()]);
         } catch (e) {
           if (e.name === 'AbortError' && !e.silent) {
+            // 超时——不确定结果，跳回列表让用户自行确认
             app.showToast(this.t('create_timeout'));
             this.createForm = null;
             this.view = 'list';
@@ -657,6 +664,7 @@ function renderKnowledge() {
           } else if (e.name === 'AbortError' && e.silent) {
             // 导航/切 tab 导致的取消，静默
           } else {
+            // 非超时——事务已回滚，留在创建页可安全重试
             app.showToast(e.message || I18N.t('common.load_failed'));
           }
         } finally {
