@@ -357,6 +357,7 @@ window._openBoardDetail = function(taskId) {
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, '/issues/' + t.issue_number)}','_blank')">${I18N.t('tasks.detail.view_issue')}</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('tasks.detail.go_conversation')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${t.id})">⎘ ${I18N.t('tasks.detail.copy_task')}</button>
       ${_renderTaskActionsInline(t)}
     </div>
     <div id="_boardDetailContent">${_detailHtml(t)}</div>
@@ -820,7 +821,7 @@ function _render() {
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
       <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
-      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('tasks.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('tasks.detail.go_conversation')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
+      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('tasks.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('tasks.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('tasks.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
 
@@ -1241,7 +1242,7 @@ function openTaskCreateModal() {
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
-    <h3 style="margin:0 0 14px;font-size:15px;color:#111">${I18N.t('tasks.create.modal_title')}</h3>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 14px"><h3 style="margin:0;font-size:15px;color:#111">${I18N.t('tasks.create.modal_title')}</h3><button onclick="document.getElementById('taskCreateOverlay').remove()" style="background:none;border:none;font-size:18px;color:#8d97a8;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#8d97a8'">✕</button></div>
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.creator_label')}<b>${esc(_currentUsername) || '—'}</b></div>
@@ -1289,10 +1290,7 @@ function openTaskCreateModal() {
     });
   }).catch(function(){});
 
-  // 点击遮罩空白处关闭
-  let _modalDownOnOverlay = false;
-  ov.addEventListener('mousedown', e => { _modalDownOnOverlay = (e.target === ov); });
-  ov.addEventListener('click', e => { if (e.target === ov && _modalDownOnOverlay) ov.remove(); });
+  // 点击遮罩空白处不关闭——防止误触丢失内容，通过右上角✕或取消按钮关闭
 }
 
 function createTaskSubmit() {
@@ -1330,6 +1328,117 @@ function createTaskSubmit() {
       if (btn) { btn.disabled = false; btn.textContent = I18N.t('tasks.create.btn_create'); }
       const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
       showErr(I18N.t('tasks.create.err_create_failed', {msg: msg}));
+    });
+}
+
+// ===== 复制需求（Issue #203：复用新建需求对话框结构，预填标题/内容/Issue 链接，选新流水线后创建并执行）=====
+let _taskCopyModal = null;
+
+function openTaskCopyModal(taskId) {
+  const t = window._tasksById[taskId] || window._currentDetailTask;
+  if (!t) return;
+  const repo = app.currentRepo();
+  const defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode):/, '');
+  if (_taskCopyModal) _taskCopyModal.remove();
+  _createAttachments = [];
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // 预填标题：原标题 + 副本后缀
+  var _prefillTitle = (t.title || '') + I18N.t('tasks.copy.title_suffix');
+
+  // 预填描述：原内容 + Issue Git 链接
+  var _issueUrl = _vcsUrl(t.repo_key, '/issues/' + t.issue_number);
+  var _origDesc = t.task_description || '';
+  var _prefillDesc = _origDesc;
+  if (_origDesc) _prefillDesc += '\n\n';
+  _prefillDesc += I18N.t('tasks.copy.issue_link_label') + ': ' + _issueUrl;
+
+  // 创建人只读字段——当前登录用户
+  let _currentUsername = '';
+  try {
+    _currentUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || '';
+  } catch(e) { _currentUsername = ''; }
+
+  let _sceneOptions = '<option value="">' + I18N.t('tasks.create.scene_vod_auto') + '</option>';
+
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 14px"><h3 style="margin:0;font-size:15px;color:#111">${I18N.t('tasks.copy.modal_title')}</h3><button onclick="document.getElementById('taskCopyOverlay').remove()" style="background:none;border:none;font-size:18px;color:#8d97a8;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#8d97a8'">✕</button></div>
+    <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+      <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
+      <div style="font-size:11px;color:#555">${I18N.t('tasks.create.creator_label')}<b>${esc(_currentUsername) || '—'}</b></div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</div>
+        <input id="tcCopyTitle" value="${esc(_prefillTitle)}" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="${I18N.t('tasks.create.title_placeholder')}">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</div>
+        <textarea id="tcCopyDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="${I18N.t('tasks.create.desc_placeholder')}">${esc(_prefillDesc)}</textarea>
+      </div>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.scene_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.scene_hint')}</span>
+        <select id="tcCopyScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
+      </label>
+      <div style="font-size:11px;color:#888">${I18N.t('tasks.create.assignee_hint')}</div>
+      <div id="tcCopyError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="tsk-btn tsk-btn-ghost" onclick="document.getElementById('taskCopyOverlay').remove()">${I18N.t('tasks.create.btn_cancel')}</button>
+      <button class="tsk-btn tsk-btn-primary" id="tcCopySubmitBtn" onclick="copyTaskSubmit()">${I18N.t('tasks.copy.btn_copy')}</button>
+    </div>
+  </div>`;
+  ov.id = 'taskCopyOverlay';
+  document.body.appendChild(ov);
+  _taskCopyModal = ov;
+
+  // 异步加载场景列表填充下拉框（带 repo 参数获取仓库级场景）
+  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
+    const sel = document.getElementById('tcCopyScene');
+    if (!sel) return;
+    const scenes = d.scenes || [];
+    scenes.forEach(function(s) {
+      const opt = document.createElement('option');
+      opt.value = s.id;
+      const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
+      opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
+      sel.appendChild(opt);
+    });
+  }).catch(function(){});
+
+  // 点击遮罩空白处不关闭——防止误触丢失内容，通过右上角✕或取消按钮关闭（与新建对话框一致）
+}
+
+function copyTaskSubmit() {
+  const repo = app.currentRepo();
+  const repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
+  const title = (document.getElementById('tcCopyTitle') || {}).value || '';
+  const desc = (document.getElementById('tcCopyDesc') || {}).value || '';
+  const sceneId = (document.getElementById('tcCopyScene') || {}).value || '';
+  const errEl = document.getElementById('tcCopyError');
+  const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
+  if (!repoKey.trim()) { showErr(I18N.t('tasks.create.err_no_repo')); return; }
+  if (!title.trim()) { showErr(I18N.t('tasks.copy.err_no_title')); return; }
+  if (!desc.trim()) { showErr(I18N.t('tasks.copy.err_no_desc')); return; }
+  const btn = document.getElementById('tcCopySubmitBtn');
+  if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.copy.btn_copying'); }
+  // 复用 POST /api/issues/{owner}/{repo} 创建入口（已支持 scene_id）
+  var _owner = repo ? (repo.owner || '') : '';
+  var _rname = repo ? (repo.name || '') : '';
+  if (!_owner || !_rname) {
+    var _p = String(repoKey).split('/');
+    _owner = _p[0] || '';
+    _rname = _p[1] || '';
+  }
+  API.post('/issues/' + encodeURIComponent(_owner) + '/' + encodeURIComponent(_rname),
+           {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
+    .then(d => {
+      const ov = document.getElementById('taskCopyOverlay');
+      if (ov) ov.remove();
+      app.showToast(I18N.t('tasks.copy.success_toast'));
+      loadTasks();
+    })
+    .catch(e => {
+      if (btn) { btn.disabled = false; btn.textContent = I18N.t('tasks.copy.btn_copy'); }
+      const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+      showErr(I18N.t('tasks.copy.err_create_failed', {msg: msg}));
     });
 }
 

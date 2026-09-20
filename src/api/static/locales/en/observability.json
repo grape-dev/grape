@@ -116,6 +116,7 @@
   "cpu": "CPU",
   "mem": "MEM",
   "disk": "DISK",
+  "bandwidth": "BANDWIDTH",
   "worker_id": "Worker #{{id}}",
   "idle": "Idle",
   "busy": "Busy",
