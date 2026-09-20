@@ -1453,9 +1453,9 @@ def init_database():
                     _backfill_scene_display_names()
                 except Exception as _e:
                     log.warning(f"Scene display_name backfill failed: {_e}")
-                # ===== Issue #67: 知识库优化迁移 =====
+                # ===== 知识库去重 + ref 迁移（每次启动执行，幂等）=====
                 try:
-                    _migrate_knowledge_issue67()
+                    _migrate_knowledge_dedup_and_ref()
                 except Exception as _e:
                     log.warning(f"Issue #67 knowledge migration failed: {_e}")
             finally:
@@ -1488,16 +1488,16 @@ def init_database():
             log.warning(f"Scene display_name backfill failed: {_e}")
         # ===== Issue #67: 知识库优化迁移 =====
         try:
-            _migrate_knowledge_issue67()
+            _migrate_knowledge_dedup_and_ref()
         except Exception as _e:
             log.warning(f"Issue #67 knowledge migration failed: {_e}")
     # MySQL with session_manager
 
-def _migrate_knowledge_issue67():
-    """Issue #67 知识库优化迁移 + Issue #95 修复：source 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。
+def _migrate_knowledge_dedup_and_ref():
+    """知识库 source 回填 + name/description 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。
 
-    Issue #95：加幂等标记——#95 修复（member ref 清理 + rejected 修复）跑一次后跳过。
-    #67 基础迁移仍每次执行（幂等，开销微量）。
+    每次启动执行（幂等）。issue95 修复部分有独立幂等标记。
+    步骤顺序：source 回填 → name/description 回填 → 去重 → ref 迁移 → 孤儿 ref 清理。
     """
     from src.mysql_compat import get_db_backend
     _is_mysql = get_db_backend() == "mysql"
@@ -1527,22 +1527,73 @@ def _migrate_knowledge_issue67():
             "UPDATE agent_shared_knowledge SET source = 'manual' "
             "WHERE scope = 'member' AND (source IS NULL OR source = '')")
 
-        # 2. 重复记录去重——每个 scope + repo_key + agent_type + issue_num + file_path 只保留最新一条
-        if _is_mysql:
-            c.execute(
-                "CREATE TEMPORARY TABLE IF NOT EXISTS _keep_ids AS "
-                "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-                "GROUP BY repo_key, scope, agent_type, issue_num, file_path")
-            c.execute(
-                "DELETE FROM agent_shared_knowledge "
-                "WHERE id NOT IN (SELECT keep_id FROM _keep_ids)")
-            c.execute("DROP TEMPORARY TABLE IF EXISTS _keep_ids")
-        else:
-            c.execute(
-                "DELETE FROM agent_shared_knowledge "
-                "WHERE id NOT IN ("
-                "  SELECT MAX(id) FROM agent_shared_knowledge "
-                "  GROUP BY repo_key, scope, agent_type, issue_num, file_path)")
+        # 1.5 回填空 name + 统一 description（所有 scope，必须在去重之前）
+        # 老代码部分 INSERT 路径没有 name 字段或自动生成逻辑不存在 → DEFAULT ''。
+        # baseline 去重按 (repo_key, name) GROUP BY，name 为空时同 repo 的 3 条
+        # 会被合并为 1 条丢失数据。description 硬编码统一值无法区分。
+        # 用 derive_knowledge_name 统一推导，所有 scope 共用同一逻辑。
+        from src.api.knowledge import derive_knowledge_name, derive_knowledge_description
+        from src.repo_key import (BASELINE_NAME_MAP, BASELINE_DESC_MAP,
+                                  BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK)
+        _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值，勿改
+        _rows = c.execute(
+            "SELECT id, scope, source, agent_type, issue_num, name, file_path, obs_key, description "
+            "FROM agent_shared_knowledge "
+            "WHERE name IS NULL OR name = '' OR name = ? "
+            "OR description = ? OR description IS NULL OR description = ''",
+            (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
+        ).fetchall()
+        _updates = []
+        for _rid, _scope, _source, _agent_type, _issue_num, _cur_name, _fp, _obs, _cur_desc in _rows:
+            # source="manual" 是用户上传的：
+            # - name 非空时不覆盖（用户填的），name 为空时用 file_path 推导回填
+            # - description 永远不碰（用户行为，即使为空也不回填）
+            if _source == "manual":
+                if not _cur_name:
+                    _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+                    _updates.append((_new_name, _cur_desc or "", _rid))
+                continue
+            _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+            _needs_name = (_cur_name != _new_name)
+            _new_desc = derive_knowledge_description(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+            _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC) and bool(_new_desc)
+            _final_desc = _new_desc if _needs_desc else (_cur_desc or "")
+            if _needs_name or _needs_desc:
+                _updates.append((_new_name, _final_desc, _rid))
+        if _updates:
+            c.executemany(
+                "UPDATE agent_shared_knowledge SET name=?, description=? WHERE id=?",
+                _updates)
+            log.info(f"[issue67] backfilled name/description for {len(_updates)} rows")
+
+        # 2. 重复记录去重——每类 scope 只保留最新一条
+        #    baseline：按 (repo_key, scope, name) 去重
+        #    其他 scope：按 (repo_key, scope, agent_type, issue_num, file_path) 去重
+        #    用派生表子查询包装避免 DELETE 自引用（MySQL 限制），SQLite/MySQL 通用
+        # baseline 去重
+        c.execute(
+            "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+            "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope='baseline' GROUP BY repo_key, scope, name) AS keep))")
+        c.execute(
+            "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope='baseline' GROUP BY repo_key, scope, name) AS keep)")
+        # 其他 scope 去重
+        c.execute(
+            "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+            "SELECT id FROM agent_shared_knowledge WHERE scope != 'baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path) AS keep))")
+        c.execute(
+            "DELETE FROM agent_shared_knowledge WHERE scope != 'baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path) AS keep)")
 
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
@@ -1645,6 +1696,22 @@ def _migrate_knowledge_issue67():
         except Exception as _e:
             log.warning(f"[migrate] content_hash backfill failed: {_e}")
 
+        # 5. 清理孤儿 scene_knowledge_ref（knowledge_id 指向已删除的知识记录）
+        # 去重删除 knowledge 记录时已先删 ref，但历史迁移轮次可能残留
+        # 先 EXISTS 快速检查，有孤儿才执行 DELETE
+        try:
+            _has_orphan = c.execute(
+                "SELECT EXISTS(SELECT 1 FROM scene_knowledge_ref "
+                "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge))"
+            ).fetchone()[0]
+            if _has_orphan:
+                c.execute(
+                    "DELETE FROM scene_knowledge_ref "
+                    "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)")
+                log.info("[issue67] cleaned orphan scene_knowledge_ref")
+        except Exception as _e:
+            log.warning(f"[issue67] orphan ref cleanup failed: {_e}")
+
         db.commit()
 
     # 4. MySQL 原生 DDL——scene_knowledge_ref 表用原生 MySQL DDL 重建（如果翻译层产出不够严谨）
@@ -1676,6 +1743,184 @@ def _migrate_knowledge_issue67():
             log.warning(f"[Issue #67] MySQL native DDL failed: {e}")
 
     log.info("[Issue #67] knowledge migration done")
+
+
+def _migrate_knowledge():
+    """Issue #190：baseline 去重 + obs_key 归一化 + file_path 归一化。
+
+    幂等：通过 meta 表 knowledge_migrate_done 标记控制，已执行则跳过。
+    异步执行：由 main.py lifespan() 内 daemon thread 调用，不阻塞启动。
+    分布式锁：acquire_lock 防多实例并发执行迁移。
+    最终一致性：迁移期间旧格式数据仍可用，迁移完成后切换到新格式。
+    """
+    from src.session_manager import db, db_lock
+    from src.user.db import get_meta_value, set_meta_value
+    from src.repo_key import parse_repo_key, knowledge_obs_prefix
+    from src.lock import acquire_lock, release_lock
+
+    # 幂等检查
+    if get_meta_value("knowledge_migrate_done") == "1":
+        log.info("[knowledge_migrate] migration already done, skip")
+        return
+
+    # 分布式锁：防多实例同时迁移
+    _lock_key = "knowledge_migrate"
+    if not acquire_lock(_lock_key, ttl=600):
+        log.info("[knowledge_migrate] migration lock contention, another instance is running, skip")
+        return
+
+    log.info("[knowledge_migrate] migration started")
+
+    _restore_ok = False       # 恢复归档记录
+    _obs_key_ok = False        # 归一化 obs_key
+    _file_path_ok = False      # 归一化 file_path
+
+    # ===== 恢复归档记录（archived=1 → archived=0）=====
+    # 归档逻辑已移除，现有归档记录恢复为活跃，防止成为孤儿数据
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE agent_shared_knowledge SET archived=0 WHERE archived=1")
+            db.commit()
+        _restore_ok = True
+        log.info("[knowledge_migrate] restore archived records done")
+    except Exception as e:
+        log.warning(f"[knowledge_migrate] restore archived failed: {e}")
+
+    # NOTE: baseline name/description 回填已移至 _migrate_knowledge_dedup_and_ref()
+    # step 1.5（每次启动执行，在去重之前）。此处不再重复——_migrate_knowledge
+    # 受 knowledge_migrate_done 标记控制，首次执行后跳过，无法保证回填在
+    # 去重之前完成。
+    # NOTE: baseline 去重也已移至 _migrate_knowledge_dedup_and_ref() step 2
+    # （每次启动执行）。此处不再重复。
+
+    # ===== 归一化 obs_key（新格式含 provider 前缀）=====
+    try:
+        from src.storage import get_storage
+        _storage = get_storage()
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT id, repo_key, scope, agent_type, issue_num, obs_key, file_path "
+                "FROM agent_shared_knowledge WHERE obs_key != '' AND obs_key IS NOT NULL"
+            ).fetchall()
+        updates = []  # [(new_obs_key, id), ...]
+        for rid, repo_key, scope, agent_type, issue_num, obs_key, file_path in rows:
+            provider, owner, repo = parse_repo_key(repo_key)
+            new_prefix = knowledge_obs_prefix(repo_key)
+            new_obs_key = obs_key
+            if obs_key.startswith(new_prefix):
+                continue  # 已是新格式
+            elif scope == "member":
+                # member：提取 member/ 或 agent/ 后的相对路径
+                for marker in ("member/", "agent/"):
+                    idx = obs_key.find(marker)
+                    if idx >= 0:
+                        _rel = obs_key[idx:]
+                        break
+                else:
+                    _rel = os.path.basename(obs_key)
+                new_obs_key = f"{new_prefix}/{_rel}"
+            elif obs_key.startswith("project-info/"):
+                # OLD_A 格式：完全重写
+                _fname = os.path.basename(obs_key)
+                if scope == "baseline":
+                    new_obs_key = f"{new_prefix}/project-info/{_fname}"
+                else:
+                    try:
+                        from src.api.knowledge import knowledge_storage_key
+                        new_obs_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
+                    except Exception:
+                        continue
+            elif obs_key.startswith(f"knowledge/{owner}/{repo}"):
+                # OLD_B 格式：在 knowledge/ 后插入 provider/
+                new_obs_key = f"knowledge/{provider}/{obs_key[len('knowledge/'):]}"
+            else:
+                continue  # 未知格式，跳过
+
+            if new_obs_key == obs_key:
+                continue
+
+            # OBS 对象迁移：旧 key 读取内容 → 写入新 key → 删旧 key
+            # 读不到内容时跳过（不更新 DB、不删旧对象），下次启动重试
+            if _storage:
+                try:
+                    _data = _storage.read_bytes(obs_key)
+                    if not _data:
+                        log.warning(f"[knowledge_migrate] OBS read empty for id={rid} old_key={obs_key}, skip")
+                        continue
+                    _storage.save_bytes(new_obs_key, _data)
+                except Exception as e:
+                    log.warning(f"[knowledge_migrate] OBS migrate failed id={rid}: {e}")
+                    continue
+            updates.append((new_obs_key, rid, obs_key))  # 记录旧 key 供清理
+
+        # 批量 UPDATE，一次 commit
+        if updates:
+            with db_lock:
+                c = db.cursor()
+                c.executemany(
+                    "UPDATE agent_shared_knowledge SET obs_key=? WHERE id=?",
+                    [(u[0], u[1]) for u in updates])
+                db.commit()
+            # DB 更新成功后删除旧 OBS 对象（去重防跨平台同名仓库共享同一旧 key）
+            if _storage:
+                _deleted_keys = set()
+                for _, _, _old_key in updates:
+                    if _old_key in _deleted_keys:
+                        continue
+                    _deleted_keys.add(_old_key)
+                    try:
+                        _storage.delete_object(_old_key)
+                    except Exception as e:
+                        log.warning(f"[knowledge_migrate] OBS old key delete failed {_old_key}: {e}")
+        _obs_key_ok = True
+        log.info(f"[knowledge_migrate] obs_key normalization done ({len(updates)} rows)")
+    except Exception as e:
+        log.warning(f"[knowledge_migrate] obs_key normalization failed: {e}")
+
+    # ===== 归一化 file_path（新格式含 provider 前缀）=====
+    try:
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT id, repo_key, file_path FROM agent_shared_knowledge "
+                "WHERE file_path != '' AND file_path IS NOT NULL"
+            ).fetchall()
+        updates = []  # [(new_file_path, id), ...]
+        for rid, repo_key, file_path in rows:
+            provider, owner, repo = parse_repo_key(repo_key)
+            full_prefix = f"{provider}/{owner}/{repo}/"
+            partial_prefix = f"{owner}/{repo}/"
+            if file_path.startswith(full_prefix):
+                continue  # 已是 NEW 格式
+            elif file_path.startswith(partial_prefix):
+                new_fp = f"{provider}/{file_path}"  # 只补 provider
+            elif file_path.startswith("project-info/"):
+                new_fp = f"{full_prefix}{file_path}"  # 补完整前缀
+            else:
+                continue  # 未知格式，跳过
+            updates.append((new_fp, rid))
+
+        if updates:
+            with db_lock:
+                c = db.cursor()
+                c.executemany(
+                    "UPDATE agent_shared_knowledge SET file_path=? WHERE id=?",
+                    updates)
+                db.commit()
+        _file_path_ok = True
+        log.info(f"[knowledge_migrate] file_path normalization done ({len(updates)} rows)")
+    except Exception as e:
+        log.warning(f"[knowledge_migrate] file_path normalization failed: {e}")
+
+    # ===== 标记完成 + 释放锁（finally 保证锁一定释放）=====
+    try:
+        if _restore_ok and _obs_key_ok and _file_path_ok:
+            set_meta_value("knowledge_migrate_done", "1")
+            log.info("[knowledge_migrate] migration done")
+        else:
+            log.warning("[knowledge_migrate] migration incomplete, will retry on next startup")
+    finally:
+        release_lock(_lock_key)
 
 
 def _cleanup_stale_meta():

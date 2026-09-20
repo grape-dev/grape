@@ -349,6 +349,7 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
                 rows = db.cursor().execute(
                     "SELECT file_path, obs_key FROM agent_shared_knowledge "
                     "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+                    "AND archived=0 "
                     "ORDER BY id DESC",
                     (repo_key,)
                 ).fetchall()
@@ -430,6 +431,7 @@ def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
                 rows = db.cursor().execute(
                     "SELECT file_path, obs_key FROM agent_shared_knowledge "
                     "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+                    "AND archived=0 "
                     "ORDER BY id DESC",
                     (repo_key,)
                 ).fetchall()

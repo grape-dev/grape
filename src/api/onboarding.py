@@ -263,18 +263,12 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     - 全部任务同步创建（同请求内完成），每个任务仅 1 条任务上下文消息
     """
     from src.api.routes.tasks import create_standard_task
-    from src.repo_key import parse_repo_key
-    _provider, _, _ = parse_repo_key(repo_key)
     task_defs = _load_onboarding_template(repo_key, template_id=template_id)
     if not task_defs:
         log.info(f"[Onboarding|repo:{repo_key}] 无 onboarding 任务模板，跳过")
         return
-    if _provider == "github":
-        from src.user.db import get_github_token
-        bot_token = get_github_token(repo_key=repo_key) or ""
-    else:
-        from src.user.db import get_gitcode_token
-        bot_token = get_gitcode_token(repo_key=repo_key) or ""
+    from src.repo import Repo
+    bot_token = Repo(repo_key).bot_token
     if not bot_token:
         log.warning(f"[Onboarding|repo:{repo_key}] 无仓库 bot token，跳过 onboarding 任务创建")
         return
@@ -283,6 +277,20 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
         log.info(f"[Onboarding|repo:{repo_key}] 全部 onboarding 任务已完成，跳过")
         return
     _mark_onboarding_started(repo_key)
+    # 读取仓库当前场景（managed_repos.dev_scene），用于绑定到每个 onboarding Issue
+    _repo_scene = ""
+    try:
+        from src.user.db import get_repo_scene
+        _repo_scene = get_repo_scene(repo_key) or ""
+    except Exception:
+        pass
+    # 解析 scene_user_id（owner → user_id）
+    _scene_uid = 0
+    try:
+        from src.api.routes.tasks import _get_user_id_by_gitcode
+        _scene_uid = _get_user_id_by_gitcode(owner) or 0
+    except Exception:
+        pass
     ok_count = 0
     for t in pending:
         _type, _title, _desc, _labels = t["type"], t["title"], t["description"], t["labels"]
@@ -296,6 +304,14 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
             ok_count += 1
             log.info(f"[Onboarding|repo:{repo_key}] 任务已创建 type={_type} issue=#{r.get('issue_number')} "
                      f"created={'yes' if r.get('created') else 'reuse'}")
+            # 绑定仓库场景到 Issue（解决 bot 创建 Issue 被 self_loop 拦截导致 scene_id 为空的问题）
+            if _repo_scene:
+                try:
+                    from src.api.session_store import set_issue_scene
+                    set_issue_scene(repo_key, f"#{r['issue_number']}", _repo_scene, scene_user_id=_scene_uid)
+                    log.info(f"[Onboarding|repo:{repo_key}] issue #{r['issue_number']} scene_id={_repo_scene}")
+                except Exception as _se:
+                    log.warning(f"[Onboarding|repo:{repo_key}] set_issue_scene failed for #{r['issue_number']}: {_se}")
         else:
             log.warning(f"[Onboarding|repo:{repo_key}] task type={_type} create failed: {r}")
     if ok_count == len(task_defs):
@@ -327,15 +343,9 @@ def retry_onboarding_task(repo_key: str, owner: str, task_type: str) -> dict:
         return {"ok": False, "reason": f"task type not in template: {task_type}"}
     if _task_done(repo_key, task_type):
         return {"ok": True, "reason": "task already complete, no retry needed"}
-    from src.repo_key import parse_repo_key
-    _provider, _, _ = parse_repo_key(repo_key)
     from src.api.routes.tasks import create_standard_task
-    if _provider == "github":
-        from src.user.db import get_github_token
-        bot_token = get_github_token(repo_key=repo_key) or ""
-    else:
-        from src.user.db import get_gitcode_token
-        bot_token = get_gitcode_token(repo_key=repo_key) or ""
+    from src.repo import Repo
+    bot_token = Repo(repo_key).bot_token
     if not bot_token:
         return {"ok": False, "reason": "no repo bot token"}
     try:

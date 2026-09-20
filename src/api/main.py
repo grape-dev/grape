@@ -152,24 +152,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Upload cleanup scheduler start failed: {e}")
 
-    # Issue #67: 归档知识定时清理——每天清理超过 90 天的归档知识
+    # Issue #190：知识库 obs_key/file_path 归一化迁移（异步，不阻塞启动）
     try:
-        from src.api.knowledge import cleanup_archived_knowledge
-        import threading, time as _t
+        async def _knowledge_migrate_wrapper():
+            from src.api.db_setup import _migrate_knowledge
+            await asyncio.to_thread(_migrate_knowledge)
+        _migrate_task = asyncio.create_task(_knowledge_migrate_wrapper())
 
-        def _knowledge_cleanup_loop():
-            while True:
-                _t.sleep(86400)  # 24 小时
-                try:
-                    cleanup_archived_knowledge()
-                except Exception as _e:
-                    log.warning(f"Knowledge cleanup failed: {_e}")
-
-        _t2 = threading.Thread(target=_knowledge_cleanup_loop, daemon=True)
-        _t2.start()
-        log.info("Knowledge cleanup scheduler started (daily)")
+        def _on_migrate_done(task: asyncio.Task):
+            if task.exception():
+                log.error(f"knowledge_migrate task failed: {task.exception()}", exc_info=task.exception())
+        _migrate_task.add_done_callback(_on_migrate_done)
+        app.state.knowledge_migrate_task = _migrate_task
+        log.info("knowledge_migrate started (async)")
     except Exception as e:
-        log.warning(f"Knowledge cleanup scheduler start failed: {e}")
+        log.warning(f"knowledge_migrate start failed: {e}")
 
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
@@ -229,6 +226,81 @@ async def lifespan(app: FastAPI):
         log.info("Reap stale runtimes loop started (60s)")
     except Exception as e:
         log.warning(f"Reap stale runtimes loop start failed: {e}")
+
+    # 主控机指标上报：每 15 秒采集本机 CPU/内存/磁盘/负载写入 DB
+    _server_metrics_task = None
+    try:
+        async def _server_metrics_loop():
+            import socket as _sock, hashlib as _hl
+            from datetime import datetime, timezone
+            _hostname = _sock.gethostname() or "unknown-server"
+            _local_ip = "127.0.0.1"
+            try:
+                _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+                _s.connect(("192.168.0.1", 80))
+                _local_ip = _s.getsockname()[0]
+                _s.close()
+            except Exception:
+                pass
+            try:
+                from src.session_manager import db, db_lock
+                _token_hash = _hl.sha256(_hostname.encode()).hexdigest()
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'", (_hostname,))
+                    if not c.fetchone():
+                        c.execute(
+                            "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip) "
+                            "VALUES (?, ?, ?, 'global', 'active', ?)",
+                            (_token_hash, _hostname, _hostname, _local_ip))
+                        db.commit()
+                        log.info(f"Server metrics: registered {_hostname}")
+            except Exception as e:
+                log.warning(f"Server metrics: register failed: {e}")
+            while True:
+                try:
+                    _cpu = _mem = _disk = _tmp = 0.0
+                    _load = ""
+                    try:
+                        import psutil as _ps
+                        _cpu = _ps.cpu_percent(interval=None)
+                        try:
+                            with open("/proc/meminfo") as _mf:
+                                _mi = {}
+                                for _line in _mf:
+                                    _p = _line.split(":")
+                                    if len(_p) == 2:
+                                        _mi[_p[0]] = int(_p[1].strip().split()[0]) * 1024
+                            _total = _mi["MemTotal"]
+                            _used = _total - _mi.get("MemFree", 0) - _mi.get("Buffers", 0) - _mi.get("Cached", 0)
+                            _mem = round(_used / _total * 100, 1) if _total > 0 else _ps.virtual_memory().percent
+                        except Exception:
+                            _mem = _ps.virtual_memory().percent
+                        _disk = _ps.disk_usage("/").percent
+                        try:
+                            _tmp = _ps.disk_usage("/tmp").percent
+                        except Exception:
+                            _tmp = 0.0
+                        _load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
+                    except Exception:
+                        pass
+                    _now = datetime.now(timezone.utc).isoformat()
+                    from src.session_manager import db, db_lock
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute(
+                            "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
+                            "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? "
+                            "WHERE device_name=? AND scope='global'",
+                            (_now, _local_ip, _cpu, _mem, _disk, _tmp, _load, _hostname))
+                        db.commit()
+                except Exception as e:
+                    log.warning(f"Server metrics: upload failed: {e}")
+                await asyncio.sleep(15)
+        _server_metrics_task = asyncio.create_task(_server_metrics_loop())
+        log.info("Server metrics loop started (15s)")
+    except Exception as e:
+        log.warning(f"Server metrics loop start failed: {e}")
 
     # Issue #85：引擎健康度定时刷新——每 5 分钟对所有引擎 force_refresh，
     # 覆盖离线引擎无任务事件触发的场景（失联引擎不会产生任务完成事件）
@@ -291,6 +363,15 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.wait_for(_knowledge_write_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    # knowledge_migrate：shutdown 时尝试等待完成（不 cancel，因为迁移中断不如跑完）
+    _migrate_task = getattr(app.state, "knowledge_migrate_task", None)
+    if _migrate_task and not _migrate_task.done():
+        try:
+            await asyncio.wait_for(_migrate_task, timeout=10)
+        except asyncio.TimeoutError:
+            log.warning("knowledge_migrate shutdown wait timeout, task continues in background")
+        except Exception:
             pass
     # 官方技能 OBS 同步：优雅关闭定时任务
     try:

@@ -192,32 +192,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
         worker_online = 0
         worker_total = 0
 
-        # 本机主控机：按 hostname 匹配 runtime_credentials 记录，采集指标后写入 DB
-        _local_hostname = ""
-        try:
-            import socket as _sock
-            _local_hostname = _sock.gethostname()
-        except Exception:
-            pass
-        _local_cred_id = None
-        if _local_hostname:
-            try:
-                c.execute("SELECT id FROM runtime_credentials WHERE device_name=?", (_local_hostname,))
-                row = c.fetchone()
-                if row:
-                    _local_cred_id = row[0]
-            except Exception:
-                pass
-        if _local_cred_id is not None:
-            # 写入本机指标到 DB（admin 健康中心读同一张表即可看到）
-            try:
-                c.execute(
-                    "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
-                    "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
-                    (now_iso, "127.0.0.1", _local_cpu, _local_mem, _local_disk, _local_tmp, _local_load, _local_cred_id))
-                db.commit()
-            except Exception:
-                pass
+        # 主控机指标由后台定时任务（_server_metrics_loop）每 15 秒写入 DB，
+        # dashboard 不再采集/写入本机指标，改为纯读取。
 
         # 查 worker（凭据），排除已注销（revoked）
         # worker 可见性：global 全部可见 + user scope 只看自己的 + repo scope 看仓库的
@@ -1133,6 +1109,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
                                      "status": derive_runtime_health(e["status"], e.get("last_seen_at"), _now),
                                      "tags": e.get("tags", []),
+                                     "scene_tags": e.get("scene_tags", ["default"]),
                                      "scope": e.get("scope", "global"),
                                      "scope_label": _scope_labels.get(e.get("scope", "global"), ""),
                                      "alias": e.get("alias", "")}

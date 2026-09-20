@@ -271,14 +271,8 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     repo_token = agent_session.get("repo_gitcode_token", "") or ""
     if not repo_token:
         try:
-            from src.repo_key import parse_repo_key
-            _provider, _, _ = parse_repo_key(repo_key)
-            if _provider == "github":
-                from src.user.db import get_github_token
-                repo_token = get_github_token(repo_key=repo_key) or ""
-            else:
-                from src.user.db import get_gitcode_token
-                repo_token = get_gitcode_token(repo_key=repo_key) or ""
+            from src.repo import Repo
+            repo_token = Repo(repo_key).bot_token
         except Exception:
             pass
 

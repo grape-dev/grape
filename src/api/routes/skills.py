@@ -53,7 +53,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
-def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
+def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "", scope: str = "",
                 agent_type: str = "", category_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
@@ -489,7 +489,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
 
 
 @router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller.")
-def get_skill_detail_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
+def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_or_api_key),
                                  repo: str = ""):
     """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
 
@@ -857,7 +857,7 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
 
 
 @router.get("/{skill_id}/sub", operation_id="skills_sub_list", summary="List sub-skills of a skill package", description="Lists a skill package's sub-skills from the references/ directory.")
-def list_sub_skills(skill_id: int, user: dict = Depends(require_no_session_token)):
+def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """返回技能包的子技能列表（从 skill_path 的 references/ 目录读取）"""
     from src.session_manager import db, db_lock
     import re as _re

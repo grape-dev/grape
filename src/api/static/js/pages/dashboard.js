@@ -1125,12 +1125,20 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   const _tagBadge = (tags) => (tags||[]).map(t => `<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:${_ENG_TAG_COLORS[t]||'#999'};margin-left:4px;font-weight:500">${t==='all'?'All':t.charAt(0).toUpperCase()+t.slice(1)}</span>`).join('');
   const _SCOPE_COLORS = {global:'#6366f1',user:'#34c759',repo:'#f59e0b',local:'#86868b'};
   const _scopeBadge = (s) => s ? `<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:${_SCOPE_COLORS[s]||'#999'};margin-left:4px;font-weight:500">${s==='global'?'全局':s==='user'?'个人':s==='repo'?'仓库':s==='local'?'本机':s}</span>` : '';
+  // 场景标签徽章（Issue #198）
+  const _ENG_CARD_SCENE_COLORS = {'default':'#10b981','cloud-native':'#3b82f6','iac':'#f59e0b','agent-dev':'#8b5cf6','skill-dev':'#ec4899','api-skill-dev':'#06b6d4','blog-publish':'#ef4444'};
+  const _sceneBadge = (tags) => (tags||[]).map(t => {
+    const c = _ENG_CARD_SCENE_COLORS[t] || '#10b981';
+    const dn = (typeof _sceneDisplayName === 'function' && typeof __sceneTagsCache !== 'undefined' && __sceneTagsCache) ? _sceneDisplayName(t) : t;
+    return `<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:${c};margin-left:4px;font-weight:500">${dn}</span>`;
+  }).join('');
   const _SCOPE_ORDER = {user:0, repo:1, global:2, local:3};
   const meta = _AGENT_TYPES[agentType] || {};
   const title = meta.display_name || agentType;
   const sorted = allEngines.slice().sort((a,b) => (_SCOPE_ORDER[a.scope]||9) - (_SCOPE_ORDER[b.scope]||9));
   let _engFilterType = '';
   let _engFilterScope = '';
+  let _engFilterScene = [];  // 场景多选筛选（Issue #198）
 
   function _renderEngineList(filter) {
     currentIds = (window._engCurIds || []).slice();
@@ -1139,6 +1147,10 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
       if (q) { const hay = [e.name, e.alias, e.device, e.cred_name, e.scope_label, (e.tags||[]).join(' ')].join(' ').toLowerCase(); if (!hay.includes(q)) return false; }
       if (_engFilterType) { const ename = (e.name || '').toLowerCase(); if (!ename.includes(_engFilterType)) return false; }
       if (_engFilterScope && (e.scope || 'global') !== _engFilterScope) return false;
+      if (_engFilterScene.length > 0) {
+        const tags = e.scene_tags || [];
+        if (!_engFilterScene.some(s => tags.includes(s))) return false;
+      }
       return true;
     });
     const groups = {};
@@ -1154,7 +1166,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
         const checked = currentIds.includes(e.id);
         return `<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:${checked ? 'rgba(0,113,227,.06)' : '#f5f5f7'};transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">
           <input type="checkbox" data-eid="${e.id}" ${checked ? 'checked' : ''} onchange="if(this.checked){window._engCurIds.push(${e.id})}else{window._engCurIds=window._engCurIds.filter(x=>x!==${e.id})}" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">
-          <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">${e.alias || e.name}${e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + e.name + ')</span>' : ''}${_tagBadge(e.tags)}${_scopeBadge(e.scope)}</div><div style="font-size:10px;color:#86868b;margin-top:3px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div></div>
+          <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">${e.alias || e.name}${e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + e.name + ')</span>' : ''}${_tagBadge(e.tags)}${_sceneBadge(e.scene_tags)}${_scopeBadge(e.scope)}</div><div style="font-size:10px;color:#86868b;margin-top:3px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div></div>
           <span style="font-size:11px;font-weight:500;color:${e.status === 'recently_lost' ? '#f59e0b' : '#34c759'}">${e.status === 'recently_lost' ? '失联' : I18N.t('dashboard.online')||'在线'}</span>
         </label>`;
       }).join('');
@@ -1165,14 +1177,53 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   window._engCurIds = currentIds.slice();
   const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; if (n.includes('codex')) return 'codex'; return ''; }).filter(Boolean))];
   const _availScopes = [...new Set(sorted.map(e => e.scope || 'global'))];
+  const _availScenes = [...new Set(sorted.flatMap(e => e.scene_tags || []))].filter(Boolean);
   const _SCOPE_LABELS_ALL = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
   const _SCOPE_ORDER_ALL = ['local','user','repo','global'];
+  // 场景标签颜色映射（与 runtimes.js _SCENE_TAG_COLORS 对齐）
+  const _ENG_SCENE_COLORS = {
+    'default':'#10b981', 'cloud-native':'#3b82f6', 'iac':'#f59e0b',
+    'agent-dev':'#8b5cf6', 'skill-dev':'#ec4899', 'api-skill-dev':'#06b6d4', 'blog-publish':'#ef4444',
+  };
+  function _engSceneDisplayName(name) {
+    if (typeof _sceneDisplayName === 'function' && typeof __sceneTagsCache !== 'undefined' && __sceneTagsCache) {
+      return _sceneDisplayName(name);
+    }
+    return name;
+  }
+
+  function _renderSceneCheckbox(s) {
+    var c = _ENG_SCENE_COLORS[s] || '#10b981';
+    var sel = _engFilterScene.indexOf(s) >= 0;
+    var q = String.fromCharCode(39);  // single quote
+    return '<label style="padding:5px 10px;font-size:11px;cursor:pointer;border-radius:4px;display:flex;align-items:center;gap:6px" '
+      + 'onmouseover="this.style.background=' + q + '#f5f5f7' + q + '" '
+      + 'onmouseout="this.style.background=' + q + q + '">'
+      + '<input type="checkbox" onchange="window._engToggleScene(' + q + s + q + ')" '
+      + (sel ? 'checked ' : '')
+      + 'style="width:13px;height:13px;accent-color:' + c + '">'
+      + '<span style="font-size:9px;padding:1px 7px;border-radius:999px;color:#fff;background:' + c + '">'
+      + _engSceneDisplayName(s) + '</span></label>';
+  }
 
   function _renderFilterTags() {
-    let html = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;flex-shrink:0">';
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;flex-shrink:0;align-items:center">';
     _availTypes.forEach(t => { const act = _engFilterType === t; html += `<span onclick="window._engToggleType('${t}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid ${act?'#0071e3':'#e8e8ed'};color:${act?'#fff':'#1d1d1f'};background:${act?'#0071e3':'#f5f5f7'};font-weight:500;transition:all .15s">${t}</span>`; });
     if (_availTypes.length > 0) html += '<span style="width:1px;background:#e8e8ed;margin:2px 4px"></span>';
     _SCOPE_ORDER_ALL.forEach(s => { if (!_availScopes.includes(s)) return; const act = _engFilterScope === s; html += `<span onclick="window._engToggleScope('${s}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid ${act?'#0071e3':'#e8e8ed'};color:${act?'#fff':'#1d1d1f'};background:${act?'#0071e3':'#f5f5f7'};font-weight:500;transition:all .15s">${_SCOPE_LABELS_ALL[s]||s}</span>`; });
+    // 场景多选下拉（Issue #198，参考 runtimes.js sceneDropdown）
+    if (_availScenes.length > 0) {
+      html += '<span style="width:1px;background:#e8e8ed;margin:2px 4px"></span>';
+      var sceneBtnBorder = _engFilterScene.length ? '#10b981' : '#e8e8ed';
+      var sceneBtnBg = _engFilterScene.length ? '#10b981' : '#f5f5f7';
+      var sceneBtnColor = _engFilterScene.length ? '#fff' : '#1d1d1f';
+      var sceneLabel = (I18N.t('runtimes.label.scene') || '场景') + (_engFilterScene.length ? '(' + _engFilterScene.length + ')' : '');
+      html += '<div style="position:relative;display:inline-block">'
+        + '<span onclick="window._engToggleDropdown(\'engSceneDropdown\')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid ' + sceneBtnBorder + ';color:' + sceneBtnColor + ';background:' + sceneBtnBg + ';font-weight:500;transition:all .15s;display:inline-flex;align-items:center;gap:4px">' + sceneLabel + '<span style="font-size:8px;opacity:.6">\u25BC</span></span>'
+        + '<div id="engSceneDropdown" style="display:none;position:absolute;top:calc(100% + 4px);left:0;background:#fff;border:1px solid #e8e8ed;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);z-index:100;padding:4px;min-width:140px">'
+        + _availScenes.map(_renderSceneCheckbox).join('')
+        + '</div></div>';
+    }
     html += '<span style="flex:1"></span>';
     html += `<span onclick="window._engClearAll()" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid #e8e8ed;color:#86868b;background:#f5f5f7;font-weight:500;transition:all .15s" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">全不选</span>`;
     html += '</div>';
@@ -1181,6 +1232,16 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
 
   window._engToggleType = function(t) { _engFilterType = (_engFilterType === t) ? '' : t; _refreshEngAll(); };
   window._engToggleScope = function(s) { _engFilterScope = (_engFilterScope === s) ? '' : s; _refreshEngAll(); };
+  window._engToggleScene = function(s) {
+    var i = _engFilterScene.indexOf(s);
+    if (i >= 0) _engFilterScene.splice(i, 1); else _engFilterScene.push(s);
+    _refreshEngAll();
+  };
+  window._engToggleDropdown = function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  };
   window._engClearAll = function() { window._engCurIds = []; _refreshEngAll(); };
 
   function _refreshEngAll() {
@@ -1203,6 +1264,11 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   </div>`;
   document.body.appendChild(overlay);
 
+  // 加载场景标签缓存（供 _engSceneDisplayName 解析显示名；runtimes.js 已定义 __sceneTagsCache）
+  if (typeof __sceneTagsCache !== 'undefined' && !__sceneTagsCache && typeof _loadSceneTagsCache === 'function') {
+    _loadSceneTagsCache(function() { _refreshEngAll(); });
+  }
+
   const _engInput = document.getElementById('engSearchInput');
   let _engComposing = false;
   _engInput.addEventListener('compositionstart', function() { _engComposing = true; });
@@ -1221,6 +1287,15 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
     }
   };
   overlay.addEventListener('click', function(ev) { if (ev.target === overlay) overlay.remove(); });
+  // 点击下拉外部关闭场景下拉（Issue #198）
+  overlay.addEventListener('click', function(ev) {
+    var dd = document.getElementById('engSceneDropdown');
+    if (dd && dd.style.display !== 'none') {
+      if (!ev.target || !ev.target.closest || (!ev.target.closest('#engSceneDropdown') && !ev.target.matches('[onclick*="_engToggleDropdown"]'))) {
+        dd.style.display = 'none';
+      }
+    }
+  });
 }
 
 // ── 创建新场景（从卡片网格的"创建"卡片触发）──

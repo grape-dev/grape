@@ -1107,14 +1107,9 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     from src.prompt_builder import build_conversation_prompt
     prompt, _inj_ids = build_conversation_prompt(evt, user_message, _list_thread(anchor_seq), agent_type, issue_num)
 
-    from src.repo_key import parse_repo_key, from_repo_key
-    _provider, _, _ = parse_repo_key(repo_key)
-    if _provider == "github":
-        from src.user.db import get_github_token
-        bot_token = get_github_token(repo_key=repo_key) or ""
-    else:
-        from src.user.db import get_gitcode_token
-        bot_token = get_gitcode_token(repo_key=repo_key) or ""
+    from src.repo_key import from_repo_key
+    from src.repo import Repo
+    bot_token = Repo(repo_key).bot_token
     repository = from_repo_key(repo_key)
 
     from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task, runtime_execution_kind
@@ -1280,7 +1275,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     from src.api.routes.knowledge import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
 
-    from src.api.knowledge import knowledge_path, knowledge_storage_key, _issue_num_from
+    from src.api.knowledge import knowledge_path, _issue_num_from
     from src.session_manager import db, db_lock
     import os
 
@@ -1298,13 +1293,21 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     if os.path.isfile(file_path):
         os.remove(file_path)
 
-    # 2. 删 OBS 对象（如有）
+    # 2. 删 OBS 对象（从 DB 取实际 obs_key，不用 knowledge_storage_key 重新生成）
     try:
         from src.storage import get_storage
         storage = get_storage()
         if storage is not None:
-            obs_key = knowledge_storage_key(evt["repo_key"], scope, agent_type=_ag, issue_num=_in)
-            storage.delete_object(obs_key)
+            from src.session_manager import db, db_lock
+            with db_lock:
+                obs_rows = db.cursor().execute(
+                    "SELECT obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
+                    "AND obs_key!='' AND obs_key IS NOT NULL",
+                    (evt["repo_key"], scope, _ag, _in)
+                ).fetchall()
+            for (obs_key,) in obs_rows:
+                storage.delete_object(obs_key)
     except Exception:
         pass
 
@@ -1452,7 +1455,6 @@ def _execute_conv_task(task_id: str, loop):
         from src.api.knowledge import _issue_num_from
         from src.api.event_pipeline import get_agent_workdir
         from src.prompt_builder import build_conversation_prompt
-        from src.user.db import get_gitcode_token
         from src.api.session_store import get_or_create_issue_session
         issue_num = _issue_num_from(issue_id)
         # 会话复用
@@ -1473,14 +1475,9 @@ def _execute_conv_task(task_id: str, loop):
         import os
         os.makedirs(ws, exist_ok=True)
         prompt, injected_ids = build_conversation_prompt(evt, message, _list_thread(anchor_seq), agent_type, issue_num)
-        from src.repo_key import parse_repo_key
-        _provider, _, _ = parse_repo_key(repo_key)
-        if _provider == "github":
-            from src.user.db import get_github_token
-            bot_token = get_github_token(repo_key=repo_key) or ""
-        else:
-            from src.user.db import get_gitcode_token
-            bot_token = get_gitcode_token(repo_key=repo_key) or ""
+        from src.repo_key import from_repo_key
+        from src.repo import Repo
+        bot_token = Repo(repo_key).bot_token
         repository = from_repo_key(repo_key)
         # 用 hermes 引擎（对齐 Chat Agent）
         for evt_type, data in stream_devops_agent(

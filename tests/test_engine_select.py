@@ -190,6 +190,24 @@ class TestQueryEngines:
         assert len(es.query_engines("owner/repo", "global")) == 1
         assert len(es.query_engines("owner/repo", "local")) == 1
 
+    def test_query_scene_tags_default(self):
+        """Issue #198: query_engines 返回 scene_tags，未设置时回退 ["default"]。"""
+        _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
+        result = es.query_engines("owner/repo", "global")
+        assert len(result) == 1
+        assert result[0]["scene_tags"] == ["default"]
+
+    def test_query_scene_tags_custom(self):
+        """Issue #198: query_engines 正确解析自定义 scene_tags JSON。"""
+        glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"))
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE agent_runtimes SET scene_tags=? WHERE id=?", ('["iac","cloud-native"]', glob_eng))
+            db.commit()
+        result = es.query_engines("owner/repo", "global")
+        assert len(result) == 1
+        assert result[0]["scene_tags"] == ["iac", "cloud-native"]
+
 
 class TestScenePoolEngineIds:
     def test_non_empty_ids(self):

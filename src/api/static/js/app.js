@@ -890,13 +890,33 @@ function loadAgentTypes() {
   }
 
   function showToast(msg, duration) {
-    const t = document.createElement('div');
-    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#101724;color:#fff;padding:10px 20px;border-radius:8px;font-size:12px;z-index:10000;box-shadow:0 4px 16px rgba(0,0,0,.2);white-space:pre-line;max-width:80vw';
+    // Issue #199: 先移除已有 Toast，避免连续提示叠加
+    var existing = document.querySelector('[role="status"].app-toast');
+    if (existing) existing.remove();
+    var t = document.createElement('div');
+    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(10px);background:#101724;color:#fff;padding:10px 20px;border-radius:10px;font-size:13px;z-index:10000;box-shadow:0 8px 32px rgba(0,0,0,.18);white-space:pre-line;max-width:80vw;opacity:0;transition:opacity .25s ease,transform .25s cubic-bezier(.25,.1,.25,1)';
     t.setAttribute('role', 'status');
-    t.setAttribute('aria-live', 'polite');
+    t.classList.add('app-toast');
     t.textContent = msg;
     document.body.appendChild(t);
-    setTimeout(() => t.remove(), duration || 3000);
+    // Apple 风格淡入 + 上移
+    requestAnimationFrame(function() {
+      t.style.opacity = '1';
+      t.style.transform = 'translateX(-50%) translateY(0)';
+    });
+    // 淡出后移除
+    var removeTimer = setTimeout(function() {
+      t.style.opacity = '0';
+      t.style.transform = 'translateX(-50%) translateY(10px)';
+      setTimeout(function() { t.remove(); }, 300);
+    }, (duration || 2500) - 300);
+    // 点击 Toast 提前关闭
+    t.addEventListener('click', function() {
+      clearTimeout(removeTimer);
+      t.style.opacity = '0';
+      t.style.transform = 'translateX(-50%) translateY(10px)';
+      setTimeout(function() { t.remove(); }, 300);
+    });
   }
 
   // ── 通用确认对话框（Issue #125: 替换原生 confirm）──
