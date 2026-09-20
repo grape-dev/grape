@@ -621,14 +621,16 @@ if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 if os.path.isdir(STATIC_DIR):
-    # Prevent browser from caching stale JS/CSS (version bump in ?v= is the primary cache-buster,
-    # but this header ensures even without ?v= change the browser revalidates)
+    # Static assets (JS/CSS): allow browser caching with ETag revalidation.
+    # ?v= bump is the primary cache-buster; must-revalidate ensures stale files are always checked.
+    # index.html itself stays no-store (see _spa_response below) so the browser always fetches the
+    # latest HTML, which references the correct ?v= for each asset.
     from starlette.middleware.base import BaseHTTPMiddleware
     class NoCacheStaticMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             resp = await call_next(request)
             if request.url.path.startswith("/static/"):
-                resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
             return resp
     app.add_middleware(NoCacheStaticMiddleware)
 
