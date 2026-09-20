@@ -890,75 +890,70 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
     assignee = (body.assignee or "").strip() or user["username"]
-    # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
-    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
-                                          provider="github" if _is_github else "gitcode")
+    # Issue #202: 不再强制阻断同名需求——允许用户提交同名需求。
+    # 去除 409 幂等拦截：无论是否已存在同名 open Issue，都继续创建新 Issue。
+    issue_num = None
     created = False
-    if issue_num is not None:
-        raise HTTPException(status_code=409, detail={"code": 409,
-                                                     "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
-                                                     "issue_number": issue_num})
-    if issue_num is None:
-        # 拼接 Task Center 上传的附件到 issue body（按 attachments 名单精确读取，避免并发串附件）
-        _desc_with_attach = (body.description or "").strip()
-        _pending_attachments = _attach_list(owner, rname, "pending")
-        if body.attachments:
-            _want = set(body.attachments)
-            _pending_attachments = [a for a in _pending_attachments if a["filename"] in _want]
-        if _pending_attachments:
-            _attachments = []
-            for _att in _pending_attachments:
-                _ext = os.path.splitext(_att["filename"])[1].lower()
-                if _ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp'):
-                    _attachments.append(f"![{_att['filename']}]({_att['url']})")
-                else:
-                    _attachments.append(f"[{_att['filename']}]({_att['url']})")
-            if _attachments:
-                _desc_with_attach += "\n\n## 附件\n" + "\n".join(_attachments)
-        if _is_github:
-            resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
-                                      _desc_with_attach, assignee=assignee)
-        else:
-            # Issue #52: 401 时自动刷新 OAuth token 并重试
-            resp = _gitcode_api_with_refresh(
-                user, _post_gitcode_issue, owner, rname, body.title.strip(),
-                _desc_with_attach, assignee=assignee
-            )
-        n = None
-        if isinstance(resp, dict):
-            n = resp.get("number") or resp.get("iid") or resp.get("id")
-        if not n:
-            raise HTTPException(status_code=502, detail={"code": 502,
-                                                         "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
-        issue_num = int(n)
-        created = True
-        # 附件从 pending 迁移到实际 issue_number（OBS: copy + delete old; 本地: rename）
-        from src.storage import get_storage
-        _storage = get_storage()
-        _pending_atts = _attach_list(owner, rname, "pending")
-        if body.attachments:
-            _want = set(body.attachments)
-            _pending_atts = [a for a in _pending_atts if a["filename"] in _want]
-        if _pending_atts:
-            for _att in _pending_atts:
-                _fname = _att["filename"]
-                if _storage:
-                    # OBS: read pending → save to issue_number → delete pending
-                    _old_key = _attach_obs_key(owner, rname, "pending", _fname)
-                    _new_key = _attach_obs_key(owner, rname, str(issue_num), _fname)
-                    _data = _storage.read_bytes(_old_key)
-                    if _data:
-                        _storage.save_bytes(_new_key, _data)
-                        _storage.delete_object(_old_key)
-                else:
-                    # 本地: move file
-                    _old_path = os.path.join(_attach_base_dir(owner, rname, "pending"), _fname)
-                    _new_dir = _attach_base_dir(owner, rname, str(issue_num))
-                    os.makedirs(_new_dir, exist_ok=True)
-                    try:
-                        os.rename(_old_path, os.path.join(_new_dir, _fname))
-                    except Exception as _e:
-                        log.warning(f"attachment file rename failed: {_e}")
+    # 拼接 Task Center 上传的附件到 issue body（按 attachments 名单精确读取，避免并发串附件）
+    _desc_with_attach = (body.description or "").strip()
+    _pending_attachments = _attach_list(owner, rname, "pending")
+    if body.attachments:
+        _want = set(body.attachments)
+        _pending_attachments = [a for a in _pending_attachments if a["filename"] in _want]
+    if _pending_attachments:
+        _attachments = []
+        for _att in _pending_attachments:
+            _ext = os.path.splitext(_att["filename"])[1].lower()
+            if _ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp'):
+                _attachments.append(f"![{_att['filename']}]({_att['url']})")
+            else:
+                _attachments.append(f"[{_att['filename']}]({_att['url']})")
+        if _attachments:
+            _desc_with_attach += "\n\n## 附件\n" + "\n".join(_attachments)
+    if _is_github:
+        resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
+                                  _desc_with_attach, assignee=assignee)
+    else:
+        # Issue #52: 401 时自动刷新 OAuth token 并重试
+        resp = _gitcode_api_with_refresh(
+            user, _post_gitcode_issue, owner, rname, body.title.strip(),
+            _desc_with_attach, assignee=assignee
+        )
+    n = None
+    if isinstance(resp, dict):
+        n = resp.get("number") or resp.get("iid") or resp.get("id")
+    if not n:
+        raise HTTPException(status_code=502, detail={"code": 502,
+                                                     "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
+    issue_num = int(n)
+    created = True
+    # 附件从 pending 迁移到实际 issue_number（OBS: copy + delete old; 本地: rename）
+    from src.storage import get_storage
+    _storage = get_storage()
+    _pending_atts = _attach_list(owner, rname, "pending")
+    if body.attachments:
+        _want = set(body.attachments)
+        _pending_atts = [a for a in _pending_atts if a["filename"] in _want]
+    if _pending_atts:
+        for _att in _pending_atts:
+            _fname = _att["filename"]
+            if _storage:
+                # OBS: read pending → save to issue_number → delete pending
+                _old_key = _attach_obs_key(owner, rname, "pending", _fname)
+                _new_key = _attach_obs_key(owner, rname, str(issue_num), _fname)
+                _data = _storage.read_bytes(_old_key)
+                if _data:
+                    _storage.save_bytes(_new_key, _data)
+                    _storage.delete_object(_old_key)
+            else:
+                # 本地: move file
+                _old_path = os.path.join(_attach_base_dir(owner, rname, "pending"), _fname)
+                _new_dir = _attach_base_dir(owner, rname, str(issue_num))
+                os.makedirs(_new_dir, exist_ok=True)
+                try:
+                    os.rename(_old_path, os.path.join(_new_dir, _fname))
+                except Exception as _e:
+                    log.warning(f"attachment file rename failed: {_e}")
     # 2) 场景选择：用户选了具体场景 → 写入 scene_id（issue_opened 读到有值则跳过推荐）
     #    选智能推荐（vod-auto）或留空 → 不写 scene_id → issue_opened 走智能推荐
     try:

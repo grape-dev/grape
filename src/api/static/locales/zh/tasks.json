@@ -98,7 +98,6 @@
     "err_no_repo": "请先在仓库页选择仓库，再创建需求",
     "err_no_title": "请填写需求标题",
     "err_no_desc": "请填写需求描述",
-    "err_dup_title": "需求已存在（Issue {{issue}}），请输入新的需求标题",
     "err_create_failed": "创建失败: {{msg}}",
     "success_prefix": "✅ "
   },

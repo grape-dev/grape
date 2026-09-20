@@ -98,7 +98,6 @@
     "err_no_repo": "Please select a repository on the repository page before creating a requirement",
     "err_no_title": "Please fill in the requirement title",
     "err_no_desc": "Please fill in the requirement description",
-    "err_dup_title": "Requirement already exists (Issue {{issue}}), please enter a new requirement title",
     "err_create_failed": "Create failed: {{msg}}",
     "success_prefix": "✅ "
   },
