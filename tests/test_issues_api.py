@@ -233,3 +233,22 @@ class TestCreateIssue:
         data = resp.json()
         assert data.get("issue_number") == 20
         assert data.get("created") is True
+
+    def test_create_duplicate_title_not_blocked(self):
+        """Issue #202: 同名需求不再被 409 阻断——即使已存在同名 open Issue，仍允许创建新 Issue。"""
+        from unittest.mock import patch
+        # mock _find_open_issue_by_title 返回已存在 Issue 编号（模拟同名已存在）
+        # 期望：不再返回 409，而是继续创建新 Issue（created=True）
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
+             patch("src.api.routes.tasks._gitcode_api_with_refresh") as _mock_api, \
+             patch("src.api.routes.tasks.ensure_issue_task") as _mock_ensure:
+            _mock_api.return_value = {"number": 21}
+            _mock_ensure.return_value = 21
+            resp = client.post(
+                f"/api/issues/{OWNER}/{REPO}",
+                json={"title": "重复标题", "description": "描述", "repo_key": REPO_KEY},
+                headers=_headers)
+        assert resp.status_code == 200, f"expected 200, got {resp.status_code}: {resp.text[:300]}"
+        data = resp.json()
+        assert data.get("issue_number") == 21
+        assert data.get("created") is True

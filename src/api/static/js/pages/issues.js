@@ -1306,12 +1306,7 @@ function createTaskSubmit() {
   if (!repoKey.trim()) { showErr(I18N.t('tasks.create.err_no_repo')); return; }
   if (!title.trim()) { showErr(I18N.t('tasks.create.err_no_title')); return; }
   if (!desc.trim()) { showErr(I18N.t('tasks.create.err_no_desc')); return; }
-  // 本地查重：同仓库同标题已存在 → 提示用户
-  var _dup = _tasksAll.filter(function(t) { return (t.title || '').trim() === title.trim(); });
-  if (_dup.length > 0) {
-    showErr(I18N.t('tasks.create.err_dup_title', {issue: '#' + (_dup[0].issue_number || _dup[0].id)}));
-    return;
-  }
+  // Issue #202: 移除本地标题重复阻断——允许提交同名需求。
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.create.btn_creating'); }
   // C2: /api/tasks/create 已废弃 → 统一走 POST /api/issues/{owner}/{repo}（对外唯一创建入口）

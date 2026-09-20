@@ -273,7 +273,10 @@ async def create_from_template(body: CreateTemplateRequest,
             try:
                 from src.api.pipeline_config import apply_market_scene_by_name
                 apply_market_scene_by_name(repo_key, tpl_scene_id, user.get("id", 0))
-                log.info(f"template scene override: applied '{tpl_scene_id}' to {repo_key}")
+                # 写入 managed_repos.dev_scene，供 onboarding 读取并绑定到 Issue
+                from src.user.db import set_repo_scene
+                set_repo_scene(repo_key, tpl_scene_id)
+                log.info(f"template scene override: applied '{tpl_scene_id}' to {repo_key} (dev_scene updated)")
             except Exception as e:
                 log.warning(f"template scene override failed for '{tpl_scene_id}': {e}")
 

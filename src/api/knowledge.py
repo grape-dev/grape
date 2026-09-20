@@ -20,8 +20,97 @@ import threading
 from datetime import datetime, timedelta
 from src.config import log, WORKSPACE_DIR
 from src.lock import acquire_lock, release_lock, renew_lock
-from src.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP
+from src.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK
 from src.session_manager import db, db_lock
+
+_AGENT_NAME_MAP = {
+    "vod": "VOD", "issue": "Issue", "coding": "Coding",
+    "qa": "QA", "sre": "SRE", "chat": "Chat",
+}
+
+
+def derive_knowledge_name(scope: str, agent_type: str = "",
+                          issue_num: int = 0, file_path: str = "") -> str:
+    """按 scope 规则推导知识 name。
+
+    写入时自动生成和存量数据回填补偿共用，避免多处重复相同逻辑。
+
+    baseline：按 file_path 中的文件名查 BASELINE_NAME_MAP，fallback 用 BASELINE_NAME_FALLBACK
+    member：用 file_path 文件名（去扩展名），fallback "未命名知识"
+    project：项目知识 - {Agent}
+    issue：Issue #{n} 知识
+    issue_agent：Issue #{n} - {Agent} 知识
+    """
+    import os
+    if scope == "baseline":
+        _fname = ""
+        for _src in (file_path, ""):
+            if not _src:
+                continue
+            for _bn in ("project-capabilities.md", "project-graph.md", ".metadata.json"):
+                if _bn in _src:
+                    _fname = _bn
+                    break
+            if _fname:
+                break
+        return BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
+    if scope == "member":
+        return os.path.splitext(os.path.basename(file_path or ""))[0] or "未命名知识"
+    if scope == "project":
+        _an = _AGENT_NAME_MAP.get(agent_type or "")
+        return f"项目知识 - {_an}" if _an else "项目知识"
+    if scope == "issue":
+        return f"Issue #{issue_num or 0} 知识"
+    if scope == "issue_agent":
+        _an = _AGENT_NAME_MAP.get(agent_type or "", agent_type or "Agent")
+        return f"Issue #{issue_num or 0} - {_an} 知识"
+    return "未命名知识"
+
+
+_AGENT_DESC_MAP = {
+    "vod": "VOD Agent：需求分析、拆解 Issue、规划开发路径",
+    "coding": "Coding Agent：代码实现、修复缺陷、创建 PR",
+    "qa": "QA Agent：代码审查、测试验证、质量把关",
+    "sre": "SRE Agent：部署发布、监控告警、运维排障",
+    "chat": "Chat Agent：对话交互、知识沉淀、流程控制",
+}
+
+
+def derive_knowledge_description(scope: str, agent_type: str = "",
+                                 issue_num: int = 0, file_path: str = "") -> str:
+    """按 scope 规则推导知识 description。
+
+    和 derive_knowledge_name 对称，写入时自动生成和存量数据回填补偿共用。
+
+    baseline：按 file_path 查 BASELINE_DESC_MAP，fallback 用 BASELINE_DESC_FALLBACK
+    project：{Agent} 沉淀的项目级经验
+    issue：Issue #{n} 对话沉淀的经验
+    issue_agent：Issue #{n} {Agent} 沉淀的经验
+    member：空（用户手动填写）
+    """
+    if scope == "baseline":
+        _fname = ""
+        for _src in (file_path, ""):
+            if not _src:
+                continue
+            for _bn in ("project-capabilities.md", "project-graph.md", ".metadata.json"):
+                if _bn in _src:
+                    _fname = _bn
+                    break
+            if _fname:
+                break
+        return BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
+    if scope == "project":
+        _role = _AGENT_DESC_MAP.get(agent_type or "", "Agent")
+        return f"{_role} 沉淀的项目级经验"
+    if scope == "issue":
+        return f"Issue #{issue_num or 0} 对话沉淀的经验"
+    if scope == "issue_agent":
+        _role = _AGENT_DESC_MAP.get(agent_type or "", agent_type or "Agent")
+        return f"Issue #{issue_num or 0} {_role} 沉淀的经验"
+    if scope == "member":
+        return ""
+    return ""
 
 
 # ===== 内存缓存（hash 比对——不用 TTL，全实例立即一致） =====
@@ -250,42 +339,11 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
 
     # 自动生成 description（如果调用方没传）
     if not description:
-        _agent_desc = {
-            "vod": "VOD Agent：需求分析、拆解 Issue、规划开发路径",
-            "coding": "Coding Agent：代码实现、修复缺陷、创建 PR",
-            "qa": "QA Agent：代码审查、测试验证、质量把关",
-            "sre": "SRE Agent：部署发布、监控告警、运维排障",
-            "chat": "Chat Agent：对话交互、知识沉淀、流程控制",
-        }
-        if scope == "baseline":
-            description = "VOD 基线分析自动生成"
-        elif scope == "project":
-            _role = _agent_desc.get(agent_type, "Agent")
-            description = f"{_role} 沉淀的项目级经验"
-        elif scope == "issue":
-            description = f"Issue #{issue_num} 对话沉淀的经验"
-        elif scope == "issue_agent":
-            _role = _agent_desc.get(agent_type, agent_type)
-            description = f"Issue #{issue_num} {_role} 沉淀的经验"
-        elif scope == "member":
-            description = ""  # 用户手动填写
+        description = derive_knowledge_description(scope, agent_type or "", issue_num or 0, "")
 
     # 自动生成 name（system/agent；manual 由调用方传入）
     if not name and source != "manual":
-        _agent_name = {
-            "vod": "VOD", "issue": "Issue", "coding": "Coding",
-            "qa": "QA", "sre": "SRE", "chat": "Chat",
-        }
-        if scope == "baseline":
-            name = "项目基线分析"
-        elif scope == "project":
-            _an = _agent_name.get(agent_type)
-            name = f"项目知识 - {_an}" if _an else "项目知识"
-        elif scope == "issue":
-            name = f"Issue #{issue_num} 知识"
-        elif scope == "issue_agent":
-            _an = _agent_name.get(agent_type, agent_type or "Agent")
-            name = f"Issue #{issue_num} - {_an} 知识"
+        name = derive_knowledge_name(scope, agent_type or "", issue_num or 0, "")
 
     # 1. 入队（生产者）
     task_id = _enqueue_knowledge_write(
@@ -348,16 +406,16 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
         with db_lock:
             existing = db.cursor().execute(
                 "SELECT id FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-                (repo_key, scope, agent_type, issue_num)
+                "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND name=?",
+                (repo_key, scope, agent_type, issue_num, name)
             ).fetchone()
             if existing:
                 return
             db.cursor().execute(
                 "INSERT INTO agent_shared_knowledge "
-                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (scope, repo_key, agent_type, issue_num, rel_path, "", "", status, source_seq, created_by, source)
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, content_hash, status, source_seq, created_by, source, description, name) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (scope, repo_key, agent_type, issue_num, rel_path, "", "", status, source_seq, created_by, source, description, name)
             )
             db.commit()
         return
@@ -415,10 +473,10 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
     # 1. 文件追加（仅当文件没有此 content）
     if not file_has_content:
         try:
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            marker = f"- [seq {source_seq or 0} / {created_by or ''}] {content}"
-            with open(file_path, "a", encoding="utf-8") as f:
-                f.write(marker + "\n")
+            from src.localfs import read_text, write_text
+            marker = f"- [seq {source_seq or 0} / {created_by or ''}] {content}\n"
+            _existing = read_text(file_path) or ""
+            write_text(file_path, _existing + marker)
         except Exception as e:
             raise RuntimeError(f"write knowledge file failed: {e}") from e
 
@@ -445,8 +503,8 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
         c = db.cursor()
         existing = c.execute(
             "SELECT id FROM agent_shared_knowledge "
-            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND archived=0",
-            (repo_key, scope, agent_type, issue_num)
+            "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? AND name=? AND archived=0",
+            (repo_key, scope, agent_type, issue_num, name)
         ).fetchone()
         if existing:
             c.execute(
@@ -885,6 +943,8 @@ async def knowledge_sync_loop():
                         if content:
                             # Issue #190：按 scope 生成 storage_key（含 provider 前缀）
                             _obs_prefix = knowledge_obs_prefix(repo_key)
+                            _sync_name = ""
+                            _sync_desc = ""
                             if scope == "member":
                                 # Issue #190：从 file_path 提取 member/ 或 agent/ 后的相对路径
                                 # 不用 replace（file_path 含 owner/repo 时会导致路径重复）
@@ -899,6 +959,8 @@ async def knowledge_sync_loop():
                             elif scope == "baseline":
                                 _fname = os.path.basename(file_path)
                                 storage_key = f"{_obs_prefix}/project-info/{_fname}"
+                                _sync_name = BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
+                                _sync_desc = BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
                             else:
                                 # 共享知识：project/issue/issue_agent
                                 storage_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
@@ -906,13 +968,18 @@ async def knowledge_sync_loop():
                             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
                             with db_lock:
                                 c2 = db.cursor()
-                                # Issue #95：UPDATE 补 source（COALESCE 空值不覆盖）
+                                # UPDATE 补 source/name/description（COALESCE 空值不覆盖）
                                 c2.execute(
                                     "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
                                     "source=COALESCE(NULLIF(source, ''), CASE WHEN scope='baseline' THEN 'system' "
-                                    "WHEN scope='member' THEN 'manual' ELSE 'agent' END) "
+                                    "WHEN scope='member' THEN 'manual' ELSE 'agent' END), "
+                                    "name=COALESCE(NULLIF(name, ''), ?), "
+                                    "description=COALESCE(NULLIF(description, ''), ?) "
                                     "WHERE id=?",
-                                    (storage_key, content_hash, rid)
+                                    (storage_key, content_hash,
+                                     _sync_name,
+                                     _sync_desc,
+                                     rid)
                                 )
                                 db.commit()
                     except Exception as e:
@@ -1000,7 +1067,7 @@ def _sync_baseline_files():
                 file_path = os.path.relpath(fpath, WORKSPACE_DIR)
 
                 # Issue #190：查重改用 name（不受 file_path 格式变化影响）
-                _baseline_name = BASELINE_NAME_MAP.get(fname, fname)
+                _baseline_name = BASELINE_NAME_MAP.get(fname, BASELINE_NAME_FALLBACK)
                 with db_lock:
                     row = db.cursor().execute(
                         "SELECT id, obs_key FROM agent_shared_knowledge "
@@ -1026,22 +1093,29 @@ def _sync_baseline_files():
                     storage_key = f"{knowledge_obs_prefix(repo_key)}/project-info/{fname}"
                     storage.save_bytes(storage_key, content_bytes)
                     content_hash = _hl.sha256(content_bytes).hexdigest()[:64]
+                    _baseline_name = BASELINE_NAME_MAP.get(fname, BASELINE_NAME_FALLBACK)
+                    _baseline_desc = BASELINE_DESC_MAP.get(fname, BASELINE_DESC_FALLBACK)
 
                     if row:  # DB 有记录但 obs_key 为空 → UPDATE
                         with db_lock:
                             c = db.cursor()
-                            # Issue #95：UPDATE 补 source/name/description（COALESCE 空值不覆盖）
+                            # 补 source/name/description
+                            # name: 空值或 fallback 值 → 替换为精确映射
+                            # description: 空值或统一值 → 替换为精确映射
+                            _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"
                             c.execute(
                                 "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
                                 "source=COALESCE(NULLIF(source, ''), 'system'), "
-                                "name=COALESCE(NULLIF(name, ''), ?) "
+                                "name=COALESCE(NULLIF(NULLIF(name, ''), ?), ?), "
+                                "description=COALESCE(NULLIF(NULLIF(NULLIF(description, ''), ?), ?), ?) "
                                 "WHERE id=?",
-                                (storage_key, content_hash, _baseline_name, row[0])
+                                (storage_key, content_hash,
+                                 BASELINE_NAME_FALLBACK, _baseline_name,
+                                 _UNIFIED_DESC, BASELINE_DESC_FALLBACK, _baseline_desc,
+                                 row[0])
                             )
                             db.commit()
                     else:  # DB 无记录 → INSERT
-                        _baseline_desc = BASELINE_DESC_MAP.get(fname, "VOD 基线分析自动生成")
-                        _baseline_name = BASELINE_NAME_MAP.get(fname, "项目基线分析")
                         with db_lock:
                             c = db.cursor()
                             c.execute(

@@ -157,7 +157,9 @@ def knowledge_obs_prefix(repo_key: str) -> str:
 
 `builder.py` 的 `_write_to_obs()` 和 `knowledge.py` 的 `_sync_baseline_files()` 查重条件从 `file_path=?` 改为 `name=? AND archived=0`。
 
-name 是固定中文展示名（"项目结构图谱"/"项目能力清单"/"项目元数据"），提取为 `BASELINE_NAME_MAP` / `BASELINE_DESC_MAP` 常量放在 `repo_key.py`（两个模块共享，避免跨层依赖和硬编码重复）。
+name 是固定中文展示名（"项目结构图谱"/"项目能力清单"/"项目元数据"），提取为 `BASELINE_NAME_MAP` / `BASELINE_DESC_MAP` 常量放在 `repo_key.py`（两个模块共享，避免跨层依赖和硬编码重复）。fallback 值 `BASELINE_NAME_FALLBACK` / `BASELINE_DESC_FALLBACK` 同在 `repo_key.py`。
+
+name 自动生成逻辑统一抽取为 `derive_knowledge_name()`（`src/api/knowledge.py`），按 scope 规则推导：baseline 用 BASELINE_NAME_MAP 精确映射、member 用 file_path 文件名去扩展名、project/issue/issue_agent 用 "项目知识 - {Agent}" / "Issue #{n} 知识" 等。写入时自动生成和存量数据回填补偿共用同一函数，避免多处重复。
 
 ### 4.3 全部 archived=0 补全
 
@@ -198,35 +200,27 @@ name 是固定中文展示名（"项目结构图谱"/"项目能力清单"/"项�
 
 ### 4.7 数据清理迁移函数
 
-#### 异步执行 + 分布式锁
+迁移分两个函数，执行时机不同：
 
-通过 `asyncio.to_thread()` + `asyncio.create_task()` 调度（非裸 threading.Thread）。Task 异常用 `add_done_callback` 捕获。Shutdown 用 `wait_for(timeout=10)` 等待完成。
+#### _migrate_knowledge_dedup_and_ref()（每次启动执行，幂等）
 
-通过 `acquire_lock("knowledge_migrate", ttl=600)` 分布式锁防多实例并发。锁 key 和 meta key 都用功能语义命名（非 issue 号）。
+在 `init_database()` 中同步调用。步骤顺序：
+1. source 回填（空值 → system/agent/manual）
+2. name/description 回填（所有 scope，用 `derive_knowledge_name()` 推导，必须在去重之前）
+3. baseline 去重（按 repo_key + name，派生表子查询，SQLite/MySQL 通用）+ 其他 scope 去重
+4. scene_knowledge_ref 数据迁移（INSERT OR IGNORE）
+5. 孤儿 scene_knowledge_ref 清理（knowledge_id 指向已删除记录）
 
-#### 幂等控制 + 失败重试
+issue95 修复部分有独立幂等标记 `issue95_migrate_done`。
 
-通过 meta 表 `knowledge_migrate_done` 标记控制。**仅在所有步骤成功时才写标记**——每个步骤用 `_stepN_ok` 追踪，三个步骤都成功才写标记，否则下次启动重试。
+#### _migrate_knowledge()（首次执行，受 knowledge_migrate_done 标记控制）
 
-#### 步骤 1：清理 baseline 重复记录
+在 `lifespan()` 中异步执行（`asyncio.to_thread` + `create_task`）。仅执行一次：
+1. 恢复归档记录（archived=1 → 0）
+2. obs_key 归一化（OLD_A/OLD_B → 新格式含 provider，OBS 对象迁移 read→save→UPDATE→delete old）
+3. file_path 归一化（OLD/PARTIAL → 新格式含 provider）
 
-两阶段去重，**优先保留 archived=0 的记录**：
-1. 先删归档记录（`archived=1` 且有同 `repo_key + name` 的 `archived=0` 记录存在）
-2. 再按 `MAX(id)` 去重剩余记录
-
-先删 scene_knowledge_ref 关联引用，再删 agent_shared_knowledge 主表行。MySQL 用临时表，SQLite 用子查询。
-
-#### 步骤 2：更新 obs_key + OBS 对象迁移
-
-obs_key 按 scope 分别处理（OLD_A 完全重写、OLD_B 插入 provider、member 提取相对路径）。
-
-OBS 对象迁移流程：**读旧 key 内容 → 写新 key → 批量 UPDATE DB（executemany 单次 commit）→ 删旧 OBS 对象**。
-
-关键安全逻辑：`read_bytes` 返回 None 或异常时 `continue`（不加入 updates，不更新 DB，不删旧对象），下次启动重试。旧对象删除失败只 warning 不阻断。
-
-#### 步骤 3：更新 file_path
-
-按格式分别处理（NEW 跳过、PARTIAL 补 provider、OLD 补完整前缀）。批量 executemany 单次 commit。
+> baseline 去重和 name/description 回填已移至 `_migrate_knowledge_dedup_and_ref()`（每次启动执行），此处不再重复。
 
 ### 4.8 _sync_baseline_files OLD_B 格式检测
 
@@ -244,13 +238,16 @@ baseline 按 `(repo_key, scope, name)` 分组（和 Issue #190 去重维度一�
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/repo_key.py` | 新增 | `knowledge_obs_prefix()`、`BASELINE_NAME_MAP`、`BASELINE_DESC_MAP` |
-| `src/project_info/builder.py` | 修改 | `_write_to_obs()` 查重改 name + archived=0 + obs_key 用新前缀 |
-| `src/api/knowledge.py` | 修改 | `knowledge_storage_key()` 新前缀；`_sync_baseline_files()` 查重改 name + archived=0 + OLD_B 检测；sync member obs_key 修复路径重复；`read_entry_content()` + `cleanup_archived_knowledge()` 加 `workspace_repo_dir()` 兜底；`_do_write_knowledge()` 查重加 archived=0；删除死代码 `_owner_repo()` |
-| `src/api/routes/knowledge.py` | 修改+删除 | member 上传 obs_key 新前缀；`_update_knowledge_content()` + `_delete_knowledge_full()` 加 `workspace_repo_dir()` 兜底；删除废弃接口 + 死代码（`_member_docs`、`_fmt_time`、`_owner_repo`、`_read_file`、`_read_ws_file`、`_safe_rel`、`ALLOWED_EXTS`、`MAX_UPLOAD_BYTES`） |
-| `src/api/db_setup.py` | 新增+修改 | `_migrate_knowledge()`：分布式锁 + 两阶段去重（archived=0 优先）+ obs_key 归一化（OBS 对象迁移+删除，read 失败跳过）+ file_path 归一化；`_migrate_knowledge_issue67()` 去重修正 |
-| `src/api/main.py` | 新增 | `asyncio.to_thread()` + `create_task()` + `add_done_callback` + shutdown `wait_for` |
+| `src/repo_key.py` | 新增 | `knowledge_obs_prefix()`、`BASELINE_NAME_MAP`、`BASELINE_DESC_MAP`、`BASELINE_NAME_FALLBACK`、`BASELINE_DESC_FALLBACK` |
+| `src/localfs.py` | 新增 | 原子文件操作模块：`write_text`/`write_bytes`（tmp+fsync+replace+fsync dir）、`read_text`/`read_bytes`、`append_text`、`safe_join`/`safe_workspace_path` |
+| `src/api/knowledge.py` | 新增+修改 | `derive_knowledge_name()` 统一 name 推导；`knowledge_storage_key()` 新前缀；`_sync_baseline_files()` 查重改 name + 精确映射；sync_loop UPDATE 补 name/description（嵌套 NULLIF 覆盖统一值）；rejected INSERT 补 name+description + 查重加 name；`read_entry_content()` 加兜底；`_do_write_knowledge` 追加写入改原子 read+write；删除死代码 |
+| `src/project_info/builder.py` | 修改 | `_write_to_obs()` 查重改 name + archived=0 + obs_key 新前缀 + description 用 BASELINE_DESC_MAP + fallback 用常量 + open("w") 改 localfs.write_text |
+| `src/api/routes/knowledge.py` | 修改+删除 | member 上传 obs_key 新前缀；2 处 open("w") 改 localfs.write_text；删除废弃接口 + 死代码 |
+| `src/api/db_setup.py` | 新增+修改 | `_migrate_knowledge_dedup_and_ref()`：source 回填 + name/description 回填（所有 scope，derive_knowledge_name）+ 派生表去重 + 孤儿 ref 清理；`_migrate_knowledge()`：恢复归档 + obs_key 归一化 + file_path 归一化（dedup 已移除） |
+| `src/api/main.py` | 修改 | `asyncio.to_thread()` + `create_task()` + `add_done_callback` + shutdown `wait_for` |
+| `src/api/routes/events.py` | 修改 | 删除知识时从 DB 取 obs_key（不用 knowledge_storage_key 重新生成） |
 | `src/runtime/service.py` | 修改 | `load_project_info()` + `load_project_info_with_obs()` 加 archived=0 |
+| `tests/test_issue190_knowledge_dedup.py` | 新增 | 30 个测试：obs_key 格式、name 映射、迁移幂等、回填+去重集成、孤儿 ref 清理 |
 | `tests/test_knowledge_board.py` | 修改 | 删除废弃接口测试，改为按 id 读知识详情 |
 | `tests/test_openapi.py` | 修改 | 更新路由清单 |
 
@@ -301,7 +298,7 @@ baseline 按 `(repo_key, scope, name)` 分组（和 Issue #190 去重维度一�
 16. _sync_baseline_files 检测 OLD_B 格式（用 `startswith(new_prefix)` 判断）——确认
 17. 归档逻辑移除（不归档、不清理、不 show_archived），迁移步骤 0 恢复 archived=1→0——确认
 18. stats 查询和 list_knowledge 一致，均无 archived 过滤——确认
-19. BASELINE_NAME_MAP / BASELINE_DESC_MAP 放在 repo_key.py 共享——确认
+19. BASELINE_NAME_MAP / BASELINE_DESC_MAP / FALLBACK 常量放在 repo_key.py，derive_knowledge_name() 放在 knowledge.py——确认
 20. 函数/变量/日志用功能语义命名（非 issue 号）——确认
 
 ## 9. 上线后的 obs_key 和 file_path 格式
@@ -354,5 +351,135 @@ baseline 按 `(repo_key, scope, name)` 分组（和 Issue #190 去重维度一�
 | knowledge.py sync member | `knowledge_obs_prefix` + 提取 member/agent 相对路径 | member obs_key |
 | knowledge.py sync baseline | `knowledge_obs_prefix` | baseline obs_key |
 | routes/knowledge.py upload | `knowledge_obs_prefix` | member obs_key |
-| routes/events.py delete | `knowledge_storage_key` | project/issue/issue_agent obs_key |
+| routes/events.py delete | 从 DB 取实际 obs_key | project/issue/issue_agent obs_key |
 | db_setup.py migrate | `knowledge_obs_prefix` / `knowledge_storage_key` | 迁移时生成新 key |
+
+## 10. 审查驱动的后续修复
+
+以下修复在初始设计完成后由外部 AI 审查驱动，逐轮发现并修复。
+
+### 10.1 name/description 回填移至每次启动路径
+
+**问题**：回填步骤原在 `_migrate_knowledge()`（受 `knowledge_migrate_done=1` 标记控制），已跑过旧迁移的环境永远不会执行回填。而 `_migrate_knowledge_dedup_and_ref()` 每次启动执行去重——去重按 `(repo_key, name)` GROUP BY，如果 name 为空或统一值，同 repo 的 3 条 baseline 会被合并为 1 条，丢失 2 条。
+
+**修复**：回填从 `_migrate_knowledge()` 移到 `_migrate_knowledge_dedup_and_ref()` step 1.5（source 回填之后、去重之前）。每次启动执行，幂等（COALESCE 空值不覆盖，统一值匹配时替换）。
+
+### 10.2 description 按文件区分
+
+**问题**：builder `_write_to_obs` 硬编码 `description="codegraph 自动生成的项目基线知识"`，三个不同文件用同一个注释，用户在列表页无法区分。
+
+**修复**：改为 `BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)`，每个文件有独立描述。迁移回填也同步修正统一 description。
+
+### 10.3 fallback 常量统一
+
+**问题**：builder / _sync_baseline_files / write_knowledge / 迁移函数各自硬编码 fallback 值，且不一致（builder 用 "codegraph 自动生成的项目基线知识"，sync 用 "VOD 基线分析自动生成"，查重用 fname，INSERT 用 "项目基线分析"）。
+
+**修复**：`repo_key.py` 新增 `BASELINE_NAME_FALLBACK` 和 `BASELINE_DESC_FALLBACK`，所有引用点统一。
+
+### 10.4 rejected INSERT 补 name+description
+
+**问题**：`_do_write_knowledge` rejected 分支的 INSERT 语句字段列表没有 name 和 description，写入后 name = DEFAULT ''。
+
+**修复**：补上 name + description 字段。5 个 INSERT 路径全部包含这两个字段（AST 扫描确认）。
+
+### 10.5 sync UPDATE 路径补 description
+
+**问题**：`knowledge_sync_loop` 和 `_sync_baseline_files` 的 UPDATE 路径只补 obs_key/content_hash/source，不碰 name/description。
+
+**修复**：两处 UPDATE 加 `name=COALESCE(NULLIF(name, ''), ?)` 和 `description=COALESCE(NULLIF(description, ''), ?)`，空值回填不覆盖已有值。
+
+### 10.6 孤儿 scene_knowledge_ref 清理
+
+**问题**：历史迁移轮次残留 53 条孤儿 ref（knowledge_id 指向已删除的知识记录）。
+
+**修复**：`_migrate_knowledge_dedup_and_ref()` 加 step 5，每次启动检查并清理 `WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)`。
+
+### 10.7 MySQL/SQLite 去重 SQL 统一
+
+**问题**：去重用 `DELETE ... NOT IN (SELECT MAX(id) FROM same_table)` 在 MySQL 报 "can't specify target table for update in FROM clause"。分了两套代码（MySQL 用 TEMPORARY TABLE，SQLite 用直接子查询）。
+
+**修复**：用标准派生表子查询 `NOT IN (SELECT keep.keep_id FROM (SELECT MAX(id) ...) AS keep)`，SQLite/MySQL 通用，删了 ~45 行重复代码。
+
+### 10.8 本地文件原子写入
+
+**问题**：6 处 `open(path, "w")` 非原子，写入中途崩溃会截断目标文件。
+
+**修复**：新建 `src/localfs.py` 模块，封装：
+- `write_text` / `write_bytes`：同目录临时文件 + flush + fsync(fd) + os.replace + fsync(dir)
+- `read_text` / `read_bytes`：安全读取
+- `append_text`：非原子追加
+- `safe_join` / `safe_workspace_path`：路径穿越校验
+
+6 处 open("w") 全部替换为 `localfs.write_text`。
+
+### 10.9 sync_loop 精确映射替代 FALLBACK
+
+**问题**：`knowledge_sync_loop` UPDATE 对 baseline 传 `BASELINE_NAME_FALLBACK` 而非按 file_path 精确映射。
+
+**修复**：baseline 分支已有 `_fname = os.path.basename(file_path)`，直接用它查 `BASELINE_NAME_MAP` / `BASELINE_DESC_MAP`，传精确值给 COALESCE。
+
+### 10.10 COALESCE 嵌套覆盖统一 description
+
+**问题**：`_sync_baseline_files` UPDATE 用 `COALESCE(NULLIF(description, ''), ?)`，统一值 "codegraph 自动生成的项目基线知识" 非空，不会被替换。
+
+**修复**：嵌套 NULLIF：`COALESCE(NULLIF(NULLIF(NULLIF(desc, ''), unified), fallback), ?)`，空值、统一值、fallback 值都转为 NULL 后用精确值替换。
+
+### 10.11 rejected 查重加 name 条件
+
+**问题**：`_do_write_knowledge` rejected 分支查重用 `(repo_key, scope, agent_type, issue_num)`，baseline scope 同 repo 的 3 条不同文件会匹配到同一条已有记录，后续 rejected 记录被跳过。
+
+**修复**：查重加 `AND name=?`。
+
+### 10.12 追加写入改原子
+
+**问题**：`_do_write_knowledge` 用 `open("a")` 追加写入，崩溃时可能截断已有内容。
+
+**修复**：改为 `localfs.read_text` + `localfs.write_text`（原子替换）。安全因为有分布式锁保护同维度串行。
+
+### 10.13 derive_knowledge_name 抽取
+
+**问题**：name 自动生成逻辑在 write_knowledge、迁移 step 1.5、step 1.6 三处重复，且 member/issue/project 的规则各自硬编码。
+
+**修复**：抽取为 `derive_knowledge_name(scope, agent_type, issue_num, file_path)` 放在 `src/api/knowledge.py`（知识层逻辑）。三处引用统一调此函数。step 1.5 + 1.6 合并为一个统一回填步骤，查所有 scope 的空 name / fallback name / 统一 description。
+
+### 10.14 _migrate_knowledge 冗余 dedup 删除
+
+**问题**：`_migrate_knowledge` 里有 baseline dedup 步骤，与 `_migrate_knowledge_dedup_and_ref` 的 step 2 重复（后者每次启动执行）。
+
+**修复**：删除 `_migrate_knowledge` 里的 dedup 步骤和 `_dedup_ok` 变量。`_migrate_knowledge` 现在只做：恢复归档 → obs_key 归一化 → file_path 归一化。
+
+### 10.15 normal-path 查重加 name 条件
+
+**问题**：`_do_write_knowledge` normal 路径（非 rejected）查重用 `(repo_key, scope, agent_type, issue_num)`，不含 name。baseline scope（agent_type='', issue_num=0）的 3 个不同文件会匹配同一条记录互相覆盖。
+
+**修复**：加 `AND name=?`，和 rejected 路径一致。
+
+### 10.16 derive_knowledge_description 抽取 + 非 baseline description 回填
+
+**问题**：回填 `_needs_desc` 只对 baseline scope 设 True，非 baseline（project/issue/issue_agent）的空 description 永远不会被回填。write_knowledge 里 description 生成逻辑也和迁移重复。
+
+**修复**：抽取 `derive_knowledge_description(scope, agent_type, issue_num, file_path)` 放在 `src/api/knowledge.py`，和 `derive_knowledge_name` 对称。write_knowledge 和迁移回填共用。回填现在对所有 scope 生成 description。
+
+### 10.17 source=manual 记录不回填 description
+
+**问题**：回填对 member scope 记录生成 description 时，derive_knowledge_description("member") 返回空字符串，隐式跳过。但如果 member name 为空需要回填 name 时，UPDATE 会把 description 也设为空字符串——清空用户已填的 description。
+
+**修复**：基于 source 字段判断——source="manual" 的记录不碰 description，保持用户填的原值。只有 system/agent 记录才回填 description。
+
+### 10.18 孤儿 ref 清理用 EXISTS 替代 COUNT
+
+**问题**：孤儿 ref 清理用 `SELECT COUNT(*) ... NOT IN (SELECT id ...)` 全表扫描计数。
+
+**修复**：改为 `SELECT EXISTS(SELECT 1 ...)`，命中第一行即返回，无孤儿时跳过 DELETE。
+
+### 10.19 localfs.write_text 加 fsync 目录
+
+**问题**：os.replace 后如果不 fsync 目录，掉电时 rename 元数据可能未落盘，文件名存在但 inode 丢失。
+
+**修复**：os.replace 后 `os.open(dir, O_RDONLY)` → `os.fsync(dir_fd)` → `os.close(dir_fd)`，OSError 兜底防 tmpfs 等不支持目录 fsync 的文件系统。
+
+### 10.20 localfs 注释修正
+
+**问题**：docstring 写"原子写入文本文件"，不准确——只有 os.replace 是原子的，写入本身不是。
+
+**修复**：改为"同目录临时文件 + os.replace 原子替换目标文件，避免进程崩溃时目标文件处于半写/截断状态"。

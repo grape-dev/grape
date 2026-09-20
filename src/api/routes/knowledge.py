@@ -7,13 +7,14 @@
 - PUT  /api/knowledge/{id}    更新知识内容
 - DEL  /api/knowledge/{id}    删除知识条目（按 id）
 """
-import os, time, uuid, hashlib
+import os, time, uuid, hashlib, json
 from src.repo_key import knowledge_obs_prefix
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.knowledge import read_entry_content
 from src.config import log, WORKSPACE_DIR
+from src.localfs import write_text as _atomic_write
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -301,17 +302,14 @@ def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
     """更新知识内容：写文件 + OBS + DB content_hash + updated_at。"""
     repo_key = row["repo_key"]
     file_path = row["file_path"]
-    from src.config import WORKSPACE_DIR
     from src.repo_key import workspace_repo_dir
-    full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
-    if not os.path.isdir(os.path.dirname(full)):
-        # 兼容旧格式 file_path（不含 provider/owner/repo 前缀）
+    from src.localfs import safe_workspace_path
+    try:
+        full = safe_workspace_path(file_path)
+    except ValueError:
+        # 旧格式 file_path 不含 provider/owner/repo 前缀
         full = os.path.normpath(os.path.join(workspace_repo_dir(repo_key), file_path))
-    if full != WORKSPACE_DIR and not full.startswith(WORKSPACE_DIR + os.sep):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "非法路径"})
-    os.makedirs(os.path.dirname(full), exist_ok=True)
-    with open(full, "w", encoding="utf-8") as f:
-        f.write(new_content)
+    _atomic_write(full, new_content)
 
     obs_key = row.get("obs_key", "")
     content_hash = ""
@@ -352,11 +350,12 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
 
     file_path = row.get("file_path", "")
     if file_path:
-        from src.config import WORKSPACE_DIR
         from src.repo_key import workspace_repo_dir
-        full = os.path.normpath(os.path.join(WORKSPACE_DIR, file_path))
-        if not os.path.isfile(full):
-            # 兼容旧格式 file_path
+        from src.localfs import safe_workspace_path
+        try:
+            full = safe_workspace_path(file_path)
+        except ValueError:
+            # 旧格式 file_path 不含 provider/owner/repo 前缀
             full = os.path.normpath(os.path.join(workspace_repo_dir(row.get("repo_key", "")), file_path))
         if os.path.isfile(full):
             try:
@@ -395,10 +394,8 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
     username = str(user.get("username") or user.get("id") or "user")
     filename = f"entry_{int(time.time())}_{uuid.uuid4().hex[:6]}.md"
     member_dir = os.path.join(base, "project-info", "member", username)
-    os.makedirs(member_dir, exist_ok=True)
     file_path = os.path.join(member_dir, filename)
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(body.content.strip())
+    _atomic_write(file_path, body.content.strip())
 
     rel = os.path.relpath(file_path, WORKSPACE_DIR)
     content_hash = hashlib.sha256(body.content.encode("utf-8")).hexdigest()
@@ -441,33 +438,30 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
     content = read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""), row.get("content_hash", ""))
 
     from src.session_manager import db, db_lock
-    from src.api.pipeline_config import get_pipeline_config
     with db_lock:
         refs = db.cursor().execute(
             "SELECT r.id, r.scene_id, r.agent_type, r.enabled, r.created_by, r.created_at, "
-            "s.name, s.description, s.display_name, s.scene_id "
+            "s.name, s.description, s.display_name, s.scene_id, s.nodes_json "
             "FROM scene_knowledge_ref r "
-            "LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? "
+            "LEFT JOIN devops_pipeline_scene s ON r.scene_id = s.scene_id AND s.repo_key = ? AND s.is_active=1 "
             "WHERE r.knowledge_id = ? ORDER BY r.id",
             (row["repo_key"], knowledge_id)
         ).fetchall()
 
-    # 为每个场景关联补充 pipeline 信息（批量查，不循环加锁）
+    # Issue #199: 批量查 pipeline 信息（消除 N+1——原来逐个调 get_pipeline_config）
     ref_list = []
-    scene_ids = [r[9] for r in refs if r[9] and row["repo_key"]]
-    pipeline_map = {}
-    for sid in scene_ids:
-        try:
-            pc = get_pipeline_config(sid, repo_key=row["repo_key"])
-            if pc and pc.get("nodes"):
-                pipeline_map[sid] = " → ".join(n.get("tag", n.get("id", "")) for n in pc["nodes"] if n.get("enabled", True))
-        except Exception:
-            pass
     for r in refs:
         scene_name = r[6] or ""
         scene_description = r[7] or ""
         scene_display_name = r[8] or scene_name
-        pipeline_chain = pipeline_map.get(r[9], "")
+        # nodes_json 已在 JOIN 中查出，直接解析
+        pipeline_chain = ""
+        if r[10]:
+            try:
+                nodes = json.loads(r[10])
+                pipeline_chain = " → ".join(n.get("tag", n.get("id", "")) for n in nodes if n.get("enabled", True))
+            except Exception:
+                pass
         ref_list.append({
             "id": r[0], "scene_id": r[1], "agent_type": r[2], "enabled": r[3],
             "created_by": r[4], "created_at": r[5],

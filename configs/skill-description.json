@@ -327,5 +327,19 @@
     "sub_scene": "app-release",
     "path": "sre/app-release/deploy-cli",
     "description": "华为云部署（CLI 版）：A2A 直连部署或 PR 合并全流程构建→部署→验证，自动识别构建方式并用 hcloud CLI 部署验证。Grape/GitCode 操作使用 grape CLI"
+  },
+  "vod-strict": {
+    "name": "开发者声音分析（严格版）",
+    "agent_type": "vod",
+    "sub_scene": "feedback-loop",
+    "path": "vod/feedback-loop/vod-strict",
+    "description": "开发者声音分析（hello-world 场景变体）：与官方 vod 同职责（收集/分析/引导/提炼需求+Issue 审视），明确禁止部署操作和跨阶段 A2A，A2A 交办目标按 pipeline next 节点动态决定（支持 vod→sre 部署流水线）"
+  },
+  "devbridge-deploy": {
+    "name": "DevBridge 隧道部署",
+    "agent_type": "sre",
+    "sub_scene": "app-release",
+    "path": "sre/app-release/devbridge-deploy",
+    "description": "DevBridge 隧道部署：在 Grape 服务器本地部署用户项目，经 DevBridge 隧道生成公网可访问 URL（替代 simple-flask-deploy，解决高端口安全组不可达问题），系统级 API Key 认证一次配置"
   }
 }
