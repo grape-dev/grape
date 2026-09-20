@@ -9,6 +9,45 @@ from src.config import log
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
+# ===== Issue #180: 本机带宽占用率差分采样缓存 =====
+_BW_SNAPSHOT = {"ts": 0.0, "bytes": 0}
+
+
+def _local_bandwidth_percent() -> float:
+    """psutil.net_io_counters() 汇总非 loopback 网卡吞吐，两次调用差分算速率，
+    与 RUNTIME_BANDWIDTH_THRESHOLD_MBPS（默认 1000 Mbps）阈值比较得出占用率。
+    首次调用无基准返回 0.0（与 CPU 采集行为一致）。"""
+    global _BW_SNAPSHOT
+    try:
+        import os as _os
+        import time as _t
+        import psutil as _ps
+        _per = _ps.net_io_counters(pernic=True)
+        _cur_bytes = 0
+        for _name, _cnt in _per.items():
+            if _name == "lo":
+                continue
+            _cur_bytes += _cnt.bytes_recv + _cnt.bytes_sent
+        _now = _t.time()
+        _prev_ts = _BW_SNAPSHOT["ts"]
+        _prev_bytes = _BW_SNAPSHOT["bytes"]
+        _BW_SNAPSHOT["ts"] = _now
+        _BW_SNAPSHOT["bytes"] = _cur_bytes
+        if _prev_ts <= 0 or _prev_bytes <= 0:
+            return 0.0
+        _dt = _now - _prev_ts
+        _db = _cur_bytes - _prev_bytes
+        if _dt <= 0 or _db < 0:
+            return 0.0
+        _mbps = _db * 8 / _dt / 1e6
+        _thr = float(_os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "1000"))
+        if _thr <= 0:
+            return 0.0
+        return round(min(_mbps / _thr * 100, 100.0), 1)
+    except Exception:
+        return 0.0
+
+
 # ===== 运维可观察性端点（必须在 /{owner}/{repo} 之前注册，否则被通配路由拦截）=====
 
 
@@ -155,10 +194,12 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
         # interval=None 非阻塞：返回自上次调用以来的平均值（10s 刷新间隔内的 CPU 均值）
         # 首次调用返回 0.0（无基准），后续调用返回真实值
         _local_cpu = _local_mem = _local_disk = _local_tmp = 0.0
+        _local_bandwidth = 0.0
         _local_load = ""
         try:
             import psutil as _ps
             _local_cpu = _ps.cpu_percent(interval=None)
+            _local_bandwidth = _local_bandwidth_percent()
             # MEM 用 /proc/meminfo 读取实际进程占用（total - free - buffers - cached，不含缓存）
             try:
                 with open("/proc/meminfo") as _mf:
@@ -205,7 +246,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                 _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                    "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
+                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
                     "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key=? OR repo_key=?) ORDER BY id",
@@ -217,14 +258,14 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                 _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                    "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
+                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
                     "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
                     (_stale_cutoff, _uname),
                 )
             for w in c.fetchall():
-                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w
+                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wbw, wload, wowner = w
                 worker_total += 1
                 w_health = derive_runtime_health(wstatus or "offline", wlast_seen, now_ts)
                 w_online = w_health == "online"
@@ -236,6 +277,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                     "last_seen_at": normalize_event_time(wlast_seen), "last_ip": wip or "",
                     "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
                     "disk_percent": wdisk or 0, "tmp_percent": wtmp or 0,
+                    "bandwidth_percent": wbw or 0,
                     "load_avg": wload or "",
                     "owner_name": wowner or "",
                 })
@@ -266,6 +308,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                         "last_seen_at": "", "last_ip": "127.0.0.1",
                         "cpu_percent": _local_cpu, "memory_percent": _local_mem,
                         "disk_percent": _local_disk, "tmp_percent": _local_tmp,
+                        "bandwidth_percent": _local_bandwidth,
                         "load_avg": _local_load, "owner_name": "",
                     })
                     worker_total += 1

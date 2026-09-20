@@ -114,7 +114,7 @@ class RuntimeClient:
 
         log_lines: worker 最近的 ERROR/WARNING 日志条目列表
         [{ts, level, message}]，主控存入 data/logs/workers/{id}.log
-        metrics: worker 系统资源指标 {cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, spec}
+        metrics: worker 系统资源指标 {cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, load_avg, spec}
         probe_results: worker 引擎探测结果 {engine_name: {status, latency, last_probe, error}}
         """
         payload = {"runtime_ids": runtime_ids}

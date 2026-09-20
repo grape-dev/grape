@@ -172,6 +172,7 @@ function _workerCardHTML(wk) {
     ${_barHTML(I18N.t('observability.mem'), wk.memory_percent, null, 'wk-' + wid + '-mem')}
     ${_barHTML(I18N.t('observability.tmp'), wk.tmp_percent, null, 'wk-' + wid + '-tmp')}
     ${_barHTML(I18N.t('observability.disk'), wk.disk_percent, null, 'wk-' + wid + '-disk')}
+    ${_barHTML(I18N.t('observability.bandwidth'), wk.bandwidth_percent, null, 'wk-' + wid + '-bw')}
   </div>`;
 }
 
@@ -469,6 +470,7 @@ function updateOverview(ops, rt) {
     _updateBar('wk-' + wid + '-mem', wk.memory_percent);
     _updateBar('wk-' + wid + '-tmp', wk.tmp_percent);
     _updateBar('wk-' + wid + '-disk', wk.disk_percent);
+    _updateBar('wk-' + wid + '-bw', wk.bandwidth_percent);
   }
   // 同步 Worker 分页控件（总页数可能变化）
   const wkPager = document.getElementById('wk-pager');
