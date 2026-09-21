@@ -153,10 +153,13 @@ class VcsApiClient:
     # === 平台内部实现 ===
 
     def _gitcode_request(self, method: str, path: str, data: dict | None = None) -> dict:
+        # GitCode v5（Gitee 系）认证用 ?access_token= 查询参数，Authorisation header 会 401 "token not found"
         url = f"https://gitcode.com/api/v5{path}"
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}access_token={self.token}"
         return self._do_request(url, method, data, headers={
-            "Authorization": f"token {self.token}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
         })
 
     def _github_request(self, method: str, path: str, data: dict | None = None) -> dict:
