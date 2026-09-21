@@ -735,7 +735,8 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
     last_run_at     TEXT DEFAULT '',                     -- 最近触发时间（UTC）
     next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间（UTC）
     created_at      TEXT DEFAULT (datetime('now')),
-    updated_at      TEXT DEFAULT (datetime('now'))
+    updated_at      TEXT DEFAULT (datetime('now')),
+    created_by      INTEGER DEFAULT 0           -- 创建者 user_id（autopilot 用此查 gitcode_user 绕过 self_loop）
 )
 """
 
@@ -1016,6 +1017,14 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_task ON autopilot_executions(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_status ON autopilot_executions(status)",
     ]
+    # autopilot_tasks.created_by 迁移
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "autopilot_tasks", "created_by", "INTEGER DEFAULT 0")
+            db.commit()
+    except Exception as e:
+        log.warning(f"autopilot_tasks created_by migration failed: {e}")
     for idx in indexes:
         try:
             with db_lock:
