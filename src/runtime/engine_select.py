@@ -144,11 +144,15 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
     """从 user_repos 表反查 repo_key 对应的 user_id。
 
     优先按 issue_creator（GitCode 用户名）查 unified_user_mapping 获取 user_id；
-    issue_creator 为空或查不到时，回退到原逻辑（取第一个 join 的用户）。
+    issue_creator 为空或查不到时，增加 user_accounts.username/gitcode_id 直接查询作为二级回退；
+    仍查不到时，user_repos 回退按创建者过滤（JOIN user_accounts），而非取第一个 join 用户。
 
     Issue #76 修复：原逻辑按 user_id ASC 取第一条 is_join=1 的记录，
     对于多用户仓库会返回"最早加入的用户"而非 Issue 创建者，
     导致 scope=user 引擎无法通过 claim_by_tag 认领任务。
+
+    Issue #211 增强：增加 user_accounts 二级回退 + user_repos 按创建者过滤，
+    确保已注册 grape 的项目组成员能正确映射而非落为 user_id=0。
     """
     if not repo_key:
         return 0
@@ -157,8 +161,8 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
     with lock:
         try:
             c = db.cursor()
-            # 优先按 Issue 创建者查 unified_user_mapping（Issue #76 修复）
             if issue_creator:
+                # 1. 优先查 unified_user_mapping（Issue #76 修复，OAuth 登录用户）
                 c.execute(
                     "SELECT user_id FROM unified_user_mapping "
                     "WHERE gitcode_user=? AND user_id>0 LIMIT 1",
@@ -166,7 +170,25 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 row = c.fetchone()
                 if row:
                     return row[0]
-            # 回退：repo_key 在 user_repos 里可能带 gitcode: 前缀，用 LIKE 匹配
+                # 2. 二级回退：直接查 user_accounts（Issue #211，非 OAuth 注册用户）
+                c.execute(
+                    "SELECT id FROM user_accounts "
+                    "WHERE (username=? OR gitcode_id=?) AND id>0 LIMIT 1",
+                    (issue_creator, issue_creator))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+                # 3. user_repos 回退：按创建者过滤（JOIN user_accounts），非取第一个 join 用户
+                c.execute(
+                    "SELECT ur.user_id FROM user_repos ur "
+                    "JOIN user_accounts ua ON ua.id = ur.user_id "
+                    "WHERE (ua.username=? OR ua.gitcode_id=?) "
+                    "AND (ur.repo_key=? OR ur.repo_key=?) AND ur.is_join=1 "
+                    "LIMIT 1",
+                    (issue_creator, issue_creator, repo, f"gitcode:{repo}"))
+                row = c.fetchone()
+                return row[0] if row else 0
+            # issue_creator 为空：保留原逻辑（取第一个 join 用户）
             c.execute(
                 "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 ORDER BY user_id LIMIT 1",
                 (repo, f"gitcode:{repo}"))
