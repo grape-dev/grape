@@ -75,6 +75,7 @@ def _row_to_task(row) -> dict:
         "next_run_at": row[11] or "",
         "created_at": row[12] or "",
         "updated_at": row[13] or "",
+        "created_by": row[14] if len(row) > 14 else 0,
     }
 
 
@@ -145,7 +146,7 @@ def list_tasks(
 ):
     """列出所有自动化任务（可按 repo_key / enabled 筛选）。"""
     sql = ("SELECT id, name, repo_key, scene_id, description, cron, agent_chain, issue_number, max_retry, "
-           "enabled, last_run_at, next_run_at, created_at, updated_at FROM autopilot_tasks")
+           "enabled, last_run_at, next_run_at, created_at, updated_at, created_by FROM autopilot_tasks")
     conditions = []
     params = []
     if repo_key:
@@ -170,7 +171,7 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         row = c.execute(
             "SELECT id, name, repo_key, scene_id, description, cron, agent_chain, issue_number, max_retry, "
-            "enabled, last_run_at, next_run_at, created_at, updated_at "
+            "enabled, last_run_at, next_run_at, created_at, updated_at, created_by "
             "FROM autopilot_tasks WHERE id=?", (task_id,)
         ).fetchone()
     if not row:
@@ -187,10 +188,10 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
         c = db.cursor()
         c.execute(
             "INSERT INTO autopilot_tasks "
-            "(name, repo_key, scene_id, description, cron, agent_chain, issue_number, max_retry, enabled, next_run_at, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(name, repo_key, scene_id, description, cron, agent_chain, issue_number, max_retry, enabled, next_run_at, created_at, updated_at, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (body.name, body.repo_key, body.scene_id, body.description, body.cron,
-             '[]', '', body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str)
+             '[]', '', body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str, user.get("id", 0) or 0)
         )
         db.commit()
         task_id = c.lastrowid

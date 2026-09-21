@@ -31,7 +31,7 @@ def _get_enabled_tasks() -> list[dict]:
     with db_lock:
         c = db.cursor()
         rows = c.execute(
-            "SELECT id, name, repo_key, scene_id, description, cron, agent_chain, issue_number, max_retry "
+            "SELECT id, name, repo_key, scene_id, description, cron, agent_chain, issue_number, max_retry, created_by "
             "FROM autopilot_tasks WHERE enabled=1"
         ).fetchall()
     tasks = []
@@ -40,6 +40,7 @@ def _get_enabled_tasks() -> list[dict]:
             "id": r[0], "name": r[1], "repo_key": r[2],
             "scene_id": r[3], "description": r[4], "cron": r[5],
             "agent_chain": r[6], "issue_number": r[7], "max_retry": r[8],
+            "created_by": r[9] if len(r) > 9 else 0,
         })
     return tasks
 
@@ -181,23 +182,24 @@ async def _create_issue_and_trigger(task: dict, exec_id: int) -> dict:
     timestamp = _utc_now().strftime("%Y%m%d-%H%M")
     issue_title = f"{task['name']} {timestamp}"
 
-    # 查找仓库 owner 的用户身份
+    # 用仓库 bot token 创建 Issue（不过期），username 用创建者身份（绕过 self_loop）
     from src.session_manager import db, db_lock
-    user_id = 0
-    username = owner
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT user_id, gitcode_user FROM unified_user_mapping WHERE gitcode_user=? LIMIT 1",
-                (owner,)
-            )
-            row = c.fetchone()
-            if row:
-                user_id = row[0] or 0
-                username = row[1] or owner
-    except Exception as e:
-        log.warning(f"Autopilot: lookup owner user failed: {e}")
+    _bot_token = _get_repo_bot_token(repo_key)
+    _creator_uid = task.get("created_by", 0) or 0
+    _creator_username = owner
+    if _creator_uid:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT gitcode_user FROM unified_user_mapping WHERE user_id=? LIMIT 1",
+                    (_creator_uid,)
+                )
+                row = c.fetchone()
+                if row:
+                    _creator_username = row[0] or owner
+        except Exception:
+            pass
 
     # 直接调用 create_task_via_issue（不走 HTTP，无需认证）
     try:
@@ -208,8 +210,7 @@ async def _create_issue_and_trigger(task: dict, exec_id: int) -> dict:
             description=task.get("description", ""),
             scene_id=task.get("scene_id", "default"),
         )
-        # 构造内部 user dict
-        internal_user = {"id": user_id, "username": username, "token": "", "auth_type": "internal"}
+        internal_user = {"id": _creator_uid, "username": _creator_username, "token": _bot_token, "auth_type": "internal"}
         result = await create_task_via_issue(body, user=internal_user)
         issue_number = str(result.get("issue_number", ""))
         if issue_number and issue_number != "0":
@@ -316,7 +317,7 @@ async def trigger_task_now(task_id: int) -> dict:
     with db_lock:
         c = db.cursor()
         row = c.execute(
-            "SELECT id, name, repo_key, scene_id, description, cron, agent_chain, issue_number, max_retry "
+            "SELECT id, name, repo_key, scene_id, description, cron, agent_chain, issue_number, max_retry, created_by "
             "FROM autopilot_tasks WHERE id=?", (task_id,)
         ).fetchone()
     if not row:
@@ -325,6 +326,7 @@ async def trigger_task_now(task_id: int) -> dict:
         "id": row[0], "name": row[1], "repo_key": row[2],
         "scene_id": row[3], "description": row[4], "cron": row[5],
         "agent_chain": row[6], "issue_number": row[7], "max_retry": row[8],
+        "created_by": row[9] if len(row) > 9 else 0,
     }
     if task["id"] in _RUNNING_TASKS:
         return {"ok": False, "message": "task already running"}
