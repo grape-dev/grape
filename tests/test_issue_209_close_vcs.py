@@ -97,7 +97,7 @@ class TestVcsApiClientCloseIssue:
         c = VcsApiClient("gitcode", "fake-token", "org", "repo")
         with patch.object(c, "_gitcode_request", return_value={"state": "closed", "number": 5}) as m:
             resp = c.close_issue(5)
-        m.assert_called_once_with("PATCH", "/repos/org/repo/issues/5", {"state": "closed"})
+        m.assert_called_once_with("PATCH", "/repos/org/repo/issues/5", {"state_event": "close"})
         assert resp["state"] == "closed"
 
     def test_close_issue_github(self):

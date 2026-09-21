@@ -71,9 +71,10 @@ class VcsApiClient:
             dict: API 返回的 Issue JSON，或 {"error": ...} 错误信息。
         """
         if self.provider == "gitcode":
+            # GitCode v5（Gitee 系）状态迁移字段为 state_event（reopen/close），非 GitHub 的 state=closed
             return self._gitcode_request(
                 "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
-                {"state": "closed"})
+                {"state_event": "close"})
         elif self.provider == "github":
             return self._github_request(
                 "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
