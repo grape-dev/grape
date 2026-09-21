@@ -117,3 +117,4 @@ src/api/static/openapi.json
 # grape-cli 已拆为独立仓库管理（D:/Developer/grape-dev/grape/cli）
 cli/
 src/api/static/uploads/
+*.log

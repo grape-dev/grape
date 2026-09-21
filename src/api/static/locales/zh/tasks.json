@@ -98,7 +98,6 @@
     "err_no_repo": "请先在仓库页选择仓库，再创建需求",
     "err_no_title": "请填写需求标题",
     "err_no_desc": "请填写需求描述",
-    "err_dup_title": "需求已存在（Issue {{issue}}），请输入新的需求标题",
     "err_create_failed": "创建失败: {{msg}}",
     "success_prefix": "✅ "
   },
@@ -111,7 +110,19 @@
     "completed_at": "完成时间",
     "no_description": "暂无需求描述。",
     "view_issue": "查看 Issue ↗",
-    "go_conversation": "去对话 ↗"
+    "go_conversation": "去对话 ↗",
+    "copy_task": "复制需求"
+  },
+  "copy": {
+    "modal_title": "复制需求",
+    "btn_copy": "创建并执行",
+    "btn_copying": "创建中…",
+    "title_suffix": "（副本）",
+    "issue_link_label": "原 Issue 链接",
+    "err_no_title": "请填写需求标题",
+    "err_no_desc": "请填写需求描述",
+    "err_create_failed": "复制失败: {{msg}}",
+    "success_toast": "需求已复制并开始执行"
   },
   "search_placeholder": "搜索需求...",
   "change_status_failed": "状态更新失败: {{msg}}",

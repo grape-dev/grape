@@ -82,9 +82,9 @@ class TestStageRoutingHelper:
 
     # Issue #51: pending_review 阶段测试
     def test_pending_review_no_dispatch(self):
-        # TC-29: pending_review 阶段所有事件不分发
+        # TC-29: pending_review 阶段 issue_comment 路由到 issue agent，其余事件不分发
         ss.set_issue_stage(RK, "#5", "pending_review", "sre")
-        assert _resolve_issue_stage_agent(RK, "issue_comment", ISSUE_PAYLOAD, "issue") == ""
+        assert _resolve_issue_stage_agent(RK, "issue_comment", ISSUE_PAYLOAD, "issue") == "issue"
         assert _resolve_issue_stage_agent(RK, "pull_request_updated", PR_PAYLOAD, "qa") == ""
         assert _resolve_issue_stage_agent(RK, "issue_updated", ISSUE_PAYLOAD, "issue") == ""
 

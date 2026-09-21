@@ -192,7 +192,7 @@ def _collect_worker_metrics() -> dict:
     采集失败的字段保持 0.0 / 空字符串。
     CPU 使用两次调用的差值计算，首次调用返回 0.0（无基准）。
     """
-    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "load_avg": "", "spec": ""}
+    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "bandwidth_percent": 0.0, "load_avg": "", "spec": ""}
 
     # spec: CPU 核数 + 总内存（如 "4C8G"），首次采集后缓存
     if not hasattr(_collect_worker_metrics, "_spec"):
@@ -270,6 +270,38 @@ def _collect_worker_metrics() -> dict:
         with open("/proc/loadavg") as f:
             parts = f.read().split()
             metrics["load_avg"] = ",".join(parts[:3])
+    except Exception:
+        pass
+
+    # BANDWIDTH: 读 /proc/net/dev（标准库，不依赖 psutil）。两次采样差分算速率，
+    # 与配置阈值比较得出占用率（RUNTIME_BANDWIDTH_THRESHOLD_MBPS 默认 1000 Mbps）。
+    # 首次采样无基准返回 0.0（与 CPU 采集行为一致）。
+    try:
+        _now_bw = time.time()
+        _rx = _tx = 0
+        with open("/proc/net/dev") as f:
+            for _line in f:
+                if ":" not in _line:
+                    continue
+                _name, _rest = _line.split(":", 1)
+                _name = _name.strip()
+                if _name == "lo":
+                    continue
+                _f = _rest.split()
+                if len(_f) >= 9:
+                    _rx += int(_f[0])
+                    _tx += int(_f[8])
+        _bw_prev = getattr(_collect_worker_metrics, "_bw_prev", None)
+        if _bw_prev:
+            _pts, _pbytes = _bw_prev
+            _dt = _now_bw - _pts
+            _db = (_rx + _tx) - _pbytes
+            if _dt > 0 and _db >= 0:
+                _mbps = _db * 8 / _dt / 1e6
+                _thr = float(os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "1000"))
+                if _thr > 0:
+                    metrics["bandwidth_percent"] = round(min(_mbps / _thr * 100, 100.0), 1)
+        _collect_worker_metrics._bw_prev = (_now_bw, _rx + _tx)
     except Exception:
         pass
 
@@ -1409,7 +1441,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 nonlocal hermes_active
-                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 1800)
+                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 3600)
                 # 立即标记 running（不等引擎首个事件）：hermes chat -q 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
                 # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。

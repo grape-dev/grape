@@ -603,12 +603,220 @@ showToast 全局改进（影响所有页面，不只是知识页）：
 - 知识列表页加载逻辑——不动
 - 权限校验逻辑——不动
 
-## 7. 确认点（已全部确认）
+## 8. 补充设计：创建知识 + 绑定关联合并为单接口（Issue #199 迭代）
 
-1. 后端 POST /refs/batch 和 DELETE /ref/{id} 不改，前端操作成功后调 GET /knowledge/{id} 详情接口刷新——已确认
-2. 超时后调 GET /knowledge/{id} 全量重载保证一致性——已确认
-3. 场景卡片用 Vue <transition-group> + CSS transition 实现进出场动画——已确认
-4. saveEdit 保存成功后返回列表（backToList），15s 超时提示——已确认
-5. saveCreate 的 loadStats + loadList 改为 Promise.all 并行——已确认
-6. 删除死代码 loadScenes（this.scenes 未被使用）——已确认
-7. 后端 get_knowledge_detail 的 N+1 查询改批量——已确认
+### 8.1 问题
+
+原 saveCreate 分两步调 API：
+1. POST /knowledge/entry（创建条目）
+2. POST /knowledge/{kid}/refs/batch（绑定关联）
+
+如果第一步成功第二步失败，用户留在创建页重试会重复创建条目。
+
+### 8.2 方案
+
+后端 POST /knowledge/entry 的 KnowledgeEntryBody 加两个可选字段：
+- `scene_ids: list[str] = []`
+- `agent_types: list[str] = []`
+
+后端创建条目拿到 kid 后，同一个请求内完成关联绑定。前端只调一次接口。
+
+### 8.3 后端校验
+
+**scene_ids 批量校验**（一条 SQL，不循环）：
+
+```python
+# 校验 scene_ids 存在性——批量查，不循环
+if scene_ids:
+    placeholders = ",".join("?" * len(scene_ids))
+    valid_rows = c.execute(
+        f"SELECT scene_id FROM devops_pipeline_scene "
+        f"WHERE is_active=1 AND repo_key=? AND scene_id IN ({placeholders})",
+        [repo_key] + scene_ids
+    ).fetchall()
+    valid_ids = {r[0] for r in valid_rows}
+    invalid = [sid for sid in scene_ids if sid not in valid_ids]
+    if invalid:
+        raise HTTPException(status_code=400,
+            detail={"code": 400, "message": f"场景不存在: {invalid}"})
+```
+
+**agent_types 内存校验**（不查 DB）：
+
+```python
+VALID_AGENT_TYPES = {'vod', 'issue', 'coding', 'qa', 'sre', 'chat'}
+if agent_types:
+    invalid = [at for at in agent_types if at not in VALID_AGENT_TYPES]
+    if invalid:
+        raise HTTPException(status_code=400,
+            detail={"code": 400, "message": f"不支持的 Agent 类型: {invalid}"})
+```
+
+**空关联校验**：scene_id 和 agent_type 不能同时为空（复用已有逻辑）。
+
+**幂等**：同一 scene_id + agent_type 跳过已存在的（复用已有逻辑）。
+
+### 8.4 事务保证
+
+创建条目 + 绑定关联在同一个 db_lock 内，同一次 db.commit()。校验在 db_lock 外独立执行——校验是只读操作，不需要和 INSERT 共享锁块，分开反而减少锁持有时间。校验失败时 raise HTTPException，不执行 commit，无副作用。绑定 INSERT 失败时异常传播，db.rollback() 回滚，自动清理。
+
+事务流程：
+
+```
+校验 agent_types（内存，不查 DB）
+  → 校验 scene_ids（独立 db_lock 块，批量 SELECT）
+  → 写本地文件 + OBS
+  → db_lock 内：INSERT 条目 → 循环 INSERT ref → commit
+  → 失败：db.rollback() + 删本地文件 + 删 OBS 对象
+```
+
+```python
+from src.session_manager import db, db_lock
+with db_lock:
+    c = db.cursor()
+    # 1. 校验 scene_ids（批量查，不循环）
+    if scene_ids:
+        placeholders = ",".join("?" * len(scene_ids))
+        valid_rows = c.execute(
+            f"SELECT scene_id FROM devops_pipeline_scene "
+            f"WHERE is_active=1 AND repo_key=? AND scene_id IN ({placeholders})",
+            [repo_key] + scene_ids
+        ).fetchall()
+        valid_ids = {r[0] for r in valid_rows}
+        invalid = [sid for sid in scene_ids if sid not in valid_ids]
+        if invalid:
+            raise HTTPException(status_code=400,
+                detail={"code": 400, "message": f"场景不存在: {invalid}"})
+
+    # 2. 校验 agent_types（内存比对，不查 DB）
+    if agent_types:
+        invalid = [at for at in agent_types if at not in VALID_AGENT_TYPES]
+        if invalid:
+            raise HTTPException(status_code=400,
+                detail={"code": 400, "message": f"不支持的 Agent 类型: {invalid}"})
+
+    # 3. INSERT 条目
+    c.execute("INSERT INTO agent_shared_knowledge ...", (...))
+    kid = c.lastrowid
+
+    # 4. 绑定关联（幂等，跳过已存在）
+    for scene_id, agent_type in items:
+        if not scene_id and not agent_type:
+            continue
+        existing = c.execute(
+            "SELECT id FROM scene_knowledge_ref "
+            "WHERE knowledge_id=? AND scene_id=? AND agent_type=?",
+            (kid, scene_id, agent_type)
+        ).fetchone()
+        if not existing:
+            c.execute(
+                "INSERT INTO scene_knowledge_ref "
+                "(knowledge_id, scene_id, agent_type, enabled, created_by) "
+                "VALUES (?, ?, ?, 1, ?)",
+                (kid, scene_id, agent_type, username)
+            )
+
+    # 5. 全部成功才 commit
+    db.commit()
+
+return {"ok": True, "message": "知识已创建", "id": kid}
+```
+
+校验在 INSERT 之前——校验失败时条目还没创建，raise 后不 commit，无副作用。
+
+### 8.5 异常处理策略
+
+**saveCreate（创建知识）**
+
+| 异常类型 | 后端状态 | 前端处理 | 用户看到 |
+|---------|---------|---------|---------|
+| 超时（AbortError） | 不确定——请求可能已到后端，条目可能已创建也可能没创建 | 提示"创建超时" + 清空表单 + 跳回列表 + loadList 刷新 | 列表里有条目=成功，没有=未创建 |
+| 非超时（400/500/网络错误） | 确定失败——事务回滚，条目不存在 | 提示错误信息 + 留在创建页 | 可安全重试，不会重复创建 |
+| 导航取消（AbortError + e.silent） | 不确定 | 静默 | 无提示 |
+
+**saveEdit（编辑知识）**
+
+| 异常类型 | 前端处理 | 用户看到 |
+|---------|---------|---------|
+| 超时（AbortError） | 提示"保存超时" + _refreshDetailFull 刷新详情 + 退出编辑模式 | 看到最新详情内容，确认是否保存成功 |
+| 非超时 | 提示错误信息 + 留在编辑页 | 可安全重试 |
+| 导航取消 | 静默 | 无提示 |
+
+**绑定/解绑操作（toggleAgentRef/removeSceneRef/confirmAddScenes）**
+
+| 异常类型 | 前端处理 | 用户看到 |
+|---------|---------|---------|
+| 超时（AbortError） | 提示"操作超时，正在刷新最新状态" + _refreshDetailFull 全量重载 | 页面恢复到后端真实状态 |
+| 非超时 | 提示错误信息 + _refreshDetailFull 全量重载 | 页面恢复到后端真实状态 |
+| 导航取消 | 静默 | 无提示 |
+
+**不需要 createdKid 防重复逻辑**——非超时失败已回滚可安全重试，超时跳回列表用户自行确认。
+
+### 8.6 前端改动
+
+saveCreate 合并为一次调用，非超时失败留在创建页可安全重试：
+
+```javascript
+async saveCreate() {
+  // ... 校验逻辑不变 ...
+  if (this.submitting) return;
+  this.submitting = true;
+  try {
+    const d = await API.post('/knowledge/entry', {
+      repo: this.currentRepo(),
+      content: this.createForm.content,
+      agent_type: '',
+      description: this.createForm.description || '',
+      name: this.createForm.name.trim(),
+      scene_ids: this.createForm.sceneSelected,
+      agent_types: this.createForm.agentSelected
+    }, 15000);
+    app.showToast(this.t('knowledge_created'));
+    this.createForm = null;
+    this.view = 'list';
+    await Promise.all([this.loadStats(), this.loadList()]);
+  } catch (e) {
+    if (e.name === 'AbortError' && !e.silent) {
+      // 超时——不确定结果，跳回列表让用户自行确认
+      app.showToast(this.t('create_timeout'));
+      this.createForm = null;
+      this.view = 'list';
+      await this.loadList();
+    } else if (e.name === 'AbortError' && e.silent) {
+      // 导航/切 tab 导致的取消，静默
+    } else {
+      // 非超时——事务已回滚，留在创建页可安全重试
+      app.showToast(e.message || I18N.t('common.load_failed'));
+    }
+  } finally {
+    this.submitting = false;
+  }
+},
+```
+
+### 8.7 改动点
+
+| # | 层 | 改动 | 说明 |
+|---|---|------|------|
+| B3 | 后端 | KnowledgeEntryBody 加 scene_ids / agent_types 字段 | 可选，默认空列表 |
+| B4 | 后端 | create_knowledge_entry 内加 scene_ids 批量校验 | 一条 SQL 查存在性 |
+| B5 | 后端 | create_knowledge_entry 内加 agent_types 内存校验 | 常量集合比对 |
+| B6 | 后端 | create_knowledge_entry 内循环 INSERT ref | 幂等，复用已有逻辑 |
+| F16 | 前端 | saveCreate 合并为一次 API 调用 | body 带 scene_ids / agent_types |
+| F17 | 前端 | 删除 createdKid 防重复逻辑 | 事务保证回滚，非超时失败留创建页可安全重试 |
+| I2 | i18n | 删除 create_ok_bind_failed key | 事务保证不会出现"条目已创建但绑定失败" |
+
+## 9. 后续优化项（不属于本次 Issue 范围）
+
+### 9.1 DB 连接池优化
+
+**现状**：整个系统 201 处模块统一使用 `from src.session_manager import db, db_lock`，SQLite 和 MySQL 模式都是单连接 + 应用层 threading.Lock 串行化。没有连接池。
+
+- SQLite 模式：单连接合理（SQLite 写操作锁文件，多连接写会 `database is locked`）
+- MySQL 模式：MySQLCompatDB 用 pymysql 单连接 + db_lock 串行化，所有 DB 操作（含读）排队执行。MySQL 本身支持多连接并发，但当前架构没有利用
+
+**问题**：MySQL 模式下单连接 + 全局锁成为并发瓶颈。高并发场景下所有 DB 操作串行排队，吞吐量受限。
+
+**建议**：MySQL 模式下引入连接池（如 dbutils.PooledDB 或 PyMySQL + SQLAlchemy QueuePool），保留 db_lock 用于写操作串行化（防止同一行竞争），读操作不加锁走连接池并发执行。SQLite 模式保持单连接不变。
+
+**前提条件**：需要梳理 201 处 `db, db_lock` 使用点，区分纯读操作和写操作，逐步迁移。工作量较大，建议独立 Issue 推进。

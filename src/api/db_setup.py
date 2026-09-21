@@ -720,6 +720,43 @@ CREATE TABLE IF NOT EXISTS distributed_locks (
 )
 """
 
+# ===== Issue #150: Autopilot 定时自动化任务（§5.3.1 + §5.3.2 + §5.3.3）=====
+_AUTOPILOT_TASKS_DDL = """
+CREATE TABLE IF NOT EXISTS autopilot_tasks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,                       -- 任务名称
+    repo_key        TEXT NOT NULL DEFAULT '',            -- 仓库标识（gitcode:owner/repo）
+    scene_id        TEXT NOT NULL DEFAULT 'default',     -- 场景ID（定义 Agent 链）
+    description     TEXT NOT NULL DEFAULT '',             -- 任务描述（Issue body）
+    cron            TEXT NOT NULL DEFAULT '*/30 * * * *', -- cron 表达式（5 段制）
+    agent_chain     MEDIUMTEXT NOT NULL DEFAULT '[]',    -- [废弃] 保留兼容
+    issue_number    TEXT DEFAULT '',                     -- [废弃] 保留兼容
+    max_retry       INTEGER NOT NULL DEFAULT 3,          -- 最大重试次数
+    enabled         INTEGER NOT NULL DEFAULT 1,          -- 1=启用 0=禁用
+    last_run_at     TEXT DEFAULT '',                     -- 最近触发时间（UTC）
+    next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间（UTC）
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now')),
+    created_by      INTEGER DEFAULT 0           -- 创建者 user_id（autopilot 用此查 gitcode_user 绕过 self_loop）
+)
+"""
+
+_AUTOPILOT_EXECUTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS autopilot_executions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         INTEGER NOT NULL,                    -- 外键 -> autopilot_tasks.id
+    status          TEXT NOT NULL DEFAULT 'pending',     -- pending/running/success/failed/retrying
+    retry_count     INTEGER NOT NULL DEFAULT 0,          -- 已重试次数
+    agent_chain_step INTEGER NOT NULL DEFAULT 0,         -- 当前执行的链步骤索引
+    result          MEDIUMTEXT DEFAULT '',               -- 执行结果摘要
+    error           MEDIUMTEXT DEFAULT '',               -- 错误信息
+    a2a_seq         INTEGER DEFAULT NULL,                -- 关联 events.seq
+    started_at      TEXT DEFAULT '',                     -- 开始时间（UTC）
+    completed_at    TEXT DEFAULT '',                     -- 完成时间（UTC）
+    created_at      TEXT DEFAULT (datetime('now'))
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
@@ -849,7 +886,11 @@ CREATE TABLE IF NOT EXISTS user_feedback (
     is_deleted      INTEGER      NOT NULL DEFAULT 0,
     created_at      TEXT         DEFAULT (datetime('now')),
     updated_at      TEXT         DEFAULT (datetime('now'))
-)""")]
+)"""),
+    # ===== Issue #150: Autopilot 定时自动化任务表 =====
+    ("autopilot_tasks", _AUTOPILOT_TASKS_DDL),
+    ("autopilot_executions", _AUTOPILOT_EXECUTIONS_DDL),
+]
 
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -971,7 +1012,20 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_kwq_status_retry ON knowledge_write_queue(queue_status, next_retry_at)",
         "CREATE INDEX IF NOT EXISTS idx_kwq_dim_created ON knowledge_write_queue(repo_key, scope, agent_type, issue_num, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_kwq_source_seq ON knowledge_write_queue(repo_key, source_seq)",
+        # ===== Issue #150: Autopilot 索引 =====
+        "CREATE INDEX IF NOT EXISTS idx_autopilot_tasks_enabled ON autopilot_tasks(enabled)",
+        "CREATE INDEX IF NOT EXISTS idx_autopilot_tasks_repo ON autopilot_tasks(repo_key)",
+        "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_task ON autopilot_executions(task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_status ON autopilot_executions(status)",
     ]
+    # autopilot_tasks.created_by 迁移
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "autopilot_tasks", "created_by", "INTEGER DEFAULT 0")
+            db.commit()
+    except Exception as e:
+        log.warning(f"autopilot_tasks created_by migration failed: {e}")
     for idx in indexes:
         try:
             with db_lock:
@@ -2232,6 +2286,8 @@ def _migrate_tables():
         "ALTER TABLE runtime_credentials ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # ===== TMP (/tmp) 使用率指标（liufei 2026-08-28）=====
         "ALTER TABLE runtime_credentials ADD COLUMN tmp_percent DOUBLE DEFAULT 0",
+        # ===== Issue #180: 带宽占用率指标 =====
+        "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_percent DOUBLE DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
@@ -2935,6 +2991,7 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "load_avg", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "spec", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "tmp_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "bandwidth_percent", "REAL DEFAULT 0")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute("""
                     DELETE FROM runtime_credentials WHERE id NOT IN (
@@ -3418,3 +3475,16 @@ def _backfill_scene_display_names():
         log.warning(f"Scene display_name backfill failed: {e}")
 
 
+
+    # ===== autopilot_tasks: 新增 scene_id / description 列 =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "autopilot_tasks", "scene_id", "TEXT NOT NULL DEFAULT 'default'")
+            _ensure_column(c, "autopilot_tasks", "description", "TEXT NOT NULL DEFAULT ''")
+            # autopilot_executions: 新增 issue_number 列
+            _ensure_column(c, "autopilot_executions", "issue_number", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Autopilot schema migration: scene_id/description/issue_number ensured")
+    except Exception as e:
+        log.warning(f"Autopilot schema migration failed: {e}")
