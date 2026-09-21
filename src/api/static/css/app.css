@@ -796,6 +796,7 @@
 .sb-toggle.collapsed{color:var(--a)}
 /* 桌面端：sidebar 宽度过渡 + 折叠收为 0 */
 .sb{transition:width .3s cubic-bezier(.25,.1,.25,1)}
+.sb.no-transition{transition:none!important}
 .sb.collapsed{width:0;overflow:hidden;flex-shrink:0;border-right:0}
 /* 折叠时隐藏内部内容溢出（防止子元素撑开） */
 .sb.collapsed .sb-h,.sb.collapsed .sb-sel,.sb.collapsed .sb-nav,.sb.collapsed .sb-ft{overflow:hidden;white-space:nowrap;opacity:0;transition:opacity .15s}

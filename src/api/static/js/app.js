@@ -317,9 +317,23 @@ function loadAgentTypes() {
     let collapsed = false;
     try { collapsed = localStorage.getItem(SB_COLLAPSE_KEY) === '1'; } catch (e) {}
     // 桌面端：恢复持久化折叠状态（窄屏下 sidebar 由 CSS display:none 控制，不持久化）
-    sb.classList.toggle('collapsed', !_isNarrowScreen() && collapsed);
+    const shouldCollapse = !_isNarrowScreen() && collapsed;
+    if (shouldCollapse) {
+      // 临时禁用 transition 避免首屏闪缩动画（Issue #207 QA 反馈）
+      sb.classList.add('no-transition');
+    }
+    sb.classList.toggle('collapsed', shouldCollapse);
     // 更新按钮图标方向（收起后图标可视觉提示）
-    _updateToggleIcon(collapsed && !_isNarrowScreen());
+    _updateToggleIcon(shouldCollapse);
+    if (shouldCollapse) {
+      // 下一帧恢复 transition（双 rAF 确保浏览器已应用无过渡状态）
+      const restore = () => sb.classList.remove('no-transition');
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
+      } else {
+        setTimeout(restore, 0);
+      }
+    }
   }
 
   function _updateToggleIcon(collapsed) {
@@ -1083,7 +1097,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '30');
+      localStorage.setItem('app_cache_ver', '31');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -1110,13 +1124,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '30') {
+    if (localStorage.getItem('app_cache_ver') !== '31') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '30');
+      localStorage.setItem('app_cache_ver', '31');
     }
 
     const token = localStorage.getItem('token');

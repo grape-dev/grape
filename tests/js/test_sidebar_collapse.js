@@ -128,7 +128,7 @@ test('initSidebarState(): localStorage="1" → 启动时恢复 collapsed（通�
   const { dom, localStorage: ls } = makeDom();
   ls.setItem('grapeSidebarCollapsed', '1');
   ls.setItem('token', 'fake-token');  // 让 init 走 showApp 路径
-  ls.setItem('app_cache_ver', '30');
+  ls.setItem('app_cache_ver', '31');
   const { app } = loadApp(dom, ls);
   app.init();
   assert.strictEqual(dom.getElementById('sidebar').classList.contains('collapsed'), true,
@@ -139,7 +139,7 @@ test('initSidebarState(): localStorage="1" → 启动时恢复 collapsed（通�
 test('initSidebarState(): 无 localStorage 记录 → 默认展开（无 collapsed）', () => {
   const { dom, localStorage: ls } = makeDom();
   ls.setItem('token', 'fake-token');
-  ls.setItem('app_cache_ver', '30');
+  ls.setItem('app_cache_ver', '31');
   const { app } = loadApp(dom, ls);
   app.init();
   assert.strictEqual(dom.getElementById('sidebar').classList.contains('collapsed'), false,
@@ -240,6 +240,44 @@ test('CSS: apple-theme 窄屏 media query 内含 transform 过渡规则', () => 
   const ruleContent = ruleBlock.substring(0, ruleEnd);
   assert.ok(ruleContent.includes('transform') && ruleContent.includes('var(--apple-transition)'),
     '窄屏 apple-theme .sb 规则应包含 transition: transform var(--apple-transition)，实际: ' + ruleContent);
+});
+
+// ─── 测试 12：initSidebarState 临时禁用 transition 避免闪缩 ───
+// QA Required: 持久化折叠用户刷新时不应看到收缩动画
+test('initSidebarState(): 恢复折叠时添加 no-transition class（同步检查）', () => {
+  const { dom, localStorage: ls } = makeDom();
+  ls.setItem('grapeSidebarCollapsed', '1');
+  ls.setItem('token', 'fake-token');
+  ls.setItem('app_cache_ver', '31');
+  const { app } = loadApp(dom, ls);
+  app.init();
+  const sb = dom.getElementById('sidebar');
+  assert.strictEqual(sb.classList.contains('no-transition'), true,
+    '恢复折叠状态时应同步添加 no-transition class');
+  assert.strictEqual(sb.classList.contains('collapsed'), true,
+    'collapsed class 也应存在');
+});
+
+// ─── 测试 13：无折叠状态不添加 no-transition ───
+test('initSidebarState(): 无折叠状态时不添加 no-transition', () => {
+  const { dom, localStorage: ls } = makeDom();
+  ls.setItem('token', 'fake-token');
+  ls.setItem('app_cache_ver', '31');
+  const { app } = loadApp(dom, ls);
+  app.init();
+  const sb = dom.getElementById('sidebar');
+  assert.strictEqual(sb.classList.contains('no-transition'), false,
+    '无折叠时不应添加 no-transition');
+  assert.strictEqual(sb.classList.contains('collapsed'), false,
+    '无折叠时不应有 collapsed');
+});
+
+// ─── 测试 14：app.css 含 .sb.no-transition 规则 ───
+test('CSS: app.css 含 .sb.no-transition{transition:none} 规则', () => {
+  const cssPath = path.resolve(__dirname, '../../src/api/static/css/app.css');
+  const css = fs.readFileSync(cssPath, 'utf8');
+  assert.ok(css.includes('.sb.no-transition{transition:none'),
+    'app.css 应含 .sb.no-transition{transition:none!important} 规则');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
