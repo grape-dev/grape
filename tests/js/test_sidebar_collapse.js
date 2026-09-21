@@ -207,5 +207,20 @@ test('API 暴露: app.toggleSidebar 在公开返回对象中', () => {
   assert.strictEqual(typeof app.toggleSidebar, 'function', 'toggleSidebar 应暴露在 app 对象');
 });
 
+// ─── 测试 10：#sbOverlay 不在 #sidebar 内部（CSS 包含块修复）───
+// QA Critical: transform 会为 fixed 子孙建立包含块，overlay 必须在 #sidebar 外部
+test('DOM 结构: #sbOverlay 是 #sidebar 的兄弟节点而非子节点', () => {
+  const htmlPath = path.resolve(__dirname, '../../src/api/static/index.html');
+  const html = fs.readFileSync(htmlPath, 'utf8');
+  const sidebarOpen = html.indexOf('id="sidebar"');
+  const sidebarClose = html.indexOf('</div>', html.indexOf('id="sidebar"'));
+  const overlayPos = html.indexOf('id="sbOverlay"');
+  assert.ok(sidebarOpen > -1, '应找到 #sidebar');
+  assert.ok(overlayPos > -1, '应找到 #sbOverlay');
+  // sbOverlay 必须出现在 #sidebar 开标签之前（是兄弟节点，不是子节点）
+  assert.ok(overlayPos < sidebarOpen,
+    '#sbOverlay 应在 #sidebar 之前（兄弟节点），当前 overlayPos=' + overlayPos + ' sidebarOpen=' + sidebarOpen);
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
