@@ -105,7 +105,7 @@ Choose a template / existing Git project
 ## Quick Start
 
 ```bash
-git clone https://gitcode.com/Jason7602/grape.git
+git clone https://gitcode.com/grape-dev/grape.git
 cd grape
 pip install -r requirements.txt
 
@@ -183,7 +183,7 @@ Every contribution, code or otherwise, makes Grape better.
 
 ## Feedback
 
-- **GitCode Issues**: https://gitcode.com/Jason7602/grape/issues
+- **GitCode Issues**: https://gitcode.com/grape-dev/grape/issues
   - Bugs: include environment, repro steps, and logs
   - Feature suggestions: describe the use case and expected behavior
 - **Feishu**: feedback directly in your bound group chat after connecting Grape

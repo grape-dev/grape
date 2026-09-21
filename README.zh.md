@@ -109,7 +109,7 @@ Agent 之间通过 A2A 协议链式协作，一个任务自动贯穿全流程。
 ## 快速开始
 
 ```bash
-git clone https://gitcode.com/Jason7602/grape.git
+git clone https://gitcode.com/grape-dev/grape.git
 cd grape
 pip install -r requirements.txt
 
@@ -163,7 +163,7 @@ python -m pytest tests/ -v
 
 欢迎参与 Grape 的开发。建议的工作流：
 
-1. **提 Issue**：先到 [Issues](https://gitcode.com/Jason7602/grape/issues) 描述你要做的事或发现的问题，确认方向
+1. **提 Issue**：先到 [Issues](https://gitcode.com/grape-dev/grape/issues) 描述你要做的事或发现的问题，确认方向
 2. **Fork & 开发**：Fork 仓库，在特性分支上开发
 3. **补充测试**：新增 / 修改功能请补充 pytest 测试
 4. **提交 PR**：描述改动内容、测试情况、关联的 Issue 编号
@@ -193,7 +193,7 @@ python -m pytest tests/ -v
 
 遇到问题或想提建议，请通过以下任一渠道：
 
-- **GitCode Issues**：https://gitcode.com/Jason7602/grape/issues
+- **GitCode Issues**：https://gitcode.com/grape-dev/grape/issues
   - Bug 请附上运行环境、复现步骤、相关日志
   - 特性建议请描述使用场景和预期行为
 - **飞书**：接入 Grape 后可在绑定的群中直接反馈
