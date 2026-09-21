@@ -56,7 +56,10 @@ function renderEventDetail(data) {
   // Issue/PR 编号 → VCS 超链接
   const _rawIssueId = String(data.issue_id || '');
   const _isPR = _rawIssueId.startsWith('#pr_');
-  const _num = _rawIssueId.replace(/^#pr_/, '').replace(/^#/, '');
+  // PR 订阅伪 issue_id 格式 #pr_{pr_num}_{scene_id}，只取 pr_num 部分
+  const _num = _isPR
+    ? _rawIssueId.replace(/^#pr_/, '').split('_')[0]
+    : _rawIssueId.replace(/^#/, '');
   const _vcsPath = _isPR ? '/pull/' + _num : '/issues/' + _num;
   const _label = _isPR ? 'PR #' + _num : 'Issue ' + data.issue_id;
   const _issueLink = (_num && data.repo_key)

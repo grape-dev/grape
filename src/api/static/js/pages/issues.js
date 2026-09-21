@@ -340,6 +340,11 @@ window._openBoardDetail = function(taskId) {
   if (!el) return;
   // 暂停轮询——防止详情页被 loadTasks() 覆盖
   if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
+  // PR 事件走专门的详情页
+  if (t.is_pr_event) {
+    _openPRDetail(t);
+    return;
+  }
   // 先渲染基本详情，然后异步加载流水线
   // Issue #166: 从场景详情页进入时，返回按钮回到场景详情页
   var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
@@ -372,6 +377,85 @@ window._openBoardDetail = function(taskId) {
     _renderPipelineSection(data);
   }).catch(function() {
     document.getElementById('_boardPipelineSection').innerHTML = '';
+  });
+};
+
+// PR 事件详情页
+window._openPRDetail = function(t) {
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+  var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
+  var _vcsBase = t.repo_key.startsWith('github:') ? 'github.com' : 'gitcode.com';
+  var _vcsPath = '/pull/' + t.issue_number;
+  var _vcsUrl = 'https://' + _vcsBase + '/' + t.repo_key.replace(/^(github|gitcode):/, '') + _vcsPath;
+  var _statusColor = t.status === 'completed' ? '#34c759' : t.status === 'cancelled' ? '#ff3b30' : t.status === 'processing' ? '#3b82f6' : '#86868b';
+  var _statusText = t.status === 'completed' ? '审查完成' : t.status === 'cancelled' ? '审查失败' : t.status === 'processing' ? '审查中' : '待处理';
+  var _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px;margin-bottom:12px';
+  var _cardTitle = 'font-size:12px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-family:-apple-system,BlinkMacSystemFont,sans-serif';
+  var _rowStyle = 'display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:0.5px solid rgba(0,0,0,.04)';
+  var _labelStyle = 'font-size:12px;color:var(--t3,#86868b);font-weight:400';
+  var _valueStyle = 'font-size:13px;color:var(--t1,#1d1d1f);font-weight:500;text-align:right';
+
+  el.innerHTML = `
+  <div style="padding:0;max-width:720px;margin:0 auto">
+    <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
+      <button class="tsk-btn tsk-btn-ghost" onclick="loadTasks()" style="padding:6px 14px">${_backLabel}</button>
+      <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl}','_blank')">查看 PR ↗</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="app.nav('event','${t.pr_seq}')">事件详情</button>
+    </div>
+    <div style="${_cardStyle}">
+      <div style="${_cardTitle}">PR 审查</div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">状态</span><b style="${_valueStyle};color:${_statusColor}">${_statusText}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">PR</span><b style="${_valueStyle}"><a href="${_vcsUrl}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">仓库</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">触发者</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">触发时间</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
+      <div style="${_rowStyle};border-bottom:none"><span style="${_labelStyle}">事件数</span><b style="${_valueStyle}">${t.events_count || 0}</b></div>
+    </div>
+    <div style="${_cardStyle}">
+      <div style="${_cardTitle}">QA 审查结果</div>
+      <div id="_prQaResult" style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.5;min-height:40px">
+        <div style="font-size:12px;color:var(--t3,#86868b)">加载中...</div>
+      </div>
+    </div>
+  </div>`;
+  // 异步加载 QA 审查结果
+  API.get('/events/detail/' + t.pr_seq).then(function(data) {
+    var resultEl = document.getElementById('_prQaResult');
+    if (!resultEl) return;
+    var result = data.result || data.summary || '';
+    if (!result) {
+      resultEl.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">暂无审查结果</div>';
+      return;
+    }
+    // 尝试解析结构化 JSON
+    try {
+      var parsed = JSON.parse(result);
+      if (parsed && parsed.conclusion) {
+        resultEl.innerHTML = '<div style="margin-bottom:6px"><b>结论：</b>' + parsed.conclusion + '</div>' +
+          (parsed.actions ? '<div style="margin-bottom:4px"><b>操作：</b></div>' + parsed.actions.map(function(a){return '<div>• ' + a + '</div>';}).join('') : '') +
+          (parsed.artifacts ? '<div style="margin-top:6px"><b>产物：</b> ' + parsed.artifacts.join(', ') + '</div>' : '');
+        return;
+      }
+    } catch(e) {}
+    // 纯文本结果：格式化展示
+    var _text = result.substring(0, 800) + (result.length > 800 ? '...' : '');
+    // 检测审查结论关键词
+    var _passMatch = _text.match(/(审查通过|审核通过|通过|无风险|安全)/);
+    var _failMatch = _text.match(/(审查不通过|审核不通过|不通过|有风险|存在问题|建议修改)/);
+    var _verdict = _passMatch && !_failMatch ? 'pass' : _failMatch ? 'fail' : 'neutral';
+    var _verdictHtml = _verdict === 'pass'
+      ? '<div style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:999px;background:rgba(52,199,89,.1);color:#34c759;font-size:12px;font-weight:600;margin-bottom:10px">✓ 审查通过</div>'
+      : _verdict === 'fail'
+      ? '<div style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:999px;background:rgba(255,59,48,.1);color:#ff3b30;font-size:12px;font-weight:600;margin-bottom:10px">✕ 需要修改</div>'
+      : '';
+    resultEl.innerHTML = _verdictHtml + '<div style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.6;background:rgba(0,0,0,.02);border-radius:10px;padding:12px 14px;white-space:pre-wrap">' + _text + '</div>';
+  }).catch(function() {
+    var resultEl = document.getElementById('_prQaResult');
+    if (resultEl) resultEl.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">加载失败</div>';
   });
 };
 
@@ -587,6 +671,11 @@ function _renderBoard(filtered) {
         const _stageLabel = stageLabels[_stage] || _stage || '—';
         const _stageColor = stageColors[_stage] || '#86868b';
         const _isRunning = s === 'in_progress' && t.is_running && ['vod','issue','coding','qa','sre'].includes(_stage);
+        // PR 事件：右上角显示紫色 PR 药丸代替 stage 标签
+        const _isPR = !!t.is_pr_event;
+        const _tagHtml = _isPR
+          ? `<span style="font-size:10px;font-weight:500;padding:2px 8px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>`
+          : `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px${_isRunning ? `;animation:radarPulse 1.2s ease-in-out infinite` : ''}">${_isRunning ? `<span style="width:5px;height:5px;border-radius:50%;background:${_stageColor};animation:radarPulse 1.2s ease-in-out infinite"></span>` : ''}${_stageLabel}</span>`;
         const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
         const _cardCls = _isRunning ? ' tsk-card-radar' : '';
         const _cardOverflow = _isRunning ? ';overflow:hidden' : '';
@@ -597,10 +686,7 @@ function _renderBoard(filtered) {
         html += `<div style="position:relative;z-index:1">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
             <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#'+t.issue_number : ''}</span>
-            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px${_isRunning ? `;animation:radarPulse 1.2s ease-in-out infinite` : ''}">
-              ${_isRunning ? `<span style="width:5px;height:5px;border-radius:50%;background:${_stageColor};animation:radarPulse 1.2s ease-in-out infinite"></span>` : ''}
-              ${_stageLabel}
-            </span>
+            ${_tagHtml}
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
@@ -711,6 +797,17 @@ function _render() {
     const si = _lStatusInfo[ms] || _lStatusInfo.pending;
     const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
     const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';
+    // PR 事件卡片：右上角紫色 PR 药丸 + 点击跳事件详情
+    if (t.is_pr_event) {
+      return `<div class="tsk-row${sel}" onclick="app.nav('event','${t.pr_seq}')">
+        <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
+        <div class="tsk-r-main">
+          <div class="tsk-r-title">PR #${t.issue_number} · ${t.title || ''}</div>
+          <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
+        </div>
+        <span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>
+      </div>`;
+    }
     return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
       <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">

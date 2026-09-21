@@ -103,22 +103,30 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
     _has_cb = False
     _has_icon = False
     _has_st = False
+    _has_pr_sub = False
     with lock:
         c = db.cursor()
         try:
             if repo_key:
-                _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
+                # PRAGMA 在 MySQL 上列不全，用 SHOW COLUMNS 替代
+                try:
+                    c.execute("SHOW COLUMNS FROM devops_pipeline_scene")
+                    _cols = {r[0] for r in c.fetchall()}
+                except Exception:
+                    _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
                 _has_dn = "display_name" in _cols
                 _has_ao = "advanced_options" in _cols
                 _has_cb = "created_by" in _cols
                 _has_icon = "icon" in _cols
                 _has_st = "scene_type" in _cols
+                _has_pr_sub = "pr_subscription_enabled" in _cols
                 _extra = ""
                 if _has_dn: _extra += ", display_name"
                 if _has_ao: _extra += ", advanced_options"
                 if _has_cb: _extra += ", created_by"
                 if _has_icon: _extra += ", icon"
                 if _has_st: _extra += ", scene_type"
+                if _has_pr_sub: _extra += ", pr_subscription_enabled"
                 c.execute(
                     f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                     "WHERE is_active=1 AND repo_key=? ORDER BY id", (repo_key,))
@@ -159,12 +167,17 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
         scene_type = "standard"
         if _has_st and len(r) > col_offset:
             scene_type = r[col_offset] or "standard"
+            col_offset += 1
+        pr_subscription_enabled = 0
+        if _has_pr_sub and len(r) > col_offset:
+            pr_subscription_enabled = int(r[col_offset] or 0)
         result.append({
             "scene_id": scene_id, "name": r[1], "description": r[2],
             "display_name": (r[5] if _has_dn and len(r) > 5 else "") or r[1],
             "nodes": nodes, "onboarding": r[4] or "repo-onboarding",
             "work_branch": work_branch, "created_by": created_by,
             "icon": icon, "scene_type": scene_type,
+            "pr_subscription_enabled": pr_subscription_enabled,
         })
     return result
 
@@ -180,15 +193,24 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
         try:
             _has_dn = False
             _has_st = False
+            _has_pr_sub = False
             try:
-                _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
+                # PRAGMA 在 MySQL 上列不全，用 SHOW COLUMNS 替代
+                try:
+                    c.execute("SHOW COLUMNS FROM devops_pipeline_scene")
+                    _cols = {r[0] for r in c.fetchall()}
+                except Exception:
+                    _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
                 _has_dn = "display_name" in _cols
                 _has_st = "scene_type" in _cols
+                _has_pr_sub = "pr_subscription_enabled" in _cols
             except Exception:
                 pass
             _extra = ", display_name" if _has_dn else ""
             if _has_st:
                 _extra += ", scene_type"
+            if _has_pr_sub:
+                _extra += ", pr_subscription_enabled"
             c.execute(
                 f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                 "WHERE is_active=1 AND scene_id=? AND repo_key=? LIMIT 1",
@@ -197,14 +219,21 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
             if row:
                 nodes = json.loads(row[3] or "[]") if row[3] else []
                 _scene_type = "standard"
-                if _has_st and len(row) > (6 if _has_dn else 5):
-                    _st_idx = 6 if _has_dn else 5
-                    _scene_type = row[_st_idx] or "standard"
+                _pr_sub = 0
+                _col_idx = 5  # after onboarding (index 4)
+                if _has_dn:
+                    _col_idx += 1  # display_name at index 5
+                if _has_st and len(row) > _col_idx:
+                    _scene_type = row[_col_idx] or "standard"
+                    _col_idx += 1
+                if _has_pr_sub and len(row) > _col_idx:
+                    _pr_sub = int(row[_col_idx] or 0)
                 return {
                     "scene_id": row[0], "name": row[1], "description": row[2],
                     "display_name": (row[5] if _has_dn and len(row) > 5 else "") or row[1],
                     "nodes": nodes, "onboarding": row[4] or "repo-onboarding",
                     "scene_type": _scene_type,
+                    "pr_subscription_enabled": _pr_sub,
                 }
         except Exception as e:
             log.warning(f"_query_scene_by_id failed: {e}")
@@ -223,7 +252,8 @@ def get_scenes(repo_key: str = "") -> list[dict]:
              "icon": s.get("icon") or "",
              "nodes": s.get("nodes") or [],
              "onboarding": s.get("onboarding") or "repo-onboarding",
-             "scene_type": s.get("scene_type") or "standard"} for s in db_scenes]
+             "scene_type": s.get("scene_type") or "standard",
+             "pr_subscription_enabled": s.get("pr_subscription_enabled", 0)} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:

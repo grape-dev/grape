@@ -1537,13 +1537,23 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     if _pr_sub_on is None:
         _pr_sub_on = bool(existing.get("pr_subscription_enabled", 0))
     if _pr_sub_on:
-        qa_node = next((n for n in body.nodes if n.tag == "qa"), None)
-        if not qa_node or not qa_node.enabled or not qa_node.skill:
+        # body.nodes 为空时从数据库已有场景查 QA 节点
+        _check_nodes = body.nodes if body.nodes else existing.get("nodes", [])
+        qa_node = next((n for n in _check_nodes if getattr(n, 'tag', n.get('tag') if isinstance(n, dict) else '') == "qa"), None)
+        if qa_node:
+            _qa_enabled = getattr(qa_node, 'enabled', True) if not isinstance(qa_node, dict) else qa_node.get("enabled", True)
+            _qa_skill = getattr(qa_node, 'skill', '') if not isinstance(qa_node, dict) else qa_node.get("skill", "")
+        else:
+            _qa_enabled = False
+            _qa_skill = ""
+        if not _qa_enabled or not _qa_skill:
             raise HTTPException(status_code=400, detail={
                 "code": 400, "message": "开启 PR 订阅需要先配置 QA Agent 并启用技能"})
 
+    # body.nodes 为空时不覆盖已有 nodes（只更新 pr_subscription_enabled 等字段）
+    _update_nodes = nodes_json if body.nodes else existing.get("nodes", [])
     update_custom_scene(
-        scene_id=scene_id, repo_key=repo_key, nodes=nodes_json,
+        scene_id=scene_id, repo_key=repo_key, nodes=_update_nodes,
         name=body.name, description=body.description, icon=body.icon,
         pr_subscription_enabled=1 if _pr_sub_on else 0 if _pr_sub_on is not None else None)
 

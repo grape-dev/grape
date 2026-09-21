@@ -31,6 +31,80 @@ def _num_from_issue_id(issue_id: str) -> str:
     return m.group(1) if m else ""
 
 
+def _query_pr_subscription_events(repo_key: str) -> list[dict]:
+    """查 PR 订阅事件（issue_id LIKE '#pr_%'），按 PR 号聚合为伪卡片。"""
+    from src.session_manager import db, db_lock
+    from src.repo_key import from_repo_key
+    items = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, result "
+                "FROM events WHERE repo_key=? AND issue_id LIKE ? ORDER BY seq DESC",
+                (repo_key, "#pr_%"))
+            rows = c.fetchall()
+        except Exception:
+            rows = []
+    if not rows:
+        return items
+    # 按 PR 号聚合（取最新一条作为卡片状态）
+    _pr_map = {}  # pr_num → latest event
+    for r in rows:
+        iid = r[1] or ""
+        # #pr_{pr_num}_{scene_id} → 取 pr_num
+        parts = iid.replace("#pr_", "").split("_", 1)
+        pr_num = int(parts[0]) if parts and parts[0].isdigit() else 0
+        if not pr_num:
+            continue
+        if pr_num not in _pr_map:
+            _pr_map[pr_num] = {
+                "seq": r[0], "issue_id": iid, "event_type": r[2],
+                "agent_type": r[3] or "", "title": r[4] or "",
+                "actor": r[5] or "", "summary": r[6] or "",
+                "status": r[7], "created_at": normalize_event_time(r[8]),
+                "result": r[9] or "",
+            }
+    for pr_num, ev in _pr_map.items():
+        _status = ev["status"]
+        # 映射到需求中心状态
+        if _status == "running":
+            _task_status = "processing"
+        elif _status == "completed":
+            _task_status = "completed"
+        elif _status == "failed":
+            _task_status = "cancelled"
+        else:
+            _task_status = "pending"
+        items.append({
+            "id": -pr_num,  # 负数避免跟真实 task id 冲突
+            "issue_number": pr_num,
+            "title": ev["title"],
+            "task_description": "",
+            "conversation_id": "",
+            "status": _task_status,
+            "completed_reason": "",
+            "created_at": ev["created_at"],
+            "completed_at": "",
+            "is_subtask_mode": 0,
+            "parent_issue_number": 0,
+            "parent_issue_id": "",
+            "scene_id": "",
+            "scene_name": "",
+            "scene_source": "",
+            "stage": "",
+            "is_running": _status == "running",
+            "agent_statuses": [],
+            "repo_key": from_repo_key(repo_key),
+            "is_pr_event": True,
+            "pr_seq": ev["seq"],
+            "events_count": sum(1 for r in rows if r[1] and r[1].replace("#pr_", "").split("_", 1)[0] == str(pr_num)),
+            "latest_event": {"seq": ev["seq"], "status": ev["status"], "title": ev["title"], "created_at": ev["created_at"]},
+            "assignee": ev["actor"],
+        })
+    return items
+
+
 def _repo_key_of(owner: str, repo: str) -> str:
     from src.repo_key import to_repo_key
     return to_repo_key(f"{owner}/{repo}")
@@ -818,6 +892,11 @@ def list_repo_issues(owner: str, repo: str,
         evs = group_map.get(str(_num or "")) or []
         it["events_count"] = len(evs)
         it["latest_event"] = evs[-1] if evs else None
+
+    # PR 订阅事件：从 events 表查 issue_id LIKE '#pr_%' 的记录，构造伪卡片混入列表
+    pr_items = _query_pr_subscription_events(repo_key)
+    issues.extend(pr_items)
+
     return {"issues": issues, "total": len(issues)}
 
 

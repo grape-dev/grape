@@ -338,7 +338,7 @@ function _renderLocalSceneCard(s, isApplied, idx) {
   const createdBy = s.created_by || '';
   const barColor = morandiColors[idx % morandiColors.length];
   var isPRSub = !!s.pr_subscription_enabled;
-  var prBadge = isPRSub ? '<span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR 订阅</span>' : '';
+  var prBadge = isPRSub ? '<span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">已开启 PR 订阅</span>' : '';
 
   return `<div class="scn-row" data-scene-id="${s.id}" data-scene-name="${(s.display_name||s.name||'').replace(/"/g,'&quot;')}" onclick="app.nav('scene-detail-local','${s.id}')">
     <div class="scn-row-icon" style="background:${barColor}">${icon}</div>
@@ -554,8 +554,8 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   const catBg = 'bg-default';
   const icon = _SCENE_ICONS[scene.id] || _SCENE_ICONS[scene.name] || (scene.scope === 'official' ? '⚙' : '📦');
   var isPRSub = !!scene.pr_subscription_enabled;
-  const agentOrder = isPRSub ? ['qa','sre'] : ['vod','issue','coding','qa','sre'];
-  const agentLabels = isPRSub ? ['QA Agent','SRE Agent'] : ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
+  const agentOrder = ['vod','issue','coding','qa','sre'];
+  const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
   const colors = {vod:'#B07A8B',issue:'#B8857A',coding:'#7A92B0',qa:'#9A85A8',sre:'#B89B6A'};
   const _detailMorandi = ['#8B9DB0','#A8B8A0','#C4A882','#B0A0B8','#9BB0C4','#C49B9B'];
   const _detailIconColor = _detailMorandi[(scene.id || '').length % _detailMorandi.length];
@@ -649,8 +649,20 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     html += `<div style="padding:20px;text-align:center;color:#86868b">无 Agent 节点</div></div>`;
   }
 
-  // 高级选项（右上角保存按钮）— PR 订阅场景不渲染
-  if (!isPRSub) {
+  // PR 订阅模块（独立卡片，高级选项上方）
+  html += `<div class="det-card-wrap" style="padding:16px 24px">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600;color:#1d1d1f">PR 订阅</div>
+        <div style="font-size:11px;color:#86868b;margin-top:3px;line-height:1.5">开启后，QA Agent 将自动审查所有目标分支匹配本场景工作分支的 Pull Request，审查结果以评论形式回帖到对应 PR</div>
+      </div>
+      <div id="prSubToggle" data-on="${scene.pr_subscription_enabled ? '1' : '0'}" onclick="_togglePrSubscription('${scene.id}','${owner}/${name}')" style="width:44px;height:26px;border-radius:999px;background:${scene.pr_subscription_enabled ? '#34c759' : '#e8e8ed'};cursor:pointer;transition:background .2s;position:relative;flex-shrink:0;margin-left:16px">
+        <div style="width:22px;height:22px;border-radius:50%;background:#fff;position:absolute;top:2px;left:${scene.pr_subscription_enabled ? '20px' : '2px'};transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.2)"></div>
+      </div>
+    </div>
+  </div>`;
+
+  // 高级选项（右上角保存按钮）
   html += `<div class="det-card-wrap" id="advOptionsInline">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <h2 style="font-size:15px;font-weight:600">${I18N.t('dashboard.advanced_options')||'高级选项'}</h2>
@@ -675,7 +687,6 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
       <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addCustomFieldInline()">+ ${I18N.t('dashboard.add_config')||'添加配置项'}</button>
     </div>
   </div>`;
-  }
 
   // 相关流水线（统计 + 表格，无流程图）— 只显示当前场景的流水线
   // pipeData=null 时先占位，数据到了由 _fillRelatedPipeline 填充
@@ -688,10 +699,8 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   el.innerHTML = html;
 
   // 将页面内所有 select 转换为自定义下拉面板（圆角风格统一）
-  // 加载高级选项数据 — PR 订阅场景无高级选项
-  if (!isPRSub) {
-    _loadAdvancedOptionsInline(scene.id, owner, name);
-  }
+  // 加载高级选项数据
+  _loadAdvancedOptionsInline(scene.id, owner, name);
 
   // 点击单个字段进入编辑模式（名称或描述独立编辑）
   window._enterInlineEdit = function(field) {
@@ -769,6 +778,31 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   };
 
   // 内联高级选项函数
+  window._togglePrSubscription = function(sceneId, repoParam) {
+    var toggle = document.getElementById('prSubToggle');
+    if (!toggle) return;
+    var knob = toggle.querySelector('div');
+    var isOn = toggle.getAttribute('data-on') === '1';
+    var newOn = !isOn;
+    toggle.setAttribute('data-on', newOn ? '1' : '0');
+    toggle.style.background = newOn ? '#34c759' : '#e8e8ed';
+    if (knob) knob.style.left = newOn ? '20px' : '2px';
+    API.put('/scenes/' + encodeURIComponent(sceneId) + '?repo=' + encodeURIComponent(repoParam), {
+      pr_subscription_enabled: newOn
+    }).then(function() {
+      app.showToast(newOn ? 'PR 订阅已开启' : 'PR 订阅已关闭');
+      if (window._dashboardData && window._dashboardData._scenes) {
+        var sc = window._dashboardData._scenes.find(function(s) { return s.id === sceneId; });
+        if (sc) sc.pr_subscription_enabled = newOn;
+      }
+    }).catch(function(e) {
+      toggle.setAttribute('data-on', isOn ? '1' : '0');
+      toggle.style.background = isOn ? '#34c759' : '#e8e8ed';
+      if (knob) knob.style.left = isOn ? '20px' : '2px';
+      app.showToast('保存失败: ' + (e.detail?.message || e.message));
+    });
+  };
+
   window._toggleNewBranchInline = function() {
     var el = document.getElementById('newBranchInputInline');
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
@@ -908,7 +942,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   var isPRSubEdit = !!_editScene.pr_subscription_enabled;
 
   // 按 sceneNodes 构建 editNodes，但始终包含全部 agent（禁用的置灰不删除）
-  const allAgentTypes = isPRSubEdit ? ['qa','sre'] : ['vod','issue','coding','qa','sre'];
+  const allAgentTypes = ['vod','issue','coding','qa','sre'];
   let editNodes = allAgentTypes.map(at => {
     const node = sceneNodes.find(n => (n.tag || n.id) === at);
     const ag = agents.find(a => a.agent_type === at) || {};
@@ -1045,7 +1079,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
 function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSub) {
   const colors = {vod:'#B07A8B',issue:'#B8857A',coding:'#7A92B0',qa:'#9A85A8',sre:'#B89B6A'};
   const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
-  const canToggle = isPRSub ? (tag) => tag !== 'qa' : (tag) => tag !== 'vod' && tag !== 'issue';
+  const canToggle = (tag) => tag !== 'vod' && tag !== 'issue';
   let html = '';
   editNodes.forEach((node, i) => {
     const tag = node.id || node.tag;
@@ -1398,6 +1432,19 @@ function _enterCreateStandardMode(data, owner, name) {
   html += _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
   html += `</div></div>`;
 
+  // PR 订阅模块（独立卡片，高级选项上方）
+  html += `<div class="det-card-wrap" style="padding:16px 24px">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600;color:#1d1d1f">PR 订阅</div>
+        <div style="font-size:11px;color:#86868b;margin-top:3px;line-height:1.5">开启后，QA Agent 将自动审查所有目标分支匹配本场景工作分支的 Pull Request，审查结果以评论形式回帖到对应 PR</div>
+      </div>
+      <div id="prSubToggle" data-on="0" onclick="_toggleCreatePrSubscription()" style="width:44px;height:26px;border-radius:999px;background:#e8e8ed;cursor:pointer;transition:background .2s;position:relative;flex-shrink:0;margin-left:16px">
+        <div style="width:22px;height:22px;border-radius:50%;background:#fff;position:absolute;top:2px;left:2px;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.2)"></div>
+      </div>
+    </div>
+  </div>`;
+
   // 高级选项
   html += `<div class="det-card-wrap" id="advOptionsInline">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
@@ -1424,6 +1471,18 @@ function _enterCreateStandardMode(data, owner, name) {
   </div>`;
 
   el.innerHTML = html;
+
+  // PR 订阅开关（创建页，只切 UI，保存时一起提交）
+  let _createPrSubEnabled = false;
+  window._toggleCreatePrSubscription = function() {
+    var toggle = document.getElementById('prSubToggle');
+    if (!toggle) return;
+    var knob = toggle.querySelector('div');
+    _createPrSubEnabled = !_createPrSubEnabled;
+    toggle.setAttribute('data-on', _createPrSubEnabled ? '1' : '0');
+    toggle.style.background = _createPrSubEnabled ? '#34c759' : '#e8e8ed';
+    if (knob) knob.style.left = _createPrSubEnabled ? '20px' : '2px';
+  };
 
   // 图标选择
   window._pickCreateIcon = function(ic) {
@@ -1516,7 +1575,7 @@ function _enterCreateStandardMode(data, owner, name) {
       const nextAgent = i < arr.length - 1 ? arr[i + 1].id : 'done';
       return { id: n.id, tag: n.tag, skill: n.skill || '', mode: 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
     });
-    API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload, icon: _createSceneIcon, pr_subscription_enabled: false }).then(r => {
+    API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload, icon: _createSceneIcon, pr_subscription_enabled: _createPrSubEnabled }).then(r => {
       window._dashboardEditing = false;
       // 收集高级选项
       var workBranch = (document.getElementById('advWorkBranchInline') || {}).value || 'main';
@@ -1601,7 +1660,7 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
       var _racScn = window._dashboardData._scenes.find(function(s) { return s.id === window._currentSceneId; });
       if (_racScn && _racScn.pr_subscription_enabled) _racIsPRSub = true;
     }
-    const canToggle = _racIsPRSub ? at !== 'qa' : at !== 'vod' && at !== 'issue';
+    const canToggle = at !== 'vod' && at !== 'issue';
 
     let toggleBtn = '';
     if (editMode && canToggle) {
