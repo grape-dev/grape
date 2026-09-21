@@ -234,9 +234,8 @@ function renderPipeline(data, focusIssueNum) {
     </div>`;
   }
 
-  // 拼接：流程卡片 + 分页（右对齐） + 搜索框 + 表格卡片
+  // 拼接：流程卡片 + 搜索框 + 表格 + 分页
   html += `${flowHtml}`;
-  if (pagerHtml) html += pagerHtml;
 
   // Issue #89: 部分任务尚未生成流水线事件提示
   if (data.has_tasks_without_events) {
@@ -291,6 +290,7 @@ function renderPipeline(data, focusIssueNum) {
       <td>${owner}</td></tr>`;
   });
   html += `</table></div></div>`;
+  if (pagerHtml) html += pagerHtml;
   html += `</div>`;
 
   el.innerHTML = html;
