@@ -677,13 +677,14 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             agent_type="qa", actor=evt.get("actor", ""),
             summary=f"PR 订阅并行: scene={scene_id} → qa",
             payload=evt.get("payload", {}), status="running",
+            scene_id=scene_id,
         )
         log.info(f"Pipeline: PR subscription extra dispatch seq={seq} scene={scene_id}")
         # 分派执行
         from src.runtime.engine_select import pick_engine, engine_name
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
         _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
-        if not _engine_id:
+        if _engine_id is None:
             log.info(f"Pipeline: PR subscription extra: no engine for scene={scene_id}, skip")
             from src.api.event_store import update_event_status
             update_event_status(seq, "failed")
@@ -1415,6 +1416,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         summary=summary,
         payload=payload,
         status="running",
+        scene_id=evt.get("_pr_sub_scene_id", "") or _issue_scene,
     )
     log.info(f"Pipeline: event created, seq={seq}, repo_key={repo_key}, agent={agent_type}, issue_id={issue_id or '#0'}")
 

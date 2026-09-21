@@ -2268,6 +2268,7 @@ def _migrate_tables():
         "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN scene_id TEXT DEFAULT ''",
         "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
         # ===== 发布配置(skill-publish v1.1)=====
         # ===== OBS 技能库(obs-skill-storage-design.md §4)=====
@@ -2941,6 +2942,15 @@ def _migrate_tables():
                 log.info(f"Migrated {_migrated} pr_subscription scenes → standard + pr_subscription_enabled=1")
     except Exception as e:
         log.warning(f"Add devops_pipeline_scene.pr_subscription_enabled column failed: {e}")
+    # ===== events 表补 scene_id 列（PR 订阅场景持久化）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "scene_id", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added events.scene_id column")
+    except Exception as e:
+        log.warning(f"Add events.scene_id column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:

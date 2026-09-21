@@ -40,7 +40,7 @@ def _query_pr_subscription_events(repo_key: str) -> list[dict]:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, result "
+                "SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, result, scene_id "
                 "FROM events WHERE repo_key=? AND issue_id LIKE ? ORDER BY seq DESC",
                 (repo_key, "#pr_%"))
             rows = c.fetchall()
@@ -48,8 +48,9 @@ def _query_pr_subscription_events(repo_key: str) -> list[dict]:
             rows = []
     if not rows:
         return items
-    # 按 PR 号聚合（取最新一条作为卡片状态）
+    # 按 PR 号聚合（取最新一条作为卡片状态，同时保留全量审查历史）
     _pr_map = {}  # pr_num → latest event
+    _pr_history = {}  # pr_num → [event, ...]
     for r in rows:
         iid = r[1] or ""
         # #pr_{pr_num}_{scene_id} → 取 pr_num
@@ -57,14 +58,28 @@ def _query_pr_subscription_events(repo_key: str) -> list[dict]:
         pr_num = int(parts[0]) if parts and parts[0].isdigit() else 0
         if not pr_num:
             continue
+        _ev = {
+            "seq": r[0], "issue_id": iid, "event_type": r[2],
+            "agent_type": r[3] or "", "title": r[4] or "",
+            "actor": r[5] or "", "summary": r[6] or "",
+            "status": r[7], "created_at": normalize_event_time(r[8]),
+            "result": r[9] or "",
+            "scene_id": r[10] if len(r) > 10 else "",
+        }
         if pr_num not in _pr_map:
-            _pr_map[pr_num] = {
-                "seq": r[0], "issue_id": iid, "event_type": r[2],
-                "agent_type": r[3] or "", "title": r[4] or "",
-                "actor": r[5] or "", "summary": r[6] or "",
-                "status": r[7], "created_at": normalize_event_time(r[8]),
-                "result": r[9] or "",
-            }
+            _pr_map[pr_num] = _ev
+        _pr_history.setdefault(pr_num, []).append(_ev)
+    # 查场景名缓存
+    from src.api.pipeline_config import get_pipeline_config
+    _scene_name_cache = {}
+    def _get_scene_name(sid):
+        if not sid:
+            return ""
+        if sid not in _scene_name_cache:
+            cfg = get_pipeline_config(sid, repo_key=repo_key)
+            _scene_name_cache[sid] = (cfg or {}).get("name", sid)
+        return _scene_name_cache[sid]
+
     for pr_num, ev in _pr_map.items():
         _status = ev["status"]
         # 映射到需求中心状态
@@ -98,6 +113,7 @@ def _query_pr_subscription_events(repo_key: str) -> list[dict]:
             "repo_key": from_repo_key(repo_key),
             "is_pr_event": True,
             "pr_seq": ev["seq"],
+            "qa_history": [{**qa, "scene_name": _get_scene_name(qa.get("scene_id", ""))} for qa in _pr_history.get(pr_num, [])],
             "events_count": sum(1 for r in rows if r[1] and r[1].replace("#pr_", "").split("_", 1)[0] == str(pr_num)),
             "latest_event": {"seq": ev["seq"], "status": ev["status"], "title": ev["title"], "created_at": ev["created_at"]},
             "assignee": ev["actor"],
