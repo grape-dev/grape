@@ -486,6 +486,7 @@ function createFromTemplate(templateId, defaultName) {
         '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
           (tplUrl ? '<button class="bt bt-o bt-s" onclick="window.open(\'' + tplUrl + '\',\'_blank\')">\u67e5\u770b\u6e90\u4ee3\u7801 \u2197</button>' : '') +
           '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove()">' + I18N.t('templates.cancel') + '</button>' +
+          (tplSource === 'git' ? '<button class="bt bt-o bt-s" onclick="document.getElementById(\'ptCreateModal\').remove();forkTemplate(\'' + templateId + '\')">' + (I18N.t('templates.fork_one_click') || '一键 Fork') + '</button>' : '') +
           '<button class="bt bt-p bt-s" id="ptCreateBtn" onclick="doCreateFromTemplate(\'' + templateId + '\')" style="padding:8px 24px">' + I18N.t('templates.create_from_template_arrow') + '</button>' +
         '</div>' +
       '</div>' +
@@ -615,5 +616,98 @@ function doCreateFromTemplate(templateId) {
     app.showToast(err || I18N.t('templates.check_failed', {msg: ''}));
     var input = document.getElementById('ptRepoName');
     if (input) { input.focus(); input.select(); }
+  });
+}
+
+
+// ====== 一键 Fork 模板（无确认弹窗，直接执行） ======
+function forkTemplate(templateId) {
+  var t = _findTemplateById(templateId) || {};
+  if (t.source !== 'git') {
+    app.showToast(I18N.t('templates.fork_not_git_template') || '仅云端模板支持 Fork');
+    return;
+  }
+
+  var tplName = t.name || templateId;
+  var tplIcon = t.icon || '📦';
+  var tplPlatform = t.source_platform || 'gitcode';
+
+  var platformLabel = tplPlatform === 'github' ? 'GitHub' : 'GitCode';
+  var platformTag = '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">' + platformLabel + '</span>';
+
+  var modal = document.createElement('div');
+  modal.id = 'ptForkModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:20px;z-index:999';
+  modal.innerHTML =
+    '<div class="cd" style="width:100%;max-width:460px;border-radius:12px;overflow:hidden;display:flex;flex-direction:column;max-height:90vh">' +
+      '<div style="padding:20px 28px 14px;flex-shrink:0;border-bottom:1px solid var(--b)">' +
+        '<div style="display:flex;align-items:center;gap:14px">' +
+          '<span style="font-size:28px;flex-shrink:0">' + tplIcon + '</span>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px">' +
+              '<span style="font-size:16px;font-weight:700;color:var(--t)">' + tplName + '</span>' +
+              platformTag +
+            '</div>' +
+            '<div style="font-size:12px;color:var(--t3);margin-top:4px">' + (I18N.t('templates.forking') || 'Fork 中...') + '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="flex:1;min-height:0;overflow-y:auto;padding:20px 28px">' +
+        '<div id="ptForkProgress"></div>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(modal);
+
+  var progressEl = document.getElementById('ptForkProgress');
+  var _step = 0;
+  var _steps = [
+    {pct: 15, text: I18N.t('templates.progress_forking') || '正在 Fork 仓库...'},
+    {pct: 50, text: I18N.t('templates.progress_hosting') || '正在配置仓库托管...'},
+    {pct: 80, text: I18N.t('templates.progress_applying_scene') || '正在应用开发场景...'},
+  ];
+  function setProgress(pct, text) {
+    var bar = pct + '%';
+    progressEl.innerHTML =
+      '<div style="font-size:11px;color:var(--t2);margin-bottom:6px">' + text + '</div>' +
+      '<div style="height:6px;background:var(--bg);border-radius:3px;overflow:hidden">' +
+        '<div style="height:100%;width:' + bar + ';background:var(--a);border-radius:3px;transition:width .4s ease"></div>' +
+      '</div>' +
+      '<div style="text-align:right;font-size:10px;color:var(--t3);margin-top:3px">' + pct + '%</div>';
+  }
+  function nextStep() {
+    if (_step < _steps.length) {
+      setProgress(_steps[_step].pct, _steps[_step].text);
+      _step++;
+    }
+  }
+  var _timer = setInterval(nextStep, 6000);
+  setProgress(15, I18N.t('templates.progress_forking') || '正在 Fork 仓库...');
+
+  API.post('/project-templates/fork', {template_id: templateId}, 300000).then(function(r) {
+    clearInterval(_timer);
+    setProgress(100, I18N.t('templates.progress_done') || '✅ 完成！');
+    var modal = document.getElementById('ptForkModal');
+    if (modal) setTimeout(function() { modal.remove(); }, 800);
+    if (r.host_warning) {
+      app.showToast(r.host_warning, 10000);
+    } else {
+      app.showToast(I18N.t('templates.fork_success', {msg: r.message || (I18N.t('templates.fork_success_default') || 'Fork 成功')}));
+    }
+    var parts = (r.full_name || '').split('/');
+    var _rk = r.repo_key || ((r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name);
+    setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1], _rk); }, 900);
+  }).catch(function(e) {
+    clearInterval(_timer);
+    var errMsg = e.message || '';
+    var toastMsg = I18N.t('templates.fork_failed', {msg: errMsg}) || ('Fork 失败: ' + errMsg);
+    if (errMsg.indexOf('已存在') >= 0 || errMsg.indexOf('already exists') >= 0) {
+      toastMsg = I18N.t('templates.fork_exists') || '⚠️ 仓库已存在（可能已 Fork 过该模板），可直接在仓库管理中托管';
+    } else if (errMsg.indexOf('权限') >= 0 || errMsg.indexOf('403') >= 0) {
+      toastMsg = I18N.t('templates.fork_no_permission') || '⚠️ 无 Fork 权限，请检查 Token 权限设置';
+    }
+    setProgress(0, I18N.t('templates.progress_failed', {msg: errMsg}) || ('❌ ' + errMsg));
+    app.showToast(toastMsg);
+    var modal = document.getElementById('ptForkModal');
+    if (modal) setTimeout(function() { modal.remove(); }, 2000);
   });
 }

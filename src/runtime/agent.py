@@ -1441,7 +1441,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 nonlocal hermes_active
-                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 1800)
+                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 3600)
                 # 立即标记 running（不等引擎首个事件）：hermes chat -q 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
                 # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。
