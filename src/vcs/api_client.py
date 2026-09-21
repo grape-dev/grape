@@ -71,19 +71,16 @@ class VcsApiClient:
             dict: API 返回的 Issue JSON，或 {"error": ...} 错误信息。
         """
         if self.provider == "gitcode":
-            # GitCode v5（Gitee 系）状态迁移字段为 state_event（reopen/close），非 GitHub 的 state=closed
-            resp = self._gitcode_request(
+            # GitCode v5 更新 Issue（docs.gitcode.com patch-api-v5-...-issues-number）：
+            # body 必填 repo+title，关闭用 state=close（reopen 开启/close 关闭；GitHub 的 state=closed 会被拒）
+            try:
+                _info = self.get_issue(issue_number)
+                _title = str(_info.get("title") or "") if isinstance(_info, dict) else ""
+            except Exception:
+                _title = ""
+            return self._gitcode_request(
                 "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
-                {"state_event": "close"})
-            # GitCode v5 已知缺陷：PATCH 返回 200 但其实现不迁移 issue state（有校验无应用），
-            # 关闭后主动校验，避免把"未关闭"误报为成功
-            if isinstance(resp, dict) and "error" not in resp:
-                _st = self.get_issue_state(issue_number)
-                if _st and _st != "closed":
-                    return {"error": "gitcode_issue_close_not_effective",
-                            "state": _st,
-                            "detail": "GitCode v5 PATCH issues 校验但未应用 state_event（平台侧缺陷），请在该仓库页面手动关闭 Issue"}
-            return resp
+                {"state": "close", "repo": f"{self.owner}/{self.repo}", "title": _title})
         elif self.provider == "github":
             return self._github_request(
                 "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
