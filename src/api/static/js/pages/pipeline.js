@@ -271,7 +271,14 @@ function renderPipeline(data, focusIssueNum) {
     const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || p.scene_name || _sceneId) : '—';
     const sceneBadge = _sceneId ? `<span class="tg tg-i" style="font-size:10px">${sceneLabel}</span>` : '<span class="ts t3">—</span>';
     const _issueNum = String(p.issue_id || '').replace(/^#/, '');
-    const _issueUrl = _issueNum ? _vcsUrl(data.repo_key || '', '/issues/' + _issueNum) : '';
+    // PR 订阅事件：issue_id 为 PR#N，链接指向 /pull/N 而非 /issues/N
+    var _prIssueMatch = String(p.issue_id || '').match(/^PR#(\d+)$/);
+    var _issueUrl = '';
+    if (_prIssueMatch) {
+      _issueUrl = _vcsUrl(data.repo_key || '', '/pull/' + _prIssueMatch[1]);
+    } else if (_issueNum) {
+      _issueUrl = _vcsUrl(data.repo_key || '', '/issues/' + _issueNum);
+    }
     const _parentIssueId = String(p.parent_issue_id || '').replace(/^#/, '');
     const _parentIssueUrl = _parentIssueId ? _vcsUrl(data.repo_key || '', '/issues/' + _parentIssueId) : '';
     const _parentIssueHtml = _parentIssueId ? `<a href="${_parentIssueUrl}" target="_blank" rel="noopener" style="color:var(--pu);text-decoration:underline;font-size:11px">#${_parentIssueId}</a>` : '<span class="ts t3">—</span>';

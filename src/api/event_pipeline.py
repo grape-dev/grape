@@ -17,6 +17,49 @@ _DIRECT_POOL = ThreadPoolExecutor(
 _DIRECT_FUTURES: dict[int, Future] = {}
 _DIRECT_FUTURES_LOCK = threading.Lock()
 
+def _match_pr_subscription(repo_key: str, evt: dict, event_type: str, pr_branch: str) -> list:
+    """PR 无关联 Issue 时，按 PR target_branch 匹配场景 work_branch，唤醒 QA agent。
+
+    支持多个场景命中同一 PR（多 QA 并行审查）。
+    返回 [(scene_id, qa_skill, qa_engine_ids, sre_skill, sre_engine_ids), ...] 匹配列表。
+    """
+    if not pr_branch:
+        return []
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scene_id, nodes_json, advanced_options FROM devops_pipeline_scene "
+                "WHERE repo_key=? AND pr_subscription_enabled=1 AND is_active=1",
+                (repo_key,))
+            rows = c.fetchall()
+        matches = []
+        for scene_id, nodes_json, adv_opts_json in rows:
+            # 匹配 work_branch
+            import json as _json
+            try:
+                adv_opts = _json.loads(adv_opts_json or "{}")
+            except Exception:
+                adv_opts = {}
+            work_branch = adv_opts.get("work_branch", "main") or "main"
+            if work_branch != pr_branch:
+                continue
+            nodes = json.loads(nodes_json or "[]")
+            qa_node = next((n for n in nodes if n.get("tag") == "qa" and n.get("enabled", True)), None)
+            if not qa_node or not qa_node.get("skill"):
+                continue
+            sre_node = next((n for n in nodes if n.get("tag") == "sre" and n.get("enabled", True)), None)
+            sre_skill = sre_node.get("skill", "") if sre_node else ""
+            sre_engine_ids = sre_node.get("engine_runtime_ids", []) if sre_node else []
+            matches.append((
+                scene_id, qa_node["skill"], qa_node.get("engine_runtime_ids", []),
+                sre_skill, sre_engine_ids
+            ))
+        return matches
+    except Exception as e:
+        log.warning(f"Pipeline: PR subscription match failed: {e}")
+        return []
+
 
 def is_plugin_mode() -> bool:
     """Check if pipeline is in plugin mode.
@@ -604,6 +647,77 @@ def _match_repo_subscription(repo_key: str, event_type: str, branch: str) -> str
     return ""
 
 
+def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, match: tuple):
+    """多场景命中同一 PR 时，为额外场景并行分发 QA 任务。
+
+    match = (scene_id, qa_skill, qa_engine_ids, sre_skill, sre_engine_ids)
+    """
+    try:
+        scene_id, qa_skill, qa_engine_ids, _, _ = match
+        # 构造 evt 副本，写入额外场景信息
+        _extra_evt = dict(evt)
+        _extra_evt["_pr_sub_scene_id"] = scene_id
+        _extra_evt["_pr_sub_skill"] = qa_skill
+        _extra_evt["_pr_sub_engine_ids"] = qa_engine_ids
+        # 提取 PR 号用于回帖
+        _payload = evt.get("payload", {}) or {}
+        _pr_obj = _payload.get("pull_request", {}) or _payload.get("merge_request", {}) or {}
+        _obj_attrs = _payload.get("object_attributes", {}) or {}
+        _pr_num = _pr_obj.get("number", _pr_obj.get("iid", "")) or _obj_attrs.get("iid", "")
+        if _pr_num:
+            _extra_evt["_pr_sub_pr_number"] = _pr_num
+        # 构造伪 issue_id（带 scene_id 区分）
+        _pseudo_id = f"#pr_{_pr_num}_{scene_id}" if _pr_num else ""
+        # 创建事件
+        from src.api.event_store import append_event
+        _title = f"PR 订阅 QA: {scene_id}"
+        seq = append_event(
+            repo_key=repo_key, event_type="a2a_event",
+            title=_title, issue_id=_pseudo_id, source="a2a",
+            agent_type="qa", actor=evt.get("actor", ""),
+            summary=f"PR 订阅并行: scene={scene_id} → qa",
+            payload=evt.get("payload", {}), status="running",
+            scene_id=scene_id,
+        )
+        log.info(f"Pipeline: PR subscription extra dispatch seq={seq} scene={scene_id}")
+        # 分派执行
+        from src.runtime.engine_select import pick_engine, engine_name
+        from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
+        _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
+        if _engine_id is None:
+            log.info(f"Pipeline: PR subscription extra: no engine for scene={scene_id}, skip")
+            from src.api.event_store import update_event_status
+            update_event_status(seq, "failed")
+            return
+        _be = engine_name(_engine_id) or ""
+        _kind = runtime_execution_kind(_engine_id)
+        if _kind == EXEC_MODE_DIRECT:
+            _extra_evt["_skill_path"] = qa_skill
+            _extra_evt["_skill_id"] = 0
+            _direct_tid = _create_direct_task(repo_key, seq, "qa", _be, qa_skill,
+                                qa_skill, _engine_id, _extra_evt, _pseudo_id, skill_id=0)
+            start_direct_agent(_execute_agent, (
+                repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
+            ))
+        else:
+            from src.runtime.service import enqueue_task
+            from src.runtime.engine_select import get_scene_pool_engine_ids
+            _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+            enqueue_task(
+                agent_session_id=f"pr_sub_{scene_id}_{_pr_num}",
+                runtime_id=_engine_id, prompt="", agent_type="qa",
+                skill=qa_skill, skill_id=0, skill_path=qa_skill,
+                repo_key=repo_key, issue_id=_pseudo_id,
+                event_seq=seq, event_type="a2a_event",
+                env_extra="{}", skill_files="{}",
+                pool_tag="qa", pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "",
+            )
+        from src.api.event_store import update_event_dispatched
+        update_event_dispatched(seq)
+    except Exception as e:
+        log.warning(f"Pipeline: PR subscription extra dispatch failed: {e}")
+
+
 def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                                  agent_type: str, main_agent: str):
     """订阅并行分发（event-routing-subscription-design.md §2.2）。
@@ -932,6 +1046,23 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     _pr_branch = resolve_pr_target_branch(evt)
     if _pr_branch and not evt.get("branch"):
         evt["branch"] = _pr_branch
+    # PR 订阅：PR 无关联 Issue 时，按 target_branch 匹配场景 work_branch
+    if not agent_type and event_type in PR_EVENT_TYPES:
+        _pr_sub_matches = _match_pr_subscription(repo_key, evt, event_type, _pr_branch)
+        if _pr_sub_matches:
+            # 第一个匹配作为主 agent，其余并行分发
+            _first = _pr_sub_matches[0]
+            evt["_pr_sub_scene_id"] = _first[0]
+            evt["_pr_sub_skill"] = _first[1]
+            evt["_pr_sub_engine_ids"] = _first[2]
+            if _first[3]:
+                evt["_pr_sub_sre_skill"] = _first[3]
+                evt["_pr_sub_sre_engine_ids"] = _first[4]
+            agent_type = "qa"
+            log.info(f"Pipeline: PR subscription triggered -> scene={_first[0]} agent=qa branch={_pr_branch}")
+            # 多场景命中：其余场景并行分发 QA
+            for _extra in _pr_sub_matches[1:]:
+                _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
     _sub_agent = _match_repo_subscription(repo_key, event_type, _pr_branch)
     if not agent_type:
         # 主路由为空 → 订阅兜底
@@ -1087,6 +1218,25 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         except Exception:
             pass
     log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
+    # PR 订阅场景：直接从场景 nodes 取 skill，不走 agent_session / issue_scene
+    _is_pr_sub = bool(evt.get("_pr_sub_scene_id"))
+    if _is_pr_sub:
+        skill_name = evt["_pr_sub_skill"]
+        skill_id = 0
+        skill_path = skill_name
+        _issue_scene = evt["_pr_sub_scene_id"]
+        try:
+            from src.user.db import resolve_skill_id, get_skill_by_id
+            _sid = resolve_skill_id(skill_name, repo_key=repo_key)
+            if _sid:
+                skill_id = _sid
+                _sk = get_skill_by_id(_sid)
+                if _sk:
+                    skill_path = _sk.get("skill_path") or skill_name
+        except Exception:
+            pass
+        backend = ""  # PR 订阅不走 agent_session，backend 置空让 pick_engine 自动选
+        log.info(f"Pipeline (PR-sub): skill from scene nodes: {skill_name} sid={skill_id} (scene={_issue_scene})")
     # Issue 级场景优先：scene 非 default 时，用 issue scene 的 skill 覆盖 session 的 skill
     # 智能推荐模式：跳过 skill 解析（场景未知，prompt 不用 skill）
     if _is_scene_recommend:
@@ -1094,7 +1244,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         skill_id = 0
         skill_path = ""
         log.info("Pipeline (plugin): 智能推荐模式, skip skill resolution")
-    elif is_plugin_mode() and _issue_scene and _issue_scene != "default":
+    elif is_plugin_mode() and _issue_scene and _issue_scene != "default" and not _is_pr_sub:
         _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene, user_id=_issue_scene_uid)
         if _pipe_skill:
             skill_name = _pipe_skill
@@ -1110,8 +1260,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_id = 0
             log.info(f"Pipeline (plugin): issue scene skill override: {agent_type}={_pipe_skill} sid={skill_id} (scene={_issue_scene})")
     if not backend or not skill_name:
-        # 智能推荐模式：skill_name 为空是正常的，用 recommender prompt，不走 fallback
-        if _is_scene_recommend:
+        if _is_pr_sub:
+            pass  # PR 订阅已设好 skill，跳过 fallback
+        elif _is_scene_recommend:
             skill_name = ""
             backend = ""
             log.info("Pipeline (plugin): 智能推荐模式, using recommender prompt (no skill)")
@@ -1172,6 +1323,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             issue_id = evt.get("issue_id", "")
     else:
         issue_id = resolve_issue_id(payload) or evt.get("issue_id", "")
+    # PR 订阅：用 PR 号 + scene_id 构造伪 issue_id 参与去重（区分不同场景）
+    if not issue_id and evt.get("_pr_sub_scene_id"):
+        pr_obj = payload.get("pull_request", {}) or payload.get("merge_request", {}) or {}
+        obj_attrs = payload.get("object_attributes", {}) or {}
+        pr_num = pr_obj.get("number", pr_obj.get("iid", "")) or obj_attrs.get("iid", "")
+        if pr_num:
+            _sub_scene = evt["_pr_sub_scene_id"]
+            issue_id = f"#pr_{pr_num}_{_sub_scene}"
+            evt["_pr_sub_pr_number"] = pr_num
+            log.info(f"Pipeline: PR subscription pseudo issue_id={issue_id}")
     title = evt.get("title", "") or event_type
     log.info(f"Pipeline: issue_id={issue_id or '(none)'}, title={title}")
 
@@ -1255,6 +1416,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         summary=summary,
         payload=payload,
         status="running",
+        scene_id=evt.get("_pr_sub_scene_id", "") or _issue_scene,
     )
     log.info(f"Pipeline: event created, seq={seq}, repo_key={repo_key}, agent={agent_type}, issue_id={issue_id or '#0'}")
 
@@ -2433,10 +2595,16 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             log.warning(f"Multi-task mode stage=done check failed: {_e}")
 
     # 执行完成 → 自动回帖到 Issue（仅 sre 等有实质产出的 Agent，且有关联 Issue）
-    if new_status == "completed" and result_text and issue_id:
+    # PR 订阅的伪 issue_id（#pr_123_scene_id）不是真实 Issue，跳过 Issue 回帖
+    if new_status == "completed" and result_text and issue_id and not evt.get("_pr_sub_pr_number"):
         _issue_num = _issue_num_from(issue_id)
         if _issue_num and repo_gitcode_token:
             _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key)
+    # PR 订阅场景 → 回帖到 PR 评论
+    if new_status == "completed" and result_text and evt.get("_pr_sub_pr_number"):
+        _pr_num = str(evt["_pr_sub_pr_number"])
+        if _pr_num and repo_gitcode_token:
+            _post_result_to_pr(repository, _pr_num, result_text, repo_gitcode_token, agent_type, repo_key)
 
     # SRE 完成后 → 从 result_text 提取部署 URL 并写入 managed_repos.deploy_url
     if new_status == "completed" and agent_type == "sre" and result_text:
@@ -2658,6 +2826,53 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
         log.info(f"All subtasks done summary posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post all subtasks done failed: {e}")
+
+
+def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_token: str,
+                        agent_type: str, repo_key: str = ""):
+    """PR 订阅场景：Agent 执行完成后，将结果作为评论发回 PR。
+
+    GitCode: POST /repos/{owner}/{repo}/pulls/{pr_number}/comments
+    GitHub:  POST /repos/{owner}/{repo}/issues/{pr_number}/comments（PR 共用 Issue 评论 API）
+    """
+    if not repository or not pr_number or not bot_token:
+        return
+    # 提取 conclusion
+    _conclusion = ""
+    try:
+        from src.api.event_store import parse_agent_output_json
+        _parsed = parse_agent_output_json(result_text)
+        if _parsed and _parsed.get("conclusion"):
+            _conclusion = _parsed["conclusion"]
+    except Exception:
+        pass
+    if not _conclusion:
+        _conclusion = f"PR 审查任务已完成（{agent_type} agent）。"
+    _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
+    _comment += "\n<!-- grape-auto-comment -->"
+    try:
+        import urllib.request, json as _json
+        if _is_github_repo(repo_key):
+            # GitHub: PR 共用 Issue 评论 API
+            _url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments"
+            _data = _json.dumps({"body": _comment}).encode("utf-8")
+            _req = urllib.request.Request(_url, data=_data,
+                headers={"Authorization": f"Bearer {bot_token}",
+                         "Accept": "application/vnd.github+json",
+                         "User-Agent": "Grape-DevOps",
+                         "Content-Type": "application/json"}, method="POST")
+        else:
+            # GitCode: PR 评论 API
+            _url = f"https://gitcode.com/api/v5/repos/{repository}/pulls/{pr_number}/comments"
+            _data = _json.dumps({"body": _comment}).encode("utf-8")
+            _req = urllib.request.Request(_url, data=_data,
+                headers={"Authorization": f"Bearer {bot_token}",
+                         "Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(_req, timeout=15)
+        log.info(f"PR-sub: posted result comment to {repository}/pulls/{pr_number}")
+    except Exception as e:
+        log.warning(f"PR-sub: post result comment failed: {e}")
+
 
 def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token: str,
                                          agent_type: str = "", repository: str = ""):
