@@ -539,6 +539,7 @@ CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
     is_active   INTEGER DEFAULT 1,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
+    scene_type  TEXT DEFAULT 'standard',  -- standard | pr_subscription
     UNIQUE (scene_id, repo_key)
 )
 """
@@ -2865,10 +2866,11 @@ def _migrate_tables():
             _ensure_column(c, "devops_pipeline_scene", "advanced_options", "TEXT DEFAULT '{}'")
             _ensure_column(c, "devops_pipeline_scene", "created_by", "TEXT DEFAULT ''")
             _ensure_column(c, "devops_pipeline_scene", "icon", "TEXT DEFAULT ''")
+            _ensure_column(c, "devops_pipeline_scene", "scene_type", "TEXT DEFAULT 'standard'")
             db.commit()
-            log.info("Added devops_pipeline_scene.advanced_options + created_by + icon columns")
+            log.info("Added devops_pipeline_scene.advanced_options + created_by + icon + scene_type columns")
     except Exception as e:
-        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by column failed: {e}")
+        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by/scene_type column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:

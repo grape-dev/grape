@@ -53,11 +53,15 @@ function renderEventDetail(data) {
   _convSeq = data.seq;
   _convAgent = agent;
 
-  // Issue 编号 → VCS 超链接
-  const _issNum = String(data.issue_id || '').replace(/^#/, '');
-  const _issueLink = (_issNum && data.repo_key)
-    ? `<a href="${_vcsUrl(data.repo_key, '/issues/' + _issNum)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">Issue ${data.issue_id}</a>`
-    : `Issue ${data.issue_id || '—'}`;
+  // Issue/PR 编号 → VCS 超链接
+  const _rawIssueId = String(data.issue_id || '');
+  const _isPR = _rawIssueId.startsWith('#pr_');
+  const _num = _rawIssueId.replace(/^#pr_/, '').replace(/^#/, '');
+  const _vcsPath = _isPR ? '/pull/' + _num : '/issues/' + _num;
+  const _label = _isPR ? 'PR #' + _num : 'Issue ' + data.issue_id;
+  const _issueLink = (_num && data.repo_key)
+    ? `<a href="${_vcsUrl(data.repo_key, _vcsPath)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${_label}</a>`
+    : `${_label === 'Issue ' ? 'Issue —' : _label}`;
 
   // 重新派发按钮显示条件（event-redispatch-design.md §3.1）：
   // failed / running>10min / 关联 task 卡在 dispatched
@@ -125,7 +129,7 @@ function renderEventDetail(data) {
             <div class="tx t2" style="line-height:1.6">
               <div>Trigger: ${data.event_type || '—'}</div>
               <div>Repository: ${data.repo_key || ''}</div>
-              <div>Issue: ${_issueLink}</div>
+              <div>${_isPR ? 'PR' : 'Issue'}: ${_issueLink}</div>
               <div>Actor: ${data.actor || '—'}</div>
               <div>Time: ${fmtLocalTime(data.created_at) || ''}</div>
             </div>

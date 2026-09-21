@@ -337,6 +337,8 @@ function _renderLocalSceneCard(s, isApplied, idx) {
   const workBranch = s.work_branch || 'main';
   const createdBy = s.created_by || '';
   const barColor = morandiColors[idx % morandiColors.length];
+  var isPRSub = s.scene_type === 'pr_subscription';
+  var prBadge = isPRSub ? '<span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR 订阅</span>' : '';
 
   return `<div class="scn-row" data-scene-id="${s.id}" data-scene-name="${(s.display_name||s.name||'').replace(/"/g,'&quot;')}" onclick="app.nav('scene-detail-local','${s.id}')">
     <div class="scn-row-icon" style="background:${barColor}">${icon}</div>
@@ -351,6 +353,7 @@ function _renderLocalSceneCard(s, isApplied, idx) {
     </div>
     <div class="scn-row-chain">${chain}</div>
     <div class="scn-row-right">
+      ${prBadge}
       <span class="scn-branch-tag">🌿 ${workBranch}</span>
       ${isApplied ? '' : ''}
     </div>
@@ -550,8 +553,9 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   if (!el) return;
   const catBg = 'bg-default';
   const icon = _SCENE_ICONS[scene.id] || _SCENE_ICONS[scene.name] || (scene.scope === 'official' ? '⚙' : '📦');
-  const agentOrder = ['vod','issue','coding','qa','sre'];
-  const agentLabels = ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
+  var isPRSub = (scene.scene_type === 'pr_subscription');
+  const agentOrder = isPRSub ? ['qa','sre'] : ['vod','issue','coding','qa','sre'];
+  const agentLabels = isPRSub ? ['QA Agent','SRE Agent'] : ['VOD Agent','Issue Agent','Coding Agent','QA Agent','SRE Agent'];
   const colors = {vod:'#B07A8B',issue:'#B8857A',coding:'#7A92B0',qa:'#9A85A8',sre:'#B89B6A'};
   const _detailMorandi = ['#8B9DB0','#A8B8A0','#C4A882','#B0A0B8','#9BB0C4','#C49B9B'];
   const _detailIconColor = _detailMorandi[(scene.id || '').length % _detailMorandi.length];
@@ -645,7 +649,8 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     html += `<div style="padding:20px;text-align:center;color:#86868b">无 Agent 节点</div></div>`;
   }
 
-  // 高级选项（右上角保存按钮）
+  // 高级选项（右上角保存按钮）— PR 订阅场景不渲染
+  if (!isPRSub) {
   html += `<div class="det-card-wrap" id="advOptionsInline">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <h2 style="font-size:15px;font-weight:600">${I18N.t('dashboard.advanced_options')||'高级选项'}</h2>
@@ -670,6 +675,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
       <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addCustomFieldInline()">+ ${I18N.t('dashboard.add_config')||'添加配置项'}</button>
     </div>
   </div>`;
+  }
 
   // 相关流水线（统计 + 表格，无流程图）— 只显示当前场景的流水线
   // pipeData=null 时先占位，数据到了由 _fillRelatedPipeline 填充
@@ -682,8 +688,10 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   el.innerHTML = html;
 
   // 将页面内所有 select 转换为自定义下拉面板（圆角风格统一）
-  // 加载高级选项数据
-  _loadAdvancedOptionsInline(scene.id, owner, name);
+  // 加载高级选项数据 — PR 订阅场景无高级选项
+  if (!isPRSub) {
+    _loadAdvancedOptionsInline(scene.id, owner, name);
+  }
 
   // 点击单个字段进入编辑模式（名称或描述独立编辑）
   window._enterInlineEdit = function(field) {
@@ -895,8 +903,12 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   // 这样 agent 数量和场景配置一致
   const sceneNodes = originalNodes || dashData.scene_nodes || [];
 
-  // 按 sceneNodes 构建 editNodes，但始终包含全部5个agent（禁用的置灰不删除）
-  const allAgentTypes = ['vod','issue','coding','qa','sre'];
+  // 根据 scene_type 决定 agent 列表
+  var _editScene = (dashData._scenes || []).find(function(s) { return s.id === sceneId; }) || {};
+  var isPRSubEdit = (_editScene.scene_type === 'pr_subscription');
+
+  // 按 sceneNodes 构建 editNodes，但始终包含全部 agent（禁用的置灰不删除）
+  const allAgentTypes = isPRSubEdit ? ['qa','sre'] : ['vod','issue','coding','qa','sre'];
   let editNodes = allAgentTypes.map(at => {
     const node = sceneNodes.find(n => (n.tag || n.id) === at);
     const ag = agents.find(a => a.agent_type === at) || {};
@@ -933,7 +945,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   // 替换卡片区域为编辑模式（保留箭头）
   const cardsContainer = document.getElementById('flowCardsContainer');
   if (cardsContainer) {
-    cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes);
+    cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
   }
 
   // 编辑操作函数
@@ -943,7 +955,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     node.enabled = !node.enabled;
     if (!node.enabled) { node.skill = ''; node.engine_runtime_ids = []; }
     if (cardsContainer) {
-      cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes);
+      cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
     }
   };
 
@@ -1030,10 +1042,10 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
 }
 
 // 渲染编辑模式的流程卡片（带箭头，引擎按钮在下方）
-function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes) {
+function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSub) {
   const colors = {vod:'#B07A8B',issue:'#B8857A',coding:'#7A92B0',qa:'#9A85A8',sre:'#B89B6A'};
   const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
-  const canToggle = (tag) => tag !== 'vod' && tag !== 'issue';
+  const canToggle = isPRSub ? (tag) => tag !== 'qa' : (tag) => tag !== 'vod' && tag !== 'issue';
   let html = '';
   editNodes.forEach((node, i) => {
     const tag = node.id || node.tag;
@@ -1283,7 +1295,15 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
     const cardsEl = document.getElementById('flowCardsContainer');
     if (cardsEl) {
       // 重新渲染编辑卡片（用 _renderEditFlowCards 保持与编辑模式一致的结构）
-      cardsEl.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
+      // 推断当前场景是否为 PR 订阅类型
+      var _engIsPRSub = false;
+      if (_createSceneType === 'pr_subscription') {
+        _engIsPRSub = true;
+      } else if (window._currentSceneId && window._dashboardData && window._dashboardData._scenes) {
+        var _engScn = window._dashboardData._scenes.find(function(s) { return s.id === window._currentSceneId; });
+        if (_engScn && _engScn.scene_type === 'pr_subscription') _engIsPRSub = true;
+      }
+      cardsEl.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes, _engIsPRSub);
     }
   };
   overlay.addEventListener('click', function(ev) { if (ev.target === overlay) overlay.remove(); });
@@ -1302,6 +1322,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
 let _isCreateMode = false;
 let _pendingSceneName = '';
 let _pendingSceneDesc = '';
+let _createSceneType = 'standard'; // standard | pr_subscription
 
 window.enterCreateMode = function() {
   const data = window._dashboardData || {};
@@ -1309,6 +1330,60 @@ window.enterCreateMode = function() {
   try { const cr = app.currentRepo(); if (cr) { owner = cr.owner; name = cr.name; } } catch(e) {}
   if (!owner || !name) { const parts = (data.repo || '').replace(/^gitcode:/, '').split('/'); owner = parts[0]||''; name = parts[1]||''; }
 
+  // 弹出类型选择弹窗
+  _showSceneTypePicker(owner, name);
+};
+
+window._showSceneTypePicker = function(owner, name) {
+  var ov = document.createElement('div');
+  ov.id = 'sceneTypePickerOverlay';
+  ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.3);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
+  ov.innerHTML = '\
+    <div style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-radius:20px;padding:32px;width:400px;max-width:90vw;box-shadow:0 12px 48px rgba(0,0,0,.15)">\
+      <h2 style="font-size:18px;font-weight:600;margin-bottom:20px;text-align:center">' + (I18N.t('dashboard.choose_scene_type')||'选择场景类型') + '</h2>\
+      <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:20px">\
+        <div onclick="window._pickSceneType(\'standard\')" style="padding:16px;border-radius:14px;border:1px solid #e8e8ed;cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'#0071e3\';this.style.background=\'rgba(0,113,227,.04)\'" onmouseout="this.style.borderColor=\'#e8e8ed\';this.style.background=\'transparent\'">\
+          <div style="font-size:14px;font-weight:600;margin-bottom:4px">' + (I18N.t('dashboard.standard_scene')||'标准场景') + '</div>\
+          <div style="font-size:12px;color:#86868b">' + (I18N.t('dashboard.standard_scene_desc')||'VOD + Issue + Coding + QA + SRE 全流程，适用于 Issue 驱动开发') + '</div>\
+        </div>\
+        <div onclick="window._pickSceneType(\'pr_subscription\')" style="padding:16px;border-radius:14px;border:1px solid #e8e8ed;cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'#af52de\';this.style.background=\'rgba(175,82,222,.04)\'" onmouseout="this.style.borderColor=\'#e8e8ed\';this.style.background=\'transparent\'">\
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><span style="font-size:14px;font-weight:600">' + (I18N.t('dashboard.pr_subscription_scene')||'PR 订阅场景') + '</span><span style="font-size:10px;font-weight:500;padding:2px 8px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span></div>\
+          <div style="font-size:12px;color:#86868b">' + (I18N.t('dashboard.pr_subscription_desc')||'QA + SRE，当 PR 无关联 Issue 时自动触发审查。每仓库最多一个') + '</div>\
+        </div>\
+      </div>\
+      <button class="ap-btn" style="width:100%" onclick="document.getElementById(\'sceneTypePickerOverlay\').remove()">' + (I18N.t('common.cancel')||'取消') + '</button>\
+    </div>';
+  document.body.appendChild(ov);
+  ov.addEventListener('click', function(e) { if (e.target === ov) ov.remove(); });
+};
+
+window._pickSceneType = function(sceneType) {
+  // PR 订阅场景唯一性前端校验：不关弹窗，弹提示后留在选择页
+  if (sceneType === 'pr_subscription') {
+    var data = window._dashboardData || {};
+    var scenes = data._scenes || [];
+    var existing = scenes.find(function(s) { return s.scene_type === 'pr_subscription' && s.is_active !== 0; });
+    if (existing) {
+      app.showToast('该仓库已存在 PR 订阅场景，每仓库最多一个', 4000);
+      return;
+    }
+  }
+  var ov = document.getElementById('sceneTypePickerOverlay');
+  if (ov) ov.remove();
+  _createSceneType = sceneType;
+  var data = window._dashboardData || {};
+  var owner = '', name = '';
+  try { var cr = app.currentRepo(); if (cr) { owner = cr.owner; name = cr.name; } } catch(e) {}
+  if (!owner || !name) { var parts = (data.repo || '').replace(/^gitcode:/, '').split('/'); owner = parts[0]||''; name = parts[1]||''; }
+
+  if (sceneType === 'pr_subscription') {
+    _enterCreatePRSubscriptionMode(data, owner, name);
+  } else {
+    _enterCreateStandardMode(data, owner, name);
+  }
+};
+
+function _enterCreateStandardMode(data, owner, name) {
   const agents = data.agents || [];
   const agentEngines = data.agent_engines || {};
   const allAgentTypes = ['vod','issue','coding','qa','sre'];
@@ -1495,8 +1570,22 @@ window.enterCreateMode = function() {
       const nextAgent = i < arr.length - 1 ? arr[i + 1].id : 'done';
       return { id: n.id, tag: n.tag, skill: n.skill || '', mode: 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
     });
-    API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload, icon: _createSceneIcon }).then(r => {
+    API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload, icon: _createSceneIcon, scene_type: _createSceneType }).then(r => {
       window._dashboardEditing = false;
+      // PR 订阅场景无高级选项，直接跳转
+      if (_createSceneType === 'pr_subscription') {
+        app.showToast(I18N.t('dashboard.scene_created')||'场景创建成功');
+        API.get('/dashboard/' + owner + '/' + name).then(dashData => {
+          return API.get('/scenes?repo=' + encodeURIComponent(owner + '/' + name)).then(scenesData => {
+            dashData._scenes = scenesData.scenes || [];
+            dashData._owner = owner;
+            dashData._name = name;
+            window._dashboardData = dashData;
+            app.nav('dash');
+          });
+        }).catch(() => { app.nav('dash'); });
+        return;
+      }
       // 收集高级选项
       var workBranch = (document.getElementById('advWorkBranchInline') || {}).value || 'main';
       var fields = [];
@@ -1525,6 +1614,142 @@ window.enterCreateMode = function() {
         app.showToast(I18N.t('dashboard.scene_created')||'场景创建成功');
         app.nav('dash');
       });
+    }).catch(e => { app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
+  };
+};
+
+// ── 创建 PR 订阅场景（QA + SRE，无高级选项）──
+function _enterCreatePRSubscriptionMode(data, owner, name) {
+  const agents = data.agents || [];
+  const agentEngines = data.agent_engines || {};
+  const allAgentTypes = ['qa','sre'];
+  // 默认全部启用，skill 为空
+  let editNodes = allAgentTypes.map(at => ({ id: at, tag: at, skill: '', mode: 'emit', next: 'done', handoff: 'a2a', skip: [], enabled: true, engine_runtime_ids: [] }));
+  _isCreateMode = true;
+  window._dashboardEditing = true;
+
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+  let _createSceneIcon = '🔍';
+  const icon = _createSceneIcon;
+  const colors = {qa:'#9A85A8',sre:'#B89B6A'};
+  const _detailMorandi = ['#8B9DB0','#A8B8A0','#C4A882','#B0A0B8','#9BB0C4','#C49B9B'];
+  const _detailIconColor = _detailMorandi[0];
+  const descs = {qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
+  const canToggle = (tag) => tag !== 'qa';
+
+  let html = `<style>
+    .ap-btn{padding:7px 18px;border-radius:999px;font-size:12px;font-weight:500;cursor:pointer;transition:all .2s ease;background:transparent;border:1px solid rgba(0,113,227,.3);color:#0071e3}
+    .ap-btn:hover{background:#0071e3;border-color:#0071e3;color:#fff}
+    .ap-btn-d{border:1px solid rgba(255,59,48,.3);color:#ff3b30}
+    .ap-btn-d:hover{background:#ff3b30;border-color:#ff3b30;color:#fff}
+    .ap-grid{display:flex;gap:12px;padding:0;overflow-x:auto;min-height:280px}
+    .ap-nd{flex:1 1 0;min-width:0;max-width:260px;min-height:260px;background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;padding:18px;display:flex;flex-direction:column;transition:all .25s ease;position:relative;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+    .ap-nd:hover{background:rgba(255,255,255,.8);box-shadow:0 3px 16px rgba(0,0,0,.08)}
+    .ap-nd-top{width:36px;height:4px;border-radius:2px;margin-bottom:12px}
+    .ap-nd-name{font-size:14px;font-weight:600;color:#1d1d1f;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+    .ap-nd-desc{font-size:11px;color:#86868b;line-height:1.5;margin-bottom:10px;font-weight:400}
+    .det-card-wrap{background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;padding:24px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+    .scn-applied-badge{font-size:11px;font-weight:500;padding:5px 14px;border-radius:999px;background:rgba(52,199,89,.1);color:#34c759;display:inline-flex;align-items:center;gap:3px;border:1px solid rgba(52,199,89,.2)}
+    select{appearance:none;-webkit-appearance:none;-moz-appearance:none;background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2386868b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px!important;border-radius:8px;cursor:pointer}
+    select option{padding:8px 12px;background:#fff;color:#1d1d1f;font-size:12px}
+    select option:checked{background:#0071e3;color:#fff}
+    select option:hover{background:#f0f4ff;color:#0071e3}
+    select::-ms-expand{display:none}
+    select:focus{border-color:#0071e3!important}
+  </style>`;
+
+  // 返回按钮
+  html += `<button class="ap-btn" onclick="window._dashboardEditing=false;app.nav('dash')" style="margin-bottom:12px">← ${I18N.t('dashboard.scene_center_title')||'项目场景'}</button>`;
+
+  // 场景名称 + 描述 + 图标选择（直接 input，不需要点击切换）
+  const _iconPickerHtml = _CUSTOM_SCENE_ICONS.map(ic =>
+    `<span class="icon-pick${ic === _createSceneIcon ? ' active' : ''}" onclick="_pickCreateIcon('${ic}')" style="font-size:20px;width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s;${ic === _createSceneIcon ? 'background:#0071e3;color:#fff' : 'background:#f5f5f7'}">${ic}</span>`
+  ).join('');
+  html += `<div class="cd" style="padding:20px 24px;margin-bottom:16px">
+    <div style="display:flex;align-items:flex-start;gap:16px">
+      <div class="scn-row-icon" id="createSceneIconDisplay" style="width:40px;height:40px;border-radius:10px;font-size:18px;cursor:pointer;background:${_detailIconColor};display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff;font-weight:600" onclick="document.getElementById('iconPickerPanel').style.display=document.getElementById('iconPickerPanel').style.display==='none'?'flex':'none'">${icon}</div>
+      <div style="flex:1;min-width:0">
+        <input id="createSceneName" placeholder="${I18N.t('dashboard.scene_name_placeholder')||'请输入场景名称'}" style="width:100%;font-size:20px;font-weight:700;padding:4px 8px;border:1px solid #d2d2d7;border-radius:6px;outline:none;background:#fff;margin-bottom:6px;transition:border-color .15s" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='#d2d2d7'">
+        <input id="createSceneDesc" placeholder="${I18N.t('dashboard.desc_optional')||'描述（可选）'}" style="width:100%;font-size:13px;padding:4px 8px;border:1px solid #d2d2d7;border-radius:6px;outline:none;background:#fff;color:#86868b;transition:border-color .15s" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='#d2d2d7'">
+        <div id="iconPickerPanel" style="display:none;flex-wrap:wrap;gap:6px;margin-top:8px;padding:8px;background:#f5f5f7;border-radius:10px">${_iconPickerHtml}</div>
+      </div>
+      <button class="ap-btn" style="margin-top:4px" onclick="_saveCreateScene('${owner}','${name}')">${I18N.t('common.save')||'保存'}</button>
+    </div>
+  </div>`;
+
+  // 执行流程（直接编辑模式）— PR 订阅场景只含 QA + SRE
+  html += `<div class="det-card-wrap" id="flowSection">
+    <div id="flowHeader" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h2 style="font-size:15px;font-weight:600">${I18N.t('skills.execution_flow')||'执行流程'}</h2>
+    </div>
+    <div class="ap-grid" style="padding:0" id="flowCardsContainer">`;
+  html += _renderEditFlowCards(editNodes, agents, agentEngines, editNodes, true);
+  html += `</div></div>`;
+
+  el.innerHTML = html;
+
+  // 图标选择
+  window._pickCreateIcon = function(ic) {
+    _createSceneIcon = ic;
+    const display = document.getElementById('createSceneIconDisplay');
+    if (display) display.textContent = ic;
+    document.querySelectorAll('.icon-pick').forEach(el => {
+      const isActive = el.textContent === ic;
+      el.style.background = isActive ? '#0071e3' : '#f5f5f7';
+      el.style.color = isActive ? '#fff' : '';
+      el.classList.toggle('active', isActive);
+    });
+  };
+
+  // 编辑操作函数
+  window.toggleAgentInScene = function(agentType) {
+    const node = editNodes.find(n => n.id === agentType);
+    if (!node) return;
+    node.enabled = !node.enabled;
+    if (!node.enabled) { node.skill = ''; node.engine_runtime_ids = []; }
+    const cardsContainer = document.getElementById('flowCardsContainer');
+    if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes, true);
+  };
+
+  window.selectAgentSkill = function(agentType, skillName) {
+    const node = editNodes.find(n => n.id === agentType);
+    if (node) node.skill = skillName;
+  };
+
+  window.openEngineModal = function(agentType) {
+    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, '');
+  };
+
+  // 保存创建场景（复用 _enterCreateStandardMode 中的 _saveCreateScene 逻辑）
+  window._saveCreateScene = function(owner, name) {
+    const sceneNameVal = (document.getElementById('createSceneName') || {}).value || '';
+    if (!sceneNameVal.trim()) { app.showToast(I18N.t('dashboard.please_input_scene_name')||'请输入场景名称'); return; }
+    const sceneDescVal = (document.getElementById('createSceneDesc') || {}).value || '';
+    const emptyAgents = editNodes.filter(n => n.enabled && !n.skill);
+    if (emptyAgents.length) {
+      const names = emptyAgents.map(n => { const meta = _AGENT_TYPES[n.id] || {}; return meta.display_name || n.id; }).join('、');
+      app.showToast(I18N.t('dashboard.skill_empty_warning', {agents: names}));
+      return;
+    }
+    const nodesPayload = editNodes.filter(n => n.enabled).map((n, i, arr) => {
+      const nextAgent = i < arr.length - 1 ? arr[i + 1].id : 'done';
+      return { id: n.id, tag: n.tag, skill: n.skill || '', mode: 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
+    });
+    // PR 订阅场景带 scene_type，无高级选项
+    API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload, icon: _createSceneIcon, scene_type: 'pr_subscription' }).then(r => {
+      window._dashboardEditing = false;
+      app.showToast(I18N.t('dashboard.scene_created')||'场景创建成功');
+      // 刷新 dashboard 数据后跳项目场景
+      API.get('/dashboard/' + owner + '/' + name).then(dashData => {
+        return API.get('/scenes?repo=' + encodeURIComponent(owner + '/' + name)).then(scenesData => {
+          dashData._scenes = scenesData.scenes || [];
+          dashData._owner = owner;
+          dashData._name = name;
+          window._dashboardData = dashData;
+          app.nav('dash');
+        });
+      }).catch(() => { app.nav('dash'); });
     }).catch(e => { app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
   };
 };
@@ -1574,7 +1799,13 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     const accentColor = meta.color || colors[at] || '#86868b';
     // 语言包优先于后端 description（后端返回中文时英文模式用前端翻译）
     const desc = descs[at] || meta.description || '';
-    const canToggle = at !== 'vod' && at !== 'issue';
+    // PR 订阅场景下 QA 不可禁用，标准场景下 VOD/Issue 不可禁用
+    var _racIsPRSub = (_createSceneType === 'pr_subscription');
+    if (!_racIsPRSub && window._currentSceneId && window._dashboardData && window._dashboardData._scenes) {
+      var _racScn = window._dashboardData._scenes.find(function(s) { return s.id === window._currentSceneId; });
+      if (_racScn && _racScn.scene_type === 'pr_subscription') _racIsPRSub = true;
+    }
+    const canToggle = _racIsPRSub ? at !== 'qa' : at !== 'vod' && at !== 'issue';
 
     let toggleBtn = '';
     if (editMode && canToggle) {
@@ -1716,11 +1947,11 @@ window._openSceneRecommendModal = function(repoParam) {
   ov.addEventListener('click', function(e) { if (e.target === ov && _downOnOv) ov.remove(); });
   document.body.appendChild(ov);
 
-  // 加载场景列表 + 已有配置
+  // 加载场景列表 + 已有配置（PR 订阅场景不参与兜底推荐）
   var sceneOptions = '';
   API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name)).then(function(d) {
     var scenes = (d && d.scenes) || [];
-    sceneOptions = scenes.map(function(s) {
+    sceneOptions = scenes.filter(function(s) { return s.scene_type !== 'pr_subscription'; }).map(function(s) {
       var disp = s.display_name || s.name || s.id;
       return '<option value="' + s.id + '">' + disp + '</option>';
     }).join('');

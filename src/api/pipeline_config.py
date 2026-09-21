@@ -102,6 +102,7 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
     _has_ao = False
     _has_cb = False
     _has_icon = False
+    _has_st = False
     with lock:
         c = db.cursor()
         try:
@@ -111,11 +112,13 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
                 _has_ao = "advanced_options" in _cols
                 _has_cb = "created_by" in _cols
                 _has_icon = "icon" in _cols
+                _has_st = "scene_type" in _cols
                 _extra = ""
                 if _has_dn: _extra += ", display_name"
                 if _has_ao: _extra += ", advanced_options"
                 if _has_cb: _extra += ", created_by"
                 if _has_icon: _extra += ", icon"
+                if _has_st: _extra += ", scene_type"
                 c.execute(
                     f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                     "WHERE is_active=1 AND repo_key=? ORDER BY id", (repo_key,))
@@ -152,12 +155,16 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
         icon = ""
         if _has_icon and len(r) > col_offset:
             icon = r[col_offset] or ""
+            col_offset += 1
+        scene_type = "standard"
+        if _has_st and len(r) > col_offset:
+            scene_type = r[col_offset] or "standard"
         result.append({
             "scene_id": scene_id, "name": r[1], "description": r[2],
             "display_name": (r[5] if _has_dn and len(r) > 5 else "") or r[1],
             "nodes": nodes, "onboarding": r[4] or "repo-onboarding",
             "work_branch": work_branch, "created_by": created_by,
-            "icon": icon,
+            "icon": icon, "scene_type": scene_type,
         })
     return result
 
@@ -172,23 +179,32 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
         c = db.cursor()
         try:
             _has_dn = False
+            _has_st = False
             try:
                 _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
                 _has_dn = "display_name" in _cols
+                _has_st = "scene_type" in _cols
             except Exception:
                 pass
-            _dn_expr = ", display_name" if _has_dn else ""
+            _extra = ", display_name" if _has_dn else ""
+            if _has_st:
+                _extra += ", scene_type"
             c.execute(
-                f"SELECT scene_id, name, description, nodes_json, onboarding{_dn_expr} FROM devops_pipeline_scene "
+                f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                 "WHERE is_active=1 AND scene_id=? AND repo_key=? LIMIT 1",
                 (scene_id, repo_key))
             row = c.fetchone()
             if row:
                 nodes = json.loads(row[3] or "[]") if row[3] else []
+                _scene_type = "standard"
+                if _has_st and len(row) > (6 if _has_dn else 5):
+                    _st_idx = 6 if _has_dn else 5
+                    _scene_type = row[_st_idx] or "standard"
                 return {
                     "scene_id": row[0], "name": row[1], "description": row[2],
-                    "display_name": (row[5] if len(row) > 5 else "") or row[1],
+                    "display_name": (row[5] if _has_dn and len(row) > 5 else "") or row[1],
                     "nodes": nodes, "onboarding": row[4] or "repo-onboarding",
+                    "scene_type": _scene_type,
                 }
         except Exception as e:
             log.warning(f"_query_scene_by_id failed: {e}")
@@ -206,7 +222,8 @@ def get_scenes(repo_key: str = "") -> list[dict]:
              "created_by": s.get("created_by") or "",
              "icon": s.get("icon") or "",
              "nodes": s.get("nodes") or [],
-             "onboarding": s.get("onboarding") or "repo-onboarding"} for s in db_scenes]
+             "onboarding": s.get("onboarding") or "repo-onboarding",
+             "scene_type": s.get("scene_type") or "standard"} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
@@ -236,6 +253,7 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
         "name": scene.get("name", scene_id) or scene_id,
         "nodes": scene.get("nodes") or [],
         "onboarding": scene.get("onboarding", "repo-onboarding"),
+        "scene_type": scene.get("scene_type", "standard"),
     }
 
 
@@ -300,7 +318,8 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
 
 def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
-                        display_name: str = "", created_by: str = "", icon: str = "") -> int:
+                        display_name: str = "", created_by: str = "", icon: str = "",
+                        scene_type: str = "standard") -> int:
     """Create or reactivate a repo-scoped custom scene in DB. Returns DB id."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -321,6 +340,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             _try_set_display_name(c, existing[0], display_name or name)
             _try_set_created_by(c, existing[0], created_by)
             _try_set_icon(c, existing[0], icon)
+            _try_set_scene_type(c, existing[0], scene_type)
             db.commit()
             return existing[0]
         # Insert new record
@@ -332,6 +352,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
         _try_set_display_name(c, new_id, display_name or name)
         _try_set_created_by(c, new_id, created_by)
         _try_set_icon(c, new_id, icon)
+        _try_set_scene_type(c, new_id, scene_type)
         db.commit()
         return new_id
 
@@ -350,6 +371,14 @@ def _try_set_icon(c, row_id: int, icon: str):
     """幂等写入 icon（列不存在时忽略）。"""
     try:
         c.execute("UPDATE devops_pipeline_scene SET icon=? WHERE id=?", (icon, row_id))
+    except Exception:
+        pass
+
+
+def _try_set_scene_type(c, row_id: int, scene_type: str):
+    """幂等写入 scene_type（列不存在时忽略）。"""
+    try:
+        c.execute("UPDATE devops_pipeline_scene SET scene_type=? WHERE id=?", (scene_type, row_id))
     except Exception:
         pass
 
