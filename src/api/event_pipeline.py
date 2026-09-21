@@ -2590,7 +2590,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             log.warning(f"Multi-task mode stage=done check failed: {_e}")
 
     # 执行完成 → 自动回帖到 Issue（仅 sre 等有实质产出的 Agent，且有关联 Issue）
-    if new_status == "completed" and result_text and issue_id:
+    # PR 订阅的伪 issue_id（#pr_123_scene_id）不是真实 Issue，跳过 Issue 回帖
+    if new_status == "completed" and result_text and issue_id and not evt.get("_pr_sub_pr_number"):
         _issue_num = _issue_num_from(issue_id)
         if _issue_num and repo_gitcode_token:
             _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key)
