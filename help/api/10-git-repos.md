@@ -247,6 +247,21 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 **返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
 
+### POST /api/git-repo/{owner}/{repo}/issues/{number}/close
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+
+关闭 Issue（对外关闭入口，供 grape-cli / agent 使用；无 Body）。
+
+**平台差异（自动适配，复用 `VcsApiClient.close_issue`）：**
+
+| provider | 平台调用 |
+|----------|----------|
+| `github` | `PATCH /repos/{owner}/{repo}/issues/{number}` body `{"state":"closed"}` |
+| `gitcode` | 先 `GET` 单个 Issue 取当前 `title`（PATCH 必填），再 `PATCH` body `{"state":"close","repo":"owner/repo","title":"当前标题"}`（GitCode 的值是 `close` 不是 `closed`） |
+
+**返回（200）**：关闭后的 Issue 对象（含 `"state":"closed"`）。
+**错误**：401 / 403 / 404（Issue 不存在）/ **502（平台关闭未生效或 token 解析失败）**。
+
 ### GET/POST /api/git-repo/{owner}/{repo}/issues/{number}/comments
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
