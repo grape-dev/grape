@@ -615,7 +615,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         _a2a_title = ""
         if issue_number:
             try:
-                from src.api.routes.tasks import _get_issue_title
+                from src.api.issues_center import _get_issue_title
                 _a2a_title = _get_issue_title(repo_key, int(issue_number)) or ""
             except Exception:
                 pass
