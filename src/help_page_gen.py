@@ -366,7 +366,7 @@ def build_help_html(data: dict | None = None) -> str:
         '<meta charset="UTF-8">\n'
         '<meta name="viewport" content="width=device-width,initial-scale=1.0">\n'
         '<title>Grape 帮助中心</title>\n'
-        '<link rel="icon" type="image/png" href="/static/logo-64.png?v=3">\n'
+        '<link rel="icon" type="image/png" href="/static/logo-64.png">\n'
         f"{_MIGRATION_COMMENT}\n"
         f"<style>{_CSS}</style>\n"
         "</head>\n<body>\n"
