@@ -1,6 +1,6 @@
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -39,6 +39,7 @@ const app = (() => {
   }
 
   function showLogin() {
+    document.documentElement.removeAttribute('data-logged-in');
     $('loginView').classList.remove('hid');
     $('sidebar').style.display = 'none';
     $('mainView').style.display = 'none';
@@ -51,9 +52,13 @@ function loadAgentTypes() {
 }
 
   function showApp() {
+    document.documentElement.setAttribute('data-logged-in', '1');
     $('loginView').classList.add('hid');
+    // 工作台已由 CSS 显示，立即展示加载中状态
+    $('pageContent').innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
     loadAgentTypes();
-    loadProfile().then(() => loadRepos()).catch(() => loadRepos());
+    // profile 和 repos 并行拉取，不互相等待
+    Promise.all([loadProfile(), loadRepos()]).catch(() => {});
   }
 
   function loadProfile() {
@@ -300,7 +305,7 @@ function loadAgentTypes() {
       return;
     }
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail' && view !== 'autopilot' && view !== 'autopilot-detail') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -375,7 +380,7 @@ function loadAgentTypes() {
       var tb = $('tb'); if (tb) tb.style.display = 'flex';
       var mv = $('mainView'); if (mv) { mv.style.position = ''; mv.style.inset = ''; mv.style.zIndex = ''; }
     }
-    // 离开任务中心时停止场景识别轮询
+    // 离开需求中心时停止场景识别轮询
     if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
     // 离开 observability 时停止定时轮询
     if (view !== 'observability' && typeof stopObsAuto === 'function') stopObsAuto();
@@ -423,12 +428,19 @@ function loadAgentTypes() {
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
-      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
       var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'event') {
+      // 路由入口清理：非 _jumpToNodeEvent 触发的进入（如全局搜索 / 直接路由）清除残留来源标志，
+      // 防止上次任务详情遗留的 _eventFromTask 导致事件页错误显示「返回需求详情」按钮。
+      if (!window._eventNavFromTask) {
+        window._eventFromTask = null;
+      }
+      // 消费瞬态标志（仅本次跳转有效，后续任何再进入都需重新标记）
+      window._eventNavFromTask = false;
       title.textContent = I18N.t('app.current_project');
       API.get('/events/detail/' + param).then(d => { if (window._currentView !== 'event') return; renderEventDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'event') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
       // 切换回事件详情时恢复活跃对话查询
@@ -438,12 +450,29 @@ function loadAgentTypes() {
       renderChat(param || null);
       // 切换回 Chat 页面时恢复活跃查询（不中断）
       if (typeof resumeChatTask === 'function') setTimeout(resumeChatTask, 500);
+    } else if (view === 'im-channel') {
+      title.textContent = I18N.t('app.nav.im_channel');
+      renderImChannel();
     } else if (view === 'tasks') {
       title.textContent = I18N.t('app.current_project');
       renderTasks();
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
       renderSettings(param || 'credentials');
+    } else if (view === 'my-feedback') {
+      title.textContent = '我的反馈';
+      if (typeof renderMyFeedback === 'function') {
+        renderMyFeedback();
+      } else {
+        pc.innerHTML = '<div class="error">反馈页面加载失败，请刷新重试</div>';
+      }
+    } else if (view === 'my-feedback-detail') {
+      title.textContent = '反馈详情';
+      if (typeof renderMyFeedbackDetail === 'function') {
+        renderMyFeedbackDetail(param);
+      } else {
+        pc.innerHTML = '<div class="error">详情页面加载失败，请刷新重试</div>';
+      }
     } else if (view === 'skills') {
       title.textContent = I18N.t('app.current_project');
       renderSkills();
@@ -459,7 +488,8 @@ function loadAgentTypes() {
         window.location.reload();
         return;
       }
-      API.get('/settings/agent-runtimes').then(d => { if (window._currentView !== 'runtimes') return; renderRuntimes(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'runtimes') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      _rtPage = 1; _rtDevPage = 1;  // Issue #185: 切入页面重置分页
+      _loadRuntimesData();
     } else if (view === 'observability') {
       title.textContent = I18N.t('app.current_project');
       if (typeof renderObservability === 'function') renderObservability();
@@ -484,6 +514,12 @@ function loadAgentTypes() {
     } else if (view === 'scene-detail-local') {
       title.textContent = I18N.t('app.current_project');
       renderSceneDetailLocal(param);
+    } else if (view === 'autopilot') {
+      title.textContent = I18N.t('app.current_project');
+      if (typeof renderAutopilot === 'function') renderAutopilot();
+    } else if (view === 'autopilot-detail') {
+      title.textContent = I18N.t('app.current_project');
+      if (typeof renderAutopilotDetail === 'function') renderAutopilotDetail(param);
     }
   }
 
@@ -500,7 +536,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local'];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail'];
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {
@@ -539,6 +575,267 @@ function loadAgentTypes() {
     API.get('/auth/login/github').then(d => { if (d.redirect_url) window.location.href = d.redirect_url; }).catch(e => showToast(I18N.t('app.login.oauth_not_configured')));
   }
 
+  // 内测申请表单
+  function openBetaApply() {
+    var isZh = I18N.getLang() === 'zh';
+    var overlay = document.createElement('div');
+    overlay.id = 'betaApplyModal';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;overflow-y:auto;padding:20px';
+    var z = isZh;
+    overlay.innerHTML = `
+      <div style="background:var(--c,#fff);border-radius:16px;padding:32px;width:480px;max-width:90vw;box-shadow:0 12px 48px rgba(0,0,0,0.15);max-height:90vh;overflow-y:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+          <h2 style="font-size:20px;font-weight:600">${z?'申请内测':'Beta Apply'}</h2>
+          <span onclick="document.getElementById('betaApplyModal').remove()" style="cursor:pointer;font-size:20px;color:var(--t3,#86868b);line-height:1">×</span>
+        </div>
+        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${z?'基础信息':'Basic Info'}</div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'平台 <span style="color:var(--r,#dc2828)">*</span>':'Platform <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <select id="betaPlatform" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+              <option value="gitcode">GitCode</option>
+              <option value="github">GitHub</option>
+            </select>
+          </div>
+          <div>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'用户名 <span style="color:var(--r,#dc2828)">*</span>':'Username <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <input id="betaAccountName" type="text" placeholder="${z?'GitCode 或 GitHub 用户名':'GitCode or GitHub username'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+          </div>
+          <div>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'邮箱 <span style="color:var(--r,#dc2828)">*</span>':'Email <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <input id="betaEmail" type="email" placeholder="user@example.com" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+          </div>
+          <div>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'手机号':'Phone'} <span style="font-size:10px;color:var(--t3,#a0a0a0)">(${z?'选填':'optional'})</span></label>
+            <input id="betaPhone" type="text" placeholder="${z?'选填':'Optional'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+          </div>
+        </div>
+        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${z?'身份选择':'Identity'}</div>
+        <div>
+          <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:8px">${z?'您的身份是？ <span style="color:var(--r,#dc2828)">*</span>':'Your identity? <span style="color:var(--r,#dc2828)">*</span>'}</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div class="ba-id-card" onclick="app.baSelectIdentity('student')" data-id="student" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">🎓</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${z?'学生':'Student'}</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'在校学生':'In school'}</div></div></div>
+            <div class="ba-id-card" onclick="app.baSelectIdentity('enterprise')" data-id="enterprise" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">🏢</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${z?'企业':'Enterprise'}</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'企业团队':'Company team'}</div></div></div>
+            <div class="ba-id-card" onclick="app.baSelectIdentity('opc')" data-id="opc" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">💼</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">OPC</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'独立开发者':'Independent'}</div></div></div>
+            <div class="ba-id-card" onclick="app.baSelectIdentity('other')" data-id="other" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">📋</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${z?'其他':'Other'}</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'其他身份':'Other identity'}</div></div></div>
+          </div>
+        </div>
+        <div id="baBranchStudent" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
+          <div style="margin-top:12px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'学历 <span style="color:var(--r,#dc2828)">*</span>':'Education <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div id="baEdu" style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${z?'本科生':'Undergraduate'}" onchange="app.baToggleOther(this)"> ${z?'本科生':'Undergraduate'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${z?'硕士研究生':'Master'}" onchange="app.baToggleOther(this)"> ${z?'硕士研究生':'Master'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${z?'博士研究生':'PhD'}" onchange="app.baToggleOther(this)"> ${z?'博士研究生':'PhD'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'专业方向 <span style="color:var(--r,#dc2828)">*</span>':'Major <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baMajor" value="${z?'计算机/软件工程':'CS/SE'}" onchange="app.baToggleOther(this)"> ${z?'计算机/软件工程':'CS/SE'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'人工智能':'AI'}" onchange="app.baToggleOther(this)"> ${z?'人工智能':'AI'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'数据科学':'Data Science'}" onchange="app.baToggleOther(this)"> ${z?'数据科学':'Data Science'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'电子/自动化':'EE/Automation'}" onchange="app.baToggleOther(this)"> ${z?'电子/自动化':'EE'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'其他理工科':'Other STEM'}" onchange="app.baToggleOther(this)"> ${z?'其他理工科':'Other STEM'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'经管/商科':'Business'}" onchange="app.baToggleOther(this)"> ${z?'经管/商科':'Business'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+            </div>
+          </div>
+        </div>
+        <div id="baBranchEnterprise" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
+          <div style="margin-top:12px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'企业规模 <span style="color:var(--r,#dc2828)">*</span>':'Company Size <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div id="baSize" style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baSize" value="1-10人" onchange="app.baToggleOther(this)"> 1-10人</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baSize" value="11-50人" onchange="app.baToggleOther(this)"> 11-50人</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baSize" value="51-200人" onchange="app.baToggleOther(this)"> 51-200人</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baSize" value="201-1000人" onchange="app.baToggleOther(this)"> 201-1000人</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baSize" value="1000人以上" onchange="app.baToggleOther(this)"> 1000人+</label>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'角色 <span style="color:var(--r,#dc2828)">*</span>':'Role <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div id="baRole" style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'开发人员':'Developer'}" onchange="app.baToggleOther(this)"> ${z?'开发人员':'Developer'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'技术负责人/架构师':'Tech Lead'}" onchange="app.baToggleOther(this)"> ${z?'技术负责人/架构师':'Tech Lead'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'产品经理':'PM'}" onchange="app.baToggleOther(this)"> ${z?'产品经理':'PM'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'项目经理':'Project Manager'}" onchange="app.baToggleOther(this)"> ${z?'项目经理':'Project Manager'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'管理人员':'Manager'}" onchange="app.baToggleOther(this)"> ${z?'管理人员':'Manager'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'使用场景 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Use Cases <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'软件开发':'Software Dev'}"> ${z?'软件开发':'Software Dev'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'AI Agent / Agent 开发':'AI Agent'}"> ${z?'AI Agent / Agent 开发':'AI Agent'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'自动化办公':'Automation'}"> ${z?'自动化办公':'Automation'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'企业内部工具':'Internal Tools'}"> ${z?'企业内部工具':'Internal Tools'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'数据分析':'Data Analysis'}"> ${z?'数据分析':'Data Analysis'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'运维 / DevOps':'DevOps'}"> ${z?'运维 / DevOps':'DevOps'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+            </div>
+          </div>
+        </div>
+        <div id="baBranchOpc" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
+          <div style="margin-top:12px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'主要从事 <span style="color:var(--r,#dc2828)">*</span>':'Occupation <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <div id="baOcc" style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'软件/IT':'Software/IT'}" onchange="app.baToggleOther(this)"> ${z?'软件/IT':'Software/IT'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="AI/Agent" onchange="app.baToggleOther(this)"> AI/Agent</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'电商':'E-commerce'}" onchange="app.baToggleOther(this)"> ${z?'电商':'E-commerce'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'内容创作':'Content Creation'}" onchange="app.baToggleOther(this)"> ${z?'内容创作':'Content'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="SaaS" onchange="app.baToggleOther(this)"> SaaS</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'咨询/服务':'Consulting'}" onchange="app.baToggleOther(this)"> ${z?'咨询/服务':'Consulting'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'解决问题 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Use Cases <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'产品开发':'Product Dev'}"> ${z?'产品开发':'Product Dev'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'编程开发':'Coding'}"> ${z?'编程开发':'Coding'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'Agent 开发':'Agent Dev'}"> ${z?'Agent 开发':'Agent Dev'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'自动化':'Automation'}"> ${z?'自动化':'Automation'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'内容生产':'Content'}"> ${z?'内容生产':'Content'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'数据处理/分析':'Data'}"> ${z?'数据处理/分析':'Data'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'运营':'Operations'}"> ${z?'运营':'Operations'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+            </div>
+          </div>
+        </div>
+        <div id="baBranchOther" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
+          <div style="margin-top:12px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'身份/职业描述 <span style="color:var(--r,#dc2828)">*</span>':'Description <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <input id="baOtherDesc" type="text" placeholder="${z?'如：自由职业者、研究者':'e.g. Freelancer, Researcher'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'使用场景 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Use Cases <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'学习':'Learning'}"> ${z?'学习':'Learning'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'工作':'Work'}"> ${z?'工作':'Work'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'编程':'Coding'}"> ${z?'编程':'Coding'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'创业':'Startup'}"> ${z?'创业':'Startup'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'内容创作':'Content'}"> ${z?'内容创作':'Content'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'数据分析':'Data'}"> ${z?'数据分析':'Data'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'自动化':'Automation'}"> ${z?'自动化':'Automation'}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${z?'申请理由':'Reason'} <span style="font-size:10px;color:var(--t3,#a0a0a0)">(${z?'选填':'optional'})</span></div>
+        <textarea id="betaReason" rows="2" placeholder="${z?'选填':'Optional'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;resize:vertical;font-family:inherit"></textarea>
+        <button id="betaSubmitBtn" onclick="app.submitBetaApply()" style="width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px">${z?'提交申请':'Submit'}</button>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+  }
+  var _baIdentity = '';
+  function baToggleOther(el) {
+    if (el.type === 'radio') {
+      var group = document.querySelectorAll('input[name="' + el.name + '"]');
+      group.forEach(function(r) {
+        var t = r.parentElement.querySelector('.ba-other-text');
+        if (t) { t.style.display = 'none'; if (r.value !== '其他' && r.value !== 'Other') t.value = ''; }
+      });
+      if (el.checked && (el.value === '其他' || el.value === 'Other')) {
+        var txt = el.parentElement.querySelector('.ba-other-text');
+        if (txt) txt.style.display = 'inline-block';
+      }
+    } else {
+      var txt = el.parentElement.querySelector('.ba-other-text');
+      if (!txt) return;
+      txt.style.display = el.checked ? 'inline-block' : 'none';
+      if (!el.checked) txt.value = '';
+    }
+  }
+  function baSelectIdentity(type) {
+    _baIdentity = type;
+    var modal = document.getElementById('betaApplyModal');
+    if (!modal) return;
+    modal.querySelectorAll('.ba-id-card').forEach(function(c) {
+      c.style.borderColor = c.dataset.id === type ? '#3168e0' : 'var(--b,#e3e6ee)';
+      c.style.background = c.dataset.id === type ? 'rgba(49,104,224,0.04)' : 'transparent';
+    });
+    ['Student','Enterprise','Opc','Other'].forEach(function(s) {
+      var el = document.getElementById('baBranch' + s);
+      if (el) { el.style.maxHeight = '0'; el.style.opacity = '0'; }
+    });
+    var key = type.charAt(0).toUpperCase() + type.slice(1);
+    var branch = document.getElementById('baBranch' + key);
+    if (branch) { branch.style.maxHeight = '1000px'; branch.style.opacity = '1'; }
+  }
+  function _baRadio(name) {
+    var c = document.querySelector('input[name="' + name + '"]:checked');
+    return c ? c.value : '';
+  }
+  function _baChecks(cls) {
+    var vals = [];
+    document.querySelectorAll('.' + cls + ':checked').forEach(function(cb) {
+      if (cb.value === '其他' || cb.value === 'Other') {
+        var t = cb.parentElement.querySelector('.ba-other-text');
+        vals.push(t && t.value.trim() ? t.value.trim() : cb.value);
+      } else { vals.push(cb.value); }
+    });
+    return vals;
+  }
+  function submitBetaApply() {
+    var isZh = I18N.getLang() === 'zh';
+    var accountType = document.getElementById('betaPlatform').value;
+    var accountName = document.getElementById('betaAccountName').value.trim();
+    var email = document.getElementById('betaEmail').value.trim();
+    var phone = (document.getElementById('betaPhone')||{}).value ? document.getElementById('betaPhone').value.trim() : '';
+    var reason = document.getElementById('betaReason').value.trim();
+    if (!accountName) { showToast(isZh ? '请填写用户名' : 'Username is required'); return; }
+    if (!email) { showToast(isZh ? '请填写邮箱' : 'Email is required'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast(isZh ? '邮箱格式不正确' : 'Invalid email'); return; }
+    if (!_baIdentity) { showToast(isZh ? '请选择身份' : 'Please select identity'); return; }
+    var survey = null;
+    if (_baIdentity === 'student') {
+      var edu = _baRadio('baEdu'), major = _baRadio('baMajor');
+      if (edu === '其他' || edu === 'Other') { var _t = document.querySelector('input[name="baEdu"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); edu = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!edu) { showToast(isZh ? '请输入学历' : 'Enter education'); return; } }
+      if (!edu || !major) { showToast(isZh ? '请完成学历和专业方向' : 'Complete education & major'); return; }
+      if (major === '其他' || major === 'Other') { var _t2 = document.querySelector('input[name="baMajor"]:checked'); if (_t2) { var _tt2 = _t2.parentElement.querySelector('.ba-other-text'); major = _tt2 && _tt2.value.trim() ? _tt2.value.trim() : ''; } if (!major) { showToast(isZh ? '请输入专业方向' : 'Enter major'); return; } }
+      survey = { identity: 'student', education: edu, major: major };
+    } else if (_baIdentity === 'enterprise') {
+      var size = _baRadio('baSize'), role = _baRadio('baRole'), cases = _baChecks('baEntCase');
+      if (role === '其他' || role === 'Other') { var _t = document.querySelector('input[name="baRole"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); role = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!role) { showToast(isZh ? '请输入角色' : 'Enter role'); return; } }
+      if (!size || !role || cases.length === 0) { showToast(isZh ? '请完成企业信息' : 'Complete company info'); return; }
+      survey = { identity: 'enterprise', companySize: size, role: role, useCases: cases };
+    } else if (_baIdentity === 'opc') {
+      var occ = _baRadio('baOcc'), cases2 = _baChecks('baOpcCase');
+      if (occ === '其他' || occ === 'Other') { var _t = document.querySelector('input[name="baOcc"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); occ = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!occ) { showToast(isZh ? '请输入职业' : 'Enter occupation'); return; } }
+      if (!occ || cases2.length === 0) { showToast(isZh ? '请完成OPC信息' : 'Complete OPC info'); return; }
+      survey = { identity: 'opc', occupation: occ, useCases: cases2 };
+    } else if (_baIdentity === 'other') {
+      var desc = (document.getElementById('baOtherDesc')||{}).value ? document.getElementById('baOtherDesc').value.trim() : '';
+      var cases3 = _baChecks('baOtherCase');
+      if (!desc || cases3.length === 0) { showToast(isZh ? '请完成描述和场景' : 'Complete description & cases'); return; }
+      survey = { identity: 'other', description: desc, useCases: cases3 };
+    }
+    var btn = document.getElementById('betaSubmitBtn');
+    btn.disabled = true; btn.textContent = isZh ? '提交中...' : 'Submitting...';
+    API.post('/settings/beta-apply/submit', {
+      accountType: accountType, accountName: accountName, email: email,
+      identityType: _baIdentity, phone: phone, reason: reason, surveyData: survey
+    }).then(function(d) {
+      if (d.success) {
+        showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        document.getElementById('betaApplyModal').remove();
+      } else if (d.error) {
+        showToast(d.error);
+        btn.disabled = false; btn.textContent = isZh ? '提交申请' : 'Submit';
+      } else {
+        showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        document.getElementById('betaApplyModal').remove();
+      }
+    }).catch(function(e) {
+      showToast((isZh ? '提交失败: ' : 'Failed: ') + (e.message || e));
+      btn.disabled = false; btn.textContent = isZh ? '提交申请' : 'Submit';
+    });
+  }
+
   let pwdVisible = false;
   function togglePwdLogin() {
     pwdVisible = !pwdVisible;
@@ -557,7 +854,33 @@ function loadAgentTypes() {
       localStorage.setItem('user', JSON.stringify(d.user));
       API.scheduleProactiveRefresh();  // Issue #86: 启动主动刷新定时器
       showApp();
-    }).catch(e => showToast(I18N.t('app.login.failed') + ': ' + e.message));
+    }).catch(e => {
+      if (e.message && e.message.indexOf('白名单') >= 0) {
+        _showWhitelistGuidance('gitcode', u);
+      } else {
+        showToast(I18N.t('app.login.failed') + ': ' + e.message);
+      }
+    });
+  }
+
+  function _showWhitelistGuidance(platform, username) {
+    var overlay = document.createElement('div');
+    overlay.id = 'whitelistModal';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center';
+    var platName = platform === 'github' ? 'GitHub' : 'GitCode';
+    overlay.innerHTML =
+      '<div style="background:var(--c,#fff);border-radius:20px;padding:40px;text-align:center;width:400px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25)">' +
+        '<div style="font-size:48px;margin-bottom:16px">🔒</div>' +
+        '<h2 style="font-size:18px;font-weight:700;color:var(--t,#1d1d1f);margin-bottom:8px">账号尚未开通内测权限</h2>' +
+        '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">您的' + platName + (username ? ' 账号 <b>' + username + '</b>' : ' 账号') + '尚未获得内测权限。</p>' +
+        '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:24px">请先申请内测，审核通过后即可登录。</p>' +
+        '<div style="display:flex;gap:8px;justify-content:center">' +
+          '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + platform + '&username=' + encodeURIComponent(username) + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">申请内测</button>' +
+          '<button onclick="document.getElementById(\'whitelistModal\').remove()" style="padding:12px 24px;border:1px solid var(--b,#e3e6ee);border-radius:12px;background:transparent;color:var(--t,#1d1d1f);font-size:14px;font-weight:500;cursor:pointer">关闭</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
   }
 
   function logout() {
@@ -573,11 +896,33 @@ function loadAgentTypes() {
   }
 
   function showToast(msg, duration) {
-    const t = document.createElement('div');
-    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#101724;color:#fff;padding:10px 20px;border-radius:8px;font-size:12px;z-index:10000;box-shadow:0 4px 16px rgba(0,0,0,.2);white-space:pre-line;max-width:80vw';
+    // Issue #199: 先移除已有 Toast，避免连续提示叠加
+    var existing = document.querySelector('[role="status"].app-toast');
+    if (existing) existing.remove();
+    var t = document.createElement('div');
+    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(10px);background:#101724;color:#fff;padding:10px 20px;border-radius:10px;font-size:13px;z-index:10000;box-shadow:0 8px 32px rgba(0,0,0,.18);white-space:pre-line;max-width:80vw;opacity:0;transition:opacity .25s ease,transform .25s cubic-bezier(.25,.1,.25,1)';
+    t.setAttribute('role', 'status');
+    t.classList.add('app-toast');
     t.textContent = msg;
     document.body.appendChild(t);
-    setTimeout(() => t.remove(), duration || 3000);
+    // Apple 风格淡入 + 上移
+    requestAnimationFrame(function() {
+      t.style.opacity = '1';
+      t.style.transform = 'translateX(-50%) translateY(0)';
+    });
+    // 淡出后移除
+    var removeTimer = setTimeout(function() {
+      t.style.opacity = '0';
+      t.style.transform = 'translateX(-50%) translateY(10px)';
+      setTimeout(function() { t.remove(); }, 300);
+    }, (duration || 2500) - 300);
+    // 点击 Toast 提前关闭
+    t.addEventListener('click', function() {
+      clearTimeout(removeTimer);
+      t.style.opacity = '0';
+      t.style.transform = 'translateX(-50%) translateY(10px)';
+      setTimeout(function() { t.remove(); }, 300);
+    });
   }
 
   // ── 通用确认对话框（Issue #125: 替换原生 confirm）──
@@ -644,7 +989,16 @@ function loadAgentTypes() {
     // Check for OAuth error in URL (e.g. github.com timeout)
     const oauthError = p.get('oauth_error');
     if (oauthError) {
-      showToast(decodeURIComponent(oauthError), 6000);
+      const decoded = decodeURIComponent(oauthError);
+      if (decoded.startsWith('WHITELIST:')) {
+        // 白名单不通过——显示引导弹窗
+        var parts = decoded.split(':');
+        var platform = parts[1] || 'gitcode';
+        var username = parts[2] || '';
+        _showWhitelistGuidance(platform, username);
+      } else {
+        showToast(decoded, 6000);
+      }
       if (window.history.replaceState) {
         window.history.replaceState(null, '', window.location.pathname);
       }
@@ -654,7 +1008,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '15');
+      localStorage.setItem('app_cache_ver', '29');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -681,13 +1035,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '15') {
+    if (localStorage.getItem('app_cache_ver') !== '29') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '15');
+      localStorage.setItem('app_cache_ver', '29');
     }
 
     const token = localStorage.getItem('token');
@@ -701,7 +1055,7 @@ function loadAgentTypes() {
         const view = parts[0];
         const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
         // Views that don't require a repo
-        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail'];
+        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'my-feedback', 'my-feedback-detail'];
         if (noRepoViews.includes(view) || currentRepo()) {
           nav(view, param);
         } else {
@@ -744,7 +1098,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, togglePwdLogin, pwdLogin, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
+  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

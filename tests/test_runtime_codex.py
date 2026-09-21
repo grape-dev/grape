@@ -77,7 +77,7 @@ class TestBuildArgs:
     def test_basic_args(self):
         b = CodexRuntime()
         args = b.build_args("hello world")
-        assert args == ["exec", "--json", "--sandbox", "workspace-write", "hello world"]
+        assert args == ["exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello world"]
 
     def test_args_contain_required_flags(self):
         b = CodexRuntime()
@@ -86,13 +86,13 @@ class TestBuildArgs:
         assert "--json" in args
         assert "--sandbox" in args
         idx = args.index("--sandbox")
-        assert args[idx + 1] == "workspace-write"
+        assert args[idx + 1] == "danger-full-access"
         assert "test prompt" in args
 
     def test_empty_prompt_no_positional(self):
         b = CodexRuntime()
         args = b.build_args("")
-        assert args == ["exec", "--json", "--sandbox", "workspace-write"]
+        assert args == ["exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check"]
 
     def test_session_id_ignored(self):
         """codex exec 不支持 --session（resume 走 exec resume，首期不做）。"""

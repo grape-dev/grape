@@ -11,18 +11,17 @@ def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     （同一 conv_id 同一路径，见 web-chat-no-response-cwd-fix.md §4）。
     远端 worker 执行时按 _remap_cwd 映射到各自用户 home；本机 direct 执行 root 可写。
     """
-    from src.repo_key import parse_repo_key
-    _, owner, repo = parse_repo_key(repo_key or "")
-    path = os.path.join(WORKSPACE_DIR, owner or "__none__", repo or "__none__",
+    from src.repo_key import workspace_repo_dir
+    path = os.path.join(workspace_repo_dir(repo_key or ""),
                         "chat", str(user_id), conv_id)
     os.makedirs(path, exist_ok=True)
     return path
 # 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
 _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.user import db as user_db
 from src.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
@@ -51,6 +50,62 @@ class FeedbackBody(BaseModel):
 
 
 # ====== Conversations ======
+
+@router.get("/analyze-image")
+async def analyze_image(request: Request):
+    """供 agent curl 调用：下载图片 → VLM 分析 → 返回文字描述。
+
+    agent 在 issue body 里看到图片链接后，curl 调用本端点获取图片内容描述。
+    VLM 管线三级降级：qwen2.5-vl-72b 真视觉 → OCR+LLM 猜图 → 纯 OCR。
+
+    注意：用 Request 而非 url 参数，因为 OBS 签名 URL 含未编码的 &（AccessKeyId=…&Signature=…），
+    FastAPI 的 query parameter 解析会按 & 截断，导致 url 只拿到第一个参数。
+    从原始 query string 手动提取 url= 后的完整内容。
+    """
+    from urllib.parse import urlparse
+    import tempfile, urllib.request
+
+    # 从原始 query string 提取 url= 后的完整值（含 & 未编码的 OBS 签名参数）
+    raw_qs = request.url.query
+    if raw_qs.startswith("url="):
+        url = raw_qs[4:]
+    else:
+        return {"error": "missing url parameter"}
+
+    # 域名白名单（防 SSRF）
+    parsed = urlparse(url)
+    _allowed = ("cdn-img.gitcode.com", "cdn-files.gitcode.com")
+    _allowed_suffixes = (".myhuaweicloud.com",)  # OBS 附件域名（桶名动态）
+    if parsed.hostname not in _allowed and not any(parsed.hostname.endswith(s) for s in _allowed_suffixes):
+        return {"error": "domain not allowed", "url": url}
+
+    # 下载图片到临时文件
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    try:
+        urllib.request.urlretrieve(url, tmp.name)
+    except Exception as e:
+        os.unlink(tmp.name)
+        return {"error": f"download failed: {e}", "url": url}
+
+    # 调 image_understanding 分析
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("image_understanding",
+            os.path.join(os.path.dirname(__file__), "..", "..", "agent", "image_understanding.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        desc = _mod.understand_image(tmp.name)
+    except Exception as e:
+        log.warning(f"analyze-image: understanding failed: {e}")
+        desc = ""
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+    return {"url": url, "description": desc or "(无法分析图片内容)"}
+
 
 @router.get("/image/{conv_id}/{filename}")
 def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")):
@@ -92,8 +147,8 @@ def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")
     _mt = "image/jpeg" if fpath.lower().endswith((".jpg", ".jpeg")) else "image/png"
     return FileResponse(fpath, media_type=_mt, headers={"Cache-Control": "public, max-age=86400"})
 
-@router.get("/conversations", operation_id="chat_conversations", summary="会话列表")
-def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(get_current_user_or_api_key)):
+@router.get("/conversations", operation_id="chat_conversations", summary="List conversations", description="Lists conversations (optionally filtered by repo_key).")
+def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(require_no_session_token)):
     convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
 
@@ -102,14 +157,14 @@ class NewConversationBody(BaseModel):
     repo_key: str = ""
 
 
-@router.post("/conversations")
-def new_conversation(body: NewConversationBody, user: dict = Depends(get_current_user)):
+@router.post("/conversations", operation_id="chat_conversations_create", summary="Create conversation", description="Creates a new chat conversation for a repo_key.")
+def new_conversation(body: NewConversationBody, user: dict = Depends(require_no_session_token)):
     cid = create_conversation(user["id"], repo_key=body.repo_key)
     return {"conversation_id": cid}
 
 
-@router.delete("/conversations/{conv_id}")
-def remove_conversation(conv_id: str, user: dict = Depends(get_current_user)):
+@router.delete("/conversations/{conv_id}", operation_id="chat_conversations_delete", summary="Delete conversation", description="Deletes a conversation and its messages.")
+def remove_conversation(conv_id: str, user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
@@ -123,8 +178,8 @@ class EnsureIssueConvBody(BaseModel):
     issue_number: int
 
 
-@router.post("/conversations/ensure-issue")
-def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(get_current_user)):
+@router.post("/conversations/ensure-issue", operation_id="chat_conversations_ensure_issue", summary="Ensure issue conversation", description="Finds or creates an Issue-scoped conversation by repo_key + issue_number (used by task-center jump). Rebuilds a deleted 'Issue #N' conversation with task context.")
+def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(require_no_session_token)):
     """基于 repo_key + issue_number 查找或新建任务会话（Task Center 跳转用）。
 
     会话被删除后，Task Center 双击跳转时调用此接口重建「Issue #N」会话，
@@ -146,7 +201,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
         from src.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            c.execute("UPDATE tasks SET conversation_id=? WHERE repo_key=? AND issue_number=?",
+            c.execute("UPDATE issue SET conversation_id=? WHERE repo_key=? AND issue_number=?",
                       (conv_id, rk, body.issue_number))
             _db.commit()
     except Exception:
@@ -154,10 +209,10 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
     # 从 GitCode Issue 补拉 agent 评论到新会话
     try:
         from src.api.event_pipeline import _sync_issue_comments_to_conversation
-        from src.user.db import get_gitcode_token
         from src.repo_key import from_repo_key
+        from src.repo import Repo
         _repo = from_repo_key(rk)
-        _token = get_gitcode_token(repo_key=rk) or ""
+        _token = Repo(rk).bot_token
         if _repo and _token:
             _sync_issue_comments_to_conversation(rk, body.issue_number, _token, repository=_repo)
     except Exception:
@@ -167,8 +222,8 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(ge
 
 # ====== Messages ======
 
-@router.get("/messages/{conv_id}", operation_id="chat_messages", summary="会话消息列表")
-def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(get_current_user_or_api_key)):
+@router.get("/messages/{conv_id}", operation_id="chat_messages", summary="List conversation messages", description="Lists messages of a conversation (limit/before pagination).")
+def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
     if not conv or conv["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
@@ -177,11 +232,11 @@ def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depen
     if not before and conv.get("conv_type") == "task" and conv.get("issue_number"):
         try:
             from src.api.event_pipeline import _sync_issue_comments_to_conversation
-            from src.user.db import get_gitcode_token
             from src.repo_key import from_repo_key
+            from src.repo import Repo
             _rk = conv.get("repo_key", "")
             _repo = from_repo_key(_rk) if _rk else ""
-            _token = get_gitcode_token(repo_key=_rk) or ""
+            _token = Repo(_rk).bot_token if _rk else ""
             if _repo and _token:
                 _sync_issue_comments_to_conversation(_rk, conv["issue_number"], _token, repository=_repo)
         except Exception:
@@ -294,8 +349,8 @@ def _resolve_gitcode_token(conv: dict | None, conv_id: str, user_token: str, rep
         return cached
     if repo_key:
         try:
-            from src.user.db import get_gitcode_token
-            repo_tok = get_gitcode_token(repo_key=repo_key) or ""
+            from src.repo import Repo
+            repo_tok = Repo(repo_key).bot_token
             if repo_tok:
                 log.warning(f"Chat resolve token: user token empty, fallback to repo token (repo={repo_key})")
                 return repo_tok
@@ -472,8 +527,8 @@ def _understand_video(video_data: str) -> str:
         return f"用户上传了视频，但分析出错: {e}"
 
 
-@router.post("/send")
-async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)):
+@router.post("/send", operation_id="chat_send", summary="Send message", description="Sends a chat message and returns the full assistant reply (text/structured).")
+async def send_message(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
     # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
@@ -588,6 +643,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
                 backend_name=backend_name, user_id=user["id"],
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                 agent_label=f"[Agent:chat|user:{user['username']}]",
+                repo_key=repo_key,
             ):
                 # 日志输出
                 if evt_type == "step_start":
@@ -635,8 +691,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(get_current_user)
     return {"reply": reply, "conversation_id": conv_id}
 
 
-@router.post("/send/stream")
-async def send_message_stream(body: ChatMessage, user: dict = Depends(get_current_user)):
+@router.post("/send/stream", operation_id="chat_send_stream", summary="Send message (SSE stream)", description="Sends a chat message over SSE: data:{delta} ... then data:{done}.")
+async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
     acc = user_db.get_user_account(user["username"]) or {}
     # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
@@ -830,6 +886,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(get_curren
                     backend_name=backend_name, user_id=user["id"],
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
+                    repo_key=repo_key,
                 ):
                     # 日志输出（对齐 master 分支 im/handler.py）
                     if evt_type == "step_start":
@@ -1042,8 +1099,8 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
 
 # ====== Feedback ======
 
-@router.post("/feedback")
-def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
+@router.post("/feedback", operation_id="chat_feedback", summary="Submit feedback", description="Submits feedback on a chat turn (seq + type + comment).")
+def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
 
     with db_lock:
@@ -1085,8 +1142,8 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
 
 # ====== Config ======
 
-@router.get("/config")
-def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
+@router.get("/config", operation_id="chat_config_get", summary="Get chat config", description="Returns chat config (backend/settings/personal engines).")
+def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = ""):
     cfg = _get_chat_config(user["id"])
     # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
     from src.runtime.instances import instance_name
@@ -1181,8 +1238,8 @@ def get_chat_config(user: dict = Depends(get_current_user), repo: str = ""):
     }
 
 
-@router.put("/config")
-async def update_chat_config(body: dict, user: dict = Depends(get_current_user), repo: str = ""):
+@router.put("/config", operation_id="chat_config_update", summary="Update chat config", description="Updates chat config.")
+async def update_chat_config(body: dict, user: dict = Depends(require_no_session_token), repo: str = ""):
     im = body.get("im", {})
     feishu = im.get("feishu", {})
     kwargs = {}
@@ -1327,8 +1384,8 @@ async def update_chat_config(body: dict, user: dict = Depends(get_current_user),
 
 # ===== Chat Agent v2: submit/stream 分离（学习 Admin AI AiTaskManager）=====
 
-@router.post("/submit")
-async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user)):
+@router.post("/submit", operation_id="chat_submit", summary="Submit (task scenario)", description="Submits a chat query and immediately returns {task_id, conversation_id, status}; the agent runs in the background.")
+async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     """提交 chat 查询 → 立即返回 {task_id, conversation_id, status}。
 
     学习 Admin AI submit/stream 分离：
@@ -1460,6 +1517,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
                     account=user["username"], user_token=gitcode_token,
                     agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
+                    repo_key=repo_key,
                 ):
                     if evt_type == "text":
                         text = data if isinstance(data, str) else (
@@ -1578,8 +1636,8 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(get_current_user))
     return {"task_id": chat_task_id, "conversation_id": conv_id, "status": "running"}
 
 
-@router.get("/task/{task_id}/stream")
-async def chat_task_stream(task_id: str, user: dict = Depends(get_current_user)):
+@router.get("/task/{task_id}/stream", operation_id="chat_task_stream", summary="Async task stream", description="SSE subscribe to task output: replays the buffer then appends live events; DB fallback for finished tasks.")
+async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session_token)):
     """SSE 订阅任务输出 — 先重放缓冲，再实时追加（学习 Admin AI subscribe）。
 
     - 内存有任务 → 重放 events 缓冲 + 加入 subscribers 接收后续
@@ -1682,8 +1740,8 @@ def _chat_task_cleanup():
             _chat_tasks.pop(tid, None)
 
 
-@router.post("/send/async")
-async def send_message_async(body: ChatMessage, user: dict = Depends(get_current_user)):
+@router.post("/send/async", operation_id="chat_send_async", summary="Send message (async)", description="Async message send: DB/engine work runs in executors. Local engines return a fallback stream; remote engines return task_id.")
+async def send_message_async(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     """异步发送消息：所有同步 DB/引擎操作在 run_in_executor 中执行，不阻塞 event loop。
 
     本机直连 → 返回 fallback_stream（前端回退到 send/stream）
@@ -1954,8 +2012,8 @@ def _execute_chat_task(task_id: str):
         log.warning(f"Chat task {task_id} failed: {e}")
 
 
-@router.get("/task/{task_id}/status")
-def chat_task_status(task_id: str, user: dict = Depends(get_current_user)):
+@router.get("/task/{task_id}/status", operation_id="chat_task_status", summary="Async task status", description="Queries chat task status (cross-machine; memory -> legacy cache -> DB fallback).")
+def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """查询 chat 任务状态（跨机器可查，对齐 Admin AI getTaskFinalStatus）。
 
     ChatTaskManager 内存优先（v2）→ 旧 _chat_tasks 内存 → DB 兜底。

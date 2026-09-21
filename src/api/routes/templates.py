@@ -2,7 +2,7 @@
 import json, os, re, asyncio, base64
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_user_token
+from src.api.deps import require_no_session_token
 from src.config import log, CONFIG_DIR, EXAMPLE_DIR
 from src.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
 
@@ -38,15 +38,18 @@ def _find_template(template_id: str) -> dict | None:
     return None
 
 
-def _load_global_bot_config() -> tuple[str, str]:
-    """读取全局 bot 配置，返回 (bot_token, bot_username)。"""
+def _load_global_bot_config(provider: str = "gitcode") -> tuple[str, str]:
+    """读取全局 bot 配置，返回 (bot_token, bot_username)。按 provider 选 token 字段。"""
     bot_token, bot_username = "", ""
     try:
         path = os.path.join(CONFIG_DIR, "global-bot-token.json")
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 gbt = json.load(f)
-            bot_token = gbt.get("gitcode_api_token", "") or ""
+            if provider == "github":
+                bot_token = gbt.get("github_bot_token", "") or gbt.get("gitcode_api_token", "") or ""
+            else:
+                bot_token = gbt.get("gitcode_api_token", "") or ""
             us = gbt.get("bot_usernames") or []
             bot_username = us[0] if us else ""
     except Exception as e:
@@ -54,15 +57,15 @@ def _load_global_bot_config() -> tuple[str, str]:
     return bot_token, bot_username
 
 
-@router.get("")
-def list_templates(user: dict = Depends(get_current_user)):
+@router.get("", operation_id="project_templates_list", summary="List template categories", description="Lists configured template categories and templates.")
+def list_templates(user: dict = Depends(require_no_session_token)):
     """返回配置化的模板分类与模板列表"""
     data = _load_templates()
     return {"categories": data.get("categories", [])}
 
 
-@router.get("/{template_id}/readme")
-def get_template_readme(template_id: str, user: dict = Depends(get_current_user)):
+@router.get("/{template_id}/readme", operation_id="project_template_readme", summary="Get template README", description="Gets template README (local preferred; git sources fetched from GitCode/GitHub).")
+def get_template_readme(template_id: str, user: dict = Depends(require_no_session_token)):
     """获取模板 README 内容（本地优先，git 来源从 GitCode/GitHub API 拉取）"""
     ctx = _find_template(template_id)
     if not ctx:
@@ -99,7 +102,7 @@ def get_template_readme(template_id: str, user: dict = Depends(get_current_user)
                 content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
                 return {"content": content, "source": "github"}
         else:
-            url = f"https://api.gitcode.com/api/v5/repos/{source_repo}/contents/README.md"
+            url = f"https://gitcode.com/api/v5/repos/{source_repo}/contents/README.md"
             gitcode_pat = os.environ.get("GITCODE_PAT", "")
             headers = {}
             if gitcode_pat:
@@ -109,7 +112,7 @@ def get_template_readme(template_id: str, user: dict = Depends(get_current_user)
                 content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
                 return {"content": content, "source": "gitcode"}
             # 尝试小写 readme.md
-            url2 = f"https://api.gitcode.com/api/v5/repos/{source_repo}/contents/readme.md"
+            url2 = f"https://gitcode.com/api/v5/repos/{source_repo}/contents/readme.md"
             r2 = requests.get(url2, headers=headers, timeout=10)
             if r2.status_code == 200:
                 content = base64.b64decode(r2.json().get("content", "")).decode("utf-8")
@@ -120,8 +123,8 @@ def get_template_readme(template_id: str, user: dict = Depends(get_current_user)
     return {"content": "", "source": "git"}
 
 
-@router.get("/{template_id}/preview")
-def get_template_preview(template_id: str, user: dict = Depends(get_current_user)):
+@router.get("/{template_id}/preview", operation_id="project_template_preview", summary="Get template preview HTML", description="Gets template preview HTML (local template reads examples/{id}/preview.html).")
+def get_template_preview(template_id: str, user: dict = Depends(require_no_session_token)):
     """获取模板预览图 HTML（本地模板读取 examples/{id}/preview.html）"""
     ctx = _find_template(template_id)
     if not ctx:
@@ -145,9 +148,9 @@ class CreateTemplateRequest(BaseModel):
     repo_name: str = ""
 
 
-@router.post("/create")
+@router.post("/create", operation_id="project_template_create", summary="Create project from template", description="One-shot create: create repo -> write template code -> auto-host -> apply dev scene.")
 async def create_from_template(body: CreateTemplateRequest,
-                               user: dict = Depends(get_current_user)):
+                               user: dict = Depends(require_no_session_token)):
     """一键创建：建仓库 → 写模板代码 → 自动托管 → 应用开发场景"""
     ctx = _find_template(body.template_id)
     if not ctx:
@@ -195,7 +198,7 @@ async def create_from_template(body: CreateTemplateRequest,
 
     # 2. 写入模板代码（放到 executor 避免阻塞 event loop）
     try:
-        bot_token, _ = _load_global_bot_config()
+        bot_token, _ = _load_global_bot_config(provider=provider)
         import asyncio, functools
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None,
@@ -251,8 +254,8 @@ async def create_from_template(body: CreateTemplateRequest,
         msg += f"。⚠️ 重要提醒：请到仓库设置 → 成员管理，将机器人账号（{bot_username}）添加为维护者，然后手动托管仓库以完成自动化配置。"
 
     # 4. 异步首次托管引导（仅模板创建触发）
-    #    dev_scene 已退役，不再写仓库级场景指针；场景数据由仓库托管时
-    #    apply_default_scene_to_repo 自动复刻，Issue 级场景由用户/智能推荐决定。
+    #    仓库托管时 apply_default_scene_to_repo 已应用默认「通用开发」场景。
+    #    如果模板自带 scene_id（如 hello-world），覆盖为模板对应的场景。
     try:
         from src.repo_key import to_repo_key
         from src.api.onboarding import trigger_onboarding, cleanup_stale_repo_data
@@ -263,6 +266,20 @@ async def create_from_template(body: CreateTemplateRequest,
         #   events/issue_state/agent_tasks/sessions 等残留，导致新仓库前端界面混乱）
         if repo_created:
             cleanup_stale_repo_data(repo_key)
+
+        # 模板 scene_id 覆盖默认场景
+        tpl_scene_id = tpl.get("scene_id") or ctx.get("scene_id") or ""
+        if tpl_scene_id and tpl_scene_id != "default":
+            try:
+                from src.api.pipeline_config import apply_market_scene_by_name
+                apply_market_scene_by_name(repo_key, tpl_scene_id, user.get("id", 0))
+                # 写入 managed_repos.dev_scene，供 onboarding 读取并绑定到 Issue
+                from src.user.db import set_repo_scene
+                set_repo_scene(repo_key, tpl_scene_id)
+                log.info(f"template scene override: applied '{tpl_scene_id}' to {repo_key} (dev_scene updated)")
+            except Exception as e:
+                log.warning(f"template scene override failed for '{tpl_scene_id}': {e}")
+
         trigger_onboarding(repo_key, owner, template_id=body.template_id)
     except Exception as e:
         log.warning(f"template onboarding trigger failed: {e}")

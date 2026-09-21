@@ -100,7 +100,7 @@ token 的**授权身份** = **repo_key + agent_type** → 天然限制为"该仓
 | **JWT / API Key（用户级）** | —（**403**） | 不适用于 git-repo；仅用于其他对外业务 API |
 | 全部缺失 | 502 | — |
 
-- 实现：`src/api/git_repo_api._repo_token(owner, repo, user)`（git-repo / git-credential 共用）。
+- 实现：`src/api/git_repo_api._repo_token(owner, repo, user)`（/api/git-repo 透传共用）+ `src/api/routes/repos.py._repo_platform_token`（/api/repos 的 git-credential 共用）。
 - 行为上与「会话时注入 env 的 token 语义」严格一致：chat 会话不该拿到 bot token，devops 会话不该拿到用户 token。
 
 **示例（agent 内）**：

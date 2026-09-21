@@ -9,6 +9,8 @@ v2 设计（见 docs/weekly-02/help-page-prototype.md）：
 
 数据流：help/*.md → 启动期生成 → /static/help.html（生成物，.gitignore）
 """
+from __future__ import annotations
+
 import html as _html
 import json
 import os
@@ -28,6 +30,7 @@ USAGE_ORDER = [
     "overview.md",
     "quickstart.md",
     "agents.md",
+    "agent-environment-variables.md",
     "pipeline.md",
     "skills.md",
     "runtimes.md",
@@ -291,13 +294,13 @@ def _collect_toc(tokens: list, prefix: str) -> list[dict]:
 
 def _adorn_blockquotes(body: str) -> str:
     def _repl(m):
-        open_tag, inner = m.group(1), m.group(2)
+        open_tag, inner, close_tag = m.group(1), m.group(2), m.group(3)
         head = (inner or "").lstrip()[:24]
         if "💡" in head or "TIP" in head.upper():
-            return open_tag.replace("<blockquote>", '<blockquote class="card tip">')
+            return open_tag.replace("<blockquote>", '<blockquote class="card tip">') + inner + close_tag
         if any(k in head for k in ("⚠️", "⚠", "❌", "🚫", "注意", "安全")):
-            return open_tag.replace("<blockquote>", '<blockquote class="card warn">')
-        return open_tag
+            return open_tag.replace("<blockquote>", '<blockquote class="card warn">') + inner + close_tag
+        return open_tag + inner + close_tag
 
     return re.sub(r"(<blockquote>)(.*?)(</blockquote>)", _repl, body, flags=re.DOTALL)
 

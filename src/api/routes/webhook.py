@@ -218,7 +218,7 @@ class A2AHandoffBody(BaseModel):
     payload: dict = {}
 
 
-@router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Agent 交办（A2A，grape a2a handoff）")
+@router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Hand off to another agent (A2A)", description="Agent-to-Agent handoff: dispatches a new event to the target agent. Accepts JWT/session token/API key (public) plus internal bot-token.")
 async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
     """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
     agent_name = body.agent or ""
@@ -265,7 +265,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             from src.session_manager import db as _ck_db, db_lock as _ck_lock
             with _ck_lock:
                 _ck_c = _ck_db.cursor()
-                _ck_c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
+                _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
                               (repo_key, int(issue_number)))
                 if _ck_c.fetchone():
                     log.info(f"A2A: rejected — task cancelled, issue=#{issue_number}, agent={agent_name}")
@@ -450,7 +450,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 try:
                     import os as _os, json as _json
                     from src.api.session_store import get_issue_scene
-                    _scene_id = get_issue_scene(repo_key, f"#{issue_number}") or "default"
+                    _scene_id, _ = get_issue_scene(repo_key, f"#{issue_number}") or ("default", 0)
                     _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
                                                "configs", "pipelines.json")
                     with open(_pipe_path, "r", encoding="utf-8") as _f:
@@ -538,14 +538,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 if agent_name == "done" or (_expected_next == "done" and agent_name not in (_stage_order or [])):
                     _stage = "pending_review"
                     log.info(f"A2A: last node completed → pending_review issue=#{issue_number} (awaiting user review)")
-                elif _expected_next and agent_name != _expected_next and agent_name in (_stage_order or []):
-                    # 跳步保护：A2A 目标不是 pipeline next → 自动修正为 next
-                    log.warning(f"A2A: skip-stage guard — issue=#{issue_number} "
-                                f"current={_current_stage} expected_next={_expected_next} but got={agent_name}, "
-                                f"correcting to {_expected_next}")
-                    _stage = _expected_next
-                    agent_name = _expected_next
                 else:
+                    # 不做跳步修正——agent 有权 A2A 到任意目标 agent（含回滚），
+                    # pipeline 顺序由 skill 逻辑保证，A2A 层不干预。
                     _stage = agent_name if agent_name in ("vod", "issue", "coding", "qa", "sre", "pending_review", "done") else "issue"
                 set_issue_stage(repo_key, f"#{issue_number}", _stage, agent_name, a2a_seq=None)
                 log.info(f"A2A: issue_state updated issue=#{issue_number} stage={_stage} owner={agent_name}")
@@ -721,7 +716,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             except Exception:
                 pass
             return {"status": "ok", "seq": 0, "agent": agent_name}
-        # Plugin 模式 + engine_id=0：仅 queue_remote 走广播；auto/direct 走本机 direct
+        # Plugin 模式 + engine_id=0：非 direct 模式均走广播（queue_remote + auto）；仅 direct 走本机 direct
         from src.api.event_pipeline import is_plugin_mode as _is_plugin
         from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
         if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:

@@ -186,10 +186,10 @@ class TestManagedRepos:
         repo_name = rk.split("/")[-1]
         assert udb.add_managed_repo(rk, "org", repo_name, webhook_id=9, bot_gitcode_token="btok",
                                     gitcode_webhook_token="wtok", bot_username="grape_bot") is True
-        assert udb.get_repo_scene(rk) == "default"
+        assert udb.get_repo_scene(rk) == ""
         udb.set_repo_scene(rk, "skill-dev")
         assert udb.get_repo_scene(rk) == "skill-dev"
-        assert udb.get_repo_scene("gitcode:nope/nope") == "default"
+        assert udb.get_repo_scene("gitcode:nope/nope") == ""
         # token helpers
         assert udb.get_bot_token_by_repo("org", repo_name) == "btok"
         assert udb.get_repo_bot_token_no_global(rk) == "btok"

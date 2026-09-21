@@ -5,20 +5,31 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Grape — Multi-Agent DevOps</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=54">
-<link rel="stylesheet" href="/static/css/apple-theme.css?v=12">
+<link rel="stylesheet" href="/static/css/app.css?v=57">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=14">
 <link rel="stylesheet" href="/static/css/vendor/select2.min.css?v=1">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
 // Reads localStorage 'grapeTheme' before DOM renders. Default: Liquid Glass (apple).
 (function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
+// Early auth check — prevents login/workbench flash on page load.
+// Checks both localStorage (returning user) and URL ?token= (OAuth callback).
+(function(){if(localStorage.getItem('token')||new URLSearchParams(location.search).get('token'))document.documentElement.setAttribute('data-logged-in','1');})();
 </script>
+<style>
+/* Default: show login overlay, hide workbench (sidebar+mainView) */
+.sb,.mn{display:none}
+/* Logged-in: hide login overlay, show workbench */
+[data-logged-in="1"] .ln{opacity:0;pointer-events:none}
+[data-logged-in="1"] .sb{display:flex}
+[data-logged-in="1"] .mn{display:flex}
+</style>
 </head>
 <body>
 
-<div class="ln hid" id="loginView">
+<div class="ln" id="loginView">
 <div class="lbox">
-<img class="logo" src="/static/logo-128.png" alt="Grape">
+<img class="logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">
 <h1>Grape</h1>
 <p class="sub">Multi-Agent DevOps</p>
 <button class="obtn" id="gitBtn" onclick="app.oauthLogin()">
@@ -29,29 +40,24 @@
   <svg width="18" height="18" viewBox="0 0 1024 1024" fill="currentColor"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>
   <span data-i18n="app.login.github_login">使用 GitHub 登录</span>
 </button>
-<div class="links" id="loginLinks">
-  <a onclick="app.togglePwdLogin()" data-i18n="app.login.pwd_login">← 用户名密码登录</a>
-</div>
-<div class="inp" id="pwdLogin">
-  <input type="text" data-i18n-placeholder="app.login.username" placeholder="用户名" id="loginUser">
-  <input type="password" data-i18n-placeholder="app.login.password" placeholder="密码" id="loginPass">
-  <button class="obtn" onclick="app.pwdLogin()" data-i18n="app.login.login_btn">登录</button>
-  <p style="margin-top:12px;font-size:12px;text-align:center"><a onclick="app.togglePwdLogin()" style="color:var(--t3);text-decoration:underline;cursor:pointer" data-i18n="app.login.back_gitcode">← 返回 GitCode 登录</a></p>
+<div class="links" style="margin-top:20px">
+  <a onclick="app.openBetaApply()" style="cursor:pointer" data-i18n="app.login.beta_apply">申请内测</a>
 </div>
 </div>
 </div>
-
+</div>
 <div class="sb" id="sidebar">
 <div class="sb-h">
-<div class="logo-s" style="cursor:pointer" onclick="app.goToRepos()" data-i18n-title="app.repo.back_to_select" title="返回仓库选择"><img class="sq" src="/static/logo-64.png" alt="A"><h1>Grape</h1></div>
+<div class="logo-s" style="cursor:pointer" onclick="app.goToRepos()" data-i18n-title="app.repo.back_to_select" title="返回仓库选择"><img class="sq" src="/static/img/grape-logo.jpg?v=1" alt="A"><h1>Grape</h1></div>
 <div class="tagline">Multi-Agent DevOps</div>
 </div>
 <div class="sb-sel"><select id="repoSelect" onchange="app.switchRepo(this.value)"><option value="" data-i18n="app.repo.select">选择仓库...</option></select></div>
 <div class="sb-nav">
 <div class="grp" data-i18n="app.sidebar.workspace">工作区</div>
-<a id="nav-tasks" onclick="app.nav('tasks')"><span class="ic">📋</span><span data-i18n="app.nav.tasks">任务中心</span></a>
+<a id="nav-tasks" onclick="app.nav('tasks')"><span class="ic">📋</span><span data-i18n="app.nav.tasks">需求中心</span></a>
 <a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span><span data-i18n="app.nav.scene_center">项目场景</span></a>
 <a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span><span data-i18n="app.nav.pipeline">流水线</span></a>
+<a id="nav-autopilot" onclick="app.nav('autopilot')"><span class="ic">⏰</span><span data-i18n="app.nav.autopilot">自动化</span></a>
 
 <div class="grp" data-i18n="app.sidebar.devops_agents">DevOps Agents</div>
 <a id="nav-vod" onclick="app.nav('vod')"><span class="ic" style="color:var(--pk)">●</span><span data-i18n="app.nav.vod">VOD Agent</span></a>
@@ -67,6 +73,8 @@
 
 <div class="grp" data-i18n="app.sidebar.account">用户中心</div>
 <a id="nav-chat" onclick="app.nav('chat')"><span class="ic">☎</span><span data-i18n="app.nav.chat">Chat Agent</span></a>
+<a id="nav-im-channel" onclick="app.nav('im-channel')"><span class="ic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></span><span data-i18n="app.nav.im_channel">IM渠道</span></a>
+<a id="nav-my-feedback" style="display:none"><span class="ic">💬</span><span data-i18n="app.feedback.my_feedback">我的反馈</span></a>
 
 <div class="grp" data-i18n="app.sidebar.device_center">设备中心</div>
 <a id="nav-runtimes" onclick="app.nav('runtimes')"><span class="ic">⚡</span><span data-i18n="app.nav.runtimes">Agent 运行时</span></a>
@@ -91,6 +99,7 @@
 <div class="bc"><b id="pageTitle"></b> <span id="repoTitle" style="color:var(--a);font-weight:500"></span></div>
 <div class="sp"></div>
 <a id="tbBackHome" onclick="app.goToRepos()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer" data-i18n="app.back_home">← 返回主页</a>
+<a id="tbFeedback" onclick="openFeedbackDialog()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="问题反馈" data-i18n-title="app.feedback.title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> <span data-i18n="app.feedback.link_text">反馈</span></a>
 <a href="/static/help.html" target="_blank" style="color:var(--t3);font-size:13px;text-decoration:none" data-i18n="app.help.link_text">📖 帮助</a>
 </div>
 <div class="ct" id="pageContent">
@@ -98,29 +107,34 @@
 </div>
 </div>
 
-<script src="/static/js/i18n.js?v=1"></script>
-<script>I18N.init('11');</script>
+<script src="/static/js/i18n.js?v=5"></script>
+<script>I18N.init('21');</script>
 <script src="/static/js/vendor/vue.global.prod.min.js?v=1"></script>
 <script src="/static/js/vendor/jquery.min.js?v=1"></script>
 <script src="/static/js/vendor/marked.min.js?v=1"></script>
 <script src="/static/js/vendor/qrcode.min.js?v=1"></script>
 <script src="/static/js/vendor/select2.min.js?v=1"></script>
-<script src="/static/js/api.js?v=24"></script>
-<script src="/static/js/pages/dashboard.js?v=65"></script>
-<script src="/static/js/pages/pipeline.js?v=37"></script>
+<script src="/static/js/api.js?v=25"></script>
+<script src="/static/js/pages/dashboard.js?v=71"></script>
+<script src="/static/js/pages/pipeline.js?v=41"></script>
 <script src="/static/js/pages/agents.js?v=24"></script>
-<script src="/static/js/pages/events.js?v=48"></script>
-<script src="/static/js/pages/chat.js?v=33"></script>
-<script src="/static/js/pages/repos.js?v=39"></script>
+<script src="/static/js/pages/events.js?v=50"></script>
+<script src="/static/js/pages/chat.js?v=40"></script>
+<script src="/static/js/pages/im_channel.js?v=20"></script>
+<script src="/static/js/pages/repos.js?v=40"></script>
 <script src="/static/js/pages/templates.js?v=35"></script>
-<script src="/static/js/pages/tasks.js?v=83"></script>
-<script src="/static/js/pages/settings.js?v=21"></script>
+<script src="/static/js/pages/issues.js?v=100"></script>
+<script src="/static/js/pages/settings.js?v=23"></script>
 <script src="/static/js/pages/scene-market.js?v=29"></script>
-<script src="/static/js/pages/skills.js?v=38"></script>
-<script src="/static/js/pages/knowledge.js?v=134"></script>
-<script src="/static/js/pages/runtimes.js?v=37"></script>
-<script src="/static/js/pages/observability.js?v=46"></script>
-<script src="/static/js/app.js?v=71"></script>
+<script src="/static/js/pages/skills.js?v=43"></script>
+<script src="/static/js/pages/knowledge.js?v=148"></script>
+<script src="/static/js/pages/runtimes.js?v=41"></script>
+<script src="/static/js/pages/observability.js?v=64"></script>
+<script src="/static/js/pages/feedback.js?v=7"></script>
+<script src="/static/js/pages/my_feedback.js?v=5"></script>
+<script src="/static/js/pages/my_feedback_detail.js?v=3"></script>
+<script src="/static/js/pages/autopilot.js?v=32"></script>
+<script src="/static/js/app.js?v=83"></script>
 
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>

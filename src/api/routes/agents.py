@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token
+from src.api.deps import get_current_user_or_api_key, get_bot_token, require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 
@@ -97,12 +97,12 @@ def list_agent_types():
     } for r in rows]}
 
 
-@router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Agent 会话配置查看")
+@router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Get agent config", description="Returns the agent session config (runtime/skill/engine bindings) for name/owner/repo.")
 def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                      keyword: str = Query("", description="事件关键词搜索（seq/issue_id/event_type/title/summary/actor）"),
                      page: int = Query(1, ge=1, description="页码，从 1 开始"),
                      page_size: int = Query(10, ge=1, le=100, description="每页条数"),
-                     user: dict = Depends(get_current_user_or_api_key)):
+                     user: dict = Depends(require_no_session_token)):
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
@@ -322,9 +322,9 @@ class AgentConfig(BaseModel):
     im_app_secret: str = ""
 
 
-@router.post("/{name}/{owner}/{repo}/clean")
+@router.post("/{name}/{owner}/{repo}/clean", operation_id="agents_clean", summary="Clean agent session", description="Cleans an agent session by clearing runtime_session_id; a new session is created on the next event.")
 def clean_agent_session(name: str, owner: str, repo: str,
-                              user: dict = Depends(get_current_user)):
+                              user: dict = Depends(require_no_session_token)):
     """清理 Agent 会话：将 devops_agent_session.runtime_session_id 置空。
 
     clean 之后清除 runtime_session_id，下一次事件到来时会创建新的 runtime_session_id
@@ -348,9 +348,9 @@ def clean_agent_session(name: str, owner: str, repo: str,
     return {"message": "Agent 会话已清理（runtime_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
 
 
-@router.put("/{name}/{owner}/{repo}")
+@router.put("/{name}/{owner}/{repo}", operation_id="agents_update", summary="Update agent config", description="Updates the agent session config (engine/skill/IM bindings).")
 async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfig,
-                              user: dict = Depends(get_current_user)):
+                              user: dict = Depends(require_no_session_token)):
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 

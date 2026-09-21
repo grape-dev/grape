@@ -7,6 +7,9 @@
 > 范围：`grape` 独立发布包的形态、子命令、与 git/worker 集成。
 >
 > ⚠️ **2026-09-08：`grape` CLI 已拆为独立项目** `https://gitcode.com/grape-dev/grape-cli`，父仓库不再跟踪 `cli/`。本设计文档为历史设计记录，实现与后续迭代以新仓库为准。
+>
+> ⚠️ **属性修订（2026-09-12）**：git-repo provider 已改由认证 token 的 `repo_key` 前缀派生，
+> 不再接受 `--provider`/`X-Git-Provider`（R5 项已过时，见 `git-repo-provider-from-token-design.md`）。
 
 ## 关联文档
 
@@ -220,7 +223,7 @@ grape --base-url https://grape.example.com --grape_api_token grape_xxx git-repo 
 |---|------|------|
 | R1 | `/openapi.json` 中 operation 动态注册命令 | `grape --help` 列出 `tasks mine`、`tasks create` 等组/动词 |
 | R2 | query 参数映射 | `grape tasks mine --status active` → `GET /api/tasks/mine?status=active` |
-| R3 | path 参数映射 | `grape git-repo issues get --issue 5` → `GET /api/repos/.../issues/5` |
+| R3 | path 参数映射 | `grape git-repo issues get --issue 5` → `GET /api/git-repo/.../issues/5` |
 | R4 | body → `--json '<body>'` | `grape tasks create --json '{"repo_key":...}'` → POST body 正确 |
 | R5 | provider 参数 | operation 含 `X-Git-Provider` → `--provider github` 生效 |
 | R6 | 安全自动带 token | 命令请求自动带 `Authorization: Bearer` |

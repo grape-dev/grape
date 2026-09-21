@@ -13,7 +13,7 @@ function renderSelectionShell(tab, innerHtml) {
   const html = `<div class="lobby">
     <header class="lobby-head">
       <div class="lobby-brand">
-        <img class="lobby-logo" src="/static/logo.png" alt="Grape">
+        <img class="lobby-logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">
         <span class="lobby-brand-name">Grape</span>
         <span class="lobby-brand-sub">${I18N.t('repos.brand_sub')}</span>
       </div>
@@ -42,8 +42,11 @@ function switchSidebarTab(tab) {
       const repos = d.repos || [];
       const hosted = repos.filter(r => r.is_hosted);
       if (hosted.length > 0) {
-        const first = hosted[0];
-        selectRepo(first.full_name, first.owner, first.name, first.repo_key);
+        let saved = null;
+        try { saved = JSON.parse(localStorage.getItem('currentRepo') || 'null'); } catch (e) { saved = null; }
+        const matched = saved && hosted.find(r => r.full_name === saved.fullName);
+        const target = matched || hosted[0];
+        selectRepo(target.full_name, target.owner, target.name, target.repo_key);
       } else {
         _renderWorkspaceEmpty();
       }

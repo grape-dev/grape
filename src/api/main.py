@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency
+from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot
 
 
 bot_manager = None
@@ -152,24 +152,29 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Upload cleanup scheduler start failed: {e}")
 
-    # Issue #67: 归档知识定时清理——每天清理超过 90 天的归档知识
+    # Autopilot 定时调度器：每分钟扫描到期任务，创建 Issue 触发流水线
     try:
-        from src.api.knowledge import cleanup_archived_knowledge
-        import threading, time as _t
-
-        def _knowledge_cleanup_loop():
-            while True:
-                _t.sleep(86400)  # 24 小时
-                try:
-                    cleanup_archived_knowledge()
-                except Exception as _e:
-                    log.warning(f"Knowledge cleanup failed: {_e}")
-
-        _t2 = threading.Thread(target=_knowledge_cleanup_loop, daemon=True)
-        _t2.start()
-        log.info("Knowledge cleanup scheduler started (daily)")
+        from src.runtime.scheduler import start_scheduler
+        asyncio.create_task(start_scheduler())
+        log.info("Autopilot scheduler started")
     except Exception as e:
-        log.warning(f"Knowledge cleanup scheduler start failed: {e}")
+        log.warning(f"Autopilot scheduler start failed: {e}")
+
+    # Issue #190：知识库 obs_key/file_path 归一化迁移（异步，不阻塞启动）
+    try:
+        async def _knowledge_migrate_wrapper():
+            from src.api.db_setup import _migrate_knowledge
+            await asyncio.to_thread(_migrate_knowledge)
+        _migrate_task = asyncio.create_task(_knowledge_migrate_wrapper())
+
+        def _on_migrate_done(task: asyncio.Task):
+            if task.exception():
+                log.error(f"knowledge_migrate task failed: {task.exception()}", exc_info=task.exception())
+        _migrate_task.add_done_callback(_on_migrate_done)
+        app.state.knowledge_migrate_task = _migrate_task
+        log.info("knowledge_migrate started (async)")
+    except Exception as e:
+        log.warning(f"knowledge_migrate start failed: {e}")
 
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
@@ -230,6 +235,81 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Reap stale runtimes loop start failed: {e}")
 
+    # 主控机指标上报：每 15 秒采集本机 CPU/内存/磁盘/负载写入 DB
+    _server_metrics_task = None
+    try:
+        async def _server_metrics_loop():
+            import socket as _sock, hashlib as _hl
+            from datetime import datetime, timezone
+            _hostname = _sock.gethostname() or "unknown-server"
+            _local_ip = "127.0.0.1"
+            try:
+                _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+                _s.connect(("192.168.0.1", 80))
+                _local_ip = _s.getsockname()[0]
+                _s.close()
+            except Exception:
+                pass
+            try:
+                from src.session_manager import db, db_lock
+                _token_hash = _hl.sha256(_hostname.encode()).hexdigest()
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'", (_hostname,))
+                    if not c.fetchone():
+                        c.execute(
+                            "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip) "
+                            "VALUES (?, ?, ?, 'global', 'active', ?)",
+                            (_token_hash, _hostname, _hostname, _local_ip))
+                        db.commit()
+                        log.info(f"Server metrics: registered {_hostname}")
+            except Exception as e:
+                log.warning(f"Server metrics: register failed: {e}")
+            while True:
+                try:
+                    _cpu = _mem = _disk = _tmp = 0.0
+                    _load = ""
+                    try:
+                        import psutil as _ps
+                        _cpu = _ps.cpu_percent(interval=None)
+                        try:
+                            with open("/proc/meminfo") as _mf:
+                                _mi = {}
+                                for _line in _mf:
+                                    _p = _line.split(":")
+                                    if len(_p) == 2:
+                                        _mi[_p[0]] = int(_p[1].strip().split()[0]) * 1024
+                            _total = _mi["MemTotal"]
+                            _used = _total - _mi.get("MemFree", 0) - _mi.get("Buffers", 0) - _mi.get("Cached", 0)
+                            _mem = round(_used / _total * 100, 1) if _total > 0 else _ps.virtual_memory().percent
+                        except Exception:
+                            _mem = _ps.virtual_memory().percent
+                        _disk = _ps.disk_usage("/").percent
+                        try:
+                            _tmp = _ps.disk_usage("/tmp").percent
+                        except Exception:
+                            _tmp = 0.0
+                        _load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
+                    except Exception:
+                        pass
+                    _now = datetime.now(timezone.utc).isoformat()
+                    from src.session_manager import db, db_lock
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute(
+                            "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
+                            "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? "
+                            "WHERE device_name=? AND scope='global'",
+                            (_now, _local_ip, _cpu, _mem, _disk, _tmp, _load, _hostname))
+                        db.commit()
+                except Exception as e:
+                    log.warning(f"Server metrics: upload failed: {e}")
+                await asyncio.sleep(15)
+        _server_metrics_task = asyncio.create_task(_server_metrics_loop())
+        log.info("Server metrics loop started (15s)")
+    except Exception as e:
+        log.warning(f"Server metrics loop start failed: {e}")
+
     # Issue #85：引擎健康度定时刷新——每 5 分钟对所有引擎 force_refresh，
     # 覆盖离线引擎无任务事件触发的场景（失联引擎不会产生任务完成事件）
     try:
@@ -268,6 +348,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Active user tracker start failed: {e}")
 
+    # Issue #150: Autopilot 定时调度引擎
+    try:
+        from src.runtime.scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        log.warning(f"Autopilot scheduler start failed: {e}")
+
     yield
 
     log.info("IM WS: stopping...")
@@ -292,6 +379,15 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(_knowledge_write_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    # knowledge_migrate：shutdown 时尝试等待完成（不 cancel，因为迁移中断不如跑完）
+    _migrate_task = getattr(app.state, "knowledge_migrate_task", None)
+    if _migrate_task and not _migrate_task.done():
+        try:
+            await asyncio.wait_for(_migrate_task, timeout=10)
+        except asyncio.TimeoutError:
+            log.warning("knowledge_migrate shutdown wait timeout, task continues in background")
+        except Exception:
+            pass
     # 官方技能 OBS 同步：优雅关闭定时任务
     try:
         from src.storage.skill_sync import stop_skill_sync_scheduler
@@ -308,6 +404,12 @@ async def lifespan(app: FastAPI):
     try:
         from src.runtime.health_scorer import stop_health_refresh_scheduler
         stop_health_refresh_scheduler()
+    except Exception:
+        pass
+    # Issue #150: 停止 Autopilot 调度器
+    try:
+        from src.runtime.scheduler import stop_scheduler
+        await stop_scheduler()
     except Exception:
         pass
     # 终止运行中的 agent 子进程（opencode），使 executor 线程尽快结束，
@@ -498,7 +600,7 @@ async def request_id_and_log_middleware(request: Request, call_next):
 
 app.include_router(auth.router)
 app.include_router(repos.router)
-# Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；与 repos.py 无路径冲突）
+# Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；prefix=/api/git-repo，与 grape 托管 repos.py 区分）
 from src.api.git_repo_api import router as git_repo_router
 app.include_router(git_repo_router)
 app.include_router(dashboard.router)
@@ -513,6 +615,7 @@ app.include_router(webhook.router)
 app.include_router(scenes.router)
 app.include_router(templates.router)
 app.include_router(tasks.router)
+app.include_router(issues.router)
 app.include_router(runtime.router)
 app.include_router(feishu_onboard.router)
 app.include_router(feishu_card.router)
@@ -521,22 +624,35 @@ app.include_router(knowledge.router)
 app.include_router(health.router)
 app.include_router(devstage.router)
 app.include_router(latency.router)
+app.include_router(feedback.router)
+app.include_router(autopilot.router)
 
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
 app.openapi = lambda: custom_openapi(app)
+# Issue 附件静态服务（Task Center 上传的文件）
+# 注意：必须在 /static 之前 mount，否则 /static 会拦截 /static/issue_attachments 请求
+# 路径与 tasks.py _attach_base_dir 对齐（基于 WORKSPACE_DIR）
+from src.config import WORKSPACE_DIR as _WS_DIR
+_ISSUE_ATTACH_DIR = os.path.join(_WS_DIR, "..", "data", "issue_attachments")
+os.makedirs(_ISSUE_ATTACH_DIR, exist_ok=True)
+app.mount("/static/issue_attachments", StaticFiles(directory=_ISSUE_ATTACH_DIR), name="issue_attachments")
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-    # Prevent browser from caching stale JS/CSS (version bump in ?v= is the primary cache-buster,
-    # but this header ensures even without ?v= change the browser revalidates)
+if os.path.isdir(STATIC_DIR):
+    # Static assets (JS/CSS): allow browser caching with ETag revalidation.
+    # ?v= bump is the primary cache-buster; must-revalidate ensures stale files are always checked.
+    # index.html itself stays no-store (see _spa_response below) so the browser always fetches the
+    # latest HTML, which references the correct ?v= for each asset.
     from starlette.middleware.base import BaseHTTPMiddleware
     class NoCacheStaticMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             resp = await call_next(request)
             if request.url.path.startswith("/static/"):
-                resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
             return resp
     app.add_middleware(NoCacheStaticMiddleware)
 

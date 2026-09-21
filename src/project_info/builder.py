@@ -10,7 +10,8 @@
 """
 import json, os, shutil, subprocess, hashlib
 from src.config import log, WORKSPACE_DIR
-from src.repo_key import split_owner_repo
+from src.localfs import write_text as _atomic_write
+from src.repo_key import split_owner_repo, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, knowledge_obs_prefix
 
 _ANALYSIS_SUBDIR = "codegraph-repo"
 _GRAPH_FILE = "project-graph.md"
@@ -64,8 +65,8 @@ _CAP_TEMPLATE = """# Project Capabilities: {owner}/{repo}
 
 
 def _pi_dir(repo_key: str) -> str:
-    owner, rname = split_owner_repo(repo_key)
-    return os.path.join(WORKSPACE_DIR, owner, rname, "project-info")
+    from src.repo_key import workspace_repo_dir
+    return os.path.join(workspace_repo_dir(repo_key), "project-info")
 
 
 def _analysis_dir(repo_key: str) -> str:
@@ -73,8 +74,8 @@ def _analysis_dir(repo_key: str) -> str:
 
 
 def _repo_base_dir(repo_key: str) -> str:
-    owner, rname = split_owner_repo(repo_key)
-    return os.path.join(WORKSPACE_DIR, owner, rname, "codebase")
+    from src.repo_key import workspace_repo_dir
+    return os.path.join(workspace_repo_dir(repo_key), "codebase")
 
 
 def _codegraph_available() -> bool:
@@ -95,9 +96,7 @@ def _read_meta(repo_key: str) -> dict:
 def _write_meta(repo_key: str, meta: dict):
     try:
         p = os.path.join(_pi_dir(repo_key), _META_FILE)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
         _write_to_obs(repo_key, _META_FILE, json.dumps(meta, ensure_ascii=False))
     except Exception as e:
         log.warning(f"project-info meta write failed {repo_key}: {e}")
@@ -106,9 +105,7 @@ def _write_meta(repo_key: str, meta: dict):
 def _write_file(repo_key: str, name: str, content: str):
     try:
         p = os.path.join(_pi_dir(repo_key), name)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(content)
+        _atomic_write(p, content)
         _write_to_obs(repo_key, name, content)
     except Exception as e:
         log.warning(f"project-info write failed {repo_key}/{name}: {e}")
@@ -122,52 +119,47 @@ def _write_to_obs(repo_key: str, name: str, content: str):
     import hashlib
     try:
         from src.storage import get_storage
-        from src.repo_key import split_owner_repo
         storage = get_storage()
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
         file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)
-        # Issue #95：name 映射为中文展示名
-        _name_map = {
-            _GRAPH_FILE: "项目结构图谱",
-            _CAP_FILE: "项目能力清单",
-            _META_FILE: "项目元数据",
-        }
-        display_name = _name_map.get(name, name)
+        # Issue #95/#190：name 映射为中文展示名（统一常量）
+        display_name = BASELINE_NAME_MAP.get(name, BASELINE_NAME_FALLBACK)
         storage_key = ""
         if storage:
-            # Issue #95：OBS key 格式统一为 knowledge/{owner}/{repo}/project-info/{name}
-            owner, rname = split_owner_repo(repo_key)
-            storage_key = f"knowledge/{owner}/{rname}/project-info/{name}"
+            # Issue #190：OBS key 含 provider 前缀，避免跨 provider 同名仓库冲突
+            storage_key = f"{knowledge_obs_prefix(repo_key)}/project-info/{name}"
             storage.save_bytes(storage_key, content.encode("utf-8"))
         # 无论 OBS 是否启用，都写 DB
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            # Issue #95：先查有没有已存在记录（避免 INSERT OR REPLACE 删旧 id 导致 ref 失效）
+            # Issue #190：查重改用 name（不受 file_path 格式变化影响）
             existing = c.execute(
                 "SELECT id FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='baseline' AND file_path=?",
-                (repo_key, file_path)
+                "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0",
+                (repo_key, display_name)
             ).fetchone()
             if existing:
                 # 已存在 → UPDATE（保留原 id，ref 不失效）
                 kid = existing[0]
+                _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
                 c.execute(
                     "UPDATE agent_shared_knowledge SET "
                     "status='accepted', obs_key=?, content_hash=?, created_by='system', "
                     "source='system', name=?, description=? "
                     "WHERE id=?",
                     (storage_key, content_hash, display_name,
-                     "codegraph 自动生成的项目基线知识", kid)
+                     _desc, kid)
                 )
             else:
                 # 不存在 → INSERT
+                _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
                 c.execute(
                     "INSERT INTO agent_shared_knowledge "
                     "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, name, description) "
                     "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'system', 'system', ?, ?)",
                     (repo_key, file_path, storage_key, content_hash, display_name,
-                     "codegraph 自动生成的项目基线知识")
+                     _desc)
                 )
                 kid = c.lastrowid
             db.commit()
@@ -200,13 +192,12 @@ def _run(cmd: list, cwd: str = None, timeout: int = 300) -> tuple[int, str, str]
 def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
     """确保分析副本为非 bare 工作目录（从 bare mirror checkout 最新 main/master）。"""
     base = _repo_base_dir(repo_key)
-    # bare mirror 不存在 → 主动建立（修复仅 VOD/Issue 仓库永不建 codebase 导致 project-info 永远 degraded 的缺陷）
-    if not os.path.isdir(base):
-        try:
-            from src.runtime.repogit import ensure_repo_base
-            base = ensure_repo_base(repo_key, token or "")
-        except Exception as e:
-            log.warning(f"project-info ensure_repo_base failed {repo_key}: {e}")
+    # Issue #200: 每次都刷新 bare mirror refs（ensure_repo_base 内部幂等：已存在只 fetch）
+    try:
+        from src.runtime.repogit import ensure_repo_base
+        base = ensure_repo_base(repo_key, token or "")
+    except Exception as e:
+        log.warning(f"project-info ensure_repo_base failed {repo_key}: {e}")
     if not base or not os.path.isdir(base):
         return None
     work = _analysis_dir(repo_key)
@@ -225,9 +216,12 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
             if code != 0:
                 log.warning(f"project-info analysis worktree add failed {repo_key}: {err[:200]}")
                 return None
-        # 刷新 main/master 到最新
+        # 刷新 main/master 到最新（私有仓库需 token 认证；Issue #200）
+        from src.runtime.repogit import _run_git
         for br in ("origin/main", "origin/master"):
-            _run(["git", "-C", work, "fetch", "origin", br], timeout=300)
+            _r = _run_git(["-C", work, "fetch", "origin", br], token=token, timeout=300)
+            if _r and _r.returncode != 0:
+                log.warning(f"project-info worktree fetch {br} failed {repo_key}: {(_r.stderr or '')[:200]}")
         # codegraph 索引初始化（幂等：已存在则跳过；索引持久化于分析副本 .codegraph/）
         if not os.path.isdir(os.path.join(work, ".codegraph")):
             code, out, err = _run(["codegraph", "init"], cwd=work, timeout=600)
@@ -298,11 +292,13 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
     # 获取 main HEAD sha（用于刷新判定）
     try:
         import urllib.request
-        from src.user.db import get_gitcode_token
-        tok = token or get_gitcode_token(repo_key=repo_key) or ""
+        from src.repo import Repo
+        _repo = Repo(repo_key)
+        tok = token or _repo.bot_token
+        _api_base = _repo.api_base
         if tok:
             req = urllib.request.Request(
-                f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                f"{_api_base}/repos/{owner}/{rname}/commits?per_page=1",
                 headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
             import json as _json
             commits = _json.load(urllib.request.urlopen(req, timeout=20))
@@ -337,9 +333,7 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         meta["note"] = "build aborted: distributed lock lost"
         try:
             p = os.path.join(_pi_dir(repo_key), _META_FILE)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+            _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
         except Exception:
             pass
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
@@ -351,9 +345,7 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         meta["note"] = "build aborted: distributed lock lost"
         try:
             p = os.path.join(_pi_dir(repo_key), _META_FILE)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+            _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
         except Exception:
             pass
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
@@ -384,13 +376,15 @@ def should_refresh(repo_key: str) -> bool:
     if last_sha:
         try:
             import urllib.request, json as _json
-            from src.user.db import get_gitcode_token
             from src.repo_key import split_owner_repo
-            tok = get_gitcode_token(repo_key=repo_key) or ""
+            from src.repo import Repo
+            _repo = Repo(repo_key)
+            tok = _repo.bot_token
+            _api_base = _repo.api_base
             if tok:
                 owner, rname = split_owner_repo(repo_key)
                 req = urllib.request.Request(
-                    f"https://gitcode.com/api/v5/repos/{owner}/{rname}/commits?per_page=1",
+                    f"{_api_base}/repos/{owner}/{rname}/commits?per_page=1",
                     headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
                 commits = _json.load(urllib.request.urlopen(req, timeout=20))
                 if commits and commits[0].get("sha", "") != last_sha:

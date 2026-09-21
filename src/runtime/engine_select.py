@@ -458,7 +458,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
                         " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
-                        " COALESCE(r.alias,'')"
+                        " COALESCE(r.alias,''), COALESCE(r.scene_tags,'')"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' "
                         "AND (rc.owner_id=? OR rc.owner_id=?) ORDER BY r.id",
@@ -468,7 +468,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
                         " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
-                        " COALESCE(r.alias,'')"
+                        " COALESCE(r.alias,''), COALESCE(r.scene_tags,'')"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
@@ -476,7 +476,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                 c.execute(
                     "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
                     " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1),"
-                    " COALESCE(alias,'')"
+                    " COALESCE(alias,''), COALESCE(scene_tags,'')"
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             elif scope == "user":
                 if username:
@@ -484,7 +484,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
                         " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
-                        " COALESCE(r.alias,'')"
+                        " COALESCE(r.alias,''), COALESCE(r.scene_tags,'')"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' AND rc.owner_name=? ORDER BY r.id", (username,))
                 else:
@@ -492,7 +492,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
                         " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
-                        " COALESCE(r.alias,'')"
+                        " COALESCE(r.alias,''), COALESCE(r.scene_tags,'')"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' ORDER BY r.id")
             else:
@@ -500,7 +500,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                     "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                     " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
                     " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
-                    " COALESCE(r.alias,'')"
+                    " COALESCE(r.alias,''), COALESCE(r.scene_tags,'')"
                     "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                     "WHERE r.credential_id>0 AND rc.scope='global' AND rc.status='active' ORDER BY r.id")
             rows = c.fetchall()
@@ -525,6 +525,13 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
             tags = [t.strip() for t in tags_str.split(",") if t.strip()]
             if agent_type not in tags and "all" not in tags:
                 continue
+        # scene_tags（r[12] = JSON 字符串，如 '["default","iac"]'；空则回退 ["default"]）
+        try:
+            _scene_tags = json.loads(r[12]) if r[12] else ["default"]
+            if not isinstance(_scene_tags, list):
+                _scene_tags = ["default"]
+        except Exception:
+            _scene_tags = ["default"]
         out.append({
             "runtime_id": r[0], "name": r[1], "status": r[2] or "offline", "healthy": bool(r[3]),
             "installed": bool(r[4]), "credential_id": r[5] or 0, "last_seen_at": r[6] or "",
@@ -533,5 +540,6 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
             "scope": scope,
             "tags": [t.strip() for t in (r[10] or "").split(",") if t.strip()],
             "alias": r[11] or "",
+            "scene_tags": _scene_tags,
         })
     return out

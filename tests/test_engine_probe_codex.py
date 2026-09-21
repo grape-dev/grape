@@ -27,7 +27,7 @@ class TestServerSideProbeCommands:
         assert "exec" in cmd
         assert "--json" in cmd
         assert "--sandbox" in cmd
-        assert "workspace-write" in cmd
+        assert "danger-full-access" in cmd
         assert "hello" in cmd
 
     def test_codex_probe_returns_result_not_skip(self):
@@ -62,7 +62,7 @@ class TestWorkerSideProbeCommands:
         assert "exec" in cmd
         assert "--json" in cmd
         assert "--sandbox" in cmd
-        assert "workspace-write" in cmd
+        assert "danger-full-access" in cmd
         assert "hello" in cmd
 
     def test_codex_worker_probe_returns_result_not_skip(self):

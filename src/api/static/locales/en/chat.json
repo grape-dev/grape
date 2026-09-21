@@ -69,6 +69,11 @@
   "thinking": "Thinking...",
   "querying": "Querying",
   "backend": "Backend",
+  "engine_skill_title": "Model & Skill",
+  "engine_skill_desc": "Configure Chat Agent execution engine and skill",
+  "engine_label": "Engine",
+  "engine_config_tip": "Engine Settings",
+  "skill_config_tip": "Skill Settings",
   "placeholder": "Ask me anything...",
   "send": "Send",
   "upload_image": "Upload Image",
@@ -78,5 +83,17 @@
   "image_too_large": "Image size must not exceed 5MB",
   "image_max_reached": "Maximum {{max}} images allowed",
   "image_max_exceeded": "Exceeded maximum limit, only partial images added (max {{max}})",
-  "image_attached": "Image attached: {{name}}, type text or just hit send"
+  "image_attached": "Image attached: {{name}}, type text or just hit send",
+  "im_channel": {
+    "title": "IM Channel Settings",
+    "subtitle": "Configure instant messaging platforms for Chat Agent",
+    "provider": "Select Platform",
+    "config": "Config",
+    "connected": "Connected",
+    "not_connected": "Not Connected",
+    "coming_soon": "Coming Soon",
+    "active_status": "Active",
+    "help_title": "Info",
+    "help_desc": "Configure the IM platform App ID and App Secret for Chat Agent to receive and reply messages via Feishu/WeCom/DingTalk. You can also use scan-to-configure for quick Feishu setup."
+  }
 }

@@ -852,6 +852,55 @@ class TestSettings:
         assert r_old.status_code == 200
         assert "backends" in r_old.json()
 
+    def test_agent_runtimes_pagination(self):
+        """Issue #185: agent-runtimes 分页参数与 total 返回验证"""
+        # 不带分页参数 → 全量返回（向后兼容），total 存在
+        r = client.get("/api/settings/agent-runtimes", headers=_headers)
+        assert r.status_code == 200
+        d = r.json()
+        assert "total" in d
+        assert d["total"] == len(d["runtimes"])
+
+        # 带分页参数 page=1&page_size=2
+        r2 = client.get("/api/settings/agent-runtimes?page=1&page_size=2", headers=_headers)
+        assert r2.status_code == 200
+        d2 = r2.json()
+        assert "runtimes" in d2
+        assert "total" in d2
+        assert "page" in d2
+        assert "page_size" in d2
+        assert d2["page"] == 1
+        assert d2["page_size"] == 2
+        # 分页结果不超过 page_size
+        assert len(d2["runtimes"]) <= 2
+        # total 与全量一致
+        assert d2["total"] == d["total"]
+
+        # page=2 应返回第二页
+        if d2["total"] > 2:
+            r3 = client.get("/api/settings/agent-runtimes?page=2&page_size=2", headers=_headers)
+            assert r3.status_code == 200
+            d3 = r3.json()
+            assert d3["page"] == 2
+            assert len(d3["runtimes"]) <= 2
+            # 第一页和第二页不应有重复
+            ids_p1 = {rt["id"] for rt in d2["runtimes"]}
+            ids_p2 = {rt["id"] for rt in d3["runtimes"]}
+            assert not (ids_p1 & ids_p2), "分页结果不应有重复项"
+
+    def test_runtime_devices_endpoint(self):
+        """Issue #185: runtime-devices 分页端点验证"""
+        r = client.get("/api/settings/runtime-devices?page=1&page_size=10", headers=_headers)
+        assert r.status_code == 200
+        d = r.json()
+        assert "devices" in d
+        assert "total" in d
+        assert "page" in d
+        assert "page_size" in d
+        assert d["page"] == 1
+        assert d["page_size"] == 10
+        assert len(d["devices"]) <= 10
+
 
 # ===================== 10. Skills =====================
 class TestSkills:
@@ -1314,3 +1363,272 @@ class TestEventPipeline:
         sc = get_or_create_agent_session(repo, "coding", "opencode")
         assert sc["id"] != sv["id"]  # Independent sessions
         delete_agent_session(repo, "vod"); delete_agent_session(repo, "coding")
+
+
+
+# ===================== 15. Knowledge (Issue #199) =====================
+class TestKnowledge:
+    """知识 CRUD + 单接口创建+绑定关联 + 校验 + N+1 优化验证"""
+
+    def _create_entry(self, **extra):
+        """辅助：创建知识条目，返回 response"""
+        import time
+        body = {
+            "repo": "org/test",
+            "content": "测试内容",
+            "description": "测试描述",
+            "name": "测试知识-" + str(time.time())
+        }
+        body.update(extra)
+        return client.post("/api/knowledge/entry", json=body, headers=_headers)
+
+    def _cleanup_kid(self, kid):
+        if kid:
+            client.delete(f"/api/knowledge/{kid}", headers=_headers)
+
+    def test_create_entry_basic(self):
+        """创建知识条目（无关联）"""
+        r = self._create_entry()
+        assert r.status_code == 200, f"create failed: {r.text[:200]}"
+        kid = r.json().get("id")
+        assert kid
+        self._cleanup_kid(kid)
+
+    def test_create_entry_with_agent_types(self):
+        """单接口创建+绑定 Agent（Issue #199）"""
+        r = self._create_entry(agent_types=["vod", "qa"])
+        assert r.status_code == 200, f"create+bind failed: {r.text[:200]}"
+        kid = r.json().get("id")
+        assert kid
+        try:
+            d = client.get(f"/api/knowledge/{kid}", headers=_headers)
+            assert d.status_code == 200
+            refs = d.json().get("refs", [])
+            agent_refs = [r for r in refs if r.get("agent_type") and not r.get("scene_id")]
+            assert len(agent_refs) == 2, f"expected 2 agent refs, got {len(agent_refs)}"
+            agent_types_set = {r["agent_type"] for r in agent_refs}
+            assert agent_types_set == {"vod", "qa"}
+        finally:
+            self._cleanup_kid(kid)
+
+    def test_create_entry_invalid_agent_type(self):
+        """非法 agent_type 校验"""
+        r = self._create_entry(agent_types=["invalid_type"])
+        assert r.status_code == 400
+        assert "不支持的 Agent 类型" in r.json().get("detail", {}).get("message", "")
+
+    def test_create_entry_invalid_scene_id(self):
+        """非法 scene_id 校验"""
+        r = self._create_entry(scene_ids=["nonexistent-scene-uuid"])
+        assert r.status_code == 400
+        assert "场景不存在" in r.json().get("detail", {}).get("message", "")
+
+    def test_create_entry_empty_name(self):
+        """name 必填校验"""
+        r = self._create_entry(name="")
+        assert r.status_code == 400
+        assert "name 必填" in r.json().get("detail", {}).get("message", "")
+
+    def test_create_entry_empty_content(self):
+        """content 必填校验"""
+        r = self._create_entry(content="")
+        assert r.status_code == 400
+        assert "content 必填" in r.json().get("detail", {}).get("message", "")
+
+    def test_create_entry_no_repo(self):
+        """repo 必填校验"""
+        r = self._create_entry(repo="")
+        assert r.status_code == 400
+        assert "必须指定 repo" in r.json().get("detail", {}).get("message", "")
+
+    def test_detail_n_plus_1_fixed(self):
+        """详情接口返回 pipeline_chain（N+1 改 JOIN 验证）"""
+        r = self._create_entry(agent_types=["vod"])
+        kid = r.json().get("id")
+        try:
+            d = client.get(f"/api/knowledge/{kid}", headers=_headers)
+            assert d.status_code == 200
+            refs = d.json().get("refs", [])
+            assert len(refs) >= 1
+            for ref in refs:
+                assert "scene_pipeline" in ref
+        finally:
+            self._cleanup_kid(kid)
+
+    def test_delete_entry_cascades_refs(self):
+        """删除知识条目后 refs 也删除"""
+        r = self._create_entry(agent_types=["vod", "qa"])
+        kid = r.json().get("id")
+        client.delete(f"/api/knowledge/{kid}", headers=_headers)
+        r = client.get(f"/api/knowledge/{kid}", headers=_headers)
+        assert r.status_code == 404
+        from src.session_manager import db, db_lock
+        with db_lock:
+            count = db.cursor().execute(
+                "SELECT COUNT(*) FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,)
+            ).fetchone()[0]
+        assert count == 0, f"refs not cascaded, still {count} rows"
+
+    def test_update_entry(self):
+        """编辑知识内容"""
+        r = self._create_entry()
+        kid = r.json().get("id")
+        try:
+            r = client.put(f"/api/knowledge/{kid}", json={
+                "content": "更新后的内容",
+                "description": "更新后的描述",
+                "name": "更新后的名称"
+            }, headers=_headers)
+            assert r.status_code == 200
+            d = client.get(f"/api/knowledge/{kid}", headers=_headers)
+            assert d.status_code == 200
+            assert d.json()["name"] == "更新后的名称"
+            assert d.json()["content"] == "更新后的内容"
+        finally:
+            self._cleanup_kid(kid)
+
+    def test_toggle_agent_ref(self):
+        """绑定+解绑 Agent"""
+        r = self._create_entry()
+        kid = r.json().get("id")
+        try:
+            r = client.post(f"/api/knowledge/{kid}/refs/batch",
+                           json={"scene_ids": [], "agent_types": ["vod"]}, headers=_headers)
+            assert r.status_code == 200
+            assert r.json()["added"] == 1
+            d = client.get(f"/api/knowledge/{kid}", headers=_headers)
+            agent_refs = [r for r in d.json()["refs"] if r.get("agent_type") == "vod" and r.get("enabled")]
+            assert len(agent_refs) == 1
+            ref_id = agent_refs[0]["id"]
+            r = client.delete(f"/api/knowledge/ref/{ref_id}", headers=_headers)
+            assert r.status_code == 200
+            d = client.get(f"/api/knowledge/{kid}", headers=_headers)
+            agent_refs = [r for r in d.json()["refs"] if r.get("agent_type") == "vod" and r.get("enabled")]
+            assert len(agent_refs) == 0
+        finally:
+            self._cleanup_kid(kid)
+
+    # ===== 边界校验测试 =====
+
+    def test_create_entry_name_too_long(self):
+        """name 超过 50 字符"""
+        r = self._create_entry(name="x" * 51)
+        assert r.status_code == 400
+        assert "name 不能超过" in r.json().get("detail", {}).get("message", "")
+
+    def test_create_entry_content_too_large(self):
+        """content 超过 10KB"""
+        r = self._create_entry(content="x" * 10241)
+        assert r.status_code == 400
+        assert "content 不能超过" in r.json().get("detail", {}).get("message", "")
+
+    def test_create_entry_desc_too_long(self):
+        """description 超过 200 字符"""
+        r = self._create_entry(description="x" * 201)
+        assert r.status_code == 400
+        assert "description 不能超过" in r.json().get("detail", {}).get("message", "")
+
+    # ===== batch 接口校验测试 =====
+
+    def test_batch_invalid_agent_type(self):
+        """batch 接口非法 agent_type 校验"""
+        r = self._create_entry()
+        kid = r.json().get("id")
+        try:
+            r = client.post(f"/api/knowledge/{kid}/refs/batch",
+                           json={"scene_ids": [], "agent_types": ["invalid_type"]},
+                           headers=_headers)
+            assert r.status_code == 400
+            assert "不支持的 Agent 类型" in r.json().get("detail", {}).get("message", "")
+        finally:
+            self._cleanup_kid(kid)
+
+    def test_batch_invalid_scene_id(self):
+        """batch 接口非法 scene_id 校验"""
+        r = self._create_entry()
+        kid = r.json().get("id")
+        try:
+            r = client.post(f"/api/knowledge/{kid}/refs/batch",
+                           json={"scene_ids": ["nonexistent-uuid"], "agent_types": []},
+                           headers=_headers)
+            assert r.status_code == 400
+            assert "场景不存在" in r.json().get("detail", {}).get("message", "")
+        finally:
+            self._cleanup_kid(kid)
+
+    def test_batch_idempotent_skip(self):
+        """batch 接口幂等跳过已存在"""
+        r = self._create_entry(agent_types=["vod"])
+        kid = r.json().get("id")
+        try:
+            # 再次绑定 vod，应该跳过
+            r = client.post(f"/api/knowledge/{kid}/refs/batch",
+                           json={"scene_ids": [], "agent_types": ["vod"]},
+                           headers=_headers)
+            assert r.status_code == 200
+            assert r.json().get("added") == 0
+        finally:
+            self._cleanup_kid(kid)
+
+    # ===== 404 测试 =====
+
+    def test_detail_not_found(self):
+        """查询不存在的知识"""
+        r = client.get("/api/knowledge/999999", headers=_headers)
+        assert r.status_code == 404
+
+    def test_delete_ref_not_found(self):
+        """删除不存在的关联记录"""
+        r = client.delete("/api/knowledge/ref/999999", headers=_headers)
+        assert r.status_code == 404
+
+    # ===== 权限测试 =====
+
+    def test_update_system_knowledge_forbidden(self):
+        """编辑系统知识返回 403"""
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO agent_shared_knowledge "
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, "
+                "content_hash, status, source_seq, created_by, source, description, name) "
+                "VALUES ('project','gitcode:org/test','',0,'','','',"
+                "'accepted',0,'system','system','测试系统知识','sys-test-update')",
+            )
+            kid = c.lastrowid
+            db.commit()
+        try:
+            r = client.put(f"/api/knowledge/{kid}", json={
+                "content": "hacked", "name": "hacked", "description": ""
+            }, headers=_headers)
+            assert r.status_code == 403, f"expected 403, got {r.status_code}: {r.text[:200]}"
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
+                db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE id=?", (kid,))
+                db.commit()
+
+    def test_delete_system_knowledge_forbidden(self):
+        """删除系统知识返回 403"""
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO agent_shared_knowledge "
+                "(scope, repo_key, agent_type, issue_num, file_path, obs_key, "
+                "content_hash, status, source_seq, created_by, source, description, name) "
+                "VALUES ('project','gitcode:org/test','',0,'','','',"
+                "'accepted',0,'system','system','测试系统知识','sys-test-delete')",
+            )
+            kid = c.lastrowid
+            db.commit()
+        try:
+            r = client.delete(f"/api/knowledge/{kid}", headers=_headers)
+            assert r.status_code == 403, f"expected 403, got {r.status_code}: {r.text[:200]}"
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
+                db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE id=?", (kid,))
+                db.commit()
+

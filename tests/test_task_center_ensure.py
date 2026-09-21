@@ -20,14 +20,14 @@ REPO = "gitcode:owner/repo"
 def _count(repo_key: str = REPO, issue: int = 1):
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM tasks WHERE repo_key=? AND issue_number=?", (repo_key, issue))
+        c.execute("SELECT COUNT(*) FROM issue WHERE repo_key=? AND issue_number=?", (repo_key, issue))
         return c.fetchone()[0]
 
 
 def _rows(repo_key: str = REPO, issue: int = 1):
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT user_id, assignee, status, title, task_description FROM tasks WHERE repo_key=? AND issue_number=?",
+        c.execute("SELECT user_id, assignee, status, title, task_description FROM issue WHERE repo_key=? AND issue_number=?",
                   (repo_key, issue))
         return c.fetchall()
 
@@ -35,7 +35,7 @@ def _rows(repo_key: str = REPO, issue: int = 1):
 def _cleanup():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM tasks WHERE repo_key=?", (REPO,))
+        c.execute("DELETE FROM issue WHERE repo_key=?", (REPO,))
         db.commit()
 
 
@@ -87,13 +87,13 @@ def test_close_issue_tasks_completes_active():
     assert n == 1
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT status, completed_reason FROM tasks WHERE repo_key=? AND issue_number=4", (REPO,))
+        c.execute("SELECT status, completed_reason FROM issue WHERE repo_key=? AND issue_number=4", (REPO,))
         row = c.fetchone()
     assert row and row[0] == "completed" and row[1] == "issue_closed"
     # issue 5 未关闭 → 仍 active
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_number=5", (REPO,))
+        c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=5", (REPO,))
         row = c.fetchone()
     assert row and row[0] == "active"
 
@@ -136,7 +136,7 @@ def test_ensure_links_conversation():
         tid = tasks_mod.ensure_issue_task(REPO, 8, title="Linked", assignee="carol", event_type="issue_opened")
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT conversation_id FROM tasks WHERE id=?", (tid,))
+        c.execute("SELECT conversation_id FROM issue WHERE id=?", (tid,))
         conv_id = c.fetchone()[0]
     assert conv_id, "任务应关联对话"
     with db_lock:
@@ -150,6 +150,41 @@ def test_ensure_links_conversation():
         assert c.fetchone()[0] >= 1, "新对话应写入任务上下文消息"
 
 
+def test_ensure_idempotent_updates_when_existing_assignee_empty():
+    """Issue #186: 已有 assignee 为空、target 有值时 → UPDATE 执行，user_id 正确更新"""
+    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=39), \
+         patch.object(tasks_mod, "_get_issue_title", return_value="T"):
+        # 第一次：assignee 为空，user_id=0（模拟历史脏数据）
+        tasks_mod.ensure_issue_task(REPO, 10, title="T", assignee="", event_type="issue_opened")
+        # 第二次：assignee 有值，应触发 UPDATE 更新 assignee 和 user_id
+        tasks_mod.ensure_issue_task(REPO, 10, title="T", assignee="songspace", event_type="issue_comment")
+    rows = _rows(REPO, 10)
+    assert rows and rows[0][0] == 39 and rows[0][1] == "songspace", \
+        f"已有 assignee 为空时应更新 user_id 和 assignee, got: {rows}"
+
+
+def test_ensure_idempotent_no_update_when_assignee_same():
+    """回归：assignee 已有值且与 target 相同时不执行 UPDATE（幂等性保持）"""
+    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=42), \
+         patch.object(tasks_mod, "_get_issue_title", return_value="T"):
+        tasks_mod.ensure_issue_task(REPO, 11, title="T", assignee="alice", event_type="issue_opened")
+        tasks_mod.ensure_issue_task(REPO, 11, title="T", assignee="alice", event_type="issue_comment")
+    assert _count(REPO, 11) == 1
+    rows = _rows(REPO, 11)
+    assert rows and rows[0][0] == 42 and rows[0][1] == "alice"
+
+
+def test_ensure_idempotent_updates_when_assignee_changed():
+    """回归：assignee 已有值且与 target 不同时 UPDATE 正常执行"""
+    with patch.object(tasks_mod, "_get_user_id_by_gitcode", side_effect=lambda u: 40 if u == "mm6667" else 39), \
+         patch.object(tasks_mod, "_get_issue_title", return_value="T"):
+        tasks_mod.ensure_issue_task(REPO, 12, title="T", assignee="mm6667", event_type="issue_opened")
+        tasks_mod.ensure_issue_task(REPO, 12, title="T", assignee="songspace", event_type="issue_comment")
+    rows = _rows(REPO, 12)
+    assert rows and rows[0][0] == 39 and rows[0][1] == "songspace", \
+        f"assignee 变更时应更新, got: {rows}"
+
+
 def test_ensure_skips_conversation_when_user0():
     """user_id=0（assignee/owner 均未注册）→ 不建对话，conversation_id 留空"""
     with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=None), \
@@ -157,6 +192,6 @@ def test_ensure_skips_conversation_when_user0():
         tid = tasks_mod.ensure_issue_task(REPO, 9, title="NoUser", assignee="ghost2", event_type="issue_opened")
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT conversation_id FROM tasks WHERE id=?", (tid,))
+        c.execute("SELECT conversation_id FROM issue WHERE id=?", (tid,))
         conv_id = c.fetchone()[0]
     assert not conv_id

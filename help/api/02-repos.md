@@ -1,8 +1,14 @@
 # Repos 仓库接口（/api/repos）
 
 > 对外公开（部分只读），认证：`get_current_user_or_api_key`。
+> scope（x-token-scope）：平台业务接口（managed/member/sync/check-name/create/host/repair/bot-token/deploy-url/remove/project-info 等）= **user_only**；
+> `{owner}/{repo}/git-credential`、`{owner}/{repo}/workspace`（CLI 私有） = **session_only**（仅 `tk_`）。
+> ⚠️ **与 `/api/git-repo` 区分**：本接口（`/api/repos`）是 **grape 平台的仓库接口**，承载 grape 平**台业务属性
+> （托管/同步/成员/bot token/部署 URL/项目知识等）；而 `/api/git-repo`（见 10-git-repos.md）是
+> **Git 仓库透传接口**（Issue/PR/内容/分支等由 gitcode/github/gitlab 提供，后端由 token 的 repo_key 前缀判定）。
 
 ## GET /api/repos/managed — 托管仓库列表
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Query | `status`（可选）等 |
 | 出参 | `[{repo_key, repo_owner, repo_name, full_name, webhook_id, bot_username, dev_scene, host_status, deploy_url, created_at}]` |
@@ -11,6 +17,7 @@
 ---
 
 ## GET /api/repos/member — 成员仓库列表
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 出参 | 用户参与的仓库数组 |
 | 返回 | 200 |
@@ -18,6 +25,7 @@
 ---
 
 ## POST /api/repos/sync — 同步仓库
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | 出参 | `{"ok": true, ...}` |
 | 返回 | 200 |
@@ -25,6 +33,7 @@
 ---
 
 ## GET /api/repos/check-name — 校验仓库名
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Query | `name` / `owner` 等 |
 | 出参 | `{"available": bool, ...}` |
@@ -33,6 +42,7 @@
 ---
 
 ## POST /api/repos/create — 创建仓库
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`Content-Type: application/json`
 
@@ -56,6 +66,7 @@
 ---
 
 ## POST /api/repos/host — 托管仓库
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`Content-Type: application/json`
 
@@ -67,6 +78,7 @@
 ---
 
 ## POST /api/repos/{owner}/{repo}/repair-host — 修复托管
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{owner}` `{repo}` |
 | 出参 | `{"ok": true, ...}` |
@@ -76,6 +88,8 @@
 
 ## GET /api/repos/bot-token/{owner}/{repo} — 获取仓库 bot token
 
+> scope（x-token-scope）：**user_only**
+
 | Path | `{owner}` `{repo}` |
 | 出参 | `{"bot_gitcode_token": "***", ...}`（脱敏） |
 | 返回 | 200；未配置 400 |
@@ -83,6 +97,7 @@
 ---
 
 ## PUT /api/repos/bot-token — 设置仓库 bot token
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`Content-Type: application/json`
 
@@ -95,6 +110,8 @@
 
 ## GET /api/repos/deploy-url/{owner}/{repo} — 获取部署 URL
 
+> scope（x-token-scope）：**user_only**
+
 | Path | `{owner}` `{repo}` |
 | 出参 | `{"deploy_url": "..."}` |
 | 返回 | 200 |
@@ -102,6 +119,7 @@
 ---
 
 ## PUT /api/repos/deploy-url — 设置部署 URL
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`Content-Type: application/json`
 
@@ -113,6 +131,7 @@
 ---
 
 ## POST /api/repos/remove — 解除托管
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 请求头：`Content-Type: application/json`
 
@@ -124,7 +143,55 @@
 ---
 
 ## GET /api/repos/{owner}/{repo}/project-info — 项目知识
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{owner}` `{repo}` |
-| 出参 | `{"project-graph.md": "...", "project-capabilities.md": "..."}` |
+| 出参 | `{files: {project-graph.md: "...", project-capabilities.md: "..."}, meta: {commit, branches, updated, degraded}}` |
+| 返回 | 200 |
+
+---
+
+## GET /api/repos/{owner}/{repo}/scene-recommend-config — 获取场景推荐配置
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Path | `{owner}` `{repo}` |
+| 出参 | 场景推荐配置（入口场景 + 路由规则） |
+| 返回 | 200 |
+
+## PUT /api/repos/{owner}/{repo}/scene-recommend-config — 保存场景推荐配置
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+请求头：`Content-Type: application/json`
+
+请求体（SceneRecommendConfigBody）：`{scene_id, fallback_scene, ...}`
+
+> 写入时自检：`scene_id` 必须存在于当前场景列表中（`fallback_scene` 同理），否则报错。
+
+| Path | `{owner}` `{repo}` |
+| 出参 | `{"ok": true}` |
+| 返回 | 200；400 场景不存在 |
+
+---
+
+## GET /api/repos/{owner}/{repo}/git-credential — 一次性 git 平台凭据（grape 私有，方案③ CLI 内部使用）
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+
+> ⚠️ 非 any gitcode/github/gitlab 平台原生接口——是 **grape 自身能力**：把平台 token 按会话身份
+> （chat→用户 token / devops agent→仓库 bot token）以**一次性/短期凭证**形式交 CLI 本地 `git clone/push` 用。
+
+| Path | `{owner}` `{repo}` |
+| Provider | 由认证 token 的 `repo_key` 前缀派生（gitcode:/github:），不传 provider 参数 |
+| 出参 | `{provider: "gitcode", username: "x-access-token", password: "<一次性 token>", clone_url: "...", expires_in: 600}` |
+| 返回 | 200；403 非会话级 token / provider 未接入；502 平台 token 解析失败 |
+
+---
+
+## GET /api/repos/{owner}/{repo}/workspace — 仓库工作区路径（grape 私有）
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+
+> ⚠️ 非平台原生——返回 grape 管理工作区（worktree）的本地路径，供 CLI 在本地执行 git。
+
+| Path | `{owner}` `{repo}` |
+| Provider | 由认证 token 的 `repo_key` 前缀派生（gitcode:/github:），不传 provider 参数 |
+| 出参 | `{workspace: "<本地路径>", clone_url: "https://gitcode.com/{owner}/{repo}.git"}` |
 | 返回 | 200 |

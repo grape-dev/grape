@@ -390,7 +390,7 @@ def resolve_issue_id(payload: dict) -> str:
     return ""
 
 
-def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
+def resolve_pr_issue_id(payload: dict, api_token: str = "", repo_key: str = "") -> str:
     """从 PR 事件 payload 解析关联的 Issue 编号。
     优先级：payload 标题 #N → 分支名 issue-N → 同步调 PR 详情 API。
     """
@@ -430,8 +430,15 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "") -> str:
                 repo_path = repo.get("full_name", "")
         if repo_path and "/" in repo_path:
             try:
-                url = f"https://gitcode.com/api/v5/repos/{repo_path}/pulls/{pr_number}"
-                req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_token}"})
+                if _is_github_repo(repo_key):
+                    url = f"https://api.github.com/repos/{repo_path}/pulls/{pr_number}"
+                    hdrs = {"Authorization": f"Bearer {api_token}",
+                            "Accept": "application/vnd.github+json",
+                            "User-Agent": "Grape-DevOps"}
+                else:
+                    url = f"https://gitcode.com/api/v5/repos/{repo_path}/pulls/{pr_number}"
+                    hdrs = {"Authorization": f"Bearer {api_token}"}
+                req = urllib.request.Request(url, headers=hdrs)
                 data = json.loads(urllib.request.urlopen(req, timeout=10).read())
                 # title / head.ref
                 issue = _extract_issue_id_from_text(str(data.get("title", "")))
@@ -492,7 +499,7 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
 
     # 解析关联 issue_id：PR 类事件优先用 title/分支提取（无需 token），Issue 类用 payload 字段
     if event_type in PR_EVENT_TYPES:
-        issue_id = resolve_pr_issue_id(payload) or resolve_issue_id(payload) or ""
+        issue_id = resolve_pr_issue_id(payload, repo_key=repo_key) or resolve_issue_id(payload) or ""
     else:
         issue_id = resolve_issue_id(payload) or ""
     if not issue_id:
@@ -511,7 +518,7 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
         if _ck_issue_num.isdigit():
             with _ck_lock:
                 _ck_c = _ck_db.cursor()
-                _ck_c.execute("SELECT status FROM tasks WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
+                _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
                               (repo_key, int(_ck_issue_num)))
                 if _ck_c.fetchone():
                     return ""
@@ -745,7 +752,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     _pre_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
     if not _pre_issue_id and event_type in PR_EVENT_TYPES:
         try:
-            _pre_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}) or ""
+            _pre_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}, repo_key=repo_key) or ""
         except Exception:
             pass
 
@@ -771,16 +778,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _body = _oa.get("description", "") or ""
                     if "## 父任务" in _body:
                         _allow_through = True
-                    # Issue #46：Onboarding 由 bot token 创建引导 Issue（description 以「首次托管引导」开头）
-                    # → issue_opened 放行，避免 bot 建引导 Issue 后流水线永不触发（见 issue-46 方案 §4.6）
-                    elif _body.startswith("首次托管引导"):
-                        _allow_through = True
                 except Exception:
                     pass
             if _allow_through:
-                log.info(f"Pipeline: bot={actor} created onboarding/subtask issue, allow through")
+                log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
             else:
-                log.info(f"Pipeline skip: self-comment from bot={actor}")
+                log.info(f"Pipeline skip: bot={actor} self-action")
                 from src.api.event_store import append_skipped_event
                 append_skipped_event(repo_key, event_type, "self_loop", actor, issue_id=_pre_issue_id)
                 return result
@@ -906,9 +909,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     log.warning(f"Pipeline: issue_opened scene check failed: {_re}")
                     break
         # project-info 后台刷新（服务端 codegraph 生成基线，不阻塞 webhook；见 codegraph-builder-plan.md）
+        # Issue #200: 传入 bot token，私有仓库 git fetch 需认证 header
         try:
             from src.project_info.builder import maybe_refresh_project_info
-            threading.Thread(target=maybe_refresh_project_info, args=(repo_key,), daemon=True).start()
+            from src.repo import Repo
+            _pi_token = Repo(repo_key).bot_token
+            threading.Thread(target=maybe_refresh_project_info, args=(repo_key, _pi_token), daemon=True).start()
         except Exception as e:
             log.warning(f"Pipeline: project-info refresh trigger failed: {e}")
     else:
@@ -988,13 +994,6 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 if _closed:
                     _n3 = close_issue_tasks(repo_key, int(_num3))
                     log.info(f"Pipeline: issue closed -> complete tasks #{_num3} ({_n3} rows)")
-                    # Issue #67: 归档该 Issue 的知识
-                    try:
-                        from src.api.knowledge import _archive_issue_knowledge
-                        _archive_issue_knowledge(repo_key, int(_num3))
-                        log.info(f"Pipeline: issue closed -> archived knowledge #{_num3}")
-                    except Exception as _e:
-                        log.warning(f"Pipeline: archive issue knowledge failed: {_e}")
                 elif event_type in ISSUE_EVENT_TYPES:
                     _asg3 = ""
                     try:
@@ -1008,11 +1007,20 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                             _asg3 = _fetch_issue_assignee(repo_key, _iid3) or ""
                         except Exception:
                             pass
+                    # Issue #178: 提取 webhook 操作用户（sender）作为 assignee fallback
+                    _sender3 = ""
+                    try:
+                        _snd = _p3.get("sender") or _p3.get("user") or {}
+                        if isinstance(_snd, dict):
+                            _sender3 = _snd.get("username") or _snd.get("login") or ""
+                    except Exception:
+                        pass
                     _t3 = str(_o3.get("title", "") or "") if isinstance(_o3, dict) else ""
                     if not _t3:
                         _t3 = evt.get("title", "") or ""
-                    ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3, event_type=event_type)
-                    log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or '(owner)'}")
+                    ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3,
+                                      event_type=event_type, sender=_sender3)
+                    log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or _sender3 or '(owner)'}")
     except Exception as _e:
         log.warning(f"Pipeline: task-center sync failed: {_e}")
 
@@ -1062,7 +1070,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     _issue_scene_uid = 0
     _early_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
     if not _early_issue_id and event_type in PR_EVENT_TYPES:
-        _early_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}) or ""
+        _early_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}, repo_key=repo_key) or ""
     if _early_issue_id:
         try:
             from src.api.session_store import get_issue_scene
@@ -1152,7 +1160,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         try:
             from src.user.db import get_agent_bot_token
             _pr_api_token = get_agent_bot_token(repo_key) or ""
-            _pr_issue = resolve_pr_issue_id(payload, _pr_api_token)
+            _pr_issue = resolve_pr_issue_id(payload, _pr_api_token, repo_key=repo_key)
             if _pr_issue:
                 issue_id = _pr_issue
                 log.info(f"Pipeline: PR 关联 Issue -> {issue_id}")
@@ -1179,7 +1187,6 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
                     "AND status IN ('running','dispatched') "
                     "AND event_type != 'a2a_event' "
-                    "AND source != 'task_center' "
                     "ORDER BY seq DESC LIMIT 1",
                     (repo_key, issue_id, agent_type))
                 _existing_evt = _dc.fetchone()
@@ -1513,15 +1520,15 @@ def _parse_parent_issue_from_payload(payload: dict) -> str:
 def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str:
     """Agent 工作目录（按 Issue 统一隔离，见 workdir-issue-centric-design.md §二）。
 
-    - 有关联 Issue：#5 → {owner}/{repo}/issues/5/{agent_type}/
-    - 无关联 Issue（push/#0）→ {owner}/{repo}/{agent_type}-agent（兼容现状）
+    - 有关联 Issue：#5 → {provider}/{owner}/{repo}/issues/5/{agent_type}/
+    - 无关联 Issue（push/#0）→ {provider}/{owner}/{repo}/{agent_type}-agent（兼容现状）
     """
-    from src.repo_key import split_owner_repo
-    owner, rname = split_owner_repo(repo_key)
+    from src.repo_key import workspace_repo_dir
+    _base = workspace_repo_dir(repo_key)
     num = _issue_num_from(issue_id)
     if num:
-        return os.path.join(WORKSPACE_DIR, owner, rname, "issues", num, agent_type)
-    return os.path.join(WORKSPACE_DIR, owner, rname, f"{agent_type}-agent")
+        return os.path.join(_base, "issues", num, agent_type)
+    return os.path.join(_base, f"{agent_type}-agent")
 
 
 def _fail_event(seq: int, reason: str):
@@ -1705,9 +1712,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     try:
         _num = _issue_num_from(issue_id)
         if _num and oc_session_id:
-            from src.repo_key import split_owner_repo
-            _o, _r = split_owner_repo(repo_key)
-            _expected_ws = os.path.join(WORKSPACE_DIR, _o, _r, "issues", _num, agent_type)
+            from src.repo_key import workspace_repo_dir
+            _expected_ws = os.path.join(workspace_repo_dir(repo_key), "issues", _num, agent_type)
             if ws != _expected_ws:
                 log.warning(f"Pipeline enqueue: cwd/session mismatch, issue={issue_id} ws={ws} expected={_expected_ws}")
     except Exception:
@@ -1990,8 +1996,8 @@ def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
         if _num:
             _token = ""
             try:
-                from src.user.db import get_gitcode_token
-                _token = get_gitcode_token(repo_key=repo_key) or ""
+                from src.repo import Repo
+                _token = Repo(repo_key).bot_token
             except Exception:
                 pass
             repogit.remove_issue_worktree_if_pushed(repo_key, agent_type, _num, token=_token)
@@ -2240,6 +2246,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             agent_name=agent_name,
             agent_label=f"[Agent:{agent_type}|repo:{repo_name}|engine:{inst_name}]",
             env_extra=env_extra,
+            repo_key=repo_key,
         ):
             # 写库兜底脱敏：即使上游 executor 已脱敏，此处再防御一次（agent 可能在 text/result 复述 token）
             _msg = str(data)[:500]
@@ -2403,7 +2410,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 with db_lock:
                     _c = db.cursor()
                     _c.execute(
-                        "UPDATE tasks SET status='awaiting_input' "
+                        "UPDATE issue SET status='awaiting_input' "
                         "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                         (repo_key, int(_issue_num)))
                     db.commit()
@@ -2465,12 +2472,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _parent_num = _issue_num_from(_parent)
                 _sub_num = _issue_num_from(issue_id)
                 if _parent_num and _sub_num:
-                    _post_subtask_completion_to_parent(repository, _sub_num, _parent_num, result_text, repo_gitcode_token)
+                    _post_subtask_completion_to_parent(repository, _sub_num, _parent_num, result_text, repo_gitcode_token, repo_key=repo_key)
                     # 检查所有子任务是否全部完成
                     _subs = get_subtask_issues(repo_key, _parent)
                     _all_done = all(s.get("stage") == "done" or s.get("issue_id") == issue_id for s in _subs)
                     if _all_done and len(_subs) > 0:
-                        _post_all_subtasks_done(repository, _parent_num, _subs, repo_gitcode_token)
+                        _post_all_subtasks_done(repository, _parent_num, _subs, repo_gitcode_token, repo_key=repo_key)
         except Exception as _e:
             log.warning(f"Subtask completion post failed: {_e}")
 
@@ -2486,7 +2493,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _rk = to_repo_key(repo_key)
                 with _dl:
                     _c = _db.cursor()
-                    _c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+                    _c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
                                (_rk, _issue_num))
                     _row = _c.fetchone()
                 if _row and _row[0]:
@@ -2494,27 +2501,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                     log.info(f"Exec agent: synced result to task conversation {_row[0]} (issue #{_issue_num})")
             except Exception as _e:
                 log.warning(f"Exec agent: sync to task conversation failed: {_e}")
-
-    # 执行完成 → 同步 tasks 表状态（agent 完成后 tasks.status 自动更新）
-    if new_status == "completed" and issue_id:
-        _issue_num = _issue_num_from(issue_id)
-        if _issue_num:
-            try:
-                from src.session_manager import db as _db, db_lock as _dl
-                from src.repo_key import to_repo_key as _to_rk
-                _rk = _to_rk(repo_key)
-                with _dl:
-                    _c = _db.cursor()
-                    _c.execute(
-                        "UPDATE tasks SET status='completed', completed_reason='agent_completed', "
-                        "completed_at=datetime('now') "
-                        "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','cancelled')",
-                        (_rk, _issue_num))
-                    _n = _c.rowcount
-                    if _n:
-                        log.info(f"Exec agent: tasks table synced -> completed (issue #{_issue_num}, {_n} row(s))")
-            except Exception as _e:
-                log.warning(f"Exec agent: sync tasks table status failed: {_e}")
 
     # 执行完成 → 从 GitCode Issue 拉取 agent 发的评论，同步到任务会话
     # （agent 通过技能 curl 直接在 Issue 上发的澄清追问等评论，上面 result_text 同步的是
@@ -2536,6 +2522,15 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
     """
     if not repository or not issue_number or not bot_token:
         return
+    # 跳过场景推荐结果（借 VOD 身份做的推荐，非真正工作产出，不应发到 Issue）
+    try:
+        import json as _json
+        _parsed = _json.loads(result_text)
+        if isinstance(_parsed, dict) and _parsed.get("scene_id") and _parsed.get("reason") and not _parsed.get("conclusion"):
+            log.info(f"Skip posting scene recommendation result to issue {issue_number}")
+            return
+    except Exception:
+        pass
     # 过滤：优先提取结构化 conclusion，避免思考过程/JSON 块泄漏到 Issue 评论
     _conclusion = ""
     try:
@@ -2609,7 +2604,7 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
 
 
 def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, parent_issue_num: str,
-                                        result_text: str, bot_token: str):
+                                        result_text: str, bot_token: str, repo_key: str = ""):
     """子任务完成后，在父 Issue 评论登记完成情况。"""
     try:
         import urllib.request, json as _json
@@ -2618,17 +2613,23 @@ def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, pare
         _summary = (_out.get("conclusion", "") if _out else "") or result_text[:200]
         _comment = f"### \u5b50\u4efb\u52a1 #{sub_issue_num} \u5df2\u5b8c\u6210\n\n{_summary}\n\n---\n\u5b50\u4efb\u52a1\u6d41\u6c34\u7ebf\u5df2\u5168\u90e8\u5b8c\u6210\u3002"
         _comment += "\n<!-- grape-auto-comment -->"
-        _data = _json.dumps({"body": _comment}).encode("utf-8")
-        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
-        _req = urllib.request.Request(_url, data=_data,
-            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
-        urllib.request.urlopen(_req, timeout=15)
+        if _is_github_repo(repo_key):
+            from src.repo_key import split_owner_repo
+            _owner, _repo = split_owner_repo(repo_key)
+            _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
+        else:
+            _data = _json.dumps({"body": _comment}).encode("utf-8")
+            _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
+            _req = urllib.request.Request(_url, data=_data,
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(_req, timeout=15)
         log.info(f"Subtask #{sub_issue_num} completion posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post subtask completion failed: {e}")
 
 
-def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: list, bot_token: str):
+def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: list, bot_token: str,
+                            repo_key: str = ""):
     """所有子任务完成后，在父 Issue 发汇总报告。"""
     try:
         import urllib.request, json as _json
@@ -2641,11 +2642,16 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
         _lines.append(f"\n\u7236\u4efb\u52a1 #{parent_issue_num} \u7684\u6240\u6709\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\u3002")
         _comment = "\n".join(_lines)
         _comment += "\n<!-- grape-auto-comment -->"
-        _data = _json.dumps({"body": _comment}).encode("utf-8")
-        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
-        _req = urllib.request.Request(_url, data=_data,
-            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
-        urllib.request.urlopen(_req, timeout=15)
+        if _is_github_repo(repo_key):
+            from src.repo_key import split_owner_repo
+            _owner, _repo = split_owner_repo(repo_key)
+            _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
+        else:
+            _data = _json.dumps({"body": _comment}).encode("utf-8")
+            _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
+            _req = urllib.request.Request(_url, data=_data,
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(_req, timeout=15)
         log.info(f"All subtasks done summary posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post all subtasks done failed: {e}")
@@ -2674,7 +2680,7 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
     try:
         with _dl:
             c = _db.cursor()
-            c.execute("SELECT conversation_id FROM tasks WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
+            c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
                       (rk, issue_number))
             row = c.fetchone()
         if not row or not row[0]:

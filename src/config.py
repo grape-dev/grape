@@ -375,10 +375,13 @@ _OFFICIAL_AGENT_TYPES = ("vod", "issue", "coding", "qa", "sre", "chat")
 
 
 def resolve_official_skill_path(skill_name: str) -> str:
-    """官方技能 SKILL.md 绝对路径（skills/<agent_type>/<skill>/SKILL.md）。
+    """官方技能 SKILL.md 绝对路径。
 
-    依 skill-description.json 的 agent_type/path 映射解析（skill-description-sync.md），
-    兼容旧平铺布局（找不到 agent_type 目录时回退 skills/<skill>/SKILL.md）。
+    解析顺序：
+    1. skill-description.json 的 path 字段（3 层：agent_type/sub_scene/skill）
+    2. path 去掉中间层（2 层兼容：agent_type/skill）
+    3. skills/<agent_type>/<skill>/SKILL.md（按 agent_type 扫描）
+    4. skills/<skill>/SKILL.md（旧平铺兼容）
     返回空串表示未找到。
     """
     if not skill_name:
@@ -391,13 +394,22 @@ def resolve_official_skill_path(skill_name: str) -> str:
             _info = _data.get(skill_name) or {}
             _path = (_info.get("path") or "").strip().replace("/", os.sep)
             if _path:
+                # 1. 完整 path（3 层：agent_type/sub_scene/skill）
                 _cand = os.path.join(SKILLS_DIR, _path, "SKILL.md")
                 if os.path.isfile(_cand):
                     return _cand
+                # 2. 去掉中间层（2 层兼容：agent_type/skill）
+                _parts = _path.split(os.sep)
+                if len(_parts) >= 3:
+                    _cand2 = os.path.join(SKILLS_DIR, _parts[0], _parts[-1], "SKILL.md")
+                    if os.path.isfile(_cand2):
+                        return _cand2
+        # 3. 按 agent_type 扫描（2 层）
         for _at in _OFFICIAL_AGENT_TYPES:
             _cand = os.path.join(SKILLS_DIR, _at, skill_name, "SKILL.md")
             if os.path.isfile(_cand):
                 return _cand
+        # 4. 旧平铺（1 层）
         _legacy = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
         if os.path.isfile(_legacy):
             return _legacy
@@ -436,14 +448,15 @@ def replace_skill_dir_placeholders(prompt: str, base_dir: str = "") -> str:
 
 
 # ====== Agent 文件系统隔离（组件2：bwrap 锁）======
-# 默认开启（关 = 回滚，设 GRAPE_AGENT_SANDBOX=off）；bwrap 沙箱隔离 agent 子进程。
-# 启用后 agent 子进程套 bwrap：只挂「基础系统 + 引擎运行时 + 工位 cwd」，
-# 敏感路径（configs/、data/sessions.db、.env、/root、~/.grape、其他仓库/issue）天然不可见。
-GRAPE_AGENT_SANDBOX = os.environ.get("GRAPE_AGENT_SANDBOX", "on").lower() in ("1", "true", "on", "yes")
+# 默认关闭（开 = 设 GRAPE_AGENT_SANDBOX=on）；bwrap 沙箱隔离 agent 子进程。
+# 关闭原因：Issue #168 — bwrap 白名单不完整，DevStage worker 三引擎全部失败。
+# 白名单修复由 Issue #156 系统性解决后方可重新开启。
+GRAPE_AGENT_SANDBOX = os.environ.get("GRAPE_AGENT_SANDBOX", "off").lower() in ("1", "true", "on", "yes")
 
 # bwrap 白名单（只读）——基础系统：动态库 / CA 证书 / DNS / nsswitch / 基础命令。
 # 注意：/run 必须挂（/etc/resolv.conf 是 symlink → /run/systemd/resolve/stub-resolv.conf，
 # 缺 /run 则沙箱内 DNS 解析失败、出网全 000）。绝对不放行 configs/、data/、WORKSPACE 其他仓库、/root、~/.grape 等敏感/越界路径。
+# /etc 整体挂载（含 resolv.conf / hosts / ssl 证书等基础配置）。
 BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/run")
 
 # bwrap 白名单（只读）——引擎运行时，按后端名展开；二进制 + 配置 + 运行时（~ 由 sandbox 模块展开）。
@@ -456,8 +469,8 @@ BWRAP_RO_ENGINE = {
     "opencode": ("~/.nvm", "~/.config/opencode", "~/.cache", "~/.opencode"),
     "codearts": ("~/.codeartsdoer", "~/.nvm", "~/.local", "~/.cache"),
     "hermes": ("~/.local",),
-    # codex: 二进制 /usr/local/bin/codex 和 node_modules 已在 COMMON(/usr/local) 覆盖；
-    # 系统级 Node.js 也在 /usr/local 或 /usr/bin，无需额外 RO。
+    # codex: 二进制 /usr/local/bin/codex 已在 COMMON(/usr/local) 覆盖。
+    # ~/.codex 和 ~/.cache 在 BWRAP_RW_ENGINE 中 rw 挂载（需写 sessions/logs/cache）。
 }
 
 # bwrap 白名单（读写）——引擎缓存；hermes overlay 由 sandbox 模块按 md5(cwd) 动态计算绑定。
@@ -473,3 +486,10 @@ BWRAP_RW_ENGINE = {
     # codex: 运行时写 ~/.codex（sqlite/sessions/logs/history）+ ~/.cache（缓存）
     "codex": ("~/.codex", "~/.cache"),
 }
+
+
+
+
+# ===== Admin Console =====
+ADMIN_CONSOLE_URL = os.environ.get("ADMIN_CONSOLE_URL", "").rstrip("/")
+ADMIN_BETA_APPLY_API_KEY = os.environ.get("ADMIN_BETA_APPLY_API_KEY", "")

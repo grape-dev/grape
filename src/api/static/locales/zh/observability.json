@@ -116,6 +116,7 @@
   "cpu": "CPU",
   "mem": "内存",
   "disk": "磁盘",
+  "bandwidth": "带宽",
   "worker_id": "Worker #{{id}}",
   "idle": "空闲",
   "busy": "繁忙",

@@ -1,5 +1,26 @@
-// ====== 任务中心（Account ▸ 任务中心）======
+// ====== 需求中心（Account ▸ 需求中心 / Issues Center）======
 // 方案 B：列表工作流风（左列表 + 右详情面板）
+
+// 事件时间友好格式：转为本地时间，1小时内显示"X分钟前"，1天内显示"X小时前"，超过1天显示"MM-DD HH:mm"
+function _fmtEventTime(utcStr) {
+  if (!utcStr) return '';
+  var local = fmtLocalTime(utcStr);
+  if (!local) return utcStr;
+  var d = new Date(local.replace(' ', 'T'));
+  if (isNaN(d.getTime())) return local;
+  var now = Date.now();
+  var diff = now - d.getTime();
+  if (diff < 0) diff = 0;
+  var mins = Math.floor(diff / 60000);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return mins + '分钟前';
+  var hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + '小时前';
+  // 超过1天：显示 MM-DD HH:mm
+  var pad = function(n) { return String(n).padStart(2, '0'); };
+  return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
 let _tasksAll = [];           // 全部任务缓存
 let _taskSel = null;          // 选中的任务
 let _taskQuery = '';          // 搜索关键字
@@ -98,6 +119,7 @@ function renderTasks() {
   if (!el) return;
   _taskSel = null;   // 进入页面重置选中（避免切换 repo 后详情残留旧仓库任务）
   _taskFilterPopoverOpen = false;
+  window._pendingTaskDetailId = null;  // Issue #175: 清理残留，防止意外跳详情
   el.innerHTML = '<div class="loading">' + I18N.t('tasks.loading') + '</div>';
   loadTasks();
   _startScenePoll();
@@ -192,29 +214,75 @@ function loadTasks() {
   const repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
   _loadTasksSortPref(repoKey);
   // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
-  // Issue #72: 「仓库全部」视图调用 /tasks/repo/{owner}/{repo}（不限 user_id）
+  // 「仓库全部」视图统一走 /issues/{owner}/{repo}（归一，见 issues-list-merge-design.md）
   let apiUrl;
   if (_tasksViewMode === 'repo_all' && repo) {
-    apiUrl = '/tasks/repo/' + repo.owner + '/' + repo.name +
+    apiUrl = '/issues/' + repo.owner + '/' + repo.name +
              '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode;
     if (_taskFilterAssignees.length) {
       apiUrl += '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(','));
     }
   } else {
-    apiUrl = '/tasks/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
+    apiUrl = '/issues/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
              '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
              (_taskFilterAssignees.length ? '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '');
   }
   API.get(apiUrl).then(d => {
     if (window._currentView !== 'tasks') return;  // stale guard
-    _tasksAll = d.tasks || [];
-    // 选中项必须在当前过滤列表内（切换 repo 后旧选中失效）
-    if (_taskSel && !_tasksAll.some(t => t.id === _taskSel.id)) _taskSel = null;
+    _tasksAll = d.issues || d.tasks || [];
+    // Issue #175: 刷新 _taskSel 指向新对象（旧引用的 status 等字段已过时）
+    if (_taskSel) {
+      var updated = _tasksAll.find(t => t.id === _taskSel.id);
+      _taskSel = updated || null;
+    }
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
-    _render();
+    // Issue #175: 有待打开详情时不先渲染列表，避免列表闪现后立刻被详情覆盖
+    var _openedDetail = false;  // 跟踪本次 loadTasks 是否打开了详情页
+    if (!window._pendingTaskDetailId && !window._pendingIssueNumber) {
+      _render();
+    } else {
+      // 跳过 _render() 时仍需更新 _tasksById 供 _openBoardDetail 使用
+      window._tasksById = {};
+      _tasksAll.forEach(t => { window._tasksById[t.id] = t; });
+    }
+    // Issue #166: 从场景详情页流水线跳转来时，按 issue_number 匹配并打开需求详情
+    if (window._pendingIssueNumber) {
+      var _pinNum = window._pendingIssueNumber;
+      window._pendingIssueNumber = null;
+      var _match = _tasksAll.find(function(t) { return String(t.issue_number) === _pinNum; });
+      if (_match) {
+        _openBoardDetail(_match.id);
+        _openedDetail = true;
+      } else if (window._taskDetailFromScene && window._taskDetailFromScene.latestSeq) {
+        var _seq = window._taskDetailFromScene.latestSeq;
+        window._taskDetailFromScene = null;
+        _render();  // 无匹配任务，渲染列表
+        app.nav('event', _seq);
+      } else {
+        window._taskDetailFromScene = null;
+        _render();  // 无匹配任务，渲染列表
+      }
+    }
+    // 从事件详情页返回时，自动打开对应任务详情
+    if (window._pendingTaskDetailId) {
+      var pid = window._pendingTaskDetailId;
+      window._pendingTaskDetailId = null;
+      if (window._tasksById && window._tasksById[pid]) {
+        _openBoardDetail(pid);
+        _openedDetail = true;
+      } else {
+        _render();  // 任务不存在了，渲染列表
+      }
+    } else if (!_openedDetail) {
+      // Issue #175: 普通列表刷新时清除详情页状态，防止 _withTaskLoading 误判在详情页。
+      // 安全前提：_openBoardDetail 进入详情页时会 clearInterval 停止轮询（L325），
+      // 所以轮询触发的 loadTasks 不会在详情页期间执行此清除。如未来改为详情页也保持轮询，需同步调整此处。
+      window._currentDetailTask = null;
+    }
   }).catch(e => {
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
     if (window._currentView !== 'tasks') return;  // stale guard
+    window._pendingTaskDetailId = null;  // Issue #175: 清理待打开详情（loadTasks 失败时不残留）
     el.innerHTML = '<div class="error">' + I18N.t('tasks.load_failed', {msg: e.message}) + '</div>';
   });
 }
@@ -273,15 +341,23 @@ window._openBoardDetail = function(taskId) {
   // 暂停轮询——防止详情页被 loadTasks() 覆盖
   if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
   // 先渲染基本详情，然后异步加载流水线
+  // Issue #166: 从场景详情页进入时，返回按钮回到场景详情页
+  var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
+  var _backAction = 'loadTasks()';
+  if (window._taskDetailFromScene) {
+    _backLabel = '← ' + (I18N.t('dashboard.scene_detail')||'场景详情');
+    _backAction = "window._taskDetailFromScene=null;window.history.back()";
+  }
   el.innerHTML = `
   <div style="padding:0;max-width:720px;margin:0 auto">
     <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
-      <button class="tsk-btn tsk-btn-ghost" onclick="loadTasks()" style="padding:6px 14px">← ${I18N.t('tasks.back_to_board')||'返回看板'}</button>
+      <button class="tsk-btn tsk-btn-ghost" onclick="${_backAction}" style="padding:6px 14px">${_backLabel}</button>
       <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, '/issues/' + t.issue_number)}','_blank')">${I18N.t('tasks.detail.view_issue')}</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('tasks.detail.go_conversation')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${t.id})">⎘ ${I18N.t('tasks.detail.copy_task')}</button>
       ${_renderTaskActionsInline(t)}
     </div>
     <div id="_boardDetailContent">${_detailHtml(t)}</div>
@@ -289,8 +365,10 @@ window._openBoardDetail = function(taskId) {
       <div style="text-align:center;padding:20px;color:var(--t3,#86868b);font-size:13px">${I18N.t('tasks.loading')||'加载中...'}...</div>
     </div>
   </div>`;
+  // 异步加载附件列表（_detailHtml 渲染后 DOM 才有 _taskAttachmentsList）
+  _loadTaskAttachments(t.id);
   // 异步加载流水线信息
-  API.get('/tasks/' + taskId + '/pipeline').then(function(data) {
+  API.get('/issues/' + taskId + '/pipeline').then(function(data) {
     _renderPipelineSection(data);
   }).catch(function() {
     document.getElementById('_boardPipelineSection').innerHTML = '';
@@ -317,8 +395,15 @@ window._jumpToPipeline = function(nodeId) {
 // 点击流水线节点 → 跳转到该节点最新事件详情页
 window._jumpToNodeEvent = function(seq) {
   if (!seq) { console.warn('jumpToNodeEvent: no seq'); return; }
-  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
+  // Issue #166: 清除场景来源标记，避免从事件页返回任务详情时错误回退到场景页
+  window._taskDetailFromScene = null;
+  // 存储来源任务上下文，供事件详情页返回使用
   const t = window._currentDetailTask;
+  // 始终赋值（无任务时置 null），避免非任务来源进入事件页时残留旧标志
+  window._eventFromTask = (t && t.id) ? { taskId: t.id } : null;
+  // 标记本次进入事件页来自任务详情，供 app.nav('event') 路由入口识别
+  window._eventNavFromTask = true;
+  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
   if (t && t.repo_key) {
     const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
     const parts = repoKey.split('/');
@@ -341,7 +426,9 @@ window._jumpToPipePage = function() {
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
   localStorage.setItem('currentRepo', JSON.stringify(repoObj));
   if (typeof app !== 'undefined' && app.nav) {
-    app.nav('pipe');
+    // 传递 issue_number 让流水线页高亮对应任务
+    var issueNum = t.issue_number || '';
+    app.nav('pipe', issueNum ? String(issueNum) : undefined);
   }
 };
 
@@ -367,36 +454,39 @@ function _renderPipelineSection(data) {
   const _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px';
   const _cardTitle = 'font-size:12px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-family:-apple-system,BlinkMacSystemFont,sans-serif';
   let html = `<div style="${_cardStyle};cursor:pointer" onclick="_jumpToPipePage()">`;
-  // 卡片标题：流水线 + 场景名 + 当前状态
-  const _stageStatusMap = {vod:'VOD分析中',issue:'需求处理中',coding:'编码中',qa:'测试中',sre:'部署中',pending_review:'待审核',done:'已完成','':'待启动'};
-  const _stageStatusText = _stageStatusMap[data.current_stage] || data.current_stage || '待启动';
-  const _stageStatusColor = data.current_stage === 'done' ? '#34c759' : data.current_stage === 'pending_review' ? '#10b981' : ['#vod','#issue','#coding','#qa','#sre'].includes('#'+data.current_stage) ? '#3b82f6' : '#86868b';
-  html += `<div style="${_cardTitle};display:flex;align-items:center;justify-content:space-between">`;
-  html += `<span>${I18N.t('tasks.pipeline_scene')||'流水线'} · ${data.scene_name || ''}</span>`;
-  html += `<span style="font-size:10px;font-weight:600;color:${_stageStatusColor};background:${_stageStatusColor}15;border-radius:4px;padding:2px 8px;text-transform:none;letter-spacing:0">${_stageStatusText}</span>`;
+  // 卡片标题：流水线 + 场景名
+  html += `<div style="${_cardTitle}">`;
+  html += `<span>${I18N.t('tasks.pipeline_scene')||'流水线'}</span>`;
   html += `</div>`;
   // 流水线节点进度条
   if (nodes.length > 0) {
     html += '<div style="display:flex;align-items:center;gap:0;margin-bottom:16px;padding:10px;background:rgba(0,0,0,.02);border-radius:10px">';
     nodes.forEach(function(n, i) {
-      var ns = n.node_status || 'pending';
-      var col = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : '#86868b';
-      var bg = ns === 'completed' ? '#34c759' : ns === 'current' ? '#3b82f6' : 'rgba(0,0,0,.06)';
-      var isCurrent = ns === 'current';
-      var isCompleted = ns === 'completed';
+      var ns = n.node_status;
+      // 兼容数字状态码（0=pending,1=running,2=completed,3=failed,4=cancelled,5=skipped）和旧字符串
+      var isCompleted = ns === 'completed' || ns === 2;
+      var isCurrent = ns === 'current' || ns === 1;
+      var isFailed = ns === 'failed' || ns === 3;
+      var isCancelled = ns === 'cancelled' || ns === 4;
+      var isSkipped = ns === 'skipped' || ns === 5;
+      var col = isCompleted ? '#34c759' : isCurrent ? '#0071e3' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : '#86868b';
+      var bg = isCompleted ? '#34c759' : isCurrent ? '#0071e3' : isFailed ? '#ff3b30' : isCancelled ? '#86868b' : isSkipped ? '#c7c7cc' : 'rgba(0,0,0,.06)';
       var pulseStyle = isCurrent ? ';animation:grapePulse 1.2s ease-in-out infinite' : '';
-      var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #3b82f6;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
+      var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #0071e3;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
       var innerStyle = isCurrent ? ';position:relative' : '';
       // 节点点击：有事件 seq 则跳转事件详情，否则跳转流水线页面（阻止冒泡到卡片）
       var nodeSeq = (n.latest_event && n.latest_event.seq) || '';
       var nodeClick = (isCurrent || isCompleted) ? (nodeSeq ? ` onclick="event.stopPropagation();_jumpToNodeEvent(${nodeSeq})"` : ` onclick="event.stopPropagation();_jumpToPipePage()"`) : '';
       var nodeCursor = (isCurrent || isCompleted) ? ';cursor:pointer' : '';
+      var nodeIcon = isCompleted ? '✓' : isFailed ? '✕' : isCancelled ? '⊘' : isSkipped ? '–' : (i+1);
       html += `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0${nodeCursor}"${nodeClick}>`;
-      html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${isCompleted?'✓':i+1}</div>`;
+      html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${nodeIcon}</div>`;
       html += `<span style="font-size:9px;color:${col};font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${n.name||n.id||''}</span>`;
       html += `</div>`;
       if (i < nodes.length - 1) {
-        var lineCol = (nodes[i+1].node_status === 'completed' || ns === 'completed') ? '#34c759' : 'rgba(0,0,0,.1)';
+        var nextNs = nodes[i+1].node_status;
+        var nextCompleted = nextNs === 'completed' || nextNs === 2;
+        var lineCol = (nextCompleted || isCompleted) ? '#34c759' : 'rgba(0,0,0,.1)';
         html += `<div style="height:2px;flex:0 0 14px;background:${lineCol};border-radius:1px;margin-top:-12px"></div>`;
       }
     });
@@ -410,15 +500,18 @@ function _renderPipelineSection(data) {
       var isLast = i === events.length - 1;
       var statusCol = e.status === 'completed' ? '#34c759' : e.status === 'failed' ? '#ef4444' : e.status === 'cancelled' ? '#86868b' : '#3b82f6';
       var statusIcon = e.status === 'completed' ? '✓' : e.status === 'failed' ? '✕' : e.status === 'cancelled' ? '○' : '●';
-      html += `<div style="display:flex;gap:10px;padding-bottom:${isLast?'0':'10px'}">`;
+      var evSeq = e.seq || '';
+      var evClick = evSeq ? ' onclick="event.stopPropagation();_jumpToNodeEvent(' + evSeq + ')"' : '';
+      var evCursor = evSeq ? ';cursor:pointer' : '';
+      html += `<div style="display:flex;gap:10px;padding-bottom:${isLast?'0':'10px'};border-radius:8px;transition:background .15s"${evClick} onmouseover="this.style.background='rgba(0,0,0,.03)'" onmouseout="this.style.background='transparent'">`;
       html += `<div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">`;
       html += `<div style="width:18px;height:18px;border-radius:50%;background:${statusCol}15;display:flex;align-items:center;justify-content:center;font-size:9px;color:${statusCol};font-weight:600">${statusIcon}</div>`;
       if (!isLast) html += `<div style="width:2px;flex:1;background:rgba(0,0,0,.08);margin-top:2px;min-height:16px"></div>`;
       html += `</div>`;
-      html += `<div style="flex:1;min-width:0;padding-top:1px">`;
+      html += `<div style="flex:1;min-width:0;padding-top:1px${evCursor}">`;
       html += `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">`;
       html += `<span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f);font-family:-apple-system,BlinkMacSystemFont,sans-serif">${e.agent_type || e.event_type || ''}</span>`;
-      html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${(e.created_at||'').substring(5,16)}</span>`;
+      html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${_fmtEventTime(e.created_at)}</span>`;
       html += `</div>`;
       if (e.title) html += `<div style="font-size:10px;color:var(--t2,#3a3a3c);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.title}</div>`;
       if (e.summary) html += `<div style="font-size:9px;color:var(--t3,#86868b);margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${e.summary}</div>`;
@@ -486,7 +579,7 @@ function _renderBoard(filtered) {
     // 卡片容器：独立垂直滚动
     html += `<div style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
     if (list.length === 0) {
-      html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无任务'}</div>`;
+      html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无需求'}</div>`;
     } else {
       list.forEach(t => {
         const _ms = _mapStatus(t);
@@ -543,7 +636,6 @@ function _render() {
   const _statusOpts = [
     {k:'pending', lbl: I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g,'') : '待处理'},
     {k:'in_progress', lbl: I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g,'') : '处理中'},
-    {k:'awaiting_input', lbl: I18N.t('tasks.status.tag_awaiting_input')||'待澄清'},
     {k:'pending_review', lbl: I18N.t('tasks.status.tag_pending_review')||'待审核'},
     {k:'done', lbl: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成'},
     {k:'cancelled', lbl: I18N.t('tasks.status.tag_cancelled')||'已取消'},
@@ -685,7 +777,7 @@ function _render() {
       <h1>${I18N.t('tasks.page_title')}</h1>
       <div id="deployLinkBar" style="margin-top:4px"></div>
       <div style="display:flex;gap:0;margin-top:8px;border-bottom:0.5px solid var(--b,#e8e8ed)">
-        <button class="tsk-tab${_tasksViewMode==='mine'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('mine')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='mine'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='mine'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='mine'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_mine')||'我的任务'}</button>
+        <button class="tsk-tab${_tasksViewMode==='mine'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('mine')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='mine'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='mine'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='mine'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_mine')||'我的需求'}</button>
         <button class="tsk-tab${_tasksViewMode==='repo_all'?' tsk-tab-act':''}" onclick="_switchTasksViewMode('repo_all')" style="border:none;border-bottom:2px solid ${_tasksViewMode==='repo_all'?'#0071e3':'transparent'};border-radius:0;padding:6px 16px;font-size:13px;font-weight:600;color:${_tasksViewMode==='repo_all'?'#fff':'#3a3a3c'};background:${_tasksViewMode==='repo_all'?'#0071e3':'transparent'};cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${I18N.t('tasks.view_repo_all')||'仓库全部'}</button>
       </div>
       <div class="tsk-controls">
@@ -729,13 +821,13 @@ function _render() {
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
       <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
-      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('tasks.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('tasks.detail.go_conversation')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
+      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('tasks.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('tasks.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('tasks.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
 
   if (_taskFilterPopoverOpen) _applyFilterPopoverState();
 
-  // 加载部署 URL 到任务中心顶部
+  // 加载部署 URL 到需求中心顶部
   _loadDeployLink();
 
   // 建立 id → task 映射供行点击
@@ -814,7 +906,7 @@ function _detailHtml(t) {
   return `
     <!-- 任务详情卡片（统一） -->
     <div style="${_cardStyle}position:relative">
-      <div style="${_cardTitle}">${I18N.t('tasks.detail_title')||'任务详情'}</div>
+      <div style="${_cardTitle}">${I18N.t('tasks.detail_title')||'需求详情'}</div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.status')}</span><b style="${_valueStyle};color:${isDone?'#34c759':isCancelled?'#86868b':isProc?'#3b82f6':'#86868b'}">${tagText}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.task_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
@@ -826,7 +918,145 @@ function _detailHtml(t) {
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.created_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
       ${t.completed_at ? `<div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.completed_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
       ${t.task_description ? `<div style="${_rowStyle};border-bottom:none;flex-direction:column;align-items:flex-start"><span style="${_labelStyle};margin-bottom:4px">${I18N.t('tasks.detail.no_description')}</span><div style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.5;white-space:pre-wrap;width:100%">${t.task_description}</div></div>` : ''}
+    </div>
+    <div style="${_cardStyle}">
+      <div style="${_cardTitle}">附件</div>
+      <div id="_taskAttachmentsList" style="min-height:30px"><div style="font-size:12px;color:var(--t3,#86868b)">加载中...</div></div>
+      ${t.status === 'active' ? `<div style="display:flex;gap:6px;margin-top:10px;align-items:center">
+        <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          上传附件
+          <input type="file" style="display:none" onchange="_onTaskAttachSelect(this,${t.id})">
+        </label>
+      </div>` : ''}
     </div>`;
+}
+
+function _loadTaskAttachments(taskId) {
+  API.get('/issues/' + taskId + '/attachments').then(function(data) {
+    var list = document.getElementById('_taskAttachmentsList');
+    if (!list) return;
+    var atts = data.attachments || [];
+    if (atts.length === 0) {
+      list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">暂无附件</div>';
+      return;
+    }
+    list.innerHTML = atts.map(function(a) {
+      var del = '<button onclick="_deleteTaskAttach(' + taskId + ',\'' + a.filename + '\')" style="margin-left:6px;font-size:11px;color:#ff3b30;background:none;border:none;cursor:pointer;padding:2px 4px">删除</button>';
+      if (a.is_image) {
+        return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
+          + '<img src="' + a.url + '" style="width:32px;height:32px;object-fit:cover;border-radius:6px;margin-right:8px">'
+          + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
+          + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
+          + del + '</div>';
+      }
+      return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
+        + '<span style="margin-right:8px">📎</span>'
+        + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
+        + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
+        + del + '</div>';
+    }).join('');
+  }).catch(function() {
+    var list = document.getElementById('_taskAttachmentsList');
+    if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">加载失败</div>';
+  });
+}
+
+function _formatSize(bytes) {
+  if (bytes < 1024) return bytes + 'B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + 'KB';
+  return (bytes/1024/1024).toFixed(1) + 'MB';
+}
+
+function _onTaskAttachSelect(fileInput, taskId) {
+  if (!fileInput.files || !fileInput.files[0]) return;
+  var formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  var list = document.getElementById('_taskAttachmentsList');
+  if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">上传中...</div>';
+  fetch('/api/issues/' + taskId + '/attachments', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+    body: formData
+  }).then(function(r) { return r.json(); }).then(function() {
+    _loadTaskAttachments(taskId);
+  }).catch(function(e) {
+    if (list) list.innerHTML = '<div style="font-size:12px;color:#ff3b30">上传失败: ' + e.message + '</div>';
+    _loadTaskAttachments(taskId);
+  });
+  fileInput.value = '';
+}
+
+function _deleteTaskAttach(taskId, filename) {
+  if (!confirm('确认删除附件？')) return;
+  // Issue #175: 走 API.js 获得超时保护
+  API.del('/issues/' + taskId + '/attachments/' + filename).then(function() {
+    _loadTaskAttachments(taskId);
+  }).catch(function(e) {
+    if (e && e.name === 'AbortError' && e.silent) return;
+    app.showToast(I18N.t('tasks.operation_failed', {msg: (e && e.detail && e.detail.message || e && e.message || String(e))}));
+  });
+}
+
+// ===== 创建弹窗附件上传 =====
+let _createAttachments = [];
+
+function _onCreateAttachSelect(fileInput) {
+  if (!fileInput.files || !fileInput.files[0]) return;
+  var repo = app.currentRepo();
+  var repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
+  var file = fileInput.files[0];
+  var formData = new FormData();
+  formData.append('file', file);
+  var container = document.getElementById('tcCreateAttachments');
+  var loading = document.createElement('div');
+  loading.style.cssText = 'font-size:11px;color:#888;padding:4px 8px;background:rgba(0,113,227,.06);border-radius:6px';
+  loading.textContent = '上传中...';
+  container.appendChild(loading);
+  fetch('/api/issues/attachments/pre-upload?repo_key=' + encodeURIComponent(repoKey), {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+    body: formData
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    loading.remove();
+    if (d.error) { alert('上传失败: ' + d.error); return; }
+    _createAttachments.push({filename: d.filename, safe_name: d.safe_name, size: d.size, url: d.url});
+    _renderCreateAttachments();
+  }).catch(function(e) {
+    loading.remove();
+    alert('上传失败: ' + e.message);
+  });
+  fileInput.value = '';
+}
+
+function _renderCreateAttachments() {
+  var container = document.getElementById('tcCreateAttachments');
+  if (!container) return;
+  if (_createAttachments.length === 0) { container.innerHTML = ''; return; }
+  container.innerHTML = _createAttachments.map(function(a, i) {
+    return '<div style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;background:rgba(0,113,227,.06);border-radius:6px;font-size:11px">'
+      + '<span>📎 ' + a.filename + '</span>'
+      + '<span style="color:#888">' + _formatSize(a.size) + '</span>'
+      + '<button onclick="_removeCreateAttach(' + i + ')" style="margin-left:2px;color:#ff3b30;background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px">✕</button>'
+      + '</div>';
+  }).join('');
+}
+
+function _removeCreateAttach(idx) {
+  var a = _createAttachments[idx];
+  if (!a) return;
+  var repo = app.currentRepo();
+  var repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
+  fetch('/api/issues/attachments/pre-upload/' + a.safe_name + '?repo_key=' + encodeURIComponent(repoKey), {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
+  }).then(function() {
+    _createAttachments.splice(idx, 1);
+    _renderCreateAttachments();
+  }).catch(function() {
+    _createAttachments.splice(idx, 1);
+    _renderCreateAttachments();
+  });
 }
 
 function _renderTaskActionsInline(t) {
@@ -883,15 +1113,57 @@ window._grapeConfirm = function(opts, event) {
   overlay.onclick = function(e) { if (e.target === overlay) _close(); };
 };
 
+// Issue #175 v3: 遮罩整个 #pageContent，成功后保持详情页视图，超时/错误自动恢复
+function _withTaskLoading(taskId, apiCall, successMsg, errorFn) {
+  var pc = document.getElementById('pageContent');
+  var overlay = null;
+  if (pc) {
+    overlay = document.createElement('div');
+    // position:fixed 覆盖全屏（不受可滚动容器的 overflow-y:auto 限制）
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,.7);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:9998';
+    var spinner = document.createElement('div');
+    spinner.style.cssText = 'width:24px;height:24px;border:3px solid var(--b,rgba(0,0,0,.1));border-top-color:#0071e3;border-radius:50%;animation:_grapeSpin .7s linear infinite';
+    // 注入 spinner 动画（仅一次）
+    if (!document.getElementById('_grapeSpinCSS')) {
+      var style = document.createElement('style');
+      style.id = '_grapeSpinCSS';
+      style.textContent = '@keyframes _grapeSpin{to{transform:rotate(360deg)}}';
+      document.head.appendChild(style);
+    }
+    var text = document.createElement('div');
+    text.style.cssText = 'font-size:14px;font-weight:500;color:var(--t3,#86868b)';
+    text.textContent = I18N.t('tasks.processing');
+    overlay.appendChild(spinner);
+    overlay.appendChild(text);
+    pc.appendChild(overlay);
+  }
+  apiCall().then(function() {
+    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return; }  // 导航离开不弹 toast
+    if (overlay) overlay.remove();
+    app.showToast(successMsg);
+    if (taskId && window._currentDetailTask) window._pendingTaskDetailId = taskId;
+    loadTasks();
+  }).catch(function(e) {
+    if (e && e.name === 'AbortError' && e.silent) { if (overlay) overlay.remove(); return; }  // 导航离开时静默
+    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return; }  // 导航离开不弹 toast
+    if (overlay) overlay.remove();
+    app.showToast(errorFn(e));
+    loadTasks();  // 超时或错误后刷新页面保证可用
+  });
+}
+
 window.confirmTaskDone = function(taskId, event) {
   _grapeConfirm({
     title: I18N.t('tasks.confirm_done'),
     message: I18N.t('tasks.confirm_done_message'),
     confirmText: I18N.t('tasks.confirm_done'),
     onConfirm: function() {
-      API.post('/tasks/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}).then(() => {
-        app.showToast(I18N.t('tasks.task_done_toast'));
-      }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
+      _withTaskLoading(
+        taskId,
+        function() { return API.post('/issues/' + taskId + '/confirm-done', {confirmation: 'user_confirmed'}); },
+        I18N.t('tasks.task_done_toast'),
+        function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
+      );
     }
   }, event);
 };
@@ -903,17 +1175,23 @@ window.cancelTask = function(taskId, event) {
     confirmText: I18N.t('tasks.cancel_task'),
     danger: true,
     onConfirm: function() {
-      API.post('/tasks/' + taskId + '/cancel').then(() => {
-        app.showToast(I18N.t('tasks.task_cancelled_toast'));
-      }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
+      _withTaskLoading(
+        taskId,
+        function() { return API.post('/issues/' + taskId + '/cancel'); },
+        I18N.t('tasks.task_cancelled_toast'),
+        function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
+      );
     }
   }, event);
 };
 
 window.resumeTask = function(taskId) {
-  API.post('/tasks/' + taskId + '/resume').then(() => {
-    app.showToast(I18N.t('tasks.task_resumed_toast'));
-  }).catch(e => app.showToast(I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)})));
+  _withTaskLoading(
+    taskId,
+    function() { return API.post('/issues/' + taskId + '/resume'); },
+    I18N.t('tasks.task_resumed_toast'),
+    function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
+  );
 };
 
 function openTaskConversation(t) {
@@ -925,43 +1203,68 @@ function openTaskConversation(t) {
   const param = issueNum && repoKey ? 'issue:' + issueNum + ':' + repoKey : (t && t.conversation_id || undefined);
   const go = () => app.nav('chat', param);
   if (t && t.id && t.status === 'active') {
-    API.post('/tasks/' + t.id + '/start').then(d => {
+    // Issue #175: 给按钮加 loading 反馈，防止用户以为没点到反复点击
+    var btn = document.querySelector('[onclick*="openTaskConversation(' + t.id + ')"]');
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+    var _restoreBtn = function() { if (btn) { btn.disabled = false; btn.style.opacity = '1'; } };
+    API.post('/issues/' + t.id + '/start').then(d => {
       if (window._tasksById[t.id] && d && d.status) { window._tasksById[t.id].status = d.status; }
+      _restoreBtn();
       go();
-    }).catch(() => go());
+    }).catch(function() {
+      _restoreBtn();
+      go();
+    });
   } else {
     go();
   }
 }
 
-// ===== 新建任务（同步建 GitCode Issue + 既有流程建档；责任人 = General Settings Account）=====
+// ===== 新建需求（同步建 GitCode Issue + 既有流程建档；责任人 = General Settings Account）=====
 let _taskCreateModal = null;
 
 function openTaskCreateModal() {
   const repo = app.currentRepo();
   const defaultRepo = repo ? repo.fullName : '';
   if (_taskCreateModal) _taskCreateModal.remove();
+  _createAttachments = [];
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
   // 异步加载可用场景列表
   let _sceneOptions = '<option value="">' + I18N.t('tasks.create.scene_vod_auto') + '</option>';
 
+  // Issue #178: 创建人只读字段——当前登录用户
+  let _currentUsername = '';
+  try {
+    _currentUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || '';
+  } catch(e) { _currentUsername = ''; }
+
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
-    <h3 style="margin:0 0 14px;font-size:15px;color:#111">${I18N.t('tasks.create.modal_title')}</h3>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 14px"><h3 style="margin:0;font-size:15px;color:#111">${I18N.t('tasks.create.modal_title')}</h3><button onclick="document.getElementById('taskCreateOverlay').remove()" style="background:none;border:none;font-size:18px;color:#8d97a8;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#8d97a8'">✕</button></div>
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
       <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
-      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span> <span style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</span>
+      <div style="font-size:11px;color:#555">${I18N.t('tasks.create.creator_label')}<b>${esc(_currentUsername) || '—'}</b></div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</div>
         <input id="tcCreateTitle" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="${I18N.t('tasks.create.title_placeholder')}">
-      </label>
-      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span> <span style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</div>
         <textarea id="tcCreateDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="${I18N.t('tasks.create.desc_placeholder')}"></textarea>
-      </label>
+      </div>
       <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.scene_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.scene_hint')}</span>
         <select id="tcCreateScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
       </label>
       <div style="font-size:11px;color:#888">${I18N.t('tasks.create.assignee_hint')}</div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333">
+        <span style="font-size:12px">附件 <span style="font-size:11px;color:#888">（可选，创建 Issue 时同步附加）</span></span>
+        <div id="tcCreateAttachments" style="display:flex;flex-wrap:wrap;gap:6px;min-height:30px"></div>
+        <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3;width:fit-content" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          添加附件
+          <input type="file" style="display:none" onchange="_onCreateAttachSelect(this)">
+        </label>
+      </div>
       <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
@@ -987,10 +1290,7 @@ function openTaskCreateModal() {
     });
   }).catch(function(){});
 
-  // 点击遮罩空白处关闭
-  let _modalDownOnOverlay = false;
-  ov.addEventListener('mousedown', e => { _modalDownOnOverlay = (e.target === ov); });
-  ov.addEventListener('click', e => { if (e.target === ov && _modalDownOnOverlay) ov.remove(); });
+  // 点击遮罩空白处不关闭——防止误触丢失内容，通过右上角✕或取消按钮关闭
 }
 
 function createTaskSubmit() {
@@ -1004,15 +1304,20 @@ function createTaskSubmit() {
   if (!repoKey.trim()) { showErr(I18N.t('tasks.create.err_no_repo')); return; }
   if (!title.trim()) { showErr(I18N.t('tasks.create.err_no_title')); return; }
   if (!desc.trim()) { showErr(I18N.t('tasks.create.err_no_desc')); return; }
-  // 本地查重：同仓库同标题已存在 → 提示用户
-  var _dup = _tasksAll.filter(function(t) { return (t.title || '').trim() === title.trim(); });
-  if (_dup.length > 0) {
-    showErr(I18N.t('tasks.create.err_dup_title', {issue: '#' + (_dup[0].issue_number || _dup[0].id)}));
-    return;
-  }
+  // Issue #202: 移除本地标题重复阻断——允许提交同名需求。
   const btn = document.getElementById('tcSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.create.btn_creating'); }
-  API.post('/tasks/create', {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
+  // C2: /api/tasks/create 已废弃 → 统一走 POST /api/issues/{owner}/{repo}（对外唯一创建入口）
+  var _owner = repo ? (repo.owner || '') : '';
+  var _rname = repo ? (repo.name || '') : '';
+  if (!_owner || !_rname) {
+    var _p = String(repoKey).split('/');
+    _owner = _p[0] || '';
+    _rname = _p[1] || '';
+  }
+  API.post('/issues/' + encodeURIComponent(_owner) + '/' + encodeURIComponent(_rname),
+           {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId,
+            attachments: _createAttachments.map(function(a) { return a.safe_name; })})
     .then(d => {
       const ov = document.getElementById('taskCreateOverlay');
       if (ov) ov.remove();
@@ -1026,8 +1331,120 @@ function createTaskSubmit() {
     });
 }
 
+// ===== 复制需求（Issue #203：复用新建需求对话框结构，预填标题/内容/Issue 链接，选新流水线后创建并执行）=====
+let _taskCopyModal = null;
+
+function openTaskCopyModal(taskId) {
+  const t = window._tasksById[taskId] || window._currentDetailTask;
+  if (!t) return;
+  const repo = app.currentRepo();
+  const defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode):/, '');
+  if (_taskCopyModal) _taskCopyModal.remove();
+  _createAttachments = [];
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // 预填标题：原标题 + 副本后缀
+  var _prefillTitle = (t.title || '') + I18N.t('tasks.copy.title_suffix');
+
+  // 预填描述：原内容 + Issue Git 链接
+  var _issueUrl = _vcsUrl(t.repo_key, '/issues/' + t.issue_number);
+  var _origDesc = t.task_description || '';
+  var _prefillDesc = _origDesc;
+  if (_origDesc) _prefillDesc += '\n\n';
+  _prefillDesc += I18N.t('tasks.copy.issue_link_label') + ': ' + _issueUrl;
+
+  // 创建人只读字段——当前登录用户
+  let _currentUsername = '';
+  try {
+    _currentUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || '';
+  } catch(e) { _currentUsername = ''; }
+
+  let _sceneOptions = '<option value="">' + I18N.t('tasks.create.scene_vod_auto') + '</option>';
+
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 14px"><h3 style="margin:0;font-size:15px;color:#111">${I18N.t('tasks.copy.modal_title')}</h3><button onclick="document.getElementById('taskCopyOverlay').remove()" style="background:none;border:none;font-size:18px;color:#8d97a8;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#8d97a8'">✕</button></div>
+    <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+      <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
+      <div style="font-size:11px;color:#555">${I18N.t('tasks.create.creator_label')}<b>${esc(_currentUsername) || '—'}</b></div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</div>
+        <input id="tcCopyTitle" value="${esc(_prefillTitle)}" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="${I18N.t('tasks.create.title_placeholder')}">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</div>
+        <textarea id="tcCopyDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="${I18N.t('tasks.create.desc_placeholder')}">${esc(_prefillDesc)}</textarea>
+      </div>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.scene_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.scene_hint')}</span>
+        <select id="tcCopyScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
+      </label>
+      <div style="font-size:11px;color:#888">${I18N.t('tasks.create.assignee_hint')}</div>
+      <div id="tcCopyError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="tsk-btn tsk-btn-ghost" onclick="document.getElementById('taskCopyOverlay').remove()">${I18N.t('tasks.create.btn_cancel')}</button>
+      <button class="tsk-btn tsk-btn-primary" id="tcCopySubmitBtn" onclick="copyTaskSubmit()">${I18N.t('tasks.copy.btn_copy')}</button>
+    </div>
+  </div>`;
+  ov.id = 'taskCopyOverlay';
+  document.body.appendChild(ov);
+  _taskCopyModal = ov;
+
+  // 异步加载场景列表填充下拉框（带 repo 参数获取仓库级场景）
+  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
+    const sel = document.getElementById('tcCopyScene');
+    if (!sel) return;
+    const scenes = d.scenes || [];
+    scenes.forEach(function(s) {
+      const opt = document.createElement('option');
+      opt.value = s.id;
+      const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
+      opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
+      sel.appendChild(opt);
+    });
+  }).catch(function(){});
+
+  // 点击遮罩空白处不关闭——防止误触丢失内容，通过右上角✕或取消按钮关闭（与新建对话框一致）
+}
+
+function copyTaskSubmit() {
+  const repo = app.currentRepo();
+  const repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
+  const title = (document.getElementById('tcCopyTitle') || {}).value || '';
+  const desc = (document.getElementById('tcCopyDesc') || {}).value || '';
+  const sceneId = (document.getElementById('tcCopyScene') || {}).value || '';
+  const errEl = document.getElementById('tcCopyError');
+  const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
+  if (!repoKey.trim()) { showErr(I18N.t('tasks.create.err_no_repo')); return; }
+  if (!title.trim()) { showErr(I18N.t('tasks.copy.err_no_title')); return; }
+  if (!desc.trim()) { showErr(I18N.t('tasks.copy.err_no_desc')); return; }
+  const btn = document.getElementById('tcCopySubmitBtn');
+  if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.copy.btn_copying'); }
+  // 复用 POST /api/issues/{owner}/{repo} 创建入口（已支持 scene_id）
+  var _owner = repo ? (repo.owner || '') : '';
+  var _rname = repo ? (repo.name || '') : '';
+  if (!_owner || !_rname) {
+    var _p = String(repoKey).split('/');
+    _owner = _p[0] || '';
+    _rname = _p[1] || '';
+  }
+  API.post('/issues/' + encodeURIComponent(_owner) + '/' + encodeURIComponent(_rname),
+           {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId})
+    .then(d => {
+      const ov = document.getElementById('taskCopyOverlay');
+      if (ov) ov.remove();
+      app.showToast(I18N.t('tasks.copy.success_toast'));
+      loadTasks();
+    })
+    .catch(e => {
+      if (btn) { btn.disabled = false; btn.textContent = I18N.t('tasks.copy.btn_copy'); }
+      const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+      showErr(I18N.t('tasks.copy.err_create_failed', {msg: msg}));
+    });
+}
+
+// @deprecated 死代码——UI 无调用点。如需启用，catch 里的 alert 应改为 app.showToast。
 function changeTaskStatus(taskId, status) {
-  API.put('/tasks/' + taskId + '/status', {status: status})
+  API.put('/issues/' + taskId + '/status', {status: status})
     .then(() => loadTasks())
     .catch(e => {
       const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);

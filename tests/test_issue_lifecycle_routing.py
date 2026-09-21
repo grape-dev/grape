@@ -13,6 +13,7 @@ from src.api.event_pipeline import _resolve_issue_stage_agent
 def _clean():
     with db_lock:
         db.cursor().execute("DELETE FROM issue_state")
+        db.cursor().execute("DELETE FROM issue")
         db.cursor().execute("DELETE FROM events")
         db.cursor().execute("DELETE FROM event_skipped")
         db.cursor().execute("DELETE FROM agent_tasks")
@@ -20,6 +21,7 @@ def _clean():
     yield
     with db_lock:
         db.cursor().execute("DELETE FROM issue_state")
+        db.cursor().execute("DELETE FROM issue")
         db.cursor().execute("DELETE FROM events")
         db.cursor().execute("DELETE FROM event_skipped")
         db.cursor().execute("DELETE FROM agent_tasks")

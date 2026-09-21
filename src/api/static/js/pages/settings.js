@@ -311,9 +311,93 @@ function selectThemeMode(mode) {
   renderSettings('appearance');
 }
 
+// _langSwitching：语言切换全局互斥锁
+// 已知行为：加载期间用户导航跳转，锁会继续持有直到请求完成；新页面中语言按钮会临时不可点击。
+var _langSwitching = false;
+
 function selectLang(lang) {
-  if (lang === I18N.getLang()) return;
-  I18N.setLang(lang);
+  // 点击当前语言：如果包已完整加载则直接退出；如果部分包失败（_loadedLangs=false）则继续触发重试
+  if (lang === I18N.getLang() && I18N.isLangLoaded(lang)) return;
+  if (_langSwitching) return;  // 全局锁，防并发切换
+
+  _langSwitching = true;
+
+  // 判断是重试（当前语言但包未完整加载）还是切换
+  var isRetry = (lang === I18N.getLang() && !I18N.isLangLoaded(lang));
+  var isZh = I18N.getLang() === 'zh';
+
+  // 禁用两个语言按钮 + 文案变更（UI 层反馈，非互斥手段）
+  var buttons = document.querySelectorAll('[onclick^="selectLang"]');
+  var origTexts = [];
+  buttons.forEach(function(btn, i) {
+    origTexts[i] = btn.textContent;
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.style.cursor = 'wait';
+    btn.textContent = isRetry
+      ? (isZh ? '重新加载中…' : 'Reloading…')
+      : (isZh ? '切换中…' : 'Switching…');
+  });
+
+  function restoreButtons() {
+    buttons.forEach(function(btn, i) {
+      btn.disabled = false;
+      btn.style.opacity = '';
+      btn.style.cursor = '';
+      btn.textContent = origTexts[i];
+    });
+  }
+
+  // 全部失败时 _currentLang 未变更，I18N.t() 用旧语言取文案
+  // inline packs 覆盖 common.error/success（zh: '错误'/'成功', en: 'Error'/'Success'）
+  // 即使语言包未加载，inline packs 保证 Toast 文案可读
+
+  try {
+    I18N.setLang(lang).then(function(result) {
+      if (result.cached) {
+        // 缓存命中：setLang 已在内部完成状态变更 + rerender，旧按钮已被替换
+        // 不弹 Toast——缓存命中是秒级操作，用户不需要"成功"反馈
+      } else if (result.failed === 0) {
+        // 全部成功：_rerenderCurrentPage 已在 setLang 内同步完成 DOM 重建
+        if (typeof app !== 'undefined' && app.showToast) {
+          // 重试成功用不同文案，避免用户困惑"我没切换为什么弹切换成功"
+          app.showToast(isRetry
+            ? (isZh ? '语言包已重新加载' : 'Language packs reloaded')
+            : I18N.t('common.success'));
+        }
+      } else if (result.failed < result.total) {
+        // 部分成功：DOM 已重建，部分文案靠 t() fallback
+        if (typeof app !== 'undefined' && app.showToast) {
+          var curZh = I18N.getLang() === 'zh';
+          app.showToast(I18N.t('common.success') + ' (' + result.failed + '/' + result.total + (curZh ? ' 个加载失败)' : ' failed)'));
+        }
+      } else {
+        // 全部失败：setLang 未提交状态变更，_currentLang 仍为旧语言
+        // DOM 不重建，旧按钮仍禁用，必须手动恢复
+        // Toast 文案用 I18N.t()——此时 _currentLang 是旧语言，inline packs 保证文案可读
+        restoreButtons();
+        if (typeof app !== 'undefined' && app.showToast) {
+          app.showToast(I18N.t('common.error'));
+        }
+      }
+    }).catch(function(e) {
+      // setLang 自身代码异常（非 fetch 失败）
+      restoreButtons();
+      if (typeof app !== 'undefined' && app.showToast) {
+        app.showToast(I18N.t('common.error') + ': ' + (e && e.message ? e.message : ''));
+      }
+    }).finally(function() {
+      // Promise 完成后才释放全局锁——避免 fetch 飞行期间锁被提前释放
+      _langSwitching = false;
+    });
+  } catch(e) {
+    // setLang 同步异常（如 _updateUrlLang 抛出）
+    restoreButtons();
+    _langSwitching = false;
+    if (typeof app !== 'undefined' && app.showToast) {
+      app.showToast(I18N.t('common.error') + ': ' + (e && e.message ? e.message : ''));
+    }
+  }
 }
 
 // ── Pipeline mode toggle ──

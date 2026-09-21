@@ -150,7 +150,7 @@ class TestTranslateSql:
         assert "DEFAULT ('x')" in out
 
     def test_delete_not_in_same_table_wrapped(self):
-        sql = "DELETE FROM tasks WHERE id NOT IN (SELECT id FROM tasks WHERE status='active')"
+        sql = "DELETE FROM issue WHERE id NOT IN (SELECT id FROM issue WHERE status='active')"
         out = mc.translate_sql(sql)
         assert "DELETE FROM `tasks`" in out
         assert "AS __derived" in out

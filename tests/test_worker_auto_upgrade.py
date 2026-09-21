@@ -1,0 +1,286 @@
+"""Worker 自动升级测试（Issue #153）。
+
+覆盖：
+- 服务端心跳响应含 latest_version 字段
+- Worker 版本对比：落后时设置 pending_upgrade
+- Worker 版本一致时不触发升级
+- 待升级时等待 active_tasks 为空
+- 无活跃任务时触发升级
+- 升级失败后指数退避
+- latest_version 为空时跳过升级
+"""
+import asyncio
+import hashlib
+import os
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.runtime import agent as ra
+
+
+# ===== 服务端测试 =====
+
+def _make_token(name="CI-Upgrade-Worker"):
+    import secrets
+    token = "rta_" + secrets.token_urlsafe(32)
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO runtime_credentials (token_hash, name, scope) VALUES (?,?,?)",
+                  (hashlib.sha256(token.encode()).hexdigest(), name, "global"))
+        db.commit()
+    return token
+
+
+@pytest.fixture
+def _clean_db():
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.cursor().execute("DELETE FROM agent_tasks")
+        db.cursor().execute("DELETE FROM runtime_credentials")
+        db.cursor().execute("DELETE FROM agent_runtimes")
+        db.commit()
+    yield
+    with db_lock:
+        db.cursor().execute("DELETE FROM agent_tasks")
+        db.cursor().execute("DELETE FROM runtime_credentials")
+        db.cursor().execute("DELETE FROM agent_runtimes")
+        db.commit()
+
+
+class TestHeartbeatLatestVersion:
+    """服务端心跳响应应包含 latest_version 字段。"""
+
+    def test_heartbeat_response_contains_latest_version(self, _clean_db):
+        from fastapi.testclient import TestClient
+        from src.api.main import app
+        token = _make_token()
+        client = TestClient(app)
+        r = client.post("/api/runtime/heartbeat",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"runtime_ids": []})
+        assert r.status_code == 200
+        data = r.json()
+        assert "latest_version" in data
+        assert isinstance(data["latest_version"], str)
+
+
+# ===== Worker 端测试 =====
+
+class TestWorkerAutoUpgrade:
+    """Worker 自动升级逻辑测试。"""
+
+    @staticmethod
+    async def _drive(loop_coro, duration=0.25):
+        t = asyncio.ensure_future(loop_coro)
+        await asyncio.sleep(duration)
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    def test_version_mismatch_sets_pending_upgrade(self):
+        """版本不一致时触发 _perform_upgrade（无活跃任务时执行）。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = {
+            "status": "ok", "cancelled_tasks": [],
+            "latest_version": "git-newversion-w123-p456"
+        }
+        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
+            m_upgrade.assert_awaited()
+
+    def test_version_match_no_upgrade(self):
+        """版本一致时不触发升级。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = {
+            "status": "ok", "cancelled_tasks": [],
+            "latest_version": "git-sameversion-w123-p456"
+        }
+        with patch("src.runtime.agent._read_local_worker_version", return_value="git-sameversion-w123-p456"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
+            m_upgrade.assert_not_awaited()
+
+    def test_pending_upgrade_waits_for_active_tasks(self):
+        """有活跃任务时不执行升级。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = {
+            "status": "ok", "cancelled_tasks": [],
+            "latest_version": "git-newversion-w123-p456"
+        }
+        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4,
+                _test_active_tasks={"busy-tid": "busy-session"})))
+            m_upgrade.assert_not_awaited()
+
+    def test_empty_latest_version_skips_upgrade(self):
+        """latest_version 为空时跳过升级。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = {
+            "status": "ok", "cancelled_tasks": [],
+            "latest_version": ""
+        }
+        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
+            m_upgrade.assert_not_awaited()
+
+    def test_upgrade_failure_does_not_crash(self):
+        """升级失败后 worker 继续运行（不崩溃）。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = {
+            "status": "ok", "cancelled_tasks": [],
+            "latest_version": "git-newversion-w123-p456"
+        }
+        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+            try:
+                asyncio.run(self._drive(ra._run_loop(
+                    client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4),
+                    duration=0.3))
+            except Exception:
+                pytest.fail("Worker should not crash after upgrade failure")
+            m_upgrade.assert_awaited()
+
+    def test_upgrade_backoff_increases_wait(self):
+        """首次失败后第二次升级在退避期间不触发。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        _call_count = {"n": 0}
+        _hb_responses = [
+            {"status": "ok", "cancelled_tasks": [], "latest_version": "git-new-w123-p456"}
+        ] * 20
+
+        async def _fake_hb(*args, **kwargs):
+            return _hb_responses[min(_call_count["n"], len(_hb_responses) - 1)]
+
+        client.heartbeat.side_effect = _fake_hb
+        with patch("src.runtime.agent._read_local_worker_version", return_value="git-old-w111-p222"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d):
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.02, max_concurrent=4),
+                duration=0.2))
+            assert m_upgrade.await_count >= 1
+
+    def test_perform_upgrade_download_failure_returns_false(self):
+        """_perform_upgrade 下载失败时返回 False。"""
+        async def _run():
+            return await ra._perform_upgrade("http://invalid-server:99999", "rta_test")
+        result = asyncio.run(_run())
+        assert result is False
+
+    def test_perform_upgrade_missing_params_returns_false(self):
+        """_perform_upgrade server 或 token 为空时返回 False，不发起网络请求。"""
+        async def _run():
+            r1 = await ra._perform_upgrade("", "rta_test")
+            r2 = await ra._perform_upgrade("http://server", "")
+            return r1, r2
+        r1, r2 = asyncio.run(_run())
+        assert r1 is False
+        assert r2 is False
+
+    def test_perform_upgrade_success_returns_true(self):
+        """_perform_upgrade install-worker.sh rc=0 时返回 True（等待重启）。"""
+        async def _run():
+            with patch("asyncio.to_thread", new=AsyncMock(side_effect=[
+                MagicMock(returncode=0, stderr=""),  # curl download
+                MagicMock(returncode=0, stderr=""),  # bash install-worker.sh
+            ])), patch("tempfile.mkstemp", return_value=(999, "/tmp/fake_upgrade_test.sh")), \
+                 patch("os.close"), patch("os.unlink"), patch("os.path.exists", return_value=False):
+                return await ra._perform_upgrade("http://server", "rta_test")
+        result = asyncio.run(_run())
+        assert result is True
+
+    def test_perform_upgrade_install_failure_returns_false(self):
+        """_perform_upgrade install-worker.sh rc!=0 时返回 False。"""
+        async def _run():
+            with patch("asyncio.to_thread", new=AsyncMock(side_effect=[
+                MagicMock(returncode=0, stderr=""),  # curl download
+                MagicMock(returncode=1, stderr="install error"),  # bash install-worker.sh
+            ])), patch("tempfile.mkstemp", return_value=(999, "/tmp/fake_upgrade_test.sh")), \
+                 patch("os.close"), patch("os.unlink"), patch("os.path.exists", return_value=False):
+                return await ra._perform_upgrade("http://server", "rta_test")
+        result = asyncio.run(_run())
+        assert result is False
+
+    def test_heartbeat_none_skips_version_check(self):
+        """心跳失败（None）时不执行版本对比。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = None
+        client.reset_session = AsyncMock()
+        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+              patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])):
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4)))
+            m_upgrade.assert_not_awaited()
+
+
+class TestReadLocalWorkerVersion:
+    """_read_local_worker_version 路径选择测试（与 install-worker.sh 一致）。"""
+
+    def test_root_reads_etc_grape(self):
+        """root 模式读取 /etc/grape/worker.version。"""
+        with patch("src.runtime.agent.os.geteuid", return_value=0), \
+             patch("builtins.open", create=True) as m_open:
+            m_open.return_value.__enter__.return_value.read.return_value = "git-root-ver\n"
+            result = ra._read_local_worker_version()
+            assert "etc/grape/worker.version" in m_open.call_args[0][0]
+            assert result == "git-root-ver"
+
+    def test_non_root_reads_home_grape(self):
+        """非 root 模式读取 $HOME/.grape/worker.version。"""
+        with patch("src.runtime.agent.os.geteuid", return_value=1000), \
+             patch("src.runtime.agent.os.path.expanduser", return_value="/home/testuser"), \
+             patch("builtins.open", create=True) as m_open:
+            m_open.return_value.__enter__.return_value.read.return_value = "git-user-ver\n"
+            result = ra._read_local_worker_version()
+            assert ".grape/worker.version" in m_open.call_args[0][0]
+            assert result == "git-user-ver"
+
+    def test_root_mode_env_override(self):
+        """RUNTIME_ROOT_MODE=1 时读取 /etc/grape/worker.version（即使非 root）。"""
+        with patch.dict("os.environ", {"RUNTIME_ROOT_MODE": "1"}), \
+             patch("src.runtime.agent.os.geteuid", return_value=1000), \
+             patch("builtins.open", create=True) as m_open:
+            m_open.return_value.__enter__.return_value.read.return_value = "git-root-ver\n"
+            result = ra._read_local_worker_version()
+            assert "etc/grape/worker.version" in m_open.call_args[0][0]
+            assert result == "git-root-ver"
+
+    def test_missing_file_returns_empty(self):
+        """版本文件不存在时返回空字符串。"""
+        with patch("builtins.open", side_effect=FileNotFoundError):
+            result = ra._read_local_worker_version()
+            assert result == ""

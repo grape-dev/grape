@@ -47,7 +47,7 @@ _PROBE_COMMANDS = {
     "opencode": ["opencode", "run", "hello"],
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
-    "codex": ["codex", "exec", "--json", "--sandbox", "workspace-write", "hello"],
+    "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
     "cursor": ["cursor", "run", "hello"],
 }
 _PROBE_TIMEOUT = 30
@@ -192,7 +192,7 @@ def _collect_worker_metrics() -> dict:
     采集失败的字段保持 0.0 / 空字符串。
     CPU 使用两次调用的差值计算，首次调用返回 0.0（无基准）。
     """
-    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "load_avg": "", "spec": ""}
+    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "bandwidth_percent": 0.0, "load_avg": "", "spec": ""}
 
     # spec: CPU 核数 + 总内存（如 "4C8G"），首次采集后缓存
     if not hasattr(_collect_worker_metrics, "_spec"):
@@ -270,6 +270,38 @@ def _collect_worker_metrics() -> dict:
         with open("/proc/loadavg") as f:
             parts = f.read().split()
             metrics["load_avg"] = ",".join(parts[:3])
+    except Exception:
+        pass
+
+    # BANDWIDTH: 读 /proc/net/dev（标准库，不依赖 psutil）。两次采样差分算速率，
+    # 与配置阈值比较得出占用率（RUNTIME_BANDWIDTH_THRESHOLD_MBPS 默认 1000 Mbps）。
+    # 首次采样无基准返回 0.0（与 CPU 采集行为一致）。
+    try:
+        _now_bw = time.time()
+        _rx = _tx = 0
+        with open("/proc/net/dev") as f:
+            for _line in f:
+                if ":" not in _line:
+                    continue
+                _name, _rest = _line.split(":", 1)
+                _name = _name.strip()
+                if _name == "lo":
+                    continue
+                _f = _rest.split()
+                if len(_f) >= 9:
+                    _rx += int(_f[0])
+                    _tx += int(_f[8])
+        _bw_prev = getattr(_collect_worker_metrics, "_bw_prev", None)
+        if _bw_prev:
+            _pts, _pbytes = _bw_prev
+            _dt = _now_bw - _pts
+            _db = (_rx + _tx) - _pbytes
+            if _dt > 0 and _db >= 0:
+                _mbps = _db * 8 / _dt / 1e6
+                _thr = float(os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "1000"))
+                if _thr > 0:
+                    metrics["bandwidth_percent"] = round(min(_mbps / _thr * 100, 100.0), 1)
+        _collect_worker_metrics._bw_prev = (_now_bw, _rx + _tx)
     except Exception:
         pass
 
@@ -1122,6 +1154,11 @@ async def _execute_task(client, task, engine_name: str = ""):
             if not _os.path.exists(_global_json):  # 幂等
                 with open(_global_json, "w") as f:
                     json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
+            # 1b. 预写 config.json (codearts 26.8.8 getEffectivePermissions 实际读取路径)
+            _config_json = _os.path.join(_perm_dir, "config.json")
+            if not _os.path.exists(_config_json):  # 幂等
+                with open(_config_json, "w") as f:
+                    json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
             # 2. 预写 sandbox/config.json (network_policy=allow_all)
             _sandbox_dir = _os.path.join(_cli_data, "storage", "sandbox")
             _os.makedirs(_sandbox_dir, exist_ok=True)
@@ -1191,6 +1228,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
             user_token=user_token,
             agent_label=_agent_label,
+            repo_key=task.get("repo_key") or "",
         ):
             if evt_type == "done":
                 done = data
@@ -1267,7 +1305,7 @@ async def _reregister(client, installed, device_name, cli_version: str = "") -> 
 
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
                     engine_by_rid: dict | None = None, installed=None, device_name="",
-                    _test_execute=None, _test_active=None):
+                    _test_execute=None, _test_active=None, _test_active_tasks=None):
     """主循环：claim → 执行 → 回报，含心跳 + 自动重连自修复。
 
     自修复机制（三层防护，见 worker 自修复重连设计）：
@@ -1277,7 +1315,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     3. 网络中断恢复：连接错误计入心跳失败，触发重注册
     """
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
-    active_tasks = {}        # tid → sid 映射（task_id 去重 + sid 看门狗反查）
+    active_tasks = _test_active_tasks if _test_active_tasks is not None else {}  # tid → sid 映射（task_id 去重 + sid 看门狗反查）
     active_task_objs = {}    # tid → task dict（sid 看门狗杀进程需要 task 的 cwd/backend 信息）
     _requeue_cooldown = {}   # sid → 上次 requeue 时间戳，60s 冷却防 claim→requeue 空转死循环
     _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
@@ -1291,6 +1329,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
     last_reregister = asyncio.get_running_loop().time()
     engine_by_rid = engine_by_rid or {}
+
+    # 自动升级状态
+    pending_upgrade = False
+    upgrade_target_version = ""
+    upgrade_fail_count = 0
+    last_upgrade_attempt = 0.0
+    _local_ver_cached = ""
+    UPGRADE_BACKOFF_BASE = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_BASE", "60"))
+    UPGRADE_BACKOFF_MAX = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_MAX", "1800"))
 
     while True:
         # ---- 定期重注册（防 id 静默失效）----
@@ -1437,8 +1484,20 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         elif _result is None:
                             await client.fail(_tid, f"task timed out after {task_timeout}s")
                         elif isinstance(_result, dict) and "exit_code" in _result:
-                            await client.complete(_tid, _result.get("text", ""), _result.get("exit_code", 0),
-                                                  session_id=_result.get("oc_session_id", ""), work_dir=t.get("cwd") or ".")
+                            _exit = _result.get("exit_code", 0)
+                            _text = _result.get("text", "")
+                            _errs = _result.get("errors") or []
+                            # exit_code=0 + 有文本 → 成功（含中间 error 告警）
+                            # exit_code=0 + 无文本 + 有 error → 失败（引擎吞错如 IAM 报错）
+                            # exit_code!=0 + 无文本 → 失败（崩溃/超时/启动失败）
+                            # exit_code!=0 + 有文本 → 交服务端 complete_task 判断（有结构化输出覆盖逻辑）
+                            if _exit == 0 and not _text and _errs:
+                                await client.fail(_tid, f"engine errors: {'; '.join(_errs[:3])}")
+                            elif _exit != 0 and not _text:
+                                await client.fail(_tid, f"engine exit_code={_exit}, errors: {'; '.join(_errs[:3])}")
+                            else:
+                                await client.complete(_tid, _text, _exit,
+                                                      session_id=_result.get("oc_session_id", ""), work_dir=t.get("cwd") or ".")
                         else:
                             await client.fail(_tid, "no done event")
                     except Exception as _ce:
@@ -1496,6 +1555,51 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
                     await asyncio.sleep(backoff)
 
+            # ---- 版本对比 + 自动升级 ----
+            if ok is not None and ok.get("status") == "ok":
+                _latest = ok.get("latest_version", "")
+                if not _local_ver_cached:
+                    _local_ver_cached = _read_local_worker_version()
+                _local_ver = _local_ver_cached
+                if _latest and _latest != _local_ver:
+                    if not pending_upgrade:
+                        log.info(f"Version mismatch: local={_local_ver} "
+                                 f"server={_latest}, will upgrade when idle")
+                    pending_upgrade = True
+                    upgrade_target_version = _latest
+                elif _latest:
+                    if pending_upgrade and _latest == _local_ver:
+                        pending_upgrade = False
+                        log.info("Version now matches, clearing pending_upgrade")
+                else:
+                    # Server disabled auto-upgrade (empty latest_version):
+                    # clear any stale pending flag so worker stops retrying
+                    # downloads forever. (2026-09-15: worker with pending state
+                    # kept re-downloading the 26MB package on backoff.)
+                    if pending_upgrade:
+                        pending_upgrade = False
+                        log.info("Auto-upgrade disabled by server (empty latest_version), "
+                                 "clearing pending_upgrade")
+
+        # ---- 升级执行（待升级 && 无活跃任务 && 退避已过）----
+        if pending_upgrade and not active_tasks:
+            _now = asyncio.get_running_loop().time()
+            _backoff = min(UPGRADE_BACKOFF_BASE * (2 ** upgrade_fail_count), UPGRADE_BACKOFF_MAX)
+            if _now - last_upgrade_attempt >= _backoff:
+                last_upgrade_attempt = _now
+                log.info(f"Starting auto-upgrade to {upgrade_target_version} "
+                         f"(attempt {upgrade_fail_count + 1})")
+                _upgrade_ok = await _perform_upgrade(
+                    os.environ.get("RUNTIME_SERVER_URL", ""),
+                    os.environ.get("RUNTIME_TOKEN", "")
+                )
+                if not _upgrade_ok:
+                    upgrade_fail_count += 1
+                    pending_upgrade = False
+                    _next = min(UPGRADE_BACKOFF_BASE * (2 ** upgrade_fail_count), UPGRADE_BACKOFF_MAX)
+                    log.warning(f"Auto-upgrade failed (count={upgrade_fail_count}), "
+                                f"will retry in {_next:.0f}s")
+
         # ---- sid 看门狗：清理幽灵 sid ----
         # active_tasks 里的任务如果已在服务端终态（failed/cancelled/completed/not_found），
         # 说明 _wrap 的 finally 没执行（opencode 进程 hang 住），sid 泄漏在 active_sessions。
@@ -1535,12 +1639,80 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
 
 def _read_local_worker_version() -> str:
-    """读取本机 Worker 安装包版本（/etc/grape/worker.version，安装脚本写入）。"""
+    """读取本机 Worker 安装包版本（install-worker.sh 写入）。
+
+    路径与 install-worker.sh 的 VERSION_FILE 保持一致：
+    - root 模式（uid=0 或 RUNTIME_ROOT_MODE=1）：/etc/grape/worker.version
+    - 非 root 模式：$HOME/.grape/worker.version
+    """
+    if os.environ.get("RUNTIME_ROOT_MODE") == "1" or os.geteuid() == 0:
+        version_path = "/etc/grape/worker.version"
+    else:
+        version_path = os.path.join(os.path.expanduser("~"), ".grape", "worker.version")
     try:
-        with open("/etc/grape/worker.version", "r", encoding="utf-8") as f:
+        with open(version_path, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
         return ""
+
+
+async def _perform_upgrade(server: str, token: str) -> bool:
+    """下载并执行 install-worker.sh 升级 worker。
+
+    成功时 worker 被 install-worker.sh 重启（本进程被杀，不会返回）。
+    失败时返回 False，worker 继续运行当前版本。
+
+    流程：
+    1. 从服务端 GET /api/runtime/install 下载 install-worker.sh
+    2. 在线程中执行 bash install-worker.sh（token 通过环境变量传递，避免命令行暴露）
+    3. install-worker.sh 幂等：下载包→解压→建 venv→写配置→重启 worker
+    4. 如果 subprocess.run 返回（未被杀），检查 returncode 判断成功/失败
+    """
+    import subprocess, tempfile
+    if not server or not token:
+        log.error("Auto-upgrade: missing server or token, skipping upgrade")
+        return False
+    install_script_url = f"{server.rstrip('/')}/api/runtime/install"
+    fd, tmp_script = tempfile.mkstemp(suffix=".sh")
+    try:
+        os.close(fd)
+        r = await asyncio.to_thread(
+            subprocess.run,
+            ["curl", "-fsSL", "--connect-timeout", "15", install_script_url, "-o", tmp_script],
+            capture_output=True, text=True, timeout=30
+        )
+        if r.returncode != 0:
+            log.error(f"Auto-upgrade: download install-worker.sh failed: {r.stderr[-300:]}")
+            return False
+        _install_dir = os.environ.get("RUNTIME_INSTALL_DIR", "")
+        if not _install_dir:
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _install_dir = os.path.dirname(os.path.dirname(_here))
+        log.info(f"Auto-upgrade: running install-worker.sh (dir={_install_dir})")
+        _upgrade_env = dict(os.environ)
+        _upgrade_env["TOKEN"] = token
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", tmp_script, "--server", server, "--dir", _install_dir],
+            capture_output=True, text=True, timeout=600, env=_upgrade_env
+        )
+        if result.returncode == 0:
+            log.info(f"Auto-upgrade: install-worker.sh succeeded (rc=0), waiting for restart")
+            return True
+        log.error(f"Auto-upgrade: install-worker.sh failed rc={result.returncode}: stderr={result.stderr[-500:]}")
+        return False
+    except subprocess.TimeoutExpired:
+        log.error("Auto-upgrade: install-worker.sh timed out (600s)")
+        return False
+    except Exception as e:
+        log.error(f"Auto-upgrade failed: {e}")
+        return False
+    finally:
+        try:
+            if os.path.exists(tmp_script):
+                os.unlink(tmp_script)
+        except Exception:
+            pass
 
 
 def _check_opencode_api_keys():
@@ -1669,10 +1841,24 @@ def main():
         # 注册成功后立即执行一轮引擎探测（线程池，不阻塞事件循环），
         # 确保第一次心跳上报时 probe_results 非空，使服务端及时纠正 healthy（ok→升级 / fail→降级）。
         await asyncio.to_thread(_worker_probe_once)
+
+        # sweeper：worker 端定期清理本地磁盘残留（worktree/node_modules/tmp）。
+        # 服务端的 sweep_loop 只扫服务端磁盘，远端 worker 的残留无人清理 → 撑满磁盘。
+        # worker 启动时也跑一轮 sweep_once（清上次崩溃残留），然后每 15min 循环。
+        _worker_sweep_task = None
+        try:
+            from src.runtime.cleanup import sweep_loop
+            _worker_sweep_task = asyncio.create_task(sweep_loop())
+            log.info("Worker sweeper loop started")
+        except Exception as e:
+            log.warning(f"Worker sweeper loop start failed: {e}")
+
         try:
             await _run_loop(client, ids, poll, heartbeat, max_concurrent, engine_by_rid,
                             installed=installed, device_name=device)
         finally:
+            if _worker_sweep_task and not _worker_sweep_task.done():
+                _worker_sweep_task.cancel()
             await client.close()
 
     asyncio.run(_amain())

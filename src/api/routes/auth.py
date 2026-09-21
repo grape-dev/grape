@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import require_no_session_token
 from src.config import log, COOKIE_SECURE
 import hashlib, os, time
 
@@ -188,10 +188,7 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     # 白名单校验：所有用户（含已存在）都必须在白名单内，踢出白名单后立即无法登录
     from src.config import is_gitcode_user_allowed
     if not is_gitcode_user_allowed(gitcode_login):
-        raise HTTPException(status_code=403, detail={
-            "code": 403,
-            "message": "您的 GitCode 账号不在白名单内，无法登录本系统。请联系统管理员。"
-        })
+        return _oauth_error_redirect(request, f"WHITELIST:gitcode:{gitcode_login}")
 
     # 新用户才创建
     if not local_user:
@@ -347,7 +344,7 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     # 白名单校验
     from src.config import is_github_user_allowed
     if not is_github_user_allowed(github_login):
-        return _oauth_error_redirect(request, "您的 GitHub 账号不在白名单内，无法登录本系统。请联系统管理员。")
+        return _oauth_error_redirect(request, f"WHITELIST:github:{github_login}")
 
     # 新用户才创建
     if not local_user:
@@ -396,8 +393,8 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     return resp
 
 
-@router.get("/profile")
-def get_profile(user: dict = Depends(get_current_user_or_api_key)):
+@router.get("/profile", operation_id="auth_profile", summary="Get current user profile", description="Returns the current user profile. Supports JWT session, user API Key (grape_) or session token (tk_).")
+def get_profile(user: dict = Depends(require_no_session_token)):
     """用户信息——支持 JWT 会话 / grape_ API Key / tk_ 会话 token（Issue #69）。"""
     acc = user_db.get_user_account(user["username"]) or {}
     managed_repos_raw = user_db.get_managed_repos(user["id"])
@@ -413,8 +410,8 @@ def get_profile(user: dict = Depends(get_current_user_or_api_key)):
     }
 
 
-@router.post("/logout")
-def logout(user: dict = Depends(get_current_user), response: Response = None):
+@router.post("/logout", operation_id="auth_logout", summary="Logout (revoke all tokens)", description="Logs out: increments token_version to revoke all tokens and clears the refresh cookie.")
+def logout(user: dict = Depends(require_no_session_token), response: Response = None):
     """登出——token_version+1 撤销所有 token + 清 cookie。"""
     user_db.increment_token_version(user["id"])
     if response:

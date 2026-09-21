@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS skill (
     created_by VARCHAR(64) DEFAULT '',
     updated_by VARCHAR(64) DEFAULT '',
     is_active INTEGER DEFAULT 1,
+    sub_scene TEXT DEFAULT '',
+    category_id INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (skill_name, scope, owner_id)
@@ -253,8 +255,9 @@ CREATE TABLE IF NOT EXISTS feishu_onboard_task (
 )
 """
 
-_TASKS_DDL = """
-CREATE TABLE IF NOT EXISTS tasks (
+# ===== Issue 任务卡片表（原 tasks，Phase B1 改名；结构不变，后续 B2 收编 issue_state 字段）=====
+_ISSUE_DDL = """
+CREATE TABLE IF NOT EXISTS issue (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id          INTEGER NOT NULL,
     assignee         TEXT NOT NULL,
@@ -377,6 +380,7 @@ CREATE TABLE IF NOT EXISTS issue_state (
     parent_issue_id TEXT DEFAULT '',      -- 父任务 Issue ID（如 "#20"，空=普通任务）
     is_subtask_mode INTEGER DEFAULT 0,    -- 1=多任务模式（Issue Agent 应拆分子任务）
     scene_user_id INTEGER DEFAULT 0,       -- 用户级场景的创建者 ID（0=非用户级）
+    allow_scene_override INTEGER DEFAULT 0, -- 允许场景覆盖（B2 收编字段，issue_state 兼容）
     updated_at   TEXT DEFAULT (datetime('now')),
     created_at   TEXT DEFAULT (datetime('now')),
     UNIQUE (repo_key, issue_id)
@@ -563,10 +567,11 @@ CREATE TABLE IF NOT EXISTS featured_templates (
 _LOGIN_WHITELIST_DDL = """
 CREATE TABLE IF NOT EXISTS login_whitelist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    gitcode_username VARCHAR(64) NOT NULL,
+    gitcode_username VARCHAR(64) DEFAULT NULL,
     remark VARCHAR(128) DEFAULT '',
     created_by VARCHAR(64) DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
+    github_username TEXT DEFAULT '',
     UNIQUE (gitcode_username)
 )
 """
@@ -599,6 +604,21 @@ CREATE TABLE IF NOT EXISTS scene_category (
     is_active   INTEGER DEFAULT 1,
     created_by  VARCHAR(64) DEFAULT '',
     updated_by  VARCHAR(64) DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (name),
+    UNIQUE (slug)
+)
+"""
+
+_SKILL_CATEGORY_DDL = """
+CREATE TABLE IF NOT EXISTS skill_category (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    slug        VARCHAR(64) NOT NULL,
+    icon        TEXT DEFAULT '',
+    order_num   INTEGER DEFAULT 0,
+    is_active   INTEGER DEFAULT 1,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
     UNIQUE (name),
@@ -699,6 +719,42 @@ CREATE TABLE IF NOT EXISTS distributed_locks (
 )
 """
 
+# ===== Issue #150: Autopilot 定时自动化任务（§5.3.1 + §5.3.2 + §5.3.3）=====
+_AUTOPILOT_TASKS_DDL = """
+CREATE TABLE IF NOT EXISTS autopilot_tasks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,                       -- 任务名称
+    repo_key        TEXT NOT NULL DEFAULT '',            -- 仓库标识（gitcode:owner/repo）
+    scene_id        TEXT NOT NULL DEFAULT 'default',     -- 场景ID（定义 Agent 链）
+    description     TEXT NOT NULL DEFAULT '',             -- 任务描述（Issue body）
+    cron            TEXT NOT NULL DEFAULT '*/30 * * * *', -- cron 表达式（5 段制）
+    agent_chain     MEDIUMTEXT NOT NULL DEFAULT '[]',    -- [废弃] 保留兼容
+    issue_number    TEXT DEFAULT '',                     -- [废弃] 保留兼容
+    max_retry       INTEGER NOT NULL DEFAULT 3,          -- 最大重试次数
+    enabled         INTEGER NOT NULL DEFAULT 1,          -- 1=启用 0=禁用
+    last_run_at     TEXT DEFAULT '',                     -- 最近触发时间（UTC）
+    next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间（UTC）
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_AUTOPILOT_EXECUTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS autopilot_executions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         INTEGER NOT NULL,                    -- 外键 -> autopilot_tasks.id
+    status          TEXT NOT NULL DEFAULT 'pending',     -- pending/running/success/failed/retrying
+    retry_count     INTEGER NOT NULL DEFAULT 0,          -- 已重试次数
+    agent_chain_step INTEGER NOT NULL DEFAULT 0,         -- 当前执行的链步骤索引
+    result          MEDIUMTEXT DEFAULT '',               -- 执行结果摘要
+    error           MEDIUMTEXT DEFAULT '',               -- 错误信息
+    a2a_seq         INTEGER DEFAULT NULL,                -- 关联 events.seq
+    started_at      TEXT DEFAULT '',                     -- 开始时间（UTC）
+    completed_at    TEXT DEFAULT '',                     -- 完成时间（UTC）
+    created_at      TEXT DEFAULT (datetime('now'))
+)
+"""
+
 _NEW_TABLES = [
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
@@ -706,6 +762,8 @@ _NEW_TABLES = [
     ("task_messages", _TASK_MESSAGES_DDL),
     ("agent_type_runtime_pool", _AGENT_TYPE_RUNTIME_POOL_DDL),
     ("runtime_credentials", _RUNTIME_CREDENTIALS_DDL),
+    # issue_state: 保留创建（session_store.py 兜底读取 + 测试引用），
+    # C5 DROP 条件性跳过（生产环境确认无孤儿后才删，测试环境保留）
     ("issue_state", _ISSUE_STATE_DDL),
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
     ("events", _EVENTS_TABLE_DDL),
@@ -721,7 +779,7 @@ _NEW_TABLES = [
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
-    ("tasks", _TASKS_DDL),
+    ("issue", _ISSUE_DDL),
     ("event_thread", _EVENT_THREAD_DDL),
     ("agent_shared_knowledge", _AGENT_SHARED_KNOWLEDGE_DDL),
     ("scene_knowledge_ref", _SCENE_KNOWLEDGE_REF_DDL),
@@ -741,6 +799,7 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("scene_likes", _SCENE_LIKES_DDL),
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
+    ("skill_category", _SKILL_CATEGORY_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
     ("distributed_locks", _DISTRIBUTED_LOCKS_DDL),
     ("api_latency_log", _API_LATENCY_LOG_DDL),
@@ -802,7 +861,34 @@ CREATE TABLE IF NOT EXISTS runtime_health_scores (
     last_status         TEXT DEFAULT '',               -- 最近一条任务状态
     window_days         INTEGER NOT NULL DEFAULT 7,    -- 滑动窗口天数
     updated_at          TEXT DEFAULT (datetime('now'))
-)"""""),]
+)"""),
+    # ===== Issue #174: 用户问题反馈表（grape_db）=====
+    ("user_feedback", """
+CREATE TABLE IF NOT EXISTS user_feedback (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER      NOT NULL DEFAULT 0,
+    username        TEXT         NOT NULL DEFAULT '',
+    category        TEXT         NOT NULL DEFAULT 'bug',
+    title           TEXT         NOT NULL,
+    description     TEXT         NOT NULL,
+    page_url        TEXT         DEFAULT '',
+    repo_key        TEXT         DEFAULT '',
+    user_agent      TEXT         DEFAULT '',
+    attachment_url  TEXT         DEFAULT '',
+    attachment_name TEXT         DEFAULT '',
+    status          TEXT         NOT NULL DEFAULT 'open',
+    priority        INTEGER      NOT NULL DEFAULT 0,
+    handler_name    TEXT         DEFAULT '',
+    handler_remark  TEXT         DEFAULT '',
+    handled_at      TEXT         DEFAULT NULL,
+    is_deleted      INTEGER      NOT NULL DEFAULT 0,
+    created_at      TEXT         DEFAULT (datetime('now')),
+    updated_at      TEXT         DEFAULT (datetime('now'))
+)"""),
+    # ===== Issue #150: Autopilot 定时自动化任务表 =====
+    ("autopilot_tasks", _AUTOPILOT_TASKS_DDL),
+    ("autopilot_executions", _AUTOPILOT_EXECUTIONS_DDL),
+]
 
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -810,7 +896,6 @@ _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 # (seed_key, json_filename, actual_table_name)
 _SEED_FILES = [
     ("agent_type", "agent-description.json", "agent_type"),
-    ("skill_official", "skill-description.json", "skill"),
 ]
 
 
@@ -896,7 +981,7 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_app_id ON bot_seen_messages(app_id)",
         "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_seen_at ON bot_seen_messages(seen_at)",
         "CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status)",
-        "CREATE INDEX IF NOT EXISTS idx_tasks_repo_issue ON tasks(repo_key, issue_number)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_repo_issue ON issue(repo_key, issue_number)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_runtime ON agent_tasks(runtime_id)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(agent_session_id)",
@@ -914,6 +999,7 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_uploaded_files_ref ON uploaded_files(ref_table, ref_id, is_active)",
         "CREATE INDEX IF NOT EXISTS idx_scene_skill_ref_skill_name ON scene_skill_ref(skill_name)",
         "CREATE INDEX IF NOT EXISTS idx_skill_is_featured ON skill(is_featured)",
+        "CREATE INDEX IF NOT EXISTS idx_skill_category_id ON skill(category_id)",
         "CREATE INDEX IF NOT EXISTS idx_market_scene_id ON devops_pipeline_scene(market_scene_id)",
         # ===== API 慢请求监控索引 =====
         "CREATE INDEX IF NOT EXISTS idx_latency_log_created ON api_latency_log(created_at)",
@@ -924,6 +1010,11 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_kwq_status_retry ON knowledge_write_queue(queue_status, next_retry_at)",
         "CREATE INDEX IF NOT EXISTS idx_kwq_dim_created ON knowledge_write_queue(repo_key, scope, agent_type, issue_num, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_kwq_source_seq ON knowledge_write_queue(repo_key, source_seq)",
+        # ===== Issue #150: Autopilot 索引 =====
+        "CREATE INDEX IF NOT EXISTS idx_autopilot_tasks_enabled ON autopilot_tasks(enabled)",
+        "CREATE INDEX IF NOT EXISTS idx_autopilot_tasks_repo ON autopilot_tasks(repo_key)",
+        "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_task ON autopilot_executions(task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_status ON autopilot_executions(status)",
     ]
     for idx in indexes:
         try:
@@ -932,6 +1023,27 @@ def _create_indexes():
                 db.commit()
         except Exception as e:
             log.warning(f"Create index failed: {e}")
+
+    # idx_tasks_repo_issue 升级为唯一索引（防止 issue 表重复行）
+    # 已有同名普通索引时，先 DROP 再 CREATE UNIQUE
+    try:
+        with db_lock:
+            c = db.cursor()
+            _need_upgrade = False
+            try:
+                c.execute("SELECT NON_UNIQUE FROM information_schema.statistics "
+                          "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' AND INDEX_NAME='idx_tasks_repo_issue' LIMIT 1")
+                row = c.fetchone()
+                _need_upgrade = bool(row and row[0] == 1)
+            except Exception:
+                pass  # SQLite 无 information_schema，跳过升级检查
+            if _need_upgrade:
+                c.execute("DROP INDEX idx_tasks_repo_issue ON issue")
+                c.execute("CREATE UNIQUE INDEX idx_tasks_repo_issue ON issue (repo_key, issue_number)")
+                db.commit()
+                log.info("Upgraded idx_tasks_repo_issue to UNIQUE")
+    except Exception as e:
+        log.warning(f"Upgrade idx_tasks_repo_issue to UNIQUE failed: {e}")
 
 
 def _seed_from_json():
@@ -943,11 +1055,9 @@ def _seed_from_json():
         seeded_keys = set(row[0].split(",")) if row and row[0] else set()
 
     for seed_key, json_file, db_table in _SEED_FILES:
-        if seed_key in seeded_keys and seed_key != "agent_type":
-            # 已 seed 过:skill_official 仍需幂等补种缺失技能;其余跳过
-            if seed_key != "skill_official":
-                log.info(f"Seed key '{seed_key}' already run, skip")
-                continue
+        if seed_key in seeded_keys:
+            log.info(f"Seed key '{seed_key}' already run, skip")
+            continue
 
         filepath = os.path.join(_CONFIG_DIR, json_file)
         if not os.path.exists(filepath):
@@ -956,30 +1066,10 @@ def _seed_from_json():
 
         with db_lock:
             c = db.cursor()
-            if seed_key == "skill_official":
-                # 官方技能:scope='official' 行
-                c.execute("SELECT COUNT(*) FROM skill WHERE scope='official'")
-            else:
-                c.execute(f"SELECT COUNT(*) FROM {db_table}")
+            c.execute(f"SELECT COUNT(*) FROM {db_table}")
             count = c.fetchone()[0]
             if count > 0 and db_table != "agent_type":
-                # 表已有数据:跳过全量 seed,但对 skill-description.json 中缺失的官方技能幂等补种
-                if seed_key == "skill_official":
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    for skill_name, info in data.items():
-                        existing = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=?", (skill_name,)).fetchone()
-                        if existing and existing[0] == 0:
-                            display_name = info.get("name", skill_name)
-                            description = info.get("description", "")
-                            agent_type = info.get("agent_type", "")
-                            skill_path = info.get("path", skill_name)
-                            c.execute(
-                                "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
-                                (skill_name, display_name, description, agent_type, skill_path)
-                            )
-                            log.info(f"Seeded missing official skill: {skill_name}")
-                    db.commit()
+                # 表已有数据，跳过 seed
                 continue
 
         with open(filepath, "r", encoding="utf-8") as f:
@@ -1080,18 +1170,6 @@ def _insert_seed_data(table: str, data: dict):
                     (agent_type, display_name, description, icon, order_num, subscribe_events, enable)
                 )
 
-        elif table == "skill_official":
-            # skill-description.json: {"skill_name": {"name": "...", "agent_type": "...", "path": "...", ...}}
-            for skill_name, info in data.items():
-                display_name = info.get("name", skill_name)
-                description = info.get("description", "")
-                agent_type = info.get("agent_type", "")
-                skill_path = info.get("path", skill_name)
-                c.execute(
-                    "INSERT OR REPLACE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
-                    (skill_name, display_name, description, agent_type, skill_path)
-                )
-
         elif table == "agent_registry":
             # agent-routing.json 已废弃(agent_registry 表移除),backend 统一用 backend_agents
             pass
@@ -1160,6 +1238,64 @@ def _init_scene_category_data():
         log.info("Seeded scene_category with 6 categories")
     except Exception as e:
         log.warning(f"Init scene_category data failed: {e}")
+
+
+def _init_skill_category_data():
+    """初始化 skill_category 表的 11 条分类数据（幂等）。
+
+    Issue #179: 技能分类表独立化，对齐 scene_category 模式。
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        if get_meta_value("skill_category_seeded") == "1":
+            return
+        categories = [
+            ("AI辅助编码与评审", "ai-coding-review", "🤖", 1),
+            ("应用发布", "app-release", "📦", 2),
+            ("自动化测试", "auto-testing", "🧪", 3),
+            ("持续集成CI", "ci", "🔧", 4),
+            ("代码质量与安全", "code-quality", "🛡️", 5),
+            ("容器与集群部署", "container-deploy", "☸️", 6),
+            ("反馈闭环", "feedback-loop", "🔄", 7),
+            ("IM", "im", "💬", 8),
+            ("日志与诊断", "log-diagnostics", "🔍", 9),
+            ("可观测性", "observability", "📊", 10),
+            ("环境与脚手架", "scaffolding", "🏗️", 11),
+        ]
+        with db_lock:
+            c = db.cursor()
+            for name, slug, icon, order_num in categories:
+                c.execute(
+                    "INSERT OR IGNORE INTO skill_category (name, slug, icon, order_num, is_active) VALUES (?,?,?,?,1)",
+                    (name, slug, icon, order_num),
+                )
+            db.commit()
+        set_meta_value("skill_category_seeded", "1")
+        log.info("Seeded skill_category with 11 categories")
+    except Exception as e:
+        log.warning(f"Init skill_category data failed: {e}")
+
+
+def _backfill_skill_category_id():
+    """一次性回填：sub_scene → category_id（幂等）。
+
+    Issue #179: 已有 official 技能的 sub_scene 有值，通过 slug 关联 skill_category 获取 category_id。
+    user/repo 技能 sub_scene 为空，category_id 保持 0。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE skill SET category_id = "
+                "(SELECT sc.id FROM skill_category sc WHERE sc.slug = skill.sub_scene) "
+                "WHERE sub_scene != '' AND category_id = 0"
+            )
+            updated = c.rowcount
+            db.commit()
+        if updated:
+            log.info(f"Backfilled skill category_id: {updated} rows")
+    except Exception as e:
+        log.warning(f"Backfill skill category_id failed: {e}")
 
 
 def _init_scene_market_data():
@@ -1338,12 +1474,12 @@ def init_database():
             try:
                 # 迁移逻辑在同一个 with db_lock 块内——同一个连接
                 # db_lock 是 RLock（可重入）——_create_tables() 等内部 with db_lock 不会死锁
+                _tasks_to_issue_rename_pre_create()
                 _create_tables()
                 _migrate_tables()
                 _create_indexes()
                 _seed_from_json()
                 _seed_event_action_filter()
-                _sync_official_skills()
                 _align_agent_enable()
                 _cleanup_stale_meta()
                 _cleanup_chat_shared_worker_runtime()
@@ -1354,26 +1490,29 @@ def init_database():
                 _init_scene_market_data()
                 _init_scene_skill_ref()
                 _init_skill_featured()
+                # ===== Issue #179: skill 分类表初始化 + category_id 回填 =====
+                _init_skill_category_data()
+                _backfill_skill_category_id()
                 # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
                 try:
                     _backfill_scene_display_names()
                 except Exception as _e:
                     log.warning(f"Scene display_name backfill failed: {_e}")
-                # ===== Issue #67: 知识库优化迁移 =====
+                # ===== 知识库去重 + ref 迁移（每次启动执行，幂等）=====
                 try:
-                    _migrate_knowledge_issue67()
+                    _migrate_knowledge_dedup_and_ref()
                 except Exception as _e:
                     log.warning(f"Issue #67 knowledge migration failed: {_e}")
             finally:
                 c.execute("SELECT RELEASE_LOCK('grape_migrate')")
     else:
         # SQLite——单实例不需要锁
+        _tasks_to_issue_rename_pre_create()
         _create_tables()
         _migrate_tables()
         _create_indexes()
         _seed_from_json()
         _seed_event_action_filter()
-        _sync_official_skills()
         _align_agent_enable()
         _cleanup_stale_meta()
         _cleanup_chat_shared_worker_runtime()
@@ -1384,6 +1523,9 @@ def init_database():
         _init_scene_market_data()
         _init_scene_skill_ref()
         _init_skill_featured()
+        # ===== Issue #179: skill 分类表初始化 + category_id 回填 =====
+        _init_skill_category_data()
+        _backfill_skill_category_id()
         # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
         try:
             _backfill_scene_display_names()
@@ -1391,16 +1533,16 @@ def init_database():
             log.warning(f"Scene display_name backfill failed: {_e}")
         # ===== Issue #67: 知识库优化迁移 =====
         try:
-            _migrate_knowledge_issue67()
+            _migrate_knowledge_dedup_and_ref()
         except Exception as _e:
             log.warning(f"Issue #67 knowledge migration failed: {_e}")
     # MySQL with session_manager
 
-def _migrate_knowledge_issue67():
-    """Issue #67 知识库优化迁移 + Issue #95 修复：source 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。
+def _migrate_knowledge_dedup_and_ref():
+    """知识库 source 回填 + name/description 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。
 
-    Issue #95：加幂等标记——#95 修复（member ref 清理 + rejected 修复）跑一次后跳过。
-    #67 基础迁移仍每次执行（幂等，开销微量）。
+    每次启动执行（幂等）。issue95 修复部分有独立幂等标记。
+    步骤顺序：source 回填 → name/description 回填 → 去重 → ref 迁移 → 孤儿 ref 清理。
     """
     from src.mysql_compat import get_db_backend
     _is_mysql = get_db_backend() == "mysql"
@@ -1430,22 +1572,73 @@ def _migrate_knowledge_issue67():
             "UPDATE agent_shared_knowledge SET source = 'manual' "
             "WHERE scope = 'member' AND (source IS NULL OR source = '')")
 
-        # 2. 重复记录去重——每个 scope + repo_key + agent_type + issue_num + file_path 只保留最新一条
-        if _is_mysql:
-            c.execute(
-                "CREATE TEMPORARY TABLE IF NOT EXISTS _keep_ids AS "
-                "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-                "GROUP BY repo_key, scope, agent_type, issue_num, file_path")
-            c.execute(
-                "DELETE FROM agent_shared_knowledge "
-                "WHERE id NOT IN (SELECT keep_id FROM _keep_ids)")
-            c.execute("DROP TEMPORARY TABLE IF EXISTS _keep_ids")
-        else:
-            c.execute(
-                "DELETE FROM agent_shared_knowledge "
-                "WHERE id NOT IN ("
-                "  SELECT MAX(id) FROM agent_shared_knowledge "
-                "  GROUP BY repo_key, scope, agent_type, issue_num, file_path)")
+        # 1.5 回填空 name + 统一 description（所有 scope，必须在去重之前）
+        # 老代码部分 INSERT 路径没有 name 字段或自动生成逻辑不存在 → DEFAULT ''。
+        # baseline 去重按 (repo_key, name) GROUP BY，name 为空时同 repo 的 3 条
+        # 会被合并为 1 条丢失数据。description 硬编码统一值无法区分。
+        # 用 derive_knowledge_name 统一推导，所有 scope 共用同一逻辑。
+        from src.api.knowledge import derive_knowledge_name, derive_knowledge_description
+        from src.repo_key import (BASELINE_NAME_MAP, BASELINE_DESC_MAP,
+                                  BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK)
+        _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值，勿改
+        _rows = c.execute(
+            "SELECT id, scope, source, agent_type, issue_num, name, file_path, obs_key, description "
+            "FROM agent_shared_knowledge "
+            "WHERE name IS NULL OR name = '' OR name = ? "
+            "OR description = ? OR description IS NULL OR description = ''",
+            (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
+        ).fetchall()
+        _updates = []
+        for _rid, _scope, _source, _agent_type, _issue_num, _cur_name, _fp, _obs, _cur_desc in _rows:
+            # source="manual" 是用户上传的：
+            # - name 非空时不覆盖（用户填的），name 为空时用 file_path 推导回填
+            # - description 永远不碰（用户行为，即使为空也不回填）
+            if _source == "manual":
+                if not _cur_name:
+                    _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+                    _updates.append((_new_name, _cur_desc or "", _rid))
+                continue
+            _new_name = derive_knowledge_name(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+            _needs_name = (_cur_name != _new_name)
+            _new_desc = derive_knowledge_description(_scope, _agent_type or "", _issue_num or 0, _fp or _obs or "")
+            _needs_desc = (not _cur_desc or _cur_desc == _UNIFIED_DESC) and bool(_new_desc)
+            _final_desc = _new_desc if _needs_desc else (_cur_desc or "")
+            if _needs_name or _needs_desc:
+                _updates.append((_new_name, _final_desc, _rid))
+        if _updates:
+            c.executemany(
+                "UPDATE agent_shared_knowledge SET name=?, description=? WHERE id=?",
+                _updates)
+            log.info(f"[issue67] backfilled name/description for {len(_updates)} rows")
+
+        # 2. 重复记录去重——每类 scope 只保留最新一条
+        #    baseline：按 (repo_key, scope, name) 去重
+        #    其他 scope：按 (repo_key, scope, agent_type, issue_num, file_path) 去重
+        #    用派生表子查询包装避免 DELETE 自引用（MySQL 限制），SQLite/MySQL 通用
+        # baseline 去重
+        c.execute(
+            "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+            "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope='baseline' GROUP BY repo_key, scope, name) AS keep))")
+        c.execute(
+            "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope='baseline' GROUP BY repo_key, scope, name) AS keep)")
+        # 其他 scope 去重
+        c.execute(
+            "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
+            "SELECT id FROM agent_shared_knowledge WHERE scope != 'baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path) AS keep))")
+        c.execute(
+            "DELETE FROM agent_shared_knowledge WHERE scope != 'baseline' "
+            "AND id NOT IN (SELECT keep.keep_id FROM ("
+            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
+            "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path) AS keep)")
 
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
@@ -1548,6 +1741,22 @@ def _migrate_knowledge_issue67():
         except Exception as _e:
             log.warning(f"[migrate] content_hash backfill failed: {_e}")
 
+        # 5. 清理孤儿 scene_knowledge_ref（knowledge_id 指向已删除的知识记录）
+        # 去重删除 knowledge 记录时已先删 ref，但历史迁移轮次可能残留
+        # 先 EXISTS 快速检查，有孤儿才执行 DELETE
+        try:
+            _has_orphan = c.execute(
+                "SELECT EXISTS(SELECT 1 FROM scene_knowledge_ref "
+                "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge))"
+            ).fetchone()[0]
+            if _has_orphan:
+                c.execute(
+                    "DELETE FROM scene_knowledge_ref "
+                    "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)")
+                log.info("[issue67] cleaned orphan scene_knowledge_ref")
+        except Exception as _e:
+            log.warning(f"[issue67] orphan ref cleanup failed: {_e}")
+
         db.commit()
 
     # 4. MySQL 原生 DDL——scene_knowledge_ref 表用原生 MySQL DDL 重建（如果翻译层产出不够严谨）
@@ -1581,63 +1790,182 @@ def _migrate_knowledge_issue67():
     log.info("[Issue #67] knowledge migration done")
 
 
-def _sync_official_skills():
-    """启动时从 configs/skill-description.json 同步官方技能到 skill 表(幂等).
+def _migrate_knowledge():
+    """Issue #190：baseline 去重 + obs_key 归一化 + file_path 归一化。
 
-    与 skill_sync.sync_official_skills_to_obs 逻辑一致:新增 INSERT + 已有 UPDATE 元信息
-   (display_name/description/agent_type)._seed_from_json 只补种缺失技能,
-    不更新已有技能的元信息--配置文件中改名/改描述后需要此步骤同步.
+    幂等：通过 meta 表 knowledge_migrate_done 标记控制，已执行则跳过。
+    异步执行：由 main.py lifespan() 内 daemon thread 调用，不阻塞启动。
+    分布式锁：acquire_lock 防多实例并发执行迁移。
+    最终一致性：迁移期间旧格式数据仍可用，迁移完成后切换到新格式。
     """
+    from src.session_manager import db, db_lock
+    from src.user.db import get_meta_value, set_meta_value
+    from src.repo_key import parse_repo_key, knowledge_obs_prefix
+    from src.lock import acquire_lock, release_lock
+
+    # 幂等检查
+    if get_meta_value("knowledge_migrate_done") == "1":
+        log.info("[knowledge_migrate] migration already done, skip")
+        return
+
+    # 分布式锁：防多实例同时迁移
+    _lock_key = "knowledge_migrate"
+    if not acquire_lock(_lock_key, ttl=600):
+        log.info("[knowledge_migrate] migration lock contention, another instance is running, skip")
+        return
+
+    log.info("[knowledge_migrate] migration started")
+
+    _restore_ok = False       # 恢复归档记录
+    _obs_key_ok = False        # 归一化 obs_key
+    _file_path_ok = False      # 归一化 file_path
+
+    # ===== 恢复归档记录（archived=1 → archived=0）=====
+    # 归档逻辑已移除，现有归档记录恢复为活跃，防止成为孤儿数据
     try:
-        import json as _json
-        config_dir = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
-        json_path = os.path.join(config_dir, "skill-description.json")
-        if not os.path.exists(json_path):
-            return
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-        added = 0
-        updated = 0
         with db_lock:
             c = db.cursor()
-            for skill_name, info in data.items():
-                display_name = info.get("name", skill_name)
-                description = info.get("description", "")
-                agent_type = info.get("agent_type", "")
-                skill_path = info.get("path", skill_name)
-                existed = c.execute(
-                    "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='official'",
-                    (skill_name,)
-                ).fetchone()[0]
-                if existed:
-                    # 更新元信息；本地（非 OBS 集群模式，file_path 为空）同时刷新 skill_path，
-                    # 保证目录按 agent_type 分组后（skills/<agent_type>/<skill>/）DB 路径与磁盘一致。
-                    _fp = c.execute(
-                        "SELECT file_path FROM skill WHERE skill_name=? AND scope='official' AND file_path IS NOT NULL AND file_path!=''",
-                        (skill_name,)
-                    ).fetchone()
-                    if _fp:
-                        c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_name)
-                        )
-                    else:
-                        c.execute(
-                            "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=? WHERE skill_name=? AND scope='official'",
-                            (display_name, description, agent_type, skill_path, skill_name)
-                        )
-                    updated += 1
-                else:
-                    c.execute(
-                        "INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash) VALUES (?,?,?,?,?,'official','',?)",
-                        (skill_name, display_name, description, agent_type, skill_path, "")
-                    )
-                    added += 1
+            c.execute("UPDATE agent_shared_knowledge SET archived=0 WHERE archived=1")
             db.commit()
-        if added or updated:
-            log.info(f"Official skills synced: +{added} added, {updated} updated")
+        _restore_ok = True
+        log.info("[knowledge_migrate] restore archived records done")
     except Exception as e:
-        log.warning(f"Sync official skills failed: {e}")
+        log.warning(f"[knowledge_migrate] restore archived failed: {e}")
+
+    # NOTE: baseline name/description 回填已移至 _migrate_knowledge_dedup_and_ref()
+    # step 1.5（每次启动执行，在去重之前）。此处不再重复——_migrate_knowledge
+    # 受 knowledge_migrate_done 标记控制，首次执行后跳过，无法保证回填在
+    # 去重之前完成。
+    # NOTE: baseline 去重也已移至 _migrate_knowledge_dedup_and_ref() step 2
+    # （每次启动执行）。此处不再重复。
+
+    # ===== 归一化 obs_key（新格式含 provider 前缀）=====
+    try:
+        from src.storage import get_storage
+        _storage = get_storage()
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT id, repo_key, scope, agent_type, issue_num, obs_key, file_path "
+                "FROM agent_shared_knowledge WHERE obs_key != '' AND obs_key IS NOT NULL"
+            ).fetchall()
+        updates = []  # [(new_obs_key, id), ...]
+        for rid, repo_key, scope, agent_type, issue_num, obs_key, file_path in rows:
+            provider, owner, repo = parse_repo_key(repo_key)
+            new_prefix = knowledge_obs_prefix(repo_key)
+            new_obs_key = obs_key
+            if obs_key.startswith(new_prefix):
+                continue  # 已是新格式
+            elif scope == "member":
+                # member：提取 member/ 或 agent/ 后的相对路径
+                for marker in ("member/", "agent/"):
+                    idx = obs_key.find(marker)
+                    if idx >= 0:
+                        _rel = obs_key[idx:]
+                        break
+                else:
+                    _rel = os.path.basename(obs_key)
+                new_obs_key = f"{new_prefix}/{_rel}"
+            elif obs_key.startswith("project-info/"):
+                # OLD_A 格式：完全重写
+                _fname = os.path.basename(obs_key)
+                if scope == "baseline":
+                    new_obs_key = f"{new_prefix}/project-info/{_fname}"
+                else:
+                    try:
+                        from src.api.knowledge import knowledge_storage_key
+                        new_obs_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
+                    except Exception:
+                        continue
+            elif obs_key.startswith(f"knowledge/{owner}/{repo}"):
+                # OLD_B 格式：在 knowledge/ 后插入 provider/
+                new_obs_key = f"knowledge/{provider}/{obs_key[len('knowledge/'):]}"
+            else:
+                continue  # 未知格式，跳过
+
+            if new_obs_key == obs_key:
+                continue
+
+            # OBS 对象迁移：旧 key 读取内容 → 写入新 key → 删旧 key
+            # 读不到内容时跳过（不更新 DB、不删旧对象），下次启动重试
+            if _storage:
+                try:
+                    _data = _storage.read_bytes(obs_key)
+                    if not _data:
+                        log.warning(f"[knowledge_migrate] OBS read empty for id={rid} old_key={obs_key}, skip")
+                        continue
+                    _storage.save_bytes(new_obs_key, _data)
+                except Exception as e:
+                    log.warning(f"[knowledge_migrate] OBS migrate failed id={rid}: {e}")
+                    continue
+            updates.append((new_obs_key, rid, obs_key))  # 记录旧 key 供清理
+
+        # 批量 UPDATE，一次 commit
+        if updates:
+            with db_lock:
+                c = db.cursor()
+                c.executemany(
+                    "UPDATE agent_shared_knowledge SET obs_key=? WHERE id=?",
+                    [(u[0], u[1]) for u in updates])
+                db.commit()
+            # DB 更新成功后删除旧 OBS 对象（去重防跨平台同名仓库共享同一旧 key）
+            if _storage:
+                _deleted_keys = set()
+                for _, _, _old_key in updates:
+                    if _old_key in _deleted_keys:
+                        continue
+                    _deleted_keys.add(_old_key)
+                    try:
+                        _storage.delete_object(_old_key)
+                    except Exception as e:
+                        log.warning(f"[knowledge_migrate] OBS old key delete failed {_old_key}: {e}")
+        _obs_key_ok = True
+        log.info(f"[knowledge_migrate] obs_key normalization done ({len(updates)} rows)")
+    except Exception as e:
+        log.warning(f"[knowledge_migrate] obs_key normalization failed: {e}")
+
+    # ===== 归一化 file_path（新格式含 provider 前缀）=====
+    try:
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT id, repo_key, file_path FROM agent_shared_knowledge "
+                "WHERE file_path != '' AND file_path IS NOT NULL"
+            ).fetchall()
+        updates = []  # [(new_file_path, id), ...]
+        for rid, repo_key, file_path in rows:
+            provider, owner, repo = parse_repo_key(repo_key)
+            full_prefix = f"{provider}/{owner}/{repo}/"
+            partial_prefix = f"{owner}/{repo}/"
+            if file_path.startswith(full_prefix):
+                continue  # 已是 NEW 格式
+            elif file_path.startswith(partial_prefix):
+                new_fp = f"{provider}/{file_path}"  # 只补 provider
+            elif file_path.startswith("project-info/"):
+                new_fp = f"{full_prefix}{file_path}"  # 补完整前缀
+            else:
+                continue  # 未知格式，跳过
+            updates.append((new_fp, rid))
+
+        if updates:
+            with db_lock:
+                c = db.cursor()
+                c.executemany(
+                    "UPDATE agent_shared_knowledge SET file_path=? WHERE id=?",
+                    updates)
+                db.commit()
+        _file_path_ok = True
+        log.info(f"[knowledge_migrate] file_path normalization done ({len(updates)} rows)")
+    except Exception as e:
+        log.warning(f"[knowledge_migrate] file_path normalization failed: {e}")
+
+    # ===== 标记完成 + 释放锁（finally 保证锁一定释放）=====
+    try:
+        if _restore_ok and _obs_key_ok and _file_path_ok:
+            set_meta_value("knowledge_migrate_done", "1")
+            log.info("[knowledge_migrate] migration done")
+        else:
+            log.warning("[knowledge_migrate] migration incomplete, will retry on next startup")
+    finally:
+        release_lock(_lock_key)
 
 
 def _cleanup_stale_meta():
@@ -1660,7 +1988,7 @@ def _cleanup_old_latency_logs():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM api_latency_log WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)")
+            c.execute("DELETE FROM api_latency_log WHERE created_at < datetime('now', '-7 days')")
             deleted = c.rowcount
             db.commit()
         if deleted:
@@ -1829,6 +2157,37 @@ def _alter_skill_files_if_needed() -> str:
         return "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT"
 
 
+def _tasks_to_issue_rename_pre_create():
+    """Phase B1：`tasks` 表改名为 `issue`（结构不变，数据零迁移）。
+
+    必须在 `_create_tables()` **之前**执行——否则 `CREATE TABLE IF NOT EXISTS issue` 会先建出空
+    `issue` 表，导致 `_migrate_tables` 里"issue 已存在则跳过 rename"，数据滞留旧 `tasks` 表。
+    幂等：无 `tasks` 表或已有 `issue` 表（非空）则跳过。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "tasks" not in _tables:
+                return
+            if "issue" in _tables:
+                _issue_cnt = c.execute("SELECT COUNT(*) FROM issue").fetchone()[0]
+                _tasks_cnt = c.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+                if _issue_cnt == 0 and _tasks_cnt > 0:
+                    c.execute("DROP TABLE issue")
+                    c.execute("ALTER TABLE tasks RENAME TO issue")
+                    db.commit()
+                    log.info(f"Phase B1: tasks -> issue (dropped empty issue, renamed), {_tasks_cnt} rows")
+                else:
+                    log.info(f"Phase B1: issue already exists ({_issue_cnt} rows), rename skipped")
+                return
+            c.execute("ALTER TABLE tasks RENAME TO issue")
+            db.commit()
+            log.info("Phase B1: tasks -> issue (structure unchanged)")
+    except Exception as e:
+        log.warning(f"Phase B1 tasks->issue pre-create rename failed: {e}")
+
+
 def _migrate_tables():
     """已有数据库的 schema 迁移"""
     # ===== new-version2 数据安全:迁移前自动备份(仅在有改动性迁移时触发一次)=====
@@ -1856,6 +2215,20 @@ def _migrate_tables():
                     pass
     except Exception as e:
         log.warning(f"Pre-migration backup skipped: {e}")
+    # ===== Phase B1: tasks 表改名为 issue（结构不变，后续 B2 收编 issue_state 字段）=====
+    # 幂等：已存在 issue 表则跳过（新建库直接建 issue；老库 tasks→issue）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "issue" not in _tables and "tasks" in _tables:
+                c.execute("ALTER TABLE tasks RENAME TO issue")
+                db.commit()
+                log.info("Migrated table tasks -> issue (Phase B1, 结构不变)")
+            elif "issue" in _tables:
+                log.info("issue table already exists (Phase B1 rename skipped)")
+    except Exception as e:
+        log.warning(f"tasks->issue rename failed: {e}")
     migrations = [
         "ALTER TABLE agent_type_config ADD COLUMN parent_agent_type TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN agent_type TEXT DEFAULT ''",
@@ -1903,6 +2276,8 @@ def _migrate_tables():
         "ALTER TABLE runtime_credentials ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # ===== TMP (/tmp) 使用率指标（liufei 2026-08-28）=====
         "ALTER TABLE runtime_credentials ADD COLUMN tmp_percent DOUBLE DEFAULT 0",
+        # ===== Issue #180: 带宽占用率指标 =====
+        "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_percent DOUBLE DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
@@ -1947,6 +2322,7 @@ def _migrate_tables():
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
+        "ALTER TABLE skill ADD COLUMN sub_scene TEXT DEFAULT ''",
         # ===== Issue-11: devops_pipeline_scene 加 market_scene_id（单向关联） =====
         "ALTER TABLE devops_pipeline_scene ADD COLUMN market_scene_id INTEGER DEFAULT NULL",
         # ===== Issue-11: scene_skill_ref 加 skill_id =====
@@ -1960,6 +2336,8 @@ def _migrate_tables():
         "ALTER TABLE scene_category ADD COLUMN slug VARCHAR(64) DEFAULT ''",
         # ===== Issue-89: event_skipped 加 issue_id 列（skipped 事件审计需关联 Issue） =====
         "ALTER TABLE event_skipped ADD COLUMN issue_id TEXT DEFAULT ''",
+        # ===== Issue #177: user_feedback 软删除标记 =====
+        "ALTER TABLE user_feedback ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0",
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
@@ -2094,27 +2472,7 @@ def _migrate_tables():
             log.info("Migrated backend -> backend_id across agent tables")
     except Exception as e:
         log.warning(f"Migrate backend->backend_id failed: {e}")
-    # 同步 skill 归属:从 skill-description.json 更新 skill 表 agent_type(确保 pr->qa 等归属一致)
-    try:
-        _skill_desc_path = os.path.join(_CONFIG_DIR, "skill-description.json")
-        if os.path.exists(_skill_desc_path):
-            with open(_skill_desc_path, "r", encoding="utf-8") as _f:
-                _skill_desc = json.load(_f)
-            with db_lock:
-                c = db.cursor()
-                _updated = 0
-                for _sn, _info in _skill_desc.items():
-                    _at = (_info or {}).get("agent_type", "")
-                    if _sn and _at:
-                        _cur = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=?", (_sn,)).fetchone()
-                        if _cur and _cur[0] > 0:
-                            c.execute("UPDATE skill SET agent_type=? WHERE skill_name=?", (_at, _sn))
-                            _updated += c.rowcount
-                db.commit()
-                if _updated:
-                    log.info(f"Synced {_updated} skill agent_type mappings from skill-description.json")
-    except Exception as e:
-        log.warning(f"Sync skill agent_type failed: {e}")
+    # skill agent_type 同步由 worker 的 _sync_skills_to_db 变更检测覆盖，init_database 不做
     # backend_agents 大小写去重(合并为小写 name,保留最小 id,更新引用)
     try:
         with db_lock:
@@ -2538,6 +2896,15 @@ def _migrate_tables():
             log.info("Added managed_repos.host_status column")
     except Exception as e:
         log.warning(f"Add managed_repos.host_status column failed: {e}")
+    # ===== Issue #179: skill 表加 category_id 列（老库升级） =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "skill", "category_id", "INTEGER DEFAULT 0")
+            db.commit()
+            log.info("Added skill.category_id column")
+    except Exception as e:
+        log.warning(f"Add skill.category_id column failed: {e}")
     # ===== devops_pipeline_scene 高级选项列（场景级工作分支 + 自定义 key:value）=====
     try:
         with db_lock:
@@ -2599,6 +2966,7 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "load_avg", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "spec", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "tmp_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "bandwidth_percent", "REAL DEFAULT 0")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute("""
                     DELETE FROM runtime_credentials WHERE id NOT IN (
@@ -2643,29 +3011,85 @@ def _migrate_tables():
         log.info("Added last_scene column to user_accounts")
     except Exception as e:
         log.warning(f"Add last_scene column failed: {e}")
-    # ===== VOD auto-scene: issue_state.scene_id (vod-auto-scene-detection-design.md §3.1) =====
+    # ===== multi-task mode: issue_state 已停用（C5），仅补 issue/chat_messages 列 =====
     try:
         with db_lock:
             c = db.cursor()
-            _ensure_column(c, "issue_state", "scene_id", "TEXT DEFAULT ''")
-            db.commit()
-        log.info("Added scene_id column to issue_state")
-    except Exception as e:
-        log.warning(f"Add issue_state.scene_id column failed: {e}")
-    # ===== multi-task mode: issue_state.parent_issue_id + is_subtask_mode =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "issue_state", "parent_issue_id", "TEXT DEFAULT ''")
-            _ensure_column(c, "issue_state", "is_subtask_mode", "INTEGER DEFAULT 0")
-            _ensure_column(c, "tasks", "parent_issue_number", "INTEGER DEFAULT 0")
-            _ensure_column(c, "tasks", "is_subtask_mode", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "parent_issue_number", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "is_subtask_mode", "INTEGER DEFAULT 0")
             _ensure_column(c, "chat_messages", "task_id", "TEXT")
             _ensure_column(c, "chat_messages", "generate_status", "INTEGER DEFAULT NULL")
             db.commit()
-        log.info("Added parent_issue_id/is_subtask_mode columns to issue_state + tasks + task_id/generate_status to chat_messages")
+        log.info("Added parent_issue_number/is_subtask_mode to issue + task_id/generate_status to chat_messages")
     except Exception as e:
         log.warning(f"Add multi-task columns failed: {e}")
+    # ===== Phase B2: issue 收编 issue_state 字段（新增列 + 存量数据回填）=====
+    # 目标：issue 单表承载 stage/status 全量，为 C 阶段弃用 issue_state 做准备。
+    # 幂等：列已存在则跳过；C5 后 issue_state 已 DROP，回填自动跳过。
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 批 A：stage + owner_agent（默认 vod）
+            _ensure_column(c, "issue", "stage", "TEXT DEFAULT 'vod'")
+            _ensure_column(c, "issue", "owner_agent", "TEXT DEFAULT 'vod'")
+            # 批 B：场景相关
+            _ensure_column(c, "issue", "scene_id", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "scene_user_id", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "allow_scene_override", "INTEGER DEFAULT 0")
+            # 批 C：A2A 触发 + 子任务归属 + 更新时间
+            _ensure_column(c, "issue", "a2a_seq", "INTEGER")
+            _ensure_column(c, "issue", "parent_issue_id", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "updated_at", "TEXT DEFAULT ''")
+            db.commit()
+    except Exception as e:
+        log.warning(f"Phase B2 issue 收编字段补列失败: {e}")
+    # 存量回填：从 issue_state 并入 issue（按 issue_id == "#{issue_number}"；C5 DROP 后跳过）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _has_issue_state = bool(c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'").fetchone())
+        if _has_issue_state:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "UPDATE issue SET "
+                    "stage = COALESCE((SELECT s.stage FROM issue_state s "
+                    "                    WHERE s.repo_key=issue.repo_key "
+                    "                      AND s.issue_id='#'||issue.issue_number), 'vod'), "
+                    "owner_agent = COALESCE((SELECT s.owner_agent FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), 'vod'), "
+                "scene_id = COALESCE((SELECT s.scene_id FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), ''), "
+                "scene_user_id = COALESCE((SELECT s.scene_user_id FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), 0), "
+                "allow_scene_override = COALESCE((SELECT s.allow_scene_override FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), 0), "
+                "a2a_seq = COALESCE((SELECT s.a2a_seq FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), a2a_seq), "
+                "parent_issue_id = COALESCE((SELECT s.parent_issue_id FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), ''), "
+                "is_subtask_mode = COALESCE((SELECT s.is_subtask_mode FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), is_subtask_mode), "
+                "updated_at = COALESCE((SELECT s.updated_at FROM issue_state s "
+                "                    WHERE s.repo_key=issue.repo_key "
+                "                      AND s.issue_id='#'||issue.issue_number), '') "
+                "WHERE EXISTS (SELECT 1 FROM issue_state s "
+                "              WHERE s.repo_key=issue.repo_key AND s.issue_id='#'||issue.issue_number)")
+            _backfilled = c.rowcount
+            db.commit()
+        else:
+            _backfilled = 0
+        log.info(f"Phase B2: issue 收编 issue_state 字段完成（补列 + 回填 {_backfilled} 行）")
+    except Exception as e:
+        log.warning(f"Phase B2 issue 收编 issue_state 字段失败: {e}")
     # ===== event_thread: task_id + generate_status（对齐 Chat Agent 持久化查询）=====
     try:
         with db_lock:
@@ -2676,24 +3100,6 @@ def _migrate_tables():
         log.info("Added task_id/generate_status columns to event_thread")
     except Exception as e:
         log.warning(f"Add event_thread task_id/generate_status columns failed: {e}")
-    # ===== Scene Center: issue_state.scene_user_id =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "issue_state", "scene_user_id", "INTEGER DEFAULT 0")
-            db.commit()
-        log.info("Added scene_user_id column to issue_state")
-    except Exception as e:
-        log.warning(f"Add issue_state.scene_user_id column failed: {e}")
-    # ===== VOD scene override switch: issue_state.allow_scene_override =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "issue_state", "allow_scene_override", "INTEGER DEFAULT 0")
-            db.commit()
-        log.info("Added allow_scene_override column to issue_state")
-    except Exception as e:
-        log.warning(f"Add issue_state.allow_scene_override column failed: {e}")
     # ===== Scene Center: agent_tasks.pool_engine_ids + 官方场景种子导入 =====
     try:
         with db_lock:
@@ -2722,12 +3128,56 @@ def _migrate_tables():
     try:
         with db_lock:
             c = db.cursor()
-            _ensure_column(c, "tasks", "created_by", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "created_by", "TEXT DEFAULT ''")
             db.commit()
-        log.info("Added created_by column to tasks")
+        log.info("Added created_by column to issue")
     except Exception as e:
         log.warning(f"Add tasks.created_by column failed: {e}")
     # ===== Scene scope downgrade 已在 _migrate_scene_table_to_repo_model 中处理（Issue-39 方案 B）=====
+    # ===== Phase C5: DROP issue_state（字段已收编进 issue 单表，见 issues-api-execution-plan.md）=====
+    # 安全条件：不存在「issue_state 有、issue 无」的孤儿；且两边 stage 全部一致。否则跳过并告警。
+    # 当前仅 SQLite 自动执行（生产为 SQLite）；MySQL 手动执行（CAST 语法差异，避免迁移期报错）。
+    # 跳过条件：测试环境（pytest）保留 issue_state（session_store 兜底 + 测试引用）。
+    try:
+        import sys as _sys
+        _is_test = any("pytest" in _mod for _mod in (_sys.modules.keys() if _sys.modules else []))
+        if _is_test:
+            log.info("Phase C5: skip drop issue_state in test mode")
+        else:
+            from src.mysql_compat import get_db_backend
+            if get_db_backend() == "mysql":
+                log.info("Phase C5: MySQL 请手动执行 DROP issue_state（数据核对后）")
+            else:
+                with db_lock:
+                    c = db.cursor()
+                    _tables = [r[0] for r in c.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'").fetchall()]
+                    if not _tables:
+                        _is_dropped = True
+                    else:
+                        _orphan = c.execute(
+                            "SELECT COUNT(*) FROM issue_state s WHERE NOT EXISTS ("
+                            "SELECT 1 FROM issue i WHERE i.repo_key=s.repo_key "
+                            "AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER))"
+                        ).fetchone()[0]
+                        _mismatch = c.execute(
+                            "SELECT COUNT(*) FROM issue_state s JOIN issue i "
+                            "ON i.repo_key=s.repo_key AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER) "
+                            "WHERE COALESCE(i.stage,'')<>COALESCE(s.stage,'')"
+                        ).fetchone()[0]
+                        if _orphan == 0 and _mismatch == 0:
+                            c.execute("DROP TABLE issue_state")
+                            db.commit()
+                            _is_dropped = True
+                        else:
+                            _is_dropped = False
+                            log.warning(f"Phase C5: skip drop issue_state (orphan={_orphan}, mismatch={_mismatch})")
+                if _is_dropped:
+                    log.info("Phase C5: issue_state dropped（字段已收编进 issue 单表）")
+            if _is_dropped:
+                log.info("Phase C5: issue_state dropped（字段已收编进 issue 单表）")
+    except Exception as e:
+        log.warning(f"Phase C5 DROP issue_state failed: {e}")
 
 
 def _rebuild_scene_market_unique():
@@ -3000,3 +3450,16 @@ def _backfill_scene_display_names():
         log.warning(f"Scene display_name backfill failed: {e}")
 
 
+
+    # ===== autopilot_tasks: 新增 scene_id / description 列 =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "autopilot_tasks", "scene_id", "TEXT NOT NULL DEFAULT 'default'")
+            _ensure_column(c, "autopilot_tasks", "description", "TEXT NOT NULL DEFAULT ''")
+            # autopilot_executions: 新增 issue_number 列
+            _ensure_column(c, "autopilot_executions", "issue_number", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Autopilot schema migration: scene_id/description/issue_number ensured")
+    except Exception as e:
+        log.warning(f"Autopilot schema migration failed: {e}")

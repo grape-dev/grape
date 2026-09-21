@@ -607,6 +607,16 @@ def _migrate_repo_key_tables():
         except Exception as e:
             log.warning(f"Add managed_repos.dev_scene failed: {e}")
 
+        # 幂等补充：managed_repos 加 scene_recommend_config 列（智能推荐配置）
+        try:
+            _mr_cols = [r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()]
+            if "scene_recommend_config" not in _mr_cols:
+                c.execute("ALTER TABLE managed_repos ADD COLUMN scene_recommend_config TEXT DEFAULT ''")
+                db.commit()
+                log.info("Migrate repo_key: added managed_repos.scene_recommend_config")
+        except Exception as e:
+            log.warning(f"Add managed_repos.scene_recommend_config failed: {e}")
+
 
 def init_db():
     """初始化用户相关表（幂等）"""
@@ -951,10 +961,12 @@ def get_skill_current_version(skill_id) -> int:
 
 
 def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
-                     description: str, object_key: str, created_by: str = "") -> bool:
+                     description: str, object_key: str, created_by: str = "",
+                     category_id: int = 0) -> bool:
     """OBS 模式技能记录 upsert（存在则更新固定 key，不存在则插入；v2.5 file_path + by 字段）。
 
     scope: user/repo；owner: user_id 或 repo_key。返回是否成功。
+    Issue #179: 新增 category_id 参数。
     """
     try:
         with db_lock:
@@ -971,16 +983,16 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
             if row:
                 c.execute(
                     "UPDATE skill SET file_path=?, display_name=?, "
-                    "agent_type=?, description=?, updated_by=?, is_active=1, updated_at=datetime('now') WHERE id=?",
+                    "agent_type=?, description=?, category_id=?, updated_by=?, is_active=1, updated_at=datetime('now') WHERE id=?",
                     (object_key, skill_name, agent_type or "", description or "",
-                     created_by or "", row[0]))
+                     category_id, created_by or "", row[0]))
             else:
                 c.execute(
                     "INSERT INTO skill (skill_name, display_name, description, agent_type, "
-                    "file_path, scope, owner_id, created_by, updated_by, is_active) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,1)",
+                    "file_path, scope, owner_id, created_by, updated_by, is_active, category_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,1,?)",
                     (skill_name, skill_name, description or "", agent_type or "",
-                     object_key, scope, owner, created_by or "", created_by or ""))
+                     object_key, scope, owner, created_by or "", created_by or "", category_id))
             db.commit()
             return True
     except Exception as e:
@@ -1043,8 +1055,8 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
 def list_skills(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, skill_name, agent_type, description, scope, owner_id, file_path FROM skill WHERE scope='user' AND owner_id=? ORDER BY id", (str(user_id),))
-        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "file_path": r[6] or "", "created_at": ""} for r in c.fetchall()]
+        c.execute("SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id FROM skill WHERE scope='user' AND owner_id=? ORDER BY id", (str(user_id),))
+        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "file_path": r[6] or "", "category_id": r[7] or 0, "created_at": ""} for r in c.fetchall()]
 
 
 def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:
@@ -1136,6 +1148,70 @@ def get_repo_scene(repo_key: str) -> str:
     except Exception as e:
         log.warning(f"Get repo scene failed: {e}")
         return ""
+
+
+def get_scene_recommend_config(repo_key: str) -> dict:
+    """读取仓库智能推荐配置（managed_repos.scene_recommend_config）。
+
+    返回 {"fallback_scene": "", "rules": [{"scene_id": "", "condition": ""}]}。
+    无记录或未设置返回默认值。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            _cols = [r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()]
+            if "scene_recommend_config" not in _cols:
+                return {"fallback_scene": "", "rules": []}
+            c.execute("SELECT scene_recommend_config FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            if row and row[0]:
+                import json
+                cfg = json.loads(row[0])
+                return {
+                    "fallback_scene": cfg.get("fallback_scene", "") or "",
+                    "rules": cfg.get("rules", []) or [],
+                }
+    except Exception as e:
+        log.warning(f"Get scene recommend config failed: {e}")
+    return {"fallback_scene": "", "rules": []}
+
+
+def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list):
+    """写入仓库智能推荐配置（managed_repos.scene_recommend_config），幂等。
+
+    写入时自检：过滤 scene_id 不在当前场景列表中的规则。
+    fallback_scene 必填，空则报错。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    import json
+
+    # 自检：过滤无效 scene_id
+    try:
+        from src.api.pipeline_config import get_scenes
+        scenes = get_scenes(repo_key=repo_key)
+        valid_ids = {s["id"] for s in scenes}
+        if not valid_ids:
+            log.warning(f"Set scene recommend config: no scenes for {repo_key}")
+            return
+        rules = [r for r in (rules or []) if isinstance(r, dict) and r.get("scene_id") in valid_ids]
+        if fallback_scene and fallback_scene not in valid_ids:
+            fallback_scene = scenes[0]["id"] if scenes else ""
+            log.info(f"Set scene recommend config: fallback invalid, reset to {fallback_scene}")
+    except Exception as e:
+        log.warning(f"Set scene recommend config: sanitize failed: {e}")
+
+    cfg = json.dumps({"fallback_scene": fallback_scene or "", "rules": rules or []}, ensure_ascii=False)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE managed_repos SET scene_recommend_config=? WHERE repo_key=?", (cfg, repo_key))
+            db.commit()
+        log.info(f"Scene recommend config saved: repo={repo_key} fallback={fallback_scene} rules={len(rules)}")
+    except Exception as e:
+        log.warning(f"Set scene recommend config failed: {e}")
 
 
 def set_host_status(repo_key: str, status: str = ""):
@@ -2000,20 +2076,26 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
             c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes ORDER BY name")
         else:
             c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
-        return [
-            {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
-             "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
-             "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
-             "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
-             "local_skills": json.loads(r[14] or "[]") if r[14] else [],
-             "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
-             "agent_tags": json.loads(r[16]) if r[16] else [],
-             "host_name": r[17] or "",
-             "max_concurrent": r[18] or 20,
-             "scene_tags": json.loads(r[19]) if r[19] else ["default"],
-             "alias": r[20] or ""}
-            for r in c.fetchall()
-        ]
+        return _rows_to_runtimes(c.fetchall())
+
+
+
+def _rows_to_runtimes(rows) -> list[dict]:
+    """将 DB 行列表转为 runtime dict 列表（供 get_agent_runtimes / paged 复用）。"""
+    return [
+        {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
+         "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
+         "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
+         "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
+         "local_skills": json.loads(r[14] or "[]") if r[14] else [],
+         "skill_scan_result": json.loads(r[15] or "[]") if r[15] else [],
+         "agent_tags": json.loads(r[16]) if r[16] else [],
+         "host_name": r[17] or "",
+         "max_concurrent": r[18] or 20,
+         "scene_tags": json.loads(r[19]) if r[19] else ["default"],
+         "alias": r[20] or ""}
+        for r in rows
+    ]
 
 
 def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
@@ -2186,6 +2268,29 @@ def get_scene_category(category_id: int) -> dict | None:
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, name, slug, icon FROM scene_category WHERE id=?", (category_id,))
+        row = c.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "slug": row[2] or "", "icon": row[3] or ""}
+
+
+def list_skill_categories() -> list[dict]:
+    """返回启用的技能分类列表，按 order_num 排序"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, name, slug, icon, order_num FROM skill_category "
+            "WHERE is_active=1 ORDER BY order_num"
+        )
+        return [{"id": r[0], "name": r[1], "slug": r[2] or "", "icon": r[3] or "", "order_num": r[4]}
+                for r in c.fetchall()]
+
+
+def get_skill_category(category_id: int) -> dict | None:
+    """按 id 查技能分类"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, name, slug, icon FROM skill_category WHERE id=?", (category_id,))
         row = c.fetchone()
     if not row:
         return None
@@ -2797,13 +2902,13 @@ def get_featured_skills(limit: int = 5) -> list[dict]:
         c = db.cursor()
         c.execute(
             "SELECT id, skill_name, display_name, description, agent_type, "
-            "is_featured, like_count "
+            "is_featured, like_count, category_id "
             "FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
             "ORDER BY like_count DESC LIMIT ?",
             (limit,)
         )
         return [{"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
                  "description": r[3] or "", "agent_type": r[4] or "",
-                 "is_featured": r[5], "like_count": r[6]}
+                 "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
                 for r in c.fetchall()]
 

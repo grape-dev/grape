@@ -8,7 +8,7 @@ import hashlib, json, os
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
-from src.api.deps import get_current_user
+from src.api.deps import require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import db, db_lock
@@ -66,6 +66,7 @@ class HeartbeatBody(BaseModel):
     memory_percent: float = 0.0
     disk_percent: float = 0.0
     tmp_percent: float = 0.0
+    bandwidth_percent: float = 0.0
     load_avg: str = ""
     spec: str = ""
     log_lines: list[LogLineBody] = []
@@ -223,11 +224,11 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
         c = db.cursor()
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
         if body.spec:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=?, spec=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, body.spec, credential_id))
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, load_avg=?, spec=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.load_avg, body.spec, credential_id))
         else:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.load_avg, credential_id))
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, load_avg=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
@@ -319,11 +320,16 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                 }
                 _wf_fp.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
 
-    return {"status": "ok", "cancelled_tasks": cancelled_tasks}
+    # Auto-upgrade disabled: stop returning latest_version to prevent worker
+    # from repeatedly downloading install-worker.sh and saturating bandwidth.
+    # Workers should be upgraded manually via the install script.
+    _latest_ver = ""
+
+    return {"status": "ok", "cancelled_tasks": cancelled_tasks, "latest_version": _latest_ver}
 
 
-@router.get("/admin/event-bus")
-def event_bus_debug(user: dict = Depends(get_current_user)):
+@router.get("/admin/event-bus", operation_id="runtime_event_bus", summary="Event bus debug")
+def event_bus_debug(user: dict = Depends(require_no_session_token)):
     """Debug endpoint: show event bus history and listeners."""
     from src.api.event_bus import get_event_bus
     bus = get_event_bus()
@@ -336,8 +342,8 @@ def event_bus_debug(user: dict = Depends(get_current_user)):
 
 # ===== Issue #134: 机器健康度查询 API =====
 
-@router.get("/admin/machine-health")
-def machine_health_overview(user: dict = Depends(get_current_user)):
+@router.get("/admin/machine-health", operation_id="runtime_machine_health", summary="Machine health overview", description="Machine health overview for all engines: {runtime_id, name, health_score, total_tasks, failed_tasks, consecutive_failures, failure_rate, ...}.")
+def machine_health_overview(user: dict = Depends(require_no_session_token)):
     """获取所有引擎的机器健康度概览（供前端/运维查看）。
 
     返回 [{runtime_id, name, health_score, total_tasks, failed_tasks,
@@ -352,8 +358,8 @@ def machine_health_overview(user: dict = Depends(get_current_user)):
     return {"engines": scores}
 
 
-@router.get("/admin/machine-health/{runtime_id}")
-def machine_health_detail(runtime_id: int, user: dict = Depends(get_current_user)):
+@router.get("/admin/machine-health/{runtime_id}", operation_id="runtime_machine_health_detail", summary="Single runtime health detail", description="Health detail for a single engine.")
+def machine_health_detail(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """获取单个引擎的健康度详情。"""
     from src.runtime.health_scorer import get_health_score
     from src.runtime.instances import runtime_instance_name
@@ -362,8 +368,8 @@ def machine_health_detail(runtime_id: int, user: dict = Depends(get_current_user
     return data
 
 
-@router.post("/admin/batch-recover")
-def batch_recover_stale_tasks_api(user: dict = Depends(get_current_user)):
+@router.post("/admin/batch-recover", operation_id="runtime_batch_recover", summary="Batch recover stale tasks")
+def batch_recover_stale_tasks_api(user: dict = Depends(require_no_session_token)):
     """Manually trigger batch stale task recovery (Phase 5)."""
     from src.runtime.service import batch_recover_stale_tasks
     result = batch_recover_stale_tasks()
@@ -656,8 +662,8 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
 
 # ===== 用户态端点（M2，保留）=====
 
-@router.get("/tasks/{task_id}/status")
-def get_task_status(task_id: str, user: dict = Depends(get_current_user)):
+@router.get("/tasks/{task_id}/status", operation_id="runtime_task_status", summary="Task status polling", description="Task status polling (chat front-end D5 typewriter fallback).")
+def get_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """任务状态轮询（chat 前端用，D5 打字机降级）。"""
     task = service.get_task(task_id)
     if not task:
@@ -689,8 +695,8 @@ def runtime_task_state(task_id: str, credential_id: int = Depends(_require_crede
     return {"status": task.get("status") or ""}
 
 
-@router.post("/tasks/{task_id}/cancel")
-def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
+@router.post("/tasks/{task_id}/cancel", operation_id="runtime_task_cancel", summary="Cancel task", description="Cancels a task (status=cancelled); the worker exits on the next heartbeat.")
+def cancel_task(task_id: str, user: dict = Depends(require_no_session_token)):
     """取消任务（M2-5）：置 cancelled；执行侧由 worker 感知退出。"""
     task = service.get_task(task_id)
     if not task:
@@ -699,8 +705,8 @@ def cancel_task(task_id: str, user: dict = Depends(get_current_user)):
     return {"message": f"任务 {task_id} 已取消", "status": "cancelled"}
 
 
-@router.get("/runtimes/{runtime_id}/tasks")
-def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
+@router.get("/runtimes/{runtime_id}/tasks", operation_id="runtime_tasks_list", summary="List runtime tasks", description="Tasks of a device (front-end device view).")
+def list_runtime_tasks(runtime_id: int, user: dict = Depends(require_no_session_token),
                              status: str = "", limit: int = 50, repo: str = ""):
     """设备任务列表（M4 前端设备 [查看任务]）。"""
     from src.session_manager import db, db_lock
@@ -728,8 +734,8 @@ def list_runtime_tasks(runtime_id: int, user: dict = Depends(get_current_user),
         ]}
 
 
-@router.get("/runtimes/{runtime_id}/sessions")
-def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user),
+@router.get("/runtimes/{runtime_id}/sessions", operation_id="runtime_sessions_list", summary="List runtime sessions", description="Engine sessions filtered by agent_tasks.runtime_id; only sessions with matching tasks are returned.")
+def list_runtime_sessions(runtime_id: int, user: dict = Depends(require_no_session_token),
                                 repo: str = ""):
     """引擎 session 列表。
 
@@ -812,8 +818,8 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(get_current_user
         return {"sessions": sessions, "total": len(sessions)}
 
 
-@router.get("/credentials/{cid}/tasks")
-def list_credential_tasks(cid: int, user: dict = Depends(get_current_user),
+@router.get("/credentials/{cid}/tasks", operation_id="runtime_credential_tasks", summary="Tasks aggregated by credential", description="Tasks aggregated by credential across all its engine instances.")
+def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_token),
                                 status: str = "", limit: int = 50):
     """按凭据聚合任务（该凭据所有引擎实例的 agent_tasks，见 runtime-admin-two-view-design.md §4.3）。"""
     from src.session_manager import db, db_lock
@@ -989,8 +995,8 @@ def _scan_engine_skills_detail(engine_name: str) -> list[dict]:
     return skill_details
 
 
-@router.post("/runtimes/{runtime_id}/refresh-skills")
-def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dict = Depends(get_current_user)):
+@router.post("/runtimes/{runtime_id}/refresh-skills", operation_id="runtime_refresh_skills", summary="Rescan runtime skills", description="Rescans an engine's local skills and returns the detail list. Local engines scan directly; remote workers set pending_skill_scan and report on the next claim.")
+def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dict = Depends(require_no_session_token)):
     """重新扫描指定 engine 的本地 skill 并返回详情列表。
 
     本机直连引擎（credential_id=0）：直接扫描本机目录，立即返回结果。
@@ -1090,9 +1096,9 @@ def _apply_tag_rules(tags: list[str]) -> list[str]:
     return sorted(tag_set)
 
 
-@router.get("/runtimes/{runtime_id}/tags")
-def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_user)):
-    """返回 engine 的角色标签列表。"""
+@router.get("/runtimes/{runtime_id}/role-tags", operation_id="runtime_role_tags", summary="Runtime role tags", description="Role tags of an engine (web admin view).")
+def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_token)):
+    """返回 engine 的角色标签列表（web 管理视图；worker 取 tags 用 GET /runtimes/{id}/tags）。"""
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -1103,8 +1109,8 @@ def get_runtime_tags(runtime_id: int, user: dict = Depends(get_current_user)):
     return {"tags": json.loads(row[0]) if row[0] else []}
 
 
-@router.put("/runtimes/{runtime_id}/tags")
-def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(get_current_user)):
+@router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache.")
+def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_no_session_token)):
     """设置 engine 的角色标签。应用互斥规则后写入。
 
     以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
@@ -1144,9 +1150,9 @@ class MaxConcurrentBody(BaseModel):
     max_concurrent: int = 20
 
 
-@router.put("/runtimes/{runtime_id}/max-concurrent")
+@router.put("/runtimes/{runtime_id}/max-concurrent", operation_id="runtime_max_concurrent_set", summary="Set max concurrent", description="Sets the engine-level max concurrency.")
 def set_runtime_max_concurrent(runtime_id: int, body: MaxConcurrentBody,
-                                user: dict = Depends(get_current_user)):
+                                user: dict = Depends(require_no_session_token)):
     """设置引擎级最大并发数（方案一：并发纯引擎级，标签只做路由）。"""
     from src.session_manager import db, db_lock
     if body.max_concurrent < 1 or body.max_concurrent > 100:
@@ -1164,8 +1170,8 @@ def set_runtime_max_concurrent(runtime_id: int, body: MaxConcurrentBody,
 
 # ===== 场景标签 =====
 
-@router.get("/scene-tags")
-def list_scene_tags(user: dict = Depends(get_current_user)):
+@router.get("/scene-tags", operation_id="runtime_scene_tags_list", summary="List scene tags", description="All scenes and their available role tags for the scene picker: [{name, display_name, roles: [...]}].")
+def list_scene_tags(user: dict = Depends(require_no_session_token)):
     """返回场景市场所有场景及其可用角色标签（供前端场景选择器使用）。
 
     返回格式：[{name, display_name, roles: ["vod","issue","coding","qa","sre"]}, ...]
@@ -1187,8 +1193,8 @@ def list_scene_tags(user: dict = Depends(get_current_user)):
     return {"scenes": result}
 
 
-@router.get("/runtimes/{runtime_id}/scene-tags")
-def get_runtime_scene_tags(runtime_id: int, user: dict = Depends(get_current_user)):
+@router.get("/runtimes/{runtime_id}/scene-tags", operation_id="runtime_scene_tags_get", summary="Runtime scene tags", description="Scene tags of an engine.")
+def get_runtime_scene_tags(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """返回引擎的场景标签列表。"""
     with db_lock:
         c = db.cursor()
@@ -1204,9 +1210,9 @@ class SceneTagsBody(BaseModel):
     scene_tags: list[str] = ["default"]
 
 
-@router.put("/runtimes/{runtime_id}/scene-tags")
+@router.put("/runtimes/{runtime_id}/scene-tags", operation_id="runtime_scene_tags_set", summary="Set runtime scene tags", description="Sets an engine's scene tags (metadata constraining selectable role tags).")
 def set_runtime_scene_tags(runtime_id: int, body: SceneTagsBody,
-                            user: dict = Depends(get_current_user)):
+                            user: dict = Depends(require_no_session_token)):
     """设置引擎的场景标签。
 
     场景标签是元数据，约束可选角色标签范围。
@@ -1237,9 +1243,9 @@ class AliasBody(BaseModel):
     alias: str = ""
 
 
-@router.put("/runtimes/{runtime_id}/alias")
+@router.put("/runtimes/{runtime_id}/alias", operation_id="runtime_alias_set", summary="Set runtime alias", description="Sets an engine alias; an empty string clears it.")
 def set_runtime_alias(runtime_id: int, body: AliasBody,
-                       user: dict = Depends(get_current_user)):
+                       user: dict = Depends(require_no_session_token)):
     """设置引擎别名。空字符串表示清除别名。"""
     alias = (body.alias or "").strip()
     if len(alias) > 64:

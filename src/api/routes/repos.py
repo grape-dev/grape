@@ -1,10 +1,11 @@
-"""仓库路由：列表、托管、移除、同步"""
+"""仓库路由：列表、托管、移除、同步 + git 平台凭据/工作区（方案③ CLI 支撑）"""
+import os
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from src.config import log
+from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
-from src.api.deps import get_current_user, get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token
+from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token, require_no_session_token
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
@@ -91,22 +92,40 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
 
 
 def _probe_stale_repos(api_token: str, user_id: int):
-    """检查当前用户名下的托管仓库在 GitCode 上的状态，清理失效的托管记录。
+    """检查当前用户名下的托管仓库在 VCS 上的状态，清理失效的托管记录。
 
     两步检查：
     1. 并发查仓库是否存在（404 = 已删除，立即清理）
     2. 仓库存在的，串行查 webhook 是否还在（200 + hooks 列表不含 expected_wh = webhook 丢失，清理）
-       串行避免 GitCode API 限流返回空列表导致误判。
+       串行避免 API 限流返回空列表导致误判。
 
     只检查当前用户名下的托管仓库（不查其他用户的），减少 API 调用量。
     在 list_member_repos（前端托管页面入口）调用，确保打开页面时数据是最新的。
+
+    GitHub 仓库走 GitHub API + 用户 github_api_token；GitCode 仓库走 GitCode API + 传入 api_token。
     """
     import concurrent.futures, urllib.request, urllib.error, json as _json
+    from src.repo_key import parse_repo_key
+
     all_repos = user_db.get_managed_repos(user_id)
-    if not all_repos or not api_token:
+    if not all_repos:
         return
 
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_token}"}
+    # 按 provider 分组：GitHub 仓库需要单独的 token
+    github_token = ""
+    try:
+        from src.api.deps import get_user_github_token
+        acc = user_db.get_user(user_id) or {}
+        github_token = get_user_github_token(acc.get("username", ""))
+    except Exception:
+        pass
+
+    gitcode_headers = {"Accept": "application/json", "Authorization": f"Bearer {api_token}"} if api_token else {}
+    github_headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {github_token}",
+        "User-Agent": "Grape-DevOps",
+    } if github_token else {}
 
     # 第一步：并发查仓库是否存在（404 = 已删除）
     def _check_exists(item):
@@ -116,9 +135,19 @@ def _probe_stale_repos(api_token: str, user_id: int):
         if not owner or not repo_name:
             return None
         repo_key = r["repo_key"]
-        url = f"https://gitcode.com/api/v5/repos/{owner}/{repo_name}"
+        provider, _, _ = parse_repo_key(repo_key)
+        if provider == "github":
+            if not github_token:
+                return None  # 无 GitHub token，跳过检查（不误判）
+            url = f"https://api.github.com/repos/{owner}/{repo_name}"
+            hdrs = github_headers
+        else:
+            if not api_token:
+                return None
+            url = f"https://gitcode.com/api/v5/repos/{owner}/{repo_name}"
+            hdrs = gitcode_headers
         try:
-            req = urllib.request.Request(url, headers=headers, method="GET")
+            req = urllib.request.Request(url, headers=hdrs, method="GET")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 pass  # 200 = 仓库存在
         except urllib.error.HTTPError as e:
@@ -158,9 +187,17 @@ def _probe_stale_repos(api_token: str, user_id: int):
         if not owner or not repo_name:
             continue
         repo_key = r["repo_key"]
-        url = f"https://gitcode.com/api/v5/repos/{owner}/{repo_name}/hooks"
+        provider, _, _ = parse_repo_key(repo_key)
+        if provider == "github":
+            if not github_token:
+                continue
+            url = f"https://api.github.com/repos/{owner}/{repo_name}/hooks"
+            hdrs = github_headers
+        else:
+            url = f"https://gitcode.com/api/v5/repos/{owner}/{repo_name}/hooks"
+            hdrs = gitcode_headers
         try:
-            req = urllib.request.Request(url, headers=headers, method="GET")
+            req = urllib.request.Request(url, headers=hdrs, method="GET")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 hooks = _json.loads(resp.read().decode() or "[]")
             hook_ids = {h.get("id") for h in hooks if isinstance(h, dict)} if isinstance(hooks, list) else set()
@@ -182,8 +219,8 @@ def _probe_stale_repos(api_token: str, user_id: int):
         user_db.remove_managed_repo(repo_key)
 
 
-@router.get("/member", operation_id="repos_member", summary="我可操作的仓库列表")
-def list_member_repos(user: dict = Depends(get_current_user_or_api_key)):
+@router.get("/member", operation_id="repos_member", summary="List repos I can operate", description="Lists repositories the current user can operate. Reads the user_repos cache, auto-refreshing from GitCode when empty or stale; prunes managed repos removed upstream.")
+def list_member_repos(user: dict = Depends(require_no_session_token)):
     """获取用户可操作仓库列表：优先从 user_repos 缓存读取；缓存为空或超过 TTL 时自动从 GitCode 拉取刷新
 
     加载前先检查托管仓库在 GitCode 上是否还存在（GitCode 删仓库不发 webhook，
@@ -239,8 +276,8 @@ def list_member_repos(user: dict = Depends(get_current_user_or_api_key)):
     return {"repos": _filter_repos(user["id"], repos), "_cached": False}
 
 
-@router.post("/sync")
-def sync_repos(user: dict = Depends(get_current_user)):
+@router.post("/sync", operation_id="repos_sync", summary="Sync repo list from VCS", description="Manually syncs the repository list from VCS, refreshes the user_repos cache and probes/cleans stale managed records.")
+def sync_repos(user: dict = Depends(require_no_session_token)):
     """手动从 VCS 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录"""
     provider, api_token = _get_user_provider_and_token(user["username"])
     if not api_token:
@@ -257,8 +294,8 @@ def sync_repos(user: dict = Depends(get_current_user)):
     return {"repos": _filter_repos(user["id"], repos), "message": "同步成功"}
 
 
-@router.get("/check-name")
-def check_repo_name(name: str, user: dict = Depends(get_current_user)):
+@router.get("/check-name", operation_id="repos_check_name", summary="Check repo name availability", description="Checks whether a repository with the same name already exists under the current user.")
+def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
     """检查当前用户名下是否已存在同名仓库"""
     provider, api_token = _get_user_provider_and_token(user["username"])
     if not api_token:
@@ -298,8 +335,8 @@ def check_repo_name(name: str, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
 
 
-@router.post("/create")
-def create_new_repo(body: CreateRepoBody, user: dict = Depends(get_current_user)):
+@router.post("/create", operation_id="repos_create", summary="Create repository (optionally auto-host)", description="Creates a repository via the VCS API; optionally auto-hosts it afterwards.")
+def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_session_token)):
     """通过 VCS API 新建仓库，可选创建后自动托管"""
     import re as _re
     from src.repo_key import to_repo_key
@@ -452,8 +489,8 @@ def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: 
                 "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
 
 
-@router.post("/host")
-def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
+@router.post("/host", operation_id="repos_host", summary="Host repository", description="Registers an existing repository for hosting: creates the webhook and sets up the repo bot.")
+def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
@@ -510,13 +547,6 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
                                      bot_github_token=gh_bot_token, bot_username=gh_bot_username)
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             ensure_default_agent_sessions(repo_key)
-            try:
-                from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
-                _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
-            except HTTPException:
-                raise
-            except Exception as e:
-                log.warning(f"host_repo: auto-fork scenes failed: {e}")
             _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
             return {"message": "仓库托管成功", "webhook_id": hook_id, **_bot_result}
         except HTTPException:
@@ -620,13 +650,6 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
             _mark("")
-            try:
-                from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
-                _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
-            except HTTPException:
-                raise
-            except Exception as e:
-                log.warning(f"host_repo: auto-fork scenes failed: {e}")
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
         hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=webhook_token)
@@ -638,13 +661,6 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         from src.api.session_store import ensure_default_agent_sessions
         ensure_default_agent_sessions(repo_key)
         _mark("")
-        try:
-            from src.api.pipeline_config import _auto_fork_official_scenes_to_repo
-            _auto_fork_official_scenes_to_repo(repo_key, user.get("id", 0))
-        except HTTPException:
-            raise
-        except Exception as e:
-            log.warning(f"host_repo: auto-fork scenes failed: {e}")
         return {"message": "仓库托管成功", "webhook_id": hook_id}
     except HTTPException:
         raise
@@ -658,8 +674,8 @@ def host_repo(body: RepoAction, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
 
 
-@router.post("/{owner}/{repo}/repair-host")
-def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
+@router.post("/{owner}/{repo}/repair-host", operation_id="repos_repair_host", summary="Repair hosting", description="Self-heals an unfinished hosting flow (bot not joined / webhook missing). Idempotent; uses owner-token invite + bot-token webhook, skipping the invite when the bot is already a maintainer.")
+def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """方案 F-4：自愈未完成的托管流程（bot 未加入 / webhook 未创建），幂等。
 
     流程：需要 owner token 邀请 + bot token 建 webhook；判定 bot 已是维护者则跳过邀请；
@@ -725,8 +741,8 @@ def repair_host(owner: str, repo: str, user: dict = Depends(get_current_user)):
             "message": "托管已修复（bot 已加入成员，webhook 已就绪）"}
 
 
-@router.get("/managed", operation_id="repos_managed", summary="托管仓库列表")
-def list_managed_repos(user: dict = Depends(get_current_user_or_api_key)):
+@router.get("/managed", operation_id="repos_managed", summary="List managed repositories", description="Lists repositories hosted by the platform for the current user.")
+def list_managed_repos(user: dict = Depends(require_no_session_token)):
     repos = user_db.get_managed_repos(user["id"])
     return {"repos": [{
         "repo_key": r["repo_key"],
@@ -744,15 +760,15 @@ class BotTokenBody(BaseModel):
     bot_token: str = ""
 
 
-@router.get("/bot-token/{owner}/{repo_name}")
-def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(get_current_user)):
+@router.get("/bot-token/{owner}/{repo_name}", operation_id="repos_bot_token_get", summary="Get repository bot token", description="Returns whether the repository has a bound DevOps bot token.")
+def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(require_no_session_token)):
     """获取仓库绑定的 DevOps Bot Token 是否存在"""
     token = get_bot_token_by_repo(owner, repo_name)
     return {"has_bot_token": bool(token)}
 
 
-@router.put("/bot-token")
-def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user)):
+@router.put("/bot-token", operation_id="repos_bot_token_set", summary="Set repository bot token", description="Sets the repository DevOps bot token and automatically adds the repo bot as a maintainer.")
+def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_session_token)):
     """设置仓库绑定的 DevOps Bot Token；自动将 repo bot 加入维护者"""
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
@@ -766,11 +782,17 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user
     if not ok:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
 
-    # 用新 token 获取 GitCode 真实登录名，更新 bot_username
+    # 用新 token 获取 VCS 真实登录名，更新 bot_username
     repo_bot_username = ""
     try:
-        from src.user.repo_manager import _req
-        user_data = _req("GET", "https://gitcode.com/api/v5/user", body.bot_token)
+        from src.repo_key import parse_repo_key
+        _provider, _, _ = parse_repo_key(repo_key)
+        if _provider == "github":
+            from src.user.repo_manager import _github_req
+            user_data = _github_req("GET", "https://api.github.com/user", body.bot_token)
+        else:
+            from src.user.repo_manager import _req
+            user_data = _req("GET", "https://gitcode.com/api/v5/user", body.bot_token)
         repo_bot_username = user_data.get("login", "") or ""
     except Exception:
         pass
@@ -780,10 +802,19 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(get_current_user
     # 将 repo bot 加入仓库维护者（用 owner token，失败仅记日志，不影响托管）
     if body.bot_token and repo_bot_username:
         try:
-            from src.user.repo_manager import add_collaborator
-            owner_token = get_user_token(user["username"])
-            if owner_token:
-                add_collaborator(owner_token, owner, repo_name, repo_bot_username, "maintainer")
+            from src.repo_key import parse_repo_key
+            _provider, _, _ = parse_repo_key(repo_key)
+            if _provider == "github":
+                from src.user.repo_manager import add_github_collaborator
+                from src.api.deps import get_user_github_token
+                _owner_gh_token = get_user_github_token(user["username"]) or ""
+                if _owner_gh_token:
+                    add_github_collaborator(_owner_gh_token, owner, repo_name, repo_bot_username, "push")
+            else:
+                from src.user.repo_manager import add_collaborator
+                owner_token = get_user_token(user["username"])
+                if owner_token:
+                    add_collaborator(owner_token, owner, repo_name, repo_bot_username, "maintainer")
         except Exception:
             pass
     return {"message": "Bot Token 已更新", "bot_username": repo_bot_username}
@@ -794,8 +825,8 @@ class DeployUrlBody(BaseModel):
     deploy_url: str = ""
 
 
-@router.put("/deploy-url")
-def set_deploy_url(body: DeployUrlBody, user: dict = Depends(get_current_user)):
+@router.put("/deploy-url", operation_id="repos_deploy_url_set", summary="Set deployment URL", description="Registers the deployed access URL of the business system.")
+def set_deploy_url(body: DeployUrlBody, user: dict = Depends(require_no_session_token)):
     """登记业务系统部署后的访问 URL"""
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
@@ -811,8 +842,8 @@ def set_deploy_url(body: DeployUrlBody, user: dict = Depends(get_current_user)):
     return {"message": "部署 URL 已更新", "deploy_url": body.deploy_url}
 
 
-@router.get("/deploy-url/{owner}/{repo_name}", operation_id="repos_deploy_url", summary="获取仓库部署 URL")
-def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(get_current_user_or_api_key)):
+@router.get("/deploy-url/{owner}/{repo_name}", operation_id="repos_deploy_url", summary="Get repository deployment URL", description="Returns the repository deployment access URL.")
+def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(require_no_session_token)):
     """获取仓库的部署访问 URL"""
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
@@ -905,15 +936,26 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     # 6. workspace 目录（data/workspaces/...）
     try:
         from src.config import WORKSPACE_DIR
+        from src.repo_key import parse_repo_key, workspace_repo_dir
         _ws_base = WORKSPACE_DIR
-        # 所有候选目录（规范化后校验必须在 WORKSPACE_DIR 下）
+        _provider, _, _ = parse_repo_key(keys[0]) if keys else ("gitcode", "", "")
+        _provider = _provider or "gitcode"
+        # 新路径（含 provider 隔离）+ 旧路径兼容（无 provider + 带前缀）
         candidates = [
-            os.path.join(_ws_base, owner, repo),            # agent 执行目录
-            os.path.join(_ws_base, repo),                   # vod-agent 平级目录
+            # 新：{WORKSPACE_DIR}/{provider}/{owner}/{repo}
+            workspace_repo_dir(keys[0]) if keys else "",
+            # 旧：{WORKSPACE_DIR}/{owner}/{repo}
+            os.path.join(_ws_base, owner, repo),
+            # vod-agent 平级目录
+            os.path.join(_ws_base, repo),
+            # feishu/vod 旧路径 + 新路径（含 provider 段）
             os.path.join(_ws_base, "feishu", f"{owner}_{repo}"),
             os.path.join(_ws_base, "vod", f"{owner}_{repo}"),
+            os.path.join(_ws_base, "vod", _provider, f"{owner}_{repo}"),
+            # history 旧路径 + 新路径
             os.path.join(_ws_base, "history", owner, repo),
             os.path.join(_ws_base, "history", f"gitcode:{owner}", repo),
+            os.path.join(_ws_base, "history", owner, _provider, f"{owner}_{repo}"),
         ]
         for _dir in candidates:
             _abs = os.path.normpath(_dir)
@@ -927,8 +969,8 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     return stats
 
 
-@router.post("/remove")
-def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)):
+@router.post("/remove", operation_id="repos_remove", summary="Remove hosting", description="Removes hosting for a repository (unregisters webhook/bot bindings).")
+def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
@@ -1066,8 +1108,8 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(get_current_user)
     return {"message": "已移除仓库"}
 
 
-@router.get("/{owner}/{repo}/project-info")
-def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_current_user)):
+@router.get("/{owner}/{repo}/project-info", operation_id="repos_project_info", summary="Get project knowledge", description="Reads the authoritative project-knowledge baseline for a repository: files (full text) + meta (commit/branches/updated/degraded).")
+def get_repo_project_info(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """读取仓库的权威项目知识基线（repo 全局，多机共享，见 multi-issue-isolation-design.md §2.4）。
 
     返回 files（全文）+ meta（commit/branches/updated/degraded）。无基线 → 空 files + meta。
@@ -1084,8 +1126,8 @@ class SceneRecommendConfigBody(BaseModel):
     rules: list = []  # [{"scene_id": "", "condition": ""}]
 
 
-@router.get("/{owner}/{repo}/scene-recommend-config")
-def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(get_current_user)):
+@router.get("/{owner}/{repo}/scene-recommend-config", operation_id="repos_scene_recommend_config_get", summary="Get scene recommend config", description="Reads the repository smart scene-recommend config (fallback scene + routing rules).")
+def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """读取仓库智能推荐配置（兜底场景 + 路由规则）。"""
     from src.repo_key import to_repo_key
     from src.user.db import get_scene_recommend_config
@@ -1093,9 +1135,9 @@ def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(get_c
     return get_scene_recommend_config(repo_key)
 
 
-@router.put("/{owner}/{repo}/scene-recommend-config")
+@router.put("/{owner}/{repo}/scene-recommend-config", operation_id="repos_scene_recommend_config_set", summary="Save scene recommend config", description="Saves the repository scene-recommend config. Self-checks on write: filters out rules whose scene_id is not in the current scene list; fallback_scene is required.")
 def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfigBody,
-                                user: dict = Depends(get_current_user)):
+                                user: dict = Depends(require_no_session_token)):
     """保存仓库智能推荐配置（兜底场景 + 路由规则）。
 
     写入时自检：过滤 scene_id 不在当前场景列表中的规则。
@@ -1120,3 +1162,112 @@ def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfi
 
     set_scene_recommend_config(repo_key, body.fallback_scene.strip(), body.rules or [])
     return {"message": "智能推荐规则已保存"}
+
+
+# ===================== git 传输支撑（方案③，grape 平台私有能力）=====================
+# git-credential / workspace 是 grape 自身能力（非 gitcode/github/gitlab 平台原生），
+# 故置于 /api/repos（grape 平台业务）而非 /api/git-repo（平台透传）。
+
+_SUPPORTED_PROVIDERS = {"gitcode", "github"}
+_GITCODE_API_BASE = "https://gitcode.com/api/v5"
+_GITHUB_API_BASE = "https://api.github.com"
+_CREDENTIAL_TTL = 600
+
+
+def _repo_provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
+    """Git provider（gitcode/github）：由认证 token 的 repo_key 前缀派生（见 git-repo-provider-from-token-design.md）。"""
+    from src.repo_key import parse_repo_key
+    p = parse_repo_key(user.get("repo_key") or "")[0] or "gitcode"
+    if p not in _SUPPORTED_PROVIDERS:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": f"Git provider 未接入: {p}"})
+    return p
+
+
+def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "gitcode") -> str:
+    """平台 token 解析（仅会话级临时 token tk_；用户 API Key / Web JWT 不适用）。
+
+    chat agent → 用户 token；devops 事件 agent → 仓库 bot token；一种缺失交叉回退；均缺失 502。
+    """
+    if user.get("auth_type") != "session_token":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
+    from src.repo_key import to_repo_key
+
+    if provider == "github":
+        rk = to_repo_key(f"github:{owner}/{repo}")
+        def _bot():
+            try:
+                from src.user.db import get_github_token
+                return get_github_token(repo_key=rk) or ""
+            except Exception:
+                return ""
+        def _user():
+            try:
+                from src.api.deps import get_user_github_token
+                username = user.get("username") or ""
+                if not username and user.get("id", 0) > 0:
+                    from src.user.db import get_user
+                    username = (get_user(user["id"]) or {}).get("username", "")
+                return get_user_github_token(username) or ""
+            except Exception:
+                return ""
+    else:
+        rk = to_repo_key(f"{owner}/{repo}")
+        def _bot():
+            try:
+                from src.user.db import get_gitcode_token
+                return get_gitcode_token(repo_key=rk) or ""
+            except Exception:
+                return ""
+        def _user():
+            try:
+                from src.api.deps import get_user_token_with_refresh
+                uid = user.get("id") or 0
+                username = user.get("username") or ""
+                if not username and uid > 0:
+                    from src.user.db import get_user
+                    username = (get_user(uid) or {}).get("username", "")
+                return get_user_token_with_refresh(username, user_id=uid)
+            except Exception:
+                return ""
+
+    if user.get("agent_type") == "chat":
+        tok = _user()
+        if not tok:
+            tok = _bot()
+    else:
+        tok = _bot()
+        if not tok:
+            tok = _user()
+    if tok:
+        return tok
+    _vcs = "GitHub" if provider == "github" else "GitCode"
+    raise HTTPException(status_code=502, detail={"code": 502, "message": f"{_vcs} 仓库 token 解析失败"})
+
+
+@router.get("/{owner}/{repo}/git-credential", operation_id="repos_git_credential",
+            summary="One-shot git platform credential (CLI internal, TTL)",
+            description="One-shot short-lived platform credential for local git via CLI (in-process, never persisted). "
+                        "gitcode uses Basic auth with username x-access-token and the configured gitcode token as password. Session-only.")
+def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
+                            p: str = Depends(_repo_provider)):
+    """返回 CLI 本地执行 git 所需的平台凭据（一次性/短期，进程内使用不落盘）。
+
+    gitcode：Basic 用 username=`x-access-token`、password=配置的 gitcode token。
+    """
+    token = _repo_platform_token(owner, repo, user, p)
+    _gh = "github.com" if p == "github" else "gitcode.com"
+    return {
+        "provider": p,
+        "username": "x-access-token",
+        "password": token,
+        "clone_url": f"https://{_gh}/{owner}/{repo}.git",
+        "expires_in": _CREDENTIAL_TTL,
+    }
+
+
+@router.get("/{owner}/{repo}/workspace", operation_id="repos_workspace", summary="Repository workspace path (local git via CLI)", description="Returns the grape-managed local workspace path for the repository (CLI local git on the server). Session-only.")
+def get_repo_workspace(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
+                       p: str = Depends(_repo_provider)):
+    ws = os.path.join(WORKSPACE_DIR, owner, repo)
+    _gh = "github.com" if p == "github" else "gitcode.com"
+    return {"workspace": ws, "clone_url": f"https://{_gh}/{owner}/{repo}.git"}

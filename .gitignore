@@ -69,6 +69,9 @@ VERSION
 *.swp
 *.swo
 
+# 本地开发启动脚本（不进仓库）
+start-dev.sh
+
 # === 临时调试脚本/备份（不进仓库）===
 _tmp_*.py
 query_*.py
@@ -101,6 +104,7 @@ skills/
 !.opencode/
 !.opencode/skills/
 trace_*.py
+diag_*.py
 configs/scene-sync.json
 .coverage
 
@@ -113,3 +117,4 @@ src/api/static/openapi.json
 # grape-cli 已拆为独立仓库管理（D:/Developer/grape-dev/grape/cli）
 cli/
 src/api/static/uploads/
+*.log

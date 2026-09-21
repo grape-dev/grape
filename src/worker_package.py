@@ -98,7 +98,7 @@ def _ensure_grape_cli_wheel(whl_dir: str) -> str:
 
 
 def _manifest_version() -> str:
-    """按 manifest 各文件 (size, mtime) 计算内容指纹（代码变更即变化，git 无关）。"""
+    """按 manifest 各文件内容 sha256 计算指纹（代码变更即变化，git 无关，多 master 一致）。"""
     h = hashlib.sha256()
     for item in MANIFEST:
         path = os.path.join(ROOT, item)
@@ -109,15 +109,19 @@ def _manifest_version() -> str:
                     fp = os.path.join(root, f)
                     if fp.endswith(".pyc"):
                         continue
-                    st = os.stat(fp)
                     h.update(fp.encode("utf-8"))
-                    h.update(str(st.st_size).encode())
-                    h.update(str(st.st_mtime).encode())
+                    try:
+                        with open(fp, "rb") as fh:
+                            h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))
+                    except Exception:
+                        h.update(b"unreadable")
         elif os.path.isfile(path):
-            st = os.stat(path)
             h.update(path.encode("utf-8"))
-            h.update(str(st.st_size).encode())
-            h.update(str(st.st_mtime).encode())
+            try:
+                with open(path, "rb") as fh:
+                    h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))
+            except Exception:
+                h.update(b"unreadable")
     return h.hexdigest()[:16]
 
 
@@ -297,9 +301,23 @@ def _wheels_fingerprint() -> str:
     return h.hexdigest()[:8]
 
 
+_cached_package_version = ""
+_cached_package_version_ts = 0.0
+_PACKAGE_VERSION_TTL = float(os.environ.get("PACKAGE_VERSION_TTL", "60"))
+
+
 def package_version() -> str:
     """当前包版本：git commit/manifest 指纹 + wheels 指纹 + 内置 python 指纹。
-    如有未提交改动，追加 -dirty 后缀强制重建包。"""
+    如有未提交改动，追加 -dirty 后缀强制重建包。
+
+    带 TTL 缓存：心跳高频调用（默认 15s 间隔），但版本变更频率远低于此，
+    缓存 60s 可避免 95%+ 的重复 git 子进程 + manifest 扫描开销。
+    """
+    import time
+    global _cached_package_version, _cached_package_version_ts
+    _now = time.monotonic()
+    if _cached_package_version and (_now - _cached_package_version_ts) < _PACKAGE_VERSION_TTL:
+        return _cached_package_version
     base = ""
     try:
         if os.path.isdir(os.path.join(ROOT, ".git")) or os.path.isfile(os.path.join(ROOT, ".git")):
@@ -321,7 +339,10 @@ def package_version() -> str:
     if not base:
         base = "h-" + _manifest_version()
     py = _python_fingerprint(_find_python())
-    return f"{base}-w{_wheels_fingerprint()}-p{py}"
+    ver = f"{base}-w{_wheels_fingerprint()}-p{py}"
+    _cached_package_version = ver
+    _cached_package_version_ts = _now
+    return ver
 
 
 def _write_sha256sums(tar: tarfile.TarFile, members: list[tuple[str, bytes]]):

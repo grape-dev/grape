@@ -145,7 +145,8 @@ def _terminate_proc(proc, label: str = "", grace_seconds: float = 10.0):
 
 def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
                        account, user_id, env_extra, bot_token, user_token,
-                       agent_name, agent_label, max_exec_seconds) -> Generator:
+                       agent_name, agent_label, max_exec_seconds,
+                       repo_key: str = "") -> Generator:
     """hermes ACP 模式入口：构建 env → 调 hermes_acp.HermesACPBackend.stream_execute。
 
     与 stream_agent 的 opencode/codearts 路径并行，不走 build_args/parse_output。
@@ -162,7 +163,7 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
     #   chat → 只 USER_GITCODE_TOKEN；事件任务 → 只 BOT_GITCODE_TOKEN（不同时注入）
     _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
                   label=label, bot_token=bot_token, user_token=user_token,
-                  user_id=user_id)
+                  user_id=user_id, repo_key=repo_key)
     if agent_name:
         env["AGENT_NAME"] = agent_name
     if env_extra:
@@ -238,9 +239,15 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
         # GitHub 用户 token 注入
         if user_id > 0:
             try:
-                from src.user.db import get_user_account
-                _acc = get_user_account(username) or {}
-                _gh_tok = _acc.get("github_api_token", "")
+                from src.user.db import get_user_github_token
+                _gh_tok = get_user_github_token(user_id) or ""
+                if not _gh_tok:
+                    # 兜底：从 user_accounts.github_api_token 列读（OAuth 登录时写入）
+                    from src.user.db import _get_username_by_id, get_user_account
+                    _uname = _get_username_by_id(user_id)
+                    if _uname:
+                        _acc = get_user_account(_uname) or {}
+                        _gh_tok = _acc.get("github_api_token", "") or ""
                 if _gh_tok:
                     env["USER_GITHUB_TOKEN"] = _gh_tok
             except Exception as e:
@@ -254,6 +261,16 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
             log.info(f"{label}GitHub repo: also injected BOT_GITHUB_TOKEN")
         # 通用 BOT_TOKEN 别名（skill 文件中 $BOT_TOKEN 引用，适配多 VCS provider）
         env["BOT_TOKEN"] = bot_token
+
+    # VCS API base URL + 名称注入（skill 中 $VCS_API_BASE 引用，适配多 VCS provider）
+    if repo_key:
+        try:
+            from src.prompt_builder import _vcs_api_base, _vcs_name
+            env["VCS_API_BASE"] = _vcs_api_base(repo_key)
+            env["VCS_NAME"] = _vcs_name(repo_key)
+        except Exception as e:
+            log.warning(f"Failed to inject VCS_API_BASE: {e}")
+
     # 用户云凭据注入（devops 的 user_id=仓库归属用户，见 event_pipeline _issue_scene_uid）
     if user_id > 0:
         try:
@@ -270,6 +287,9 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                 else:
                     for k, v in cfg.items():
                         env[k.upper()] = str(v)
+                    # provider=openai: api_key → OPENAI_API_KEY（codex 读此变量）
+                    if provider == "openai" and cfg.get("api_key"):
+                        env["OPENAI_API_KEY"] = str(cfg["api_key"])
         except Exception as e:
             log.warning(f"Failed to inject user credentials: {e}")
 
@@ -281,6 +301,7 @@ def stream_chat_agent(prompt: str, cwd: str, session_id: str = "",
                       agent_name: str = "",
                       agent_label: str = "",
                       backend_name: str = "",
+                      repo_key: str = "",
                       max_exec_seconds: int = 600) -> Generator:
     """chat 语义专用执行器：以用户身份运行（只注入 USER_GITCODE_TOKEN + 用户云凭据）。
 
@@ -292,6 +313,7 @@ def stream_chat_agent(prompt: str, cwd: str, session_id: str = "",
         backend_name=backend_name, account=account, user_id=user_id,
         env_extra=env_extra, bot_token="", user_token=user_token,
         agent_name=agent_name, agent_label=agent_label,
+        repo_key=repo_key,
         max_exec_seconds=max_exec_seconds,
     )
 
@@ -304,6 +326,7 @@ def stream_devops_agent(prompt: str, cwd: str, session_id: str = "",
                         agent_name: str = "",
                         agent_label: str = "",
                         backend_name: str = "",
+                        repo_key: str = "",
                         max_exec_seconds: int = 600) -> Generator:
     """devops 事件语义专用执行器：以仓库身份运行（只注入 BOT_GITCODE_TOKEN）。
 
@@ -315,6 +338,7 @@ def stream_devops_agent(prompt: str, cwd: str, session_id: str = "",
         backend_name=backend_name, account=account, user_id=repo_user_id,
         env_extra=env_extra, bot_token=bot_token, user_token="",
         agent_name=agent_name, agent_label=agent_label,
+        repo_key=repo_key,
         max_exec_seconds=max_exec_seconds,
     )
 
@@ -326,6 +350,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  bot_token: str = "", user_token: str = "",
                  agent_name: str = "",
                  agent_label: str = "",
+                 repo_key: str = "",
                  max_exec_seconds: int = 600) -> Generator:
     """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）。
 
@@ -347,6 +372,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             prompt, cwd, session_id, event_type, backend,
             account, user_id, env_extra, bot_token, user_token,
             agent_name, agent_label, max_exec_seconds,
+            repo_key=repo_key,
         )
         return
 
@@ -358,7 +384,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     #   判定严格以 event_type 为准（不依赖 user_token 兜底判断，防调用方误传导致误判 chat）。
     _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
                   label=label, bot_token=bot_token, user_token=user_token,
-                  user_id=user_id)
+                  user_id=user_id, repo_key=repo_key)
     # Agent 显示名（skill 中 [$AGENT_NAME] 使用，如 "Issue Agent" / "QA Agent"）
     if agent_name:
         env["AGENT_NAME"] = agent_name

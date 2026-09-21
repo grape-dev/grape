@@ -355,14 +355,16 @@ SECURITY (MUST FOLLOW):
 4. NEVER write any token into files, logs, or comments."""
 
 
-def build_task_role_definition() -> str:
+def build_task_role_definition(repo_key="") -> str:
     """Task 会话专属 Role（task-vs-general-chat-flow-analysis.md §2.1）。
 
     与 general 的 build_chat_role_definition 不同：task 会话是**已被分配 Issue** 的对话，
     职责是澄清该 Issue 需求并回帖，不是"收到任务再创建新 Issue"。因此去掉
     general 的「创建 Issue 转交流水线」流程，突出澄清+回帖边界（对齐 chat-prompt-overview §2.2）。
     """
-    return """You are a DevOps operations assistant. Your domain:
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    return f"""You are a DevOps operations assistant. Your domain:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
 - Repository (GitCode/GitHub) API operations
@@ -372,7 +374,7 @@ You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, 
 ## 当前职责（任务对话）
 你正参与一个**已被分配 Issue** 的需求澄清对话。你的职责：
 1. 围绕该 Issue 的需求与用户多轮沟通，澄清关键参数与实现方案；
-2. 将澄清结论回帖到对应 Issue（GitCode 评论）；
+2. 将澄清结论回帖到对应 Issue（{_vcs} 评论）；
 3. 不实施 / 不部署 / 不写代码、不执行 git 命令——实现由 pipeline（coding/sre）在回帖后执行。
 
 SECURITY (MUST FOLLOW):
@@ -428,23 +430,24 @@ def _load_agent_registry() -> dict:
         return _agent_registry_cache or {}
 
 
-def _build_output_contract() -> str:
+def _build_output_contract(repo_key: str = "") -> str:
     """处理记录输出要求 + 行为约束（所有 DevOps agent 共用，见 agent-runtime-event-full-design.md §8）。
 
     包含：JSON 契约、任务结束规则、内部思考 vs 对外结论分离、评论内容边界、发布前自检。
     """
-    return """
+    _vcs = _vcs_name(repo_key)
+    return f"""
 ## 处理记录输出要求
 
 完成当前任务后，在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
 
-{
+{{
   "actions": ["做了什么，如 labeled:bug / assigned:@bob / 提交了PR / 发布了审查评论"],
   "conclusion": "处理结论/分析结果（简要）",
   "artifacts": ["产生的产物：PR#N / 评论 / 标签 / 部署 / Issue"],
   "next_step": "下一步建议；如需交办其他 Agent 则说明调用 A2A 的目标",
   "issue_summary": "Issue 最新聚合结论（覆盖档案 summary；紧凑文本，用 | 分隔）"
-}
+}}
 
 注意：
 - 只输出一个 JSON 块，放在答复末尾。
@@ -458,7 +461,7 @@ def _build_output_contract() -> str:
 不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
 
 ⚠️ 思考过程禁止出现在对外输出：任何思考过程叙述（如"让我…""现在我…""Let me…""Now I…"）
-只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 GitCode 评论 body 中。
+只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 {_vcs} 评论 body 中。
 最终答复只输出：动作结果结论 + 处理记录 JSON 块。
 
 ## 内部思考 vs 对外结论（必须分清）
@@ -486,6 +489,91 @@ def _build_output_contract() -> str:
 """
 
 
+# 附件文件扩展名分类
+_ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_id=0):
+    """统一附件注入入口。按 agent_type 分级，从 OBS/文件系统扫描附件。
+
+    所有 agent_type 都走此函数，内部按角色决定注入内容：
+    - vod:     图片+文件 URL + 完整处理指引（调 analyze-image / curl 下载）
+    - issue:   只注入文件名清单（无 URL、无下载指引）
+    - coding:  非图片附件的文件名 + URL + 简短下载指引
+    - qa/sre:  不注入
+    """
+    if agent_type not in ("vod", "issue", "coding"):
+        return
+
+    if not repo_key or not issue_id:
+        return
+
+    from src.repo_key import split_owner_repo
+    try:
+        _owner, _rname = split_owner_repo(repo_key)
+    except Exception:
+        return
+    if not _owner or not _rname:
+        return
+
+    _issue_num = str(issue_id).lstrip("#")
+    if not _issue_num.isdigit():
+        return
+
+    # 通过 tasks._attach_list 获取附件列表（自动适配 OBS/本地）
+    # 注意：_attach_list 尚未实现（远端 bbca2f9a 引用但未定义），容错跳过
+    try:
+        from src.api.routes.tasks import _attach_list
+    except ImportError:
+        return
+    _attachments = _attach_list(_owner, _rname, _issue_num)
+    if not _attachments:
+        return
+
+    _images = [a for a in _attachments if a.get("is_image")]
+    _files = [a for a in _attachments if not a.get("is_image")]
+
+    # --- VOD：强制读取所有附件 ---
+    if agent_type == "vod":
+        _lines = []
+        for a in _images:
+            _lines.append(f"- 图片 {a['filename']}: {a['url']}")
+        for a in _files:
+            _lines.append(f"- 文件 {a['filename']}: {a['url']}")
+        _server_url = _resolve_server_url(runtime_id)
+        parts.append(
+            "\n## 用户附件\n"
+            "Issue 包含以下用户上传附件，必须全部读取以理解用户需求：\n"
+            + "\n".join(_lines) + "\n"
+            f"- 图片：用 bash 工具执行 curl {_server_url}/api/analyze-image?url=<图片URL>，"
+            "返回 JSON 中 description 字段为图片内容描述。\n"
+            "- 文本/代码/文档：用 bash 工具 curl 下载到当前工作目录，然后用 read tool 读取内容。\n"
+            "- 图片分析完成后，在 A2A 交办的 context 中写明图片描述结果，供下游 Agent 参考。\n"
+        )
+
+    # --- Issue：只注入文件名清单 ---
+    elif agent_type == "issue":
+        _names = [a["filename"] for a in _files] + [a["filename"] for a in _images]
+        if _names:
+            parts.append(
+                "\n## 用户附件\n"
+                f"用户上传了以下附件：{', '.join(_names)}\n"
+                "图片附件已由 VOD Agent 分析，描述见前序 Agent 摘要。"
+                "非图片附件可在 A2A 交办 coding 时说明需参考的文件名。\n"
+            )
+
+    # --- Coding：非图片附件文件名 + URL + 强制读取指引 ---
+    elif agent_type == "coding":
+        if _files:
+            _lines = [f"- {a['filename']}: {a['url']}" for a in _files]
+            parts.append(
+                "\n## 用户附件\n"
+                "以下用户上传的附件必须全部 curl 下载到当前工作目录并用 read tool 读取内容，"
+                "作为实现需求的参考依据：\n"
+                + "\n".join(_lines) + "\n"
+                "图片附件已由 VOD Agent 分析，描述见前序 Agent 摘要。\n"
+            )
+
+
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
                  agent_type=""):
     number = extract_event_number(evt['payload'])
@@ -502,7 +590,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     elif isinstance(payload.get("object_attributes"), dict):
         issue_data = payload["object_attributes"]
     title = json.dumps(issue_data.get("title", ""), ensure_ascii=False)
-    body = json.dumps(issue_data.get("body", issue_data.get("description", "")), ensure_ascii=False)[:500]
+    body = json.dumps(issue_data.get("body", issue_data.get("description", "")), ensure_ascii=False)[:4000]
     parts = []
     evt_type = evt.get("type", "event")
 
@@ -533,10 +621,10 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
                 parts.append("(User @mentioned the bot)")
         if number is None:
             parts.append(f"\n⚠️ 本评论事件未携带 Issue 编号。你必须先通过 {_vcs} API 定位该评论落在哪个 Issue：")
-            parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /repos/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
+            parts.append(f"  查询仓库 {repo} 最近的 Issue 评论（GET /git-repo/{repo.split('/')[0]}/{repo.split('/')[-1]}/issues/{{n}}/comments），")
             parts.append("  用评论内容匹配确认 Issue 编号，然后对用户评论进行回复。")
             parts.append("  注意：即使缺少编号，也必须对用户评论作出回复，不得静默跳过。")
-        parts.append("\n必须回复该评论：使用 POST /repos/{owner}/{repo}/issues/{n}/comments，body 按你的技能规定的评论前缀开头，并引用用户评论原文。")
+        parts.append("\n必须回复该评论：使用 POST /git-repo/{owner}/{repo}/issues/{n}/comments，body 按你的技能规定的评论前缀开头，并引用用户评论原文。")
         parts.append("\n⚠️ **Issue 评论格式规范（必须遵守）**：评论 body 开头必须用 `[角色名 Agent]` 做前缀（如 `[Coding Agent]`、`[QA Agent]`、`[SRE Agent]`、`[Issue Agent]`、`[VOD Agent]`），角色名首字母大写。**禁止**使用 skill 名、仓库名或其他自定义前缀。")
     elif evt_type == "vod_signal":
         user_msg = payload.get("user_message", "")
@@ -552,6 +640,9 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             parts.append(f"Title: {title}")
         if body != '""':
             parts.append(f"Body: {body}")
+
+    # 附件注入：按 agent_type 分级（统一走文件系统扫描，不再从 body 正则匹配）
+    _inject_attachments_by_role(parts, _rk, evt.get("issue_id", "") or str(number or ""), agent_type, runtime_id)
 
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
@@ -646,13 +737,19 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             desc = info.get("description", "")
             parts.append(f"- {ag}：{desc}")
         parts.append("""
+### 认证说明
+
+本环境注入了两种 token，用途不同，**严禁混用**：
+- **Grape API**（`{{SERVER_URL}}/api/a2a`、`{{SERVER_URL}}/api/events/*`、`{{SERVER_URL}}/api/tasks/*`）：使用 `$GRAPE_SESSION_TOKEN` 作为 Bearer
+- **__VCS__ API**（`__API_BASE__/*`）：使用 `$__BOT_TOKEN__` 作为 Bearer
+
 ### 调用方式
 
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
 然后调用 A2A API：
 
-  curl -X POST {SERVER_URL}/api/a2a \\
-    -H "Authorization: Bearer $""" + _bot_token_env + """\" \\
+  curl -X POST {{SERVER_URL}}/api/a2a \\
+    -H "Authorization: Bearer $GRAPE_SESSION_TOKEN" \\
     -H "Content-Type: application/json" \\
     -d '{
       "agent": "coding",
@@ -679,10 +776,20 @@ context 是传给下一个 Agent 的接力说明，应包含：
 3. 建议下一步：需要下一个 Agent 做什么
 
 ⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
-""")
+""".replace("__VCS__", _vcs).replace("__API_BASE__", _api_base).replace("__BOT_TOKEN__", _bot_token_env))
 
     # 角色特定的 A2A 交办规则（按 agent_type 注入，指引何时 A2A 给哪个 Agent）
     _a2a_role_rules = {
+        "vod": (
+            "\n### VOD Agent A2A 交办规则\n"
+            "需求分析完成后，根据需求类型决定 A2A 目标：\n"
+            "- **部署类需求**（关键词：部署/deploy/上线/发布/运行服务/启动应用/云资源/ECS/容器等）→ A2A 给 `sre`，context 写明「部署」+ 资源需求摘要\n"
+            "- **开发类需求**（关键词：开发/实现/新增/修改/优化/bug修复/feature等）→ A2A 给 `issue`，context 写明需求摘要和引导结论，触发需求细化\n"
+            "- **资源释放类需求**（关键词：销毁/释放/删除资源/回收等）→ A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\n"
+            "⚠️ 部署类需求直接 A2A 给 `sre` 是正常行为（跳过 issue/coding/qa 中间环节），不算「跨阶段跳过」。\n"
+            "⚠️ 开发类需求必须先 A2A 给 `issue` 走完整开发流程（issue→coding→qa→sre），不要直接跳到 `sre` 或 `coding`。\n"
+            "⚠️ A2A 时 `pr_number` 不需要传入（VOD 阶段尚无 PR）。`issue_number` 必填。\n"
+        ),
         "qa": (
             "\n### QA Agent A2A 交办规则\n"
             "PR 审查完成后，根据审查结果决定 A2A 目标：\n"
@@ -723,7 +830,22 @@ API base URL: {_api_base}
 Never print or reveal the token value.
 """)
 
-    parts.append(_build_output_contract())
+    # 引擎绑定信息（避免 agent 查 /openapi.json 核验引擎）
+    if runtime_id:
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
+                _rt_row = c.fetchone()
+            _engine_name = (_rt_row[0] if _rt_row else "") or "unknown"
+            parts.append(f"\n## 执行引擎\n当前绑定引擎: {_engine_name} (runtime_id={runtime_id})\n"
+                         "引擎绑定信息已通过 prompt 注入，无需查询 /openapi.json 核验。"
+                         "如接口返回 403 属正常安全限制，不应阻塞后续调度。\n")
+        except Exception:
+            pass
+
+    parts.append(_build_output_contract(_rk))
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
     return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
 
@@ -778,7 +900,7 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
     - 不含全量技能枚举/中文标题（不在 Role 里展开 get_skill_capabilities）；
     - 注入项目知识基线（§2.1 要求）。
     """
-    parts = [build_chat_role_definition()]
+    parts = [build_chat_role_definition(repo_key)]
     if backend_name:
         parts.append(f"Runtime engine: {backend_name}")
     elif runtime_id:
@@ -860,11 +982,11 @@ def _get_task_description(conv: dict | None) -> str:
             c = db.cursor()
             if conv_id:
                 c.execute(
-                    "SELECT task_description FROM tasks WHERE conversation_id=? AND task_description!='' ORDER BY id DESC LIMIT 1",
+                    "SELECT task_description FROM issue WHERE conversation_id=? AND task_description!='' ORDER BY id DESC LIMIT 1",
                     (conv_id,))
             else:
                 c.execute(
-                    "SELECT task_description FROM tasks WHERE repo_key=? AND issue_number=? AND task_description!='' ORDER BY id DESC LIMIT 1",
+                    "SELECT task_description FROM issue WHERE repo_key=? AND issue_number=? AND task_description!='' ORDER BY id DESC LIMIT 1",
                     (repo_key, issue_number))
             row = c.fetchone()
             return row[0] if row else ""
@@ -886,7 +1008,7 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
 
     # Role Definition（task 专属，见 task-vs-general-chat-flow-analysis.md §2.1；
     # 与 general 不同：去掉"创建 Issue 转交流水线"，突出澄清+回帖）
-    parts.append(build_task_role_definition())
+    parts.append(build_task_role_definition(repo_key))
 
     # 用户基本信息（飞书侧前置）
     if user_info:
@@ -924,6 +1046,18 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     _append_chat_history(parts, history, has_valid_session)
 
     parts.append(f"\n## 本次用户消息\n{user_text}")
+
+    # VCS API 访问说明（与 general chat 一致，按 repo_key 前缀分流 GitHub/GitCode）
+    _vcs = _vcs_name(repo_key)
+    _token_env = _vcs_token_env(repo_key)
+    _api_base = _vcs_api_base(repo_key)
+    parts.append(f"""
+## {_vcs} API Access
+Your token is available as the {_token_env} environment variable.
+  curl -s -H "Authorization: Bearer ***" \\
+    {_api_base}/repos/{{owner}}/{{repo}}/issues
+Never print or reveal the token value.
+""")
 
     _sp = "{{SKILL_DIR}}/chat/SKILL.md"
     parts.append(
@@ -1032,7 +1166,10 @@ def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
         parts.append(f"## 共享知识\n{knowledge}")
 
     parts.append(f"## 用户消息\n{user_message}")
-    parts.append("请用中文简洁回复；如需沉淀共享知识或流程干预，调用对应端点（POST /api/events/{seq}/knowledge、/flow/reset，带 BOT_GITCODE_TOKEN）。")
+    _rk = evt.get("repo_key", "")
+    _bot_token_env = _vcs_bot_token_env(_rk)
+    _seq = evt.get("seq", "")
+    parts.append(f"请用中文简洁回复；如需沉淀共享知识或流程干预，调用对应端点（POST /api/events/{_seq}/knowledge、/flow/reset，带 {_bot_token_env}）。")
     return "\n\n".join(parts), _injected_ids
 
 
@@ -1114,7 +1251,7 @@ def build_scene_recommender_prompt(evt, repo_key: str) -> str:
     elif isinstance(payload.get("object_attributes"), dict):
         issue_data = payload["object_attributes"]
     title = issue_data.get("title", "")
-    body = issue_data.get("body", issue_data.get("description", ""))[:1000]
+    body = issue_data.get("body", issue_data.get("description", ""))[:4000]
 
     parts = []
 
@@ -1175,7 +1312,7 @@ def build_scene_recommender_prompt(evt, repo_key: str) -> str:
     parts.append("- A2A 交办 → 禁止")
     parts.append("- 多轮对话/需求澄清 → 禁止")
     parts.append("- 读取项目知识基线 → 禁止")
-    parts.append("- 调用 GitCode API → 禁止")
+    parts.append(f"- 调用 {_vcs_name(repo_key)} API → 禁止")
     parts.append("- 读写文件 → 禁止")
     parts.append("- 输出 JSON 以外的内容 → 禁止")
 
@@ -1190,7 +1327,7 @@ def build_scene_recommender_prompt(evt, repo_key: str) -> str:
 
     parts.append("\n## 硬约束")
     parts.append("1. 只输出 JSON：答复中只能有一个 JSON 块，不得有任何前后文字。")
-    parts.append("2. 不调用任何 API：不访问 GitCode、不调用 A2A、不发评论、不查 Issue。")
+    parts.append(f"2. 不调用任何 API：不访问 {_vcs_name(repo_key)}、不调用 A2A、不发评论、不查 Issue。")
     parts.append("3. 不读取任何文件：所有信息已在 prompt 中注入。")
     parts.append("4. scene_id 必须来自列表：只能填写 prompt 注入的场景列表中存在的 scene_id。")
     parts.append("5. 用户路由规则优先于你的语义判断：规则命中时必须遵从，不要用语义匹配覆盖。")

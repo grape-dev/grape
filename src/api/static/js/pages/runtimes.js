@@ -1,9 +1,8 @@
-/* Agent Runtime 管理页（M4 双视图）：Engines / Workers 两个子页，各按 scope 分区展示。
-   见 runtime-admin-two-view-design.md。卡片式布局：状态徽章置顶，异常引擎优先捕捉。 */
+/* Agent Runtime 管理页（M4 双视图）：Engines / Workers 两个子页，统一扁平列表展示（Issue #185）。
+   见 runtime-admin-two-view-design.md。卡片式布局：状态徽章置顶，来源徽章标注，分页控件。 */
 const RUNTIME_ICON = { online: '●', recently_lost: '◐', offline: '○', about_to_gc: '⚠' };
 const RUNTIME_COLOR = { online: 'var(--g)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
 const SCOPE_NAMES = { global: 'global', repo: 'repo', user: 'user' };
-const SCOPE_ORDER = ['global', 'repo', 'user'];
 const HEALTH_NAMES = { online: 'online', recently_lost: 'recently_lost', offline: 'offline', about_to_gc: 'about_to_gc' };
 const HEALTH_BADGE = {
   online: { color: 'var(--g)', bg: '#dcfce7' },
@@ -21,12 +20,109 @@ let _rtFilterTag = [];
 let __runtimeData = null;
 let __runtimeDevices = null;
 let _skillScanDirty = false;  // skills 扫描成功后标记，关闭弹窗时刷新引擎列表
-let _scopeCollapse = { global: false, repo: true, user: true };  // scope 分组折叠状态：global 默认展开，repo/user 默认折叠
 
-function _toggleScope(sc) {
-  _scopeCollapse[sc] = !_scopeCollapse[sc];
-  renderRuntimes(__runtimeData);
+// Issue #185: 分页状态
+let _rtPage = 1;        // 当前页码（Engines 用）
+let _rtPageSize = 20;   // 每页条数
+let _rtTotal = 0;       // 服务端返回的过滤后总数
+let _rtDevPage = 1;     // Workers 当前页码
+let _rtDevTotal = 0;    // Workers 总数
+
+// 来源徽章配置（Issue #185: 统一列表每张卡片标注来源）
+const _SCOPE_BADGE = {
+  global: { label: '全局', color: '#3168e0', bg: '#e3edfd' },
+  repo:   { label: '仓库', color: '#8b5cf6', bg: '#ede9fe' },
+  user:   { label: '个人', color: '#1ca44c', bg: '#dcfce7' },
+  local:  { label: '本机', color: '#0e7490', bg: '#cffafe' },
+};
+
+function _scopeBadge(scope, isLocal) {
+  var sc = isLocal ? 'local' : (scope || 'global');
+  var cfg = _SCOPE_BADGE[sc] || _SCOPE_BADGE.global;
+  return '<span style="display:inline-flex;align-items:center;font-size:10px;font-weight:600;color:' + cfg.color + ';background:' + cfg.bg + ';border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle">' + cfg.label + '</span>';
 }
+
+// 分页控件渲染（Issue #185）
+function _paginationBar(currentPage, total, pageSize, onChangeFn) {
+  if (!total || total <= pageSize) return '';
+  var totalPages = Math.ceil(total / pageSize);
+  var parts = [];
+  // 上一页
+  parts.push('<button onclick="' + onChangeFn + '(' + (currentPage - 1) + ')"' + (currentPage <= 1 ? ' disabled' : '') + ' style="padding:4px 10px;border:1px solid var(--b);border-radius:6px;background:var(--c);color:' + (currentPage <= 1 ? 'var(--t3)' : 'var(--t1)') + ';font-size:12px;cursor:' + (currentPage <= 1 ? 'default' : 'pointer') + ';margin:0 2px">‹</button>');
+  // 页码按钮（最多显示 7 个）
+  var start = Math.max(1, currentPage - 3);
+  var end = Math.min(totalPages, start + 6);
+  if (start > 1) {
+    parts.push('<button onclick="' + onChangeFn + '(1)" style="padding:4px 10px;border:1px solid var(--b);border-radius:6px;background:var(--c);color:var(--t1);font-size:12px;cursor:pointer;margin:0 2px">1</button>');
+    if (start > 2) parts.push('<span style="color:var(--t3);font-size:12px;padding:0 4px">…</span>');
+  }
+  for (var i = start; i <= end; i++) {
+    var active = i === currentPage;
+    parts.push('<button onclick="' + onChangeFn + '(' + i + ')" style="padding:4px 10px;border:1px solid ' + (active ? '#0071e3' : 'var(--b)') + ';border-radius:6px;background:' + (active ? '#0071e3' : 'var(--c)') + ';color:' + (active ? '#fff' : 'var(--t1)') + ';font-size:12px;cursor:pointer;margin:0 2px;font-weight:' + (active ? '600' : '400') + '">' + i + '</button>');
+  }
+  if (end < totalPages) {
+    if (end < totalPages - 1) parts.push('<span style="color:var(--t3);font-size:12px;padding:0 4px">…</span>');
+    parts.push('<button onclick="' + onChangeFn + '(' + totalPages + ')" style="padding:4px 10px;border:1px solid var(--b);border-radius:6px;background:var(--c);color:var(--t1);font-size:12px;cursor:pointer;margin:0 2px">' + totalPages + '</button>');
+  }
+  // 下一页
+  parts.push('<button onclick="' + onChangeFn + '(' + (currentPage + 1) + ')"' + (currentPage >= totalPages ? ' disabled' : '') + ' style="padding:4px 10px;border:1px solid var(--b);border-radius:6px;background:var(--c);color:' + (currentPage >= totalPages ? 'var(--t3)' : 'var(--t1)') + ';font-size:12px;cursor:' + (currentPage >= totalPages ? 'default' : 'pointer') + ';margin:0 2px">›</button>');
+  return '<div style="display:flex;align-items:center;justify-content:center;gap:4px;padding:12px 0;flex-wrap:wrap">' + parts.join('') + '<span style="font-size:11px;color:var(--t3);margin-left:8px">共 ' + total + ' 条 / ' + totalPages + ' 页</span></div>';
+}
+
+window._rtGoPage = function(p) {
+  _rtPage = Math.max(1, p);
+  _loadRuntimesData();
+};
+window._rtDevGoPage = function(p) {
+  _rtDevPage = Math.max(1, p);
+  _loadRuntimeDevices();
+};
+
+// Issue #185: Engines 分页加载
+function _loadRuntimesData() {
+  var qs = '?page=' + _rtPage + '&page_size=' + _rtPageSize;
+  if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
+  API.get('/settings/agent-runtimes' + qs).then(function(d) {
+    if (window._currentView !== 'runtimes') return;
+    _rtTotal = d.total || 0;
+    renderRuntimes(d);
+  }).catch(function(e) {
+    if (e.name === 'AbortError' && e.silent) return;
+    if (window._currentView !== 'runtimes') return;
+    var el = document.getElementById('pageContent');
+    if (el) el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
+  });
+}
+
+// Issue #185: Workers 设备分页加载（独立端点）
+function _loadRuntimeDevices() {
+  var qs = '?page=' + _rtDevPage + '&page_size=' + _rtPageSize;
+  API.get('/settings/runtime-devices' + qs).then(function(d) {
+    if (window._currentView !== 'runtimes') return;
+    _rtDevTotal = d.total || 0;
+    // 合并到 __runtimeData 供 renderWorkers 使用
+    if (__runtimeData) {
+      __runtimeData.devices = d.devices || [];
+      renderRuntimes(__runtimeData);
+    }
+  }).catch(function(e) {
+    if (e.name === 'AbortError' && e.silent) return;
+    if (window._currentView !== 'runtimes') return;
+    var el = document.getElementById('pageContent');
+    if (el) el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
+  });
+}
+
+// Issue #185: tab 切换时渲染（Workers 首次展示使用 agent-runtimes 返回的全量 devices，
+// 翻页时由 _rtDevGoPage 调 runtime-devices 端点加载分页数据）
+// 审查修复：tab 切换到 workers 时调用 _loadRuntimeDevices() 统一数据源，获取权威 total
+window._onRuntimeTabSwitch = function(tab) {
+  if (tab === 'workers') {
+    _loadRuntimeDevices();
+  } else {
+    renderRuntimes(__runtimeData);
+  }
+};
 
 // 健康状态排序：在线 → 刚失联 → 离线 → 待回收
 const _HEALTH_ORDER = { online: 0, recently_lost: 1, offline: 2, about_to_gc: 3 };
@@ -45,31 +141,6 @@ function _sortByName(list) {
     const nb = (b.instance_name || b.name || b.device_name || '').toLowerCase();
     return na.localeCompare(nb);
   });
-}
-
-// 健康子分组 Tab（scope 展开后，点击切换不同状态的卡片）
-const _HEALTH_SECTIONS = [
-  { key: 'online', label: '在线', color: 'var(--g)', icon: '●' },
-  { key: 'recently_lost', label: '刚失联', color: 'var(--y)', icon: '◐' },
-  { key: 'offline', label: '离线', color: 'var(--t3)', icon: '○' },
-  { key: 'about_to_gc', label: '待回收', color: 'var(--r)', icon: '⚠' },
-];
-let _healthTab = {};  // { scope: current_tab_key }，默认 'online'
-
-function _healthTabBar(sc, list) {
-  const counts = {};
-  _HEALTH_SECTIONS.forEach(sec => { counts[sec.key] = 0; });
-  list.forEach(e => { const h = e.health || e.status || 'offline'; if (counts[h] !== undefined) counts[h]++; });
-  const active = _healthTab[sc] || 'all';
-  const allCount = list.length;
-  return `<div style="display:flex;align-items:center;gap:0;margin:8px 0 12px;border-bottom:1px solid var(--b)">
-    <span onclick="_healthTab['${sc}']='all';renderRuntimes(__runtimeData)" style="display:inline-flex;align-items:center;gap:5px;padding:6px 14px;font-size:12px;font-weight:${active==='all'?'600':'400'};color:${active==='all'?'var(--t1)':'var(--t3)'};cursor:pointer;border-bottom:2px solid ${active==='all'?'var(--t1)':'transparent'};transition:all .15s;user-select:none" onmouseover="if('${active}'!=='all')this.style.color='var(--t2)'" onmouseout="if('${active}'!=='all')this.style.color='var(--t3)'">全部 <span style="font-size:10px;opacity:.7">${allCount}</span></span>
-    ${_HEALTH_SECTIONS.map(sec => {
-      const n = counts[sec.key] || 0;
-      const isActive = active === sec.key;
-      return `<span onclick="_healthTab['${sc}']='${sec.key}';renderRuntimes(__runtimeData)" style="display:inline-flex;align-items:center;gap:5px;padding:6px 14px;font-size:12px;font-weight:${isActive?'600':'400'};color:${isActive ? sec.color : 'var(--t3)'};cursor:pointer;border-bottom:2px solid ${isActive ? sec.color : 'transparent'};transition:all .15s;user-select:none" onmouseover="if(!${isActive})this.style.color='var(--t2)'" onmouseout="if(!${isActive})this.style.color='var(--t3)'">${sec.icon} ${sec.label} <span style="font-size:10px;opacity:.7">${n}</span></span>`;
-    }).join('')}
-  </div>`;
 }
 
 // 健康状态统计摘要（折叠时显示在标题栏）
@@ -135,16 +206,13 @@ function _healthBadge(h, suffix) {
   return `<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:${st.color};background:${st.bg};padding:3px 10px;border-radius:999px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:${st.color}"></span>${_healthLabel(h)}${suffix ? ' · ' + suffix : ''}</span>`;
 }
 
-function _scopeBar(sc, n, localN, healthSummary, collapsed) {
-  const _SCOPE_BORDER = { global: '#3168e0', repo: '#8b5cf6', user: '#1ca44c' };
-  const arrow = collapsed ? '▸' : '▾';
-  const arrowRot = collapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
-  const sub = (sc === 'global' && localN) ? ` <span style="color:#0e7490;font-weight:600">· ${I18N.t('runtimes.label.local_direct')} ${localN} / ${I18N.t('runtimes.label.remote')} ${(n || 0) - localN}</span>` : '';
-  const health = healthSummary ? ` <span style="font-weight:400;font-size:11px;color:var(--t2);margin-left:4px">${healthSummary}</span>` : '';
-  return `<div onclick="_toggleScope('${sc}')" style="display:flex;align-items:center;gap:8px;background:#e3edfd;color:#235ec7;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600;margin:16px 0 10px;cursor:pointer;user-select:none;transition:background .15s;border-left:3px solid ${_SCOPE_BORDER[sc] || 'var(--a)'}" onmouseover="this.style.background='#d4e3fc'" onmouseout="this.style.background='#e3edfd'">
-    <span style="font-size:14px;width:14px;flex-shrink:0;display:inline-block;transition:transform .25s ease;transform:${arrowRot}">${arrow}</span>
-    ${_scopeLabel(sc)} <span style="background:rgba(35,94,199,.12);border-radius:10px;padding:0 8px;font-size:11px">${n}</span>${sub}${health}
-  </div>`;
+function _healthScoreBadge(rt) {
+  const s = rt.health_score;
+  if (s === null || s === undefined) return '';
+  const c = s === 0 ? 'var(--r)' : s < 50 ? 'var(--y)' : 'var(--g)';
+  const hb = rt.health_heartbeat_alive === false ? ' · 失联' : '';
+  const cf = rt.health_consecutive_failures > 0 ? ` <span class="ts t3" style="font-size:10px">连续失败${rt.health_consecutive_failures}</span>` : '';
+  return `<span style="color:${c};font-weight:600">${s}</span>${cf}${hb ? `<span class="ts t3" style="font-size:10px">${hb}</span>` : ''}`;
 }
 
 function _legendHtml() {
@@ -159,6 +227,8 @@ function renderRuntimes(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   __runtimeData = data;
+  // Issue #185: 更新分页 total（服务端返回）
+  if (data.total !== undefined) _rtTotal = data.total;
   // 场景标签缓存未加载时先异步拉取，拿到后再渲染（避免卡片显示原始 name 而非 display_name）
   if (!__sceneTagsCache) {
     _loadSceneTagsCache(function() { renderRuntimes(data); });
@@ -171,18 +241,20 @@ function renderRuntimes(data) {
     : (data.runtimes || []).map(rt => ({ name: rt.worker_name || rt.name, device_name: I18N.t('runtimes.label.local'), health: rt.health || 'offline',
       scope: 'global', owner: rt.owner || '', worker_ip: rt.worker_ip || '', credential_id: 0, runtimes: [rt] }));
   __runtimeDevices = devices;
+  // Issue #185 审查修复：_rtDevTotal 只由 runtime-devices 端点提供权威值，
+  // 不再从 agent-runtimes 返回的 devices 启发式更新（避免过滤不一致导致分页页数错误）
 
   const tabBtn = t => {
     const active = _runtimeTab === t;
-    return `<button class="bt ${active ? 'bt-p' : 'bt-o'}" onclick="_runtimeTab='${t}';renderRuntimes(__runtimeData)">${I18N.t('runtimes.tab.' + t)}</button>`;
+    return `<button class="bt ${active ? 'bt-p' : 'bt-o'}" onclick="_runtimeTab='${t}';_onRuntimeTabSwitch('${t}')">${I18N.t('runtimes.tab.' + t)}</button>`;
   };
   let html = `<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
       ${tabBtn('engines')}${tabBtn('workers')}
       <div class="sp"></div>
       <button class="bt bt-o" onclick="refreshRuntimes()">⟳ ${I18N.t('runtimes.refresh')}</button>
       <div style="display:flex;align-items:center;flex:1;max-width:300px">
-        <input id="runtimeSearchInput" placeholder="搜索名称、设备、标签..." value="${_runtimeSearch}" onkeyup="if(event.key==='Enter'){_runtimeSearch=this.value;renderRuntimes(__runtimeData)}" onchange="_runtimeSearch=this.value;renderRuntimes(__runtimeData)" style="flex:1;padding:7px 12px 7px 14px;border:1px solid var(--b);border-radius:10px 0 0 10px;font-size:13px;background:var(--bg);color:var(--t1);transition:border-color .2s;outline:none" onfocus="this.style.borderColor='#0071e3';this.style.background='var(--c)'" onblur="this.style.borderColor='var(--b)';this.style.background='var(--bg)'">
-        <button onclick="var i=document.getElementById('runtimeSearchInput');_runtimeSearch=i.value;renderRuntimes(__runtimeData)" style="padding:7px 14px;border:1px solid var(--b);border-left:none;border-radius:0 10px 10px 0;background:var(--bg);color:var(--t3);font-size:13px;cursor:pointer;flex-shrink:0;transition:all .15s" onmouseover="this.style.background='#0071e3';this.style.color='#fff'" onmouseout="this.style.background='var(--bg)';this.style.color='var(--t3)'"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></button>
+        <input id="runtimeSearchInput" placeholder="搜索名称、设备、标签..." value="${_runtimeSearch}" onkeyup="if(event.key==='Enter'){_runtimeSearch=this.value;_rtResetPageAndReload()}" onchange="_runtimeSearch=this.value;_rtResetPageAndReload()" style="flex:1;padding:7px 12px 7px 14px;border:1px solid var(--b);border-radius:10px 0 0 10px;font-size:13px;background:var(--bg);color:var(--t1);transition:border-color .2s;outline:none" onfocus="this.style.borderColor='#0071e3';this.style.background='var(--c)'" onblur="this.style.borderColor='var(--b)';this.style.background='var(--bg)'">
+        <button onclick="var i=document.getElementById('runtimeSearchInput');_runtimeSearch=i.value;_rtResetPageAndReload()" style="padding:7px 14px;border:1px solid var(--b);border-left:none;border-radius:0 10px 10px 0;background:var(--bg);color:var(--t3);font-size:13px;cursor:pointer;flex-shrink:0;transition:all .15s" onmouseover="this.style.background='#0071e3';this.style.color='#fff'" onmouseout="this.style.background='var(--bg)';this.style.color='var(--t3)'"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></button>
       </div>
       <button onclick="openAddDevicePanel()" style="margin-left:auto;display:inline-flex;align-items:center;gap:7px;padding:8px 18px;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 12px rgba(59,130,246,.35);transition:all .2s;position:relative;overflow:hidden" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 20px rgba(59,130,246,.45)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 2px 12px rgba(59,130,246,.35)'><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M12 5v14M5 12h14"/></svg>${I18N.t('runtimes.action.add_device')}</button>
     </div>`;
@@ -197,10 +269,9 @@ function renderRuntimes(data) {
   }).filter(Boolean))];
   const _allScopes = ['local','user','repo','global'];
   const _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
-  const _hasScope = (sc) => {
-    const list = _runtimeTab === 'engines' ? (data.runtimes||[]) : devices;
-    return list.some(e => (e.scope || (e.is_local ? 'local' : 'global')) === sc || (sc === 'local' && e.is_local));
-  };
+  // 筛选标签从后端返回的 avail_scopes 生成（不再依赖当前页数据）
+  const _availScopes = data.avail_scopes || [];
+  const _hasScope = (sc) => _availScopes.includes(sc);
   const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
   // 收集可用场景和标签（从引擎数据提取）
   const _allRuntimes = (data.runtimes || []);
@@ -242,7 +313,7 @@ function renderRuntimes(data) {
 
 function renderEngines(data, devices) {
   const runtimes = data.runtimes || [];
-  // 搜索 + 类型 + scope 过滤
+  // 搜索 + 类型 + scope 过滤（Issue #185: 统一扁平列表，不再按 scope 分区）
   const q = (_runtimeSearch || '').toLowerCase().trim();
   const filtered = runtimes.filter(rt => {
     if (q) {
@@ -253,10 +324,7 @@ function renderEngines(data, devices) {
       const ename = (rt.instance_name || rt.name || '').toLowerCase();
       if (!ename.includes(_rtFilterType)) return false;
     }
-    if (_rtFilterScope) {
-      const sc = rt.is_local ? 'local' : (rt.scope || 'global');
-      if (sc !== _rtFilterScope) return false;
-    }
+    // scope 筛选已由后端处理，前端不再过滤
     if (_rtFilterScene.length > 0) {
       const tags = rt.scene_tags || [];
       if (!_rtFilterScene.some(s => tags.includes(s))) return false;
@@ -267,58 +335,44 @@ function renderEngines(data, devices) {
     }
     return true;
   });
-  const groups = { global: [], repo: [], user: [] };
-  filtered.forEach(rt => { (groups[rt.scope] || groups.global).push(rt); });
+  // 排序：本机直连优先 → 按健康状态（在线→刚失联→离线→待回收）→ 按名称
+  filtered.sort((a, b) => (b.is_local ? 1 : 0) - (a.is_local ? 1 : 0));
+  _sortByHealth(filtered);
+  _sortByName(filtered);
   let html = '';
-  SCOPE_ORDER.forEach(sc => {
-    const list = groups[sc];
-    if (!list.length) return;
-    // 排序：本机直连优先 → 按健康状态（在线→刚失联→离线→待回收）
-    list.sort((a, b) => (b.is_local ? 1 : 0) - (a.is_local ? 1 : 0));
-    _sortByHealth(list);
-    const localN = list.filter(r => r.is_local).length;
-    const collapsed = _scopeCollapse[sc];
-    html += _scopeBar(sc, list.length, localN, _healthSummary(list), collapsed);
-    if (collapsed) return;  // 折叠时不渲染卡片网格
-    // 健康 Tab 切换栏
-    html += _healthTabBar(sc, list);
-    const activeTab = _healthTab[sc] || 'all';
-    const secList = activeTab === 'all' ? list.slice() : list.filter(rt => (rt.health || rt.status || 'offline') === activeTab);
-    _sortByName(secList);
-    html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px;max-height:440px;overflow-y:auto">`;
-    secList.forEach(rt => {
-      const localBadge = rt.is_local
-        ? `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle">${I18N.t('runtimes.label.local_direct')}</span>`
-        : '';
-      const hostTag = '';
-      const _hStatus = rt.health || rt.status || 'offline';
-      const _cardLeftBorder = RUNTIME_COLOR[_hStatus] || 'var(--t3)';
-      html += `<div style="background:var(--c);border:1px solid var(--b);border-left:3px solid ${_cardLeftBorder};border-radius:0 var(--r2) var(--r2) 0;padding:14px 16px;box-shadow:var(--sh);cursor:pointer;position:relative;overflow:hidden;display:flex;flex-direction:column" onclick="openEngineDetail(${rt.id})">
-        ${_engineWatermark(rt.name)}
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;min-height:24px">
-          ${_healthBadge(rt.health)}
-          <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
-            <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rt.alias || rt.instance_name || rt.name}</span>
-            ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${rt.instance_name || rt.name})</span>` : ''}
-            <svg onclick="event.stopPropagation();copyText('${(rt.instance_name || rt.name || '').replace(/'/g, "\\'")}');this.style.color='var(--g)';var _t=this;setTimeout(function(){_t.style.color='var(--t3)'},1500)" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;cursor:pointer;transition:color .2s"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            ${localBadge}${hostTag}
-          </span>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:12px;color:var(--t2);flex:1">
-          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.worker')}</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
-          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.skills_label')}</span> ${I18N.t('runtimes.label.skills_count', {count: (rt.local_skills || []).length})}</div>
-          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.scene')}</span> ${_sceneTagSummary(rt.scene_tags)}</div>
-          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
-        </div>
-      </div>`;
-    });
-    html += `</div>`;
+  if (!filtered.length) return `<div class="ts t2" style="padding:12px">${I18N.t('runtimes.empty.no_engines')}</div>`;
+  html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">`;
+  filtered.forEach(rt => {
+    const _hStatus = rt.health || rt.status || 'offline';
+    const _cardLeftBorder = RUNTIME_COLOR[_hStatus] || 'var(--t3)';
+    html += `<div style="background:var(--c);border:1px solid var(--b);border-left:3px solid ${_cardLeftBorder};border-radius:0 var(--r2) var(--r2) 0;padding:14px 16px;box-shadow:var(--sh);cursor:pointer;position:relative;overflow:hidden;display:flex;flex-direction:column" onclick="openEngineDetail(${rt.id})">
+      ${_engineWatermark(rt.name)}
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;min-height:24px">
+        ${_healthBadge(rt.health)}
+        ${_scopeBadge(rt.scope, rt.is_local)}
+        <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
+          <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rt.alias || rt.instance_name || rt.name}</span>
+          ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${rt.instance_name || rt.name})</span>` : ''}
+          <svg onclick="event.stopPropagation();copyText('${(rt.instance_name || rt.name || '').replace(/'/g, "\\'")}');this.style.color='var(--g)';var _t=this;setTimeout(function(){_t.style.color='var(--t3)'},1500)" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;cursor:pointer;transition:color .2s"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:12px;color:var(--t2);flex:1">
+        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.worker')}</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.skills_label')}</span> ${I18N.t('runtimes.label.skills_count', {count: (rt.local_skills || []).length})}</div>
+        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.scene')}</span> ${_sceneTagSummary(rt.scene_tags)}</div>
+        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:46px">健康分</span> ${_healthScoreBadge(rt) || '—'}</div>
+      </div>
+    </div>`;
   });
-  return html || `<div class="ts t2" style="padding:12px">${I18N.t('runtimes.empty.no_engines')}</div>`;
+  html += `</div>`;
+  // Issue #185: 分页控件
+  html += _paginationBar(_rtPage, _rtTotal, _rtPageSize, '_rtGoPage');
+  return html;
 }
 
 function renderWorkers(data, devices) {
-  // 搜索 + 类型 + scope 过滤
+  // 搜索 + 类型 + scope 过滤（Issue #185: 统一扁平列表，不再按 scope 分区）
   const q = (_runtimeSearch || '').toLowerCase().trim();
   const fDevices = devices.filter(d => {
     if (q) {
@@ -335,54 +389,47 @@ function renderWorkers(data, devices) {
     }
     return true;
   });
-  const groups = { global: [], repo: [], user: [] };
-  fDevices.forEach(d => { (groups[d.scope] || groups.global).push(d); });
+  // 排序：按健康 → 按名称
+  _sortByHealth(fDevices);
+  _sortByName(fDevices);
   let html = '';
-  SCOPE_ORDER.forEach(sc => {
-    const list = groups[sc];
-    if (!list.length) return;
-    const collapsed = _scopeCollapse[sc];
-    _sortByHealth(list);
-    html += _scopeBar(sc, list.length, 0, _healthSummary(list), collapsed);
-    if (collapsed) return;  // 折叠时不渲染卡片网格
-    // 健康 Tab 切换栏
-    html += _healthTabBar(sc, list);
-    const activeTab = _healthTab[sc] || 'all';
-    const secList = activeTab === 'all' ? list.slice() : list.filter(d => (d.health || d.status || 'offline') === activeTab);
-    _sortByName(secList);
-    html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px;max-height:440px;overflow-y:auto">`;
-    secList.forEach(d => {
-      const _isOwner = d.owner && window._grapeUsername && d.owner === window._grapeUsername;
-      const _canManage = d.credential_id && _isOwner;
-      const _curScope = d.scope || 'global';
-      const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.alias || rt.name} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
-      const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
-      const _wStatus = d.health || 'offline';
-      const _wCardLeftBorder = _wStatus === 'online' ? 'none' : (RUNTIME_COLOR[_wStatus] || 'var(--t3)');
-      html += `<div style="background:var(--c);border:1px solid var(--b);border-left:${_wCardLeftBorder === 'none' ? '1px solid var(--b)' : '3px solid ' + _wCardLeftBorder};border-radius:0 var(--r2) var(--r2) 0;padding:12px 14px;box-shadow:var(--sh)">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
-          ${_healthBadge(d.health, d.credential_id ? relTime(d.last_seen_at) : I18N.t('runtimes.label.local_direct'))}
-          <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'}</span>
-          <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span>
-          ${_canManage ? `<button class="bt bt-o" style="font-size:11px;padding:4px 10px;border-radius:4px;margin-left:auto" onclick="openScopeSwitcher(${d.credential_id}, '${_curScope}')">${_scopeLabelShort(_curScope)}</button>` : ''}
-          ${d.credential_id && _isOwner ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}
+  if (!fDevices.length) return `<div class="ts t2" style="padding:12px">${I18N.t('runtimes.empty.no_workers')}</div>`;
+  html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">`;
+  fDevices.forEach(d => {
+    const _isOwner = d.owner && window._grapeUsername && d.owner === window._grapeUsername;
+    const _canManage = d.credential_id && _isOwner;
+    const _curScope = d.scope || 'global';
+    const _isLocal = d.credential_id === 0;
+    const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.alias || rt.name} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
+    const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
+    const _wStatus = d.health || 'offline';
+    const _wCardLeftBorder = _wStatus === 'online' ? 'none' : (RUNTIME_COLOR[_wStatus] || 'var(--t3)');
+    html += `<div style="background:var(--c);border:1px solid var(--b);border-left:${_wCardLeftBorder === 'none' ? '1px solid var(--b)' : '3px solid ' + _wCardLeftBorder};border-radius:0 var(--r2) var(--r2) 0;padding:12px 14px;box-shadow:var(--sh)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        ${_healthBadge(d.health, d.credential_id ? relTime(d.last_seen_at) : I18N.t('runtimes.label.local_direct'))}
+        ${_scopeBadge(_curScope, _isLocal)}
+        <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'}</span>
+        <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span>
+        ${_canManage ? `<button class="bt bt-o" style="font-size:11px;padding:4px 10px;border-radius:4px;margin-left:auto" onclick="openScopeSwitcher(${d.credential_id}, '${_curScope}')">${_scopeLabelShort(_curScope)}</button>` : ''}
+        ${d.credential_id && _isOwner ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:12px;color:var(--t2)">
+        <div style="display:flex;gap:16px;flex:1;min-width:0">
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${d.owner || '—'}</div>
+          <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.credential')}</span> <b style="color:${credColor}">${d.credential_status || ''}</b></div>
         </div>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:12px;color:var(--t2)">
-          <div style="display:flex;gap:16px;flex:1;min-width:0">
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${d.owner || '—'} ${d.credential_id === 0 ? `<span style="color:var(--t3);font-size:10px">(${I18N.t('runtimes.scope.global')})</span>` : ''}</div>
-            <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.credential')}</span> <b style="color:${credColor}">${d.credential_status || ''}</b></div>
-          </div>
-          ${d.credential_id && _isOwner ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">${I18N.t('runtimes.action.revoke')}</button>` : ''}
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">
-          <span style="color:var(--t3);white-space:nowrap;flex-shrink:0">${I18N.t('runtimes.label.hosted_engines')}</span>
-          <span style="flex:1;min-width:0;word-break:break-all">${clis || '—'}</span>
-        </div>
-      </div>`;
-    });
-    html += `</div>`;
+        ${d.credential_id && _isOwner ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">${I18N.t('runtimes.action.revoke')}</button>` : ''}
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--t2)">
+        <span style="color:var(--t3);white-space:nowrap;flex-shrink:0">${I18N.t('runtimes.label.hosted_engines')}</span>
+        <span style="flex:1;min-width:0;word-break:break-all">${clis || '—'}</span>
+      </div>
+    </div>`;
   });
-  return html || `<div class="ts t2" style="padding:12px">${I18N.t('runtimes.empty.no_workers')}</div>`;
+  html += `</div>`;
+  // Issue #185: 分页控件
+  html += _paginationBar(_rtDevPage, _rtDevTotal, _rtPageSize, '_rtDevGoPage');
+  return html;
 }
 
 function relTime(iso) {
@@ -443,7 +490,8 @@ function openScopeSwitcher(cid, currentScope) {
     overlay.remove();
     API.put('/settings/runtime-credentials/' + cid + '/scope', {scope: scope, repo_key: repoKey}).then(function(d) {
       app.showToast(I18N.t('runtimes.toast.scope_changed', {scope: _scopeLabelShort(d.scope)}));
-      API.get('/settings/agent-runtimes').then(renderRuntimes).catch(function(){});
+      _loadRuntimesData();
+      if (_runtimeTab === 'workers') _loadRuntimeDevices();
     }).catch(function(e) { app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})); });
   };
 }
@@ -742,11 +790,11 @@ function openDeviceTasks(credId) {
 
 window._rtToggleType = function(t) {
   _rtFilterType = (_rtFilterType === t) ? '' : t;
-  renderRuntimes(__runtimeData);
+  _rtResetPageAndReload();
 };
 window._rtToggleScope = function(s) {
   _rtFilterScope = (_rtFilterScope === s) ? '' : s;
-  renderRuntimes(__runtimeData);
+  _rtResetPageAndReload();
 };
 window._rtClearFilters = function() {
   _rtFilterType = '';
@@ -754,19 +802,29 @@ window._rtClearFilters = function() {
   _rtFilterScene = [];
   _rtFilterTag = [];
   _runtimeSearch = '';
-  renderRuntimes(__runtimeData);
+  _rtResetPageAndReload();
 };
 window._rtToggleMulti = function(kind, val) {
   if (kind === 'scene') {
     var i = _rtFilterScene.indexOf(val);
     if (i >= 0) _rtFilterScene.splice(i, 1); else _rtFilterScene.push(val);
-    renderRuntimes(__runtimeData);
+    _rtResetPageAndReload();
   } else if (kind === 'tag') {
     var i = _rtFilterTag.indexOf(val);
     if (i >= 0) _rtFilterTag.splice(i, 1); else _rtFilterTag.push(val);
-    renderRuntimes(__runtimeData);
+    _rtResetPageAndReload();
   }
 };
+// Issue #185 审查修复 FYI：搜索/过滤时重置到第一页，避免前端二次过滤后当前页为空
+function _rtResetPageAndReload() {
+  if (_runtimeTab === 'engines') {
+    _rtPage = 1;
+    _loadRuntimesData();
+  } else {
+    _rtDevPage = 1;
+    _loadRuntimeDevices();
+  }
+}
 window._toggleFilterDropdown = function(id) {
   var el = document.getElementById(id);
   if (!el) return;
@@ -793,7 +851,8 @@ function refreshRuntimes() {
   const el = document.getElementById('pageContent');
   if (el) el.innerHTML = `<div class="loading">${I18N.t('runtimes.toast.refreshing')}</div>`;
   API.post('/settings/agent-runtimes/refresh').then(() => {
-    API.get('/settings/agent-runtimes').then(d => { if (window._currentView !== 'runtimes') return; renderRuntimes(d); }).catch(() => {});
+    _loadRuntimesData();
+    if (_runtimeTab === 'workers') _loadRuntimeDevices();
     app.showToast(I18N.t('runtimes.toast.refresh_success'));
   }).catch(e => app.showToast(I18N.t('runtimes.toast.refresh_failed', {msg: e.message})));
 }
@@ -841,6 +900,7 @@ function openEngineDetail(runtimeId) {
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.scope_label')}</span> ${_scopeLabel(rt.scope)}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.installed')}</span> ${rt.installed ? I18N.t('runtimes.label.yes') : I18N.t('runtimes.label.no')}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">健康分</span> ${_healthScoreBadge(rt) || '—'}</div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">

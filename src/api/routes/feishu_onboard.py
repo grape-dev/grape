@@ -15,7 +15,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 
-from src.api.deps import get_current_user
+from src.api.deps import require_no_session_token
 from src.config import log
 
 router = APIRouter(prefix="/api/feishu/onboard", tags=["feishu-onboard"])
@@ -275,8 +275,8 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
         _TASKS.pop(task_id, None)
 
 
-@router.post("/start")
-async def start_onboard(body: StartBody, user: dict = Depends(get_current_user)):
+@router.post("/start", operation_id="feishu_onboard_start", summary="Start Feishu scan onboarding", description="Creates a scan-onboarding task and returns task_id; poll status for the QR/result.")
+async def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token)):
     """创建扫码任务，返回 task_id（前端轮询 status 获取二维码/结果）。"""
     if body.bot_type not in ("chat_bot", "vod_bot"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "bot_type 仅支持 chat_bot / vod_bot"})
@@ -303,8 +303,8 @@ async def start_onboard(body: StartBody, user: dict = Depends(get_current_user))
     return {"task_id": task_id, "status": _STATUS_PENDING}
 
 
-@router.get("/status")
-def onboard_status(task_id: str = Query(...), user: dict = Depends(get_current_user)):
+@router.get("/status", operation_id="feishu_onboard_status", summary="Get Feishu onboarding status", description="Queries the scan-onboarding task status.")
+def onboard_status(task_id: str = Query(...), user: dict = Depends(require_no_session_token)):
     """查询扫码任务状态（前端轮询）。"""
     t = _get_task(task_id)
     if not t:
@@ -326,8 +326,8 @@ class CancelBody(BaseModel):
     task_id: str = ""
 
 
-@router.post("/cancel")
-def cancel_onboard(body: CancelBody, user: dict = Depends(get_current_user)):
+@router.post("/cancel", operation_id="feishu_onboard_cancel", summary="Cancel Feishu onboarding", description="Cancels an in-progress scan task. connected tasks cancel idempotently without affecting saved config.")
+def cancel_onboard(body: CancelBody, user: dict = Depends(require_no_session_token)):
     """取消进行中的扫码任务。已 connected 的任务取消为幂等，不影响已保存配置。"""
     t = _get_task(body.task_id)
     if not t or t["user_id"] != user["id"]:

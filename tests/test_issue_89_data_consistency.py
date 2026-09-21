@@ -27,8 +27,11 @@ def _cleanup():
         c = db.cursor()
         c.execute("DELETE FROM events WHERE repo_key=?", (REPO,))
         c.execute("DELETE FROM event_skipped WHERE repo_key=?", (REPO,))
-        c.execute("DELETE FROM tasks WHERE repo_key=?", (REPO,))
-        c.execute("DELETE FROM issue_state WHERE repo_key=?", (REPO,))
+        c.execute("DELETE FROM issue WHERE repo_key=?", (REPO,))
+        try:
+            c.execute("DELETE FROM issue_state WHERE repo_key=?", (REPO,))
+        except Exception:
+            pass
         db.commit()
 
 
@@ -75,7 +78,7 @@ class TestPipelineTasksWithoutEvents:
         """tasks 有记录但 events 无记录 → has_tasks_without_events=True"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.api.deps import get_current_user
+        from src.api.deps import get_current_user, get_current_user_or_api_key
         from src.api.routes import tasks as tasks_mod
 
         # 在 tasks 表插入一条任务，但不创建 events
@@ -84,7 +87,8 @@ class TestPipelineTasksWithoutEvents:
             tasks_mod.ensure_issue_task(REPO, 100, title="Test Task", assignee="alice",
                                         event_type="issue_opened")
 
-        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester"}
+        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "api_key"}
+        app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 1, "username": "tester", "auth_type": "api_key"}
         try:
             client = TestClient(app)
             r = client.get("/api/pipeline/owner/issue89-test")
@@ -100,7 +104,7 @@ class TestPipelineTasksWithoutEvents:
         """tasks 有记录且 events 也有记录 → has_tasks_without_events=False"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.api.deps import get_current_user
+        from src.api.deps import get_current_user, get_current_user_or_api_key
         from src.api.event_store import append_event
         from src.api.routes import tasks as tasks_mod
 
@@ -113,7 +117,8 @@ class TestPipelineTasksWithoutEvents:
         append_event(repo_key=REPO, event_type="issue_opened", title="Test Task 2",
                      issue_id="#101", agent_type="vod", status="completed")
 
-        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester"}
+        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "api_key"}
+        app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 1, "username": "tester", "auth_type": "api_key"}
         try:
             client = TestClient(app)
             r = client.get("/api/pipeline/owner/issue89-test")
@@ -133,17 +138,19 @@ class TestCreateTaskTriggersEvent:
         """create_task_via_issue 成功后 events 表立即有 issue_opened 事件"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.api.deps import get_current_user
+        from src.api.deps import get_current_user, get_current_user_or_api_key
 
-        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester"}
+        app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "session_token"}
+        app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 1, "username": "tester"}
         try:
             with patch("src.api.routes.tasks.get_user_token", return_value="fake_token"), \
+                 patch("src.api.deps.get_user_token_with_refresh", return_value="fake_token"), \
                  patch("src.api.routes.tasks._find_open_issue_by_title", return_value=None), \
                  patch("src.api.routes.tasks._post_gitcode_issue", return_value={"number": 200}), \
                  patch("src.api.routes.tasks._get_user_id_by_gitcode", return_value=1), \
                  patch("src.api.routes.tasks._get_issue_title", return_value=""):
                 client = TestClient(app)
-                r = client.post("/api/tasks/create", json={
+                r = client.post("/api/issues/owner/issue89-test", json={
                     "repo_key": REPO,
                     "title": "Issue89 Test Task",
                     "description": "Test description",

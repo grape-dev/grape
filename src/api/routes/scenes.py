@@ -2,12 +2,31 @@
 import json, os, re
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.config import log
 
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "agent-skill-mapping.json")
+
+
+def _resolve_repo_key(repo: str) -> str:
+    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(repo)
+    if ":" in repo:
+        return rk
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            c = _db.cursor()
+            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+                            (f"gitcode:{repo}", f"github:{repo}")).fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return rk
 
 
 def _load_scenes() -> dict:
@@ -19,27 +38,26 @@ def _load_scenes() -> dict:
     return data.get("scenes", {})
 
 
-@router.get("", operation_id="scenes_list", summary="场景列表")
+@router.get("", operation_id="scenes_list", summary="List scenes", description="Lists all available scenes for a repo (repo-scoped, non-official).")
 def list_scenes(user: dict = Depends(get_current_user_or_api_key), repo: str = ""):
     """返回所有可用场景列表（repo，不含 official）"""
     from src.api.pipeline_config import get_scenes
-    from src.repo_key import to_repo_key
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
     scenes = get_scenes(repo_key=repo_key)
     return {"scenes": scenes}
 
 
-@router.get("/with-pipeline")
-def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str = ""):
+@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query.")
+def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = ""):
     """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）。
     
     优化：get_scenes 已在单次 DB 查询中返回 nodes_json，直接复用，
@@ -49,12 +67,12 @@ def list_scenes_with_pipeline(user: dict = Depends(get_current_user), repo: str 
     from src.repo_key import to_repo_key
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
     scene_list = get_scenes(repo_key=repo_key)
@@ -131,15 +149,15 @@ def _parse_scene_skills(nodes_json: str) -> list[str]:
     return [n.get("skill", "") for n in nodes if n.get("skill")]
 
 
-@router.get("/market/categories")
-def list_scene_categories(user: dict = Depends(get_current_user)):
+@router.get("/market/categories", operation_id="scenes_market_categories", summary="List scene market categories", description="Scene categories ordered by order_num; only is_active=1.")
+def list_scene_categories(user: dict = Depends(require_no_session_token)):
     """场景分类列表：按 order_num 排序，只返回 is_active=1 的"""
     from src.user.db import list_scene_categories as _list_cats
     return {"categories": _list_cats()}
 
 
-@router.get("/market")
-def list_scenes_market(user: dict = Depends(get_current_user),
+@router.get("/market", operation_id="scenes_market_list", summary="List scene market", description="Scene market list with search/category/sort/featured/paging/scope filters. limit>0 skips paging.")
+def list_scenes_market(user: dict = Depends(require_no_session_token),
                        q: str = "", category_id: int = 0, sort: str = "latest",
                        scope: str = "", repo: str = "",
                        featured_only: int = 0, limit: int = 0,
@@ -155,12 +173,12 @@ def list_scenes_market(user: dict = Depends(get_current_user),
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     elif scope in ("repo",):
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
 
@@ -199,8 +217,8 @@ def list_scenes_market(user: dict = Depends(get_current_user),
     return {"scenes": result, "total": total, "page": page, "page_size": page_size}
 
 
-@router.get("/market/{market_id}")
-def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_user)):
+@router.get("/market/{market_id}", operation_id="scenes_market_detail", summary="Get market scene detail", description="Scene market detail: full intro + skill chain + recommended template + used repo list.")
+def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_session_token)):
     """场景详情：完整介绍 + 技能链路详解 + 推荐模板 + 在用仓库列表"""
     from src.user.db import (get_scene_market_by_id, is_scene_liked,
                              get_scene_repos, get_scene_category)
@@ -314,8 +332,8 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(get_current_use
     }
 
 
-@router.get("/market/{market_id}/applied")
-def check_market_scene_applied(market_id: int, user: dict = Depends(get_current_user),
+@router.get("/market/{market_id}/applied", operation_id="scenes_market_applied", summary="Check market scene applied", description="Checks whether a market scene is already applied to the current repo: {applied, scene_name}.")
+def check_market_scene_applied(market_id: int, user: dict = Depends(require_no_session_token),
                                 owner: str = "", repo: str = ""):
     """检查市场场景是否已应用到当前仓库。
 
@@ -327,7 +345,7 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(get_current_
     if not owner or not repo:
         return {"applied": False, "scene_name": ""}
 
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _resolve_repo_key(f"{owner}/{repo}")
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -340,8 +358,8 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(get_current_
     return {"applied": bool(row), "scene_name": row[0] if row else ""}
 
 
-@router.post("/market/{market_id}/apply")
-def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
+@router.post("/market/{market_id}/apply", operation_id="scenes_market_apply", summary="Apply market scene", description="Applies a market scene to the repo-level pipeline scene. Idempotent per market_scene_id + repo_key.")
+def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_token),
                        owner: str = "", repo: str = "", repo_key: str = ""):
     """应用场景：从市场复制配置到仓库级 devops_pipeline_scene。
 
@@ -365,7 +383,7 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
 
     # repo_key：优先用传入的（保留 provider 前缀），否则默认 gitcode:
     if not repo_key:
-        repo_key = to_repo_key(f"{owner}/{repo}")
+        repo_key = _resolve_repo_key(f"{owner}/{repo}")
     nodes_json = scene["nodes_json"]
     try:
         nodes = json.loads(nodes_json) if nodes_json else []
@@ -439,7 +457,8 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
         db_id = create_custom_scene(
             scene_id=new_scene_id, name=scene["display_name"] or new_scene_id,
             description=scene["description"] or "",
-            repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding")
+            repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding",
+            created_by=user.get("username", ""))
         scene_id = new_scene_id
         # 回写 market_scene_id 关联
         try:
@@ -455,8 +474,8 @@ def apply_market_scene(market_id: int, user: dict = Depends(get_current_user),
     return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id}
 
 
-@router.get("/market/{market_id}/experience-check")
-async def check_market_scene_experience(market_id: int, user: dict = Depends(get_current_user)):
+@router.get("/market/{market_id}/experience-check", operation_id="scenes_market_experience_check", summary="Market scene experience pre-check", description="Pre-check before experiencing: {repo_exists, scene_applied, full_name, scene_name}.")
+async def check_market_scene_experience(market_id: int, user: dict = Depends(require_no_session_token)):
     """体验前检查：项目仓库是否已存在 + 是否已应用过此场景。
 
     返回: {"repo_exists": bool, "scene_applied": bool, "full_name": str, "scene_name": str}
@@ -490,7 +509,7 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(get
         return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
 
     full_name = f"{gitcode_login}/{repo_name}"
-    repo_key = to_repo_key(full_name)
+    repo_key = _resolve_repo_key(full_name)
     user_id = user.get("id", 0)
 
     repo_exists = False
@@ -528,8 +547,8 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(get
             "full_name": full_name, "scene_name": scene_name}
 
 
-@router.post("/market/{market_id}/experience")
-async def experience_market_scene(market_id: int, user: dict = Depends(get_current_user)):
+@router.post("/market/{market_id}/experience", operation_id="scenes_market_experience", summary="Experience market scene", description="Experiences a scene: creates/reuses the recommended-template project and applies the scene.")
+async def experience_market_scene(market_id: int, user: dict = Depends(require_no_session_token)):
     """体验场景：基于场景关联的推荐模板创建/复用项目并应用场景。
 
     流程：
@@ -577,7 +596,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
     already_exists = False
 
     # 查 managed_repos 里是否已托管
-    repo_key = to_repo_key(full_name)
+    repo_key = _resolve_repo_key(full_name)
     already_hosted = False
     repo_in_user_repos = False
     with db_lock:
@@ -626,7 +645,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
 
     # 创建/复用仓库级 devops_pipeline_scene（只与仓库关联，方案 B）
     # 幂等：同一仓库同一市场场景不重复创建（按 market_scene_id + repo_key 查重）
-    experience_repo_key = to_repo_key(full_name) if full_name else ""
+    experience_repo_key = _resolve_repo_key(full_name) if full_name else ""
     existing_scene_id = ""
     existing_row_id = 0
     with db_lock:
@@ -701,8 +720,8 @@ async def experience_market_scene(market_id: int, user: dict = Depends(get_curre
             "already_exists": already_exists, "message": msg}
 
 
-@router.post("/market/{market_id}/like")
-def toggle_scene_like(market_id: int, user: dict = Depends(get_current_user)):
+@router.post("/market/{market_id}/like", operation_id="scenes_market_like_toggle", summary="Toggle scene like", description="Toggles a scene like.")
+def toggle_scene_like(market_id: int, user: dict = Depends(require_no_session_token)):
     """场景点赞 toggle：已赞→取消，未赞→点赞"""
     from src.user.db import toggle_scene_like as _toggle, get_scene_market_by_id
 
@@ -721,11 +740,73 @@ class CreateBranchRequest(BaseModel):
     refs: str = "main"
 
 
-@router.get("/branches/{owner}/{repo}")
-def list_repo_branches(owner: str, repo: str, user: dict = Depends(get_current_user)):
+def _detect_repo_provider(owner: str, repo: str) -> str:
+    """根据 managed_repos.repo_key 前缀判断仓库属于 gitcode 还是 github。
+
+    优先查 managed_repos 表（托管仓库有明确的 provider 前缀）；
+    其次查 user_repos（用户绑定的仓库缓存）；
+    默认返回 'gitcode'。
+    """
+    from src.user.db import db_lock, db
+    from src.repo_key import to_repo_key
+    for prov in ("github", "gitcode"):
+        rk = to_repo_key(f"{owner}/{repo}", provider=prov)
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (rk,))
+                if c.fetchone():
+                    return prov
+        except Exception:
+            pass
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT 1 FROM user_repos WHERE repo_key=? LIMIT 1", (rk,))
+                if c.fetchone():
+                    return prov
+        except Exception:
+            pass
+    return "gitcode"
+
+
+@router.get("/branches/{owner}/{repo}", operation_id="scenes_branches", summary="List repo branches", description="Lists all repo branches (for the advanced-options work-branch picker).")
+def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """列出仓库所有分支（供高级选项工作分支选择）"""
+    from src.user.repo_manager import _req, _github_req
+
+    provider = _detect_repo_provider(owner, repo)
+
+    if provider == "github":
+        from src.user.db import get_github_token
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(f"{owner}/{repo}", provider="github")
+        token = get_github_token(repo_key=rk)
+        if not token:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": "GitHub Bot Token 未配置，无法查询分支"})
+        branches = []
+        try:
+            page = 1
+            while page <= 5:
+                url = f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100&page={page}"
+                data = _github_req("GET", url, token)
+                if not isinstance(data, list) or not data:
+                    break
+                for b in data:
+                    branches.append({
+                        "name": b.get("name", ""),
+                        "protected": bool(b.get("protected", False)),
+                    })
+                if len(data) < 100:
+                    break
+                page += 1
+        except Exception as e:
+            log.warning(f"List branches failed for GitHub {owner}/{repo}: {e}")
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
+        return {"branches": branches}
+
+    # GitCode（原逻辑）
     from src.user.db import get_bot_token_by_repo
-    from src.user.repo_manager import _req
 
     # 仓库 bot token → 全局 bot token
     token = get_bot_token_by_repo(owner, repo)
@@ -765,12 +846,64 @@ def list_repo_branches(owner: str, repo: str, user: dict = Depends(get_current_u
     return {"branches": branches}
 
 
-@router.post("/branches/{owner}/{repo}")
+@router.post("/branches/{owner}/{repo}", operation_id="scenes_branch_create", summary="Create repo branch", description="Creates a new branch in the repo.")
 def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
-                        user: dict = Depends(get_current_user)):
+                        user: dict = Depends(require_no_session_token)):
     """在仓库中创建新分支"""
+    from src.user.repo_manager import _req, _github_req
+
+    provider = _detect_repo_provider(owner, repo)
+
+    if provider == "github":
+        from src.user.db import get_github_token
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(f"{owner}/{repo}", provider="github")
+        token = get_github_token(repo_key=rk)
+        if not token:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": "GitHub Bot Token 未配置，无法创建分支"})
+        if not body.branch_name or not body.branch_name.strip():
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "分支名不能为空"})
+        try:
+            # GitHub 创建分支：先获取 base branch 的 sha，再创建 ref
+            base_ref = body.refs or "main"
+            # 尝试获取 base branch 的 commit sha
+            sha = None
+            try:
+                branch_info = _github_req("GET",
+                    f"https://api.github.com/repos/{owner}/{repo}/branches/{base_ref}", token)
+                sha = branch_info.get("commit", {}).get("sha", "")
+            except Exception:
+                pass
+            if not sha:
+                # fallback: 获取默认分支
+                repo_info = _github_req("GET", f"https://api.github.com/repos/{owner}/{repo}", token)
+                default_branch = repo_info.get("default_branch", "main")
+                branch_info = _github_req("GET",
+                    f"https://api.github.com/repos/{owner}/{repo}/branches/{default_branch}", token)
+                sha = branch_info.get("commit", {}).get("sha", "")
+            if not sha:
+                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取基准分支 SHA"})
+            url = f"https://api.github.com/repos/{owner}/{repo}/git/refs"
+            _github_req("POST", url, token, {
+                "ref": f"refs/heads/{body.branch_name.strip()}",
+                "sha": sha,
+            })
+            log.info(f"Branch created: {body.branch_name} in GitHub {owner}/{repo}")
+            return {"name": body.branch_name.strip(), "message": "分支已创建"}
+        except RuntimeError as e:
+            err_msg = str(e)
+            if "422" in err_msg or "already exists" in err_msg:
+                raise HTTPException(status_code=409, detail={"code": 409, "message": "分支已存在"})
+            if "403" in err_msg:
+                raise HTTPException(status_code=403, detail={"code": 403, "message": "需要维护者权限才能创建分支"})
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {err_msg}"})
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
+
+    # GitCode（原逻辑）
     from src.user.db import get_bot_token_by_repo
-    from src.user.repo_manager import _req
 
     # 仓库 bot token → 全局 bot token
     token = get_bot_token_by_repo(owner, repo)
@@ -822,8 +955,8 @@ class CreateMarketSceneRequest(BaseModel):
     recommended_template: str = ""
 
 
-@router.post("/market")
-def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(get_current_user),
+@router.post("/market", operation_id="scenes_market_create", summary="Create market scene", description="Creates a user custom scene in scene_market. scope=repo: repo scene visible to all repo users.")
+def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(require_no_session_token),
                         repo: str = ""):
     """创建用户自定义场景（写入 scene_market 表）。
 
@@ -841,12 +974,12 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(get
     # 获取 repo_key
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
     if not repo_key:
@@ -915,9 +1048,9 @@ class UpdateMarketSceneRequest(BaseModel):
     recommended_template: str = ""
 
 
-@router.put("/market/{market_id}")
+@router.put("/market/{market_id}", operation_id="scenes_market_update", summary="Update market scene", description="Updates a custom market scene (scope != official).")
 def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
-                        user: dict = Depends(get_current_user)):
+                        user: dict = Depends(require_no_session_token)):
     """更新用户自定义场景（scope != 'official'）。"""
     from src.user.db import (update_scene_market, get_scene_market_by_id,
                              delete_uploaded_file, get_uploaded_files_by_ref)
@@ -978,8 +1111,8 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     return {"message": "场景更新成功"}
 
 
-@router.delete("/market/{market_id}")
-def delete_market_scene(market_id: int, user: dict = Depends(get_current_user)):
+@router.delete("/market/{market_id}", operation_id="scenes_market_delete", summary="Delete market scene", description="Hard-deletes a custom market scene (scope != official).")
+def delete_market_scene(market_id: int, user: dict = Depends(require_no_session_token)):
     """硬删除用户自定义场景（scope != 'official'）。"""
     from src.user.db import (delete_scene_market, get_scene_market_by_id,
                              delete_uploaded_file, get_uploaded_files_by_ref)
@@ -1002,8 +1135,8 @@ def delete_market_scene(market_id: int, user: dict = Depends(get_current_user)):
     log.info(f"Market scene deleted: id={market_id} by user={user.get('id')}")
     return {"message": "场景已删除"}
 
-@router.get("/check-name")
-def check_scene_name(name: str, scope: str, user: dict = Depends(get_current_user),
+@router.get("/check-name", operation_id="scenes_check_name", summary="Check scene name availability", description="Checks scene name uniqueness within the same scope/user/repo.")
+def check_scene_name(name: str, scope: str, user: dict = Depends(require_no_session_token),
                      repo: str = "", exclude_id: int = 0):
     """检查场景名称是否重复（同 scope 同用户同仓库下名称唯一）。"""
     from src.user.db import check_scene_name_exists
@@ -1011,12 +1144,12 @@ def check_scene_name(name: str, scope: str, user: dict = Depends(get_current_use
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
 
@@ -1027,9 +1160,9 @@ def check_scene_name(name: str, scope: str, user: dict = Depends(get_current_use
     return {"exists": exists}
 
 
-@router.post("/market/icon-upload")
+@router.post("/market/icon-upload", operation_id="scenes_market_icon_upload", summary="Upload scene icon", description="Uploads a scene icon (temporary file). Allowed jpg/png/webp/gif/svg <= 2MB. Returns {file_id, icon, obs_icon_key}.")
 async def upload_scene_icon(file: UploadFile = File(...),
-                            user: dict = Depends(get_current_user)):
+                            user: dict = Depends(require_no_session_token)):
     """上传场景图标（临时文件，保存时落定）。
 
     限制：格式 jpg/png/webp/gif/svg，大小 ≤ 2MB。
@@ -1158,8 +1291,8 @@ def _delete_scene_icon_file(file_key: str):
             log.warning(f"Scene icon delete (local): {e}")
 
 
-@router.get("/{scene_id}")
-def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)):
+@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info.")
+def get_scene_detail(scene_id: str, user: dict = Depends(require_no_session_token)):
     """返回场景详情（nodes + engine 信息）"""
     from src.api.pipeline_config import get_pipeline_config
     from src.repo_key import to_repo_key
@@ -1167,7 +1300,7 @@ def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)):
     try:
         repo = app_current_repo()
         if repo:
-            repo_key = to_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
+            repo_key = _resolve_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
     except Exception:
         pass
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
@@ -1176,8 +1309,8 @@ def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user)):
     return {"id": scene_id, "name": cfg["name"], "nodes": cfg["nodes"], "onboarding": cfg.get("onboarding", "")}
 
 
-@router.get("/skills/{agent_type}")
-def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user),
+@router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging).")
+def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_session_token),
                           q: str = "", scope: str = "", repo: str = "",
                           page: int = 1, page_size: int = 20):
     """返回该 agent_type 可选的 skill 列表（支持搜索 + scope 过滤 + 分页）。"""
@@ -1190,13 +1323,13 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(get_current_user
     repo_key = ""
     if repo:
         from src.repo_key import to_repo_key
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
                 from src.repo_key import to_repo_key
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
     user_id = str(user.get("id", ""))
@@ -1314,8 +1447,8 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str):
                         "message": f"节点 {tag} 的引擎 {_eid} 没有该角色能力标签（{tag}），请重新选择"})
 
 
-@router.post("")
-def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
+@router.post("", operation_id="scenes_create", summary="Create scene", description="Creates a custom scene (associated only with the repo, no user-level).")
+def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """创建自定义场景（方案 B：场景只与仓库关联，无 user 级）"""
     from src.api.pipeline_config import create_custom_scene
     from src.repo_key import to_repo_key
@@ -1328,12 +1461,12 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持仓库级场景"})
 
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             repo_key = ""
     if not repo_key:
@@ -1359,20 +1492,20 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(get_current_user
     return {"scene_id": scene_id, "db_id": db_id, "message": "场景创建成功"}
 
 
-@router.put("/{scene_id}")
-def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(get_current_user), repo: str = ""):
+@router.put("/{scene_id}", operation_id="scenes_update", summary="Update scene", description="Updates a scene (repo/user scope directly; official immutable).")
+def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """更新场景（repo/user scope 直接更新，official 不可修改）"""
     from src.api.pipeline_config import update_custom_scene, _query_scene_by_id
     from src.repo_key import to_repo_key
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
 
@@ -1391,20 +1524,20 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(g
     return {"message": "场景更新成功"}
 
 
-@router.delete("/{scene_id}")
-def delete_scene(scene_id: str, user: dict = Depends(get_current_user), repo: str = ""):
+@router.delete("/{scene_id}", operation_id="scenes_delete", summary="Delete scene", description="Deletes a custom scene (soft delete; official undeletable).")
+def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
     """删除自定义场景（软删除，官方场景不可删除）"""
     from src.api.pipeline_config import delete_custom_scene, _query_scene_by_id
     from src.repo_key import to_repo_key
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                repo_key = to_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
 
@@ -1418,9 +1551,9 @@ def delete_scene(scene_id: str, user: dict = Depends(get_current_user), repo: st
     return {"message": "场景已删除"}
 
 
-@router.post("/apply/{owner}/{repo}")
+@router.post("/apply/{owner}/{repo}", operation_id="scenes_apply", summary="Apply scene to repository", description="Applies a scene to a repository.")
 def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(require_no_session_token)):
     """为仓库应用指定场景"""
     from src.api.pipeline_config import get_pipeline_config
     from src.repo_key import to_repo_key
@@ -1428,7 +1561,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.user.db import get_bot_token_by_repo
     from src.api.session_store import upsert_agent_session
 
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _resolve_repo_key(f"{owner}/{repo}")
     cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{body.scene_id}' 不存在"})
@@ -1455,14 +1588,30 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                 skill_id = resolve_skill_id(skill, repo_key=repo_key, user_id=user.get("id", ""))
 
                 runtime_id = 0
-                try:
-                    _cur = c.execute(
-                        "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                        (repo_key, agent_type)).fetchone()
-                    if _cur and _cur[0]:
-                        runtime_id = _cur[0]
-                except Exception:
-                    runtime_id = 0
+                # 优先使用场景 node 配置的 engine_runtime_ids
+                node_engine_ids = node.get("engine_runtime_ids") or []
+                if node_engine_ids:
+                    # 验证配置的引擎是否在线可用，选第一个可用的
+                    for eid in node_engine_ids:
+                        try:
+                            _row = c.execute(
+                                "SELECT status, healthy FROM agent_runtimes WHERE id=?",
+                                (eid,)).fetchone()
+                            if _row and _row[0] == "online" and _row[1] == 1:
+                                runtime_id = eid
+                                break
+                        except Exception:
+                            pass
+                # 场景未配置引擎或配置的引擎都不可用 → fallback
+                if not runtime_id:
+                    try:
+                        _cur = c.execute(
+                            "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                            (repo_key, agent_type)).fetchone()
+                        if _cur and _cur[0]:
+                            runtime_id = _cur[0]
+                    except Exception:
+                        runtime_id = 0
                 if not runtime_id:
                     from src.runtime.engine_select import resolve_default_engine
                     _rid = resolve_default_engine(repo_key, agent_type) or 0
@@ -1499,8 +1648,8 @@ class AdvancedOptionsRequest(BaseModel):
     custom_fields: list = []   # [{key: str, value: str}]
 
 
-@router.get("/{scene_id}/advanced-options")
-def get_advanced_options(scene_id: str, user: dict = Depends(get_current_user), repo: str = ""):
+@router.get("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_get", summary="Get scene advanced options", description="Reads scene advanced options (work branch + custom key:value).")
+def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
     """读取场景高级选项（工作分支 + 自定义 key:value）"""
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
@@ -1508,7 +1657,7 @@ def get_advanced_options(scene_id: str, user: dict = Depends(get_current_user), 
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     if not repo_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
 
@@ -1535,9 +1684,9 @@ def get_advanced_options(scene_id: str, user: dict = Depends(get_current_user), 
     return {"work_branch": "main", "custom_fields": []}
 
 
-@router.put("/{scene_id}/advanced-options")
+@router.put("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_set", summary="Save scene advanced options", description="Saves scene advanced options (work branch + custom key:value).")
 def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
-                          user: dict = Depends(get_current_user), repo: str = ""):
+                          user: dict = Depends(require_no_session_token), repo: str = ""):
     """保存场景高级选项（工作分支 + 自定义 key:value）"""
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
@@ -1547,7 +1696,7 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
 
     repo_key = ""
     if repo:
-        repo_key = to_repo_key(repo)
+        repo_key = _resolve_repo_key(repo)
     if not repo_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
 

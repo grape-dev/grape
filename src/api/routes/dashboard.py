@@ -1,7 +1,7 @@
 """Dashboard 路由：仓库概览、指标、Agent 状态、运维可观察性"""
 from fastapi import APIRouter, Depends
 from src.user import db as user_db
-from src.api.deps import get_current_user
+from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 from src.observability.engine_probe import get_probe_results
 from src.config import log
@@ -9,11 +9,50 @@ from src.config import log
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
+# ===== Issue #180: 本机带宽占用率差分采样缓存 =====
+_BW_SNAPSHOT = {"ts": 0.0, "bytes": 0}
+
+
+def _local_bandwidth_percent() -> float:
+    """psutil.net_io_counters() 汇总非 loopback 网卡吞吐，两次调用差分算速率，
+    与 RUNTIME_BANDWIDTH_THRESHOLD_MBPS（默认 1000 Mbps）阈值比较得出占用率。
+    首次调用无基准返回 0.0（与 CPU 采集行为一致）。"""
+    global _BW_SNAPSHOT
+    try:
+        import os as _os
+        import time as _t
+        import psutil as _ps
+        _per = _ps.net_io_counters(pernic=True)
+        _cur_bytes = 0
+        for _name, _cnt in _per.items():
+            if _name == "lo":
+                continue
+            _cur_bytes += _cnt.bytes_recv + _cnt.bytes_sent
+        _now = _t.time()
+        _prev_ts = _BW_SNAPSHOT["ts"]
+        _prev_bytes = _BW_SNAPSHOT["bytes"]
+        _BW_SNAPSHOT["ts"] = _now
+        _BW_SNAPSHOT["bytes"] = _cur_bytes
+        if _prev_ts <= 0 or _prev_bytes <= 0:
+            return 0.0
+        _dt = _now - _prev_ts
+        _db = _cur_bytes - _prev_bytes
+        if _dt <= 0 or _db < 0:
+            return 0.0
+        _mbps = _db * 8 / _dt / 1e6
+        _thr = float(_os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "1000"))
+        if _thr <= 0:
+            return 0.0
+        return round(min(_mbps / _thr * 100, 100.0), 1)
+    except Exception:
+        return 0.0
+
+
 # ===== 运维可观察性端点（必须在 /{owner}/{repo} 之前注册，否则被通配路由拦截）=====
 
 
-@router.get("/ops/overview")
-def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
+@router.get("/ops/overview", operation_id="dashboard_ops_overview", summary="Ops overview", description="Real-time ops overview: task queue depth, running count, stuck detection and runtime online status.")
+def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_token)):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
 
     参考 multica BusinessSampler（metrics/business_sampler.go）的实时采样设计，
@@ -155,10 +194,12 @@ def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
         # interval=None 非阻塞：返回自上次调用以来的平均值（10s 刷新间隔内的 CPU 均值）
         # 首次调用返回 0.0（无基准），后续调用返回真实值
         _local_cpu = _local_mem = _local_disk = _local_tmp = 0.0
+        _local_bandwidth = 0.0
         _local_load = ""
         try:
             import psutil as _ps
             _local_cpu = _ps.cpu_percent(interval=None)
+            _local_bandwidth = _local_bandwidth_percent()
             # MEM 用 /proc/meminfo 读取实际进程占用（total - free - buffers - cached，不含缓存）
             try:
                 with open("/proc/meminfo") as _mf:
@@ -192,32 +233,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
         worker_online = 0
         worker_total = 0
 
-        # 本机主控机：按 hostname 匹配 runtime_credentials 记录，采集指标后写入 DB
-        _local_hostname = ""
-        try:
-            import socket as _sock
-            _local_hostname = _sock.gethostname()
-        except Exception:
-            pass
-        _local_cred_id = None
-        if _local_hostname:
-            try:
-                c.execute("SELECT id FROM runtime_credentials WHERE device_name=?", (_local_hostname,))
-                row = c.fetchone()
-                if row:
-                    _local_cred_id = row[0]
-            except Exception:
-                pass
-        if _local_cred_id is not None:
-            # 写入本机指标到 DB（admin 健康中心读同一张表即可看到）
-            try:
-                c.execute(
-                    "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
-                    "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? WHERE id=?",
-                    (now_iso, "127.0.0.1", _local_cpu, _local_mem, _local_disk, _local_tmp, _local_load, _local_cred_id))
-                db.commit()
-            except Exception:
-                pass
+        # 主控机指标由后台定时任务（_server_metrics_loop）每 15 秒写入 DB，
+        # dashboard 不再采集/写入本机指标，改为纯读取。
 
         # 查 worker（凭据），排除已注销（revoked）
         # worker 可见性：global 全部可见 + user scope 只看自己的 + repo scope 看仓库的
@@ -225,24 +242,30 @@ def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
         try:
             if repo:
                 # 仓库级看板：global + 自己的 user + 该 repo 的 worker
+                # 过滤：从未连接(last_seen_at IS NULL)或长期失联(>7天)的设备不展示
+                _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                    "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
+                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
+                    "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key=? OR repo_key=?) ORDER BY id",
-                    (_uname, repo_key, repo),
+                    (_stale_cutoff, _uname, repo_key, repo),
                 )
             else:
                 # 全局看板：global + 自己的 user scope worker
+                # 过滤：从未连接(last_seen_at IS NULL)或长期失联(>7天)的设备不展示
+                _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                    "cpu_percent, memory_percent, disk_percent, tmp_percent, load_avg, owner_name "
+                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
+                    "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
-                    (_uname,),
+                    (_stale_cutoff, _uname),
                 )
             for w in c.fetchall():
-                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wload, wowner = w
+                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wbw, wload, wowner = w
                 worker_total += 1
                 w_health = derive_runtime_health(wstatus or "offline", wlast_seen, now_ts)
                 w_online = w_health == "online"
@@ -254,6 +277,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
                     "last_seen_at": normalize_event_time(wlast_seen), "last_ip": wip or "",
                     "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
                     "disk_percent": wdisk or 0, "tmp_percent": wtmp or 0,
+                    "bandwidth_percent": wbw or 0,
                     "load_avg": wload or "",
                     "owner_name": wowner or "",
                 })
@@ -284,6 +308,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
                         "last_seen_at": "", "last_ip": "127.0.0.1",
                         "cpu_percent": _local_cpu, "memory_percent": _local_mem,
                         "disk_percent": _local_disk, "tmp_percent": _local_tmp,
+                        "bandwidth_percent": _local_bandwidth,
                         "load_avg": _local_load, "owner_name": "",
                     })
                     worker_total += 1
@@ -350,6 +375,34 @@ def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
                 # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）
                 if (cid or 0) > 0 and rcred_status == 'revoked':
                     continue
+                # 跳过从未连接或长期失联(>7天)的远端引擎（与 Workers 视图过滤一致）
+                if (cid or 0) > 0:
+                    if not rlast_seen:
+                        continue
+                    try:
+                        _seen_ts = datetime.fromisoformat(rlast_seen.replace('Z', '+00:00')).timestamp() if rlast_seen else 0
+                    except Exception:
+                        _seen_ts = 0
+                    if _seen_ts and (now_ts - _seen_ts) > 7 * 86400:
+                        continue
+                # 远端引擎跟随 Worker scope 过滤（与 Workers 视图一致）
+                if (cid or 0) > 0 and repo:
+                    # 仓库级看板：global + 自己的 user + 该 repo 的 worker
+                    pass  # repo 级过滤由前端按需处理，后端不过滤
+                elif (cid or 0) > 0:
+                    # 全局看板：global scope worker 的引擎才展示给所有用户
+                    # user scope worker 的引擎只展示给 owner
+                    _cred_scope = ''
+                    _cred_owner = ''
+                    try:
+                        c.execute("SELECT scope, owner_name FROM runtime_credentials WHERE id=?", (cid,))
+                        _cr = c.fetchone()
+                        if _cr:
+                            _cred_scope, _cred_owner = _cr[0] or '', _cr[1] or ''
+                    except Exception:
+                        pass
+                    if _cred_scope == 'user' and _cred_owner != _uname:
+                        continue
                 runtimes_total += 1
                 base_health = derive_runtime_health(rstatus or "offline", rlast_seen, now_ts)
                 mode = "remote" if (cid or 0) > 0 else "local"
@@ -409,6 +462,15 @@ def get_ops_overview(repo: str = "", user: dict = Depends(get_current_user)):
                     "probe_last": _probe.get("last_probe", ""),
                     "probe_error": _probe.get("error", ""),
                 })
+                # 引擎健康分（Issue #134 展示增强）
+                try:
+                    from src.runtime.health_scorer import get_health_score
+                    _hd = get_health_score(rid)
+                    runtime_list[-1]["health_score"] = _hd.get("health_score")
+                    runtime_list[-1]["health_consecutive_failures"] = _hd.get("consecutive_failures", 0)
+                    runtime_list[-1]["health_heartbeat_alive"] = _hd.get("heartbeat_alive")
+                except Exception:
+                    runtime_list[-1]["health_score"] = None
         except Exception:
             pass
 
@@ -901,8 +963,8 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
         return ""
 
 
-@router.get("/{owner}/{repo}")
-def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user)):
+@router.get("/{owner}/{repo}", operation_id="dashboard_repo", summary="Repository dashboard", description="Repository-scoped dashboard panel data for the current user.")
+def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 
@@ -1090,6 +1152,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(get_current_user))
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
                                      "status": derive_runtime_health(e["status"], e.get("last_seen_at"), _now),
                                      "tags": e.get("tags", []),
+                                     "scene_tags": e.get("scene_tags", ["default"]),
                                      "scope": e.get("scope", "global"),
                                      "scope_label": _scope_labels.get(e.get("scope", "global"), ""),
                                      "alias": e.get("alias", "")}

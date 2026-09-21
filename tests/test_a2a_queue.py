@@ -15,7 +15,11 @@ class TestA2AQueue:
             c = db.cursor()
             c.execute("DELETE FROM agent_tasks")
             c.execute("DELETE FROM events")
-            c.execute("DELETE FROM issue_state WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
+            # issue_state 表在 Phase C5 已 DROP（字段收编进 issue 单表），容错跳过
+            try:
+                c.execute("DELETE FROM issue_state WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
+            except Exception:
+                pass
             c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%' OR id LIKE 'sess-a2a-%'")
             c.execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'a2a-cred-%')")
             c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'a2a-cred-%'")

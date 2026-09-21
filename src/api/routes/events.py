@@ -3,14 +3,14 @@ import asyncio
 import os
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
-from src.api.deps import get_current_user, get_current_user_or_api_key
+from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
-@router.get("/detail/{seq}", operation_id="events_detail", summary="事件详情（结果/日志）")
+@router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)", description="Event detail with payload/agent_logs/result for a seq.")
 def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
     from src.session_manager import db, db_lock
     with db_lock:
@@ -108,6 +108,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     engine_instance = ""
     engine_device = ""
     engine_ip = ""
+    runtime_id = 0
     try:
         from src.runtime.instances import instance_name
         runtime_id = 0
@@ -156,6 +157,24 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     result["engine_device"] = engine_device
     result["engine_ip"] = engine_ip
 
+    # 引擎健康分（Issue #134 展示增强）
+    engine_health = {"score": None, "total_tasks": 0, "failed_tasks": 0,
+                     "consecutive_failures": 0, "heartbeat_alive": None}
+    if runtime_id:
+        try:
+            from src.runtime.health_scorer import get_health_score
+            hd = get_health_score(runtime_id)
+            engine_health = {
+                "score": hd.get("health_score"),
+                "total_tasks": hd.get("total_tasks", 0),
+                "failed_tasks": hd.get("failed_tasks", 0),
+                "consecutive_failures": hd.get("consecutive_failures", 0),
+                "heartbeat_alive": hd.get("heartbeat_alive"),
+            }
+        except Exception:
+            pass
+    result["engine_health"] = engine_health
+
     # 关联任务（重派按钮展示/判定用，见 event-redispatch-design.md §4.1.1）
     task_info = {"task_id": "", "task_status": "", "runtime_id": 0,
                  "runtime_session_id": "", "task_created_at": "", "task_started_at": ""}
@@ -180,12 +199,13 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     return result
 
 
-@router.post("/{seq}/terminate")
-def terminate_event(seq: int, user: dict = Depends(get_current_user)):
+@router.post("/{seq}/terminate", operation_id="events_terminate", summary="Terminate event", description="Forcefully terminates a running event task. Worker mode cancels the task (cancelled); direct mode fail_task + cancels the subprocess. The event is marked failed.")
+def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     """强行终止正在运行的事件任务。
 
-    - 有关联 task_id（worker 模式）→ 调 fail_task（更新 task+event 状态为 failed）
-    - 无 task_id（direct 模式）→ 调 cancel_direct_task
+    - worker 模式（runtime_id 绑定远端 worker）→ cancel_task（task 状态=cancelled）
+      worker 心跳 15s 内匹配 WHERE status=cancelled → _kill_stale_engine 杀引擎进程
+    - direct 模式（本机引擎）→ fail_task（task 状态=failed）+ cancel_direct_task 杀子进程
     - 事件状态回写 failed
     """
     from src.session_manager import db, db_lock
@@ -218,15 +238,49 @@ def terminate_event(seq: int, user: dict = Depends(get_current_user)):
         pass
 
     cancelled = False
-    # 1) 有关联 task_id → 走 fail_task（同时更新 task 和 event 状态为 failed）+ 杀进程
+    # 1) 有关联 task_id → 根据 execution mode 分流：
+    #    worker 模式 → cancel_task（标记 cancelled，worker 心跳匹配后立即杀引擎）
+    #    direct 模式 → fail_task（标记 failed，cancel_direct_task 杀本地子进程）
     if task_id:
         try:
-            from src.runtime.service import fail_task
-            fail_task(task_id, "用户手动终止")
-            cancelled = True
-            log.info(f"Event terminate: seq={seq} task={task_id} failed via fail_task")
+            from src.runtime.service import (
+                get_task, cancel_task, fail_task,
+                runtime_execution_kind, EXEC_MODE_REMOTE,
+            )
+            _task = get_task(task_id)
+            _is_worker = (
+                _task
+                and runtime_execution_kind(_task.get("runtime_id") or 0) == EXEC_MODE_REMOTE
+            )
+            if _is_worker:
+                cancel_task(task_id)
+                # 事件档案/状态收尾（cancel_task 只更新 task 状态，事件侧需手动补）
+                if _task.get("event_seq"):
+                    try:
+                        from datetime import datetime, timezone
+                        from src.api.event_store import update_event_complete
+                        from src.api.event_archive import finalize_event_archive
+                        finalize_event_archive(
+                            _task.get("repo_key", ""), _task["event_seq"], "failed",
+                            exit_code=-1,
+                            tokens=[_task.get("repo_gitcode_token") or ""],
+                            issue_num_hint=_task.get("issue_id") or "",
+                        )
+                        update_event_complete(
+                            _task["event_seq"], "failed", exit_code=-1,
+                            completed_at=datetime.now(timezone.utc).isoformat(),
+                            result="用户手动终止",
+                        )
+                    except Exception as e:
+                        log.warning(f"Event terminate: worker cancel event finalize failed: {e}")
+                cancelled = True
+                log.info(f"Event terminate: seq={seq} task={task_id} cancelled via cancel_task (worker mode)")
+            else:
+                fail_task(task_id, "用户手动终止")
+                cancelled = True
+                log.info(f"Event terminate: seq={seq} task={task_id} failed via fail_task (direct mode)")
         except Exception as e:
-            log.warning(f"Event terminate: fail_task failed: {e}")
+            log.warning(f"Event terminate: task cancel/fail failed: {e}")
 
     # 2) direct 模式 → cancel_direct_task（无论有无 task_id 都尝试，兜底）
     #    同时取消 worker 模式的 future（direct 模式杀本地子进程）
@@ -239,7 +293,7 @@ def terminate_event(seq: int, user: dict = Depends(get_current_user)):
     except Exception as e:
         log.warning(f"Event terminate: cancel_direct_task failed: {e}")
 
-    # 3) 事件状态回写 failed（兜底，fail_task 已处理但再确认一次）
+    # 3) 事件状态回写 failed（兜底，fail_task/cancel_task 已处理但再确认一次）
     try:
         update_event_status(seq, "failed")
     except Exception as e:
@@ -248,8 +302,8 @@ def terminate_event(seq: int, user: dict = Depends(get_current_user)):
     return {"message": f"事件 {seq} 终止请求已发送", "cancelled": cancelled}
 
 
-@router.post("/{seq}/redispatch")
-def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(get_current_user)):
+@router.post("/{seq}/redispatch", operation_id="events_redispatch", summary="Redispatch event", description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")
+def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(require_no_session_token)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
 
     见 event-redispatch-design.md §4.1.2：
@@ -439,10 +493,24 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
             _new_rid = 0
             with db_lock:
                 c2 = db.cursor()
-                # Get pool_tag and requeue in one step
-                c2.execute("SELECT pool_tag FROM agent_tasks WHERE id=?", (task_id,))
+                # Get pool_tag + pool_engine_ids + repo_key + user_id for scope filtering
+                c2.execute("SELECT pool_tag, pool_engine_ids, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
                 _ptag_row = c2.fetchone()
-                _ptag = (_ptag_row[0] if _ptag_row else "") or ""
+                _ptag = ""
+                _pool_eids = []
+                _task_repo = ""
+                _task_uid = 0
+                if _ptag_row:
+                    _ptag = _ptag_row[0] or ""
+                    import json as _json_pe
+                    try:
+                        _raw_eids = _ptag_row[1] or ""
+                        if _raw_eids:
+                            _pool_eids = [int(x) for x in _json_pe.loads(_raw_eids) if x]
+                    except Exception:
+                        pass
+                    _task_repo = _ptag_row[2] or ""
+                    _task_uid = _ptag_row[3] or 0
                 # Requeue
                 c2.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status IN ('dispatched','running')", (task_id,))
                 _requeued = c2.rowcount > 0
@@ -452,16 +520,35 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
                     _old_rid_row = c2.fetchone()
                     if _old_rid_row and _old_rid_row[0]:
                         c2.execute("UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?", (_old_rid_row[0],))
-                    # Reassign to an online engine with the right tag
+                    # Reassign to an online engine with the right tag + scope isolation
                     # Prefer remote (credential_id > 0) so workers can claim; fall back to local direct
+                    # pool_engine_ids 非空 → 限定场景绑定的引擎列表（与首次派发一致）
+                    # pool_engine_ids 为空 → 加 scope 过滤（与 claim_by_tag 对齐）
                     if _ptag:
+                        if _pool_eids:
+                            _ph = ",".join("?" * len(_pool_eids))
+                            _scope_extra = f" AND ar.id IN ({_ph})"
+                            _scope_params = list(_pool_eids)
+                        else:
+                            _repo_bare = _task_repo.split(":", 1)[1] if ":" in _task_repo else _task_repo
+                            _scope_extra = (
+                                " AND (ar.credential_id = 0"
+                                " OR rc.scope = 'global'"
+                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ?))"
+                                " OR (rc.scope = 'user' AND rc.owner_name ="
+                                " (SELECT username FROM user_accounts WHERE id=?)))"
+                            )
+                            _scope_params = [_repo_bare, f"gitcode:{_repo_bare}", _task_uid]
+                        # Query 1: prefer remote (credential_id > 0)
                         c2.execute(
                             "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
                             "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
                             "AND (ec.tag=? OR ec.tag='all') "
-                            "WHERE ar.status='online' AND ar.healthy=1 AND ar.credential_id > 0 "
-                            "ORDER BY ar.busy_slots ASC LIMIT 1",
-                            (_ptag,)
+                            "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                            "WHERE ar.status='online' AND ar.healthy=1 AND ar.credential_id > 0"
+                            + _scope_extra +
+                            " ORDER BY ar.busy_slots ASC LIMIT 1",
+                            (_ptag, *_scope_params)
                         )
                         _new_rid_row = c2.fetchone()
                         if not _new_rid_row:
@@ -470,9 +557,11 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
                                 "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
                                 "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
                                 "AND (ec.tag=? OR ec.tag='all') "
-                                "WHERE ar.status='online' AND ar.healthy=1 "
-                                "ORDER BY ar.busy_slots ASC LIMIT 1",
-                                (_ptag,)
+                                "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                                "WHERE ar.status='online' AND ar.healthy=1"
+                                + _scope_extra +
+                                " ORDER BY ar.busy_slots ASC LIMIT 1",
+                                (_ptag, *_scope_params)
                             )
                             _new_rid_row = c2.fetchone()
                         if _new_rid_row:
@@ -587,25 +676,53 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
                     _rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "", fallback_runtime_id=_rid) or 0
                 except Exception:
                     _rid = 0
-                # Plugin mode: prefer an engine that has the matching tag
+                # Plugin mode: prefer an engine that has the matching tag + scope isolation
+                # pool_engine_ids 非空 → 限定场景绑定的引擎列表（与首次派发一致）
+                # pool_engine_ids 为空 → 加 scope 过滤（与 claim_by_tag 对齐）
                 if is_plugin_mode() and old.get("pool_tag"):
                     try:
+                        _old_pool_eids = []
+                        import json as _json_pe2
+                        try:
+                            _raw = old.get("pool_engine_ids") or ""
+                            if _raw:
+                                _old_pool_eids = [int(x) for x in _json_pe2.loads(_raw) if x]
+                        except Exception:
+                            pass
+                        _old_repo = old.get("repo_key") or ""
+                        _old_uid = old.get("user_id") or 0
+                        if _old_pool_eids:
+                            _ph2 = ",".join("?" * len(_old_pool_eids))
+                            _scope_extra2 = f" AND ar.id IN ({_ph2})"
+                            _scope_params2 = list(_old_pool_eids)
+                        else:
+                            _repo_bare2 = _old_repo.split(":", 1)[1] if ":" in _old_repo else _old_repo
+                            _scope_extra2 = (
+                                " AND (ar.credential_id = 0"
+                                " OR rc.scope = 'global'"
+                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ?))"
+                                " OR (rc.scope = 'user' AND rc.owner_name ="
+                                " (SELECT username FROM user_accounts WHERE id=?)))"
+                            )
+                            _scope_params2 = [_repo_bare2, f"gitcode:{_repo_bare2}", _old_uid]
                         with db_lock:
                             c3 = db.cursor()
                             c3.execute(
                                 "SELECT ar.id FROM agent_runtimes ar "
                                 "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
                                 "AND (ec.tag=? OR ec.tag='all') "
-                                "WHERE ar.status='online' AND ar.healthy=1 "
-                                "ORDER BY ar.busy_slots ASC LIMIT 1",
-                                (old.get("pool_tag"),)
+                                "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                                "WHERE ar.status='online' AND ar.healthy=1"
+                                + _scope_extra2 +
+                                " ORDER BY ar.busy_slots ASC LIMIT 1",
+                                (old.get("pool_tag"), *_scope_params2)
                             )
                             _tagged_rid = c3.fetchone()
                             if _tagged_rid:
                                 _rid = _tagged_rid[0]
                     except Exception:
                         pass
-                if not _rid:
+                if not _rid and not is_plugin_mode():
                     raise HTTPException(status_code=409, detail={"code": 409, "message": "无可用引擎，无法重派"})
                 # Determine engine type to choose execution path
                 # Check credential_id directly (not just runtime_execution_kind, which is affected by global mode)
@@ -644,6 +761,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(ge
                     server_url=old.get("server_url") or "",
                     issue_session_id=_sid,
                     pool_tag=old.get("agent_type") or "" if is_plugin_mode() else "",
+                    pool_agent_type=old.get("agent_type") or "" if is_plugin_mode() else "",
                 )
                 # If local direct engine, trigger direct execution (no worker will claim)
                 if _is_local_direct and _new_task_id:
@@ -989,8 +1107,9 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     from src.prompt_builder import build_conversation_prompt
     prompt, _inj_ids = build_conversation_prompt(evt, user_message, _list_thread(anchor_seq), agent_type, issue_num)
 
-    from src.user.db import get_gitcode_token
-    bot_token = get_gitcode_token(repo_key=repo_key) or ""
+    from src.repo_key import from_repo_key
+    from src.repo import Repo
+    bot_token = Repo(repo_key).bot_token
     repository = from_repo_key(repo_key)
 
     from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task, runtime_execution_kind
@@ -1033,7 +1152,9 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
             except Exception:
                 runtime_id = 0
             if not runtime_id:
-                final_text = "（对话执行失败：无可用引擎/会话）"
+                from src.api.event_pipeline import is_plugin_mode
+                if not is_plugin_mode():
+                    final_text = "（对话执行失败：无可用引擎/会话）"
             else:
                 tid = enqueue_task(
                     agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
@@ -1045,6 +1166,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
                     skill_path=event_dialogue_path,
                     account=repository, repo_gitcode_token=bot_token,
                     issue_id=issue_id or "#0",
+                    pool_agent_type=agent_type if not runtime_id else "",  # plugin 广播模式下需要 pool_tag
                 )
                 # Fix C：超时/失败要有回显与清理，不再 30 分钟静默
                 task = None
@@ -1114,8 +1236,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     yield ("done", {"reply": final_text, "messages": _list_thread(anchor_seq)})
 
 
-@router.get("/{seq}/thread")
-def get_event_thread(seq: int, user: dict = Depends(get_current_user)):
+@router.get("/{seq}/thread", operation_id="events_thread", summary="Event conversation thread", description="Returns the event conversation thread messages.")
+def get_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
     from src.api.knowledge import read_knowledge, _issue_num_from
     issue_num = _issue_num_from(evt["issue_id"])
@@ -1130,8 +1252,8 @@ def get_event_thread(seq: int, user: dict = Depends(get_current_user)):
     }
 
 
-@router.delete("/{seq}/chat")
-def delete_event_thread(seq: int, user: dict = Depends(get_current_user)):
+@router.delete("/{seq}/chat", operation_id="events_chat_delete", summary="Delete event conversation thread", description="Clears the event conversation thread records.")
+def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     """Issue #100: 清理事件关联的对话消息（event_thread 记录）。"""
     evt = _load_event(seq)
     from src.api.routes.knowledge import _check_repo_member
@@ -1144,8 +1266,8 @@ def delete_event_thread(seq: int, user: dict = Depends(get_current_user)):
     return {"ok": True, "message": "对话已清理"}
 
 
-@router.delete("/{seq}/knowledge/{scope}")
-def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(get_current_user)):
+@router.delete("/{seq}/knowledge/{scope}", operation_id="events_knowledge_delete", summary="Delete issue knowledge", description="Deletes agent knowledge produced for the event (file + DB + refs).")
+def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no_session_token)):
     """Issue #100: 删除事件关联的 agent 沉淀知识（文件 + DB + ref）。"""
     evt = _load_event(seq)
     if scope not in ("project", "issue", "issue_agent"):
@@ -1153,7 +1275,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(get_curren
     from src.api.routes.knowledge import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
 
-    from src.api.knowledge import knowledge_path, knowledge_storage_key, _issue_num_from
+    from src.api.knowledge import knowledge_path, _issue_num_from
     from src.session_manager import db, db_lock
     import os
 
@@ -1171,13 +1293,21 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(get_curren
     if os.path.isfile(file_path):
         os.remove(file_path)
 
-    # 2. 删 OBS 对象（如有）
+    # 2. 删 OBS 对象（从 DB 取实际 obs_key，不用 knowledge_storage_key 重新生成）
     try:
         from src.storage import get_storage
         storage = get_storage()
         if storage is not None:
-            obs_key = knowledge_storage_key(evt["repo_key"], scope, agent_type=_ag, issue_num=_in)
-            storage.delete_object(obs_key)
+            from src.session_manager import db, db_lock
+            with db_lock:
+                obs_rows = db.cursor().execute(
+                    "SELECT obs_key FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
+                    "AND obs_key!='' AND obs_key IS NOT NULL",
+                    (evt["repo_key"], scope, _ag, _in)
+                ).fetchall()
+            for (obs_key,) in obs_rows:
+                storage.delete_object(obs_key)
     except Exception:
         pass
 
@@ -1199,8 +1329,8 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(get_curren
     return {"ok": True, "scope": scope, "message": "知识已删除"}
 
 
-@router.post("/{seq}/chat")
-async def send_conversation(seq: int, body: ConversationMessage, user: dict = Depends(get_current_user)):
+@router.post("/{seq}/chat", operation_id="events_chat_send", summary="Send event conversation", description="Sends a message into the event conversation (non-streaming).")
+async def send_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
     gate = _thread_gate(evt["repo_key"], evt["issue_id"])
     if not gate["open"]:
@@ -1214,8 +1344,8 @@ async def send_conversation(seq: int, body: ConversationMessage, user: dict = De
     return final
 
 
-@router.post("/{seq}/chat/stream")
-async def stream_conversation(seq: int, body: ConversationMessage, user: dict = Depends(get_current_user)):
+@router.post("/{seq}/chat/stream", operation_id="events_chat_stream", summary="Event conversation SSE", description="SSE streaming conversation. Direct mode streams live; queue mode returns a single done.")
+async def stream_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     """SSE 流式对话（direct 模式；队列模式为一次性 done）。"""
     from fastapi.responses import StreamingResponse
     evt = _load_event(seq)
@@ -1258,8 +1388,8 @@ def _cleanup_conv_tasks():
             _conv_tasks.pop(tid, None)
 
 
-@router.post("/{seq}/chat/submit")
-async def submit_conversation(seq: int, body: ConversationMessage, user: dict = Depends(get_current_user)):
+@router.post("/{seq}/chat/submit", operation_id="events_chat_submit", summary="Submit event conversation (async)", description="Submits a conversation query and immediately returns a task_id; the agent executes in the background.")
+async def submit_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     """提交对话查询 → 立即返回 task_id。后台异步执行 agent。"""
     _cleanup_conv_tasks()
     evt = _load_event(seq)
@@ -1325,7 +1455,6 @@ def _execute_conv_task(task_id: str, loop):
         from src.api.knowledge import _issue_num_from
         from src.api.event_pipeline import get_agent_workdir
         from src.prompt_builder import build_conversation_prompt
-        from src.user.db import get_gitcode_token
         from src.api.session_store import get_or_create_issue_session
         issue_num = _issue_num_from(issue_id)
         # 会话复用
@@ -1346,7 +1475,9 @@ def _execute_conv_task(task_id: str, loop):
         import os
         os.makedirs(ws, exist_ok=True)
         prompt, injected_ids = build_conversation_prompt(evt, message, _list_thread(anchor_seq), agent_type, issue_num)
-        bot_token = get_gitcode_token(repo_key=repo_key) or ""
+        from src.repo_key import from_repo_key
+        from src.repo import Repo
+        bot_token = Repo(repo_key).bot_token
         repository = from_repo_key(repo_key)
         # 用 hermes 引擎（对齐 Chat Agent）
         for evt_type, data in stream_devops_agent(
@@ -1423,8 +1554,8 @@ def _push_conv_event(task_id: str, evt_type: str, data):
                 t["result"] = (t.get("result", "") or "") + (data if isinstance(data, str) else str(data))
 
 
-@router.get("/chat/task/{task_id}/status")
-def conv_task_status(task_id: str, user: dict = Depends(get_current_user)):
+@router.get("/chat/task/{task_id}/status", operation_id="events_chat_task_status", summary="Event conversation async status", description="Queries conversation task status (memory first, DB fallback).")
+def conv_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """查询对话任务状态（内存优先 → DB 兜底）。"""
     # 1. 内存
     with _conv_tasks_lock:
@@ -1453,8 +1584,8 @@ def conv_task_status(task_id: str, user: dict = Depends(get_current_user)):
     return {"task_id": task_id, "status": "not_found"}
 
 
-@router.get("/chat/task/{task_id}/stream")
-async def conv_task_stream(task_id: str, user: dict = Depends(get_current_user)):
+@router.get("/chat/task/{task_id}/stream", operation_id="events_chat_task_stream", summary="Event conversation async stream", description="Subscribes to conversation task SSE output (buffered replay + live append).")
+async def conv_task_stream(task_id: str, user: dict = Depends(require_no_session_token)):
     """订阅对话任务 SSE 输出（重放缓冲 + 实时追加）。"""
     from fastapi.responses import StreamingResponse
 
@@ -1554,12 +1685,12 @@ def flow_reset(seq: int, body: FlowResetBody, request: Request):
     return {"ok": True, "stage": to_stage, "cancelled": cancelled}
 
 
-@router.get("/{owner}/{repo}")
+@router.get("/{owner}/{repo}", operation_id="events_list", summary="List repository events", description="Paged event list for a repository with optional filters.")
 def list_events(owner: str, repo: str,
                       page: int = Query(1, ge=1),
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 
