@@ -95,10 +95,20 @@ class TestVcsApiClientCloseIssue:
     def test_close_issue_gitcode(self):
         """GitCode 平台：PATCH /repos/{owner}/{repo}/issues/{n}"""
         c = VcsApiClient("gitcode", "fake-token", "org", "repo")
-        with patch.object(c, "_gitcode_request", return_value={"state": "closed", "number": 5}) as m:
+        with patch.object(c, "_gitcode_request", return_value={"state": "closed", "number": 5}) as m, \
+             patch.object(c, "get_issue_state", return_value="closed"):
             resp = c.close_issue(5)
         m.assert_called_once_with("PATCH", "/repos/org/repo/issues/5", {"state_event": "close"})
         assert resp["state"] == "closed"
+
+    def test_close_issue_gitcode_not_effective(self):
+        """GitCode v5 平台缺陷：PATCH 返回 200 但 issue state 未变 → 不误报成功"""
+        c = VcsApiClient("gitcode", "fake-token", "org", "repo")
+        with patch.object(c, "_gitcode_request", return_value={"state": "open", "number": 5}), \
+             patch.object(c, "get_issue_state", return_value="open"):
+            resp = c.close_issue(5)
+        assert "error" in resp
+        assert resp["error"] == "gitcode_issue_close_not_effective"
 
     def test_close_issue_github(self):
         """GitHub 平台：PATCH /repos/{owner}/{repo}/issues/{n}"""
