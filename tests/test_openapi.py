@@ -61,6 +61,7 @@ EXPECTED_PUBLIC = {
     "gitrepo_issues_create": ("post", "/api/git-repo/{owner}/{repo}/issues"),
     "gitrepo_issues_get": ("get", "/api/git-repo/{owner}/{repo}/issues/{number}"),
     "gitrepo_issues_update": ("patch", "/api/git-repo/{owner}/{repo}/issues/{number}"),
+    "gitrepo_issues_close": ("post", "/api/git-repo/{owner}/{repo}/issues/{number}/close"),
     "gitrepo_issues_comments_list": ("get", "/api/git-repo/{owner}/{repo}/issues/{number}/comments"),
     "gitrepo_issues_comments_create": ("post", "/api/git-repo/{owner}/{repo}/issues/{number}/comments"),
     "gitrepo_pulls_list": ("get", "/api/git-repo/{owner}/{repo}/pulls"),
