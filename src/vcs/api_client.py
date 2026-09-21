@@ -62,6 +62,36 @@ class VcsApiClient:
                 "GET", f"/projects/{project_id}/issues/{issue_number}")
         return {"error": f"unsupported provider: {self.provider}"}
 
+    # === Issue 关闭 ===
+
+    def close_issue(self, issue_number: int) -> dict:
+        """关闭 Issue（设置 state=closed）。
+
+        Returns:
+            dict: API 返回的 Issue JSON，或 {"error": ...} 错误信息。
+        """
+        if self.provider == "gitcode":
+            return self._gitcode_request(
+                "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
+                {"state": "closed"})
+        elif self.provider == "github":
+            return self._github_request(
+                "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
+                {"state": "closed"})
+        elif self.provider == "gitlab":
+            project_id = f"{self.owner}%2F{self.repo}"
+            return self._gitlab_request(
+                "PUT", f"/projects/{project_id}/issues/{issue_number}",
+                {"state_event": "close"})
+        return {"error": f"unsupported provider: {self.provider}"}
+
+    def get_issue_state(self, issue_number: int) -> str:
+        """获取 Issue 当前 state（open/closed），失败返回空串。"""
+        resp = self.get_issue(issue_number)
+        if isinstance(resp, dict) and "error" not in resp:
+            return str(resp.get("state", "")).lower()
+        return ""
+
     # === PR 操作 ===
 
     def create_pr(self, title: str, head: str, base: str, body: str = "") -> dict:

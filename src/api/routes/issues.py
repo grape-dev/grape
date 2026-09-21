@@ -302,6 +302,115 @@ class _IssueConfirmBody(BaseModel):
     confirmation: str = "user_confirmed"
 
 
+def _close_vcs_issues(repo_key: str, issue_number, user: dict) -> dict:
+    """confirm-done 后同步关闭 GitCode/GitHub Issue（降级不阻断）。
+
+    Returns:
+        {"gitcode": "success|failed|skipped", "github": "success|failed|skipped"}
+        — gitcode 始终尝试关闭（无 issue_number 时 skipped）；github 仅当 repo_key
+        以 github: 开头时尝试关闭，否则 skipped。
+    """
+    result = {"gitcode": "skipped", "github": "skipped"}
+    if not issue_number:
+        return result
+    try:
+        issue_number = int(issue_number)
+    except (TypeError, ValueError):
+        return result
+
+    is_github = repo_key.startswith("github:")
+
+    # --- 确定 GitCode 侧的 repo_key 与 issue（GitHub 仓库时 GitCode 侧 skip）---
+    if not is_github:
+        result["gitcode"] = _try_close_issue_for_repo(repo_key, issue_number, user, is_github=False)
+
+    # --- GitHub 侧：repo_key 本身是 github:，或需要查找镜像 ---
+    if is_github:
+        result["github"] = _try_close_issue_for_repo(repo_key, issue_number, user, is_github=True)
+    else:
+        # GitCode 仓库可能绑定了 GitHub 镜像，尝试查找并关闭镜像 Issue
+        _gh_rk = _find_github_mirror_repo_key(repo_key)
+        if _gh_rk:
+            result["github"] = _try_close_issue_for_repo(_gh_rk, issue_number, user, is_github=True)
+        # 无镜像 → 保持 skipped
+
+    return result
+
+
+def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_github: bool) -> str:
+    """对单个 repo_key 执行幂等关闭 Issue，返回 success/failed/skipped。"""
+    from src.repo_key import parse_repo_key
+    provider, owner, repo = parse_repo_key(repo_key)
+    if not owner or not repo:
+        return "skipped"
+
+    # 获取 token
+    token = ""
+    try:
+        if is_github:
+            # 优先用用户个人 GitHub token（与 clarify_issue 一致），其次 bot token
+            from src.user.db import get_user_github_token as _get_ugh
+            from src.user.db import get_github_token as _get_gh
+            token = (_get_ugh(user["id"]) if user.get("id") else "") or _get_gh(repo_key=repo_key) or ""
+        else:
+            from src.api.deps import get_user_token_with_refresh
+            token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    except Exception as e:
+        log.warning(f"confirm-done close_issue: get token for {repo_key} failed: {e}")
+
+    if not token:
+        log.info(f"confirm-done close_issue: no token for {repo_key}, skipping")
+        return "skipped"
+
+    from src.vcs.api_client import VcsApiClient
+    client = VcsApiClient(provider, token, owner, repo)
+
+    # 幂等检查：已 closed 则跳过
+    try:
+        state = client.get_issue_state(issue_number)
+        if state == "closed":
+            log.info(f"confirm-done: {repo_key}#{issue_number} already closed, skipping")
+            return "skipped"
+    except Exception as e:
+        log.warning(f"confirm-done: get_issue_state {repo_key}#{issue_number} failed: {e}")
+        # 查询失败不阻断关闭尝试
+
+    # 执行关闭
+    try:
+        resp = client.close_issue(issue_number)
+        if isinstance(resp, dict) and "error" not in resp:
+            log.info(f"confirm-done: closed {repo_key}#{issue_number}")
+            return "success"
+        log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} → {resp}")
+        return "failed"
+    except Exception as e:
+        log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} exception: {e}")
+        return "failed"
+
+
+def _find_github_mirror_repo_key(repo_key: str) -> str:
+    """查找 GitCode 仓库绑定的 GitHub 镜像 repo_key。
+
+    managed_repos 表中同一 owner/repo 可能同时存在 gitcode: 和 github: 两条记录，
+    通过 full_name 匹配。找不到返回空串。
+    """
+    try:
+        from src.repo_key import split_owner_repo
+        from src.session_manager import db, db_lock
+        owner, repo = split_owner_repo(repo_key)
+        if not owner or not repo:
+            return ""
+        gh_key = f"github:{owner}/{repo}"
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1", (gh_key,))
+            row = c.fetchone()
+        return row[0] if row else ""
+    except Exception as e:
+        log.warning(f"confirm-done: find github mirror for {repo_key} failed: {e}")
+        return ""
+
+
 @router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="Confirm issue done", description="Developer confirms the requirement is done: status -> completed, stage -> done (idempotent in terminal state).")
 async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
     """开发者确认需求完成：status→completed、stage→done（任意阶段可确认，终态幂等）。"""
@@ -316,7 +425,9 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
         _repo_key, _issue_num, _status = row[0], row[1], row[2]
         if _status == 'completed' or _status == 'done':
-            return {"ok": True, "already_done": True}
+            # 幂等：已关闭的 Issue 再次 confirm-done 不重复调用关闭 API
+            return {"ok": True, "already_done": True,
+                    "issue_closed": {"gitcode": "skipped", "github": "skipped"}}
         if _status == 'cancelled':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "已取消需求不可确认完成"})
         c.execute(
@@ -326,7 +437,9 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
             set_issue_stage(_repo_key, f"#{_issue_num}", "done", "user")
         db.commit()
     log.info(f"Issue #{issue_id} confirmed done by {body.confirmation}")
-    return {"ok": True, "issue_id": issue_id, "status": "completed", "stage": "done"}
+    _issue_closed = _close_vcs_issues(_repo_key, _issue_num, user)
+    return {"ok": True, "issue_id": issue_id, "status": "completed", "stage": "done",
+            "issue_closed": _issue_closed}
 
 
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
