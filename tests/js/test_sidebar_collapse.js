@@ -222,5 +222,25 @@ test('DOM 结构: #sbOverlay 是 #sidebar 的兄弟节点而非子节点', () =>
     '#sbOverlay 应在 #sidebar 之前（兄弟节点），当前 overlayPos=' + overlayPos + ' sidebarOpen=' + sidebarOpen);
 });
 
+// ─── 测试 11：apple-theme 窄屏抽屉 transform 过渡 ───
+// QA Required: apple-theme .sb{transition:width} 覆盖了窄屏 transform 过渡
+test('CSS: apple-theme 窄屏 media query 内含 transform 过渡规则', () => {
+  const cssPath = path.resolve(__dirname, '../../src/api/static/css/apple-theme.css');
+  const css = fs.readFileSync(cssPath, 'utf8');
+  // 提取最后一个 @media(max-width:768px) 块
+  const mediaIdx = css.lastIndexOf('@media(max-width:768px)');
+  assert.ok(mediaIdx > -1, 'apple-theme.css 应有 @media(max-width:768px) 块');
+  const mediaBlock = css.substring(mediaIdx);
+  // 精确匹配 [data-theme="apple"] .sb {（而非 .sb-ov / .sb-toggle 等）
+  const sbRuleMatch = mediaBlock.match(/\[data-theme="apple"\]\s+\.sb\s*\{/);
+  assert.ok(sbRuleMatch, 'media query 内应有 [data-theme="apple"] .sb { 规则');
+  const sbRuleIdx = sbRuleMatch.index;
+  const ruleBlock = mediaBlock.substring(sbRuleIdx);
+  const ruleEnd = ruleBlock.indexOf('}');
+  const ruleContent = ruleBlock.substring(0, ruleEnd);
+  assert.ok(ruleContent.includes('transform') && ruleContent.includes('var(--apple-transition)'),
+    '窄屏 apple-theme .sb 规则应包含 transition: transform var(--apple-transition)，实际: ' + ruleContent);
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
