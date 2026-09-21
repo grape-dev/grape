@@ -788,3 +788,25 @@
 /* 确认按钮 loading */
 .bt.kb-btn-loading{pointer-events:none;opacity:.7}
 .bt.kb-btn-loading::after{content:'';display:inline-block;width:12px;height:12px;margin-left:6px;border:1.5px solid currentColor;border-top-color:transparent;border-radius:50%;animation:kb-spin .6s linear infinite;vertical-align:middle}
+/* ===== Issue #207: Sidebar 折叠/展开 + 窄屏 overlay 抽屉 ===== */
+/* 折叠按钮（toolbar 内汉堡图标） */
+.sb-toggle{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;color:var(--t2);cursor:pointer;text-decoration:none;flex-shrink:0;transition:background .2s,color .2s,transform .15s}
+.sb-toggle:hover{background:var(--bg);color:var(--t)}
+.sb-toggle:active{transform:scale(.92)}
+.sb-toggle.collapsed{color:var(--a)}
+/* 桌面端：sidebar 宽度过渡 + 折叠收为 0 */
+.sb{transition:width .3s cubic-bezier(.25,.1,.25,1)}
+.sb.collapsed{width:0;overflow:hidden;flex-shrink:0;border-right:0}
+/* 折叠时隐藏内部内容溢出（防止子元素撑开） */
+.sb.collapsed .sb-h,.sb.collapsed .sb-sel,.sb.collapsed .sb-nav,.sb.collapsed .sb-ft{overflow:hidden;white-space:nowrap;opacity:0;transition:opacity .15s}
+/* 窄屏 overlay 遮罩（默认隐藏） */
+.sb-ov{display:none}
+/* 窄屏（≤768px）：sidebar 默认 display:none，折叠按钮切换 overlay 抽屉 */
+@media(max-width:768px){
+  .sb-ov{position:fixed;inset:0;z-index:1098;background:rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity .3s;display:block}
+  .sb-ov.show{opacity:1;pointer-events:auto}
+  .sb{position:fixed;top:0;left:0;height:100vh;z-index:1099;transform:translateX(-100%);transition:transform .3s cubic-bezier(.25,.1,.25,1);display:flex !important;width:232px;box-shadow:4px 0 24px rgba(0,0,0,.15)}
+  .sb.sb-drawer-open{transform:translateX(0)}
+  .sb.collapsed{width:232px;overflow:visible}
+  .sb.collapsed .sb-h,.sb.collapsed .sb-sel,.sb.collapsed .sb-nav,.sb.collapsed .sb-ft{opacity:1;overflow:visible;white-space:normal}
+}

@@ -34,7 +34,8 @@
     "knowledge": "知识库",
     "account": "用户中心",
     "device_center": "设备中心",
-    "settings": "设置"
+    "settings": "设置",
+    "toggle": "收起/展开侧边栏"
   },
   "login": {
     "gitcode_login": "使用 GitCode 登录",
