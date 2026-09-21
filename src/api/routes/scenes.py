@@ -107,6 +107,7 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "work_branch": s.get("work_branch") or "main",
                        "created_by": s.get("created_by") or "",
                        "scene_type": s.get("scene_type") or "standard",
+                       "pr_subscription_enabled": bool(s.get("pr_subscription_enabled", 0)),
                        "pipeline": cfg})
     return {"scenes": result}
 
@@ -1383,13 +1384,15 @@ class CreateSceneRequest(BaseModel):
     scope: str = "repo"  # repo
     nodes: list[SceneNodeInput] = []
     icon: str = ""
-    scene_type: str = "standard"  # standard | pr_subscription
+    scene_type: str = "standard"  # deprecated, 保留向后兼容
+    pr_subscription_enabled: bool = False
 
 class UpdateSceneRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     nodes: list[SceneNodeInput] = []
     icon: str | None = None
+    pr_subscription_enabled: bool | None = None
 
 class ApplySceneRequest(BaseModel):
     scene_id: str
@@ -1479,30 +1482,12 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     # 校验 engine_runtime_ids：scope=repo 的引擎必须属于当前仓库，且 tag 必须包含节点标签
     _validate_scene_engine_ids(nodes_json := [n.model_dump() for n in body.nodes], repo_key)
 
-    # PR 订阅场景校验
-    if body.scene_type == "pr_subscription":
-        from src.session_manager import db, db_lock
-        # 唯一性：同仓库最多一个 PR 订阅场景
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT scene_id FROM devops_pipeline_scene "
-                "WHERE repo_key=? AND scene_type='pr_subscription' AND is_active=1 LIMIT 1",
-                (repo_key,))
-            if c.fetchone():
-                raise HTTPException(status_code=409, detail={
-                    "code": 409, "message": "该仓库已存在 PR 订阅场景，每个仓库最多一个"})
-        # nodes 只允许 qa 和 sre，QA 必须启用且有 skill
-        allowed_tags = {"qa", "sre"}
-        node_tags = {n.tag for n in body.nodes}
-        invalid = node_tags - allowed_tags
-        if invalid:
-            raise HTTPException(status_code=400, detail={
-                "code": 400, "message": f"PR 订阅场景只允许 QA 和 SRE Agent，不允许: {','.join(sorted(invalid))}"})
+    # PR 订阅开启时校验：QA 节点必须启用且有 skill
+    if body.pr_subscription_enabled:
         qa_node = next((n for n in body.nodes if n.tag == "qa"), None)
         if not qa_node or not qa_node.enabled or not qa_node.skill:
             raise HTTPException(status_code=400, detail={
-                "code": 400, "message": "PR 订阅场景必须包含 QA Agent 且已配置技能"})
+                "code": 400, "message": "开启 PR 订阅需要先配置 QA Agent 并启用技能"})
 
     scene_id = body.scene_id or str(uuid.uuid4())
 
@@ -1510,7 +1495,8 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
         db_id = create_custom_scene(
             scene_id=scene_id, name=body.name, description=body.description,
             repo_key=repo_key, nodes=nodes_json, created_by=user.get("username") or "",
-            icon=body.icon or "", scene_type=body.scene_type)
+            icon=body.icon or "", scene_type="standard",
+            pr_subscription_enabled=1 if body.pr_subscription_enabled else 0)
     except Exception as e:
         err_upper = str(e).upper()
         if "UNIQUE" in err_upper or "DUPLICATE" in err_upper:
@@ -1546,22 +1532,20 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     if repo_key:
         _validate_scene_engine_ids(nodes_json, repo_key)
 
-    # PR 订阅场景更新时校验 nodes
-    if existing.get("scene_type") == "pr_subscription":
-        allowed_tags = {"qa", "sre"}
-        node_tags = {n.tag for n in body.nodes}
-        invalid = node_tags - allowed_tags
-        if invalid:
-            raise HTTPException(status_code=400, detail={
-                "code": 400, "message": f"PR 订阅场景只允许 QA 和 SRE Agent，不允许: {','.join(sorted(invalid))}"})
+    # PR 订阅开启时校验：QA 节点必须启用且有 skill
+    _pr_sub_on = body.pr_subscription_enabled
+    if _pr_sub_on is None:
+        _pr_sub_on = bool(existing.get("pr_subscription_enabled", 0))
+    if _pr_sub_on:
         qa_node = next((n for n in body.nodes if n.tag == "qa"), None)
         if not qa_node or not qa_node.enabled or not qa_node.skill:
             raise HTTPException(status_code=400, detail={
-                "code": 400, "message": "PR 订阅场景必须包含 QA Agent 且已配置技能"})
+                "code": 400, "message": "开启 PR 订阅需要先配置 QA Agent 并启用技能"})
 
     update_custom_scene(
         scene_id=scene_id, repo_key=repo_key, nodes=nodes_json,
-        name=body.name, description=body.description, icon=body.icon)
+        name=body.name, description=body.description, icon=body.icon,
+        pr_subscription_enabled=1 if _pr_sub_on else 0 if _pr_sub_on is not None else None)
 
     log.info(f"Scene updated: id={scene_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}
@@ -1605,11 +1589,6 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.api.session_store import upsert_agent_session
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
-    # PR 订阅场景不能设为仓库默认场景
-    _existing = _query_scene_by_id(body.scene_id, repo_key=repo_key)
-    if _existing and _existing.get("scene_type") == "pr_subscription":
-        raise HTTPException(status_code=400, detail={
-            "code": 400, "message": "PR 订阅场景不能设为仓库默认场景"})
     cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{body.scene_id}' 不存在"})

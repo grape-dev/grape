@@ -319,7 +319,7 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
 def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
                         display_name: str = "", created_by: str = "", icon: str = "",
-                        scene_type: str = "standard") -> int:
+                        scene_type: str = "standard", pr_subscription_enabled: int = 0) -> int:
     """Create or reactivate a repo-scoped custom scene in DB. Returns DB id."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -341,6 +341,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             _try_set_created_by(c, existing[0], created_by)
             _try_set_icon(c, existing[0], icon)
             _try_set_scene_type(c, existing[0], scene_type)
+            _try_set_pr_sub_enabled(c, existing[0], pr_subscription_enabled)
             db.commit()
             return existing[0]
         # Insert new record
@@ -353,6 +354,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
         _try_set_created_by(c, new_id, created_by)
         _try_set_icon(c, new_id, icon)
         _try_set_scene_type(c, new_id, scene_type)
+        _try_set_pr_sub_enabled(c, new_id, pr_subscription_enabled)
         db.commit()
         return new_id
 
@@ -382,6 +384,13 @@ def _try_set_scene_type(c, row_id: int, scene_type: str):
     except Exception:
         pass
 
+def _try_set_pr_sub_enabled(c, row_id: int, enabled: int):
+    """幂等写入 pr_subscription_enabled（列不存在时忽略）。"""
+    try:
+        c.execute("UPDATE devops_pipeline_scene SET pr_subscription_enabled=? WHERE id=?", (int(enabled), row_id))
+    except Exception:
+        pass
+
 
 def _try_set_display_name(c, row_id: int, display_name: str):
     """幂等写入 display_name（列不存在时忽略，兼容旧库）。"""
@@ -393,7 +402,7 @@ def _try_set_display_name(c, row_id: int, display_name: str):
 
 def update_custom_scene(scene_id: str, repo_key: str,
                         nodes: list, name: str | None = None, description: str | None = None,
-                        icon: str | None = None):
+                        icon: str | None = None, pr_subscription_enabled: int | None = None):
     """Update a repo-scoped custom scene."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -414,6 +423,9 @@ def update_custom_scene(scene_id: str, repo_key: str,
         if icon is not None:
             sets.append("icon=?")
             params.append(icon)
+        if pr_subscription_enabled is not None:
+            sets.append("pr_subscription_enabled=?")
+            params.append(int(pr_subscription_enabled))
         params.extend([scene_id, repo_key])
         c.execute(
             f"UPDATE devops_pipeline_scene SET {','.join(sets)} WHERE scene_id=? AND repo_key=? AND is_active=1",

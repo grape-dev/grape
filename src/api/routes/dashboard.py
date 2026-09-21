@@ -1054,9 +1054,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
         scene_ids = {s["id"] for s in scenes}
         if scenes:
             if not dev_scene or dev_scene not in scene_ids:
-                # 跳过 PR 订阅场景，选第一个标准场景
-                _std = [s for s in scenes if s.get("scene_type") != "pr_subscription"]
-                dev_scene = (_std[0]["id"] if _std else scenes[0]["id"])
+                dev_scene = scenes[0]["id"]
             cfg = get_pipeline_config(dev_scene, repo_key=_actual_repo_key)
             if cfg:
                 scene_nodes = cfg.get("nodes", [])

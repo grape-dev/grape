@@ -2871,6 +2871,20 @@ def _migrate_tables():
             log.info("Added devops_pipeline_scene.advanced_options + created_by + icon + scene_type columns")
     except Exception as e:
         log.warning(f"Add devops_pipeline_scene.advanced_options/created_by/scene_type column failed: {e}")
+    # ===== PR 订阅附加能力：场景级开关（替代独立 scene_type='pr_subscription'）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "devops_pipeline_scene", "pr_subscription_enabled", "INTEGER NOT NULL DEFAULT 0")
+            db.commit()
+            # 数据迁移：已有 pr_subscription 场景 → standard + pr_subscription_enabled=1
+            c.execute("UPDATE devops_pipeline_scene SET pr_subscription_enabled=1, scene_type='standard' WHERE scene_type='pr_subscription'")
+            _migrated = c.rowcount
+            db.commit()
+            if _migrated:
+                log.info(f"Migrated {_migrated} pr_subscription scenes → standard + pr_subscription_enabled=1")
+    except Exception as e:
+        log.warning(f"Add devops_pipeline_scene.pr_subscription_enabled column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:

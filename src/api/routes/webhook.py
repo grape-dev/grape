@@ -259,6 +259,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             repo_key = to_repo_key(repository)
     log.info(f"A2A: agent={agent_name}, repo={repository}")
 
+    # PR 订阅模式拦截：PR 订阅触发的 QA 任务不允许 A2A（只做审查，不流转流水线）
+    # PR 订阅的 issue_number 格式为 pr_{pr_num}_{scene_id}（非纯数字）
+    if issue_number and not str(issue_number).lstrip("#").isdigit():
+        log.info(f"A2A: rejected — PR subscription mode (issue={issue_number}), A2A disabled")
+        return {"ok": False, "skipped": "pr_subscription_a2a_disabled"}
+
     # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
     if issue_number and repo_key:
         try:
