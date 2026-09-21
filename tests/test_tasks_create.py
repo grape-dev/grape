@@ -74,7 +74,7 @@ def _issue_post_fake(api_token, owner, repo, title, body_text="", assignee=""):
 def test_create_task_creates_issue_and_task():
     """新建任务：POST 创建 Issue → 建档 task；assignee= 系统 Account（登录用户 gitcode 账号）。"""
     with patch("src.user.repo_manager._req", side_effect=_req_fake), \
-         patch("src.api.routes.tasks._post_gitcode_issue", side_effect=_issue_post_fake):
+         patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake):
         r = client.post("/api/issues/tc_git/demo", headers=_headers,
                         json={"repo_key": "tc_git/demo", "title": "测试任务标题", "description": "任务描述"})
     assert r.status_code == 200, r.text
@@ -96,7 +96,7 @@ def test_create_task_creates_issue_and_task():
 def test_create_reuses_existing_issue_same_task_id():
     """幂等：同仓库同标题 open issue 存在 → 不重复创建；同一 issue 任务 id 复用。"""
     with patch("src.user.repo_manager._req", side_effect=_req_fake_with_existing), \
-         patch("src.api.routes.tasks._post_gitcode_issue", side_effect=_issue_post_fake):
+         patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake):
         r = client.post("/api/issues/tc_git/demo", headers=_headers,
                         json={"repo_key": "tc_git/demo", "title": "测试任务标题"})
     assert r.status_code == 200, r.text
@@ -104,7 +104,7 @@ def test_create_reuses_existing_issue_same_task_id():
     assert d["created"] is False          # 复用已有 issue，未新创建
     assert d["issue_number"] == 42
     with patch("src.user.repo_manager._req", side_effect=_req_fake_with_existing), \
-         patch("src.api.routes.tasks._post_gitcode_issue", side_effect=_issue_post_fake):
+         patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake):
         r2 = client.post("/api/issues/tc_git/demo", headers=_headers,
                          json={"repo_key": "tc_git/demo", "title": "测试任务标题"})
     assert r2.status_code == 200
@@ -114,7 +114,7 @@ def test_create_reuses_existing_issue_same_task_id():
 def test_status_transition_rules():
     """状态迁移：active→processing→completed 合法；completed 终态不可逆。"""
     with patch("src.user.repo_manager._req", side_effect=_req_fake), \
-         patch("src.api.routes.tasks._post_gitcode_issue", side_effect=_issue_post_fake):
+         patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake):
         tid = client.post("/api/issues/tc_git/demo", headers=_headers,
                           json={"repo_key": "tc_git/demo", "title": "状态迁移任务"}).json()["task_id"]
     r = client.put(f"/api/tasks/{tid}/status", headers=_headers, json={"status": "processing"})

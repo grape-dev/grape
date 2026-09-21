@@ -221,7 +221,7 @@ class TestNotify:
 
         # 断言：不调用 consume_stream_async、不产生 agent LLM 回复（静态模板消息落会话）
         with patch("src.runtime.executor.consume_stream_async") as m_evict, \
-             patch("src.api.routes.tasks.add_message") as m_add:
+             patch("src.api.issues_center.add_message") as m_add:
             _aio.run(_run())
         m_evict.assert_not_called(), "notify 不得触发 LLM/opencode 执行"
         m_add.assert_called_once(), "应写入一条静态模板 agent 消息"

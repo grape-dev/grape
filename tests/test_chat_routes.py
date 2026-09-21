@@ -407,7 +407,7 @@ class TestHelpers:
             bm.api = MagicMock()
             bm.api.send_card_to_user = AsyncMock()
             with patch("src.api.main.bot_manager", bm), \
-                 patch("src.api.routes.tasks._get_feishu_open_id", return_value="ou_1"):
+                 patch("src.api.issues_center._get_feishu_open_id", return_value="ou_1"):
                 asyncio.run(_push_reply_to_feishu({"id": "c1", "im_channel_id": "oc_x"}, {"id": 1, "username": "u"}, "hi"))
             bm.api.send_card_to_user.assert_awaited_once()
         finally:

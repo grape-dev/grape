@@ -185,7 +185,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(re
     会话被删除后，Task Center 双击跳转时调用此接口重建「Issue #N」会话，
     并写入任务上下文消息 + 从 GitCode Issue 补拉 agent 评论。
     """
-    from src.api.routes.tasks import _ensure_task_conversation, _get_issue_title
+    from src.api.issues_center import _ensure_task_conversation, _get_issue_title
     from src.repo_key import to_repo_key
     rk = to_repo_key(body.repo_key)
     title = ""
@@ -296,7 +296,7 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
         if not im_channel_id:
             return
         from src.session_manager import db, db_lock
-        from src.api.routes.tasks import _get_feishu_open_id
+        from src.api.issues_center import _get_feishu_open_id
         open_id = _get_feishu_open_id(user.get("username", ""))
         if not open_id and im_channel_id.startswith("ou_"):
             open_id = im_channel_id
@@ -557,7 +557,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
         _chat_log = _log_mod.getLogger("devops-bot")
         if _msg_stripped in ["任务完成", "完成任务", "/done", "确认完成"]:
             try:
-                from src.api.routes.tasks import confirm_issue_done
+                from src.api.issues_center import confirm_issue_done
                 confirm_issue_done(_task_repo_key, _task_issue_num, confirmed_by="chat_agent")
                 add_message(conv_id, "assistant", "✅ 任务已确认完成")
                 return {"conversation_id": conv_id, "reply": "✅ 任务已确认完成", "task_command": "done"}
@@ -565,7 +565,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
                 _chat_log.warning(f"Chat command confirm_done failed: {_e}")
         elif _msg_stripped in ["取消任务", "/cancel"]:
             try:
-                from src.api.routes.tasks import cancel_issue_task
+                from src.api.issues_center import cancel_issue_task
                 cancel_issue_task(_task_repo_key, _task_issue_num)
                 add_message(conv_id, "assistant", "任务已取消")
                 return {"conversation_id": conv_id, "reply": "任务已取消", "task_command": "cancel"}
@@ -573,7 +573,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
                 _chat_log.warning(f"Chat command cancel failed: {_e}")
         elif _msg_stripped in ["恢复任务", "/resume"]:
             try:
-                from src.api.routes.tasks import resume_issue_task
+                from src.api.issues_center import resume_issue_task
                 resume_issue_task(_task_repo_key, _task_issue_num)
                 add_message(conv_id, "assistant", "任务已恢复")
                 return {"conversation_id": conv_id, "reply": "任务已恢复", "task_command": "resume"}
