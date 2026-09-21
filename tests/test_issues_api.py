@@ -219,10 +219,10 @@ class TestCreateIssue:
         from unittest.mock import patch
         _mk_issue_state(20, stage="vod")  # 预置避免走 GitCode API
         # 用 mock 覆盖 GitCode create + token，防止真实 API 调用
-        with patch("src.api.routes.tasks._find_open_issue_by_title", return_value=None), \
+        with patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
              patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
-             patch("src.api.routes.tasks._gitcode_api_with_refresh") as _mock_api, \
-             patch("src.api.routes.tasks.ensure_issue_task") as _mock_ensure:
+             patch("src.api.issues_center._gitcode_api_with_refresh") as _mock_api, \
+             patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
             _mock_api.return_value = {"number": 20}
             _mock_ensure.return_value = 20
             resp = client.post(

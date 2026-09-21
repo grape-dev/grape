@@ -26,6 +26,7 @@ GitCode 事件（Issue/PR/评论）
 |----------|------|-----------|----------|
 | `GRAPE_SERVER_URL` | Grape 服务端地址（skill 调 API 用） | 全部 | `_execute_agent` / agent.py 本机修正 |
 | `GRAPE_SESSION_TOKEN` | 会话级临时 token（`tk_`，task 生命周期内有效，终态失效） | 全部 | `service.py` `issue_session_token` |
+| `GRAPE_CLI_MODE` | CLI 命令过滤模式：`WORKER` = 只显示会话 token（`tk_`）可用的命令（dual + session_only），隐藏 user_only（agent 持 `tk_` 打了也 403） | 全部（注入 session token 的任务） | 随 `GRAPE_SESSION_TOKEN` 注入（`service.py` / `event_pipeline.py`） |
 | `REPO_FULL_NAME` | `owner/repo` 仓库全名 | 全部（devops 事件） | `_execute_agent` |
 | `ACCOUNT` | 仓库所属账号 | 全部 | `_execute_agent` |
 | `ISSUE_NUMBER` | Issue 编号（去 # 前缀的数字） | 事件任务（有 Issue） | `_execute_agent` |
@@ -84,10 +85,13 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
      "https://api.gitcode.com/api/v5/repos/$REPO_FULL_NAME"
    ```
 2. **调 Grape 内部 API**：用 `GRAPE_SERVER_URL` + `GRAPE_SESSION_TOKEN`（鉴权 Bearer）。
-3. **cloud-deploy 类 Skill**：读 `HUAWEICLOUD_SDK_AK/SK`（SRE，仓库 owner 配置后注入）。
-4. **场景自定义字段**：读 `GRAPE_CF_MAP` 按 key 名取 `GRAPE_CF_N` 值。
-5. **git 操作**：用 `GRAPE_WORK_BRANCH` 作工作基线；`GIT_ASKPASS` 已注入 `$BOT_GITCODE_TOKEN`。
-6. **token 安全**：`BOT_GITCODE_TOKEN`/`USER_GITCODE_TOKEN` 是敏感变量——**不要 printenv 打印/写入日志**；
+3. **CLI 命令范围**：环境已注入 `GRAPE_CLI_MODE=WORKER`——`grape --help` / `grape commands` 只会列出
+   **会话 token（`tk_`）可用的命令**（dual + session_only，含 git-repo / issues 读 / a2a / tasks 等）；
+   user_only（skills 管理 / settings / repos 平台管理 等）已被过滤——agent 不要尝试调用它们（服务端仍会 403）。
+4. **cloud-deploy 类 Skill**：读 `HUAWEICLOUD_SDK_AK/SK`（SRE，仓库 owner 配置后注入）。
+5. **场景自定义字段**：读 `GRAPE_CF_MAP` 按 key 名取 `GRAPE_CF_N` 值。
+6. **git 操作**：用 `GRAPE_WORK_BRANCH` 作工作基线；`GIT_ASKPASS` 已注入 `$BOT_GITCODE_TOKEN`。
+7. **token 安全**：`BOT_GITCODE_TOKEN`/`USER_GITCODE_TOKEN` 是敏感变量——**不要 printenv 打印/写入日志**；
    平台已有脱敏（[REDACTED]）。token 仅在进程内有效、删除即失效（GRAPE_SESSION_TOKEN 生命周期=任务）。
 
 ## 六、关键代码位置
