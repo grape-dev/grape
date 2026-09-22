@@ -340,6 +340,11 @@ window._openBoardDetail = function(taskId) {
   if (!el) return;
   // 暂停轮询——防止详情页被 loadTasks() 覆盖
   if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
+  // PR 事件走专门的详情页
+  if (t.is_pr_event) {
+    _openPRDetail(t);
+    return;
+  }
   // 先渲染基本详情，然后异步加载流水线
   // Issue #166: 从场景详情页进入时，返回按钮回到场景详情页
   var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
@@ -373,6 +378,140 @@ window._openBoardDetail = function(taskId) {
   }).catch(function() {
     document.getElementById('_boardPipelineSection').innerHTML = '';
   });
+};
+
+// PR 事件详情页
+window._openPRDetail = function(t) {
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+  var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
+  var _vcsBase = t.repo_key.startsWith('github:') ? 'github.com' : 'gitcode.com';
+  var _vcsPath = '/pull/' + t.issue_number;
+  var _vcsUrl = 'https://' + _vcsBase + '/' + t.repo_key.replace(/^(github|gitcode):/, '') + _vcsPath;
+  var _statusColor = t.status === 'completed' ? '#34c759' : t.status === 'cancelled' ? '#ff3b30' : t.status === 'processing' ? '#3b82f6' : '#86868b';
+  var _statusText = t.status === 'completed' ? '审查完成' : t.status === 'cancelled' ? '审查失败' : t.status === 'processing' ? '审查中' : '待处理';
+  var _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px;margin-bottom:12px';
+  var _cardTitle = 'font-size:12px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-family:-apple-system,BlinkMacSystemFont,sans-serif';
+  var _rowStyle = 'display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:0.5px solid rgba(0,0,0,.04)';
+  var _labelStyle = 'font-size:12px;color:var(--t3,#86868b);font-weight:400';
+  var _valueStyle = 'font-size:13px;color:var(--t1,#1d1d1f);font-weight:500;text-align:right';
+
+  el.innerHTML = `
+  <div style="padding:0;max-width:720px;margin:0 auto">
+    <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
+      <button class="tsk-btn tsk-btn-ghost" onclick="loadTasks()" style="padding:6px 14px">${_backLabel}</button>
+      <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl}','_blank')">查看 PR ↗</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="app.nav('event','${t.pr_seq}')">事件详情</button>
+      <button class="tsk-btn tsk-btn-primary" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openPrInterveneModal()">介入解决</button>
+    </div>
+    <div style="${_cardStyle}">
+      <div style="${_cardTitle}">PR 审查</div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">状态</span><b style="${_valueStyle};color:${_statusColor}">${_statusText}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">PR</span><b style="${_valueStyle}"><a href="${_vcsUrl}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">仓库</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">触发者</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">触发时间</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
+      <div style="${_rowStyle};border-bottom:none"><span style="${_labelStyle}">事件数</span><b style="${_valueStyle}">${t.events_count || 0}</b></div>
+    </div>
+    <div style="${_cardStyle}">
+      <div style="${_cardTitle}">QA 审查结果</div>
+      <div id="_prQaResult" style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.5;min-height:40px">
+        <div style="font-size:12px;color:var(--t3,#86868b)">加载中...</div>
+      </div>
+    </div>
+  </div>`;
+  // QA 审查结果：展示所有历史审查记录
+  var _qaHistory = t.qa_history || [];
+  var _prSeq = t.pr_seq;
+  if (_qaHistory.length > 0) {
+    var resultEl = document.getElementById('_prQaResult');
+    if (resultEl) {
+      var _html = _qaHistory.filter(function(qa) {
+        // 只展示有审查结果或有场景的记录（过滤掉 failed 且无 result 的无效记录）
+        return (qa.result && qa.result.length > 0) || (qa.scene_id && qa.scene_id.length > 0);
+      }).map(function(qa, idx) {
+        var _result = qa.result || '';
+        var _sceneName = qa.scene_name || qa.scene_id || '';
+        var _status = qa.status || '';
+        var _createdAt = (qa.created_at || '').substring(0, 16);
+        var _text = _result.substring(0, 800) + (_result.length > 800 ? '...' : '');
+        var _passMatch = _text.match(/(审查通过|审核通过|通过|无风险|安全)/);
+        var _failMatch = _text.match(/(审查不通过|审核不通过|不通过|有风险|存在问题|建议修改)/);
+        var _verdict = _passMatch && !_failMatch ? 'pass' : _failMatch ? 'fail' : 'neutral';
+        var _structured = null;
+        try {
+          var parsed = JSON.parse(_result);
+          if (parsed && parsed.conclusion) {
+            _structured = parsed;
+            if (parsed.conclusion.indexOf('通过') >= 0 && parsed.conclusion.indexOf('不通过') < 0) _verdict = 'pass';
+            else if (parsed.conclusion.indexOf('不通过') >= 0) _verdict = 'fail';
+          }
+        } catch(e) {}
+        var _verdictBadge = _verdict === 'pass'
+          ? '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;background:rgba(52,199,89,.1);color:#34c759;font-size:11px;font-weight:600">✓ 审查通过</span>'
+          : _verdict === 'fail'
+          ? '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;background:rgba(255,59,48,.1);color:#ff3b30;font-size:11px;font-weight:600">✕ 需要修改</span>'
+          : '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;background:rgba(142,142,147,.1);color:#8e8e93;font-size:11px;font-weight:600">— 待定</span>';
+        var _sceneBadge = _sceneName
+          ? '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;background:rgba(0,113,227,.08);color:#0071e3;font-size:11px;margin-left:6px">' + _sceneName + '</span>'
+          : '';
+        var _statusBadge = _status === 'running'
+          ? '<span style="font-size:10px;color:#ff9f0a;margin-left:6px">⚡ 进行中</span>'
+          : '';
+        var _body = '';
+        if (_structured) {
+          _body = '<div style="margin-bottom:4px"><b>结论：</b>' + _structured.conclusion + '</div>' +
+            (_structured.actions ? '<div style="margin-bottom:4px"><b>操作：</b></div>' + _structured.actions.map(function(a){return '<div>• ' + a + '</div>';}).join('') : '') +
+            (_structured.artifacts ? '<div><b>产物：</b> ' + _structured.artifacts.join(', ') + '</div>' : '');
+        } else if (_result) {
+          _body = '<div style="font-size:12px;color:var(--t2,#3a3a3c);line-height:1.6;background:rgba(0,0,0,.02);border-radius:8px;padding:10px 12px;white-space:pre-wrap">' + _text + '</div>';
+        } else {
+          _body = '<div style="font-size:11px;color:var(--t3,#86868b)">暂无审查内容</div>';
+        }
+        return '<div style="' + (idx > 0 ? 'margin-top:14px;padding-top:14px;border-top:1px solid #f2f2f7' : '') + '">' +
+          '<div style="display:flex;align-items:center;flex-wrap:wrap;margin-bottom:8px">' + _verdictBadge + _sceneBadge + _statusBadge +
+          '<span style="font-size:10px;color:var(--t3,#86868b);margin-left:auto">' + _createdAt + '</span></div>' +
+          _body + '</div>';
+      }).join('');
+      resultEl.innerHTML = _html || '<div style="font-size:12px;color:var(--t3,#86868b)">暂无审查结果</div>';
+    }
+  } else {
+    // 回退：无历史记录时单条加载
+    API.get('/events/detail/' + _prSeq).then(function(data) {
+      var resultEl = document.getElementById('_prQaResult');
+      if (!resultEl) return;
+      var result = data.result || data.summary || '';
+      if (!result) {
+        resultEl.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">暂无审查结果</div>';
+        return;
+      }
+      try {
+        var parsed = JSON.parse(result);
+        if (parsed && parsed.conclusion) {
+          resultEl.innerHTML = '<div style="margin-bottom:6px"><b>结论：</b>' + parsed.conclusion + '</div>' +
+            (parsed.actions ? '<div style="margin-bottom:4px"><b>操作：</b></div>' + parsed.actions.map(function(a){return '<div>• ' + a + '</div>';}).join('') : '') +
+            (parsed.artifacts ? '<div style="margin-top:6px"><b>产物：</b> ' + parsed.artifacts.join(', ') + '</div>' : '');
+          return;
+        }
+      } catch(e) {}
+      var _text = result.substring(0, 800) + (result.length > 800 ? '...' : '');
+      var _passMatch = _text.match(/(审查通过|审核通过|通过|无风险|安全)/);
+      var _failMatch = _text.match(/(审查不通过|审核不通过|不通过|有风险|存在问题|建议修改)/);
+      var _verdict = _passMatch && !_failMatch ? 'pass' : _failMatch ? 'fail' : 'neutral';
+      var _verdictHtml = _verdict === 'pass'
+        ? '<div style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:999px;background:rgba(52,199,89,.1);color:#34c759;font-size:12px;font-weight:600;margin-bottom:10px">✓ 审查通过</div>'
+        : _verdict === 'fail'
+        ? '<div style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:999px;background:rgba(255,59,48,.1);color:#ff3b30;font-size:12px;font-weight:600;margin-bottom:10px">✕ 需要修改</div>'
+        : '';
+      resultEl.innerHTML = _verdictHtml + '<div style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.6;background:rgba(0,0,0,.02);border-radius:10px;padding:12px 14px;white-space:pre-wrap">' + _text + '</div>';
+    }).catch(function() {
+      var resultEl = document.getElementById('_prQaResult');
+      if (resultEl) resultEl.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">加载失败</div>';
+    });
+  }
 };
 
 window._jumpToPipeline = function(nodeId) {
@@ -587,6 +726,11 @@ function _renderBoard(filtered) {
         const _stageLabel = stageLabels[_stage] || _stage || '—';
         const _stageColor = stageColors[_stage] || '#86868b';
         const _isRunning = s === 'in_progress' && t.is_running && ['vod','issue','coding','qa','sre'].includes(_stage);
+        // PR 事件：右上角显示紫色 PR 药丸代替 stage 标签
+        const _isPR = !!t.is_pr_event;
+        const _tagHtml = _isPR
+          ? `<span style="font-size:10px;font-weight:500;padding:2px 8px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>`
+          : `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px${_isRunning ? `;animation:radarPulse 1.2s ease-in-out infinite` : ''}">${_isRunning ? `<span style="width:5px;height:5px;border-radius:50%;background:${_stageColor};animation:radarPulse 1.2s ease-in-out infinite"></span>` : ''}${_stageLabel}</span>`;
         const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
         const _cardCls = _isRunning ? ' tsk-card-radar' : '';
         const _cardOverflow = _isRunning ? ';overflow:hidden' : '';
@@ -597,10 +741,7 @@ function _renderBoard(filtered) {
         html += `<div style="position:relative;z-index:1">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
             <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#'+t.issue_number : ''}</span>
-            <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px${_isRunning ? `;animation:radarPulse 1.2s ease-in-out infinite` : ''}">
-              ${_isRunning ? `<span style="width:5px;height:5px;border-radius:50%;background:${_stageColor};animation:radarPulse 1.2s ease-in-out infinite"></span>` : ''}
-              ${_stageLabel}
-            </span>
+            ${_tagHtml}
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
@@ -711,6 +852,17 @@ function _render() {
     const si = _lStatusInfo[ms] || _lStatusInfo.pending;
     const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
     const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';
+    // PR 事件卡片：右上角紫色 PR 药丸 + 点击跳事件详情
+    if (t.is_pr_event) {
+      return `<div class="tsk-row${sel}" onclick="app.nav('event','${t.pr_seq}')">
+        <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
+        <div class="tsk-r-main">
+          <div class="tsk-r-title">PR #${t.issue_number} · ${t.title || ''}</div>
+          <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
+        </div>
+        <span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>
+      </div>`;
+    }
     return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
       <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">
@@ -1218,6 +1370,107 @@ function openTaskConversation(t) {
   } else {
     go();
   }
+}
+
+// ===== PR 介入解决：复用需求创建弹窗，场景限定为PR唤醒的场景，预填标题和PR链接 =====
+function openPrInterveneModal() {
+  var t = window._currentDetailTask;
+  if (!t || !t.is_pr_event) return;
+  const repo = app.currentRepo();
+  const defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode):/, '');
+  var prUrl = _vcsUrl(t.repo_key, '/pull/' + t.issue_number) || '';
+  // 从 qa_history 提取去重的场景列表
+  var scenes = {};
+  (t.qa_history || []).forEach(function(qa) {
+    var sid = qa.scene_id || '';
+    var sname = qa.scene_name || qa.scene_id || '';
+    if (sid && !scenes[sid]) scenes[sid] = sname;
+  });
+  var sceneList = Object.keys(scenes);
+  if (sceneList.length === 0) {
+    alert('该 PR 无关联场景，无法介入解决');
+    return;
+  }
+  if (_taskCreateModal) _taskCreateModal.remove();
+  _createAttachments = [];
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  var _sceneOptions = sceneList.map(function(sid) {
+    return '<option value="' + esc(sid) + '">' + esc(scenes[sid]) + '</option>';
+  }).join('');
+
+  let _currentUsername = '';
+  try { _currentUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || ''; } catch(e) {}
+
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 14px"><h3 style="margin:0;font-size:15px;color:#111">介入解决 PR#${esc(t.issue_number)}</h3><button onclick="document.getElementById('prInterveneOverlay').remove()" style="background:none;border:none;font-size:18px;color:#8d97a8;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#8d97a8'">✕</button></div>
+    <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+      <div style="font-size:11px;color:#555">${I18N.t('tasks.create.repo_label')}<b>${esc(defaultRepo) || I18N.t('tasks.create.repo_empty')}</b></div>
+      <div style="font-size:11px;color:#555">${I18N.t('tasks.create.creator_label')}<b>${esc(_currentUsername) || '—'}</b></div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</div>
+        <input id="tcCreateTitle" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" value="介入解决 PR#${esc(t.issue_number)}">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</div>
+        <textarea id="tcCreateDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical">PR 链接: ${esc(prUrl)}
+
+请描述需要介入解决的问题:</textarea>
+      </div>
+      <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.scene_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.scene_hint')}</span>
+        <select id="tcCreateScene" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;font-size:13px">${_sceneOptions}</select>
+      </label>
+      <div style="font-size:11px;color:#888">${I18N.t('tasks.create.assignee_hint')}</div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333">
+        <span style="font-size:12px">附件 <span style="font-size:11px;color:#888">（可选，创建 Issue 时同步附加）</span></span>
+        <div id="tcCreateAttachments" style="display:flex;flex-wrap:wrap;gap:6px;min-height:30px"></div>
+        <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3;width:fit-content" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          添加附件
+          <input type="file" style="display:none" onchange="_onCreateAttachSelect(this)">
+        </label>
+      </div>
+      <div id="tcError" style="display:none;color:#d32f2f;font-size:12px;background:#fdecea;border:1px solid #f5c6c0;border-radius:6px;padding:7px 10px"></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="tsk-btn tsk-btn-ghost" onclick="document.getElementById('prInterveneOverlay').remove()">${I18N.t('tasks.create.btn_cancel')}</button>
+      <button class="tsk-btn tsk-btn-primary" id="tcSubmitBtn" onclick="prInterveneSubmit()">${I18N.t('tasks.create.btn_create')}</button>
+    </div>
+  </div>`;
+  ov.id = 'prInterveneOverlay';
+  document.body.appendChild(ov);
+  _taskCreateModal = ov;
+}
+
+function prInterveneSubmit() {
+  const repo = app.currentRepo();
+  const repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
+  const title = (document.getElementById('tcCreateTitle') || {}).value || '';
+  const desc = (document.getElementById('tcCreateDesc') || {}).value || '';
+  const sceneId = (document.getElementById('tcCreateScene') || {}).value || '';
+  const errEl = document.getElementById('tcError');
+  const showErr = (msg) => { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
+  if (!repoKey.trim()) { showErr(I18N.t('tasks.create.err_no_repo')); return; }
+  if (!title.trim()) { showErr(I18N.t('tasks.create.err_no_title')); return; }
+  if (!desc.trim()) { showErr(I18N.t('tasks.create.err_no_desc')); return; }
+  const btn = document.getElementById('tcSubmitBtn');
+  if (btn) { btn.disabled = true; btn.textContent = I18N.t('tasks.create.btn_creating'); }
+  var _owner = repo ? (repo.owner || '') : '';
+  var _rname = repo ? (repo.name || '') : '';
+  if (!_owner || !_rname) { var _p = String(repoKey).split('/'); _owner = _p[0] || ''; _rname = _p[1] || ''; }
+  API.post('/issues/' + encodeURIComponent(_owner) + '/' + encodeURIComponent(_rname),
+    {repo_key: repoKey.trim(), title: title.trim(), description: desc.trim(), scene_id: sceneId,
+     attachments: _createAttachments.map(function(a) { return a.safe_name; })})
+    .then(function(d) {
+      var ov = document.getElementById('prInterveneOverlay');
+      if (ov) ov.remove();
+      loadTasks();
+    })
+    .catch(function(e) {
+      if (btn) { btn.disabled = false; btn.textContent = I18N.t('tasks.create.btn_create'); }
+      const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+      showErr(I18N.t('tasks.create.err_create_failed', {msg: msg}));
+    });
 }
 
 // ===== 新建需求（同步建 GitCode Issue + 既有流程建档；责任人 = General Settings Account）=====

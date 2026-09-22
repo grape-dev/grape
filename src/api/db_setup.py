@@ -539,6 +539,7 @@ CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
     is_active   INTEGER DEFAULT 1,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
+    scene_type  TEXT DEFAULT 'standard',  -- standard | pr_subscription
     UNIQUE (scene_id, repo_key)
 )
 """
@@ -1250,13 +1251,14 @@ def _init_scene_category_data():
 
 
 def _init_skill_category_data():
-    """初始化 skill_category 表的 11 条分类数据（幂等）。
+    """初始化 skill_category 表的 15 条分类数据（幂等）。
 
     Issue #179: 技能分类表独立化，对齐 scene_category 模式。
+    Issue #222: 新增 code-hosting/browser-verify/meeting/other 4 个分类。
     """
     try:
         from src.user.db import get_meta_value, set_meta_value
-        if get_meta_value("skill_category_seeded") == "1":
+        if get_meta_value("skill_category_seeded_v2") == "1":
             return
         categories = [
             ("AI辅助编码与评审", "ai-coding-review", "🤖", 1),
@@ -1270,6 +1272,10 @@ def _init_skill_category_data():
             ("日志与诊断", "log-diagnostics", "🔍", 9),
             ("可观测性", "observability", "📊", 10),
             ("环境与脚手架", "scaffolding", "🏗️", 11),
+            ("代码托管", "code-hosting", "📁", 12),
+            ("浏览器验证", "browser-verify", "🌐", 13),
+            ("会议", "meeting", "📅", 14),
+            ("其他", "other", "📌", 15),
         ]
         with db_lock:
             c = db.cursor()
@@ -1279,8 +1285,8 @@ def _init_skill_category_data():
                     (name, slug, icon, order_num),
                 )
             db.commit()
-        set_meta_value("skill_category_seeded", "1")
-        log.info("Seeded skill_category with 11 categories")
+        set_meta_value("skill_category_seeded_v2", "1")
+        log.info("Seeded skill_category with 15 categories")
     except Exception as e:
         log.warning(f"Init skill_category data failed: {e}")
 
@@ -2267,6 +2273,7 @@ def _migrate_tables():
         "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN scene_id TEXT DEFAULT ''",
         "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
         # ===== 发布配置(skill-publish v1.1)=====
         # ===== OBS 技能库(obs-skill-storage-design.md §4)=====
@@ -2322,6 +2329,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN probe_latency INT DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_last VARCHAR(64) DEFAULT ''",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_error TEXT DEFAULT ''",
+        # ===== probe 连续失败计数：连续2次fail才降级healthy，避免偶发超时误判 =====
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_fail_count INT DEFAULT 0",
         # ===== 场景标签：引擎绑定的场景列表，约束可选角色标签 =====
         "ALTER TABLE agent_runtimes ADD COLUMN scene_tags TEXT DEFAULT '[\"default\"]'",
         # ===== 引擎别名：用户自定义别名，不受心跳覆盖 =====
@@ -2921,10 +2930,34 @@ def _migrate_tables():
             _ensure_column(c, "devops_pipeline_scene", "advanced_options", "TEXT DEFAULT '{}'")
             _ensure_column(c, "devops_pipeline_scene", "created_by", "TEXT DEFAULT ''")
             _ensure_column(c, "devops_pipeline_scene", "icon", "TEXT DEFAULT ''")
+            _ensure_column(c, "devops_pipeline_scene", "scene_type", "TEXT DEFAULT 'standard'")
             db.commit()
-            log.info("Added devops_pipeline_scene.advanced_options + created_by + icon columns")
+            log.info("Added devops_pipeline_scene.advanced_options + created_by + icon + scene_type columns")
     except Exception as e:
-        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by column failed: {e}")
+        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by/scene_type column failed: {e}")
+    # ===== PR 订阅附加能力：场景级开关（替代独立 scene_type='pr_subscription'）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "devops_pipeline_scene", "pr_subscription_enabled", "INTEGER NOT NULL DEFAULT 0")
+            db.commit()
+            # 数据迁移：已有 pr_subscription 场景 → standard + pr_subscription_enabled=1
+            c.execute("UPDATE devops_pipeline_scene SET pr_subscription_enabled=1, scene_type='standard' WHERE scene_type='pr_subscription'")
+            _migrated = c.rowcount
+            db.commit()
+            if _migrated:
+                log.info(f"Migrated {_migrated} pr_subscription scenes → standard + pr_subscription_enabled=1")
+    except Exception as e:
+        log.warning(f"Add devops_pipeline_scene.pr_subscription_enabled column failed: {e}")
+    # ===== events 表补 scene_id 列（PR 订阅场景持久化）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "scene_id", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added events.scene_id column")
+    except Exception as e:
+        log.warning(f"Add events.scene_id column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:

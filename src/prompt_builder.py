@@ -623,6 +623,10 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         if body != '""':
             parts.append(f"Body: {body}")
 
+    # PR 订阅场景提示
+    if evt.get("_pr_sub_scene_id"):
+        parts.append(f"\n## PR 审查任务\n本任务来自 PR 订阅场景，PR 无关联 Issue。请审查 PR #{number} 的变更内容，结果回帖到 PR 评论。")
+
     # 附件注入：按 agent_type 分级（统一走文件系统扫描，不再从 body 正则匹配）
     _inject_attachments_by_role(parts, _rk, evt.get("issue_id", "") or str(number or ""), agent_type, runtime_id)
 

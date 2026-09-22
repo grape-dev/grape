@@ -133,5 +133,10 @@
   "recommend_rules_hint": "Select scene from current repo scenes, describe when to recommend it",
   "recommend_saved": "Smart recommend rules saved",
   "recommend_fallback_required": "Fallback scene is required",
-  "recommend_rule_dup": "Duplicate scene in rules"
+  "recommend_rule_dup": "Duplicate scene in rules",
+  "choose_scene_type": "Choose Scene Type",
+  "standard_scene": "Standard Scene",
+  "standard_scene_desc": "VOD + Issue + Coding + QA + SRE full pipeline for issue-driven development",
+  "pr_subscription_scene": "PR Subscription Scene",
+  "pr_subscription_desc": "QA + SRE, auto-triggered when a PR has no associated Issue. One per repo"
 }

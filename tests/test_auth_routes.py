@@ -129,7 +129,7 @@ class TestOAuthCallback:
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 502
 
-    def test_whitelist_denies_new_user_403(self):
+    def test_whitelist_denies_new_user_redirect(self):
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("urllib.request.urlopen",
@@ -138,8 +138,8 @@ class TestOAuthCallback:
                                               "nickname": "拒绝"})), \
              patch("src.config.is_gitcode_user_allowed", return_value=False):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
-        assert r.status_code == 403
-        assert "白名单" in r.json()["detail"]["message"]
+        assert r.status_code == 302
+        assert "WHITELIST" in r.headers.get("location", "")
 
     def test_success_creates_new_user_and_redirects(self):
         uname = "oauth_new_" + uuid.uuid4().hex[:6]

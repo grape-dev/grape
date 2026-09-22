@@ -797,6 +797,35 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
             # A2A 事件不能走 run_pipeline（payload 格式不同，且无 webhook header 映射）
             # → 直接重新触发 A2A 交办
+
+            # PR 订阅事件分支：issue_id 以 #pr_ 开头且 scene_id 非空
+            # 不能走 A2A 端点（payload 是 webhook 原始格式，无 issue_number → 400；
+            # issue_id 非纯数字 → A2A 端点 PR订阅模式拦截拒绝）
+            # 正确做法：在原事件上直接重新创建 task，不创建新事件
+            _issue_id = evt.get("issue_id", "") or ""
+            _scene_id = evt.get("scene_id", "") or ""
+            if _event_type == "a2a_event" and _issue_id.startswith("#pr_") and _scene_id:
+                try:
+                    from src.api.event_pipeline import _dispatch_pr_subscription_redispatch
+                    _res = _dispatch_pr_subscription_redispatch(evt, seq, _scene_id)
+                    if _res:
+                        log.info(f"[redispatch] seq={seq} PR subscription re-dispatch ok, scene={_scene_id}")
+                        try:
+                            from src.user.db import set_meta_value as _smv
+                            import time as _tm
+                            _smv(f"redispatch:{seq}", str(_tm.time()))
+                        except Exception:
+                            pass
+                        return {"status": "redispatched", "task_id": "(new)", "event_seq": seq}
+                    else:
+                        raise HTTPException(status_code=409, detail={"code": 409,
+                            "message": "重派失败：PR订阅场景引擎不可用或无QA节点"})
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    log.warning(f"[redispatch] seq={seq} PR subscription re-dispatch failed: {e}")
+                    raise HTTPException(status_code=500, detail={"code": 500, "message": f"重派异常: {str(e)[:100]}"})
+
             if _event_type == "a2a_event":
                 try:
                     _payload = evt.get("payload") or evt.get("payload_raw") or "{}"
@@ -812,7 +841,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     import urllib.request as _url_req
                     _a2a_body = _json.dumps({"agent": evt.get("agent_type", ""), "payload": _payload}).encode()
                     _a2a_req = _url_req.Request(
-                        f"http://localhost:3000/api/a2a",
+                        f"http://localhost:8000/api/a2a",
                         data=_a2a_body,
                         headers={"Content-Type": "application/json", "X-Bot-Token": _bot_token},
                         method="POST"
@@ -918,7 +947,7 @@ def _load_event(seq: int) -> dict:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, repo_key, issue_id, agent_type, event_type, title, result, status, payload, source, actor FROM events WHERE seq=?",
+                "SELECT seq, repo_key, issue_id, agent_type, event_type, title, result, status, payload, source, actor, scene_id FROM events WHERE seq=?",
                 (seq,))
             row = c.fetchone()
         except Exception:
@@ -934,6 +963,7 @@ def _load_event(seq: int) -> dict:
     return {"seq": row[0], "repo_key": row[1], "issue_id": row[2] or "", "agent_type": row[3] or "",
             "event_type": row[4] or "", "title": row[5] or "", "result": row[6] or "", "status": row[7] or "",
             "payload": row[8] or "", "source": row[9] or "gitcode", "actor": row[10] or "",
+            "scene_id": row[11] or "",
             "account": row[1].replace("gitcode:", "") if row[1] else ""}
 
 

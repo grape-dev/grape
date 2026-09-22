@@ -1092,7 +1092,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
     try:
         from src.api.pipeline_config import get_scenes, get_pipeline_config
         scenes = get_scenes(repo_key=_actual_repo_key)
-        # dev_scene 必须在可见场景列表中才加载，否则自动选中第一个场景
+        # dev_scene 必须在可见场景列表中才加载，否则自动选中第一个标准场景
+        # PR 订阅场景不作为 Dashboard 默认选中
         scene_ids = {s["id"] for s in scenes}
         if scenes:
             if not dev_scene or dev_scene not in scene_ids:
