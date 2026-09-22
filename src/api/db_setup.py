@@ -1196,13 +1196,14 @@ def _init_scene_category_data():
 
 
 def _init_skill_category_data():
-    """初始化 skill_category 表的 11 条分类数据（幂等）。
+    """初始化 skill_category 表的 15 条分类数据（幂等）。
 
     Issue #179: 技能分类表独立化，对齐 scene_category 模式。
+    Issue #222: 新增 code-hosting/browser-verify/meeting/other 4 个分类。
     """
     try:
         from src.user.db import get_meta_value, set_meta_value
-        if get_meta_value("skill_category_seeded") == "1":
+        if get_meta_value("skill_category_seeded_v2") == "1":
             return
         categories = [
             ("AI辅助编码与评审", "ai-coding-review", "🤖", 1),
@@ -1216,6 +1217,10 @@ def _init_skill_category_data():
             ("日志与诊断", "log-diagnostics", "🔍", 9),
             ("可观测性", "observability", "📊", 10),
             ("环境与脚手架", "scaffolding", "🏗️", 11),
+            ("代码托管", "code-hosting", "📁", 12),
+            ("浏览器验证", "browser-verify", "🌐", 13),
+            ("会议", "meeting", "📅", 14),
+            ("其他", "other", "📌", 15),
         ]
         with db_lock:
             c = db.cursor()
@@ -1225,8 +1230,8 @@ def _init_skill_category_data():
                     (name, slug, icon, order_num),
                 )
             db.commit()
-        set_meta_value("skill_category_seeded", "1")
-        log.info("Seeded skill_category with 11 categories")
+        set_meta_value("skill_category_seeded_v2", "1")
+        log.info("Seeded skill_category with 15 categories")
     except Exception as e:
         log.warning(f"Init skill_category data failed: {e}")
 
