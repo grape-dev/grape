@@ -2329,6 +2329,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN probe_latency INT DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_last VARCHAR(64) DEFAULT ''",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_error TEXT DEFAULT ''",
+        # ===== probe 连续失败计数：连续2次fail才降级healthy，避免偶发超时误判 =====
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_fail_count INT DEFAULT 0",
         # ===== 场景标签：引擎绑定的场景列表，约束可选角色标签 =====
         "ALTER TABLE agent_runtimes ADD COLUMN scene_tags TEXT DEFAULT '[\"default\"]'",
         # ===== 引擎别名：用户自定义别名，不受心跳覆盖 =====
