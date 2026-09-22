@@ -812,7 +812,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     import urllib.request as _url_req
                     _a2a_body = _json.dumps({"agent": evt.get("agent_type", ""), "payload": _payload}).encode()
                     _a2a_req = _url_req.Request(
-                        f"http://localhost:3000/api/a2a",
+                        f"http://localhost:8000/api/a2a",
                         data=_a2a_body,
                         headers={"Content-Type": "application/json", "X-Bot-Token": _bot_token},
                         method="POST"
