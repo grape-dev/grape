@@ -235,3 +235,66 @@ event_pipeline.run_pipeline()  ──►  build_devops_agent_prompt(evt, ...)
 - `_build_output_contract` 输出含「以你当前技能（SKILL.md）的收尾流程为准」「不要再重复输出下方 JSON 块」「二选一」
 - 非 CLI 技能 JSON 块契约仍完整（五字段 + 纯 JSON 结构约束）
 - 服务端无需改动（self-reported completed 跳过误判路径已存在）
+
+---
+
+## 10. 后续优化：移除 prompt 上下文/协议段（Option B，全部技能，已实施 2026-09-22）
+
+### 10.1 背景与决策
+
+经审查生成的实际 prompt 输出（vod-cli 示例），确认以下 5 段对**所有技能**（不限于 CLI 技能）都应从 prompt 中移除，
+由技能 SKILL.md 自行承载（对齐 #219「API/CLI 选择权下放技能」+「agent 通过技能内 grape-cli/API 主动获取上下文」）：
+
+| # | 移除段 | 承载方 |
+|---|--------|--------|
+| 1 | 项目知识基线（`_build_project_info_section` 注入） | 技能内 `grape knowledge list/detail` 或 `grape api knowledge` 获取 |
+| 2 | 共享知识（`{{KNOWLEDGE_DIR}}` 引导） | 技能内按需读取 / knowledge API |
+| 3 | A2A 协议（agent 列表 + 认证说明 + 字段规则 + context 构造） | 技能 SKILL.md（含 a2a handoff 命令） |
+| 4 | 角色特定 A2A 交办规则（vod/qa/coding/issue 路由） | 技能 SKILL.md / runbook |
+| 5 | VCS API Access 段（token 环境变量 + API base URL） | 技能 SKILL.md / references |
+
+### 10.2 改动
+
+`build_devops_agent_prompt`：
+- 移除项目知识基线注入及其 `_devops_issue_num/_devops_scene_id` 预计算逻辑
+- 移除「## 共享知识」段
+- 移除「## Agent-to-Agent 协议」整段（认证说明 / 调用方式 / 字段规则 / context 构造）
+- 移除「角色特定的 A2A 交办规则」`_a2a_role_rules`（vod/qa/coding/issue）
+- 移除「## {_vcs} API Access」段
+- 移除不再使用的 `_load_agent_registry()` 与其 mtime 缓存 + 未使用变量（`_token_env`/`_bot_token_env`/`_api_base`/`account`）
+
+`build_general_chat_prompt` / `build_task_chat_prompt`：
+- 移除项目知识基线注入 + VCS API Access 段
+
+`src/im/vod_handler_async.py`（IM VOD 提示）：
+- 移除项目知识基线段、共享知识段、Available Agents（agent 列表）段；保留 Issue 生命周期 + Issue 档案摘要
+
+保留不变：事件正文（Title/Body）、Issue Pipeline 摘要、附件清单、Skill 指引段、
+`build_role_definition`（security + 回复规则，改后版本）、执行引擎、`_build_output_contract`（收尾二选一）。
+
+### 10.3 测试
+
+`tests/test_prompt_builder.py` `TestNoCurlTemplates` 新增：
+- `test_devops_prompt_no_a2a_section`：不含 `Agent-to-Agent 协议` / `字段规则` / `认证说明`
+- `test_devops_prompt_no_project_baseline_or_shared_knowledge`：不含 `项目知识基线` / `{{PROJECT_INFO_DIR}}` / `共享知识` / `{{KNOWLEDGE_DIR}}`
+- `test_devops_prompt_no_vcs_api_access_section`：不含 `API Access` / `API base URL`
+- `test_devops_prompt_keeps_token_env_name` 收敛为仅断言 `BOT_GITCODE_TOKEN` 仍在（来自 role definition）
+
+`tests/test_project_info.py` `TestPromptProjectInfoSection` 重写：
+- 改为直接测 `_build_project_info_section`（段落仍一致，供技能/管理侧复用）
+- 新增 `test_devops_prompt_not_injecting_baseline`：验证 `build_devops_agent_prompt` 输出不再含知识基线段
+
+### 10.4 验收
+
+- [x] `build_devops_agent_prompt` 输出不含：项目知识基线 / 共享知识 / A2A 协议 / 角色 A2A 规则 / VCS API Access
+- [x] `build_general_chat_prompt` / `build_task_chat_prompt` 输出不含知识基线 / VCS API Access
+- [x] IM VOD 提示不含知识基线 / 共享知识 / Agent 列表
+- [x] 测试通过（无新增失败；存量 27 项为基线既有环境/权限类失败）
+- [ ] 服务端/技能侧跟进：各技能 SKILL.md 需自行补齐知识获取、A2A 交办、VCS API 指引（独立仓库，待 deploy 后逐步迁移）
+
+### 10.5 风险
+
+| 风险 | 等级 | 缓解 |
+|------|------|------|
+| 技能 SKILL.md 尚未补齐 → agent 不知如何获取知识/A2A/VCS | Med | 技能仓库渐进补全；本次 prompt 已中性化，技术 A2A 字段规则需在技能内写明 |
+| 存量非 CLI 技能（issue/coding 等）近期依赖 prompt 段 | Med | 需同步推进各技能迁移（本方案已决策全量移除，迁移为独立技能仓库任务） |

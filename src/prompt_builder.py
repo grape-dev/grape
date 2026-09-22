@@ -408,28 +408,6 @@ def extract_event_number(payload):
     return None
 
 
-_agent_registry_cache: dict = {}
-_agent_registry_mtime: float = 0.0
-
-
-def _load_agent_registry() -> dict:
-    """加载 A2A 协议配置（mtime 缓存，文件未变时不重复读盘）。"""
-    global _agent_registry_cache, _agent_registry_mtime
-    agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
-    if not os.path.isfile(agents_file):
-        return {}
-    try:
-        mtime = os.path.getmtime(agents_file)
-        if _agent_registry_cache and mtime == _agent_registry_mtime:
-            return _agent_registry_cache
-        with open(agents_file, encoding="utf-8") as f:
-            _agent_registry_cache = json.load(f)
-            _agent_registry_mtime = mtime
-            return _agent_registry_cache
-    except Exception:
-        return _agent_registry_cache or {}
-
-
 def _build_output_contract(repo_key: str = "") -> str:
     """处理记录输出要求 + 行为约束（所有 DevOps agent 共用，见 agent-runtime-event-full-design.md §8）。
 
@@ -587,9 +565,6 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     payload = evt['payload']
     _rk = evt.get("repo_key", "")
     _vcs = _vcs_name(_rk)
-    _token_env = _vcs_token_env(_rk)
-    _bot_token_env = _vcs_bot_token_env(_rk)
-    _api_base = _vcs_api_base(_rk)
     issue_data = {}
     if isinstance(payload.get("issue"), dict):
         issue_data = payload["issue"]
@@ -664,28 +639,6 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
 
     # 优先用 evt 里已有的 repo_key（A2A 事件 source='a2a' 会导致拼接错误）
     repo_key = evt.get("repo_key") or f"{evt['source']}:{evt['repository']}"
-    account = evt.get("account") or evt.get("repository", "")
-    # Issue #95：传 issue_num + scene_id 给 _build_project_info_section（条件输出 member 引导用）
-    _devops_issue_id = evt.get("issue_id", "") or ""
-    _devops_issue_num = 0
-    _devops_scene_id = ""
-    if _devops_issue_id:
-        import re as _re
-        _m = _re.search(r"(\d+)", str(_devops_issue_id))
-        if _m:
-            _devops_issue_num = int(_m.group(1))
-        try:
-            from src.api.session_store import get_issue_scene
-            _devops_scene_id, _ = get_issue_scene(repo_key, _devops_issue_id)
-        except Exception:
-            pass
-    parts.append(_build_project_info_section(repo_key, agent_type or (skills[0] if skills else ""),
-                                             issue_num=_devops_issue_num, scene_id=_devops_scene_id or ""))
-
-    # Issue #95：agent 沉淀知识引导——告知 agent 去 .knowledge/ 目录读取
-    # {{KNOWLEDGE_DIR}} 由 worker 物化后替换为真实路径（agent.py:1079 / event_pipeline.py:1685）
-    parts.append("\n## 共享知识\n> 前序 Agent 沉淀的经验已落地：{{KNOWLEDGE_DIR}}/，存在则用 read tool 读取并遵循。")
-
     # 场景高级选项注入（仅执行类 agent：coding/qa/sre）
     if agent_type in ("coding", "qa", "sre"):
         _issue_id_for_scene = evt.get("issue_id", "") or ""
@@ -733,92 +686,6 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 
     parts.append(build_role_definition(skills, agent_type=agent_type, repo_key=_rk))
-
-    # A2A protocol instructions + available agents（mtime 缓存，避免每次构建 prompt 读文件）
-    agent_registry = _load_agent_registry()
-    if agent_registry:
-        parts.append("\n## Agent-to-Agent 协议\n")
-        parts.append("当你需要调用其他 Agent 时，从下表中选择最合适的：\n")
-        for ag, info in agent_registry.items():
-            desc = info.get("description", "")
-            parts.append(f"- {ag}：{desc}")
-        parts.append("""
-### 认证说明
-
-本环境注入了两种 token，用途不同，**严禁混用**：
-- **Grape API**（`{{SERVER_URL}}/api/a2a`、`{{SERVER_URL}}/api/events/*`、`{{SERVER_URL}}/api/tasks/*`）：使用 `$GRAPE_SESSION_TOKEN` 作为 Bearer
-- **__VCS__ API**（`__API_BASE__/*`）：使用 `$__BOT_TOKEN__` 作为 Bearer
-
-### 调用方式
-
-如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
-然后调用 A2A API（调用方式见你当前技能的 SKILL.md）：
-
-⚠️ **字段规则（A2A 服务端强制校验，必须遵守）：**
-1. `issue_number`（Issue 编号）**必填**：必须填写当前任务关联的真实 Issue 编号。**如果无法确定对应的 issue_number，就不要调用 A2A API**，直接在回复中说明原因。
-2. `pr_number`（PR 编号）**可选但有则必填**：如果当前任务涉及 PR（有 `$PR_NUMBER`），必须一并传入；没有则不传（例如 Issue 刚创建、PR 尚未创建）。
-3. **严禁字段混用**：`pr_number` 只能填 PR 编号，`issue_number` 只能填 Issue 编号，两者不可互换。
-4. `repository` 与 `account` 必填。
-
-### context 构造规则
-
-context 是传给下一个 Agent 的接力说明，应包含：
-1. 原始需求：本 prompt 的核心内容摘要（如果来源于 Issue，包含 Issue 标题和关键信息）
-2. 你的分析结论：关键分析结果
-3. 建议下一步：需要下一个 Agent 做什么
-
-⚡ context 要简洁完整，让下一个 Agent 无需重复分析。
-""".replace("__VCS__", _vcs).replace("__API_BASE__", _api_base).replace("__BOT_TOKEN__", _bot_token_env))
-
-    # 角色特定的 A2A 交办规则（按 agent_type 注入，指引何时 A2A 给哪个 Agent）
-    _a2a_role_rules = {
-        "vod": (
-            "\n### VOD Agent A2A 交办规则\n"
-            "需求分析完成后，根据需求类型决定 A2A 目标：\n"
-            "- **部署类需求**（关键词：部署/deploy/上线/发布/运行服务/启动应用/云资源/ECS/容器等）→ A2A 给 `sre`，context 写明「部署」+ 资源需求摘要\n"
-            "- **开发类需求**（关键词：开发/实现/新增/修改/优化/bug修复/feature等）→ A2A 给 `issue`，context 写明需求摘要和引导结论，触发需求细化\n"
-            "- **资源释放类需求**（关键词：销毁/释放/删除资源/回收等）→ A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\n"
-            "⚠️ 部署类需求直接 A2A 给 `sre` 是正常行为（跳过 issue/coding/qa 中间环节），不算「跨阶段跳过」。\n"
-            "⚠️ 开发类需求必须先 A2A 给 `issue` 走完整开发流程（issue→coding→qa→sre），不要直接跳到 `sre` 或 `coding`。\n"
-            "⚠️ A2A 时 `pr_number` 不需要传入（VOD 阶段尚无 PR）。`issue_number` 必填。\n"
-        ),
-        "qa": (
-            "\n### QA Agent A2A 交办规则\n"
-            "PR 审查完成后，根据审查结果决定 A2A 目标：\n"
-            "- 审查通过（无 Critical/Required 问题）且 PR 已合并 → A2A 给 `sre`，context 写明「部署」+ PR 编号 + 合并摘要\n"
-            "- 审查通过但 PR 未合并 → 不 A2A，在评论中建议维护者合并\n"
-            "- 审查不通过（有 Critical/Required 问题）→ A2A 给 `coding`，context 写明问题清单和修复建议\n"
-            "⚠️ 审查通过+PR合并后必须 A2A 给 `sre` 触发部署，不要输出「无需 A2A 交办」。\n"
-            "⚠️ A2A 给 `sre` 时**不传 `pr_number`**（避免触发订阅去重导致 SRE 任务被跳过），在 context 中写明 PR 编号和合并摘要即可。\n"
-        ),
-        "coding": (
-            "\n### Coding Agent A2A 交办规则\n"
-            "任务完成后，根据是否创建了 PR 决定 A2A 目标：\n"
-            "- 创建了 PR（代码改动类任务）→ A2A 给 `qa`，context 写明 PR 编号、改动摘要和验收标准，触发代码审查\n"
-            "- 未创建 PR（直接执行类任务，如博客生成/发布、脚本执行、配置变更等）→ A2A 给 `sre`，context 写明「发布验证」+ 执行摘要 + 产物链接（如文章 URL），触发发布后验证\n"
-            "⚠️ 任务完成后必须 A2A 交办下一个 Agent，不要输出「任务已完成，如需 XX 可调用 A2A」这类建议性语句。直接调用。\n"
-            "⚠️ 创建了 PR 时 A2A 给 `qa` 传 `pr_number`；未创建 PR 时 A2A 给 `sre` 不传 `pr_number`（避免触发订阅去重导致 SRE 任务被跳过），在 context 中写明执行摘要和产物链接即可。\n"
-        ),
-        "issue": (
-            "\n### Issue Agent A2A 交办规则\n"
-            "需求澄清完成后，根据 Issue 标签决定 A2A 目标：\n"
-            "- 标签含 `sre-deploy` → A2A 给 `sre`，context 写明「部署」+ 资源规格\n"
-            "- 标签含 `sre-release` → A2A 给 `sre`，context 写明「资源释放」+ 要释放的资源清单\n"
-            "- 标签含 `feature`/`bug` → A2A 给 `coding`\n"
-            "A2A 时 `pr_number` 仅在当前任务有直接关联的 PR（如 PR 审查后交办）时传入。纯部署/资源释放类请求不传 `pr_number`，否则会触发订阅去重导致 SRE 任务被跳过。\n"
-        ),
-    }
-    _role_rule = _a2a_role_rules.get(agent_type, "")
-    if _role_rule:
-        parts.append(_role_rule)
-
-    # VCS API 访问说明（告诉 agent 用哪个 API URL 和 token 环境变量）
-    parts.append(f"""
-## {_vcs} API Access
-Your token is available as the {_bot_token_env} environment variable.
-API base URL: {_api_base}
-Never print or reveal the token value.
-""")
 
     # 引擎绑定信息（避免 agent 查 /openapi.json 核验引擎）
     if runtime_id:
@@ -914,8 +781,6 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
                 parts.append(f"\nRepository event context:\n{summary}")
         except Exception:
             pass
-    # 项目知识基线（chat-prompt-overview.md §2.1）
-    parts.append(_build_project_info_section(repo_key, agent_type="chat"))
     # 对话历史 / Issue Agent 进展（chat-prompt-history-injection-design.md §3）
     _append_chat_history(parts, history, has_valid_session)
     # 使用技能：优先 skill_name/skill_id，其次 skills[0]（飞书/tasks 传入）。
@@ -938,16 +803,6 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
                 f"Skill 文件：{{{{SKILL_DIR}}}}/{_sn}/SKILL.md\n"
                 f"**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令去完成任务（不得跳过读取或凭空猜测）。"
             )
-    # VCS API 访问说明
-    _vcs = _vcs_name(repo_key)
-    _token_env = _vcs_token_env(repo_key)
-    _api_base = _vcs_api_base(repo_key)
-    parts.append(f"""
-## {_vcs} API Access
-Your token is available as the {_token_env} environment variable.
-API base URL: {_api_base}
-Never print or reveal the token value.
-""")
     repo_note = f" (in {repo_key})" if repo_key else ""
     parts.append(f"\nUser{repo_note}: {message}{_CHAT_PROMPT_SUFFIX}")
     return "\n".join(parts)
@@ -1028,24 +883,10 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     except Exception:
         pass
 
-    # 项目知识基线
-    parts.append(_build_project_info_section(repo_key, agent_type="chat"))
-
     # 对话历史 / Issue Agent 进展（chat-prompt-history-injection-design.md §3）
     _append_chat_history(parts, history, has_valid_session)
 
     parts.append(f"\n## 本次用户消息\n{user_text}")
-
-    # VCS API 访问说明（与 general chat 一致，按 repo_key 前缀分流 GitHub/GitCode）
-    _vcs = _vcs_name(repo_key)
-    _token_env = _vcs_token_env(repo_key)
-    _api_base = _vcs_api_base(repo_key)
-    parts.append(f"""
-## {_vcs} API Access
-Your token is available as the {_token_env} environment variable.
-API base URL: {_api_base}
-Never print or reveal the token value.
-""")
 
     _sp = "{{SKILL_DIR}}/chat/SKILL.md"
     parts.append(

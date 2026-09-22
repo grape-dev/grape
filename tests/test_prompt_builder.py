@@ -341,17 +341,31 @@ class TestNoCurlTemplates:
     def test_devops_prompt_keeps_token_env_name(self, pb, base_evt):
         prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
         assert "BOT_GITCODE_TOKEN" in prompt
-        assert "token is available" in prompt
 
     def test_devops_prompt_keeps_repo_identifier(self, pb, base_evt):
         prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
         assert "owner/repo" in prompt
 
-    def test_a2a_field_rules_kept(self, pb, base_evt):
-        """A2A 服务端强制校验的字段规则保留（纯移除 curl，不删除契约）。"""
+    def test_devops_prompt_no_a2a_section(self, pb, base_evt):
+        """Option B：A2A 协议章节整体移除，由技能 SKILL.md 承载。"""
         prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
-        assert "字段规则" in prompt
-        assert "issue_number" in prompt
+        assert "Agent-to-Agent 协议" not in prompt
+        assert "字段规则" not in prompt
+        assert "### 认证说明" not in prompt
+
+    def test_devops_prompt_no_project_baseline_or_shared_knowledge(self, pb, base_evt):
+        """Option B：项目知识基线与共享知识从 prompt 移除，由技能通过 grape-cli/API 获取。"""
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
+        assert "项目知识基线" not in prompt
+        assert "{{PROJECT_INFO_DIR}}" not in prompt
+        assert "共享知识" not in prompt
+        assert "{{KNOWLEDGE_DIR}}" not in prompt
+
+    def test_devops_prompt_no_vcs_api_access_section(self, pb, base_evt):
+        """Option B：VCS API Access 章节移除，由技能 SKILL.md 承载。"""
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
+        assert "API Access" not in prompt
+        assert "API base URL" not in prompt
 
 
 class TestConditionalClosingFlow:
