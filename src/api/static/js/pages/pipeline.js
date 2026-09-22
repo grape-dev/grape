@@ -139,7 +139,7 @@ function renderPipeline(data, focusIssueNum) {
     .pl-pbtn:hover{border-color:#0071e3;color:#0071e3}
     .pl-pbtn:disabled{opacity:.4;cursor:not-allowed}
     .pl-pbtn.act{border-color:#0071e3;color:#0071e3;font-weight:600}
-    .pl-table-card{background:#fff;border:1px solid #d2d2d7;border-radius:18px;box-shadow:0 2px 12px rgba(0,0,0,.06);flex:1;overflow:hidden;min-height:0}
+    .pl-table-card{background:#fff;border:1px solid #d2d2d7;border-radius:18px;box-shadow:0 2px 12px rgba(0,0,0,.06);display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0}
     .pl-table-wrap{flex:1;overflow-y:auto;min-height:0}
     .pl-table{width:100%;border-collapse:collapse;font-size:12px}
     .pl-table th{text-align:left;padding:10px 14px;font-weight:500;color:#86868b;border-bottom:1px solid #e8e8ed;font-size:10px;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;background:#fff;z-index:1}
