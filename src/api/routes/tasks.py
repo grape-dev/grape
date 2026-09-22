@@ -331,18 +331,18 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
         return {"ok": True, "task_id": task_id, "status": _status, "already": True}
 
     result_text = (body.result_text or "").strip() or f"任务自报完成{(' / ' + body.next_step) if body.next_step else ''}"
-    # 结构化产出（可选）：有 actions/conclusion/artifacts/issue_summary 时组装为结构化 JSON 文本，
-    # 使 complete_task 的 structured output 解析（actions+conclusion）能识别，供事件对话/下游读取。
-    if body.conclusion or body.actions or body.artifacts or body.issue_summary:
-        import json as _json
-        _sd = {
-            "actions": body.actions or [],
-            "conclusion": body.conclusion or result_text,
-            "artifacts": body.artifacts or [],
-            "next_step": body.next_step,
-            "issue_summary": body.issue_summary or result_text,
-        }
-        result_text = _json.dumps(_sd, ensure_ascii=False)
+    # 结构化产出：始终组装为结构化 JSON——结构化字段缺失时用叙述 result_text 回填 conclusion/issue_summary，
+    # 保证 event.json archive.seg.output 有结论/动作/产出（issue-219：仅传叙述文本会丢结构化归档，
+    # 详情页「处理记录与答复结论」为空）。
+    import json as _json
+    _sd = {
+        "actions": body.actions or [],
+        "conclusion": body.conclusion or result_text,
+        "artifacts": body.artifacts or [],
+        "next_step": body.next_step,
+        "issue_summary": body.issue_summary or result_text,
+    }
+    result_text = _json.dumps(_sd, ensure_ascii=False)
     complete_task(task_id, result_text, 0)
     return {"ok": True, "task_id": task_id, "status": "completed"}
 

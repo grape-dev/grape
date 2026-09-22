@@ -155,3 +155,34 @@ def test_t8_structured_fields_compose_result_text():
     assert d["actions"] == ["改代码", "push"]
     assert "PR #1" in d["artifacts"]
     assert d["next_step"] == "qa_review"
+
+
+def test_t9_narrative_only_backfills_structured_conclusion():
+    """issue-219：仅传叙述 result_text（无结构化字段）时，服务端回填 conclusion/issue_summary，
+    保证归档结构化产出非空（否则详情页「处理记录与答复结论」为空）。"""
+    import json
+    _seed_task("running")
+    tok = _session_token()
+    r = _post_complete(tok, {"result_text": "已回复 Issue #3 并归档为终态"})
+    assert r.status_code == 200
+    assert _task_status() == "completed"
+    with db_lock:
+        row = db.cursor().execute("SELECT result_text FROM agent_tasks WHERE id=?", (TASK,)).fetchone()
+    d = json.loads(row[0])
+    assert d["conclusion"] == "已回复 Issue #3 并归档为终态"
+    assert d["actions"] == []
+    assert d["next_step"] in ("", None)
+    assert d["issue_summary"] == "已回复 Issue #3 并归档为终态"
+
+
+def test_t10_structured_conclusion_preferred_over_narrative():
+    """结论回填优先级：显式 conclusion 优先，不因同时传 result_text 被覆盖。"""
+    import json
+    _seed_task("running")
+    tok = _session_token()
+    r = _post_complete(tok, {"result_text": "叙述兜底", "conclusion": "显式结论"})
+    assert r.status_code == 200
+    with db_lock:
+        row = db.cursor().execute("SELECT result_text FROM agent_tasks WHERE id=?", (TASK,)).fetchone()
+    d = json.loads(row[0])
+    assert d["conclusion"] == "显式结论"
