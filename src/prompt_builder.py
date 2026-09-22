@@ -72,7 +72,7 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     return "http://localhost:8080"
 
 
-_PROJECT_INFO_MAX_CHARS = 2500
+_PROJECT_INFO_SUMMARY_CHARS = 400
 
 _CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
 
@@ -109,8 +109,8 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
         content = files.get(rel, "")
         if not content:
             continue
-        truncated = len(content) > _PROJECT_INFO_MAX_CHARS
-        body = content[:_PROJECT_INFO_MAX_CHARS] + ("\n...(已截断)" if truncated else "")
+        truncated = len(content) > _PROJECT_INFO_SUMMARY_CHARS
+        body = content[:_PROJECT_INFO_SUMMARY_CHARS] + ("\n...(已截断)" if truncated else "")
         lines.append(f"### {label}\n{body}")
     lines.append("> 全文副本已落地：{{PROJECT_INFO_DIR}}/project-graph.md 与 {{PROJECT_INFO_DIR}}/project-capabilities.md，可用 read tool 读取全文。")
     # Issue #95：条件输出 member 引导（不固定输出，去掉 agent/{type}/ 引导）
@@ -439,7 +439,15 @@ def _build_output_contract(repo_key: str = "") -> str:
     return f"""
 ## 处理记录输出要求
 
-完成当前任务后，在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
+完成当前任务后，**以你当前技能（SKILL.md）的收尾流程为准**，按以下二选一执行：
+
+**情形一：技能提供 `grape tasks complete` 结构化收尾（采用 grape-cli 的技能）**
+- 调完 `grape tasks complete`（结构化直传 actions/conclusion/artifacts/next_step/issue_summary）即结束任务。
+- **不要再重复输出下方 JSON 块**——内容已随 complete 结构化上报服务端。
+- ⚠️ 若任务已终态，complete 返回 `already:true` 属正常，忽略即可。
+
+**情形二：技能未提供 `grape tasks complete` 收尾**
+- 在最终答复末尾输出以下 JSON 块（系统会解析写入该 Issue 的 event.json 档案）：
 
 {{
   "actions": ["做了什么，如 labeled:bug / assigned:@bob / 提交了PR / 发布了审查评论"],
@@ -450,19 +458,19 @@ def _build_output_contract(repo_key: str = "") -> str:
 }}
 
 注意：
-- 只输出一个 JSON 块，放在答复末尾。
-- JSON 块必须保持纯 JSON 结构，不得与叙述混排，且只能是最终答复末尾唯一的追加内容。
+- 两路**二选一**，不得同时输出 JSON 块并在结尾再调 `grape tasks complete`（内容重复）。
+- 情形二下只输出一个 JSON 块，放在答复末尾；纯 JSON 结构，不得与叙述混排，且只能是最终答复末尾唯一的追加内容。
 - 若无法确定动作或结论，相应字段填空数组/空字符串，不要伪造。
 - `issue_summary` 应反映截至当前链尾的最新状态，供下游 Agent 快速浏览。
 
 ## 任务结束
 
-完成所有业务动作（发评论 / 打标签 / 交办 A2A / 提交 PR 等）后，输出上述最终 JSON 块并**结束任务**。
+按上述情形完成收尾（调 `grape tasks complete` 或输出 JSON 块）后**结束任务**。
 不要继续思考、不要等待用户输入、不要追加额外内容；任务以你的最终输出为终点。
 
 ⚠️ 思考过程禁止出现在对外输出：任何思考过程叙述（如"让我…""现在我…""Let me…""Now I…"）
 只能出现在工具调用前的自然语言里，绝不能出现在最终答复、报告或 {_vcs} 评论 body 中。
-最终答复只输出：动作结果结论 + 处理记录 JSON 块。
+最终答复只输出：动作结果结论 + 收尾产物（`grape tasks complete` 结构化上报或处理记录 JSON 块，二选一）。
 
 ## 内部思考 vs 对外结论（必须分清）
 
@@ -496,7 +504,7 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
     """统一附件注入入口。按 agent_type 分级，从 OBS/文件系统扫描附件。
 
     所有 agent_type 都走此函数，内部按角色决定注入内容：
-    - vod:     图片+文件 URL + 完整处理指引（调 analyze-image / curl 下载）
+    - vod:     图片+文件 URL + 完整处理指引（分析图片 / 下载附件）
     - issue:   只注入文件名清单（无 URL、无下载指引）
     - coding:  非图片附件的文件名 + URL + 简短下载指引
     - qa/sre:  不注入
@@ -539,14 +547,12 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
             _lines.append(f"- 图片 {a['filename']}: {a['url']}")
         for a in _files:
             _lines.append(f"- 文件 {a['filename']}: {a['url']}")
-        _server_url = _resolve_server_url(runtime_id)
         parts.append(
             "\n## 用户附件\n"
             "Issue 包含以下用户上传附件，必须全部读取以理解用户需求：\n"
             + "\n".join(_lines) + "\n"
-            f"- 图片：用 bash 工具执行 curl {_server_url}/api/analyze-image?url=<图片URL>，"
-            "返回 JSON 中 description 字段为图片内容描述。\n"
-            "- 文本/代码/文档：用 bash 工具 curl 下载到当前工作目录，然后用 read tool 读取内容。\n"
+            "- 图片：分析图片内容以获得描述（分析方式见你当前技能的 SKILL.md）。\n"
+            "- 文本/代码/文档：下载到当前工作目录，然后用 read tool 读取内容。\n"
             "- 图片分析完成后，在 A2A 交办的 context 中写明图片描述结果，供下游 Agent 参考。\n"
         )
 
@@ -567,7 +573,7 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
             _lines = [f"- {a['filename']}: {a['url']}" for a in _files]
             parts.append(
                 "\n## 用户附件\n"
-                "以下用户上传的附件必须全部 curl 下载到当前工作目录并用 read tool 读取内容，"
+                "以下用户上传的附件必须全部下载到当前工作目录并用 read tool 读取内容，"
                 "作为实现需求的参考依据：\n"
                 + "\n".join(_lines) + "\n"
                 "图片附件已由 VOD Agent 分析，描述见前序 Agent 摘要。\n"
@@ -746,21 +752,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
 ### 调用方式
 
 如果你认为当前任务需要其他技能继续处理，请先完成当前任务，
-然后调用 A2A API：
-
-  curl -X POST {{SERVER_URL}}/api/a2a \\
-    -H "Authorization: Bearer $GRAPE_SESSION_TOKEN" \\
-    -H "Content-Type: application/json" \\
-    -d '{
-      "agent": "coding",
-      "payload": {
-        "repository": '"$REPO_FULL_NAME"',
-        "account": '"$ACCOUNT"',
-        "issue_number": '"$ISSUE_NUMBER"',
-        "pr_number": '"$PR_NUMBER"',
-        "context": "当前处理摘要"
-      }
-    }'
+然后调用 A2A API（调用方式见你当前技能的 SKILL.md）：
 
 ⚠️ **字段规则（A2A 服务端强制校验，必须遵守）：**
 1. `issue_number`（Issue 编号）**必填**：必须填写当前任务关联的真实 Issue 编号。**如果无法确定对应的 issue_number，就不要调用 A2A API**，直接在回复中说明原因。
@@ -825,8 +817,6 @@ context 是传给下一个 Agent 的接力说明，应包含：
 ## {_vcs} API Access
 Your token is available as the {_bot_token_env} environment variable.
 API base URL: {_api_base}
-  curl -s -H "Authorization: Bearer ${_bot_token_env}" \
-    {_api_base}/repos/$REPO_FULL_NAME/issues
 Never print or reveal the token value.
 """)
 
@@ -955,8 +945,7 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
     parts.append(f"""
 ## {_vcs} API Access
 Your token is available as the {_token_env} environment variable.
-  curl -s -H "Authorization: Bearer ${_token_env}" \\
-    {_api_base}/repos/{{owner}}/{{repo}}/issues
+API base URL: {_api_base}
 Never print or reveal the token value.
 """)
     repo_note = f" (in {repo_key})" if repo_key else ""
@@ -1054,8 +1043,7 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     parts.append(f"""
 ## {_vcs} API Access
 Your token is available as the {_token_env} environment variable.
-  curl -s -H "Authorization: Bearer ***" \\
-    {_api_base}/repos/{{owner}}/{{repo}}/issues
+API base URL: {_api_base}
 Never print or reveal the token value.
 """)
 

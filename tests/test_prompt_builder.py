@@ -297,3 +297,101 @@ class TestThinkingCommentSeparation:
         prompt = pb.build_prompt(base_evt, [], "", ["issue"])
         assert "必须调用工具执行实际动作" in prompt
 
+
+class TestNoCurlTemplates:
+    """Issue #219：所有 Agent prompt 移除直接 API 调用（curl 模板），保持中性，
+    不含 API/CLI 引导；仍保留认证 token 环境变量名与仓库标识。
+
+    设计文档：docs/weekly-04/issue-219-devops-agent-prompt-optimization-design.md
+    """
+
+    @pytest.fixture
+    def base_evt(self):
+        return {
+            "type": "issue_opened",
+            "repository": "owner/repo",
+            "source": "gitcode",
+            "payload": {
+                "project": {"path_with_namespace": "owner/repo"},
+                "issue": {"number": 1, "title": "Bug: test", "body": "desc"}
+            }
+        }
+
+    def test_devops_prompt_no_curl(self, pb, base_evt):
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
+        assert "curl" not in prompt
+
+    def test_devops_prompt_no_hardcoded_api_usage(self, pb, base_evt):
+        """prompt 不包含硬编码的 API / CLI 调用模板（curl、a2a handoff 命令体）。
+        收尾仅以「技能收尾流程」条件化提及，见 TestConditionalClosingFlow。"""
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
+        assert "curl" not in prompt
+        assert "a2a handoff" not in prompt
+        assert "grape a2a handoff" not in prompt
+
+    def test_general_chat_prompt_no_curl(self, pb):
+        prompt = pb.build_general_chat_prompt("test query", "owner/repo", [])
+        assert "curl" not in prompt
+
+    def test_task_chat_prompt_no_curl(self, pb):
+        conv = {"conv_type": "task", "issue_number": 7, "title": "t", "repo_key": "org/repo"}
+        prompt = pb.build_task_chat_prompt("hi", "org/repo", [], conv)
+        assert "curl" not in prompt
+
+    def test_devops_prompt_keeps_token_env_name(self, pb, base_evt):
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
+        assert "BOT_GITCODE_TOKEN" in prompt
+        assert "token is available" in prompt
+
+    def test_devops_prompt_keeps_repo_identifier(self, pb, base_evt):
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
+        assert "owner/repo" in prompt
+
+    def test_a2a_field_rules_kept(self, pb, base_evt):
+        """A2A 服务端强制校验的字段规则保留（纯移除 curl，不删除契约）。"""
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
+        assert "字段规则" in prompt
+        assert "issue_number" in prompt
+
+
+class TestConditionalClosingFlow:
+    """Issue #219 + 方案 C：收尾二选一——技能提供 `grape tasks complete` 结构化收尾则
+    调完即结束、不再输出 JSON 块；否则按 JSON 块契约输出（docs/weekly-04/issue-219-...md）。"""
+
+    @pytest.fixture
+    def base_evt(self):
+        return {
+            "type": "issue_opened",
+            "repository": "owner/repo",
+            "source": "gitcode",
+            "payload": {
+                "project": {"path_with_namespace": "owner/repo"},
+                "issue": {"number": 1, "title": "Bug: test", "body": "desc"}
+            }
+        }
+
+    def _prompt(self, pb, base_evt):
+        return pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
+
+    def test_contract_mentions_tasks_complete_branch(self, pb, base_evt):
+        p = self._prompt(pb, base_evt)
+        assert "以你当前技能（SKILL.md）的收尾流程为准" in p
+        assert "grape tasks complete" in p
+        assert "不要再重复输出下方 JSON 块" in p
+
+    def test_contract_mentions_json_fallback_branch(self, pb, base_evt):
+        p = self._prompt(pb, base_evt)
+        assert "情形二：技能未提供" in p
+        assert '"actions"' in p and '"issue_summary"' in p
+
+    def test_two_paths_mutually_exclusive(self, pb, base_evt):
+        """硬约束：两路二选一，不得同时输出 JSON 块并调 tasks complete。"""
+        p = self._prompt(pb, base_evt)
+        assert "二选一" in p
+        assert "不得同时输出 JSON 块并在结尾再调" in p
+
+    def test_task_end_section_aligned(self, pb, base_evt):
+        """「任务结束」段对齐二选一收尾（不再仅要求输出 JSON 块）。"""
+        p = self._prompt(pb, base_evt)
+        assert "按上述情形完成收尾（调 `grape tasks complete` 或输出 JSON 块）后**结束任务**" in p
+
