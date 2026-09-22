@@ -33,8 +33,8 @@ function renderSettings(tab) {
           <div class="srow"><label>${I18N.t('settings.credentials.account')}</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account : (d.github && d.github.login ? d.github.login : '—')}" disabled style="background:#f1f5f9;font-size:10px"></div>
         </div>
         <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.huawei_cloud_title')}</h3>
-          <div class="srow"><label>${I18N.t('settings.credentials.access_key')}</label><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.access_key')}"></div>
-          <div class="srow"><label>${I18N.t('settings.credentials.secret_key')}</label><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.secret_key')}"></div>
+          <div class="srow" style="align-items:center"><label>${I18N.t('settings.credentials.access_key')}</label><div style="display:flex;align-items:center;gap:6px;flex:1"><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.access_key')}" style="flex:1"><button type="button" id="huaweiToggleAk" onclick="toggleHuaweiSecret()" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0">👁</button></div></div>
+          <div class="srow" style="align-items:center"><label>${I18N.t('settings.credentials.secret_key')}</label><div style="display:flex;align-items:center;gap:6px;flex:1"><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.secret_key')}" style="flex:1"><button type="button" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0">👁</button></div></div>
           <p class="tx t2 mt8">${I18N.t('settings.credentials.huawei_cloud_desc')}</p>
           <button class="bt bt-p mt8" onclick="saveCredentials()">${I18N.t('settings.common.save')}</button>
         </div>
@@ -237,10 +237,21 @@ function saveCredentials() {
   }).catch(e => app.showToast(I18N.t('settings.common.update_failed')));
 }
 
-// 华为云 AK/SK 明文显示/隐藏切换（默认掩码，👁 查看明文；autocomplete=new-password 防浏览器自动填充覆盖）
+// 华为云 AK/SK 明文显示/隐藏切换
+// 首次点击眼睛时从后端拉取真实值填入输入框（之前回显的是 ******** 掩码）
 let _hwSecretVisible = false;
+let _hwSecretFetched = false;
 function toggleHuaweiSecret() {
   _hwSecretVisible = !_hwSecretVisible;
+  // 首次切换为明文时，从后端拉取真实 AK/SK 填入输入框
+  if (_hwSecretVisible && !_hwSecretFetched) {
+    _hwSecretFetched = true;
+    API.get('/settings/credentials').then(function(d) {
+      var hw = (d && d.huawei_cloud) || {};
+      if (hw.ak) { var akEl = document.getElementById('huaweiAk'); if (akEl) akEl.value = hw.ak; }
+      if (hw.sk) { var skEl = document.getElementById('huaweiSk'); if (skEl) skEl.value = hw.sk; }
+    }).catch(function() {});
+  }
   ['huaweiAk', 'huaweiSk'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.type = _hwSecretVisible ? 'text' : 'password';
