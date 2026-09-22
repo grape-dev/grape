@@ -77,7 +77,7 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
         if not sid:
             return ""
         if sid not in _scene_name_cache:
-            cfg = get_pipeline_config(sid, repo_key=repo_key)
+            cfg = get_pipeline_config(sid, repo_key=repo_keys[0] if repo_keys else "")
             _scene_name_cache[sid] = (cfg or {}).get("name", sid)
         return _scene_name_cache[sid]
 
@@ -111,7 +111,7 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
             "stage": "",
             "is_running": _status == "running",
             "agent_statuses": [],
-            "repo_key": from_repo_key(repo_key),
+            "repo_key": from_repo_key(repo_keys[0] if repo_keys else ""),
             "is_pr_event": True,
             "pr_seq": ev["seq"],
             "qa_history": [{**qa, "scene_name": _get_scene_name(qa.get("scene_id", ""))} for qa in _pr_history.get(pr_num, [])],
