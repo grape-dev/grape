@@ -1,7 +1,9 @@
 # Skills 技能接口（/api/skills）
 
 > 对外公开，认证：`get_current_user_or_api_key`。
-> scope（x-token-scope）：全部 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> scope（x-token-scope）：多数 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）；
+> `skills_upload`（repo 技能上传，会话需仓库作用域匹配）与既有读类 `skills_list` / `skills_detail`
+> 由依赖推导为 **dual**（会话 token 可调，见各节说明）。
 
 ## GET /api/skills — 技能列表
 
@@ -94,7 +96,8 @@
 ---
 
 ## POST /api/skills/upload — 上传技能
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**——用户（`grape_` API Key / JWT）可传个人或仓库技能；
+> 会话 token（`tk_`）仅支持 **scope=repo** 且 `repo` 必须与 token 绑定的仓库一致（越权 → 403）。
 > CLI：`grape skills upload`（命令路径即端点，见 README「CLI 命令映射」）。
 
 请求头：`multipart/form-data`，字段：
