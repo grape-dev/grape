@@ -1230,10 +1230,11 @@ def _init_scene_category_data():
         categories = [
             ("通用", "general", "⚙", 1),
             ("移动开发", "mobile", "🍃", 2),
-            ("基础设施", "iac", "☁", 3),
-            ("技能开发", "skill-dev", "🔧", 4),
-            ("AI应用", "ai", "🤖", 5),
-            ("内容创作", "content", "📝", 6),
+            ("云原生", "cloud-native", "☁", 3),
+            ("IaC", "iac", "🏗️", 4),
+            ("技能开发", "skill-dev", "🔧", 5),
+            ("AI应用", "ai", "🤖", 6),
+            ("内容创作", "content", "📝", 7),
         ]
         with db_lock:
             c = db.cursor()
@@ -1342,12 +1343,12 @@ def _init_scene_market_data():
             init_scenes = [
                 ("harmony", "鸿蒙开发", 2, 0, "harmony-ecommerce", "鸿蒙应用开发场景，适合 HarmonyOS 应用开发", None),
                 ("default", "通用开发", 1, 1, "hello-flask", "通用的全链路开发场景，从需求收集到部署运维，适合大多数项目", "default"),
-                ("iac", "IaC开发", 3, 1, "tf-infra", "IaC 基础设施即代码开发场景，使用 Terraform 管理云资源", "iac"),
-                ("skill-dev", "华为云Skill开发", 4, 1, "hello-skill", "华为云 Skill 开发场景，创建和发布华为云技能", "skill-dev"),
+                ("iac", "IaC开发", 4, 1, "tf-infra", "IaC 基础设施即代码开发场景，使用 Terraform 管理云资源", "iac"),
+                ("skill-dev", "华为云Skill开发", 5, 1, "hello-skill", "华为云 Skill 开发场景，创建和发布华为云技能", "skill-dev"),
                 ("cloud-native", "云原生开发", 3, 0, "micro-svc", "云原生开发场景，适合微服务和容器化项目", "cloud-native"),
-                ("agent-dev", "Agent开发", 5, 0, "ai-interview-swarm", "Agent 开发场景，适合构建 AI Agent 项目", "agent-dev"),
-                ("api-skill-dev", "通用Skill开发", 4, 0, "hello-skill", "通用 Skill 开发场景，创建和发布通用技能", "api-skill-dev"),
-                ("blog-publish", "博客发布", 6, 0, "", "博客系统开发与发布场景", "blog-publish"),
+                ("agent-dev", "Agent开发", 6, 0, "ai-interview-swarm", "Agent 开发场景，适合构建 AI Agent 项目", "agent-dev"),
+                ("api-skill-dev", "通用Skill开发", 5, 0, "hello-skill", "通用 Skill 开发场景，创建和发布通用技能", "api-skill-dev"),
+                ("blog-publish", "博客发布", 7, 0, "", "博客系统开发与发布场景", "blog-publish"),
             ]
             imported = 0
             for name, display_name, cat_id, featured, template, mkt_desc, src_scene_id in init_scenes:
@@ -2350,8 +2351,8 @@ def _migrate_tables():
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
-        ("general", "通用"), ("mobile", "移动开发"), ("iac", "基础设施"),
-        ("skill-dev", "技能开发"), ("ai", "AI应用"), ("content", "内容创作"),
+        ("general", "通用"), ("mobile", "移动开发"), ("cloud-native", "云原生"),
+        ("iac", "IaC"), ("skill-dev", "技能开发"), ("ai", "AI应用"), ("content", "内容创作"),
     ]
     for slug, name in _category_slugs:
         try:
