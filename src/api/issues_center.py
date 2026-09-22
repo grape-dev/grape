@@ -803,7 +803,14 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     owner, rname = split_owner_repo(repo_key)
     # provider 分流：github: → GitHub API，gitcode: → GitCode API
     _is_github = repo_key.startswith("github:")
-    if _is_github:
+    # _preauth_token: autopilot 等内部调用（auth_type=api_key/internal）预注入 bot token
+    # JWT 登录用户的 token 是 session JWT 不是 GitCode API token，不能走此路径
+    _preauth_token = ""
+    if user.get("auth_type") in ("api_key", "internal") and user.get("token"):
+        _preauth_token = user["token"]
+    if _preauth_token:
+        api_token = _preauth_token
+    elif _is_github:
         from src.user.db import get_user_github_token
         api_token = get_user_github_token(user["id"]) or ""
         if not api_token:
@@ -839,6 +846,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         if _is_github:
             resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
                                       _desc_with_attach, assignee=assignee)
+        elif _preauth_token:
+            resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
+                                       _desc_with_attach, assignee=assignee)
         else:
             # Issue #52: 401 时自动刷新 OAuth token 并重试
             resp = _gitcode_api_with_refresh(
@@ -926,6 +936,8 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 _gh_token = get_user_github_token(user["id"]) or ""
                 if _gh_token:
                     _patch_github_issue_body(_gh_token, owner, rname, issue_num, (body.description or "") + _marker)
+            elif _preauth_token:
+                _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
             else:
                 # Issue #52: 401 时自动刷新 token 重试
                 _gitcode_api_with_refresh(user, _patch_issue_body, owner, rname, issue_num, (body.description or "") + _marker)

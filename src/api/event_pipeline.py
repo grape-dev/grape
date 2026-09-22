@@ -680,9 +680,11 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             scene_id=scene_id,
         )
         log.info(f"Pipeline: PR subscription extra dispatch seq={seq} scene={scene_id}")
-        # 分派执行
-        from src.runtime.engine_select import pick_engine, engine_name
-        from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
+        # 分派执行：跟主场景 run_pipeline 一致的判断逻辑
+        # engine_id=0 + plugin + auto(非direct) → broadcast enqueue（远端worker认领）
+        # 仅 direct 模式或选中具体本机引擎时走 DIRECT
+        from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
+        from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT, get_execution_mode
         _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
         if _engine_id is None:
             log.info(f"Pipeline: PR subscription extra: no engine for scene={scene_id}, skip")
@@ -690,32 +692,133 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             update_event_status(seq, "failed")
             return
         _be = engine_name(_engine_id) or ""
-        _kind = runtime_execution_kind(_engine_id)
-        if _kind == EXEC_MODE_DIRECT:
-            _extra_evt["_skill_path"] = qa_skill
-            _extra_evt["_skill_id"] = 0
-            _direct_tid = _create_direct_task(repo_key, seq, "qa", _be, qa_skill,
-                                qa_skill, _engine_id, _extra_evt, _pseudo_id, skill_id=0)
-            start_direct_agent(_execute_agent, (
-                repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
-            ))
-        else:
-            from src.runtime.service import enqueue_task
-            from src.runtime.engine_select import get_scene_pool_engine_ids
+        _is_broadcast = (_engine_id == 0 and is_plugin_mode()
+                         and get_execution_mode() != EXEC_MODE_DIRECT)
+        if _is_broadcast:
+            # 复用 _enqueue_pipeline_task：自动构建 prompt/env_extra/会话/init_event_json
             _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
-            enqueue_task(
-                agent_session_id=f"pr_sub_{scene_id}_{_pr_num}",
-                runtime_id=_engine_id, prompt="", agent_type="qa",
-                skill=qa_skill, skill_id=0, skill_path=qa_skill,
-                repo_key=repo_key, issue_id=_pseudo_id,
-                event_seq=seq, event_type="a2a_event",
-                env_extra=None,
-                pool_tag="qa", pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "",
-            )
-        from src.api.event_store import update_event_dispatched
-        update_event_dispatched(seq)
+            _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                                   0, qa_skill, _engine_id, _pseudo_id,
+                                   pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+        else:
+            _kind = runtime_execution_kind(_engine_id)
+            if _kind == EXEC_MODE_DIRECT:
+                _extra_evt["_skill_path"] = qa_skill
+                _extra_evt["_skill_id"] = 0
+                _direct_tid = _create_direct_task(repo_key, seq, "qa", _be, qa_skill,
+                                    qa_skill, _engine_id, _extra_evt, _pseudo_id, skill_id=0)
+                start_direct_agent(_execute_agent, (
+                    repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
+                ))
+            else:
+                _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+                _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                                       0, qa_skill, _engine_id, _pseudo_id,
+                                       pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
     except Exception as e:
         log.warning(f"Pipeline: PR subscription extra dispatch failed: {e}")
+
+
+def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> bool:
+    """PR 订阅事件重派：在原事件上直接重新创建 task，不创建新事件。
+
+    用于 redispatch 路径 — 当 PR 订阅事件的 task 派发失败（如远程 enqueue 报错）、
+    需要手动重派时调用。不能走 A2A 端点（payload 是 webhook 原始格式，无 issue_number）。
+
+    返回 True = 派发成功，False = 引擎不可用或无 QA 节点。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        import json as _json
+
+        repo_key = evt.get("repo_key", "") or ""
+
+        # 从 devops_pipeline_scene 查 scene_id 对应的 QA 节点 skill
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scene_id, nodes_json FROM devops_pipeline_scene "
+                "WHERE repo_key=? AND scene_id=? AND is_active=1",
+                (repo_key, scene_id))
+            row = c.fetchone()
+        if not row:
+            log.warning(f"Pipeline: PR subscription redispatch: scene={scene_id} not found")
+            return False
+
+        nodes = json.loads(row[1] or "[]")
+        qa_node = next((n for n in nodes if n.get("tag") == "qa" and n.get("enabled", True)), None)
+        if not qa_node or not qa_node.get("skill"):
+            log.warning(f"Pipeline: PR subscription redispatch: no QA node in scene={scene_id}")
+            return False
+
+        qa_skill = qa_node["skill"]
+        qa_engine_ids = qa_node.get("engine_runtime_ids", [])
+
+        # 提取 PR 号
+        _payload = evt.get("payload", {}) or {}
+        if isinstance(_payload, str):
+            _payload = _json.loads(_payload)
+        _pr_obj = _payload.get("pull_request", {}) or _payload.get("merge_request", {}) or {}
+        _obj_attrs = _payload.get("object_attributes", {}) or {}
+        _pr_num = _pr_obj.get("number", _pr_obj.get("iid", "")) or _obj_attrs.get("iid", "")
+
+        # 伪 issue_id（跟 _dispatch_pr_subscription_extra 一致）
+        _pseudo_id = f"#pr_{_pr_num}_{scene_id}" if _pr_num else ""
+
+        # 选引擎
+        from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
+        from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT, get_execution_mode
+        _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
+        if _engine_id is None:
+            log.info(f"Pipeline: PR subscription redispatch: no engine for scene={scene_id}")
+            return False
+
+        _be = engine_name(_engine_id) or ""
+        _is_broadcast = (_engine_id == 0 and is_plugin_mode()
+                         and get_execution_mode() != EXEC_MODE_DIRECT)
+        _extra_evt = dict(evt)
+        _extra_evt["payload"] = _payload  # 确保是 dict（_load_event 返回 JSON 字符串）
+        # 补全 build_devops_agent_prompt 必需的字段（_load_event 不返回 repository/source）
+        from src.repo_key import from_repo_key
+        _extra_evt["repository"] = _extra_evt.get("repository") or from_repo_key(repo_key)
+        _extra_evt["source"] = _extra_evt.get("source") or (repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode")
+        _extra_evt["repo_key"] = repo_key
+        _extra_evt["_pr_sub_scene_id"] = scene_id
+        _extra_evt["_pr_sub_skill"] = qa_skill
+        _extra_evt["_pr_sub_engine_ids"] = qa_engine_ids
+        if _pr_num:
+            _extra_evt["_pr_sub_pr_number"] = _pr_num
+
+        if _is_broadcast:
+            # 复用 _enqueue_pipeline_task：自动构建 prompt/env_extra/会话/init_event_json
+            _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+            _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                                   0, qa_skill, _engine_id, _pseudo_id,
+                                   pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+        else:
+            _kind = runtime_execution_kind(_engine_id)
+            if _kind == EXEC_MODE_DIRECT:
+                _extra_evt["_skill_path"] = qa_skill
+                _extra_evt["_skill_id"] = 0
+                _direct_tid = _create_direct_task(repo_key, seq, "qa", _be, qa_skill,
+                                    qa_skill, _engine_id, _extra_evt, _pseudo_id, skill_id=0)
+                start_direct_agent(_execute_agent, (
+                    repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
+                ))
+            else:
+                _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+                _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                                       0, qa_skill, _engine_id, _pseudo_id,
+                                       pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+
+        # 重派成功：把事件状态改回 running（重派前可能是 failed）
+        from src.api.event_store import update_event_status
+        update_event_status(seq, "running")
+        log.info(f"Pipeline: PR subscription redispatch ok, seq={seq} scene={scene_id} engine={_engine_id}")
+        return True
+    except Exception as e:
+        log.warning(f"Pipeline: PR subscription redispatch failed: {e}")
+        return False
 
 
 def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
