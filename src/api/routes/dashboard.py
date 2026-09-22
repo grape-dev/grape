@@ -1132,8 +1132,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
             ag["enabled_in_scene"] = False
             ag["engine_runtime_ids"] = []
 
-    # 获取可用引擎列表（供前端 engine 下拉）
+    # 获取已注册引擎列表（供前端 engine 下拉）
     # 按 agent_type 标签过滤：只返回 tags 包含该 agent_type 或 "all" 的引擎
+    # 返回全部引擎（含 offline/about_to_gc），前端通过状态徽章区分
     agent_engines = {}
     try:
         from src.runtime.engine_select import query_engines
@@ -1148,6 +1149,14 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
             from src.runtime.health import derive_runtime_health
             import time as _time
             _now = _time.time()
+            _seen_ids = set()
+            _deduped = []
+            for e in engines:
+                _rid = e["runtime_id"]
+                if _rid in _seen_ids:
+                    continue
+                _seen_ids.add(_rid)
+                _deduped.append(e)
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
@@ -1157,7 +1166,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
                                      "scope": e.get("scope", "global"),
                                      "scope_label": _scope_labels.get(e.get("scope", "global"), ""),
                                      "alias": e.get("alias", "")}
-                                    for e in engines]
+                                    for e in _deduped]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")
 
