@@ -1,8 +1,9 @@
 # Knowledge 知识接口（/api/knowledge）
 
 > 对外公开，认证：`get_current_user_or_api_key`。
-> scope（x-token-scope）：读接口 `list/stats/detail` = **dual**；写操作
-> （entry/refs/delete/update）= **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> scope（x-token-scope）：读接口 `list/stats/detail` = **dual**（会话 token `tk_` 可用，要求**仓库作用域匹配**——
+> token 绑定的 repo_key 与 `repo` 一致（provider+owner/repo），不一致 403；详情按 id 读取不额外校验仓库）；
+> 写操作（entry/refs/delete/update）= **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 > 概念：知识 = 仓库/场景/Agent 注入的说明文档。**文件型**（`source=system/agent`，按 repo+file 落 OBS/工作区）
 > 与**条目型**（`source=manual`，用户 Web 直接录入，以 `knowledge_id` 定位）两类并存。
 
