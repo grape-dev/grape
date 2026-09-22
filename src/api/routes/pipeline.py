@@ -300,6 +300,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
 
     return {
         "issue_id": display_issue_id,
+        "raw_issue_id": issue_id,
         "title": title,
         "stages": stages,
         "statuses": stage_statuses,
@@ -473,7 +474,7 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
     # 不维护 issue_agent_session.status 双份记账，避免状态漂移
     running_issues = _running_issue_ids(_repo_keys)
     for p in pipelines:
-        p["executing"] = p["issue_id"] in running_issues
+        p["executing"] = (p.get("raw_issue_id") or p["issue_id"]) in running_issues
 
     active = pipelines[0] if pipelines else None
     history = pipelines[1:] if len(pipelines) > 1 else []
