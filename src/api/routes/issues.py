@@ -31,18 +31,19 @@ def _num_from_issue_id(issue_id: str) -> str:
     return m.group(1) if m else ""
 
 
-def _query_pr_subscription_events(repo_key: str) -> list[dict]:
+def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
     """查 PR 订阅事件（issue_id LIKE '#pr_%'），按 PR 号聚合为伪卡片。"""
     from src.session_manager import db, db_lock
     from src.repo_key import from_repo_key
     items = []
+    placeholders = ",".join("?" * len(repo_keys))
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, result, scene_id "
-                "FROM events WHERE repo_key=? AND issue_id LIKE ? ORDER BY seq DESC",
-                (repo_key, "#pr_%"))
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, result, scene_id "
+                f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id LIKE ? ORDER BY seq DESC",
+                (*repo_keys, "#pr_%"))
             rows = c.fetchall()
         except Exception:
             rows = []
@@ -126,7 +127,25 @@ def _repo_key_of(owner: str, repo: str) -> str:
     return to_repo_key(f"{owner}/{repo}")
 
 
-def _issue_stage_map(repo_key: str) -> dict:
+def _repo_keys_of(owner: str, repo: str) -> list[str]:
+    """跨 provider 双查：返回 [gitcode:owner/repo, github:owner/repo] 两个前缀。
+
+    与 pipeline.py 的双查逻辑一致——用户可能通过 GitHub Webhook 接入仓库，
+    DB 中数据存为 github: 前缀，但前端传入的 owner/repo 无 provider 信息，
+    _repo_key_of 默认返回 gitcode: 前缀会漏查 GitHub 仓库数据。
+    """
+    from src.repo_key import to_repo_key
+    _owner_repo = f"{owner}/{repo}"
+    repo_key = to_repo_key(_owner_repo)
+    keys = [repo_key]
+    if repo_key.startswith("gitcode:"):
+        keys.append(f"github:{_owner_repo}")
+    elif repo_key.startswith("github:"):
+        keys.append(f"gitcode:{_owner_repo}")
+    return keys
+
+
+def _issue_stage_map(repo_keys: list[str]) -> dict:
     """仓库内 issue number → issue 阶段摘要（stage/owner/scene/assignee/subtask）。
 
     Phase C1/C3：`issue` 单表为权威（已收编 + 停写 issue_state），直接读 issue 卡片行；
@@ -134,15 +153,16 @@ def _issue_stage_map(repo_key: str) -> dict:
     """
     from src.session_manager import db, db_lock
     out = {}
+    placeholders = ",".join("?" * len(repo_keys))
     # 1. issue 单表（权威）
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT issue_number, stage, owner_agent, assignee, a2a_seq, scene_id, "
-                "parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
-                "FROM issue WHERE repo_key=?",
-                (repo_key,))
+                f"SELECT issue_number, stage, owner_agent, assignee, a2a_seq, scene_id, "
+                f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
+                f"FROM issue WHERE repo_key IN ({placeholders})",
+                repo_keys)
             for r in c.fetchall():
                 n = str(r[0])
                 if not n:
@@ -161,10 +181,10 @@ def _issue_stage_map(repo_key: str) -> dict:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT issue_id, stage, owner_agent, assignee, a2a_seq, scene_id, "
-                "parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
-                "FROM issue_state WHERE repo_key=?",
-                (repo_key,))
+                f"SELECT issue_id, stage, owner_agent, assignee, a2a_seq, scene_id, "
+                f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
+                f"FROM issue_state WHERE repo_key IN ({placeholders})",
+                repo_keys)
             for r in c.fetchall():
                 n = _num_from_issue_id(r[0])
                 if not n or n in out:
@@ -181,14 +201,15 @@ def _issue_stage_map(repo_key: str) -> dict:
     return out
 
 
-def _task_status_map(repo_key: str) -> dict:
+def _task_status_map(repo_keys: list[str]) -> dict:
     """仓库内 issue_number → tasks.status（任务中心状态）。"""
     from src.session_manager import db, db_lock
     out = {}
+    placeholders = ",".join("?" * len(repo_keys))
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT issue_number, status FROM issue WHERE repo_key=?", (repo_key,))
+            c.execute(f"SELECT issue_number, status FROM issue WHERE repo_key IN ({placeholders})", repo_keys)
             for r in c.fetchall():
                 out[str(r[0])] = r[1]
         except Exception as e:
@@ -196,17 +217,18 @@ def _task_status_map(repo_key: str) -> dict:
     return out
 
 
-def _group_events_by_issue(repo_key: str) -> dict:
+def _group_events_by_issue(repo_keys: list[str]) -> dict:
     """仓库内 issue_id → events 列表（seq 升序），带时间格式化。"""
     from src.session_manager import db, db_lock
     out = {}
+    placeholders = ",".join("?" * len(repo_keys))
     with db_lock:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at "
-                "FROM events WHERE repo_key=? AND issue_id!='' ORDER BY seq ASC",
-                (repo_key,))
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at "
+                f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!='' ORDER BY seq ASC",
+                repo_keys)
             rows = c.fetchall()
         except Exception:
             rows = []
@@ -224,9 +246,9 @@ def _group_events_by_issue(repo_key: str) -> dict:
     return out
 
 
-def _issue_title_map(repo_key: str) -> dict:
+def _issue_title_map(repo_keys: list[str]) -> dict:
     """仓库内 issue_number → 标题（从 events 首条带 title 的事件取）。"""
-    g = _group_events_by_issue(repo_key)
+    g = _group_events_by_issue(repo_keys)
     out = {}
     for n, evs in g.items():
         for ev in evs:
@@ -257,40 +279,41 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
     }
 
 
-def _pipeline_from_archive(repo_key: str, number: str) -> dict | None:
-    """读 event.json 组装 pipeline 路线图。"""
-    try:
-        from src.api.event_archive import load_event_json
-        arch = load_event_json(repo_key, number)
-        if not arch:
-            return None
-        segments = []
-        for seg in arch.get("pipeline", []):
-            op = seg.get("output", {}) or {}
-            segments.append({
-                "seq": seg.get("seq"),
-                "agent": seg.get("agent", ""),
-                "event_type": seg.get("event_type", ""),
-                "status": seg.get("status", ""),
-                "runtime": seg.get("runtime", ""),
-                "skill": seg.get("skill", ""),
-                "output": {
-                    "conclusion": op.get("conclusion", ""),
-                    "next_step": op.get("next_step", ""),
-                    "actions": op.get("actions", []),
-                    "artifacts": op.get("artifacts", []),
-                    "issue_summary": op.get("issue_summary", ""),
-                },
-            })
-        return {
-            "issue": arch.get("issue", {}),
-            "summary": arch.get("summary", ""),
-            "status": arch.get("status", ""),
-            "segments": segments,
-        }
-    except Exception as e:
-        log.warning(f"issues: load pipeline archive failed repo={repo_key} #{number}: {e}")
-        return None
+def _pipeline_from_archive(repo_keys: list[str], number: str) -> dict | None:
+    """读 event.json 组装 pipeline 路线图（跨 provider 双查）。"""
+    from src.api.event_archive import load_event_json
+    for rk in repo_keys:
+        try:
+            arch = load_event_json(rk, number)
+            if not arch:
+                continue
+            segments = []
+            for seg in arch.get("pipeline", []):
+                op = seg.get("output", {}) or {}
+                segments.append({
+                    "seq": seg.get("seq"),
+                    "agent": seg.get("agent", ""),
+                    "event_type": seg.get("event_type", ""),
+                    "status": seg.get("status", ""),
+                    "runtime": seg.get("runtime", ""),
+                    "skill": seg.get("skill", ""),
+                    "output": {
+                        "conclusion": op.get("conclusion", ""),
+                        "next_step": op.get("next_step", ""),
+                        "actions": op.get("actions", []),
+                        "artifacts": op.get("artifacts", []),
+                        "issue_summary": op.get("issue_summary", ""),
+                    },
+                })
+            return {
+                "issue": arch.get("issue", {}),
+                "summary": arch.get("summary", ""),
+                "status": arch.get("status", ""),
+                "segments": segments,
+            }
+        except Exception as e:
+            log.warning(f"issues: load pipeline archive failed repo={rk} #{number}: {e}")
+    return None
 
 
 def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dict:
@@ -991,9 +1014,10 @@ def list_repo_issues(owner: str, repo: str,
     - 行为对齐原 issues_list（仓库 public 读聚合，无显式仓库权限门禁）
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter
-    repo_key = _repo_key_of(owner, repo)
-    clauses = ["repo_key=?"]
-    params: list = [repo_key]
+    repo_keys = _repo_keys_of(owner, repo)
+    placeholders = ",".join("?" * len(repo_keys))
+    clauses = [f"repo_key IN ({placeholders})"]
+    params: list = list(repo_keys)
     if status:
         clauses.append("status=?")
         params.append(status)
@@ -1007,8 +1031,8 @@ def list_repo_issues(owner: str, repo: str,
                      f"ELSE 4 END, created_at {_order_dir}")
     issues = _query_tasks(where, params, _order_by, include_user_id=True)
     # 事件聚合字段 + number/task_status/owner_agent 等别名（原 issues_list 字段兼容）
-    group_map = _group_events_by_issue(repo_key)
-    stage_map = _issue_stage_map(repo_key)
+    group_map = _group_events_by_issue(repo_keys)
+    stage_map = _issue_stage_map(repo_keys)
     for it in issues:
         _num = it.get("issue_number")
         it["number"] = _num or it.get("number")
@@ -1023,7 +1047,7 @@ def list_repo_issues(owner: str, repo: str,
         it["latest_event"] = evs[-1] if evs else None
 
     # PR 订阅事件：从 events 表查 issue_id LIKE '#pr_%' 的记录，构造伪卡片混入列表
-    pr_items = _query_pr_subscription_events(repo_key)
+    pr_items = _query_pr_subscription_events(repo_keys)
     issues.extend(pr_items)
 
     return {"issues": issues, "total": len(issues)}
@@ -1054,29 +1078,29 @@ async def create_issue(owner: str, repo: str, body: dict = None,
 @router.get("/{owner}/{repo}/{number}", operation_id="issues_detail", summary="Issue detail (stage+events+pipeline)", description="Single issue detail: base fields + events (seq asc) + pipeline segments.")
 def get_issue_detail(owner: str, repo: str, number: int,
                      user: dict = Depends(get_current_user_or_api_key)):
-    repo_key = _repo_key_of(owner, repo)
+    repo_keys = _repo_keys_of(owner, repo)
     num = str(number)
-    stage_map = _issue_stage_map(repo_key)
-    status_map = _task_status_map(repo_key)
-    group_map = _group_events_by_issue(repo_key)
-    title_map = _issue_title_map(repo_key)
+    stage_map = _issue_stage_map(repo_keys)
+    status_map = _task_status_map(repo_keys)
+    group_map = _group_events_by_issue(repo_keys)
+    title_map = _issue_title_map(repo_keys)
     if num not in stage_map and num not in status_map and num not in group_map:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
-    base = _assemble_issue(repo_key, num, stage_map, status_map, group_map, title_map)
+    base = _assemble_issue(repo_keys[0], num, stage_map, status_map, group_map, title_map)
     events = group_map.get(num) or []
-    pipeline = _pipeline_from_archive(repo_key, num) or _pipeline_from_events(repo_key, num, events)
+    pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
     return {**base, "events": events, "pipeline": pipeline}
 
 
 @router.get("/{owner}/{repo}/{number}/events", operation_id="issues_events", summary="Issue events list", description="Event list of an issue (paged, seq asc).")
 def get_issue_events(owner: str, repo: str, number: int,
                      user: dict = Depends(get_current_user_or_api_key)):
-    repo_key = _repo_key_of(owner, repo)
-    group_map = _group_events_by_issue(repo_key)
+    repo_keys = _repo_keys_of(owner, repo)
+    group_map = _group_events_by_issue(repo_keys)
     num = str(number)
     if num not in group_map:
-        stage_map = _issue_stage_map(repo_key)
-        status_map = _task_status_map(repo_key)
+        stage_map = _issue_stage_map(repo_keys)
+        status_map = _task_status_map(repo_keys)
         if num not in stage_map and num not in status_map:
             raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
         return {"events": [], "total": 0}
@@ -1087,11 +1111,11 @@ def get_issue_events(owner: str, repo: str, number: int,
 @router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap", description="Pipeline roadmap of an issue: issue + summary + status + segments.")
 def get_issue_pipeline(owner: str, repo: str, number: int,
                        user: dict = Depends(get_current_user_or_api_key)):
-    repo_key = _repo_key_of(owner, repo)
+    repo_keys = _repo_keys_of(owner, repo)
     num = str(number)
-    group_map = _group_events_by_issue(repo_key)
+    group_map = _group_events_by_issue(repo_keys)
     events = group_map.get(num) or []
-    pipeline = _pipeline_from_archive(repo_key, num) or _pipeline_from_events(repo_key, num, events)
-    if not pipeline.get("segments") and num not in _issue_stage_map(repo_key):
+    pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
+    if not pipeline.get("segments") and num not in _issue_stage_map(repo_keys):
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
     return pipeline
