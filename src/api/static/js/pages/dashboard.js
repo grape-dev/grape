@@ -813,8 +813,13 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     if (!container) return;
     var row = document.createElement('div');
     row.className = 'adv-kv';
+    var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
+    var _hasVal = !!(value && String(value).trim());
+    var _vType = _hasVal ? 'password' : 'text';
+    var _vEye = _hasVal ? '👁' : '🙈';
     row.innerHTML = '<input class="adv-kv-key" placeholder="key" value="' + (key || '') + '">' +
-      '<input class="adv-kv-val" placeholder="value" value="' + (value || '') + '">' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + (value || '') + '">' +
+      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
       '<button class="adv-del" onclick="this.parentElement.remove()">×</button>';
     container.appendChild(row);
   };
@@ -1536,8 +1541,13 @@ function _enterCreateStandardMode(data, owner, name) {
     var row = document.createElement('div');
     row.className = 'adv-kv';
     row.style.cssText = 'display:flex;gap:8px;align-items:center';
+    var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
+    var _hasVal = !!(value && String(value).trim());
+    var _vType = _hasVal ? 'password' : 'text';
+    var _vEye = _hasVal ? '👁' : '🙈';
     row.innerHTML = '<input class="adv-kv-key" placeholder="key" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (key || '') + '">' +
-      '<input class="adv-kv-val" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (value || '') + '">' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (value || '') + '">' +
+      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
       '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>';
     container.appendChild(row);
   };

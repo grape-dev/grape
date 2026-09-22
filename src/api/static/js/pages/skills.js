@@ -488,8 +488,12 @@ function _renderSkillCard(s, fixedWidth) {
     let btns = '';
     if (s.scope !== 'official') {
       btns = `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.id}','${s.scope}')">${I18N.t('skills.action.delete')||'删除'}</button>`;
-      if (s.scope === 'user' && _currentRepo()) {
-        btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}')">${I18N.t('skills.action.convert_to_repo')||'转换'}</button>`;
+      if (_currentRepo()) {
+        if (s.scope === 'user') {
+          btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}','user')">转仓库</button>`;
+        } else if (s.scope === 'repo') {
+          btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}','repo')">转个人</button>`;
+        }
       }
     }
     return btns;
@@ -764,12 +768,17 @@ function deleteSkill(skillId, scope) {
   };
 }
 
-function convertSkill(skillName) {
+function convertSkill(skillName, sourceScope) {
   const repo = _currentRepo();
   if (!repo) {
-    if (app && app.showToast) app.showToast(I18N.t('skills.toast.select_repo_first')||'请先选择仓库');
+    if (app && app.showToast) app.showToast('请先选择仓库');
     return;
   }
+  sourceScope = sourceScope || 'user';
+  var isUserToRepo = sourceScope === 'user';
+  var sourceLabel = isUserToRepo ? '个人' : '仓库';
+  var targetLabel = isUserToRepo ? '仓库' : '个人';
+  var targetDesc = isUserToRepo ? '此仓库的仓库' : '个人';
   // 移除已有弹窗
   var existing = document.getElementById('convertSkillModal');
   if (existing) { existing.remove(); return; }
@@ -782,12 +791,12 @@ function convertSkill(skillName) {
     <div style="background:rgba(255,255,255,0.98);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.15);width:360px;max-width:90vw;overflow:hidden">
       <div style="padding:24px 24px 20px;text-align:center">
         <div style="width:48px;height:48px;border-radius:50%;background:rgba(0,113,227,0.1);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:22px">🔄</div>
-        <h3 style="font-size:16px;font-weight:600;color:#1d1d1f;margin-bottom:6px">${I18N.t('skills.confirm.convert_skill',{name:skillName,repo:repo})||'确认转换？'}</h3>
-        <div style="font-size:12px;color:#86868b">${I18N.t('skills.convert_skill_tip')||'将个人技能转换为此仓库的仓库技能'}</div>
+        <h3 style="font-size:16px;font-weight:600;color:#1d1d1f;margin-bottom:6px">确认复制「${skillName}」</h3>
+        <div style="font-size:12px;color:#86868b">将${sourceLabel}技能复制为${targetDesc}技能，原${sourceLabel}技能保留</div>
       </div>
       <div style="padding:0 24px 20px;display:flex;gap:10px">
-        <button onclick="document.getElementById('convertSkillModal').remove()" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">${I18N.t('skills.action.cancel')||'取消'}</button>
-        <button id="convertSkillConfirmBtn" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#0071e3;color:#fff;cursor:pointer">${I18N.t('skills.confirm_convert')||'确认转换'}</button>
+        <button onclick="document.getElementById('convertSkillModal').remove()" style="flex:1;padding:10px 16px;font-size:13px;border:1px solid #d1d1d6;border-radius:10px;background:transparent;color:#1d1d1f;cursor:pointer">取消</button>
+        <button id="convertSkillConfirmBtn" style="flex:1;padding:10px 16px;font-size:13px;border:none;border-radius:10px;background:#0071e3;color:#fff;cursor:pointer">确认复制</button>
       </div>
     </div>
   `;
@@ -798,15 +807,15 @@ function convertSkill(skillName) {
   document.getElementById('convertSkillConfirmBtn').onclick = function() {
     var btn = this;
     btn.disabled = true;
-    btn.textContent = I18N.t('skills.converting') || '转换中...';
-    API.post('/skills/convert', {skill_name: skillName, repo}).then(r => {
+    btn.textContent = '复制中...';
+    API.post('/skills/convert', {skill_name: skillName, repo, source_scope: sourceScope}).then(r => {
       modal.remove();
-      if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.convert_success')||'转换成功');
+      if (app && app.showToast) app.showToast(r.message || '复制成功');
       renderSkills();
     }).catch(e => {
       btn.disabled = false;
-      btn.textContent = I18N.t('skills.confirm_convert')||'确认转换';
-      if (app && app.showToast) app.showToast(I18N.t('skills.toast.convert_failed',{msg:e.message})||'转换失败');
+      btn.textContent = '确认复制';
+      if (app && app.showToast) app.showToast('复制失败：' + (e.message||''));
     });
   };
 }
