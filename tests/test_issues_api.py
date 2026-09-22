@@ -240,8 +240,8 @@ class TestCreateIssue:
         # mock _find_open_issue_by_title 返回已存在 Issue 编号（模拟同名已存在）
         # 期望：不再返回 409，而是继续创建新 Issue（created=True）
         with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
-             patch("src.api.routes.tasks._gitcode_api_with_refresh") as _mock_api, \
-             patch("src.api.routes.tasks.ensure_issue_task") as _mock_ensure:
+             patch("src.api.issues_center._gitcode_api_with_refresh") as _mock_api, \
+             patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
             _mock_api.return_value = {"number": 21}
             _mock_ensure.return_value = 21
             resp = client.post(
