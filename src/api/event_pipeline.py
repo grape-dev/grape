@@ -709,7 +709,7 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
                 skill=qa_skill, skill_id=0, skill_path=qa_skill,
                 repo_key=repo_key, issue_id=_pseudo_id,
                 event_seq=seq, event_type="a2a_event",
-                env_extra="{}", skill_files="{}",
+                env_extra=None,
                 pool_tag="qa", pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "",
             )
         from src.api.event_store import update_event_dispatched
