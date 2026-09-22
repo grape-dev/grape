@@ -310,7 +310,10 @@ def _skill_files_from_zip(zip_bytes: bytes, skill_name: str) -> dict:
 
 
 def _collect_server_env(user_id, account):
-    """服务端 DB 系凭据注入（user credentials / 账户 AK-SK），远端 worker 无本地 DB 也生效。"""
+    """服务端 DB 系凭据注入（user credentials / 账户 AK-SK），远端 worker 无本地 DB 也生效。
+
+    #219：huawei_cloud / codearts 的 AK-SK 不再经 env 注入（按需获取或自定义场景变量），跳过。
+    """
     env = {}
     if user_id and user_id > 0:
         try:
@@ -318,25 +321,10 @@ def _collect_server_env(user_id, account):
             for c in get_credentials(user_id):
                 provider = c.get("provider", "")
                 cfg = c.get("config", {})
-                if provider == "huawei_cloud":
-                    # cloud-deploy skill expects HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK
-                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
-                elif provider == "codearts":
-                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
-                else:
-                    for k, v in cfg.items():
-                        env[k.upper()] = str(v)
-        except Exception:
-            pass
-    if account:
-        try:
-            from src.config import get_account
-            acc = get_account(account)
-            for k in ("CODEARTS_CLI_AK", "CODEARTS_CLI_SK"):
-                if acc.get(k):
-                    env[k] = acc[k]
+                if provider in ("huawei_cloud", "codearts"):
+                    continue
+                for k, v in cfg.items():
+                    env[k.upper()] = str(v)
         except Exception:
             pass
     return env

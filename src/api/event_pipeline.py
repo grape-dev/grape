@@ -203,7 +203,6 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     # env_extra
     repository = evt.get("repository", "")
     env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
-    _inject_cloud_credentials(env_extra, repo_key)
 
     # repo_gitcode_token（按 provider 分流）
     repo_gitcode_token = ""
@@ -1665,7 +1664,6 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "ACCOUNT": evt.get("account") or repository,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
-    _inject_cloud_credentials(env_extra, repo_key)
     # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
     try:
         from src.runtime.repogit import _read_scene_work_branch
@@ -1679,10 +1677,6 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
         env_extra.update(_evt_ext)
-    # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
-    if agent_type == "sre":
-        # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
-        _apply_comment_repo_override(env_extra, evt)
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
     if agent_type == "coding":
         try:
@@ -1813,74 +1807,6 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "") -> Non
     except Exception as _e:
         from src.config import log
         log.warning(f"inject scene env failed: {_e}")
-
-
-def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:
-    """按仓库 owner 注入华为云 AK/SK 到任务环境变量（多用户隔离）。
-
-    cloud-deploy 技能读取 HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK 环境变量；
-    AK/SK 按 user_accounts.username（=GitCode login）分别存储，
-    仓库归谁所有就用谁的凭证（repo_owner → user_accounts）。
-    owner 未配置时注入空值，由技能侧报"请仓库 owner 配置华为云凭证"。
-    """
-    try:
-        from src.repo_key import split_owner_repo
-        owner, _repo = split_owner_repo(repo_key)
-        if not owner:
-            env_extra.setdefault("HUAWEICLOUD_SDK_AK", "")
-            env_extra.setdefault("HUAWEICLOUD_SDK_SK", "")
-            return env_extra
-        from src.user.db import get_user_account
-        acc = get_user_account(owner) or {}
-        ak = (acc.get("huawei_cloud_ak") or "").strip()
-        sk = (acc.get("huawei_cloud_sk") or "").strip()
-        env_extra["HUAWEICLOUD_SDK_AK"] = ak
-        env_extra["HUAWEICLOUD_SDK_SK"] = sk
-        if not (ak and sk):
-            log.warning(f"cloud credentials: repo owner '{owner}' has no Huawei Cloud AK/SK configured, injected empty")
-    except Exception as e:
-        log.warning(f"cloud credentials injection failed for {repo_key}: {e}")
-        env_extra.setdefault("HUAWEICLOUD_SDK_AK", "")
-        env_extra.setdefault("HUAWEICLOUD_SDK_SK", "")
-    return env_extra
-
-
-def _apply_comment_repo_override(env_extra: dict, evt: dict) -> None:
-    """v4.5：评论里指定发布目标仓库（「同步到 signway/xxx」/「to owner/repo」）→ 覆盖默认。
-
-    根据 repo_key provider 分流：GitHub 仓库默认覆盖 GITHUB_PUBLISH_REPO，
-    GitCode 仓库默认覆盖 GITCODE_PUBLISH_REPO。
-    """
-    import re
-    note = ""
-    payload = evt.get("payload") or {}
-    if isinstance(payload, dict):
-        note = str(payload.get("object_attributes", {}).get("note") or "")
-    if not note:
-        return
-    # 从 evt 获取 repo_key 判断 provider
-    _rk = evt.get("repo_key") or ""
-    _is_github = _is_github_repo(_rk)
-    m = re.search(r"(?:到|同步到|push\s*到|to)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", note)
-    if m:
-        repo = m.group(1)
-        # 按平台覆盖（评论提到 github/gitcode 时精确覆盖；否则按 repo_key provider 覆盖）
-        low = note.lower()
-        if "github" in low:
-            env_extra["GITHUB_PUBLISH_REPO"] = repo
-        if "gitcode" in low:
-            env_extra["GITCODE_PUBLISH_REPO"] = repo
-        if "github" not in low and "gitcode" not in low:
-            # 未明确指定平台 → 按 repo_key provider 默认覆盖
-            if _is_github:
-                env_extra["GITHUB_PUBLISH_REPO"] = repo
-            else:
-                env_extra["GITCODE_PUBLISH_REPO"] = repo
-                env_extra["GITHUB_PUBLISH_REPO"] = repo
-    # v4.6：评论指定 ClawHub 组织发布者（「发布到组织 @my-org」/「owner: my-org」/「ownerHandle: xxx」）
-    mo = re.search(r"(?:组织\s*@|owner(?:handle)?\s*[:：]\s*@?)([A-Za-z0-9_.-]+)", note, re.IGNORECASE)
-    if mo:
-        env_extra["CLAWHUB_OWNER_HANDLE"] = mo.group(1)
 
 
 def get_prompt_context(repo_key: str) -> str:
@@ -2188,7 +2114,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         "REPO_FULL_NAME": repository,
         "ACCOUNT": exec_account,
     }
-    _inject_cloud_credentials(env_extra, repo_key)
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     try:
         from src.runtime.repogit import _read_scene_work_branch
@@ -2198,11 +2123,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception:
         pass
     _inject_scene_env(env_extra, repo_key, issue_id)
-    # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
-    # （direct 模式同样需要——A2A 交办 sre 走本路径，见 _enqueue_pipeline_task 同款逻辑）
-    if agent_type == "sre":
-        # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
-        _apply_comment_repo_override(env_extra, evt)
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
     if agent_type == "coding":
         try:
