@@ -31,6 +31,96 @@ def _num_from_issue_id(issue_id: str) -> str:
     return m.group(1) if m else ""
 
 
+def _query_pr_subscription_events(repo_key: str) -> list[dict]:
+    """查 PR 订阅事件（issue_id LIKE '#pr_%'），按 PR 号聚合为伪卡片。"""
+    from src.session_manager import db, db_lock
+    from src.repo_key import from_repo_key
+    items = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, result, scene_id "
+                "FROM events WHERE repo_key=? AND issue_id LIKE ? ORDER BY seq DESC",
+                (repo_key, "#pr_%"))
+            rows = c.fetchall()
+        except Exception:
+            rows = []
+    if not rows:
+        return items
+    # 按 PR 号聚合（取最新一条作为卡片状态，同时保留全量审查历史）
+    _pr_map = {}  # pr_num → latest event
+    _pr_history = {}  # pr_num → [event, ...]
+    for r in rows:
+        iid = r[1] or ""
+        # #pr_{pr_num}_{scene_id} → 取 pr_num
+        parts = iid.replace("#pr_", "").split("_", 1)
+        pr_num = int(parts[0]) if parts and parts[0].isdigit() else 0
+        if not pr_num:
+            continue
+        _ev = {
+            "seq": r[0], "issue_id": iid, "event_type": r[2],
+            "agent_type": r[3] or "", "title": r[4] or "",
+            "actor": r[5] or "", "summary": r[6] or "",
+            "status": r[7], "created_at": normalize_event_time(r[8]),
+            "result": r[9] or "",
+            "scene_id": r[10] if len(r) > 10 else "",
+        }
+        if pr_num not in _pr_map:
+            _pr_map[pr_num] = _ev
+        _pr_history.setdefault(pr_num, []).append(_ev)
+    # 查场景名缓存
+    from src.api.pipeline_config import get_pipeline_config
+    _scene_name_cache = {}
+    def _get_scene_name(sid):
+        if not sid:
+            return ""
+        if sid not in _scene_name_cache:
+            cfg = get_pipeline_config(sid, repo_key=repo_key)
+            _scene_name_cache[sid] = (cfg or {}).get("name", sid)
+        return _scene_name_cache[sid]
+
+    for pr_num, ev in _pr_map.items():
+        _status = ev["status"]
+        # 映射到需求中心状态
+        if _status == "running":
+            _task_status = "processing"
+        elif _status == "completed":
+            _task_status = "completed"
+        elif _status == "failed":
+            _task_status = "cancelled"
+        else:
+            _task_status = "pending"
+        items.append({
+            "id": -pr_num,  # 负数避免跟真实 task id 冲突
+            "issue_number": pr_num,
+            "title": ev["title"],
+            "task_description": "",
+            "conversation_id": "",
+            "status": _task_status,
+            "completed_reason": "",
+            "created_at": ev["created_at"],
+            "completed_at": "",
+            "is_subtask_mode": 0,
+            "parent_issue_number": 0,
+            "parent_issue_id": "",
+            "scene_id": "",
+            "scene_name": "",
+            "scene_source": "",
+            "stage": "",
+            "is_running": _status == "running",
+            "agent_statuses": [],
+            "repo_key": from_repo_key(repo_key),
+            "is_pr_event": True,
+            "pr_seq": ev["seq"],
+            "qa_history": [{**qa, "scene_name": _get_scene_name(qa.get("scene_id", ""))} for qa in _pr_history.get(pr_num, [])],
+            "events_count": sum(1 for r in rows if r[1] and r[1].replace("#pr_", "").split("_", 1)[0] == str(pr_num)),
+            "latest_event": {"seq": ev["seq"], "status": ev["status"], "title": ev["title"], "created_at": ev["created_at"]},
+            "assignee": ev["actor"],
+        })
+    return items
+
+
 def _repo_key_of(owner: str, repo: str) -> str:
     from src.repo_key import to_repo_key
     return to_repo_key(f"{owner}/{repo}")
@@ -271,7 +361,7 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
     设置（高优先级覆盖）；若放行 tk_ 会话 token，Agent 执行期可随意改状态，与 pipeline 驱动的 stage
     脱钩→冲突/不一致，干扰任务执行。故仅用户（JWT / grape_）可改；读（GET /status，轮询 wait 用）保持 dual。
     """
-    from src.api.routes.tasks import _TASK_STATUS_FLOWS
+    from src.api.issues_center import _TASK_STATUS_FLOWS
     from src.session_manager import db, db_lock
     ns = (body.status or "").strip()
     if ns not in _TASK_STATUS_FLOWS:
@@ -302,6 +392,115 @@ class _IssueConfirmBody(BaseModel):
     confirmation: str = "user_confirmed"
 
 
+def _close_vcs_issues(repo_key: str, issue_number, user: dict) -> dict:
+    """confirm-done 后同步关闭 GitCode/GitHub Issue（降级不阻断）。
+
+    Returns:
+        {"gitcode": "success|failed|skipped", "github": "success|failed|skipped"}
+        — gitcode 始终尝试关闭（无 issue_number 时 skipped）；github 仅当 repo_key
+        以 github: 开头时尝试关闭，否则 skipped。
+    """
+    result = {"gitcode": "skipped", "github": "skipped"}
+    if not issue_number:
+        return result
+    try:
+        issue_number = int(issue_number)
+    except (TypeError, ValueError):
+        return result
+
+    is_github = repo_key.startswith("github:")
+
+    # --- 确定 GitCode 侧的 repo_key 与 issue（GitHub 仓库时 GitCode 侧 skip）---
+    if not is_github:
+        result["gitcode"] = _try_close_issue_for_repo(repo_key, issue_number, user, is_github=False)
+
+    # --- GitHub 侧：repo_key 本身是 github:，或需要查找镜像 ---
+    if is_github:
+        result["github"] = _try_close_issue_for_repo(repo_key, issue_number, user, is_github=True)
+    else:
+        # GitCode 仓库可能绑定了 GitHub 镜像，尝试查找并关闭镜像 Issue
+        _gh_rk = _find_github_mirror_repo_key(repo_key)
+        if _gh_rk:
+            result["github"] = _try_close_issue_for_repo(_gh_rk, issue_number, user, is_github=True)
+        # 无镜像 → 保持 skipped
+
+    return result
+
+
+def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_github: bool) -> str:
+    """对单个 repo_key 执行幂等关闭 Issue，返回 success/failed/skipped。"""
+    from src.repo_key import parse_repo_key
+    provider, owner, repo = parse_repo_key(repo_key)
+    if not owner or not repo:
+        return "skipped"
+
+    # 获取 token
+    token = ""
+    try:
+        if is_github:
+            # 优先用用户个人 GitHub token（与 clarify_issue 一致），其次 bot token
+            from src.user.db import get_user_github_token as _get_ugh
+            from src.user.db import get_github_token as _get_gh
+            token = (_get_ugh(user["id"]) if user.get("id") else "") or _get_gh(repo_key=repo_key) or ""
+        else:
+            from src.api.deps import get_user_token_with_refresh
+            token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    except Exception as e:
+        log.warning(f"confirm-done close_issue: get token for {repo_key} failed: {e}")
+
+    if not token:
+        log.info(f"confirm-done close_issue: no token for {repo_key}, skipping")
+        return "skipped"
+
+    from src.vcs.api_client import VcsApiClient
+    client = VcsApiClient(provider, token, owner, repo)
+
+    # 幂等检查：已 closed 则跳过
+    try:
+        state = client.get_issue_state(issue_number)
+        if state == "closed":
+            log.info(f"confirm-done: {repo_key}#{issue_number} already closed, skipping")
+            return "skipped"
+    except Exception as e:
+        log.warning(f"confirm-done: get_issue_state {repo_key}#{issue_number} failed: {e}")
+        # 查询失败不阻断关闭尝试
+
+    # 执行关闭
+    try:
+        resp = client.close_issue(issue_number)
+        if isinstance(resp, dict) and "error" not in resp:
+            log.info(f"confirm-done: closed {repo_key}#{issue_number}")
+            return "success"
+        log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} → {resp}")
+        return "failed"
+    except Exception as e:
+        log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} exception: {e}")
+        return "failed"
+
+
+def _find_github_mirror_repo_key(repo_key: str) -> str:
+    """查找 GitCode 仓库绑定的 GitHub 镜像 repo_key。
+
+    managed_repos 表中同一 owner/repo 可能同时存在 gitcode: 和 github: 两条记录，
+    通过 full_name 匹配。找不到返回空串。
+    """
+    try:
+        from src.repo_key import split_owner_repo
+        from src.session_manager import db, db_lock
+        owner, repo = split_owner_repo(repo_key)
+        if not owner or not repo:
+            return ""
+        gh_key = f"github:{owner}/{repo}"
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1", (gh_key,))
+            row = c.fetchone()
+        return row[0] if row else ""
+    except Exception as e:
+        log.warning(f"confirm-done: find github mirror for {repo_key} failed: {e}")
+        return ""
+
+
 @router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="Confirm issue done", description="Developer confirms the requirement is done: status -> completed, stage -> done (idempotent in terminal state).")
 async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
     """开发者确认需求完成：status→completed、stage→done（任意阶段可确认，终态幂等）。"""
@@ -316,7 +515,9 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
         _repo_key, _issue_num, _status = row[0], row[1], row[2]
         if _status == 'completed' or _status == 'done':
-            return {"ok": True, "already_done": True}
+            # 幂等：已关闭的 Issue 再次 confirm-done 不重复调用关闭 API
+            return {"ok": True, "already_done": True,
+                    "issue_closed": {"gitcode": "skipped", "github": "skipped"}}
         if _status == 'cancelled':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "已取消需求不可确认完成"})
         c.execute(
@@ -326,7 +527,9 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
             set_issue_stage(_repo_key, f"#{_issue_num}", "done", "user")
         db.commit()
     log.info(f"Issue #{issue_id} confirmed done by {body.confirmation}")
-    return {"ok": True, "issue_id": issue_id, "status": "completed", "stage": "done"}
+    _issue_closed = _close_vcs_issues(_repo_key, _issue_num, user)
+    return {"ok": True, "issue_id": issue_id, "status": "completed", "stage": "done",
+            "issue_closed": _issue_closed}
 
 
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
@@ -496,7 +699,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
 @router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue clarification history", description="Fetches the agent's clarification messages for the Issue.")
 async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
     """拉取 agent 在该 Issue 上的澄清消息。"""
-    from src.api.routes.tasks import _get_task_issue_info, _find_agent_task_ids
+    from src.api.issues_center import _get_task_issue_info, _find_agent_task_ids
     from src.session_manager import db, db_lock
     info = _get_task_issue_info(issue_id)
     if not info:
@@ -541,7 +744,7 @@ class _IssueClarifyBody(BaseModel):
 @router.post("/{issue_id}/clarify", operation_id="issues_clarify", summary="Reply issue clarification", description="Developer replies to an agent clarification: posts a GitCode issue comment and writes to the task conversation.")
 async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Depends(require_no_session_token)):
     """开发者在需求中心回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。"""
-    from src.api.routes.tasks import _get_task_issue_info, _gitcode_api_with_refresh, _is_gitcode_401
+    from src.api.issues_center import _get_task_issue_info, _gitcode_api_with_refresh, _is_gitcode_401
     from src.session_manager import db, db_lock
     msg = (body.message or "").strip()
     if not msg:
@@ -627,7 +830,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
 async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
                                   user: dict = Depends(require_no_session_token)):
     """上传附件到需求关联的附件目录。"""
-    from src.api.routes.tasks import (_attach_save, _ATTACH_ALL_EXTS, _ATTACH_MAX_SIZE)
+    from src.api.issues_center import (_attach_save, _ATTACH_ALL_EXTS, _ATTACH_MAX_SIZE)
     from src.repo_key import split_owner_repo
     from src.session_manager import db, db_lock
     with db_lock:
@@ -656,7 +859,7 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
 @router.get("/{issue_id}/attachments", operation_id="issues_list_attachments", summary="List issue attachments", description="Lists attachments of an issue.")
 def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """列出需求关联的附件文件列表。"""
-    from src.api.routes.tasks import _attach_list
+    from src.api.issues_center import _attach_list
     from src.repo_key import split_owner_repo
     from src.session_manager import db, db_lock
     with db_lock:
@@ -676,7 +879,7 @@ def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_
 @router.delete("/{issue_id}/attachments/{filename}", operation_id="issues_delete_attachment", summary="Delete issue attachment", description="Deletes an attachment file by UUID filename.")
 def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(require_no_session_token)):
     """删除指定附件文件。filename 为 UUID 文件名。"""
-    from src.api.routes.tasks import _attach_delete
+    from src.api.issues_center import _attach_delete
     from src.repo_key import split_owner_repo
     from src.session_manager import db, db_lock
     import re
@@ -752,7 +955,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     返回当前用户的需求（Issue 卡片行，user_id 过滤）+ 富化
     （scene/stage/is_running/agent_statuses）。
     """
-    from src.api.routes.tasks import _query_tasks, _build_assignee_filter
+    from src.api.issues_center import _query_tasks, _build_assignee_filter
     from src.repo_key import to_repo_key
     if repo_key:
         repo_key = to_repo_key(repo_key)
@@ -787,7 +990,7 @@ def list_repo_issues(owner: str, repo: str,
     - 排序按 created_at + 状态优先级（mode 可切换纯时间序）
     - 行为对齐原 issues_list（仓库 public 读聚合，无显式仓库权限门禁）
     """
-    from src.api.routes.tasks import _query_tasks, _build_assignee_filter
+    from src.api.issues_center import _query_tasks, _build_assignee_filter
     repo_key = _repo_key_of(owner, repo)
     clauses = ["repo_key=?"]
     params: list = [repo_key]
@@ -818,6 +1021,11 @@ def list_repo_issues(owner: str, repo: str,
         evs = group_map.get(str(_num or "")) or []
         it["events_count"] = len(evs)
         it["latest_event"] = evs[-1] if evs else None
+
+    # PR 订阅事件：从 events 表查 issue_id LIKE '#pr_%' 的记录，构造伪卡片混入列表
+    pr_items = _query_pr_subscription_events(repo_key)
+    issues.extend(pr_items)
+
     return {"issues": issues, "total": len(issues)}
 
 
@@ -829,7 +1037,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     body: {repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode?}
     repo_key 可选（缺省按 {owner}/{repo} 拼）。返回 {ok, issue_number, task_id, created, ...}
     """
-    from src.api.routes.tasks import TaskCreateBody, create_task_via_issue
+    from src.api.issues_center import TaskCreateBody, create_task_via_issue
     _body = body or {}
     b = TaskCreateBody(
         repo_key=_body.get("repo_key") or f"{owner}/{repo}",

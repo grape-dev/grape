@@ -1423,3 +1423,64 @@
 [data-theme="apple"][data-theme-mode="dark"] .help-drawer-close:hover {
   background: rgba(255,255,255,0.18);
 }
+
+/* ── 14. Issue #207: Sidebar 折叠按钮 — Liquid Glass Style ── */
+[data-theme="apple"] .sb-toggle {
+  border-radius: 980px;
+  background: rgba(0,0,0,0.04);
+  backdrop-filter: blur(10px) saturate(180%);
+  -webkit-backdrop-filter: blur(10px) saturate(180%);
+  border: 0.5px solid rgba(0,0,0,0.06);
+  color: var(--t2);
+  transition: all var(--apple-transition);
+}
+[data-theme="apple"] .sb-toggle:hover {
+  background: rgba(0,113,227,0.1);
+  color: var(--a);
+  transform: scale(1.08);
+  box-shadow: 0 2px 12px rgba(0,113,227,0.2);
+}
+[data-theme="apple"] .sb-toggle:active {
+  transform: scale(0.92);
+}
+[data-theme="apple"] .sb-toggle.collapsed {
+  color: var(--a);
+  background: rgba(0,113,227,0.1);
+}
+/* Apple 主题：sidebar 折叠过渡曲线与主题一致 */
+[data-theme="apple"] .sb {
+  transition: width var(--apple-transition);
+}
+/* 窄屏 overlay 抽屉 — Liquid Glass 阴影与圆角 */
+@media(max-width:768px){
+  [data-theme="apple"] .sb-ov {
+    background: rgba(0,0,0,0.25);
+    backdrop-filter: blur(8px) saturate(150%);
+    -webkit-backdrop-filter: blur(8px) saturate(150%);
+  }
+  [data-theme="apple"] .sb {
+    border-right: 0.5px solid rgba(0,0,0,0.08);
+    border-radius: 0 24px 24px 0;
+    box-shadow: 12px 0 48px rgba(0,0,0,0.12);
+    transition: transform var(--apple-transition);
+  }
+}
+/* Dark mode: 折叠按钮 */
+[data-theme="apple"][data-theme-mode="dark"] .sb-toggle {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.1);
+  color: var(--t3);
+}
+[data-theme="apple"][data-theme-mode="dark"] .sb-toggle:hover {
+  background: rgba(0,113,227,0.25);
+  color: #5ac8fa;
+}
+[data-theme="apple"][data-theme-mode="dark"] .sb-toggle.collapsed {
+  color: #5ac8fa;
+  background: rgba(0,113,227,0.2);
+}
+[data-theme="apple"][data-theme-mode="auto"] .sb-toggle {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.1);
+  color: var(--t3);
+}

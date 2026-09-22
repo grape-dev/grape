@@ -17,8 +17,8 @@ def ob():
 
 @pytest.fixture(scope="module")
 def parts():
-    from src.api.routes import tasks
-    return tasks
+    from src.api import issues_center as parts
+    return parts
 
 
 def _write_default_template(tmp_path, monkeypatch, tasks_list):
@@ -131,7 +131,7 @@ class TestCreateStandardTask:
         return created
 
     def test_create_and_then_reuse(self, parts, monkeypatch):
-        from src.api.routes.tasks import create_standard_task
+        from src.api.issues_center import create_standard_task
         created = self._patch_http(parts, monkeypatch)
         # 桩 ensure_issue_task：隔离真实 DB
         monkeypatch.setattr(parts, "ensure_issue_task", lambda *a, **k: 1)

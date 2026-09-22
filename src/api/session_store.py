@@ -118,11 +118,15 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
             if ensure_row:
                 # 建档最小行（幂等：仅当无该卡片行时 INSERT；后再 UPDATE 收编字段）。
                 # SQLite 与 MySQL 均支持 INSERT..SELECT..WHERE NOT EXISTS。
+                # user_id 按 assignee 解析（unified_user_mapping 可映射则落真实 id，否则 0），
+                # 避免 stage/scene 先行建档把归属错存为 0（issues-mine-user-id-zero-fix-design.md）。
                 c.execute(
                     "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) "
-                    "SELECT 0, ?, ?, ?, 'active' WHERE NOT EXISTS "
+                    "SELECT COALESCE((SELECT m.user_id FROM unified_user_mapping m "
+                    "                 WHERE m.gitcode_user = ? AND m.user_id > 0 LIMIT 1), 0), "
+                    "?, ?, ?, 'active' WHERE NOT EXISTS "
                     "(SELECT 1 FROM issue WHERE repo_key=? AND issue_number=?)",
-                    (assignee, repo_key, _num, repo_key, _num))
+                    (assignee, assignee, repo_key, _num, repo_key, _num))
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
             else:
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)

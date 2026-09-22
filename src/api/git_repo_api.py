@@ -339,6 +339,21 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
                     _repo_token(owner, repo, user, p), payload)
 
 
+@router.post("/{owner}/{repo}/issues/{number}/close", operation_id="gitrepo_issues_close", summary="Close issue", description="Closes an issue on the Git provider. Provider-adapted: GitHub PATCH state=closed; GitCode PATCH state=close with the required repo/title (title auto-fetched). Returns the updated issue, or 502 if the provider does not apply the close.")
+def close_issue(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
+                p: str = Depends(_provider)):
+    """关闭 Issue（对外接口，供 grape-cli / agent 使用）。平台差异复用 VcsApiClient.close_issue（#209 实测）：
+    - GitHub：PATCH {"state": "closed"}
+    - GitCode：PATCH body 必填 repo+title、state 值为 close（reopen/close），title 需先 GET 取回。
+    """
+    from src.vcs.api_client import VcsApiClient
+    client = VcsApiClient(p, _repo_token(owner, repo, user, p), owner, repo)
+    resp = client.close_issue(number)
+    if isinstance(resp, dict) and resp.get("error"):
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"关闭 Issue 失败: {resp.get('error')}"})
+    return resp
+
+
 @router.get("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_list", summary="List issue comments", description="Lists comments on an issue.")
 def list_issue_comments(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
                         p: str = Depends(_provider)):

@@ -17,6 +17,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from unittest.mock import patch, MagicMock
 
 from src.api.routes import tasks as tasks_mod
+from src.api import issues_center as ic
 from src.session_manager import db, db_lock
 from src.user import db as user_db
 from fastapi.testclient import TestClient
@@ -52,14 +53,14 @@ def _rows(repo_key=REPO, issue=1):
 def test_get_user_id_warning_on_not_found():
     """_get_user_id_by_gitcode 查找失败时记录 warning 日志"""
     _cleanup_issues()
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", wraps=tasks_mod._get_user_id_by_gitcode) as _:
+    with patch.object(ic, "_get_user_id_by_gitcode", wraps=ic._get_user_id_by_gitcode) as _:
         # 临时插入一条映射确保有数据
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='__test_nonexist_178__'")
             db.commit()
         with self_logger() as mock_log:
-            result = tasks_mod._get_user_id_by_gitcode("__test_nonexist_178__")
+            result = ic._get_user_id_by_gitcode("__test_nonexist_178__")
         assert result is None
         # 验证 warning 被调用
         warned = any("not found" in str(call) for call in mock_log.warning.call_args_list)
@@ -70,7 +71,7 @@ def test_get_user_id_warning_on_exception():
     """_get_user_id_by_gitcode 异常时记录 warning 日志"""
     with self_logger() as mock_log:
         with patch.object(tasks_mod.db, "cursor", side_effect=Exception("DB down")):
-            result = tasks_mod._get_user_id_by_gitcode("anyone")
+            result = ic._get_user_id_by_gitcode("anyone")
         assert result is None
         warned = any("query failed" in str(call) for call in mock_log.warning.call_args_list)
         assert warned, f"expected warning log for exception, got: {mock_log.warning.call_args_list}"
@@ -81,9 +82,9 @@ def test_get_user_id_warning_on_exception():
 def test_ensure_sender_fallback_when_no_assignee():
     """assignee 为空 + sender 存在 → assignee 设为 sender（非 owner）"""
     _cleanup_issues()
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=99), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="T"):
-        tasks_mod.ensure_issue_task(REPO, 10, title="T", assignee="",
+    with patch.object(ic, "_get_user_id_by_gitcode", return_value=99), \
+         patch.object(ic, "_get_issue_title", return_value="T"):
+        ic.ensure_issue_task(REPO, 10, title="T", assignee="",
                                     event_type="issue_opened", sender="webhook_operator")
     rows = _rows(REPO, 10)
     assert rows and rows[0][1] == "webhook_operator"  # assignee = sender, not owner
@@ -93,10 +94,10 @@ def test_ensure_sender_fallback_when_no_assignee():
 def test_ensure_owner_fallback_with_warning_when_no_sender():
     """assignee 为空 + sender 也为空 → fallback owner + warning 日志"""
     _cleanup_issues()
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", side_effect=lambda u: 7 if u == "owner" else None), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="T"), \
+    with patch.object(ic, "_get_user_id_by_gitcode", side_effect=lambda u: 7 if u == "owner" else None), \
+         patch.object(ic, "_get_issue_title", return_value="T"), \
          self_logger() as mock_log:
-        tasks_mod.ensure_issue_task(REPO, 11, title="T", assignee="",
+        ic.ensure_issue_task(REPO, 11, title="T", assignee="",
                                     event_type="issue_opened", sender="")
     rows = _rows(REPO, 11)
     assert rows and rows[0][1] == "owner"  # fallback to owner
@@ -108,9 +109,9 @@ def test_ensure_owner_fallback_with_warning_when_no_sender():
 def test_ensure_assignee_takes_priority_over_sender():
     """assignee 非空时，sender 被忽略"""
     _cleanup_issues()
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=42), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="T"):
-        tasks_mod.ensure_issue_task(REPO, 12, title="T", assignee="alice",
+    with patch.object(ic, "_get_user_id_by_gitcode", return_value=42), \
+         patch.object(ic, "_get_issue_title", return_value="T"):
+        ic.ensure_issue_task(REPO, 12, title="T", assignee="alice",
                                     event_type="issue_opened", sender="bob")
     rows = _rows(REPO, 12)
     assert rows and rows[0][1] == "alice"  # assignee wins over sender
@@ -166,8 +167,8 @@ def test_user_a_creates_task_assignee_is_a():
     _cleanup_issues("gitcode:test_ab/demo")
     client = TestClient(app)
     with patch("src.user.repo_manager._req", side_effect=_req_fake), \
-         patch("src.api.routes.tasks._post_gitcode_issue", side_effect=_issue_post_fake), \
-         patch("src.api.routes.tasks._gitcode_api_with_refresh", side_effect=lambda *a, **kw: {"number": 178}):
+         patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake), \
+         patch("src.api.issues_center._gitcode_api_with_refresh", side_effect=lambda *a, **kw: {"number": 178}):
         r = client.post("/api/issues/test_ab/demo", headers=_headers_a,
                         json={"repo_key": "test_ab/demo", "title": "用户A的任务", "description": "desc"})
     assert r.status_code == 200, r.text
@@ -185,8 +186,8 @@ def test_user_b_creates_task_assignee_is_b():
     _cleanup_issues("gitcode:test_ab/demo")
     client = TestClient(app)
     with patch("src.user.repo_manager._req", side_effect=_req_fake), \
-         patch("src.api.routes.tasks._post_gitcode_issue", side_effect=_issue_post_fake), \
-         patch("src.api.routes.tasks._gitcode_api_with_refresh", side_effect=lambda *a, **kw: {"number": 179}):
+         patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake), \
+         patch("src.api.issues_center._gitcode_api_with_refresh", side_effect=lambda *a, **kw: {"number": 179}):
         r = client.post("/api/issues/test_ab/demo", headers=_headers_b,
                         json={"repo_key": "test_ab/demo", "title": "用户B的任务", "description": "desc"})
     assert r.status_code == 200, r.text
@@ -207,10 +208,10 @@ class _LoggerCapture:
         self.warning = MagicMock()
     def __enter__(self):
         self._orig = tasks_mod.log
-        tasks_mod.log = MagicMock(warning=self.warning, info=MagicMock(), debug=MagicMock())
+        ic.log = tasks_mod.log = MagicMock(warning=self.warning, info=MagicMock(), debug=MagicMock())
         return tasks_mod.log
     def __exit__(self, *a):
-        tasks_mod.log = self._orig
+        ic.log = tasks_mod.log = self._orig
 
 
 def self_logger():

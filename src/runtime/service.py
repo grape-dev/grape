@@ -643,6 +643,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             env["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=task_id, repo_key=repo_key,
                 agent_type=agent_type, user_id=_tk_uid)
+            # CLI 命令按 token 作用域过滤：本任务持 tk_ 会话 token → 只暴露 dual+session_only 命令
+            # （见 grape-cli-mode-filter-design.md；chat 与 devops 任务均适用）
+            env["GRAPE_CLI_MODE"] = "WORKER"
         except Exception as e:
             log.warning(f"enqueue: session token issue failed for {task_id}: {e}")
     _server_url = server_url or ""

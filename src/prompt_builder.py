@@ -522,7 +522,7 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
     # 通过 tasks._attach_list 获取附件列表（自动适配 OBS/本地）
     # 注意：_attach_list 尚未实现（远端 bbca2f9a 引用但未定义），容错跳过
     try:
-        from src.api.routes.tasks import _attach_list
+        from src.api.issues_center import _attach_list
     except ImportError:
         return
     _attachments = _attach_list(_owner, _rname, _issue_num)
@@ -640,6 +640,10 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             parts.append(f"Title: {title}")
         if body != '""':
             parts.append(f"Body: {body}")
+
+    # PR 订阅场景提示
+    if evt.get("_pr_sub_scene_id"):
+        parts.append(f"\n## PR 审查任务\n本任务来自 PR 订阅场景，PR 无关联 Issue。请审查 PR #{number} 的变更内容，结果回帖到 PR 评论。")
 
     # 附件注入：按 agent_type 分级（统一走文件系统扫描，不再从 body 正则匹配）
     _inject_attachments_by_role(parts, _rk, evt.get("issue_id", "") or str(number or ""), agent_type, runtime_id)

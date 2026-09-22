@@ -39,11 +39,12 @@ def append_event(repo_key: str, event_type: str, title: str = "",
                  issue_id: str = "", agent_type: str = "", source: str = "gitcode",
                  actor: str = "", summary: str = "",
                  payload: dict = None, status: str = "completed",
-                 result: str = "") -> int:
+                 result: str = "", scene_id: str = "") -> int:
     """写入事件到 events 表，返回 seq。result 为 Agent 答复结论（纯文本）。
 
     issue_id 保证非空：传入为空时按 payload → result → title/summary 顺序兜底解析，
     仍无法解析则用 #0 表示"无关联"。
+    scene_id: PR 订阅等场景级事件持久化场景ID，空字符串表示无关联场景。
     """
     # 兜底解析 issue_id
     if not issue_id:
@@ -69,9 +70,9 @@ def append_event(repo_key: str, event_type: str, title: str = "",
         c = db.cursor()
         try:
             c.execute(
-                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
-                 json.dumps(payload or {}), status, result)
+                 json.dumps(payload or {}), status, result, scene_id)
             )
             db.commit()
             _seq = c.lastrowid

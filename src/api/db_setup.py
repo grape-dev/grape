@@ -539,6 +539,7 @@ CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
     is_active   INTEGER DEFAULT 1,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
+    scene_type  TEXT DEFAULT 'standard',  -- standard | pr_subscription
     UNIQUE (scene_id, repo_key)
 )
 """
@@ -735,7 +736,8 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
     last_run_at     TEXT DEFAULT '',                     -- 最近触发时间（UTC）
     next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间（UTC）
     created_at      TEXT DEFAULT (datetime('now')),
-    updated_at      TEXT DEFAULT (datetime('now'))
+    updated_at      TEXT DEFAULT (datetime('now')),
+    created_by      INTEGER DEFAULT 0           -- 创建者 user_id（autopilot 用此查 gitcode_user 绕过 self_loop）
 )
 """
 
@@ -1016,6 +1018,14 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_task ON autopilot_executions(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_status ON autopilot_executions(status)",
     ]
+    # autopilot_tasks.created_by 迁移
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "autopilot_tasks", "created_by", "INTEGER DEFAULT 0")
+            db.commit()
+    except Exception as e:
+        log.warning(f"autopilot_tasks created_by migration failed: {e}")
     for idx in indexes:
         try:
             with db_lock:
@@ -2258,6 +2268,7 @@ def _migrate_tables():
         "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN scene_id TEXT DEFAULT ''",
         "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
         # ===== 发布配置(skill-publish v1.1)=====
         # ===== OBS 技能库(obs-skill-storage-design.md §4)=====
@@ -2912,10 +2923,34 @@ def _migrate_tables():
             _ensure_column(c, "devops_pipeline_scene", "advanced_options", "TEXT DEFAULT '{}'")
             _ensure_column(c, "devops_pipeline_scene", "created_by", "TEXT DEFAULT ''")
             _ensure_column(c, "devops_pipeline_scene", "icon", "TEXT DEFAULT ''")
+            _ensure_column(c, "devops_pipeline_scene", "scene_type", "TEXT DEFAULT 'standard'")
             db.commit()
-            log.info("Added devops_pipeline_scene.advanced_options + created_by + icon columns")
+            log.info("Added devops_pipeline_scene.advanced_options + created_by + icon + scene_type columns")
     except Exception as e:
-        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by column failed: {e}")
+        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by/scene_type column failed: {e}")
+    # ===== PR 订阅附加能力：场景级开关（替代独立 scene_type='pr_subscription'）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "devops_pipeline_scene", "pr_subscription_enabled", "INTEGER NOT NULL DEFAULT 0")
+            db.commit()
+            # 数据迁移：已有 pr_subscription 场景 → standard + pr_subscription_enabled=1
+            c.execute("UPDATE devops_pipeline_scene SET pr_subscription_enabled=1, scene_type='standard' WHERE scene_type='pr_subscription'")
+            _migrated = c.rowcount
+            db.commit()
+            if _migrated:
+                log.info(f"Migrated {_migrated} pr_subscription scenes → standard + pr_subscription_enabled=1")
+    except Exception as e:
+        log.warning(f"Add devops_pipeline_scene.pr_subscription_enabled column failed: {e}")
+    # ===== events 表补 scene_id 列（PR 订阅场景持久化）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "scene_id", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added events.scene_id column")
+    except Exception as e:
+        log.warning(f"Add events.scene_id column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:

@@ -225,14 +225,19 @@ class TestScenePoolEngineIds:
 
 
 class TestRepoUserIdIssueCreator:
-    """回归测试：_repo_user_id(repo_key, issue_creator=...) 4 场景（Issue #116）。
+    """回归测试：_repo_user_id(repo_key, issue_creator=...) 场景（Issue #116 / #211）。
 
     PR #123 修复：6 处调用点补传 issue_creator，使多用户仓库下 _repo_user_id
     优先按 Issue 创建者反查 unified_user_mapping，而非取 user_repos 中 user_id 最小行。
+
+    Issue #211 增强：增加 user_accounts.username 二级回退 + user_repos 按创建者过滤，
+    确保已注册 grape 的项目组成员能正确映射而非落为 user_id=0。
     """
 
     REPO = "multiuser/demo"
     GITCODE_REPO = "gitcode:multiuser/demo"
+    # 测试专用 user_accounts 用户名前缀，避免与真实数据冲突
+    _TEST_USERS = []  # [(username, gitcode_id), ...] 记录创建的测试用户
 
     def _seed(self, users, mapping=None):
         """插入 user_repos 多用户 + 可选 unified_user_mapping 记录。"""
@@ -251,15 +256,44 @@ class TestRepoUserIdIssueCreator:
                         (uid, gcu))
             db.commit()
 
+    def _seed_user_account(self, username, gitcode_id="", nickname=""):
+        """插入 user_accounts 测试用户，返回 user_id。"""
+        import hashlib
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO user_accounts (username, password_hash, gitcode_id, nickname) "
+                "VALUES (?, ?, ?, ?)",
+                (username, hashlib.sha256(b"test").hexdigest(), gitcode_id, nickname))
+            uid = c.lastrowid
+            db.commit()
+            self._TEST_USERS.append((username, gitcode_id))
+            return uid
+
+    def _cleanup_test_users(self):
+        """清理测试创建的 user_accounts 用户。"""
+        with db_lock:
+            c = db.cursor()
+            for username, _ in self._TEST_USERS:
+                c.execute("DELETE FROM user_accounts WHERE username=?", (username,))
+            db.commit()
+            self._TEST_USERS.clear()
+
+    def setup_method(self):
+        self._TEST_USERS.clear()
+
+    def teardown_method(self):
+        self._cleanup_test_users()
+
     def test_issue_creator_resolved_to_mapping(self):
         """场景1：issue_creator 匹配 unified_user_mapping → 返回该 user_id（非最小 user_id）。"""
         self._seed(users=[100, 501], mapping=[(501, "creator_alice")])
         assert es._repo_user_id(self.REPO, issue_creator="creator_alice") == 501
 
-    def test_unknown_issue_creator_falls_back(self):
-        """场景2：issue_creator 未知 → 回退 user_repos ORDER BY user_id ASC（取最小）。"""
+    def test_unknown_issue_creator_returns_zero(self):
+        """场景2（Issue #211 更新）：issue_creator 未注册 grape → 返回 0（不再回退取第一个 join 用户）。"""
         self._seed(users=[100, 200])
-        assert es._repo_user_id(self.REPO, issue_creator="ghost_user") == 100
+        assert es._repo_user_id(self.REPO, issue_creator="ghost_user") == 0
 
     def test_empty_issue_creator_falls_back(self):
         """场景3：issue_creator="" → 回退 user_repos ORDER BY user_id ASC。"""
@@ -270,3 +304,37 @@ class TestRepoUserIdIssueCreator:
         """场景4：不传 issue_creator（默认 ""）→ 回退 user_repos ORDER BY user_id ASC。"""
         self._seed(users=[100, 200])
         assert es._repo_user_id(self.REPO) == 100
+
+    def test_issue_creator_resolved_via_user_accounts_username(self):
+        """Issue #211 二级回退：issue_creator 匹配 user_accounts.username（无 unified_user_mapping）。"""
+        uid = self._seed_user_account("dev_bob", gitcode_id="", nickname="Bob")
+        self._seed(users=[uid, 999], mapping=None)  # 无 unified_user_mapping 记录
+        assert es._repo_user_id(self.REPO, issue_creator="dev_bob") == uid
+
+    def test_issue_creator_resolved_via_user_accounts_gitcode_id(self):
+        """Issue #211 二级回退：issue_creator 匹配 user_accounts.gitcode_id。"""
+        uid = self._seed_user_account("dev_charlie", gitcode_id="gc_charlie_42", nickname="Charlie")
+        self._seed(users=[uid, 888], mapping=None)
+        assert es._repo_user_id(self.REPO, issue_creator="gc_charlie_42") == uid
+
+    def test_issue_creator_resolved_via_user_repos_join(self):
+        """Issue #211 user_repos 过滤：username 不在 unified_user_mapping 但在 user_accounts + user_repos 中。"""
+        uid = self._seed_user_account("dev_dave", gitcode_id="", nickname="Dave")
+        self._seed(users=[uid, 777], mapping=None)
+        # user_accounts.username 匹配 → 二级回退直接返回，不需要 user_repos JOIN
+        assert es._repo_user_id(self.REPO, issue_creator="dev_dave") == uid
+
+    def test_unregistered_creator_does_not_steal_other_user(self):
+        """Issue #211 关键回归：未注册创建者不会映射到 user_repos 中的其他用户。"""
+        alice_uid = self._seed_user_account("real_alice", gitcode_id="", nickname="Alice")
+        bob_uid = self._seed_user_account("real_bob", gitcode_id="", nickname="Bob")
+        self._seed(users=[alice_uid, bob_uid], mapping=None)
+        # "unknown_dev" 未注册 → 返回 0，而非取 alice_uid 或 bob_uid
+        assert es._repo_user_id(self.REPO, issue_creator="unknown_dev") == 0
+
+    def test_mapping_takes_priority_over_user_accounts(self):
+        """Issue #211 优先级验证：unified_user_mapping 优先于 user_accounts 二级回退。"""
+        uid = self._seed_user_account("dev_eve", gitcode_id="", nickname="Eve")
+        # unified_user_mapping 中 gitcode_user="eve_gitcode" → 应返回 uid（而非因 username="dev_eve" 不匹配而走二级）
+        self._seed(users=[uid], mapping=[(uid, "eve_gitcode")])
+        assert es._repo_user_id(self.REPO, issue_creator="eve_gitcode") == uid
