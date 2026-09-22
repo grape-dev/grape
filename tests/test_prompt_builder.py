@@ -49,13 +49,23 @@ class TestBuildRoleDefinition:
         assert "Never write code" in role
 
     def test_implementation_allows_code(self, pb):
-        role = pb.build_role_definition(skills=["implementation"])
+        role = pb.build_role_definition(skills=["implementation"], agent_type="coding")
         assert "MAY write code" in role
         assert "Never write code" not in role
 
     def test_other_skill_blocks_code(self, pb):
         role = pb.build_role_definition(skills=["issue"])
         assert "Never write code" in role
+
+    def test_security_rules_merged_continuous_numbering(self, pb):
+        """issue-219 方向 C：SECURITY 与规则合并为单一连续编号 1-7（无粘连/无重复编号）。"""
+        role = pb.build_role_definition(agent_type="issue")
+        assert "## SECURITY (MUST FOLLOW):" in role
+        assert "data.3." not in role  # 缺逗号隐式拼接 bug 已修复
+        for n in range(1, 8):
+            assert f"{n}." in role
+        assert role.count("3.") == 1
+        assert role.count("4.") == 1
 
 
 class TestBuildChatRoleDefinition:
@@ -117,31 +127,31 @@ class TestHistoryInjection:
 
     def test_general_no_session_injects_history(self, pb):
         p = self._general(False)
-        assert "## 对话历史" in p
+        assert "## Chat History" in p
         assert "怎么部署？" in p
-        assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p
+        assert "## Issue Agent Progress" in p and "[QA Agent] ✅ PR #1" in p
 
     def test_general_with_session_keeps_progress_and_recent_history(self, pb):
         p = self._general(True)
         # has_session 时仍注入最近 3 条对话历史作为兜底（防止远端 worker session 丢失）
-        assert "## 对话历史" in p
-        assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p   # 进展始终注入
+        assert "## Chat History" in p
+        assert "## Issue Agent Progress" in p and "[QA Agent] ✅ PR #1" in p   # 进展始终注入
 
     def test_task_no_session_injects_history(self, pb):
         p = self._task(False)
-        assert "## 对话历史" in p and "怎么部署？" in p
-        assert "## Issue Agent 进展" in p
+        assert "## Chat History" in p and "怎么部署？" in p
+        assert "## Issue Agent Progress" in p
 
     def test_task_with_session_keeps_progress_and_recent_history(self, pb):
         p = self._task(True)
         # has_session 时仍注入最近 3 条对话历史作为兜底
-        assert "## 对话历史" in p
-        assert "## Issue Agent 进展" in p and "[QA Agent] ✅ PR #1" in p
+        assert "## Chat History" in p
+        assert "## Issue Agent Progress" in p and "[QA Agent] ✅ PR #1" in p
 
     def test_no_history_no_sections(self, pb):
         from src.prompt_builder import build_general_chat_prompt
         p = build_general_chat_prompt("hi", "org/repo", [], has_valid_session=False)
-        assert "## 对话历史" not in p and "## Issue Agent 进展" not in p
+        assert "## Chat History" not in p and "## Issue Agent Progress" not in p
 
 
 class TestBuildPrompt:
@@ -151,6 +161,8 @@ class TestBuildPrompt:
             "type": "issue_opened",
             "repository": "owner/repo",
             "source": "gitcode",
+            "repo_key": "gitcode:owner/repo",
+            "issue_id": "1",
             "payload": {
                 "project": {"path_with_namespace": "owner/repo"},
                 "issue": {"number": 1, "title": "Bug: test", "body": "desc"}
@@ -158,7 +170,7 @@ class TestBuildPrompt:
         }
 
     def test_issue_opened_format(self, pb, base_evt):
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
         assert "Event: issue_opened #1 on owner/repo" in prompt
         assert "Bug: test" in prompt
         assert "Never write code" in prompt
@@ -168,25 +180,34 @@ class TestBuildPrompt:
             "type": "issue_comment",
             "repository": "owner/repo",
             "source": "gitcode",
+            "repo_key": "gitcode:owner/repo",
+            "issue_id": "5",
             "payload": {
                 "object_attributes": {
                     "noteable_iid": 5, "note": "hello @bot"
                 }
             }
         }
-        prompt = pb.build_prompt(evt, [], "", ["issue"])
+        prompt = pb.build_devops_agent_prompt(evt, [], "", ["issue"])
         assert "User commented on issue #5" in prompt
         assert "hello @bot" in prompt
+        assert "Issue comment format (MUST FOLLOW)" in prompt
 
     def test_with_history(self, pb, base_evt):
         history = [{"type": "issue_opened", "success": True}]
-        prompt = pb.build_prompt(base_evt, history, "", ["issue"])
+        prompt = pb.build_devops_agent_prompt(base_evt, history, "", ["issue"])
         # v1.6 移除 session_history 文件注入（正文由事件 payload + A2A context 承载）
         assert "session_history.json" not in prompt
 
     def test_implementation_skill_role(self, pb, base_evt):
-        prompt = pb.build_prompt(base_evt, [], "", ["implementation"])
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["implementation"], agent_type="coding")
         assert "MAY write code" in prompt
+
+    def test_role_definition_heading_and_blank_line(self, pb, base_evt):
+        """issue-219 方向 B：角色段加 `## Role Definition` 标题。"""
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
+        assert "\n\n## Role Definition\n" in prompt
+        assert prompt.index("## Role Definition") < prompt.index("You are a DevOps")
 
     def test_with_feishu_ctx(self, pb, base_evt):
         ctx = {
@@ -205,7 +226,7 @@ class TestBuildPrompt:
             "auto_impl_enabled": True,
             "notify_enabled": True,
         }
-        prompt = pb.build_prompt(base_evt, [], "", ["im-notify"], ctx)
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["im-notify"], ctx)
         assert "Feishu tenant token: test_token_12345" in prompt
         assert "张三" in prompt
         assert "李四" in prompt
@@ -214,7 +235,7 @@ class TestBuildPrompt:
 
 
 class TestTaskEndInstruction:
-    """方案 B：prompt 含「任务结束」指令（见 vod-agent-hang-rootcause-fix.md 方案 B）。"""
+    """方案 B：prompt 含「任务完成」指令（issue-219 方向 D：Task Completion 段，英文）。"""
 
     @pytest.fixture
     def base_evt(self):
@@ -222,6 +243,8 @@ class TestTaskEndInstruction:
             "type": "issue_opened",
             "repository": "owner/repo",
             "source": "gitcode",
+            "repo_key": "gitcode:owner/repo",
+            "issue_id": "1",
             "payload": {
                 "project": {"path_with_namespace": "owner/repo"},
                 "issue": {"number": 1, "title": "Bug: test", "body": "desc"}
@@ -229,17 +252,17 @@ class TestTaskEndInstruction:
         }
 
     def test_b1_prompt_has_end_instruction(self, pb, base_evt):
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
-        assert "任务结束" in prompt
-        assert "完成所有业务动作" in prompt
-        assert "结束任务" in prompt
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
+        assert "## Task Completion" in prompt
+        assert "finishes the task" in prompt
+        assert "grape tasks complete" in prompt
 
     def test_b2_json_contract_preserved(self, pb, base_evt):
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
-        # 既有「处理记录输出要求」JSON 块仍存在，且在「任务结束」指令之前
-        assert "处理记录输出要求" in prompt
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
+        # JSON 合约仍存在，且在「Task Completion」段内（早于 Comment Reply）
         assert '"actions"' in prompt
-        assert prompt.index("处理记录输出要求") < prompt.index("任务结束")
+        assert '"issue_summary"' in prompt
+        assert prompt.index("## Task Completion") < prompt.index("## Comment Reply")
 
 
 class TestThinkingCommentSeparation:
@@ -252,6 +275,8 @@ class TestThinkingCommentSeparation:
             "type": "issue_opened",
             "repository": "owner/repo",
             "source": "gitcode",
+            "repo_key": "gitcode:owner/repo",
+            "issue_id": "1",
             "payload": {
                 "project": {"path_with_namespace": "owner/repo"},
                 "issue": {"number": 1, "title": "Bug: test", "body": "desc"}
@@ -260,42 +285,43 @@ class TestThinkingCommentSeparation:
 
     def test_no_reverse_instruction_left(self, pb, base_evt):
         """负向：反向指令（"说了 Let me…即判未完成"）必须被移除。"""
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
         assert '禁止"分析完就结束"' not in prompt
         assert "任务将被判定为未完成并重新执行" not in prompt
 
     def test_thinking_banned_from_output(self, pb, base_evt):
         """正向：思考过程禁止出现在对外输出。"""
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
-        assert "思考过程禁止出现在对外输出" in prompt
-        assert "绝不能出现在最终答复、报告或 GitCode 评论 body 中" in prompt
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
+        assert "Thinking must never appear in external output" in prompt
+        assert "never in the final answer, a report, or the GitCode comment body" in prompt
 
     def test_example_section_present(self, pb, base_evt):
-        """正向：内部思考 vs 对外结论 正反例范本存在。"""
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
-        assert "## 内部思考 vs 对外结论（必须分清）" in prompt
-        assert '❌ "让我分析一下这个问题……"' in prompt
-        assert '❌ "Now I have a thorough understanding……"' in prompt
-        assert '✅ "完成：分类=bug，标签=bug/P1，已 A2A 交办 coding。"' in prompt
+        """正向：内部思考 vs 对外结论 正反例范本存在（英文，方向 E）。"""
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
+        assert "## Internal Thinking vs External Conclusion (MUST DISTINGUISH)" in prompt
+        assert '❌ "Let me analyze this problem..."' in prompt
+        assert '❌ "Now I have a thorough understanding..."' in prompt
+        assert '✅ "Done: classification=bug, label=bug/P1, A2A handoff to coding agent."' in prompt
 
     def test_four_banned_items_in_comment(self, pb, base_evt):
         """正向：评论评论边界保留四类禁止项 + 发布前自检。"""
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
-        assert "评论内容边界（必须遵守）" in prompt
-        assert "处理记录 JSON 块（actions/conclusion/...）" in prompt
-        assert "任何 HTML 注释标记" in prompt
-        assert "发布前自检" in prompt
-        assert "对外发布文案" in prompt
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
+        assert "Comment content boundary (MUST FOLLOW)" in prompt
+        assert "processing-record JSON block (actions/conclusion/...)" in prompt
+        assert "HTML comment markers" in prompt
+        assert "Pre-publish self-check" in prompt
+        assert "read the comment body aloud as a public post" in prompt
 
     def test_json_pure_structure_rule(self, pb, base_evt):
         """正向：处理记录 JSON 纯结构约束存在。"""
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
-        assert "JSON 块必须保持纯 JSON 结构" in prompt
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
+        assert "pure JSON, not mixed with prose" in prompt
 
     def test_must_execute_action_kept(self, pb, base_evt):
-        """正向：必执行工具动作纪律保留（未被误删）。"""
-        prompt = pb.build_prompt(base_evt, [], "", ["issue"])
-        assert "必须调用工具执行实际动作" in prompt
+        """正向：必执行动作纪律保留（Skill 段 Execute directly）。"""
+        prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"])
+        assert "Execute the instructions directly" in prompt
+        assert "do not analyze or propose" in prompt
 
 
 class TestNoCurlTemplates:
@@ -370,7 +396,7 @@ class TestNoCurlTemplates:
 
 class TestConditionalClosingFlow:
     """Issue #219 + 方案 C：收尾二选一——技能提供 `grape tasks complete` 结构化收尾则
-    调完即结束、不再输出 JSON 块；否则按 JSON 块契约输出（docs/weekly-04/issue-219-...md）。"""
+    调完即结束、不再输出 JSON 块；否则按 JSON 块契约输出（docs/weekly-04/issue-219-...md 方向 D）。"""
 
     @pytest.fixture
     def base_evt(self):
@@ -378,6 +404,8 @@ class TestConditionalClosingFlow:
             "type": "issue_opened",
             "repository": "owner/repo",
             "source": "gitcode",
+            "repo_key": "gitcode:owner/repo",
+            "issue_id": "1",
             "payload": {
                 "project": {"path_with_namespace": "owner/repo"},
                 "issue": {"number": 1, "title": "Bug: test", "body": "desc"}
@@ -389,23 +417,82 @@ class TestConditionalClosingFlow:
 
     def test_contract_mentions_tasks_complete_branch(self, pb, base_evt):
         p = self._prompt(pb, base_evt)
-        assert "以你当前技能（SKILL.md）的收尾流程为准" in p
+        assert "follow the closing flow of your current skill (SKILL.md)" in p
         assert "grape tasks complete" in p
-        assert "不要再重复输出下方 JSON 块" in p
+        assert "Do NOT repeat the JSON block below" in p
 
     def test_contract_mentions_json_fallback_branch(self, pb, base_evt):
         p = self._prompt(pb, base_evt)
-        assert "情形二：技能未提供" in p
+        assert "Case 2: The skill does not provide" in p
         assert '"actions"' in p and '"issue_summary"' in p
 
     def test_two_paths_mutually_exclusive(self, pb, base_evt):
         """硬约束：两路二选一，不得同时输出 JSON 块并调 tasks complete。"""
         p = self._prompt(pb, base_evt)
-        assert "二选一" in p
-        assert "不得同时输出 JSON 块并在结尾再调" in p
+        assert "mutually exclusive" in p
+        assert "never output the JSON block AND call" in p
 
     def test_task_end_section_aligned(self, pb, base_evt):
-        """「任务结束」段对齐二选一收尾（不再仅要求输出 JSON 块）。"""
+        """「任务完成」段承载收尾说明，位于「评论答复」之前（方向 D）。"""
         p = self._prompt(pb, base_evt)
-        assert "按上述情形完成收尾（调 `grape tasks complete` 或输出 JSON 块）后**结束任务**" in p
+        assert "## Task Completion" in p
+        assert "finishes the task" in p
+        assert p.index("## Task Completion") < p.index("## Comment Reply")
+
+
+class TestIssueSummaryExcludesCurrent:
+    """issue-219 方向 A：当前 Issue 不应出现在 Issue Pipeline 摘要中。"""
+
+    REPO = "gitcode:org/issue219-excl"
+
+    def _seed(self):
+        from src.session_manager import db, db_lock
+        rows = [
+            (1, "1", "issue_one", "r1"),
+            (2, "2", "issue_two", "r2"),
+            (3, "3", "issue_three", "r3"),
+        ]
+        with db_lock:
+            for i, iid, title, res in rows:
+                db.cursor().execute(
+                    "INSERT INTO events (seq, repo_key, issue_id, event_type, agent_type, title, status, result, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (i, self.REPO, iid, "issue_opened", "vod", title, "completed", res, f"2026-09-22 0{i}:00:00")
+                )
+            db.commit()
+
+    def _clean(self):
+        from src.session_manager import db, db_lock
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE repo_key=?", (self.REPO,))
+            db.commit()
+
+    def test_excludes_current_issue(self):
+        from src.api.event_store import get_issue_summary
+        from src.prompt_builder import build_devops_agent_prompt
+        self._seed()
+        try:
+            s = get_issue_summary(self.REPO, exclude_issue="3")
+            assert "issue_three" not in s
+            assert "issue_one" in s and "issue_two" in s
+            evt = {
+                "type": "issue_opened", "source": "gitcode", "repository": "org/issue219-excl",
+                "repo_key": self.REPO, "issue_id": "3",
+                "payload": {"issue": {"number": 3, "title": "issue_three", "body": "b"}},
+            }
+            p = build_devops_agent_prompt(evt, [], "", ["issue"])
+            # 当前 Issue(#3) 不出现在 Issue Pipeline；其它 Issue 仍在
+            assert "  3 issue_three" not in p
+            assert "  1 issue_one" in p
+        finally:
+            self._clean()
+
+    def test_no_exclude_includes_all(self):
+        from src.api.event_store import get_issue_summary
+        self._seed()
+        try:
+            s = get_issue_summary(self.REPO)
+            assert "issue_one" in s and "issue_three" in s
+        finally:
+            self._clean()
 

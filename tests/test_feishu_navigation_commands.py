@@ -503,8 +503,8 @@ def test_feishu_task_conversation_uses_task_prompt():
     _seed()
     cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #5", conv_type="task", issue_number=5)
     prompt = _build_prompt(cid)
-    assert "## 场景: task" in prompt
-    assert "## 任务边界" in prompt
+    assert "## Scene: task" in prompt
+    assert "## Current Role (task conversation)" in prompt
     assert "Issue: #5" in prompt
     _clean()
 
@@ -514,7 +514,7 @@ def test_feishu_general_conversation_uses_chat_prompt():
     _seed()
     cid = create_conversation(1, "gitcode:navuser/repo-a", title="普通")
     prompt = _build_prompt(cid)
-    assert "## 场景: task" not in prompt
+    assert "## Scene: task" not in prompt
     assert "DevOps topic: analyze and reply" in prompt
     _clean()
 
@@ -527,7 +527,7 @@ def test_feishu_task_prompt_history_from_conversation_messages():
     add_message(cid, "user", "任务分配")
     add_message(cid, "agent", "收到")
     prompt = _build_prompt(cid)
-    assert "## 对话历史" in prompt
+    assert "## Chat History" in prompt
     assert "任务分配" in prompt
     _clean()
 
@@ -541,6 +541,6 @@ def test_feishu_task_prompt_injects_task_description():
         c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (1,'navuser','gitcode:navuser/repo-a',7,'刷新readme','处理登录超时',?,'active')", (cid,))
         db.commit()
     prompt = _build_prompt(cid)
-    assert "## 任务描述" in prompt
+    assert "### Task Description" in prompt
     assert "处理登录超时" in prompt
     _clean()
