@@ -600,8 +600,8 @@ function renderSkillDetail(data) {
       </div>
       <p class="det-sum">${data.description || ''}</p>
       <div class="fn-card">
-        <div class="fn-label">${I18N.t('skills.info_function')||'功能说明'}</div>
-        <div class="fn-body">${fnDesc}</div>
+        <div class="fn-label">${I18N.t('skills.info_function')||'内容说明'}</div>
+        <div class="fn-body">${renderMarkdown(rawContent)}</div>
       </div>
       <div class="info-grid">
         <div class="info-cell"><div class="il">${I18N.t('skills.info_scenes')||'场景'}</div><div class="iv">${scenesStr}</div></div>
