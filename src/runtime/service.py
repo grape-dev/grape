@@ -226,11 +226,35 @@ _TASK_COLUMNS = (
     "user_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
-    "status, exit_code, result_text, errors, stderr, "
+    "status, stream_ended, self_reported, "
+    "exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
 
 _TASK_COLUMNS_LIST = [c.strip() for c in _TASK_COLUMNS.split(",")]
+
+# 双标记列：INSERT 时让 DB 默认（0）落地，select 时按表实际列过滤（兼容未迁移库）
+_TASK_SIGNAL_COLUMNS = ("stream_ended", "self_reported")
+
+_TABLE_COLS_CACHE: dict = {}
+
+
+def _table_columns(table: str) -> set:
+    """表实际存在的列（PRAGMA，进程内缓存）。
+
+    迁移动态列后代码兼容未迁移的旧库（如测试库）与已迁移库。
+    """
+    _cached = _TABLE_COLS_CACHE.get(table)
+    if _cached is not None:
+        return _cached
+    try:
+        with db_lock:
+            _rows = db.cursor().execute(f"PRAGMA table_info({table})").fetchall()
+        _col = {r[1] for r in _rows}
+    except Exception:
+        _col = set()
+    _TABLE_COLS_CACHE[table] = _col
+    return _col
 
 
 def _row_to_dict(row):
@@ -657,20 +681,32 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             pass
     with db_lock:
         c = db.cursor()
+        _avail = _table_columns("agent_tasks")
+        _insert_cols = [x for x in _TASK_COLUMNS_LIST if x not in _TASK_SIGNAL_COLUMNS and x in _avail]
+        _insert_vals = {
+            "id": task_id,
+            "agent_session_id": agent_session_id,
+            "runtime_id": runtime_id,
+            "event_seq": event_seq,
+            "issue_id": issue_id or "", "repo_key": repo_key or "",
+            "agent_type": agent_type or "", "skill": skill or "", "skill_id": skill_id or 0,
+            "prompt": prompt, "cwd": cwd or "", "runtime_session_id": runtime_session_id or "",
+            "event_type": event_type or "", "account": account or "", "user_id": user_id or 0,
+            "repo_gitcode_token": repo_gitcode_token or "", "user_gitcode_token": user_gitcode_token or "",
+            "env_extra": json.dumps(env), "skill_files": json.dumps(skill_files), "server_url": _server_url,
+            "issue_session_id": issue_session_id or "",
+            "project_info_files": json.dumps(project_info_files), "project_info_meta": json.dumps(project_info_meta),
+            "knowledge_files": json.dumps(knowledge_files),
+            "project_info_file_urls": json.dumps(project_info_file_urls), "knowledge_file_urls": json.dumps(knowledge_file_urls),
+            "attempts": 0, "pool_agent_type": pool_agent_type or "", "affinity_runtime_id": affinity_runtime_id or 0,
+            "pool_tag": pool_tag or "", "pool_engine_ids": pool_engine_ids or "",
+            "status": "queued", "exit_code": None, "result_text": "", "errors": "", "stderr": "",
+            "usage_json": "{}", "started_at": None, "completed_at": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
         c.execute(
-            f"INSERT INTO agent_tasks ({_TASK_COLUMNS}) VALUES "
-            f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
-            (task_id, agent_session_id, runtime_id, event_seq, issue_id or "", repo_key or "",
-             agent_type or "", skill or "", skill_id or 0,
-             prompt, cwd or "", runtime_session_id or "",
-             event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
-             user_gitcode_token or "",
-             json.dumps(env), json.dumps(skill_files), _server_url,
-             issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
-             json.dumps(knowledge_files),
-            json.dumps(project_info_file_urls), json.dumps(knowledge_file_urls),
-            0, pool_agent_type or "", affinity_runtime_id or 0, pool_tag or "", pool_engine_ids or "",
-             "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
+            f"INSERT INTO agent_tasks ({', '.join(_insert_cols)}) VALUES ({','.join(['?'] * len(_insert_cols))})",
+            [_insert_vals[x] for x in _insert_cols],
         )
         db.commit()
     from src.runtime.instances import runtime_instance_name
@@ -1077,9 +1113,10 @@ def claim(runtime_id) -> dict | None:
 def get_task(task_id) -> dict | None:
     with db_lock:
         c = db.cursor()
-        c.execute(f"SELECT {_TASK_COLUMNS} FROM agent_tasks WHERE id=?", (task_id,))
+        _cols = [x for x in _TASK_COLUMNS_LIST if x in _table_columns("agent_tasks")]
+        c.execute(f"SELECT {', '.join(_cols)} FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
-    return _row_to_dict(row) if row else None
+    return dict(zip(_cols, row)) if row else None
 
 
 def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
@@ -1738,6 +1775,79 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                           task_id=task_id, payload={"exit_code": exit_code}))
     except Exception:
         pass
+
+
+# ===== 双重标记完成（issue-219-task-complete-double-signal-design.md）=====
+
+def skill_self_reports(skill_name: str) -> bool:
+    """技能是否声明以 `grape tasks complete` 结构化收尾（#219 方案C 情形一）。
+
+    判定：解析该技能 SKILL.md 内容含 "grape tasks complete"。
+    无法解析（技能文件不在服务器/自定义技能）→ False（非自报，按旧路径直接完成，不阻塞）。
+    """
+    if not skill_name:
+        return False
+    try:
+        from src.config import resolve_official_skill_path
+        _p = resolve_official_skill_path(skill_name)
+        if not _p:
+            return False
+        with open(_p, "r", encoding="utf-8") as _f:
+            _content = _f.read()
+        return "grape tasks complete" in _content
+    except Exception:
+        return False
+
+
+def set_task_signal(task_id: str, signal: str, result_text: str = "") -> bool:
+    """条件置双标记之一（stream_ended=worker 隐式 / self_reported=agent 显式）。
+
+    - 仅当标记未置时置 1（重放安全）；置 `self_reported` 时同步写入 result_text（防值丢失）。
+    - 返回 True = 本次调用是第一个落该标记的；调用方据此读取另一标记，决定是否 finalize。
+    """
+    if signal not in ("stream_ended", "self_reported"):
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            if signal == "self_reported":
+                c.execute("UPDATE agent_tasks SET self_reported=1, result_text=? "
+                          "WHERE id=? AND self_reported=0", (result_text or "", task_id))
+            else:
+                c.execute("UPDATE agent_tasks SET stream_ended=1 WHERE id=? AND stream_ended=0", (task_id,))
+            _first = c.rowcount > 0
+            db.commit()
+        return _first
+    except Exception as e:
+        log.warning(f"set_task_signal({signal}) failed for {task_id}: {e}")
+        return False
+
+
+def task_double_signal_ready(task_id: str) -> bool:
+    """双标记齐（stream_ended=1 且 self_reported=1）→ 可以收敛终态。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            _r = c.execute("SELECT stream_ended, self_reported FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+        return bool(_r and _r[0] == 1 and _r[1] == 1)
+    except Exception:
+        return False
+
+
+def finalize_task(task_id: str, exit_code: int = 0, usage=None) -> bool:
+    """双标记齐时收敛终态：用已存储的 self_reported result_text 走完整 complete_task（副作用单次）。
+
+    任一标记未齐 → 不终态（事件保持 running），等后到者触发。
+    仅由「后到标记」的调用方调用；complete_task 内部幂等保证只会真正完成一次。
+    """
+    if not task_double_signal_ready(task_id):
+        return False
+    _task = get_task(task_id)
+    if not _task:
+        return False
+    complete_task(task_id, _task.get("result_text") or "", exit_code,
+                  usage=usage or {})
+    return True
 
 
 def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: str,
