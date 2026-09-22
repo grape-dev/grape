@@ -43,12 +43,17 @@ GitCode 事件（Issue/PR/评论）
 | `HUAWEICLOUD_SDK_AK` / `HUAWEICLOUD_SDK_SK` | 华为云 AK/SK（按仓库 owner 注入） | SRE（cloud-deploy）等 | `_inject_cloud_credentials` |
 | `CODEARTS_CLI_AK` / `CODEARTS_CLI_SK` | CodeArts CLI 华为云认证 | CodeArts 引擎 | `_collect_server_env` / codearts.get_env |
 | `DEVOPS_SKILLS_DIR` | 技能目录 | 全部 | 各引擎 get_env |
-| `DEVOPS_EVENT_TYPE` | 事件类型 | 全部 | 各引擎 get_env |
-| `AGENT_NAME` | Agent 显示名 | 全部 | `stream_agent` env_extra 前设置 |
+| `DEVOPS_EVENT_TYPE` | **触发事件类型**（`issue_opened` / `issue_comment` / `push` / `pr_merge` / `vod_signal` 等）——「在响应什么事件」 | 全部 | 引擎 get_env 默认空，`stream_agent` 覆写为 event_type |
+| `AGENT_NAME` | **Agent 角色显示名**（`Issue Agent` / `QA Agent` / `Coding Agent` / `VOD Agent`…）——「我是谁」，skill 评论前缀 `[$AGENT_NAME]` 用 | 全部 | `stream_agent` 前 `get_agent_display_name(agent_type)` |
 | `GIT_ASKPASS` | git 凭据辅助脚本（BOT_GITCODE_TOKEN） | Coding/QA/SRE（git workflow） | `repogit.askpass_path` |
 | `GITHUB_PUBLISH_REPO` | 评论指定发布目标 GitHub 仓库 | SRE（skill 发布） | `_apply_comment_repo_override` |
 | `GITCODE_PUBLISH_REPO` | 评论指定发布目标 GitCode 仓库 | SRE（skill 发布） | `_apply_comment_repo_override` |
 | `CLAWHUB_OWNER_HANDLE` | 评论指定 ClawHub 发布组织 | SRE（skill 发布） | `_apply_comment_repo_override` |
+
+> **`AGENT_NAME` 与 `DEVOPS_EVENT_TYPE` 的区别**：两者是正交的两个维度——
+> `AGENT_NAME` = **身份**（谁在执行，按 agent_type 的角色显示名，如 `QA Agent`，用于 `[$AGENT_NAME]` 评论前缀）；
+> `DEVOPS_EVENT_TYPE` = **时机**（在响应什么触发事件，如 `issue_comment`/`push`，技能据此分派分支）。
+> 例：同一 `QA Agent`（名字恒为 `QA Agent`）可以在 `pr_opened`、`issue_comment` 等不同事件类型下被触发。
 
 ## 三、GitCode Token 互斥注入（关键）
 
