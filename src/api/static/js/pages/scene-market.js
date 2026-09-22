@@ -615,7 +615,7 @@ function _applyScene(sceneId, sceneName, sceneSkills) {
   // sceneSkills 可能是逗号分隔字符串，转回数组
   var skillsArr = typeof sceneSkills === 'string' ? (sceneSkills ? sceneSkills.split(',') : []) : (Array.isArray(sceneSkills) ? sceneSkills : []);
   // 判断是否为华为云 Skill 场景（name=skill-dev 或 skills 含 huawei-cloud）
-  var isHwCloudScene = (sceneName === 'skill-dev') || (skillsArr.indexOf('huawei-cloud') >= 0);
+  var isHwCloudScene = (sceneName === 'huawei-skill') || (skillsArr.indexOf('huawei-cloud') >= 0);
   // 先检查是否已应用过，然后统一弹高级选项弹窗
   API.get('/scenes/market/' + sceneId + '/applied?owner=' + owner + '&repo=' + repoName).then(check => {
     _showApplyOptionsModal(sceneId, owner, repoName, check.applied, check.scene_name, isHwCloudScene);
