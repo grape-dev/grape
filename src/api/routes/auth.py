@@ -380,7 +380,7 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
 
     try:
         from src.session_manager import update_unified_user_info
-        update_unified_user_info(github_login, open_id="", github_login=github_login)
+        update_unified_user_info(github_login)
     except Exception as e:
         log.warning(f"GitHub OAuth login: write user mapping failed: {e}")
 
