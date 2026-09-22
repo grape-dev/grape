@@ -33,7 +33,8 @@ GitCode 事件（Issue/PR/评论）
 | `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent` |
 | `BOT_USERNAME` | 全局 bot 用户名（grape_bot） | Coding 等（skill 用） | `_execute_agent`（coding 注入） |
 | `GRAPE_WORK_BRANCH` | 场景工作基线分支 | Coding/QA/SRE（git 类） | `_read_scene_work_branch` → env_extra |
-| `GRAPE_CF_1..N` | 场景高级选项 custom_fields 按序号注入的值 | 配置了 custom_fields 的场景 | `_inject_custom_fields_env` |
+| `GRAPE_SCENE_ID` | 当前 Issue 绑定的场景标识（issue-219：统一 env 注入；未选定=空串，不回落 default） | 全部（devops 事件，含注入场景的任务） | `_inject_scene_env` → env_extra |
+| `GRAPE_CF_1..N` | 场景高级选项 custom_fields 按序号注入的值 | 配置了 custom_fields 的场景 | `_inject_scene_env` |
 | `GRAPE_CF_MAP` | `{"GRAPE_CF_1":"key名",...}` 键名映射 | 同上 | 同上 |
 | `BOT_GITCODE_TOKEN` | 仓库 bot token（仓库身份，事件任务） | **非 chat**（devops 事件） | `_assemble_env`（互斥） |
 | `BOT_GITHUB_TOKEN` | GitHub 仓库 bot token | 非 chat（GitHub 仓库） | `_assemble_env`（互斥） |
@@ -89,7 +90,8 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
    **会话 token（`tk_`）可用的命令**（dual + session_only，含 git-repo / issues 读 / a2a / tasks 等）；
    user_only（skills 管理 / settings / repos 平台管理 等）已被过滤——agent 不要尝试调用它们（服务端仍会 403）。
 4. **cloud-deploy 类 Skill**：读 `HUAWEICLOUD_SDK_AK/SK`（SRE，仓库 owner 配置后注入）。
-5. **场景自定义字段**：读 `GRAPE_CF_MAP` 按 key 名取 `GRAPE_CF_N` 值。
+5. **场景读取**：`printenv GRAPE_SCENE_ID` 确认当前 Issue 绑定的场景（空串=尚未判定）；
+   自定义字段读 `GRAPE_CF_MAP` 按 key 名取 `GRAPE_CF_N` 值。
 6. **git 操作**：用 `GRAPE_WORK_BRANCH` 作工作基线；`GIT_ASKPASS` 已注入 `$BOT_GITCODE_TOKEN`。
 7. **token 安全**：`BOT_GITCODE_TOKEN`/`USER_GITCODE_TOKEN` 是敏感变量——**不要 printenv 打印/写入日志**；
    平台已有脱敏（[REDACTED]）。token 仅在进程内有效、删除即失效（GRAPE_SESSION_TOKEN 生命周期=任务）。
@@ -99,7 +101,7 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
 | 环节 | 位置 |
 |------|------|
 | env_extra 组装 | `src/api/event_pipeline.py` `_execute_agent`（~L1653 起） |
-| 场景字段注入 | `_inject_custom_fields_env` / `_inject_cloud_credentials` / `_apply_comment_repo_override`（L1742-1858） |
+| 场景字段注入 | `_inject_scene_env` / `_inject_cloud_credentials` / `_apply_comment_repo_override`（L1742-1858 附近） |
 | 会话级 token | `src/api/auth_token.py` `issue_session_token`（TTL 6h） |
 | token 互斥注入 | `src/agent/executor.py` `_assemble_env`（L212-254） |
 | env 落库 | `src/runtime/service.py` `enqueue_task` env_extra（L574-591） |

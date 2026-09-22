@@ -1666,7 +1666,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     _inject_cloud_credentials(env_extra, repo_key)
-    # 注入场景 work_branch + custom_fields 环境变量（值不暴露在 prompt 文本里）
+    # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -1674,7 +1674,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_custom_fields_env(env_extra, repo_key, issue_id)
+    _inject_scene_env(env_extra, repo_key, issue_id)
     # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
@@ -1748,33 +1748,48 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
 
 
-def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = "") -> None:
-    """读场景高级选项的 custom_fields，按序号注入环境变量。
+def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
+    """解析 Issue 当前绑定开发场景（issue-219：env 注入 GRAPE_SCENE_ID 用）。
 
-    每个自定义字段对应 GRAPE_CF_1、GRAPE_CF_2...
-    GRAPE_CF_MAP = {"GRAPE_CF_1":"key名","GRAPE_CF_2":"key名"} 供 agent 查映射。
-    值不暴露在 prompt 文本里，agent 通过 printenv 自行读取。
+    优先读 issue 卡片 scene_id（get_issue_scene → issue 单表权威），空则回退
+    managed_repos.dev_scene（与 runtime/repogit._read_scene_work_branch 同源，保证同场景）。
+    未选定返回空串——agent 借此区分「场景未判定」，不回落 default（避免误导）。
     """
-    try:
-        from src.session_manager import db, db_lock
-        import json as _json
-        # 1. 优先读 issue_state.scene_id，空则回退 managed_repos.dev_scene
-        scene_id = ""
-        if issue_id:
-            try:
-                from src.api.session_store import get_issue_scene
-                scene_id, _ = get_issue_scene(repo_key, issue_id)
-            except Exception:
-                scene_id = ""
-        if not scene_id:
+    scene_id = ""
+    if issue_id:
+        try:
+            from src.api.session_store import get_issue_scene
+            scene_id, _ = get_issue_scene(repo_key, issue_id)
+        except Exception:
+            scene_id = ""
+    if not scene_id:
+        try:
+            from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
                 row = c.fetchone()
             scene_id = (row[0] if row else "") or ""
+        except Exception:
+            scene_id = ""
+    return scene_id
+
+
+def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "") -> None:
+    """注入场景相关环境变量：GRAPE_SCENE_ID + 高级选项 custom_fields（GRAPE_CF_1..N / GRAPE_CF_MAP）。
+
+    值不暴露在 prompt 文本里，agent 通过 printenv 自行读取。
+    - GRAPE_SCENE_ID：当前 Issue 绑定的场景标识；未选定注入空串（不回落 default，agent 判「未判定」）。
+    - GRAPE_CF_1..N / GRAPE_CF_MAP：custom_fields 按序号注入 + 键名映射（沿用原行为）。
+    """
+    try:
+        scene_id = _resolve_scene_id(repo_key, issue_id)
+        env_extra["GRAPE_SCENE_ID"] = scene_id
         if not scene_id:
             return
-        # 2. 读 advanced_options
+        from src.session_manager import db, db_lock
+        import json as _json
+        # 读 advanced_options 的 custom_fields
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -1788,7 +1803,7 @@ def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = ""
         fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("key")]
         if not fields:
             return
-        # 3. 按序号注入
+        # 按序号注入
         cf_map = {}
         for i, f in enumerate(fields, 1):
             var_name = f"GRAPE_CF_{i}"
@@ -1796,7 +1811,8 @@ def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = ""
             cf_map[var_name] = f.get("key", "")
         env_extra["GRAPE_CF_MAP"] = _json.dumps(cf_map, ensure_ascii=False)
     except Exception as _e:
-        log.warning(f"inject custom_fields env failed: {_e}")
+        from src.config import log
+        log.warning(f"inject scene env failed: {_e}")
 
 
 def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:
@@ -2173,7 +2189,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         "ACCOUNT": exec_account,
     }
     _inject_cloud_credentials(env_extra, repo_key)
-    # 注入场景 work_branch + custom_fields 环境变量（direct 模式同样注入，保持与 worker 模式一致）
+    # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -2181,7 +2197,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_custom_fields_env(env_extra, repo_key, issue_id)
+    _inject_scene_env(env_extra, repo_key, issue_id)
     # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
     # （direct 模式同样需要——A2A 交办 sre 走本路径，见 _enqueue_pipeline_task 同款逻辑）
     if agent_type == "sre":
