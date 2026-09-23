@@ -53,7 +53,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
-def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "", scope: str = "",
+def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
                 agent_type: str = "", category_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
@@ -978,7 +978,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
 
 
 @router.get("/{skill_id}/sub/{sub_name}", operation_id="skills_sub_get", summary="Read sub-skill SKILL.md", description="Reads a sub-skill's SKILL.md content.")
-def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
+def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """读取技能包子技能的 SKILL.md 内容"""
     from src.session_manager import db, db_lock
 
@@ -1028,7 +1028,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no
 
 
 @router.get("/package-sub/{pkg_id}/{sub_name}", operation_id="skills_package_sub_get", summary="Get sub-skill detail from package", description="Returns a sub-skill detail from a package (same shape as skill detail).")
-def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
+def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """返回技能包子技能详情（格式与 skill detail 一致，支持导航到独立详情页）"""
     from src.session_manager import db, db_lock
     import re as _re

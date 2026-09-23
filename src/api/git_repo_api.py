@@ -14,22 +14,25 @@ from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key
 from src.config import log
+from src.vcs.providers import (
+    translate_inbound,
+    translate_query_state,
+)
+from src.vcs.providers import _MODULES as _PROVIDER_MODULES
 
 router = APIRouter(prefix="/api/git-repo", tags=["git-repo"])
 
-_SUPPORTED_PROVIDERS = {"gitcode", "github"}
-
-# gitcode API base（与 repo_manager 同源；测试可 mock）
-_GITCODE_API_BASE = "https://gitcode.com/api/v5"
-_GITHUB_API_BASE = "https://api.github.com"
+# provider = 注册表（vcs/providers）自动派生；新增 provider 只加模块
+_SUPPORTED_PROVIDERS = set(_PROVIDER_MODULES)
 
 
 class PRCreateBody(BaseModel):
     title: str = ""
     head: str = ""
     base: str = ""
-    inner_issue_nums: str = ""
-    close_related_issue: bool = False
+    body: str = ""
+    related_issue_nums: list = []
+    auto_close_issues: bool = False
 
 
 class PRUpdateBody(BaseModel):
@@ -75,57 +78,40 @@ def _provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
     return p
 
 
-def _repo_token(owner: str, repo: str, user: dict, provider: str = "gitcode") -> str:
+def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
     """解析仓库平台 token（git-repo 透传端点共用）。
 
+    ⚠️ 无 provider 默认（默认空串），未注册/未传 provider 直接 fail-fast（不静默 gitcode）。
     ⚠️ 本接口**仅服务会话级临时 token（tk_）**——用户级 API Key（`grape_`）/ Web JWT **不适用**（403）。
-    token 按会话 agent_type 决定平台凭据（issue-45-api-token-design §2.5.1）：
+    token 按会话 agent_type 决定平台凭据：
     - chat agent → **用户 token**（用户身份）
-    - devops 事件 agent（vod/issue/coding/qa/sre）→ **仓库 bot token**（仓库身份）
+    - devops 事件 agent → **仓库 bot token**（仓库身份）
     - 一种缺失 → 交叉回退；均缺失 → 502。
-    provider=github → 走 GitHub token 分流；provider=gitcode → 走 GitCode token 分流。
     """
+    if provider not in _SUPPORTED_PROVIDERS:
+        raise ValueError(f"Git provider 未支持: {provider}")
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
     from src.repo_key import to_repo_key
+    mod = _PROVIDER_MODULES[provider]
+    rk = to_repo_key(f"{provider}:{owner}/{repo}")
 
-    if provider == "github":
-        rk = to_repo_key(f"github:{owner}/{repo}")
-        def _bot():
-            try:
-                from src.user.db import get_github_token
-                return get_github_token(repo_key=rk) or ""
-            except Exception:
-                return ""
-        def _user():
-            try:
-                from src.api.deps import get_user_github_token
-                username = user.get("username") or ""
-                if not username and user.get("id", 0) > 0:
-                    from src.user.db import get_user
-                    username = (get_user(user["id"]) or {}).get("username", "")
-                return get_user_github_token(username) or ""
-            except Exception:
-                return ""
-    else:
-        rk = to_repo_key(f"{owner}/{repo}")
-        def _bot():
-            try:
-                from src.user.db import get_gitcode_token
-                return get_gitcode_token(repo_key=rk) or ""
-            except Exception:
-                return ""
-        def _user():
-            try:
-                from src.api.deps import get_user_token_with_refresh
-                uid = user.get("id") or 0
-                username = user.get("username") or ""
-                if not username and uid > 0:
-                    from src.user.db import get_user
-                    username = (get_user(uid) or {}).get("username", "")
-                return get_user_token_with_refresh(username, user_id=uid)
-            except Exception:
-                return ""
+    def _bot():
+        try:
+            return mod.bot_token(rk) or ""
+        except Exception:
+            return ""
+
+    def _user():
+        try:
+            uid = user.get("id") or 0
+            username = user.get("username") or ""
+            if not username and uid > 0:
+                from src.user.db import get_user
+                username = (get_user(uid) or {}).get("username", "")
+            return mod.user_token(username, uid) or ""
+        except Exception:
+            return ""
 
     if user.get("agent_type") == "chat":
         tok = _user()
@@ -141,14 +127,16 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "gitcode") ->
         tok = _user()
         if tok:
             return tok
-    _vcs = "GitHub" if provider == "github" else "GitCode"
-    raise HTTPException(status_code=502, detail={"code": 502, "message": f"{_vcs} 仓库 token 解析失败"})
+    raise HTTPException(status_code=502, detail={"code": 502, "message": f"{provider} 仓库 token 解析失败"})
 
 
 def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
-               provider: str = "gitcode") -> str:
+               provider: str = "") -> str:
+    """拼 provider 原生 URL。无默认 provider（空串）→ fail-fast，不静默 gitcode。"""
+    if provider not in _SUPPORTED_PROVIDERS:
+        raise ValueError(f"Git provider 未支持: {provider}")
     import urllib.parse
-    api_base = _GITHUB_API_BASE if provider == "github" else _GITCODE_API_BASE
+    api_base = _PROVIDER_MODULES[provider].API_BASE
     base = f"{api_base}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}"
     url = base + subpath
     if params:
@@ -158,18 +146,15 @@ def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
     return url
 
 
-def _gitcode(provider: str, method: str, url: str, token: str, body: dict | None = None):
-    """按 provider 分流 GitCode/GitHub API 调用。"""
+def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None = None):
+    """按 provider 注册表分发原生 API 调用（新增 provider=加模块）。"""
     try:
-        if provider == "github":
-            from src.user.repo_manager import _github_req
-            return _github_req(method, url, token, body)
-        from src.user.repo_manager import _req
-        return _req(method, url, token, body)
+        return _PROVIDER_MODULES[provider].request(method, url, token, body)
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning(f"Git repo API {method} {url} failed: {e}")
-        _vcs = "GitHub" if provider == "github" else "GitCode"
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"{_vcs} API 调用失败: {str(e)[:120]}"})
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"{provider} API 调用失败: {str(e)[:120]}"})
 
 
 # ===================== 仓库信息 / 传输支撑 =====================
@@ -177,7 +162,7 @@ def _gitcode(provider: str, method: str, url: str, token: str, body: dict | None
 @router.get("/{owner}/{repo}", operation_id="gitrepo_repo", summary="Repository info (clone_url/default_branch)", description="Repository metadata from the Git provider: id/name/full_name/default_branch/html_url/clone_url/visibility.")
 def get_repo_info(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                   p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, "", None, p), _repo_token(owner, repo, user, p))
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "", None, p), _repo_token(owner, repo, user, p))
 
 
 # ===================== 分支 / 提交 / 内容 / 标签 / 里程碑 =====================
@@ -185,14 +170,14 @@ def get_repo_info(owner: str, repo: str, user: dict = Depends(get_current_user_o
 @router.get("/{owner}/{repo}/branches", operation_id="gitrepo_branches", summary="List branches", description="Lists repository branches from the Git provider (paged).")
 def list_branches(owner: str, repo: str, per_page: int = Query(50, ge=1, le=100),
                   user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, "/branches", {"per_page": per_page}, p),
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/branches", {"per_page": per_page}, p),
                     _repo_token(owner, repo, user, p))
 
 
 @router.get("/{owner}/{repo}/commits", operation_id="gitrepo_commits", summary="Commit history", description="Lists the repository commit history from the Git provider.")
 def list_commits(owner: str, repo: str, per_page: int = Query(20, ge=1, le=100),
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, "/commits", {"per_page": per_page}, p),
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/commits", {"per_page": per_page}, p),
                     _repo_token(owner, repo, user, p))
 
 
@@ -214,7 +199,7 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
     if depth != "recursive":
         if not ref:
             ref = _default_ref(p, owner, repo, user)
-        return _gitcode(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
+        return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
                         _repo_token(owner, repo, user, p))
     # 递归
     if p != "github":
@@ -224,7 +209,7 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
         ref = _default_ref(p, owner, repo, user)
     # GitHub：git/trees/{sha} 需要 tree sha → 先取默认分支最新 commit 的 tree sha
     _tree_sha = _github_tree_sha(owner, repo, ref, user)
-    return _gitcode(p, "GET", _vcs_url(owner, repo, f"/git/trees/{_tree_sha}", {"recursive": "1"}, p),
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/git/trees/{_tree_sha}", {"recursive": "1"}, p),
                     _repo_token(owner, repo, user, p))
 
 
@@ -232,11 +217,11 @@ def _default_ref(p: str, owner: str, repo: str, user: dict) -> str:
     """解析默认分支（ref 空时）：GitCode 用 branches[0]，GitHub 用 default_branch 或 branches[0]。"""
     try:
         if p == "github":
-            data = _gitcode(p, "GET", _vcs_url(owner, repo, "", None), _repo_token(owner, repo, user, p))
+            data = _vcs_req(p, "GET", _vcs_url(owner, repo, "", None, p), _repo_token(owner, repo, user, p))
             if isinstance(data, dict) and data.get("default_branch"):
                 return data["default_branch"]
         else:
-            data = _gitcode(p, "GET", _vcs_url(owner, repo, "/branches", {"per_page": 1}, p),
+            data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/branches", {"per_page": 1}, p),
                             _repo_token(owner, repo, user, p))
             if isinstance(data, list) and data and data[0].get("name"):
                 return data[0]["name"]
@@ -248,7 +233,7 @@ def _default_ref(p: str, owner: str, repo: str, user: dict) -> str:
 def _github_tree_sha(owner: str, repo: str, ref: str, user: dict) -> str:
     """GitHub：从 ref 解析 tree sha（GET commit 的 commit.tree.sha）。"""
     try:
-        data = _gitcode("github", "GET", _vcs_url(owner, repo, f"/commits/{ref}", {"per_page": 1}, "github"),
+        data = _vcs_req("github", "GET", _vcs_url(owner, repo, f"/commits/{ref}", {"per_page": 1}, "github"),
                         _repo_token(owner, repo, user, "github"))
         if isinstance(data, list) and data:
             _c = data[0]
@@ -270,34 +255,34 @@ def _github_tree_sha(owner: str, repo: str, ref: str, user: dict) -> str:
 def list_root_contents(owner: str, repo: str, ref: str = Query("", description="分支/引用"),
                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     """取仓库根目录条目列表（空 path → GitCode contents 返回根目录数组）。"""
-    return _gitcode(p, "GET", _vcs_url(owner, repo, "/contents/", {"ref": ref}, p),
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/contents/", {"ref": ref}, p),
                     _repo_token(owner, repo, user, p))
 
 
 @router.get("/{owner}/{repo}/contents/{path:path}", operation_id="gitrepo_contents", summary="Repository contents: dir listing or file content (base64)", description="Repository contents via the Git provider: empty/root or directory returns an entry list; a file returns base64 content.")
 def get_file_content(owner: str, repo: str, path: str = "", ref: str = Query("", description="分支/引用"),
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, "/contents/" + path, {"ref": ref}, p),
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/contents/" + path, {"ref": ref}, p),
                     _repo_token(owner, repo, user, p))
 
 
 @router.get("/{owner}/{repo}/labels", operation_id="gitrepo_labels_list", summary="List labels", description="Lists repository labels.")
 def list_labels(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                 p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, "/labels", None, p), _repo_token(owner, repo, user, p))
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/labels", None, p), _repo_token(owner, repo, user, p))
 
 
 @router.post("/{owner}/{repo}/labels", operation_id="gitrepo_labels_create", summary="Create label", description="Creates a repository label (name required, color optional).")
 def create_label(owner: str, repo: str, body: LabelCreateBody, user: dict = Depends(get_current_user_or_api_key),
                  p: str = Depends(_provider)):
-    return _gitcode(p, "POST", _vcs_url(owner, repo, "/labels", None, p), _repo_token(owner, repo, user, p),
+    return _vcs_req(p, "POST", _vcs_url(owner, repo, "/labels", None, p), _repo_token(owner, repo, user, p),
                     {"name": body.name, "color": body.color})
 
 
 @router.get("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones", summary="List milestones", description="Lists repository milestones (state filter).")
 def list_milestones(owner: str, repo: str, state: str = Query("all"),
                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, "/milestones", {"state": state}, p),
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones", {"state": state}, p),
                     _repo_token(owner, repo, user, p))
 
 
@@ -307,7 +292,8 @@ def list_milestones(owner: str, repo: str, state: str = Query("all"),
 def list_issues(owner: str, repo: str, state: str = Query("open"),
                 page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=100),
                 user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, "/issues",
+    state = translate_query_state(p, state)
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/issues",
                                         {"state": state, "page": page, "per_page": per_page}, p),
                     _repo_token(owner, repo, user, p))
 
@@ -315,27 +301,29 @@ def list_issues(owner: str, repo: str, state: str = Query("open"),
 @router.post("/{owner}/{repo}/issues", operation_id="gitrepo_issues_create", summary="Create issue", description="Creates an issue (title/body/assignee).")
 def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depends(get_current_user_or_api_key),
                  p: str = Depends(_provider)):
-    payload = {"title": body.title, "body": body.body}
-    if body.assignee:
-        payload["assignee"] = body.assignee
-    return _gitcode(p, "POST", _vcs_url(owner, repo, "/issues", None, p), _repo_token(owner, repo, user, p), payload)
+    neutral = {"title": body.title, "body": body.body, "assignee": body.assignee}
+    payload = translate_inbound(p, "issues", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
+    return _vcs_req(p, "POST", _vcs_url(owner, repo, "/issues", None, p), _repo_token(owner, repo, user, p), payload)
 
 
 @router.get("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_get", summary="Get issue", description="Returns a single issue.")
 def get_issue(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
               p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
 
 
 @router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body).")
 def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    payload = {k: v for k, v in {
-        "labels": body.labels, "assignee": body.assignee,
-        "milestone_id": body.milestone_id or None, "state": body.state,
+    neutral = {
+        "labels": body.labels,
+        "assignee": body.assignee,
+        "milestone_id": body.milestone_id or None,
+        "state": body.state,
         "body": body.body,
-    }.items() if v not in (None, "", 0)}
-    return _gitcode(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+    }
+    payload = translate_inbound(p, "issues", "update", neutral, {"owner_repo": f"{owner}/{repo}"})
+    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
 
 
@@ -357,14 +345,14 @@ def close_issue(owner: str, repo: str, number: int, user: dict = Depends(get_cur
 @router.get("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_list", summary="List issue comments", description="Lists comments on an issue.")
 def list_issue_comments(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
                         p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p))
 
 
 @router.post("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_create", summary="Create issue comment", description="Creates a comment on an issue (body required).")
 def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
                          user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _gitcode(p, "POST", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
+    return _vcs_req(p, "POST", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
 
 
@@ -374,58 +362,64 @@ def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
 def list_pulls(owner: str, repo: str, state: str = Query("open"),
                page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=100),
                user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, "/pulls",
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/pulls",
                                         {"state": state, "page": page, "per_page": per_page}, p),
                     _repo_token(owner, repo, user, p))
 
 
-@router.post("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls_create", summary="Create pull request", description="Creates a pull request (title/head/base).")
+@router.post("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls_create", summary="Create pull request", description="Creates a pull request (title/head/base). Provider-adapted: gitcode inner_issue_nums; github Closes #N body.")
 def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(get_current_user_or_api_key),
                 p: str = Depends(_provider)):
-    payload = {"title": body.title, "head": body.head, "base": body.base}
-    if body.inner_issue_nums:
-        payload["inner_issue_nums"] = body.inner_issue_nums
-    payload["close_related_issue"] = body.close_related_issue
-    return _gitcode(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
+    related = list(body.related_issue_nums or [])
+    neutral = {
+        "title": body.title,
+        "head": body.head,
+        "base": body.base,
+        "body": body.body,
+        "related_issue_nums": related,
+        "auto_close_issues": body.auto_close_issues,
+    }
+    payload = translate_inbound(p, "pulls", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
+    return _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
 
 
 @router.get("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_get", summary="Get pull request", description="Returns a single pull request.")
 def get_pull(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
              p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _repo_token(owner, repo, user, p))
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _repo_token(owner, repo, user, p))
 
 
 @router.patch("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_update", summary="Update pull request", description="Updates a pull request (title/body/labels).")
 def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
                 user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     payload = {k: v for k, v in {"title": body.title, "body": body.body, "labels": body.labels}.items() if v != ""}
-    return _gitcode(p, "PATCH", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
+    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
 
 
 @router.put("/{owner}/{repo}/pulls/{number}/merge", operation_id="gitrepo_pulls_merge", summary="Merge pull request", description="Merges a pull request; returns {merged, sha}.")
 def merge_pull(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
                p: str = Depends(_provider)):
-    return _gitcode(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
+    return _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
                     _repo_token(owner, repo, user, p))
 
 
 @router.get("/{owner}/{repo}/pulls/{number}/comments", operation_id="gitrepo_pulls_comments_list", summary="List PR comments", description="Lists PR inline comments.")
 def list_pull_comments(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
                        p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p),
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p))
 
 
 @router.post("/{owner}/{repo}/pulls/{number}/comments", operation_id="gitrepo_pulls_comments_create", summary="Create PR comment", description="Creates a PR comment (body required).")
 def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _gitcode(p, "POST", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p),
+    return _vcs_req(p, "POST", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
 
 
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files", description="Lists files changed in a pull request.")
 def list_pull_files(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
                     p: str = Depends(_provider)):
-    return _gitcode(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files", None, p),
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files", None, p),
                     _repo_token(owner, repo, user, p))

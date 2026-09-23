@@ -218,6 +218,53 @@ class A2AHandoffBody(BaseModel):
     payload: dict = {}
 
 
+def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
+    """目标 agent 是否在当前 Issue 场景的 pipeline nodes 内（nodes=单一事实源）。
+
+    解析优先级：项目场景行（`devops_pipeline_scene`，按 repo_key 过滤；nodes 为空也认，视为无节点）
+    → 官方 `pipelines.json[scene_id]` → 官方 `default`。
+    返回 {"scene_id", "nodes", "in_scene"}。
+    """
+    from src.api.session_store import get_issue_scene
+    _scene_id = "default"
+    try:
+        _sid, _ = get_issue_scene(repo_key, f"#{issue_number}")
+        _scene_id = _sid or "default"
+    except Exception:
+        _scene_id = "default"
+    nodes = None
+    try:
+        from src.session_manager import db, db_lock
+        import json as _json
+        with db_lock:
+            _row = db.cursor().execute(
+                "SELECT nodes_json FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (_scene_id, repo_key)).fetchone()
+        if _row is not None:
+            nodes = _json.loads(_row[0] or "[]") or []
+    except Exception:
+        nodes = None
+    if nodes is None:
+        import os as _os, json as _json
+        try:
+            _pipe_path = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
+                "configs", "pipelines.json")
+            with open(_pipe_path, "r", encoding="utf-8") as _f:
+                _pipes = _json.load(_f)
+            _scene_def = _pipes.get("scenes", {}).get(_scene_id) \
+                or _pipes.get("scenes", {}).get("default") or {}
+            nodes = _scene_def.get("nodes") or []
+        except Exception:
+            nodes = []
+    return {
+        "scene_id": _scene_id,
+        "nodes": nodes,
+        "in_scene": any(n.get("id") == agent_name for n in nodes),
+    }
+
+
 @router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Hand off to another agent (A2A)", description="Agent-to-Agent handoff: dispatches a new event to the target agent. Accepts JWT/session token/API key (public) plus internal bot-token.")
 async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
     """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
@@ -298,39 +345,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
 
     # 场景节点校验：目标 agent 不在当前场景的 pipeline nodes 里 → 拦截（不创建事件）
     # 防止 agent skill 硬编码 A2A 目标（如 coding→qa）与自定义场景 pipeline 冲突
+    # （项目场景 nodes=单一事实源；空 nodes → 任何 agent 都不在场景 → 拦截；见 a2a-scene-node-check-fix-design.md）
     if issue_number:
-        try:
-            from src.session_manager import db, db_lock
-            from src.api.session_store import get_issue_scene
-            _scene_id_check, _ = get_issue_scene(repo_key, f"#{issue_number}")
-            _scene_id_check = _scene_id_check or "default"
-            _scene_nodes_check = None
-            # 自定义场景从 DB 查
-            if _scene_id_check.startswith("custom-"):
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT nodes_json FROM devops_pipeline_scene WHERE scene_id=? AND is_active=1",
-                              (_scene_id_check,))
-                    _row = c.fetchone()
-                if _row and _row[0]:
-                    import json as _json
-                    _scene_nodes_check = _json.loads(_row[0])
-            # 官方场景从 pipelines.json 查
-            if not _scene_nodes_check:
-                import os as _os, json as _json
-                _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
-                                           "configs", "pipelines.json")
-                with open(_pipe_path, "r", encoding="utf-8") as _f:
-                    _pipes = _json.load(_f)
-                _scene_def = _pipes.get("scenes", {}).get(_scene_id_check) or _pipes.get("scenes", {}).get("default") or {}
-                _scene_nodes_check = _scene_def.get("nodes") or []
-            # 检查目标 agent 是否在场景 nodes 里
-            _agent_in_scene = any(n.get("id") == agent_name for n in _scene_nodes_check)
-            if not _agent_in_scene:
-                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_id_check}' for issue=#{issue_number}, skipped (nodes={[n.get('id') for n in _scene_nodes_check]})")
-                return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "not_in_scene", "scene": _scene_id_check})
-        except Exception as _se:
-            log.warning(f"A2A: scene node check failed: {_se}")
+        _scene_ck = _scene_node_check(repo_key, issue_number, agent_name)
+        if not _scene_ck.get("in_scene"):
+            log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})")
+            return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "not_in_scene", "scene": _scene_ck.get("scene_id")})
 
     # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
     try:

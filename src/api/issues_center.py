@@ -1300,7 +1300,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             pass
         _has_running_agent = bool(r[3]) and _stage in ("vod", "issue", "coding", "qa", "sre") and ((_rk, _issue_id) in _running)
         item = {
-            "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
+            "id": r[0], "assignee": r[1], "repo_key": r[2], "issue_number": r[3],
             "title": r[4] or "", "task_description": r[5] or "",
             "conversation_id": r[6] or "", "status": r[7],
             "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),

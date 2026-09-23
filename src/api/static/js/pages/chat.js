@@ -35,7 +35,7 @@ function linkifyIssueNumbers(text, repoKey) {
   return text.replace(/(Issue\s*#(\d+))/gi, (match, full, num) => {
     if (repoKey) {
       const url = _vcsUrl(repoKey, '/issues/' + num);
-      return `<a href="${url}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${full}</a>`;
+      return `<a href="${url}" target="_blank" rel="noopener">${full}</a>`;
     }
     return match; // 无仓库信息时保持原文
   });
