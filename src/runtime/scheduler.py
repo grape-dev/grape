@@ -38,29 +38,19 @@ _FINDINGS_PATTERN = re.compile(
 )
 
 _FINDINGS_FORMAT_TEMPLATE = """\
-请在执行结果的末尾包含以下格式的标记块（即使未发现问题也要包含空列表）：
+请在执行结果的末尾输出问题列表，用 HTML 注释标记包裹（必须严格按以下格式，不要在标记头或 JSON 的 key 中插入换行符）：
 
 <!-- autopilot-findings
-{
-  "summary": "本次巡检总结（一句话）",
-  "findings": [
-    {
-      "id": "f1",
-      "title": "问题标题",
-      "severity": "high",
-      "category": "security",
-      "description": "问题描述和建议",
-      "suggested_assignee": "coding",
-      "suggested_skill": "implementation"
-    }
-  ]
-}
+{"summary":"本次巡检总结（一句话）","findings":[{"id":"f1","title":"问题标题","severity":"high","category":"security","description":"问题描述和建议","suggested_assignee":"coding","suggested_skill":"implementation"}]}
 -->
 
-字段说明：
+规则：
+- 标记头必须是 <!-- autopilot-findings，中间不能有空格或换行
+- JSON 必须是单行紧凑格式，key 和 value 之间不要加换行符
 - severity: high/medium/low
 - category: security/quality/documentation/performance/other
-- findings 为空数组表示未发现问题"""
+- findings 为空数组表示未发现问题
+- 即使未发现问题也要包含空数组：{"summary":"未发现问题","findings":[]}"""
 
 
 def parse_findings(agent_output: str) -> dict:
@@ -69,12 +59,22 @@ def parse_findings(agent_output: str) -> dict:
     返回: {"summary": str, "findings": list, "parse_error": str}
     解析失败时 findings 为空列表。
     """
-    match = _FINDINGS_PATTERN.search(agent_output or "")
+    # 宽松匹配：允许 autopilot 和 -findings 之间有换行/空格
+    match = re.search(
+        r'<!--\s*autopilot[\s\-]*findings\s*\n(.*?)\n-->',
+        agent_output or "",
+        re.DOTALL
+    )
     if not match:
         return {"summary": "", "findings": [], "parse_error": "no findings block found"}
 
     try:
-        data = json.loads(match.group(1))
+        raw = match.group(1).strip()
+        # 容错：清理 agent 输出中 JSON key 前多余的换行符
+        # 如 "\"\\nseverity\"" → "\"severity\""
+        raw = re.sub(r'"\s*\\n\s*', '"', raw)
+        raw = re.sub(r'\\n\s*"', '"', raw)
+        data = json.loads(raw)
         findings = data.get("findings", [])
         valid = []
         for f in findings:
@@ -353,10 +353,16 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
     # 解析 findings
     findings_result = parse_findings(final_text)
 
+    # result 只存 summary（不存原始工作日志），解析失败时降级存最后 500 字
+    if findings_result["summary"]:
+        _result_summary = findings_result["summary"]
+    else:
+        _result_summary = final_text[-500:] if final_text else ""
+
     # 更新 autopilot_executions
     status = "success" if exit_code == 0 else "failed"
     _update_execution_result(exec_id, status,
-                             result=final_text[:5000],
+                             result=_result_summary,
                              findings_json=json.dumps(findings_result, ensure_ascii=False) if findings_result["findings"] else "")
 
     log.info(f"Autopilot exec {exec_id}: completed status={status} findings={len(findings_result['findings'])}")
@@ -519,8 +525,13 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 600) -> str:
             if _at_status in ("completed", "success"):
                 # worker 完成，同步终态到 autopilot_executions
                 findings_result = parse_findings(_result_text)
+                # result 只存 summary（不存原始工作日志），解析失败时降级存最后 500 字
+                if findings_result["summary"]:
+                    _result_summary = findings_result["summary"]
+                else:
+                    _result_summary = _result_text[-500:] if _result_text else ""
                 _update_execution_result(exec_id, "success",
-                                         result=_result_text[:5000],
+                                         result=_result_summary,
                                          findings_json=json.dumps(findings_result, ensure_ascii=False) if findings_result["findings"] else "")
                 return "success"
             elif _at_status in ("failed", "cancelled"):

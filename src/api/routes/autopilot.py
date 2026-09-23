@@ -385,6 +385,9 @@ def get_findings(exec_id: int, user: dict = Depends(get_current_user)):
 
 class DispatchBody(BaseModel):
     finding_id: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    scene_id: Optional[str] = None
 
 
 @router.post("/executions/{exec_id}/dispatch")
@@ -423,7 +426,7 @@ async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depend
                                                       "message": f"已派发过 (Issue #{finding['dispatched_issue_number']})",
                                                       "issue_number": finding["dispatched_issue_number"]})
 
-    # 创建真实 Issue
+    # 创建真实 Issue（前端可覆盖标题/描述/场景）
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
 
@@ -439,12 +442,13 @@ async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depend
     except Exception:
         pass
 
-    # 调 create_task_via_issue
+    # 调 create_task_via_issue（前端传的 title/desc/scene_id 优先，否则用 finding 原值）
     from src.api.issues_center import TaskCreateBody, create_task_via_issue
     issue_body = TaskCreateBody(
         repo_key=repo_key,
-        title=finding["title"],
-        description=finding.get("description", ""),
+        title=body.title or finding["title"],
+        description=body.description or finding.get("description", ""),
+        scene_id=body.scene_id or "",
     )
     internal_user = {"id": user.get("id", 0), "username": user.get("username", owner),
                      "token": repo_token, "auth_type": "internal"}

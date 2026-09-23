@@ -1272,21 +1272,86 @@ function _apShowFindings(execId) {
 
 // ===== 派发问题 =====
 function _apDispatchFinding(execId, findingId, btn) {
-  if (btn) { btn.disabled = true; btn.textContent = '派发中...'; }
-  API.post('/autopilot/executions/' + execId + '/dispatch', {finding_id: findingId}).then(function(d) {
-    var msg = '已创建 Issue #' + (d.issue_number || '');
-    if (app && app.showToast) app.showToast(msg);
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = '已派发';
-      btn.classList.remove('bt-p');
-      btn.classList.add('bt-o');
-      btn.style.opacity = '0.6';
-      btn.style.cursor = 'default';
-    }
+  // 先获取 finding 详情
+  API.get('/autopilot/executions/' + execId + '/findings').then(function(d) {
+    var finding = null;
+    (d.findings || []).forEach(function(f) { if (f.id == findingId) finding = f; });
+    if (!finding) { if (app&&app.showToast) app.showToast('未找到问题详情'); return; }
+    _apShowDispatchDialog(execId, finding, btn);
   }).catch(function(e) {
-    if (app && app.showToast) app.showToast('派发失败: ' + (e.message||e));
-    if (btn) { btn.disabled = false; btn.textContent = '派发'; }
+    if (app&&app.showToast) app.showToast('加载问题详情失败: ' + (e.message||e));
+  });
+}
+
+function _apShowDispatchDialog(execId, finding, btn) {
+  // 获取当前仓库的场景列表
+  var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
+  API.get('/scenes?repo=' + encodeURIComponent(repo)).then(function(d) {
+    var scenes = d.scenes || [];
+    var sceneOpts = '<option value="">智能推荐（自动选场景）</option>' +
+      scenes.map(function(s) {
+        return '<option value="' + _esc(s.scene_id) + '">' + _esc(s.name || s.scene_id) + '</option>';
+      }).join('');
+
+    var overlay = document.createElement('div');
+    overlay.id = 'apDispatchDialog';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+    var _inp = 'width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t);outline:none;min-width:0';
+    var _lbl = 'display:block;font-size:12px;font-weight:600;color:var(--t2);margin-bottom:4px';
+    overlay.innerHTML =
+      '<div style="background:var(--c,#fff);border-radius:12px;width:520px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,0.15)">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--b);flex-shrink:0">' +
+          '<span style="font-size:14px;font-weight:600">派发为 Issue</span>' +
+          '<span onclick="document.getElementById(\'apDispatchDialog\').remove()" style="cursor:pointer;font-size:18px;color:var(--t3);padding:4px 8px;border-radius:4px;line-height:1">×</span>' +
+        '</div>' +
+        '<div style="flex:1;overflow-y:auto;padding:16px 20px">' +
+          '<div style="margin-bottom:12px">' +
+            '<label style="' + _lbl + '">标题</label>' +
+            '<input id="apDispatchTitle" type="text" value="' + _esc(finding.title) + '" style="' + _inp + '">' +
+          '</div>' +
+          '<div style="margin-bottom:12px">' +
+            '<label style="' + _lbl + '">描述</label>' +
+            '<textarea id="apDispatchDesc" rows="5" style="' + _inp + ';resize:vertical;font-family:inherit">' + _esc(finding.description || '') + '</textarea>' +
+          '</div>' +
+          '<div>' +
+            '<label style="' + _lbl + '">场景</label>' +
+            '<select id="apDispatchScene" style="' + _inp + '">' + sceneOpts + '</select>' +
+          '</div>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px;padding:10px 20px;border-top:1px solid var(--b);flex-shrink:0;background:var(--c,#fff)">' +
+          '<button class="bt bt-o" onclick="document.getElementById(\'apDispatchDialog\').remove()">取消</button>' +
+          '<button class="bt bt-p" id="apDispatchConfirmBtn" onclick="_apConfirmDispatch(' + execId + ',\'' + _esc(finding.id) + '\')">创建 Issue</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+  }).catch(function(e) {
+    if (app&&app.showToast) app.showToast('加载场景列表失败: ' + (e.message||e));
+  });
+}
+
+function _apConfirmDispatch(execId, findingId) {
+  var title = $('apDispatchTitle').value.trim();
+  var desc = $('apDispatchDesc').value.trim();
+  var sceneId = $('apDispatchScene').value;
+  if (!title) { if (app&&app.showToast) app.showToast('标题不能为空'); return; }
+  if (!desc) { if (app&&app.showToast) app.showToast('描述不能为空'); return; }
+  var btn = $('apDispatchConfirmBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '创建中...'; }
+  API.post('/autopilot/executions/' + execId + '/dispatch', {
+    finding_id: findingId,
+    title: title,
+    description: desc,
+    scene_id: sceneId
+  }).then(function(d) {
+    if (app&&app.showToast) app.showToast('已创建 Issue #' + (d.issue_number || ''));
+    $('apDispatchDialog').remove();
+    // 刷新 findings 列表
+    var container = $('apExecFindings_' + execId);
+    if (container) { container.dataset.loaded = ''; _apLoadFindingsInline(execId, container); }
+  }).catch(function(e) {
+    if (app&&app.showToast) app.showToast('派发失败: ' + (e.message||e));
+    if (btn) { btn.disabled = false; btn.textContent = '创建 Issue'; }
   });
 }
 
