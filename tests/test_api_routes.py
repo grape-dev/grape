@@ -950,6 +950,72 @@ class TestSettings:
         r = client.put("/api/settings/credentials", json={"huawei_cloud_ak": "test_ak"}, headers=_headers)
         assert r.status_code == 200
 
+    def test_clear_credentials_empty_string(self):
+        """Issue #237：传空字符串应清除已有凭据"""
+        uname = "test_api"
+        # 1. 先写入 AK/SK
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "real_ak_123", "huawei_cloud_sk": "real_sk_456"
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["huawei_cloud_ak"] == "real_ak_123"
+        assert acc["huawei_cloud_sk"] == "real_sk_456"
+        # 2. 传空字符串清除
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "", "huawei_cloud_sk": ""
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["huawei_cloud_ak"] == ""
+        assert acc["huawei_cloud_sk"] == ""
+        # 3. GET 端点反映清除后的状态
+        r = client.get("/api/settings/credentials", headers=_headers)
+        hw = r.json()["huawei_cloud"]
+        assert hw["ak_exists"] is False
+        assert hw["sk_exists"] is False
+
+    def test_credentials_not_modified_when_omitted(self):
+        """Issue #237：未传字段不应修改已有值"""
+        uname = "test_api"
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "keep_this_ak"
+        }, headers=_headers)
+        # 只传 SK，不传 AK → AK 应保持不变
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_sk": "new_sk"
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["huawei_cloud_ak"] == "keep_this_ak"
+        assert acc["huawei_cloud_sk"] == "new_sk"
+
+    def test_placeholder_rejected_on_clear(self):
+        """Issue #237：占位符值应被拒绝，不覆盖已有值"""
+        uname = "test_api"
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "existing_ak"
+        }, headers=_headers)
+        # 传占位符 → 应被拒绝，已有值保持不变
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "AK-demo-access-key-xxxx"
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["huawei_cloud_ak"] == "existing_ak"
+
+    def test_clear_github_token(self):
+        """Issue #237：传空字符串清除 GitHub token"""
+        uname = "test_api"
+        # 先写入 github token（直接写 DB，跳过网络验证）
+        acc = user_db.get_user_account(uname) or {}
+        acc["github_api_token"] = "ghp_test_token"
+        acc["github_login"] = "testuser"
+        user_db.save_user_account(uname, acc)
+        # 传空字符串清除
+        client.put("/api/settings/credentials", json={
+            "github_token": ""
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["github_api_token"] == ""
+        assert acc["github_login"] == ""
+
     def test_notifications(self):
         r = client.get("/api/settings/notifications", headers=_headers)
         assert r.status_code == 200
