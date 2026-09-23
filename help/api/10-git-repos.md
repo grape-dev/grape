@@ -2,30 +2,31 @@
 
 > 设计：技能/第三方访问 Git 仓库资源（Issue/PR/内容/分支等）时，统一走 grape 的 Git 仓库 API。
 > ⚠️ **grape `/api/repos` 是平台业务接口**（托管/同步/成员/部署 URL 等，见 02-repos.md）；**本接口 `/api/git-repo` 是 Git 仓库透传**（Issue/PR/内容/分支等由 gitcode/github/gitlab 提供）。
-> **不是 GitCode 代理**：grape 侧定义中立的 Git 仓库资源语义，backend 由请求头/参数区分（gitcode / github / gitlab，未来扩展）。
+> **不是 GitCode 代理**：grape 侧定义**中性的 Git 资源契约**（入参/语义 provider 无关），平台差异由
+> 服务端 `vcs/providers/`（§git-repo-provider-neutral-interface-design.md 查表翻译）收敛；backend 由 token `repo_key` 前缀区分。
 > 认证：`get_current_user_or_api_key`（契约收录）+ 体内 `_repo_token` **强制 session**。
 > scope（x-token-scope）：**全部 = `session_only`**——仅 `tk_` 会话 token（agent 专用）可用；
 > `grape_` API Key / Web JWT → **403**。写操作需授权。
 > Base：`{{SERVER_URL}}/api/git-repo`
-> 出参结构为 **gitcode 平台实际结构**（与技能 `gitcode-api-reference.md` 一致）；github/gitlab 未来映射。
+> 出参当前为 **gitcode 平台实际结构**（github 逐步归一中，`raw` 兜底保留）。
 > CLI：`grape git-repo <子资源>`（如 `grape git-repo branches` 对应 `GET /api/git-repo/{owner}/{repo}/branches`；
 > `owner`/`repo` 由 CLI 参数传入，**命令名 ≠ 路径**，见 README「CLI 命令映射」）。
 
 ## 后端区分（Git Provider 判定）
 
-Git provider（gitcode / github）**由认证 token 的 `repo_key` 前缀派生**（`gitcode:` / `github:`），
-不接受 `X-Git-Provider` / `provider` 参数（单一信息源，避免错配，见 `docs/weekly-02/git-repo-provider-from-token-design.md`）：
+Git provider **由认证 token 的 `repo_key` 前缀派生**（`gitcode:` / `github:`），不接受 `X-Git-Provider` / `provider` 参数
+（单一信息源，见 `docs/weekly-02/git-repo-provider-from-token-design.md`）：
 
 ```
 token（tk_）repo_key = gitcode:owner/repo  → GitCode 后端
 token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ```
 
-| provider | 内部实现 |
+| provider | 内部实现（`src/vcs/providers/` 注册表自动派生，新增 provider 只加模块） |
 |----------|----------|
-| `gitcode` | 现状：`repo_manager_vcs` → `api.gitcode.com/api/v5` |
-| `github` | 未来接入 `api.github.com` |
-| `gitlab` | 未来接入 `gitlab.com/api/v4` |
+| `gitcode` | `https://gitcode.com/api/v5`（原生 `_req`）+ `providers/gitcode.py` |
+| `github` | `https://api.github.com`（原生 `_github_req`）+ `providers/github.py`**（已接入；仅少数语义差异逐步归一）** |
+| `gitlab` | 未来：新增 `vcs/providers/gitlab.py`（API_BASE/request/token/MAP）+ 注册 |
 
 通用的 `Content-Type: application/json`（有 body 时）；分页 `?page=1&per_page=20`（max 100）。
 
@@ -212,17 +213,15 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ### POST /api/git-repo/{owner}/{repo}/issues
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
-**入参**：
-- GitCode（issue-advance 风格）：Body `{repo, title, body}`（repo = 仓库名，可省略）
-- gitcode 标准：Body `{title, body, assignee?}`
-
-**入参 Body**：
+**入参 Body（中性，provider 无关）**：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|:---:|------|
 | `title` | string | ✅ | Issue 标题 |
 | `body` | string | ✅ | Issue 正文 |
-| `assignee` | string | 否 | 负责人用户名 |
+| `assignee` | string | 否 | 负责人用户名（github 映射为 `assignees:[...]`） |
+
+服务端按 provider 归一（`vcs/providers`）：gitcode 收 `{title,body,assignee}`；github 收 `{title,body,assignees}`。
 
 **返回（201）**：创建后的 Issue 对象（同 GET 单个结构）。
 
@@ -234,16 +233,17 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ### PATCH /api/git-repo/{owner}/{repo}/issues/{number}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
-**入参 Body（JSON）**：
+**入参 Body（JSON，中性）**：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `labels` | string | 标签（逗号分隔字符串）或数组 |
-| `assignee` | string | 责任人（单） |
-| `assignee_ids` | array | 责任人 id 数组（implementation 风格） |
+| `labels` | string/array | 标签 |
+| `assignee` | string | 责任人（github 映射 `assignees:[...]`） |
 | `milestone_id` | int | 里程碑 id |
-| `state` | string | `"close"`（**注意**：GitCode 关闭用 "close" 非 "closed"） |
-| `body` | string | Issue 正文（同 POST create / PR update 的 body；空值忽略，不影响其他字段） |
+| `state` | string | `"close"`/`"closed"`（中性，服务端按 provider 归一：gitcode→`close`、github→`closed`；`open` 同理） |
+| `body` | string | Issue 正文（空值忽略，不影响其他字段） |
+
+> 旧字段 `assignee_ids`（implementation 风格）已并入 `assignee` 中性映射。
 
 **返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
 
@@ -286,15 +286,20 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 ### POST /api/git-repo/{owner}/{repo}/pulls
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 
-**入参 Body（JSON）**：
+**入参 Body（JSON，中性）**：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|:---:|------|
 | `title` | string | ✅ | PR 标题（如 `feat: #7 标题`） |
 | `head` | string | ✅ | 源分支（push 的分支，如 `feat/issue-7`） |
 | `base` | string | ✅ | 目标分支（main/master） |
-| `inner_issue_nums` | string | 否 | 关联 Issue（`owner/repo#7`） |
-| `close_related_issue` | bool | 否 | true=合并后自动关闭关联 Issue |
+| `body` | string | 否 | PR 正文 |
+| `related_issue_nums` | array[int] | 否 | 关联 Issue 号 `[7, 8]`（中性，取代旧 `inner_issue_nums`） |
+| `auto_close_issues` | bool | 否 | true=合并后自动关闭关联 Issue（中性，取代旧 `close_related_issue`） |
+
+> **平台映射**（`vcs/providers`）：gitcode → `inner_issue_nums="owner/repo#7,8"` + `close_related_issue`；
+> github → 无原生字段，body 自动追加 `Closes #7 #8`。
+> 旧字段 `inner_issue_nums`（`owner/repo#7`）/`close_related_issue` 仍兼容（别名，归一为中性别名走同一映射）。
 
 **返回（201）**：创建的 PR 对象。**错误**：400（缺 head/base）/ 404 / 403。
 
