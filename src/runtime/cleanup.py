@@ -451,9 +451,10 @@ def _sweep_tmp_residuals() -> int:
 
     # 目录类清理（按前缀 glob + mtime 判断）
     # hermes 隔离目录已迁移到 ~/.cache（issue #238），同时保留 /tmp 旧路径兜底
+    # 注意：~/.cache/hermes-acp-homes 是 ACP 模式持久化目录（state.db 续传），不清理；
+    # 只清理 hermes-iso-*（executor 临时隔离目录，异常退出时残留）。
     _cache_home = os.path.expanduser("~/.cache")
     _dir_prefixes = [
-        f"{_cache_home}/hermes-acp-*",
         f"{_cache_home}/hermes-iso-*",
         f"{_cache_home}/hermes-sandbox-*",
         f"{_cache_home}/hermes-snap-*",
