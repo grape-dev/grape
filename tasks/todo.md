@@ -1,16 +1,12 @@
-# TODO: Issue #162
+# Todo — Issue #238
 
-- [x] Task 1: 替换 `_OBS_PAGE_SIZE` 为 `_workerPageSize` / `_runtimePageSize` / `_timelinePage` / `_timelinePageSize`
-- [x] Task 2: 新增 `_paginationWithPageSizeHTML()` 函数
-- [x] Task 3: 更新 `_rerenderWorkerGrid()` 使用 `_workerPageSize`
-- [x] Task 4: 更新 `_rerenderRuntimeTable()` 使用 `_runtimePageSize`
-- [x] Task 5: 更新 `renderOverview()` 使用新页面尺寸 + 新分页栏
-- [x] Task 6: 更新 `updateOverview()` 使用新页面尺寸 + 新分页栏
-- [x] Task 7: `_filterTimelineIssues()` 增加分页切片 + 分页栏
-- [x] Task 8: 搜索 oninput 重置 `_timelinePage = 0`
-- [x] Task 9: `#N` 定位搜索自动跳到目标页
-- [x] Task 10: 更新 #117 测试断言（选择器可见行为变更）
-- [x] Task 11: 新增 `test_observability_page_size_162.js` 回归测试（15 条）
-- [x] Task 12: 全部 JS 测试通过
-- [ ] 自审查完成
-- [ ] PR 创建完成
+- [x] 修改 hermes_acp.py: /tmp → ~/.cache/hermes-acp-homes
+- [x] 修改 executor.py: mkdtemp(dir=~/.cache/hermes-iso)
+- [x] 修改 sandbox.py: bwrap bind 路径同步迁移到 ~/.cache/hermes-acp-homes（自审查发现一致性缺陷）
+- [x] 修改 cleanup.py + agent.py: 清理 glob 模式同步新增 ~/.cache/hermes-iso-*（自审查发现清理遗漏）
+- [x] py_compile 语法校验通过
+- [x] 功能验证：目录创建 + 清理逻辑正常
+- [x] 五轴自审查（发现并修复清理逻辑 + sandbox 一致性问题）
+- [ ] 建 PR (base: multitask)
+- [ ] Issue 评论告知
+- [ ] A2A 通知 QA

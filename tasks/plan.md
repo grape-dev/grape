@@ -1,37 +1,25 @@
-# Implementation Plan: Issue #162 — 系统监控分页增加「每页条数」选择器
+# Plan — Issue #238: Hermes ACP 临时目录权限修复
 
-## Overview
-在系统监控页面概览 Worker/Runtime 分页栏和任务 Tab timeline 列表，新增「每页条数」选择器（10/20/50）。
+## 任务类型：bug 修复（简单 — 单文件 <10 行变更 ×2）
 
-## Architecture Decisions
-- **独立状态变量**：Worker/Runtime 各自持有 `_workerPageSize` / `_runtimePageSize`，互不影响
-- **复用 `_paginationWithPageSizeHTML` 通用函数**：统一翻页栏 UI，含 prev/next 按钮 + 页码 + rows_per_page 下拉框
-- **空列表不渲染分页栏**：`workers.length === 0` 或 `_filteredRuntimes.length === 0` 时 pager 渲染为空
-- **任务 Tab 新增完整分页**：`_timelinePage` / `_timelinePageSize` + `_filterTimelineIssues` 内分页
+## 任务拆解
 
-## Task List
+| # | 任务 | 文件 | 状态 |
+|---|------|------|------|
+| 1 | hermes_acp.py: 临时目录根路径 /tmp → ~/.cache | src/agent/hermes_acp.py ~89 | ✅ |
+| 2 | executor.py: mkdtemp 指定 dir=~/.cache/hermes-iso | src/agent/executor.py ~459 | ✅ |
+| 3 | py_compile 语法校验 | 两文件 | ✅ |
+| 4 | 路径创建逻辑功能验证 | python3 -c 模拟 | ✅ |
+| 5 | 自审查（五轴） | — | ⬜ |
+| 6 | 建 PR + body/label | — | ⬜ |
+| 7 | Issue 评论告知 | — | ⬜ |
+| 8 | A2A 通知 QA | — | ⬜ |
 
-### Phase 1: 状态与通用函数
-- [x] Task 1: 替换 `_OBS_PAGE_SIZE` 为 `_workerPageSize` / `_runtimePageSize` / `_timelinePage` / `_timelinePageSize`
-- [x] Task 2: 新增 `_paginationWithPageSizeHTML()` 函数
+## 依赖
 
-### Phase 2: 概览 Worker/Runtime
-- [x] Task 3: 更新 `_rerenderWorkerGrid()` 使用 `_workerPageSize`
-- [x] Task 4: 更新 `_rerenderRuntimeTable()` 使用 `_runtimePageSize`
-- [x] Task 5: 更新 `renderOverview()` 使用新页面尺寸 + 新分页栏
-- [x] Task 6: 更新 `updateOverview()` 使用新页面尺寸 + 新分页栏
+无外部依赖，仅用 Python 标准库（os.path/tempfile/shutil），已在文件内 import。
 
-### Phase 3: 任务 Tab
-- [x] Task 7: `_filterTimelineIssues()` 增加分页切片 + 分页栏
-- [x] Task 8: 搜索 oninput 重置 `_timelinePage = 0`
-- [x] Task 9: `#N` 定位搜索自动跳到目标页
+## 风险
 
-### Phase 4: 测试与回归
-- [x] Task 10: 更新 #117 测试断言（选择器可见行为变更）
-- [x] Task 11: 新增 `test_observability_page_size_162.js` 回归测试（15 条）
-- [x] Task 12: 全部 JS 测试通过
-
-### Checkpoint: Complete
-- [x] 3 个测试文件全部通过
-- [ ] 自审查完成
-- [ ] PR 创建完成
+- **低**：`~/.cache` 在极端环境下可能不可写（无家目录的用户），但 grape/gtd 均有正常家目录，风险可忽略。
+- **低**：已有 `/tmp/hermes-acp-homes` 残留目录不影响新逻辑（新路径独立）。
