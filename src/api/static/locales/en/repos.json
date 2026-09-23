@@ -73,6 +73,11 @@
     "host_success": "Hosted successfully",
     "host_failed": "Host failed: {{msg}}"
   },
+  "host": {
+    "confirm_title": "Add Hosting",
+    "confirm": "Add this repository to the hosting list?",
+    "confirm_btn": "Confirm"
+  },
   "unhost": {
     "confirm": "Are you sure you want to unhost {{name}}?\n\nAfter unhosting, all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files) will be deleted and cannot be recovered.",
     "confirm_title": "Unhost Repository",

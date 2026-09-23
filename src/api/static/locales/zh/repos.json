@@ -73,6 +73,11 @@
     "host_success": "加入并托管成功",
     "host_failed": "托管失败: {{msg}}"
   },
+  "host": {
+    "confirm_title": "添加托管",
+    "confirm": "确认将该仓库添加到托管列表？",
+    "confirm_btn": "确认"
+  },
   "unhost": {
     "confirm": "确定要解除托管 {{name}} 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。",
     "confirm_title": "解除托管",
