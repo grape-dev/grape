@@ -39,7 +39,7 @@ def _load_scenes() -> dict:
 
 
 @router.get("", operation_id="scenes_list", summary="List scenes", description="Lists all available scenes for a repo (repo-scoped, non-official).")
-def list_scenes(user: dict = Depends(get_current_user_or_api_key), repo: str = ""):
+def list_scenes(user: dict = Depends(require_no_session_token), repo: str = ""):
     """返回所有可用场景列表（repo，不含 official）"""
     from src.api.pipeline_config import get_scenes
     repo_key = ""
@@ -1293,8 +1293,8 @@ def _delete_scene_icon_file(file_key: str):
             log.warning(f"Scene icon delete (local): {e}")
 
 
-@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info.")
-def get_scene_detail(scene_id: str, user: dict = Depends(require_no_session_token)):
+@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand).")
+def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user_or_api_key)):
     """返回场景详情（nodes + engine 信息）"""
     from src.api.pipeline_config import get_pipeline_config
     from src.repo_key import to_repo_key

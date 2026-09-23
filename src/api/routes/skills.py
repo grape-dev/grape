@@ -620,6 +620,15 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
     if agent_type not in VALID_AGENT_TYPES:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"技能类型不合法，可选: {', '.join(sorted(VALID_AGENT_TYPES))}"})
 
+    # #219 会话 token（tk_，agent）上传：仅支持 scope=repo，且仓库必须与 token 绑定仓库一致（防越权写）。
+    if user.get("auth_type") == "session_token":
+        if scope != "repo":
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 仅支持上传仓库技能（scope=repo）"})
+        from src.repo_key import split_owner_repo
+        _tok_owner, _tok_repo = split_owner_repo(user.get("repo_key") or "")
+        if not _tok_owner or split_owner_repo(repo) != (_tok_owner, _tok_repo):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权上传到该仓库技能（仓库作用域不匹配）"})
+
     # 校验 category_id 存在性（0=未分类，>0 时必须在 skill_category 表中存在）
     if category_id > 0:
         from src.user.db import get_skill_category

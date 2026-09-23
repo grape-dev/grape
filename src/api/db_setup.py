@@ -3152,6 +3152,16 @@ def _migrate_tables():
         log.info("Added pool_engine_ids column to agent_tasks")
     except Exception as e:
         log.warning(f"Add pool_engine_ids column failed: {e}")
+    # ===== 双重标记完成（issue-219-task-complete-double-signal-design.md）：stream_ended / self_reported =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "agent_tasks", "stream_ended", "INTEGER DEFAULT 0")
+            _ensure_column(c, "agent_tasks", "self_reported", "INTEGER DEFAULT 0")
+            db.commit()
+        log.info("Added stream_ended/self_reported columns to agent_tasks")
+    except Exception as e:
+        log.warning(f"Add stream_ended/self_reported columns failed: {e}")
     # 官方场景种子导入（从 pipelines.json → DB，仅首次）
     try:
         _seed_official_scene_market_from_pipelines()

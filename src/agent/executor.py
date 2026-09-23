@@ -272,24 +272,20 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
             log.warning(f"Failed to inject VCS_API_BASE: {e}")
 
     # 用户云凭据注入（devops 的 user_id=仓库归属用户，见 event_pipeline _issue_scene_uid）
+    # #219：huawei_cloud / codearts 的 AK-SK 不再经 env 注入（按需获取或自定义场景变量），跳过。
     if user_id > 0:
         try:
             from src.user.db import get_credentials
             for c in get_credentials(user_id):
                 provider = c.get("provider", "")
                 cfg = c.get("config", {})
-                if provider == "huawei_cloud":
-                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
-                elif provider == "codearts":
-                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
-                else:
-                    for k, v in cfg.items():
-                        env[k.upper()] = str(v)
-                    # provider=openai: api_key → OPENAI_API_KEY（codex 读此变量）
-                    if provider == "openai" and cfg.get("api_key"):
-                        env["OPENAI_API_KEY"] = str(cfg["api_key"])
+                if provider in ("huawei_cloud", "codearts"):
+                    continue
+                for k, v in cfg.items():
+                    env[k.upper()] = str(v)
+                # provider=openai: api_key → OPENAI_API_KEY（codex 读此变量）
+                if provider == "openai" and cfg.get("api_key"):
+                    env["OPENAI_API_KEY"] = str(cfg["api_key"])
         except Exception as e:
             log.warning(f"Failed to inject user credentials: {e}")
 

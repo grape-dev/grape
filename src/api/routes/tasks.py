@@ -313,11 +313,11 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
 
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, repo_key, status FROM agent_tasks WHERE id=?", (task_id,))
+        c.execute("SELECT id, repo_key, status, skill, self_reported FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
-    _repo, _status = row[1], row[2]
+    _repo, _status, _skill, _self_reported = row[1], row[2], row[3] or "", row[4] or 0
 
     if user.get("auth_type") == "session_token":
         if user.get("session_key") != task_id or user.get("repo_key") != _repo:
@@ -327,23 +327,33 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
         if _repo not in managed:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权完成该任务（非本人托管仓库）"})
 
-    if _status in ("completed", "failed", "cancelled"):
+    if _status in ("failed", "cancelled"):
         return {"ok": True, "task_id": task_id, "status": _status, "already": True}
+    if _status == "completed":
+        # completed 且已自报 → 重复显式幂等；completed 且未自报（其它路径终态化）→ 保持现状不再覆盖
+        return {"ok": True, "task_id": task_id, "status": _status, "already": True,
+                "self_reported": bool(_self_reported)}
 
     result_text = (body.result_text or "").strip() or f"任务自报完成{(' / ' + body.next_step) if body.next_step else ''}"
-    # 结构化产出（可选）：有 actions/conclusion/artifacts/issue_summary 时组装为结构化 JSON 文本，
-    # 使 complete_task 的 structured output 解析（actions+conclusion）能识别，供事件对话/下游读取。
-    if body.conclusion or body.actions or body.artifacts or body.issue_summary:
-        import json as _json
-        _sd = {
-            "actions": body.actions or [],
-            "conclusion": body.conclusion or result_text,
-            "artifacts": body.artifacts or [],
-            "next_step": body.next_step,
-            "issue_summary": body.issue_summary or result_text,
-        }
-        result_text = _json.dumps(_sd, ensure_ascii=False)
-    complete_task(task_id, result_text, 0)
+    # 结构化产出：始终组装为结构化 JSON——结构化字段缺失时用叙述 result_text 回填 conclusion/issue_summary，
+    # 保证 event.json archive.seg.output 有结论/动作/产出（issue-219：仅传叙述文本会丢结构化归档，
+    # 详情页「处理记录与答复结论」为空）。
+    import json as _json
+    _sd = {
+        "actions": body.actions or [],
+        "conclusion": body.conclusion or result_text,
+        "artifacts": body.artifacts or [],
+        "next_step": body.next_step,
+        "issue_summary": body.issue_summary or result_text,
+    }
+    result_text = _json.dumps(_sd, ensure_ascii=False)
+    from src.runtime import service as _svc
+    if _svc.skill_self_reports(_skill):
+        # #219 双重标记：置 self_reported（同步存 result_text 防丢）；stream_ended 已齐则触发收敛终态
+        _svc.set_task_signal(task_id, "self_reported", result_text)
+        _svc.finalize_task(task_id, 0)
+    else:
+        complete_task(task_id, result_text, 0)
     return {"ok": True, "task_id": task_id, "status": "completed"}
 
 

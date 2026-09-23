@@ -246,7 +246,6 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     # env_extra
     repository = evt.get("repository", "")
     env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
-    _inject_cloud_credentials(env_extra, repo_key)
 
     # repo_gitcode_token（按 provider 分流）
     repo_gitcode_token = ""
@@ -1952,8 +1951,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "ACCOUNT": evt.get("account") or repository,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
-    _inject_cloud_credentials(env_extra, repo_key)
-    # 注入场景 work_branch + custom_fields 环境变量（值不暴露在 prompt 文本里）
+    # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -1961,15 +1959,11 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_custom_fields_env(env_extra, repo_key, issue_id)
+    _inject_scene_env(env_extra, repo_key, issue_id)
     # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
         env_extra.update(_evt_ext)
-    # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
-    if agent_type == "sre":
-        # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
-        _apply_comment_repo_override(env_extra, evt)
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
     if agent_type == "coding":
         try:
@@ -2035,33 +2029,48 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
 
 
-def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = "") -> None:
-    """读场景高级选项的 custom_fields，按序号注入环境变量。
+def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
+    """解析 Issue 当前绑定开发场景（issue-219：env 注入 GRAPE_SCENE_ID 用）。
 
-    每个自定义字段对应 GRAPE_CF_1、GRAPE_CF_2...
-    GRAPE_CF_MAP = {"GRAPE_CF_1":"key名","GRAPE_CF_2":"key名"} 供 agent 查映射。
-    值不暴露在 prompt 文本里，agent 通过 printenv 自行读取。
+    优先读 issue 卡片 scene_id（get_issue_scene → issue 单表权威），空则回退
+    managed_repos.dev_scene（与 runtime/repogit._read_scene_work_branch 同源，保证同场景）。
+    未选定返回空串——agent 借此区分「场景未判定」，不回落 default（避免误导）。
     """
-    try:
-        from src.session_manager import db, db_lock
-        import json as _json
-        # 1. 优先读 issue_state.scene_id，空则回退 managed_repos.dev_scene
-        scene_id = ""
-        if issue_id:
-            try:
-                from src.api.session_store import get_issue_scene
-                scene_id, _ = get_issue_scene(repo_key, issue_id)
-            except Exception:
-                scene_id = ""
-        if not scene_id:
+    scene_id = ""
+    if issue_id:
+        try:
+            from src.api.session_store import get_issue_scene
+            scene_id, _ = get_issue_scene(repo_key, issue_id)
+        except Exception:
+            scene_id = ""
+    if not scene_id:
+        try:
+            from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
                 row = c.fetchone()
             scene_id = (row[0] if row else "") or ""
+        except Exception:
+            scene_id = ""
+    return scene_id
+
+
+def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "") -> None:
+    """注入场景相关环境变量：GRAPE_SCENE_ID + 高级选项 custom_fields（GRAPE_CF_1..N / GRAPE_CF_MAP）。
+
+    值不暴露在 prompt 文本里，agent 通过 printenv 自行读取。
+    - GRAPE_SCENE_ID：当前 Issue 绑定的场景标识；未选定注入空串（不回落 default，agent 判「未判定」）。
+    - GRAPE_CF_1..N / GRAPE_CF_MAP：custom_fields 按序号注入 + 键名映射（沿用原行为）。
+    """
+    try:
+        scene_id = _resolve_scene_id(repo_key, issue_id)
+        env_extra["GRAPE_SCENE_ID"] = scene_id
         if not scene_id:
             return
-        # 2. 读 advanced_options
+        from src.session_manager import db, db_lock
+        import json as _json
+        # 读 advanced_options 的 custom_fields
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -2075,7 +2084,7 @@ def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = ""
         fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("key")]
         if not fields:
             return
-        # 3. 按序号注入
+        # 按序号注入
         cf_map = {}
         for i, f in enumerate(fields, 1):
             var_name = f"GRAPE_CF_{i}"
@@ -2083,75 +2092,8 @@ def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = ""
             cf_map[var_name] = f.get("key", "")
         env_extra["GRAPE_CF_MAP"] = _json.dumps(cf_map, ensure_ascii=False)
     except Exception as _e:
-        log.warning(f"inject custom_fields env failed: {_e}")
-
-
-def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:
-    """按仓库 owner 注入华为云 AK/SK 到任务环境变量（多用户隔离）。
-
-    cloud-deploy 技能读取 HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK 环境变量；
-    AK/SK 按 user_accounts.username（=GitCode login）分别存储，
-    仓库归谁所有就用谁的凭证（repo_owner → user_accounts）。
-    owner 未配置时注入空值，由技能侧报"请仓库 owner 配置华为云凭证"。
-    """
-    try:
-        from src.repo_key import split_owner_repo
-        owner, _repo = split_owner_repo(repo_key)
-        if not owner:
-            env_extra.setdefault("HUAWEICLOUD_SDK_AK", "")
-            env_extra.setdefault("HUAWEICLOUD_SDK_SK", "")
-            return env_extra
-        from src.user.db import get_user_account
-        acc = get_user_account(owner) or {}
-        ak = (acc.get("huawei_cloud_ak") or "").strip()
-        sk = (acc.get("huawei_cloud_sk") or "").strip()
-        env_extra["HUAWEICLOUD_SDK_AK"] = ak
-        env_extra["HUAWEICLOUD_SDK_SK"] = sk
-        if not (ak and sk):
-            log.warning(f"cloud credentials: repo owner '{owner}' has no Huawei Cloud AK/SK configured, injected empty")
-    except Exception as e:
-        log.warning(f"cloud credentials injection failed for {repo_key}: {e}")
-        env_extra.setdefault("HUAWEICLOUD_SDK_AK", "")
-        env_extra.setdefault("HUAWEICLOUD_SDK_SK", "")
-    return env_extra
-
-
-def _apply_comment_repo_override(env_extra: dict, evt: dict) -> None:
-    """v4.5：评论里指定发布目标仓库（「同步到 signway/xxx」/「to owner/repo」）→ 覆盖默认。
-
-    根据 repo_key provider 分流：GitHub 仓库默认覆盖 GITHUB_PUBLISH_REPO，
-    GitCode 仓库默认覆盖 GITCODE_PUBLISH_REPO。
-    """
-    import re
-    note = ""
-    payload = evt.get("payload") or {}
-    if isinstance(payload, dict):
-        note = str(payload.get("object_attributes", {}).get("note") or "")
-    if not note:
-        return
-    # 从 evt 获取 repo_key 判断 provider
-    _rk = evt.get("repo_key") or ""
-    _is_github = _is_github_repo(_rk)
-    m = re.search(r"(?:到|同步到|push\s*到|to)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", note)
-    if m:
-        repo = m.group(1)
-        # 按平台覆盖（评论提到 github/gitcode 时精确覆盖；否则按 repo_key provider 覆盖）
-        low = note.lower()
-        if "github" in low:
-            env_extra["GITHUB_PUBLISH_REPO"] = repo
-        if "gitcode" in low:
-            env_extra["GITCODE_PUBLISH_REPO"] = repo
-        if "github" not in low and "gitcode" not in low:
-            # 未明确指定平台 → 按 repo_key provider 默认覆盖
-            if _is_github:
-                env_extra["GITHUB_PUBLISH_REPO"] = repo
-            else:
-                env_extra["GITCODE_PUBLISH_REPO"] = repo
-                env_extra["GITHUB_PUBLISH_REPO"] = repo
-    # v4.6：评论指定 ClawHub 组织发布者（「发布到组织 @my-org」/「owner: my-org」/「ownerHandle: xxx」）
-    mo = re.search(r"(?:组织\s*@|owner(?:handle)?\s*[:：]\s*@?)([A-Za-z0-9_.-]+)", note, re.IGNORECASE)
-    if mo:
-        env_extra["CLAWHUB_OWNER_HANDLE"] = mo.group(1)
+        from src.config import log
+        log.warning(f"inject scene env failed: {_e}")
 
 
 def get_prompt_context(repo_key: str) -> str:
@@ -2459,8 +2401,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         "REPO_FULL_NAME": repository,
         "ACCOUNT": exec_account,
     }
-    _inject_cloud_credentials(env_extra, repo_key)
-    # 注入场景 work_branch + custom_fields 环境变量（direct 模式同样注入，保持与 worker 模式一致）
+    # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -2468,12 +2409,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_custom_fields_env(env_extra, repo_key, issue_id)
-    # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
-    # （direct 模式同样需要——A2A 交办 sre 走本路径，见 _enqueue_pipeline_task 同款逻辑）
-    if agent_type == "sre":
-        # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
-        _apply_comment_repo_override(env_extra, evt)
+    _inject_scene_env(env_extra, repo_key, issue_id)
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
     if agent_type == "coding":
         try:

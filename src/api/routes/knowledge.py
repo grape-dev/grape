@@ -52,7 +52,19 @@ def _resolve_repo_key(repo: str) -> str:
 
 
 def _check_repo_member(user: dict, repo_key: str):
-    """校验用户是否是当前仓库的成员（托管者或已加入）。"""
+    """校验知识读取权限。
+
+    - 会话 token（`tk_`，devops agent 无 user_repos）：按 token 绑定的仓库作用域匹配
+      （provider + owner/repo 一致才放行，防绑 A 读 B，见 issue-219 知识按需获取）。
+    - 用户（JWT / `grape_` API Key）：仓库成员（托管者或已加入）。
+    """
+    if user.get("auth_type") == "session_token":
+        from src.repo_key import parse_repo_key
+        _tok_prov, _tok_owner, _tok_repo = parse_repo_key(user.get("repo_key") or "")
+        _req_prov, _req_owner, _req_repo = parse_repo_key(repo_key)
+        if _tok_owner and (_tok_prov, _tok_owner, _tok_repo) == (_req_prov, _req_owner, _req_repo):
+            return
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问此仓库的知识库（仓库作用域不匹配）"})
     from src.user.db import get_user_repos
     user_id = user.get("id")
     if not user_id:

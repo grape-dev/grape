@@ -544,18 +544,24 @@ def get_events_grouped_by_issue(repo_key: str) -> dict[str, list[dict]]:
     return grouped
 
 
-def get_issue_summary(repo_key: str, max_issues: int = 10) -> str:
+def get_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: str = "") -> str:
     """按 Issue 聚类生成事件摘要文本，用于 Prompt 注入。
 
     每条 Issue 包含：事件流（agent:type✓）+ 最新已完成事件的 result 摘要（截断 300 字符），
     使 Chat Agent 能感知「部署已完成 / PR 已合并」等关键结论，避免重复追问用户已提供的信息。
+
+    exclude_issue：排除当前 Issue（issue-219 方向 A——当前 Issue 不应出现在自己的 pipeline 摘要中）。
+    比较时两侧均忽略 '#' 前缀，兼容 events.issue_id 存 "#5" 或 "5" 两种格式。
     """
     grouped = get_events_grouped_by_issue(repo_key)
     if not grouped:
         return ""
 
+    _ex = str(exclude_issue or "").lstrip("#")
     lines = []
     sorted_issues = sorted(grouped.keys(), key=lambda iid: grouped[iid][-1]["created_at"], reverse=True)[:max_issues]
+    if _ex:
+        sorted_issues = [iid for iid in sorted_issues if str(iid).lstrip("#") != _ex]
 
     for iid in sorted_issues:
         events = grouped[iid]

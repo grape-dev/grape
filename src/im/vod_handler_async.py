@@ -195,13 +195,8 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
         parts.append(summary)
         parts.append("")
 
-    # VOD v2.0：项目知识基线 + 生命周期阶段 + Issue 富上下文（见 vod-skill-upgrade-plan.md §3.6）
-    # Issue #95：baseline 注入统一到 _build_project_info_section，删独立查询
+    # VOD v2.0：Issue 生命周期阶段 + Issue 富上下文（知识基线移入技能侧，task #219）
     try:
-        from src.prompt_builder import _build_project_info_section
-        parts.append(_build_project_info_section(repo_key, ""))
-        parts.append("\n> 若知识基线缺失或过期，请按 issue-advance/references/codegraph-project-analysis.md 生成/更新。")
-        # 当前 Issue 生命周期阶段（若有）
         _iid = evt.get("issue_id", "") or ""
         if _iid:
             try:
@@ -233,21 +228,6 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
 
     parts.append("## 角色定义")
     parts.append(_VOD_ROLE_DEFINITION)
-
-    # Issue #95：agent 沉淀知识引导（和 build_devops_agent_prompt 一致）
-    parts.append("\n## 共享知识\n> 前序 Agent 沉淀的经验已落地：{{KNOWLEDGE_DIR}}/，存在则用 read tool 读取并遵循。")
-
-    try:
-        agents_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "agent-description.json")
-        if os.path.isfile(agents_file):
-            with open(agents_file, encoding="utf-8") as f:
-                registry = json.load(f)
-            parts.append("\n## Available Agents")
-            for ag, info in registry.items():
-                desc = info.get("description", "")
-                parts.append(f"- {ag}：{desc}")
-    except Exception:
-        pass
 
     # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
     try:

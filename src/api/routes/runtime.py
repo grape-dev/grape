@@ -624,12 +624,21 @@ def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int = Depen
 
 @router.post("/tasks/{task_id}/complete")
 def runtime_task_complete(task_id: str, body: CompleteBody, credential_id: int = Depends(_require_credential)):
-    """完成（幂等）：解析结构化 output → finalize_event_archive → update_event_complete。"""
+    """完成（幂等）：解析结构化 output → finalize_event_archive → update_event_complete。
+
+    #219 双重标记：自报技能（skill 声明 grape tasks complete）→ worker 只落 stream_ended，
+    终态由「stream_ended ∧ self_reported」双满后收敛（agent 显式 complete 为权威，防空/截断结果抢跑）；
+    非自报技能维持原直调 complete_task。
+    """
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
-    service.complete_task(task_id, body.result_text, body.exit_code,
-                          usage={"session_id": body.session_id, "work_dir": body.work_dir})
+    _usage = {"session_id": body.session_id, "work_dir": body.work_dir}
+    if service.skill_self_reports(task.get("skill") or ""):
+        service.set_task_signal(task_id, "stream_ended")
+        service.finalize_task(task_id, body.exit_code, usage=_usage)
+    else:
+        service.complete_task(task_id, body.result_text, body.exit_code, usage=_usage)
     return {"status": "completed"}
 
 
