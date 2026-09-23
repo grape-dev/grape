@@ -474,36 +474,50 @@ class PolishBody(BaseModel):
 
 @router.post("/polish")
 async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_user)):
-    """用 chat agent 润色巡检指令，返回优化后的指令内容。"""
+    """用 LLM 润色巡检指令，返回优化后的指令内容。"""
     if not body.instruction or not body.instruction.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "巡检指令不能为空"})
 
-    import os
-    from src.api.session_store import get_or_create_agent_session
-    from src.session_manager import get_chat_config
-    from src.api.routes.chat import _get_chat_cwd
-    from src.agent.executor import stream_chat_agent
-    from src.api.deps import get_user_token_with_refresh
+    import os, json, urllib.request
+    import yaml
 
-    cfg = get_chat_config(user["id"])
-    backend_name = cfg.get("backend", "")
-    if not backend_name:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "无可用引擎，请先配置 Chat Agent 引擎"})
-
-    user_token = ""
+    # 从 hermes config.yaml 读 LLM 配置
+    hermes_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
+    cfg_path = os.path.join(hermes_home, "config.yaml")
     try:
-        user_token = get_user_token_with_refresh(user.get("username", ""), user_id=user.get("id", 0)) or ""
-    except Exception:
-        pass
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            hermes_cfg = yaml.safe_load(f) or {}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": f"无法读取 LLM 配置: {e}"})
 
-    # 用临时工作目录（不关联会话/仓库）
-    import uuid as _uuid
-    tmp_conv_id = "polish_" + _uuid.uuid4().hex[:12]
-    cwd = _get_chat_cwd(user["id"], "", tmp_conv_id)
-    os.makedirs(cwd, exist_ok=True)
+    model_cfg = hermes_cfg.get("model", {})
+    base_url = model_cfg.get("base_url", "").rstrip("/")
+    model_name = model_cfg.get("default") or model_cfg.get("model") or ""
+    api_key = ""
 
-    session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
-    runtime_session_id = session.get("runtime_session_id", "") or ""
+    # api_key 可能是 ${ENV_VAR} 格式
+    raw_key = model_cfg.get("api_key", "")
+    if raw_key.startswith("${") and raw_key.endswith("}"):
+        env_name = raw_key[2:-1]
+        api_key = os.environ.get(env_name, "")
+    elif raw_key:
+        api_key = raw_key
+
+    # fallback: 如果主配置缺 api_key，试 fallback_providers
+    if not api_key or not base_url:
+        for fb in hermes_cfg.get("fallback_providers", []):
+            fb_url = fb.get("base_url", "").rstrip("/")
+            fb_model = fb.get("model") or model_name
+            key_env = fb.get("key_env", "")
+            fb_key = os.environ.get(key_env, "") if key_env else fb.get("api_key", "")
+            if fb_url and fb_key:
+                base_url = base_url or fb_url
+                model_name = model_name or fb_model
+                api_key = api_key or fb_key
+                break
+
+    if not base_url or not api_key or not model_name:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "LLM 配置不完整（缺 base_url/api_key/model）"})
 
     polish_prompt = f"""请优化以下 DevOps 巡检指令，使其更清晰、更结构化。
 
@@ -519,41 +533,25 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
 
 请直接输出优化后的指令内容，不要加任何解释说明。"""
 
+    def _call_llm():
+        body_json = json.dumps({
+            "model": model_name,
+            "messages": [{"role": "user", "content": polish_prompt}],
+            "temperature": 0.3,
+            "max_tokens": 2000,
+        }).encode("utf-8")
+        req = urllib.request.Request(f"{base_url}/chat/completions", data=body_json, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", f"Bearer {api_key}")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data["choices"][0]["message"]["content"].strip()
+
     try:
         import asyncio
-
-        def _run_polish():
-            parts = []
-            done_text = ""
-            for evt_type, data in stream_chat_agent(
-                prompt=polish_prompt,
-                cwd=cwd,
-                session_id=runtime_session_id,
-                account=user.get("username", ""),
-                user_id=user.get("id", 0),
-                user_token=user_token,
-                agent_name="Chat Agent",
-                agent_label="[Autopilot:polish]",
-                backend_name=backend_name,
-                max_exec_seconds=15,
-            ):
-                if evt_type == "text" and isinstance(data, str):
-                    parts.append(data)
-                elif evt_type == "done" and isinstance(data, dict):
-                    done_text = data.get("text", "") or ""
-            return (done_text or "".join(parts)).strip()
-
-        polished = await asyncio.to_thread(_run_polish)
+        polished = await asyncio.to_thread(_call_llm)
         if not polished:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": "润色结果为空，agent 可能未返回内容"})
-
-        # 清理临时工作目录
-        try:
-            import shutil
-            shutil.rmtree(cwd, ignore_errors=True)
-        except Exception:
-            pass
-
+            raise HTTPException(status_code=500, detail={"code": 500, "message": "润色结果为空"})
         return {"instruction": polished}
     except HTTPException:
         raise
