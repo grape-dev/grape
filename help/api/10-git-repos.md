@@ -36,6 +36,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo repo --owner {owner} --repo {repo}`（operation_id=`gitrepo_repo`，命令名 ≠ 路径，见 README「CLI 命令映射」）。
 
 **入参**
 
@@ -66,6 +67,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/branches
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo branches --owner {owner} --repo {repo}`（operation_id=`gitrepo_branches`）。
 
 **入参**：Path `{owner}`/`{repo}`（provider 由 token 派生，不传）；Query `?per_page=50`（技能用）。
 
@@ -84,6 +86,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/tree?ref={branch}&depth={single|recursive}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo tree --owner {owner} --repo {repo} --ref {branch} --depth single|recursive`（operation_id=`gitrepo_tree`）。
 
 **入参**
 
@@ -109,6 +112,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/contents — 根目录列表
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo contents --owner {owner} --repo {repo}`（operation_id=`gitrepo_contents_root`）。
 
 > 无尾斜杠的根路由（`gitrepo_contents_root`），等价 `contents/{path}` 的空 path：返回根目录条目数组。
 
@@ -122,6 +126,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/contents/{path}?ref={branch}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo contents --owner {owner} --repo {repo} --path {path} --ref {branch}`（operation_id=`gitrepo_contents`）。
 
 **入参**
 
@@ -155,6 +160,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/commits
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo commits --owner {owner} --repo {repo}`（operation_id=`gitrepo_commits`）。
 
 **入参**：Path owner/repo；Query `?per_page=`（可选）。
 
@@ -171,11 +177,13 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/labels
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo labels --owner {owner} --repo {repo}`（operation_id=`gitrepo_labels_list`）。
 
 **返回（200）**：标签数组 `[{"id":1,"name":"bug","color":"#ff0000","description":""}]`
 
 ### POST /api/git-repo/{owner}/{repo}/labels
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo labels create --owner {owner} --repo {repo} --json '{"name":"bug","color":"#d73a4a"}'`（operation_id=`gitrepo_labels_create`）。
 
 **Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `#d73a4a`）
 
@@ -187,6 +195,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/milestones?state=all
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo milestones --owner {owner} --repo {repo} --state all`（operation_id=`gitrepo_milestones`）。
 
 **Query**：`state`（open/closed/all，技能用 all）
 
@@ -200,6 +209,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/issues
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo issues --owner {owner} --repo {repo} --state open`（operation_id=`gitrepo_issues_list`）。
 
 **入参**：Query `?state=open&page=1&per_page=50`（state: open/closed/all）
 
@@ -213,6 +223,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### POST /api/git-repo/{owner}/{repo}/issues
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo issues create --owner {owner} --repo {repo} --json '{"title":"...","body":"...","assignee":"..."}'`（operation_id=`gitrepo_issues_create`）。
 
 **入参 Body（中性，provider 无关）**：
 
@@ -228,11 +239,13 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/issues/{number}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo issues get --owner {owner} --repo {repo} --number {number}`（operation_id=`gitrepo_issues_get`）。
 
 **返回（200）**：单个 Issue 对象（结构同上）。**错误**：404。
 
 ### PATCH /api/git-repo/{owner}/{repo}/issues/{number}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo issues update --owner {owner} --repo {repo} --number {number} --json '{...}'`（operation_id=`gitrepo_issues_update`）。
 
 **入参 Body（JSON，中性）**：
 
@@ -248,6 +261,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### POST /api/git-repo/{owner}/{repo}/issues/{number}/close
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo issues close --owner {owner} --repo {repo} --number {number}`（operation_id=`gitrepo_issues_close`）。
 
 关闭 Issue（对外关闭入口，供 grape-cli / agent 使用；无 Body）。平台适配由服务端完成，**调用方无需区分 provider**。
 
@@ -256,6 +270,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET/POST /api/git-repo/{owner}/{repo}/issues/{number}/comments
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo issues comments list --owner {owner} --repo {repo} --number {number}` / `issues comments create ... --json '{"body":"..."}'`（operation_id=`gitrepo_issues_comments_list` / `gitrepo_issues_comments_create`）。
 
 - **GET**：返回评论数组 `[{"id":1,"body":"...","user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）创建后的评论对象。
@@ -266,6 +281,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/pulls
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo pulls --owner {owner} --repo {repo}`（operation_id=`gitrepo_pulls_list`）。
 
 **返回（200）**：PR 对象数组
 ```json
@@ -277,6 +293,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### POST /api/git-repo/{owner}/{repo}/pulls
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo pulls create --owner {owner} --repo {repo} --json '{...}'`（operation_id=`gitrepo_pulls_create`）。
 
 **入参 Body（JSON，中性）**：
 
@@ -295,11 +312,13 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/pulls/{number}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo pulls get --owner {owner} --repo {repo} --number {number}`（operation_id=`gitrepo_pulls_get`）。
 
 **返回（200）**：单个 PR 对象（结构同上）。**错误**：404。
 
 ### PATCH /api/git-repo/{owner}/{repo}/pulls/{number}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo pulls update --owner {owner} --repo {repo} --number {number} --json '{...}'`（operation_id=`gitrepo_pulls_update`）。
 
 **入参 Body（JSON）**：`title` / `body` / `labels`（按需更新字段）。
 
@@ -307,11 +326,13 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### PUT /api/git-repo/{owner}/{repo}/pulls/{number}/merge
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo pulls merge --owner {owner} --repo {repo} --number {number}`（operation_id=`gitrepo_pulls_merge`）。
 
 **返回（200）**：`{"merged": true, "sha": "..."}`。**错误**：409（不可合并）。
 
 ### GET/POST /api/git-repo/{owner}/{repo}/pulls/{number}/comments
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo pulls comments list --owner {owner} --repo {repo} --number {number}` / `pulls comments create ... --json '{"body":"LGTM","path":"a.py","line":5}'`（operation_id=`gitrepo_pulls_comments_list` / `gitrepo_pulls_comments_create`）。
 
 - **GET**：返回 PR 行内评论数组 `[{"id":1,"body":"LGTM","path":"a.py","line":5,"user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）评论对象。
@@ -319,6 +340,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET /api/git-repo/{owner}/{repo}/pulls/{number}/files
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo pulls files --owner {owner} --repo {repo} --number {number}`（operation_id=`gitrepo_pulls_files`）。
 
 **返回（200）**：变更文件数组
 ```json
