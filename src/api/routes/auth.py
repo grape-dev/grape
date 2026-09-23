@@ -193,7 +193,10 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     if not local_user:
         result = user_db.create_user(gitcode_login, hashlib.sha256(os.urandom(16)).hexdigest(), 0)
         if not result:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
+            # username 冲突（已有同用户名的 GitHub 账号）→ 加前缀创建独立 GitCode 账号
+            result = user_db.create_user(f"gc_{gitcode_login}", hashlib.sha256(os.urandom(16)).hexdigest(), 0)
+            if not result:
+                raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
         local_user = user_db.get_user(result["id"])
 
     user_db.link_gitcode_user(local_user["id"], gitcode_id, access_token, refresh_token)
@@ -348,7 +351,10 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     if not local_user:
         result = user_db.create_user(github_login, hashlib.sha256(os.urandom(16)).hexdigest(), 0)
         if not result:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
+            # username 冲突（已有同用户名的 GitCode 账号）→ 加前缀创建独立 GitHub 账号
+            result = user_db.create_user(f"gh_{github_login}", hashlib.sha256(os.urandom(16)).hexdigest(), 0)
+            if not result:
+                raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
         local_user = user_db.get_user(result["id"])
 
     user_db.link_github_user(local_user["id"], github_id, access_token, refresh_token)
