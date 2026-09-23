@@ -2,8 +2,8 @@
 
 > 对外公开，认证：`get_current_user_or_api_key`。
 > scope（x-token-scope）：多数 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）；
-> `skills_upload`（repo 技能上传，会话需仓库作用域匹配）与 `skills_detail`（按 id 读详情）
-> 为 **dual**（会话 token 可调，见各节说明）；其余（含 `skills_list`）均为 **user_only**。
+> `skills_upload`、`skills_detail` 与**子技能三端点**（`sub`/`sub get`/`package-sub`）为 **dual**
+> （会话 token 可调，agent 运行时按需加载）；其余（含 `skills_list`）均为 **user_only**。
 
 ## GET /api/skills — 技能列表
 
@@ -143,18 +143,18 @@
 ---
 
 ## GET /api/skills/{skill_id}/sub — 子技能列表
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）
 > CLI：`grape skills sub --id {skill_id}`（operation_id=`skills_sub_list`）。
 
 ## GET /api/skills/{skill_id}/sub/{sub_name} — 读子技能
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（同左；agent 运行时按需加载子技能）
 > CLI：`grape skills sub get --id {skill_id} --name {sub_name}`（operation_id=`skills_sub_get`）。
 
 ## GET /api/skills/package-sub/{pkg_id}/{sub_name} — 包内子技能
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（同左）
 > CLI：`grape skills package-sub --package {pkg_id} --name {sub_name}`（operation_id=`skills_package_sub_get`）。
 
-> 子技能接口返回 SKILL.md/references 内容，供 agent 运行时按需加载。
+> 子技能接口返回 SKILL.md/references 内容，供 agent 运行时按需加载（三端点 session token 均可读）。
 
 ---
 

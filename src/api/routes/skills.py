@@ -968,7 +968,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
 
 
 @router.get("/{skill_id}/sub/{sub_name}", operation_id="skills_sub_get", summary="Read sub-skill SKILL.md", description="Reads a sub-skill's SKILL.md content.")
-def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
+def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """读取技能包子技能的 SKILL.md 内容"""
     from src.session_manager import db, db_lock
 
@@ -1018,7 +1018,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no
 
 
 @router.get("/package-sub/{pkg_id}/{sub_name}", operation_id="skills_package_sub_get", summary="Get sub-skill detail from package", description="Returns a sub-skill detail from a package (same shape as skill detail).")
-def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
+def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """返回技能包子技能详情（格式与 skill detail 一致，支持导航到独立详情页）"""
     from src.session_manager import db, db_lock
     import re as _re
