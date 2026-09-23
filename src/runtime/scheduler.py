@@ -272,6 +272,22 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     # 广播模式设 pool_tag
     _pool_tag = agent_type if engine_id == 0 else ""
 
+    # 限定 opencode 引擎认领（定时任务轻量，opencode 最快，复用智能推荐逻辑）
+    _pool_engine_ids = ""
+    if engine_id == 0:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT id FROM agent_runtimes WHERE name='opencode' AND status='online'")
+                _oc_ids = [r[0] for r in c.fetchall()]
+            if _oc_ids:
+                _pool_engine_ids = json.dumps(_oc_ids)
+                log.info(f"Autopilot exec {exec_id}: 限定 opencode engines={_oc_ids}")
+            else:
+                log.info(f"Autopilot exec {exec_id}: 无 online opencode，不限定（兜底放行）")
+        except Exception as _oe:
+            log.warning(f"Autopilot exec {exec_id}: opencode 过滤失败: {_oe}")
+
     log.info(f"Autopilot exec {exec_id}: enqueuing remote agent={agent_type} engine={inst_name} pool_tag={_pool_tag}")
 
     try:
@@ -298,7 +314,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             issue_session_id="",
             pool_agent_type=_pool_tag,
             pool_tag=_pool_tag,
-            pool_engine_ids="",
+            pool_engine_ids=_pool_engine_ids,
         )
         if not task_id:
             log.warning(f"Autopilot exec {exec_id}: enqueue_task failed")
