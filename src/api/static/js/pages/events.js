@@ -27,7 +27,19 @@ function navEvent(seq) {
     var titleEl = document.getElementById('pageTitle');
     if (titleEl) titleEl.textContent = I18N.t('events.page_title_prefix', {seq: seq});
     renderEventDetail(data);
+    // Issue #224: 同步更新 URL hash（replaceState 避免污染浏览器历史栈）
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, '', '#event/' + seq);
+    }
   }).catch(function(e) {
+    // Issue #224: 403 无权限访问该事件（可能属于其他仓库）→ 提示用户，不静默失败
+    var status = (e && e.status) || 0;
+    if (status === 403) {
+      if (typeof app !== 'undefined' && app.showToast) {
+        app.showToast(I18N.t('events.nav_forbidden', {seq: seq}));
+      }
+      return;
+    }
     // 事件不存在 → 后端返回 max_seq，跳转到最后一个事件
     var detail = (e && e.detail) || {};
     var maxSeq = detail.max_seq;
