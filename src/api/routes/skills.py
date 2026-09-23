@@ -209,14 +209,14 @@ def toggle_skill_like(skill_id: int, user: dict = Depends(require_no_session_tok
     return {"liked": liked, "like_count": like_count}
 
 
-@router.get("/featured", operation_id="skills_featured", summary="List featured skills", description="Featured skills: is_featured=1 official skills ordered by like_count desc (default limit 4).")
+@router.get("/featured", operation_id="skills_featured", summary="List featured skills", description="Featured skills: is_featured=1 official skills ordered by like_count desc (default limit 5).")
 def list_featured_skills(user: dict = Depends(require_no_session_token), limit: int = 0):
-    """精选技能：is_featured=1 的 official 技能，按 like_count 降序。limit=0 时默认 4"""
+    """精选技能：is_featured=1 的 official 技能，按 like_count 降序。limit=0 时默认 5"""
     from src.user.db import (get_featured_skills, batch_skill_liked,
                              get_skill_usage_stats, batch_skill_scenes,
                              list_skill_categories)
 
-    skills = get_featured_skills(limit=limit if limit > 0 else 4)
+    skills = get_featured_skills(limit=limit if limit > 0 else 5)
     if not skills:
         return {"skills": []}
 
@@ -242,6 +242,16 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
         s["repo_count"] = stats.get("repo_count", 0)
         s["scenes"] = scenes_map.get(s["id"], [])
         s["category_name"] = cat_map.get(s.get("category_id", 0), "")
+    # 精选技能按 admin 管理台设置的顺序排列
+    if skills:
+        try:
+            from src.featured_order import get_featured_order
+            _order = get_featured_order("skill")
+            if _order:
+                _order_map = {sid: i for i, sid in enumerate(_order)}
+                skills.sort(key=lambda x: _order_map.get(x["id"], 9999))
+        except Exception:
+            pass
     return {"skills": skills}
 
 

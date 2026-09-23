@@ -20,12 +20,29 @@ _conn = None
 
 
 def _admin_db_config() -> dict:
-    """admin 库连接配置：ADMIN_DB_* 环境变量优先，其次复用 DEVOPS_DB_* 的 host/port/user/password。"""
-    # 复用业务库的 host/port/user/password（两库通常在同一实例）
-    host = os.environ.get("ADMIN_DB_HOST", os.environ.get("DEVOPS_DB_HOST", "127.0.0.1"))
-    port = int(os.environ.get("ADMIN_DB_PORT", os.environ.get("DEVOPS_DB_PORT", "3306")))
-    user = os.environ.get("ADMIN_DB_USER", os.environ.get("DEVOPS_DB_USER", "root"))
-    password = os.environ.get("ADMIN_DB_PASSWORD", os.environ.get("DEVOPS_DB_PASSWORD", ""))
+    """admin 库连接配置：ADMIN_DB_* 环境变量优先，其次复用 DEVOPS_DB_* 或 configs/db-backend.json。"""
+    import json as _json
+    # 先从 configs/db-backend.json 读基础配置
+    _cfg_host = "127.0.0.1"
+    _cfg_port = 3306
+    _cfg_user = "root"
+    _cfg_password = ""
+    try:
+        _cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "db-backend.json")
+        with open(_cfg_path) as f:
+            _db_cfg = _json.load(f)
+            _mysql = _db_cfg.get("mysql", {})
+            _cfg_host = _mysql.get("host", _cfg_host)
+            _cfg_port = _mysql.get("port", _cfg_port)
+            _cfg_user = _mysql.get("user", _cfg_user)
+            _cfg_password = _mysql.get("password", _cfg_password)
+    except Exception:
+        pass
+    # 环境变量优先覆盖
+    host = os.environ.get("ADMIN_DB_HOST", os.environ.get("DEVOPS_DB_HOST", _cfg_host))
+    port = int(os.environ.get("ADMIN_DB_PORT", os.environ.get("DEVOPS_DB_PORT", str(_cfg_port))))
+    user = os.environ.get("ADMIN_DB_USER", os.environ.get("DEVOPS_DB_USER", _cfg_user))
+    password = os.environ.get("ADMIN_DB_PASSWORD", os.environ.get("DEVOPS_DB_PASSWORD", _cfg_password))
     database = os.environ.get("ADMIN_DB_NAME", "grape_admin_db")
     return {
         "host": host,
