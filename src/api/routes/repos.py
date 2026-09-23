@@ -66,6 +66,14 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
     """
     from src.repo_key import to_repo_key
     managed = {r["repo_key"]: r["webhook_id"] for r in user_db.get_all_managed_repos()}
+    # 当前用户自己托管（user_repos.is_join=1）的仓库集合
+    my_hosted_keys = set()
+    try:
+        for r in user_db.get_user_repos(user_id):
+            if r.get("is_join"):
+                my_hosted_keys.add(r.get("repo_key", ""))
+    except Exception:
+        pass
     result = []
     for r in repos:
         full_name = r.get("full_name", "")
@@ -86,6 +94,7 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
             "in_managed": in_managed,
             "is_joined": in_managed,
             "is_hosted": hosted,
+            "my_hosted": repo_key in my_hosted_keys,
             "created_at": r.get("created_at", "") or "",
         })
     return result

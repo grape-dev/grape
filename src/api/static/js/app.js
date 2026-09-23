@@ -151,9 +151,9 @@ function loadAgentTypes() {
 
     // Issue #82: 仅在完全无选中仓库时才默认选第一个；
     // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
-    // 只自动选中当前用户自己有权限托管（can_host）的仓库，不自动跳到别人托管的仓库
+    // 只自动选中当前用户自己托管（my_hosted）的仓库，不跳到别人托管的
     if (!current) {
-        const myRepo = managedRepos.find(r => r.can_host);
+        const myRepo = managedRepos.find(r => r.my_hosted);
         if (myRepo) {
             localStorage.setItem('currentRepo', JSON.stringify({fullName: myRepo.full_name, owner: myRepo.owner, name: myRepo.name, repoKey: myRepo.repo_key || ''}));
         } else {
@@ -1210,7 +1210,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '33');
+      localStorage.setItem('app_cache_ver', '34');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -1237,13 +1237,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '33') {
+    if (localStorage.getItem('app_cache_ver') !== '34') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '33');
+      localStorage.setItem('app_cache_ver', '34');
     }
 
     const token = localStorage.getItem('token');
