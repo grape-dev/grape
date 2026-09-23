@@ -216,6 +216,16 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
             "repo_count": repo_count_map.get(s["id"], 0),
             "scope": s.get("scope", "official"),
         })
+    # 精选场景按 admin 管理台设置的顺序排列
+    if featured_only and result:
+        try:
+            from src.featured_order import get_featured_order
+            _order = get_featured_order("scene")
+            if _order:
+                _order_map = {sid: i for i, sid in enumerate(_order)}
+                result.sort(key=lambda x: _order_map.get(x["id"], 9999))
+        except Exception:
+            pass
     return {"scenes": result, "total": total, "page": page, "page_size": page_size}
 
 
