@@ -231,7 +231,7 @@ function renderDashboard(data) {
         <h2>${I18N.t('dashboard.scene_center_title')} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${scenesData.length}</span></h2>
         <div style="display:flex;gap:8px">
           <button class="ap-btn" onclick="_openSceneRecommendModal('${owner}/${name}')">${I18N.t('dashboard.scene_recommend_rules')||'智能推荐规则'}</button>
-          <button class="ap-btn" onclick="app.nav('autopilot')">⏰ ${I18N.t('dashboard.autopilot')||'定时任务'}</button>
+          <button class="ap-btn" onclick="app.nav('autopilot')">⏰ 定时任务</button>
           <button class="ap-btn" onclick="enterCreateMode()">＋ ${I18N.t('dashboard.add_scene')||'添加场景'}</button>
         </div>
       </div>
