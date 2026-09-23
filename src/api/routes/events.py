@@ -67,14 +67,15 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
-    # 前后同 agent_type 事件 seq（供前端箭头导航）
+    # 前后同 agent_type 同仓库事件 seq（供前端箭头导航，Issue #224: 增加 repo_key 过滤避免跨仓库导航）
     try:
         agent_type = row[5] or ""
+        repo_key = row[1] or ""
         with db_lock:
             c2 = db.cursor()
-            c2.execute("SELECT MAX(seq) FROM events WHERE seq < ? AND agent_type=?", (seq, agent_type))
+            c2.execute("SELECT MAX(seq) FROM events WHERE seq < ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
             prev_seq = c2.fetchone()[0]
-            c2.execute("SELECT MIN(seq) FROM events WHERE seq > ? AND agent_type=?", (seq, agent_type))
+            c2.execute("SELECT MIN(seq) FROM events WHERE seq > ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
             next_seq = c2.fetchone()[0]
         result["prev_seq"] = prev_seq if prev_seq else 0
         result["next_seq"] = next_seq if next_seq else 0

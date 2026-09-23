@@ -353,6 +353,126 @@ class TestDashboard:
         assert len(d["agents"]) == 5  # VOD/Issue/Coding/QA/SRE
         assert "agent_engines" in d  # Scene Center: engine 列表替代 activity
 
+    def test_dashboard_agent_engines_includes_offline(self):
+        """Issue #227: agent_engines 应返回全部引擎（含 offline），不能按状态过滤。"""
+        import datetime as _dt
+        from src.session_manager import db, db_lock
+        _tz = _dt.timezone.utc
+        _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
+        _stale = (_dt.datetime.now(_tz) - _dt.timedelta(minutes=20)).isoformat()
+        _ids = []
+        with db_lock:
+            c = db.cursor()
+            # 清理可能残留的同名引擎
+            for n in ("test-offline-eng", "test-online-eng", "test-recentlylost-eng"):
+                c.execute("SELECT id FROM agent_runtimes WHERE name=?", (n,))
+                for row in c.fetchall():
+                    c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (row[0],))
+                c.execute("DELETE FROM agent_runtimes WHERE name=?", (n,))
+            for n in ("cred-offline", "cred-online", "cred-recentlylost"):
+                c.execute("DELETE FROM runtime_credentials WHERE name=?", (n,))
+            # 3 个凭证（global scope, active）
+            creds = {}
+            for cn in ("cred-online", "cred-recentlylost", "cred-offline"):
+                c.execute(
+                    "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
+                    "VALUES (?,?,?,?,?,?, 'active')",
+                    ("h"+cn, cn, "dev-"+cn, "global", "", "tester"))
+                creds[cn] = c.lastrowid
+            # online 引擎：status=online + 心跳新鲜
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-online-eng", "test-online-eng", creds["cred-online"], "online", 1, 1, _fresh, "global", ""))
+            _ids.append(c.lastrowid)
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (_ids[-1],))
+            # recently_lost 引擎：status=online + 心跳超时
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-recentlylost-eng", "test-recentlylost-eng", creds["cred-recentlylost"], "online", 1, 1, _stale, "global", ""))
+            _ids.append(c.lastrowid)
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (_ids[-1],))
+            # offline 引擎：status=offline + 无心跳
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-offline-eng", "test-offline-eng", creds["cred-offline"], "offline", 0, 1, "", "global", ""))
+            _ids.append(c.lastrowid)
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (_ids[-1],))
+            db.commit()
+        try:
+            r = client.get("/api/dashboard/org/test", headers=_headers)
+            assert r.status_code == 200
+            d = r.json()
+            ae = d["agent_engines"]
+            # tag="all" 的引擎应出现在每个 agent_type 下
+            all_engines = []
+            for atype in ("vod", "issue", "coding", "qa", "sre"):
+                all_engines.extend(ae.get(atype, []))
+            statuses = {e["status"] for e in all_engines}
+            # 必须包含 offline（Issue #227 核心验收点）
+            assert "offline" in statuses, f"offline engines missing from agent_engines, got statuses: {statuses}"
+            # 三种状态都应出现
+            assert "online" in statuses, f"online engines missing, got: {statuses}"
+            assert "recently_lost" in statuses, f"recently_lost engines missing, got: {statuses}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                for rid in _ids:
+                    c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+                    c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
+                for cn in ("cred-online", "cred-recentlylost", "cred-offline"):
+                    c.execute("DELETE FROM runtime_credentials WHERE name=?", (cn,))
+                db.commit()
+
+    def test_dashboard_agent_engines_dedup(self):
+        """Issue #227: 同一 runtime_id 跨 scope 查询时应去重。"""
+        import datetime as _dt
+        from src.session_manager import db, db_lock
+        _tz = _dt.timezone.utc
+        _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
+        _ids = []
+        with db_lock:
+            c = db.cursor()
+            for n in ("test-dedup-eng",):
+                c.execute("SELECT id FROM agent_runtimes WHERE name=?", (n,))
+                for row in c.fetchall():
+                    c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (row[0],))
+                c.execute("DELETE FROM agent_runtimes WHERE name=?", (n,))
+            for n in ("cred-dedup",):
+                c.execute("DELETE FROM runtime_credentials WHERE name=?", (n,))
+            c.execute(
+                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
+                "VALUES (?,?,?,?,?,?, 'active')",
+                ("hcred-dedup", "cred-dedup", "dev-dedup", "global", "", "tester"))
+            cid = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-dedup-eng", "test-dedup-eng", cid, "online", 1, 1, _fresh, "global", ""))
+            _ids.append(c.lastrowid)
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (_ids[-1],))
+            db.commit()
+        try:
+            r = client.get("/api/dashboard/org/test", headers=_headers)
+            assert r.status_code == 200
+            d = r.json()
+            ae = d["agent_engines"]
+            for atype in ("vod", "issue", "coding", "qa", "sre"):
+                engines = ae.get(atype, [])
+                ids = [e["id"] for e in engines]
+                # 同一 runtime_id 不应重复出现
+                assert len(ids) == len(set(ids)), f"Duplicate engine ids found for {atype}: {ids}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                for rid in _ids:
+                    c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+                    c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
+                c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-dedup",))
+                db.commit()
+
 
 # ===================== 5. Pipeline =====================
 class TestPipeline:
