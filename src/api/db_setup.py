@@ -2307,11 +2307,12 @@ def _migrate_tables():
         "ALTER TABLE global_im_bot_config ADD COLUMN lease_expires_at DATETIME DEFAULT NULL",
         "ALTER TABLE global_im_bot_config ADD COLUMN lease_owner VARCHAR(128) DEFAULT NULL",
         "ALTER TABLE global_im_bot_config ADD COLUMN lease_acquired_at DATETIME DEFAULT NULL",
-        "ALTER TABLE global_im_bot_config ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        # SQLite 不支持 ALTER ADD COLUMN non-constant default（CURRENT_TIMESTAMP 会静默失败）
+        "ALTER TABLE global_im_bot_config ADD COLUMN updated_at TEXT DEFAULT ''",
         # ===== knowledge-obs-design：agent_shared_knowledge OBS 对象存储字段 =====
         "ALTER TABLE agent_shared_knowledge ADD COLUMN obs_key VARCHAR(512) DEFAULT ''",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
-        "ALTER TABLE agent_shared_knowledge ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE agent_shared_knowledge ADD COLUMN updated_at TEXT DEFAULT ''",
         # ===== Issue #67：知识来源 + 归档标记 =====
         "ALTER TABLE agent_shared_knowledge ADD COLUMN source TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
