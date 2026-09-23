@@ -77,7 +77,7 @@ _PLACEHOLDER_VALUES = {
 def _is_placeholder(value: str) -> bool:
     v = (value or "").strip()
     if not v:
-        return True  # 空 = 无值（不写）
+        return False  # 空字符串不是占位符（清除语义由调用方处理）
     if v in _PLACEHOLDER_VALUES:
         return True
     if v.startswith(("AK-demo-", "SK-demo-", "ghp_devopsbot_")):
@@ -85,36 +85,57 @@ def _is_placeholder(value: str) -> bool:
     return "xxxx" in v.lower()
 
 
-@router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected.")
+@router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected. Sending an empty string explicitly clears the field; omitting a field leaves it unchanged.")
 def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_session_token)):
     acc = user_db.get_user_account(user["username"]) or {}
-    if body.huawei_cloud_ak and not _is_placeholder(body.huawei_cloud_ak):
-        acc["huawei_cloud_ak"] = body.huawei_cloud_ak.strip()
-    if body.huawei_cloud_sk and not _is_placeholder(body.huawei_cloud_sk):
-        acc["huawei_cloud_sk"] = body.huawei_cloud_sk.strip()
-    if body.codearts_ak and not _is_placeholder(body.codearts_ak):
-        acc["CODEARTS_CLI_AK"] = body.codearts_ak.strip()
-    if body.codearts_sk and not _is_placeholder(body.codearts_sk):
-        acc["CODEARTS_CLI_SK"] = body.codearts_sk.strip()
-    if body.github_token and not _is_placeholder(body.github_token):
-        _gh_tok = body.github_token.strip()
-        acc["github_api_token"] = _gh_tok
-        # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
-        try:
-            import requests as _req
-            _resp = _req.get("https://api.github.com/user",
-                             headers={"Authorization": f"Bearer {_gh_tok}", "Accept": "application/vnd.github+json"},
-                             timeout=10)
-            if _resp.status_code == 200:
-                _gh_user = _resp.json()
-                acc["github_login"] = _gh_user.get("login", "")
-                # 关联到用户表
-                user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
-                log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
-            else:
-                log.warning(f"GitHub token validation failed: {_resp.status_code}")
-        except Exception as _e:
-            log.warning(f"GitHub token validation error: {_e}")
+    # 区分「未传字段」（不修改）与「传空字符串」（清除）：
+    # model_dump(exclude_unset=True) 仅含请求体中显式传递的字段，未传字段取默认值时不包含在内。
+    explicit = body.model_dump(exclude_unset=True)
+
+    def _apply_credential(field: str, acc_key: str):
+        """统一凭据写入逻辑（Issue #237）：
+        - 字段未传 → 不修改（保持已有值）
+        - 字段传空字符串 → 清除（置空）
+        - 字段传非空非占位符值 → 写入
+        - 字段传占位符/demo 值 → 拒绝写入（保持已有值）
+        """
+        if field not in explicit:
+            return
+        v = (explicit[field] or "").strip()
+        if v and not _is_placeholder(v):
+            acc[acc_key] = v
+        elif not v:
+            acc[acc_key] = ""
+
+    _apply_credential("huawei_cloud_ak", "huawei_cloud_ak")
+    _apply_credential("huawei_cloud_sk", "huawei_cloud_sk")
+    _apply_credential("codearts_ak", "CODEARTS_CLI_AK")
+    _apply_credential("codearts_sk", "CODEARTS_CLI_SK")
+
+    # GitHub Token（写入时需验证 token 并获取用户信息；清除时无需验证）
+    if "github_token" in explicit:
+        _gh_tok = (explicit["github_token"] or "").strip()
+        if _gh_tok and not _is_placeholder(_gh_tok):
+            acc["github_api_token"] = _gh_tok
+            # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
+            try:
+                import requests as _req
+                _resp = _req.get("https://api.github.com/user",
+                                 headers={"Authorization": f"Bearer {_gh_tok}", "Accept": "application/vnd.github+json"},
+                                 timeout=10)
+                if _resp.status_code == 200:
+                    _gh_user = _resp.json()
+                    acc["github_login"] = _gh_user.get("login", "")
+                    # 关联到用户表
+                    user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
+                    log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
+                else:
+                    log.warning(f"GitHub token validation failed: {_resp.status_code}")
+            except Exception as _e:
+                log.warning(f"GitHub token validation error: {_e}")
+        elif not _gh_tok:
+            acc["github_api_token"] = ""
+            acc["github_login"] = ""
     user_db.save_user_account(user["username"], acc)
     return {"message": "凭据已更新"}
 

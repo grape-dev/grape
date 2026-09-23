@@ -217,13 +217,14 @@ function saveCredentials() {
   const akVal = ak && ak.value ? ak.value.trim() : '';
 
   const skVal = sk && sk.value ? sk.value.trim() : '';
-  if (akVal && !_isCredPlaceholder(akVal)) body.huawei_cloud_ak = akVal;
-  if (skVal && !_isCredPlaceholder(skVal)) body.huawei_cloud_sk = skVal;
+  // Issue #237：始终传递 AK/SK（含空字符串=清除），排除 ******** 掩码值（代表未修改）
+  if (akVal !== '********') body.huawei_cloud_ak = akVal;
+  if (skVal !== '********') body.huawei_cloud_sk = skVal;
 
-  // GitHub Token
+  // GitHub Token：同样排除 ******** 掩码值；空字符串=清除
   const ghEl = document.getElementById('githubToken');
   const ghVal = ghEl && ghEl.value ? ghEl.value.trim() : '';
-  if (ghVal && !_isCredPlaceholder(ghVal) && ghVal !== '********') body.github_token = ghVal;
+  if (ghVal !== '********') body.github_token = ghVal;
 
   // v4.3：发布令牌按仓库（项目维度）——带当前仓库
   const cur = app.currentRepo();
