@@ -474,55 +474,82 @@ class PolishBody(BaseModel):
 
 @router.post("/polish")
 async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_user)):
-    """用 LLM 润色巡检指令，返回优化后的指令内容。"""
+    """用 chat agent 润色巡检指令，返回优化后的指令内容。"""
     if not body.instruction or not body.instruction.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "巡检指令不能为空"})
 
-    from src.agent.image_understanding import _load_vlm_config
-    import httpx
+    import os
+    from src.api.session_store import get_or_create_agent_session
+    from src.session_manager import get_chat_config
+    from src.api.routes.chat import _get_chat_cwd
+    from src.agent.executor import stream_chat_agent
+    from src.api.deps import get_user_token_with_refresh
 
-    cfg = _load_vlm_config()
-    if not cfg:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "LLM 配置不可用，请联系管理员配置 vlm-config.json"})
+    cfg = get_chat_config(user["id"])
+    backend_name = cfg.get("backend", "")
+    if not backend_name:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "无可用引擎，请先配置 Chat Agent 引擎"})
 
-    system_prompt = """你是一个 DevOps 巡检指令优化助手。用户会给你一个巡检任务的名称和初步指令，你需要：
+    user_token = ""
+    try:
+        user_token = get_user_token_with_refresh(user.get("username", ""), user_id=user.get("id", 0)) or ""
+    except Exception:
+        pass
 
+    # 用临时工作目录（不关联会话/仓库）
+    import uuid as _uuid
+    tmp_conv_id = "polish_" + _uuid.uuid4().hex[:12]
+    cwd = _get_chat_cwd(user["id"], "", tmp_conv_id)
+    os.makedirs(cwd, exist_ok=True)
+
+    session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
+    runtime_session_id = session.get("runtime_session_id", "") or ""
+
+    polish_prompt = f"""请优化以下 DevOps 巡检指令，使其更清晰、更结构化。
+
+要求：
 1. 补充巡检步骤的细节和顺序（编号列表）
 2. 明确输出要求（分析什么、报告什么）
-3. 加入问题分类标准（严重程度 high/medium/low）
-4. 保持用户原有的核心意图，不要凭空发明新的巡检范围
-5. 输出纯文本，不要 markdown 标题语法（不要用 #），直接输出指令内容
+3. 不要凭空发明用户意图之外的巡检范围
+4. 输出纯文本指令，不要 markdown 标题语法（不要用 #）
 
-格式参考：
-1. [具体步骤]
-2. [具体步骤]
-...
-输出要求：[明确要求 agent 输出什么]"""
+任务名称：{body.name}
+初步指令：
+{body.instruction}
 
-    user_msg = f"任务名称：{body.name}\n初步指令：\n{body.instruction}"
+请直接输出优化后的指令内容，不要加任何解释说明。"""
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{cfg['base_url']}/chat/completions",
-                headers={"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"},
-                json={
-                    "model": cfg["model"],
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 2000,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            polished = data["choices"][0]["message"]["content"].strip()
-            return {"instruction": polished}
-    except httpx.HTTPStatusError as e:
-        log.warning(f"Autopilot polish: LLM API error {e.response.status_code}")
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"润色服务暂时不可用: {e.response.status_code}"})
+        result_parts = []
+        for evt_type, data in stream_chat_agent(
+            prompt=polish_prompt,
+            cwd=cwd,
+            session_id=runtime_session_id,
+            account=user.get("username", ""),
+            user_id=user.get("id", 0),
+            user_token=user_token,
+            agent_name="Chat Agent",
+            agent_label="[Autopilot:polish]",
+            backend_name=backend_name,
+            max_exec_seconds=60,
+        ):
+            if evt_type == "content" and isinstance(data, str):
+                result_parts.append(data)
+
+        polished = "".join(result_parts).strip()
+        if not polished:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": "润色结果为空，agent 可能未返回内容"})
+
+        # 清理临时工作目录
+        try:
+            import shutil
+            shutil.rmtree(cwd, ignore_errors=True)
+        except Exception:
+            pass
+
+        return {"instruction": polished}
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning(f"Autopilot polish: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": f"润色失败: {e}"})
