@@ -118,11 +118,15 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
             if ensure_row:
                 # 建档最小行（幂等：仅当无该卡片行时 INSERT；后再 UPDATE 收编字段）。
                 # SQLite 与 MySQL 均支持 INSERT..SELECT..WHERE NOT EXISTS。
+                # user_id 按 assignee 解析（unified_user_mapping 可映射则落真实 id，否则 0），
+                # 避免 stage/scene 先行建档把归属错存为 0（issues-mine-user-id-zero-fix-design.md）。
                 c.execute(
                     "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) "
-                    "SELECT 0, ?, ?, ?, 'active' WHERE NOT EXISTS "
+                    "SELECT COALESCE((SELECT m.user_id FROM unified_user_mapping m "
+                    "                 WHERE m.gitcode_user = ? AND m.user_id > 0 LIMIT 1), 0), "
+                    "?, ?, ?, 'active' WHERE NOT EXISTS "
                     "(SELECT 1 FROM issue WHERE repo_key=? AND issue_number=?)",
-                    (assignee, repo_key, _num, repo_key, _num))
+                    (assignee, assignee, repo_key, _num, repo_key, _num))
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
             else:
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
@@ -453,6 +457,19 @@ def delete_agent_session(repo_key: str, agent_type: str) -> bool:
 
 def ensure_default_agent_sessions(repo_key: str):
     """基于 agent-skill-mapping.json 的 default 场景，为仓库创建默认 Agent 会话"""
+    # 先确保仓库有默认场景（幂等：已有场景则跳过）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM devops_pipeline_scene WHERE repo_key=? AND is_active=1", (repo_key,))
+            _scene_count = c.fetchone()[0]
+        if _scene_count == 0:
+            from src.api.pipeline_config import apply_market_scene_by_name
+            apply_market_scene_by_name(repo_key, "default")
+            log.info(f"ensure_default_agent_sessions: created default scene for {repo_key}")
+    except Exception as _e:
+        log.warning(f"ensure_default_agent_sessions: scene creation skipped: {_e}")
+
     import os
     _path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
     if not os.path.exists(_path):

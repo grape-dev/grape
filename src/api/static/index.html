@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Grape — Multi-Agent DevOps</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=57">
-<link rel="stylesheet" href="/static/css/apple-theme.css?v=14">
+<link rel="stylesheet" href="/static/css/app.css?v=60">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=16">
 <link rel="stylesheet" href="/static/css/vendor/select2.min.css?v=1">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
@@ -46,6 +46,7 @@
 </div>
 </div>
 </div>
+<div class="sb-ov" id="sbOverlay" onclick="app.toggleSidebar(true)"></div>
 <div class="sb" id="sidebar">
 <div class="sb-h">
 <div class="logo-s" style="cursor:pointer" onclick="app.goToRepos()" data-i18n-title="app.repo.back_to_select" title="返回仓库选择"><img class="sq" src="/static/img/grape-logo.jpg?v=1" alt="A"><h1>Grape</h1></div>
@@ -96,6 +97,7 @@
 
 <div class="mn" id="mainView">
 <div class="tb" id="tb">
+<a class="sb-toggle" id="sbToggle" onclick="app.toggleSidebar()" data-i18n-title="app.sidebar.toggle" title="收起/展开侧边栏"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></a>
 <div class="bc"><b id="pageTitle"></b> <span id="repoTitle" style="color:var(--a);font-weight:500"></span></div>
 <div class="sp"></div>
 <a id="tbBackHome" onclick="app.goToRepos()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer" data-i18n="app.back_home">← 返回主页</a>
@@ -108,33 +110,33 @@
 </div>
 
 <script src="/static/js/i18n.js?v=5"></script>
-<script>I18N.init('21');</script>
+<script>I18N.init('23');</script>
 <script src="/static/js/vendor/vue.global.prod.min.js?v=1"></script>
 <script src="/static/js/vendor/jquery.min.js?v=1"></script>
 <script src="/static/js/vendor/marked.min.js?v=1"></script>
 <script src="/static/js/vendor/qrcode.min.js?v=1"></script>
 <script src="/static/js/vendor/select2.min.js?v=1"></script>
 <script src="/static/js/api.js?v=25"></script>
-<script src="/static/js/pages/dashboard.js?v=71"></script>
-<script src="/static/js/pages/pipeline.js?v=41"></script>
-<script src="/static/js/pages/agents.js?v=24"></script>
-<script src="/static/js/pages/events.js?v=50"></script>
+<script src="/static/js/pages/dashboard.js?v=72"></script>
+<script src="/static/js/pages/pipeline.js?v=42"></script>
+<script src="/static/js/pages/agents.js?v=25"></script>
+<script src="/static/js/pages/events.js?v=51"></script>
 <script src="/static/js/pages/chat.js?v=40"></script>
 <script src="/static/js/pages/im_channel.js?v=20"></script>
 <script src="/static/js/pages/repos.js?v=40"></script>
-<script src="/static/js/pages/templates.js?v=35"></script>
-<script src="/static/js/pages/issues.js?v=100"></script>
+<script src="/static/js/pages/templates.js?v=36"></script>
+<script src="/static/js/pages/issues.js?v=104"></script>
 <script src="/static/js/pages/settings.js?v=23"></script>
-<script src="/static/js/pages/scene-market.js?v=29"></script>
+<script src="/static/js/pages/scene-market.js?v=32"></script>
 <script src="/static/js/pages/skills.js?v=43"></script>
 <script src="/static/js/pages/knowledge.js?v=148"></script>
 <script src="/static/js/pages/runtimes.js?v=41"></script>
-<script src="/static/js/pages/observability.js?v=64"></script>
+<script src="/static/js/pages/observability.js?v=65"></script>
 <script src="/static/js/pages/feedback.js?v=7"></script>
 <script src="/static/js/pages/my_feedback.js?v=5"></script>
 <script src="/static/js/pages/my_feedback_detail.js?v=3"></script>
 <script src="/static/js/pages/autopilot.js?v=32"></script>
-<script src="/static/js/app.js?v=83"></script>
+<script src="/static/js/app.js?v=89"></script>
 
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>

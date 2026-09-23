@@ -299,6 +299,93 @@ function loadAgentTypes() {
     try { localStorage.setItem(key, collapsed ? '1' : '0'); } catch (e) {}
   }
 
+  // ── Sidebar 折叠/展开（Issue #207）──
+  // 桌面端：toggleSidebar() 切换 .sb.collapsed，宽度收为 0，主内容 .mn 自适应扩展。
+  // 窄屏（≤768px，CSS 已 display:none）：toggleSidebar() 以 overlay 抽屉模式临时展开 sidebar。
+  // 状态通过 localStorage('grapeSidebarCollapsed') 持久化，刷新后恢复。
+  // initSidebarState() 在启动时读取持久化状态并同步 class（仅桌面端；窄屏始终临时展开不持久化）。
+  const SB_COLLAPSE_KEY = 'grapeSidebarCollapsed';
+  const SB_NARROW_MAX = 768;  // 与 app.css @media(max-width:768px) 断点一致
+
+  function _isNarrowScreen() {
+    return window.innerWidth <= SB_NARROW_MAX;
+  }
+
+  function initSidebarState() {
+    const sb = $('sidebar');
+    if (!sb) return;
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(SB_COLLAPSE_KEY) === '1'; } catch (e) {}
+    // 桌面端：恢复持久化折叠状态（窄屏下 sidebar 由 CSS display:none 控制，不持久化）
+    const shouldCollapse = !_isNarrowScreen() && collapsed;
+    if (shouldCollapse) {
+      // 临时禁用 transition 避免首屏闪缩动画（Issue #207 QA 反馈）
+      sb.classList.add('no-transition');
+    }
+    sb.classList.toggle('collapsed', shouldCollapse);
+    // 更新按钮图标方向（收起后图标可视觉提示）
+    _updateToggleIcon(shouldCollapse);
+    if (shouldCollapse) {
+      // 下一帧恢复 transition（双 rAF 确保浏览器已应用无过渡状态）
+      const restore = () => sb.classList.remove('no-transition');
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
+      } else {
+        setTimeout(restore, 0);
+      }
+    }
+  }
+
+  function _updateToggleIcon(collapsed) {
+    const btn = $('sbToggle');
+    if (!btn) return;
+    btn.classList.toggle('collapsed', collapsed);
+  }
+
+  // forceClose：窄屏 overlay 模式下点击遮罩关闭抽屉（不写回持久化）
+  function toggleSidebar(forceClose) {
+    const sb = $('sidebar');
+    if (!sb) return;
+    if (_isNarrowScreen()) {
+      // 窄屏 overlay 抽屉模式：临时展开/收起，不持久化
+      const open = sb.classList.contains('sb-drawer-open');
+      if (forceClose && !open) return;
+      sb.classList.toggle('sb-drawer-open', !open);
+      const ov = $('sbOverlay');
+      if (ov) ov.classList.toggle('show', !open);
+      return;
+    }
+    // 桌面端：切换 collapsed，写回 localStorage
+    const collapsed = !sb.classList.contains('collapsed');
+    sb.classList.toggle('collapsed', collapsed);
+    _updateToggleIcon(collapsed);
+    try { localStorage.setItem(SB_COLLAPSE_KEY, collapsed ? '1' : '0'); } catch (e) {}
+  }
+
+  // 窗口尺寸跨越断点时清理窄屏 overlay 状态，避免残留 class 影响桌面布局
+  let _sbWasNarrow = _isNarrowScreen();
+  window.addEventListener('resize', () => {
+    const nowNarrow = _isNarrowScreen();
+    if (_sbWasNarrow !== nowNarrow) {
+      _sbWasNarrow = nowNarrow;
+      const sb = $('sidebar');
+      if (sb) {
+        sb.classList.remove('sb-drawer-open');
+        if (!nowNarrow) {
+          // 从窄屏切到桌面：恢复持久化状态
+          let collapsed = false;
+          try { collapsed = localStorage.getItem(SB_COLLAPSE_KEY) === '1'; } catch (e) {}
+          sb.classList.toggle('collapsed', collapsed);
+          _updateToggleIcon(collapsed);
+        } else {
+          sb.classList.remove('collapsed');
+        }
+      }
+      const ov = $('sbOverlay');
+      if (ov) ov.classList.remove('show');
+    }
+  });
+
   function nav(view, param) {
     // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
     if (view === 'knowledge' && window._currentView === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
@@ -729,9 +816,104 @@ function loadAgentTypes() {
         <button id="betaSubmitBtn" onclick="app.submitBetaApply()" style="width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px">${z?'提交申请':'Submit'}</button>
       </div>`;
     document.body.appendChild(overlay);
-    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+    // Issue #205: 移除遮罩点击关闭逻辑，仅通过 × 按钮关闭；表单数据 sessionStorage 持久化
+    _baRestoreForm();
+    overlay.addEventListener('input', _baSaveForm);
+    overlay.addEventListener('change', _baSaveForm);
   }
   var _baIdentity = '';
+  var _BA_FORM_KEY = 'beta_apply_form';
+  function _baCollectFormData() {
+    var modal = document.getElementById('betaApplyModal');
+    if (!modal) return null;
+    var data = {};
+    ['betaPlatform','betaAccountName','betaEmail','betaPhone','betaReason'].forEach(function(id){
+      var el = document.getElementById(id);
+      if (el) data[id] = el.value;
+    });
+    data.identity = _baIdentity;
+    ['baEdu','baMajor','baSize','baRole','baOcc'].forEach(function(name){
+      var r = modal.querySelector('input[name="' + name + '"]:checked');
+      if (r) data['r_' + name] = r.value;
+    });
+    ['baEdu','baMajor','baRole','baOcc'].forEach(function(name){
+      var r = modal.querySelector('input[name="' + name + '"]:checked');
+      if (r && (r.value === '其他' || r.value === 'Other')) {
+        var t = r.parentElement.querySelector('.ba-other-text');
+        if (t) data['ro_' + name] = t.value;
+      }
+    });
+    ['baEntCase','baOpcCase','baOtherCase'].forEach(function(cls){
+      var vals = [];
+      modal.querySelectorAll('.' + cls + ':checked').forEach(function(cb){
+        var item = { v: cb.value };
+        if (cb.value === '其他' || cb.value === 'Other') {
+          var t = cb.parentElement.querySelector('.ba-other-text');
+          item.o = t ? t.value : '';
+        }
+        vals.push(item);
+      });
+      data['c_' + cls] = vals;
+    });
+    var desc = document.getElementById('baOtherDesc');
+    if (desc) data.baOtherDesc = desc.value;
+    return data;
+  }
+  function _baSaveForm() {
+    var data = _baCollectFormData();
+    if (data) { try { sessionStorage.setItem(_BA_FORM_KEY, JSON.stringify(data)); } catch(e) {} }
+  }
+  function _baRestoreForm() {
+    var modal = document.getElementById('betaApplyModal');
+    if (!modal) return;
+    var raw;
+    try { raw = sessionStorage.getItem(_BA_FORM_KEY); } catch(e) { return; }
+    if (!raw) return;
+    var data;
+    try { data = JSON.parse(raw); } catch(e) { return; }
+    ['betaPlatform','betaAccountName','betaEmail','betaPhone','betaReason'].forEach(function(id){
+      var el = document.getElementById(id);
+      if (el && data[id] !== undefined && data[id] !== '') el.value = data[id];
+    });
+    ['baEdu','baMajor','baSize','baRole','baOcc'].forEach(function(name){
+      var val = data['r_' + name];
+      if (val === undefined) return;
+      var radios = modal.querySelectorAll('input[name="' + name + '"]');
+      for (var i = 0; i < radios.length; i++) {
+        if (radios[i].value === val) {
+          radios[i].checked = true;
+          if (radios[i].value === '其他' || radios[i].value === 'Other') {
+            var t = radios[i].parentElement.querySelector('.ba-other-text');
+            if (t) { t.style.display = 'inline-block'; if (data['ro_' + name] !== undefined) t.value = data['ro_' + name]; }
+          }
+          break;
+        }
+      }
+    });
+    ['baEntCase','baOpcCase','baOtherCase'].forEach(function(cls){
+      var vals = data['c_' + cls];
+      if (!Array.isArray(vals)) return;
+      vals.forEach(function(item){
+        var cbs = modal.querySelectorAll('.' + cls);
+        for (var i = 0; i < cbs.length; i++) {
+          if (cbs[i].value === item.v) {
+            cbs[i].checked = true;
+            if (cbs[i].value === '其他' || cbs[i].value === 'Other') {
+              var t = cbs[i].parentElement.querySelector('.ba-other-text');
+              if (t) { t.style.display = 'inline-block'; if (item.o) t.value = item.o; }
+            }
+            break;
+          }
+        }
+      });
+    });
+    var desc = document.getElementById('baOtherDesc');
+    if (desc && data.baOtherDesc !== undefined) desc.value = data.baOtherDesc;
+    if (data.identity) { _baIdentity = data.identity; baSelectIdentity(data.identity); }
+  }
+  function _baClearForm() {
+    try { sessionStorage.removeItem(_BA_FORM_KEY); } catch(e) {}
+  }
   function baToggleOther(el) {
     if (el.type === 'radio') {
       var group = document.querySelectorAll('input[name="' + el.name + '"]');
@@ -765,6 +947,7 @@ function loadAgentTypes() {
     var key = type.charAt(0).toUpperCase() + type.slice(1);
     var branch = document.getElementById('baBranch' + key);
     if (branch) { branch.style.maxHeight = '1000px'; branch.style.opacity = '1'; }
+    _baSaveForm();
   }
   function _baRadio(name) {
     var c = document.querySelector('input[name="' + name + '"]:checked');
@@ -822,12 +1005,14 @@ function loadAgentTypes() {
     }).then(function(d) {
       if (d.success) {
         showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        _baClearForm();
         document.getElementById('betaApplyModal').remove();
       } else if (d.error) {
         showToast(d.error);
         btn.disabled = false; btn.textContent = isZh ? '提交申请' : 'Submit';
       } else {
         showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        _baClearForm();
         document.getElementById('betaApplyModal').remove();
       }
     }).catch(function(e) {
@@ -984,6 +1169,8 @@ function loadAgentTypes() {
     }));
     // 同步可折叠分组的持久化状态（Issue #66）
     initGroupCollapse();
+    // 同步 sidebar 折叠/展开持久化状态（Issue #207）
+    initSidebarState();
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
     // Check for OAuth error in URL (e.g. github.com timeout)
@@ -1008,7 +1195,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '29');
+      localStorage.setItem('app_cache_ver', '35');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -1035,13 +1222,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '29') {
+    if (localStorage.getItem('app_cache_ver') !== '35') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '29');
+      localStorage.setItem('app_cache_ver', '35');
     }
 
     const token = localStorage.getItem('token');
@@ -1098,7 +1285,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
+  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

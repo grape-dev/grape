@@ -688,7 +688,13 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     repo_key = to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
-    api_token = get_user_token(user["username"])
+    # 按 repo_key 前缀分流 owner token
+    from src.repo_key import parse_repo_key
+    _provider, _, _ = parse_repo_key(repo_key)
+    if _provider == "github":
+        api_token = get_user_github_token(user["username"])
+    else:
+        api_token = get_user_token(user["username"])
     bot_token, bot_username = get_global_bot_credential()
     if not api_token or not bot_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "缺少 API Token，无法自愈"})
@@ -1108,15 +1114,22 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
     return {"message": "已移除仓库"}
 
 
-@router.get("/{owner}/{repo}/project-info", operation_id="repos_project_info", summary="Get project knowledge", description="Reads the authoritative project-knowledge baseline for a repository: files (full text) + meta (commit/branches/updated/degraded).")
-def get_repo_project_info(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
+@router.get("/{owner}/{repo}/project-info", operation_id="repos_project_info", summary="Get project knowledge", description="Reads the authoritative project-knowledge baseline for a repository: files (full text) + meta (commit/branches/updated/degraded). Dual: user (JWT/API key) and session token (tk_, repo scope must match).")
+def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key)):
     """读取仓库的权威项目知识基线（repo 全局，多机共享，见 multi-issue-isolation-design.md §2.4）。
 
     返回 files（全文）+ meta（commit/branches/updated/degraded）。无基线 → 空 files + meta。
+
+    #219 按需获取：支持会话 token（tk_）——要求仓库作用域匹配（防绑 A 读 B）；
+    JWT / API Key 用户维持现状（依赖 x-token-scope 的 user 通道）。
     """
-    from src.repo_key import to_repo_key
+    from src.repo_key import split_owner_repo, to_repo_key
     from src.runtime.service import load_project_info
     repo_key = to_repo_key(f"{owner}/{repo}")
+    if user.get("auth_type") == "session_token":
+        _bound_owner, _bound_repo = split_owner_repo(user.get("repo_key") or "")
+        if _bound_owner and (_bound_owner != owner or _bound_repo != repo):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权读取该项目知识（仓库作用域不匹配）"})
     files, meta = load_project_info(repo_key)
     return {"repo_key": repo_key, "files": files, "meta": meta}
 

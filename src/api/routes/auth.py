@@ -181,9 +181,8 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     if not gitcode_id:
         raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取用户信息"})
 
+    # 按平台 ID 精确匹配，不跨平台 fallback username（同用户名不代表同一人）
     local_user = user_db.get_user_by_gitcode_id(gitcode_id)
-    if not local_user:
-        local_user = user_db.get_user_by_username(gitcode_login)
 
     # 白名单校验：所有用户（含已存在）都必须在白名单内，踢出白名单后立即无法登录
     from src.config import is_gitcode_user_allowed
@@ -194,7 +193,10 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     if not local_user:
         result = user_db.create_user(gitcode_login, hashlib.sha256(os.urandom(16)).hexdigest(), 0)
         if not result:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
+            # username 冲突（已有同用户名的 GitHub 账号）→ 加前缀创建独立 GitCode 账号
+            result = user_db.create_user(f"gc_{gitcode_login}", hashlib.sha256(os.urandom(16)).hexdigest(), 0)
+            if not result:
+                raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
         local_user = user_db.get_user(result["id"])
 
     user_db.link_gitcode_user(local_user["id"], gitcode_id, access_token, refresh_token)
@@ -337,9 +339,8 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     if not github_id:
         return _oauth_error_redirect(request, "GitHub 登录失败：无法获取用户信息。")
 
+    # 按平台 ID 精确匹配，不跨平台 fallback username（同用户名不代表同一人）
     local_user = user_db.get_user_by_github_id(github_id)
-    if not local_user:
-        local_user = user_db.get_user_by_username(github_login)
 
     # 白名单校验
     from src.config import is_github_user_allowed
@@ -350,7 +351,10 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     if not local_user:
         result = user_db.create_user(github_login, hashlib.sha256(os.urandom(16)).hexdigest(), 0)
         if not result:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
+            # username 冲突（已有同用户名的 GitCode 账号）→ 加前缀创建独立 GitHub 账号
+            result = user_db.create_user(f"gh_{github_login}", hashlib.sha256(os.urandom(16)).hexdigest(), 0)
+            if not result:
+                raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
         local_user = user_db.get_user(result["id"])
 
     user_db.link_github_user(local_user["id"], github_id, access_token, refresh_token)
@@ -380,7 +384,7 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
 
     try:
         from src.session_manager import update_unified_user_info
-        update_unified_user_info(github_login, open_id="", github_login=github_login)
+        update_unified_user_info(github_login)
     except Exception as e:
         log.warning(f"GitHub OAuth login: write user mapping failed: {e}")
 

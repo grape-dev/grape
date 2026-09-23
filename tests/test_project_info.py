@@ -111,7 +111,27 @@ class TestEnqueueProjectInfo:
 
 
 class TestPromptProjectInfoSection:
-    def test_prompt_injects_baseline(self, tmp_path, monkeypatch):
+    """Option B（issue-219）：prompt 不再内联项目知识基线，由技能通过 grape-cli/API 获取。
+    本节直接测 _build_project_info_section，验证其仍产出一致段落（供技能/管理侧复用）。"""
+
+    def test_section_injects_baseline(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path))
+        _write_project_info(tmp_path, graph="# Graph", caps="# Caps")
+        from src import prompt_builder
+        sec = prompt_builder._build_project_info_section("gitcode:org/test", agent_type="issue")
+        assert "项目知识基线" in sec
+        assert "# Graph" in sec and "# Caps" in sec
+        assert "{{PROJECT_INFO_DIR}}" in sec
+
+    def test_section_degraded_without_baseline(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path))
+        from src import prompt_builder
+        sec = prompt_builder._build_project_info_section("gitcode:org/none", agent_type="issue")
+        assert "无项目知识基线" in sec
+        assert "降级" in sec
+
+    def test_devops_prompt_not_injecting_baseline(self, tmp_path, monkeypatch):
+        """Option B 主验收：build_devops_agent_prompt 输出不再含知识基线段。"""
         monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path))
         _write_project_info(tmp_path, graph="# Graph", caps="# Caps")
         from src import prompt_builder
@@ -121,18 +141,5 @@ class TestPromptProjectInfoSection:
             "title": "t", "body": "b", "actor": "a", "issue_id": "#5", "payload": {},
         }
         prompt = prompt_builder.build_devops_agent_prompt(evt, [], "", ["issue"])
-        assert "项目知识基线" in prompt
-        assert "# Graph" in prompt and "# Caps" in prompt
-        assert "{{PROJECT_INFO_DIR}}" in prompt
-
-    def test_prompt_degraded_without_baseline(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path))
-        from src import prompt_builder
-        evt = {
-            "type": "issue_opened", "source": "gitcode", "repository": "org/none",
-            "repo_key": "gitcode:org/none",
-            "title": "t", "body": "b", "actor": "a", "issue_id": "#5", "payload": {},
-        }
-        prompt = prompt_builder.build_devops_agent_prompt(evt, [], "", ["issue"])
-        assert "无项目知识基线" in prompt
-        assert "降级" in prompt
+        assert "项目知识基线" not in prompt
+        assert "{{PROJECT_INFO_DIR}}" not in prompt

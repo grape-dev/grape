@@ -39,7 +39,7 @@ def _load_scenes() -> dict:
 
 
 @router.get("", operation_id="scenes_list", summary="List scenes", description="Lists all available scenes for a repo (repo-scoped, non-official).")
-def list_scenes(user: dict = Depends(get_current_user_or_api_key), repo: str = ""):
+def list_scenes(user: dict = Depends(require_no_session_token), repo: str = ""):
     """返回所有可用场景列表（repo，不含 official）"""
     from src.api.pipeline_config import get_scenes
     repo_key = ""
@@ -106,6 +106,8 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "description": s.get("description") or "",
                        "work_branch": s.get("work_branch") or "main",
                        "created_by": s.get("created_by") or "",
+                       "scene_type": s.get("scene_type") or "standard",
+                       "pr_subscription_enabled": bool(s.get("pr_subscription_enabled", 0)),
                        "pipeline": cfg})
     return {"scenes": result}
 
@@ -214,6 +216,16 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
             "repo_count": repo_count_map.get(s["id"], 0),
             "scope": s.get("scope", "official"),
         })
+    # 精选场景按 admin 管理台设置的顺序排列
+    if featured_only and result:
+        try:
+            from src.featured_order import get_featured_order
+            _order = get_featured_order("scene")
+            if _order:
+                _order_map = {sid: i for i, sid in enumerate(_order)}
+                result.sort(key=lambda x: _order_map.get(x["id"], 9999))
+        except Exception:
+            pass
     return {"scenes": result, "total": total, "page": page, "page_size": page_size}
 
 
@@ -1291,8 +1303,8 @@ def _delete_scene_icon_file(file_key: str):
             log.warning(f"Scene icon delete (local): {e}")
 
 
-@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info.")
-def get_scene_detail(scene_id: str, user: dict = Depends(require_no_session_token)):
+@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand).")
+def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user_or_api_key)):
     """返回场景详情（nodes + engine 信息）"""
     from src.api.pipeline_config import get_pipeline_config
     from src.repo_key import to_repo_key
@@ -1306,7 +1318,9 @@ def get_scene_detail(scene_id: str, user: dict = Depends(require_no_session_toke
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
-    return {"id": scene_id, "name": cfg["name"], "nodes": cfg["nodes"], "onboarding": cfg.get("onboarding", "")}
+    return {"id": scene_id, "name": cfg["name"], "nodes": cfg["nodes"],
+            "onboarding": cfg.get("onboarding", ""),
+            "scene_type": cfg.get("scene_type", "standard")}
 
 
 @router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging).")
@@ -1380,12 +1394,15 @@ class CreateSceneRequest(BaseModel):
     scope: str = "repo"  # repo
     nodes: list[SceneNodeInput] = []
     icon: str = ""
+    scene_type: str = "standard"  # deprecated, 保留向后兼容
+    pr_subscription_enabled: bool = False
 
 class UpdateSceneRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     nodes: list[SceneNodeInput] = []
     icon: str | None = None
+    pr_subscription_enabled: bool | None = None
 
 class ApplySceneRequest(BaseModel):
     scene_id: str
@@ -1475,13 +1492,21 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     # 校验 engine_runtime_ids：scope=repo 的引擎必须属于当前仓库，且 tag 必须包含节点标签
     _validate_scene_engine_ids(nodes_json := [n.model_dump() for n in body.nodes], repo_key)
 
+    # PR 订阅开启时校验：QA 节点必须启用且有 skill
+    if body.pr_subscription_enabled:
+        qa_node = next((n for n in body.nodes if n.tag == "qa"), None)
+        if not qa_node or not qa_node.enabled or not qa_node.skill:
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "开启 PR 订阅需要先配置 QA Agent 并启用技能"})
+
     scene_id = body.scene_id or str(uuid.uuid4())
 
     try:
         db_id = create_custom_scene(
             scene_id=scene_id, name=body.name, description=body.description,
             repo_key=repo_key, nodes=nodes_json, created_by=user.get("username") or "",
-            icon=body.icon or "")
+            icon=body.icon or "", scene_type="standard",
+            pr_subscription_enabled=1 if body.pr_subscription_enabled else 0)
     except Exception as e:
         err_upper = str(e).upper()
         if "UNIQUE" in err_upper or "DUPLICATE" in err_upper:
@@ -1516,9 +1541,31 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     nodes_json = [n.model_dump() for n in body.nodes]
     if repo_key:
         _validate_scene_engine_ids(nodes_json, repo_key)
+
+    # PR 订阅开启时校验：QA 节点必须启用且有 skill
+    _pr_sub_on = body.pr_subscription_enabled
+    if _pr_sub_on is None:
+        _pr_sub_on = bool(existing.get("pr_subscription_enabled", 0))
+    if _pr_sub_on:
+        # body.nodes 为空时从数据库已有场景查 QA 节点
+        _check_nodes = body.nodes if body.nodes else existing.get("nodes", [])
+        qa_node = next((n for n in _check_nodes if getattr(n, 'tag', n.get('tag') if isinstance(n, dict) else '') == "qa"), None)
+        if qa_node:
+            _qa_enabled = getattr(qa_node, 'enabled', True) if not isinstance(qa_node, dict) else qa_node.get("enabled", True)
+            _qa_skill = getattr(qa_node, 'skill', '') if not isinstance(qa_node, dict) else qa_node.get("skill", "")
+        else:
+            _qa_enabled = False
+            _qa_skill = ""
+        if not _qa_enabled or not _qa_skill:
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "开启 PR 订阅需要先配置 QA Agent 并启用技能"})
+
+    # body.nodes 为空时不覆盖已有 nodes（只更新 pr_subscription_enabled 等字段）
+    _update_nodes = nodes_json if body.nodes else existing.get("nodes", [])
     update_custom_scene(
-        scene_id=scene_id, repo_key=repo_key, nodes=nodes_json,
-        name=body.name, description=body.description, icon=body.icon)
+        scene_id=scene_id, repo_key=repo_key, nodes=_update_nodes,
+        name=body.name, description=body.description, icon=body.icon,
+        pr_subscription_enabled=1 if _pr_sub_on else 0 if _pr_sub_on is not None else None)
 
     log.info(f"Scene updated: id={scene_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}
@@ -1555,7 +1602,7 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
 def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                       user: dict = Depends(require_no_session_token)):
     """为仓库应用指定场景"""
-    from src.api.pipeline_config import get_pipeline_config
+    from src.api.pipeline_config import get_pipeline_config, _query_scene_by_id
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
     from src.user.db import get_bot_token_by_repo

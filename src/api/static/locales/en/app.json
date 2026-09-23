@@ -34,7 +34,8 @@
     "knowledge": "Knowledge",
     "account": "User Center",
     "device_center": "Device Center",
-    "settings": "Settings"
+    "settings": "Settings",
+    "toggle": "Collapse/Expand Sidebar"
   },
   "login": {
     "gitcode_login": "Sign in with GitCode",

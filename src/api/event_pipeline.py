@@ -17,6 +17,49 @@ _DIRECT_POOL = ThreadPoolExecutor(
 _DIRECT_FUTURES: dict[int, Future] = {}
 _DIRECT_FUTURES_LOCK = threading.Lock()
 
+def _match_pr_subscription(repo_key: str, evt: dict, event_type: str, pr_branch: str) -> list:
+    """PR 无关联 Issue 时，按 PR target_branch 匹配场景 work_branch，唤醒 QA agent。
+
+    支持多个场景命中同一 PR（多 QA 并行审查）。
+    返回 [(scene_id, qa_skill, qa_engine_ids, sre_skill, sre_engine_ids), ...] 匹配列表。
+    """
+    if not pr_branch:
+        return []
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scene_id, nodes_json, advanced_options FROM devops_pipeline_scene "
+                "WHERE repo_key=? AND pr_subscription_enabled=1 AND is_active=1",
+                (repo_key,))
+            rows = c.fetchall()
+        matches = []
+        for scene_id, nodes_json, adv_opts_json in rows:
+            # 匹配 work_branch
+            import json as _json
+            try:
+                adv_opts = _json.loads(adv_opts_json or "{}")
+            except Exception:
+                adv_opts = {}
+            work_branch = adv_opts.get("work_branch", "main") or "main"
+            if work_branch != pr_branch:
+                continue
+            nodes = json.loads(nodes_json or "[]")
+            qa_node = next((n for n in nodes if n.get("tag") == "qa" and n.get("enabled", True)), None)
+            if not qa_node or not qa_node.get("skill"):
+                continue
+            sre_node = next((n for n in nodes if n.get("tag") == "sre" and n.get("enabled", True)), None)
+            sre_skill = sre_node.get("skill", "") if sre_node else ""
+            sre_engine_ids = sre_node.get("engine_runtime_ids", []) if sre_node else []
+            matches.append((
+                scene_id, qa_node["skill"], qa_node.get("engine_runtime_ids", []),
+                sre_skill, sre_engine_ids
+            ))
+        return matches
+    except Exception as e:
+        log.warning(f"Pipeline: PR subscription match failed: {e}")
+        return []
+
 
 def is_plugin_mode() -> bool:
     """Check if pipeline is in plugin mode.
@@ -203,7 +246,6 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     # env_extra
     repository = evt.get("repository", "")
     env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
-    _inject_cloud_credentials(env_extra, repo_key)
 
     # repo_gitcode_token（按 provider 分流）
     repo_gitcode_token = ""
@@ -604,6 +646,180 @@ def _match_repo_subscription(repo_key: str, event_type: str, branch: str) -> str
     return ""
 
 
+def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, match: tuple):
+    """多场景命中同一 PR 时，为额外场景并行分发 QA 任务。
+
+    match = (scene_id, qa_skill, qa_engine_ids, sre_skill, sre_engine_ids)
+    """
+    try:
+        scene_id, qa_skill, qa_engine_ids, _, _ = match
+        # 构造 evt 副本，写入额外场景信息
+        _extra_evt = dict(evt)
+        _extra_evt["_pr_sub_scene_id"] = scene_id
+        _extra_evt["_pr_sub_skill"] = qa_skill
+        _extra_evt["_pr_sub_engine_ids"] = qa_engine_ids
+        # 提取 PR 号用于回帖
+        _payload = evt.get("payload", {}) or {}
+        _pr_obj = _payload.get("pull_request", {}) or _payload.get("merge_request", {}) or {}
+        _obj_attrs = _payload.get("object_attributes", {}) or {}
+        _pr_num = _pr_obj.get("number", _pr_obj.get("iid", "")) or _obj_attrs.get("iid", "")
+        if _pr_num:
+            _extra_evt["_pr_sub_pr_number"] = _pr_num
+        # 构造伪 issue_id（带 scene_id 区分）
+        _pseudo_id = f"#pr_{_pr_num}_{scene_id}" if _pr_num else ""
+        # 创建事件
+        from src.api.event_store import append_event
+        _title = f"PR 订阅 QA: {scene_id}"
+        seq = append_event(
+            repo_key=repo_key, event_type="a2a_event",
+            title=_title, issue_id=_pseudo_id, source="a2a",
+            agent_type="qa", actor=evt.get("actor", ""),
+            summary=f"PR 订阅并行: scene={scene_id} → qa",
+            payload=evt.get("payload", {}), status="running",
+            scene_id=scene_id,
+        )
+        log.info(f"Pipeline: PR subscription extra dispatch seq={seq} scene={scene_id}")
+        # 分派执行：跟主场景 run_pipeline 一致的判断逻辑
+        # engine_id=0 + plugin + auto(非direct) → broadcast enqueue（远端worker认领）
+        # 仅 direct 模式或选中具体本机引擎时走 DIRECT
+        from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
+        from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT, get_execution_mode
+        _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
+        if _engine_id is None:
+            log.info(f"Pipeline: PR subscription extra: no engine for scene={scene_id}, skip")
+            from src.api.event_store import update_event_status
+            update_event_status(seq, "failed")
+            return
+        _be = engine_name(_engine_id) or ""
+        _is_broadcast = (_engine_id == 0 and is_plugin_mode()
+                         and get_execution_mode() != EXEC_MODE_DIRECT)
+        if _is_broadcast:
+            # 复用 _enqueue_pipeline_task：自动构建 prompt/env_extra/会话/init_event_json
+            _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+            _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                                   0, qa_skill, _engine_id, _pseudo_id,
+                                   pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+        else:
+            _kind = runtime_execution_kind(_engine_id)
+            if _kind == EXEC_MODE_DIRECT:
+                _extra_evt["_skill_path"] = qa_skill
+                _extra_evt["_skill_id"] = 0
+                _direct_tid = _create_direct_task(repo_key, seq, "qa", _be, qa_skill,
+                                    qa_skill, _engine_id, _extra_evt, _pseudo_id, skill_id=0)
+                start_direct_agent(_execute_agent, (
+                    repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
+                ))
+            else:
+                _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+                _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                                       0, qa_skill, _engine_id, _pseudo_id,
+                                       pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+    except Exception as e:
+        log.warning(f"Pipeline: PR subscription extra dispatch failed: {e}")
+
+
+def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> bool:
+    """PR 订阅事件重派：在原事件上直接重新创建 task，不创建新事件。
+
+    用于 redispatch 路径 — 当 PR 订阅事件的 task 派发失败（如远程 enqueue 报错）、
+    需要手动重派时调用。不能走 A2A 端点（payload 是 webhook 原始格式，无 issue_number）。
+
+    返回 True = 派发成功，False = 引擎不可用或无 QA 节点。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        import json as _json
+
+        repo_key = evt.get("repo_key", "") or ""
+
+        # 从 devops_pipeline_scene 查 scene_id 对应的 QA 节点 skill
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scene_id, nodes_json FROM devops_pipeline_scene "
+                "WHERE repo_key=? AND scene_id=? AND is_active=1",
+                (repo_key, scene_id))
+            row = c.fetchone()
+        if not row:
+            log.warning(f"Pipeline: PR subscription redispatch: scene={scene_id} not found")
+            return False
+
+        nodes = json.loads(row[1] or "[]")
+        qa_node = next((n for n in nodes if n.get("tag") == "qa" and n.get("enabled", True)), None)
+        if not qa_node or not qa_node.get("skill"):
+            log.warning(f"Pipeline: PR subscription redispatch: no QA node in scene={scene_id}")
+            return False
+
+        qa_skill = qa_node["skill"]
+        qa_engine_ids = qa_node.get("engine_runtime_ids", [])
+
+        # 提取 PR 号
+        _payload = evt.get("payload", {}) or {}
+        if isinstance(_payload, str):
+            _payload = _json.loads(_payload)
+        _pr_obj = _payload.get("pull_request", {}) or _payload.get("merge_request", {}) or {}
+        _obj_attrs = _payload.get("object_attributes", {}) or {}
+        _pr_num = _pr_obj.get("number", _pr_obj.get("iid", "")) or _obj_attrs.get("iid", "")
+
+        # 伪 issue_id（跟 _dispatch_pr_subscription_extra 一致）
+        _pseudo_id = f"#pr_{_pr_num}_{scene_id}" if _pr_num else ""
+
+        # 选引擎
+        from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
+        from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT, get_execution_mode
+        _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
+        if _engine_id is None:
+            log.info(f"Pipeline: PR subscription redispatch: no engine for scene={scene_id}")
+            return False
+
+        _be = engine_name(_engine_id) or ""
+        _is_broadcast = (_engine_id == 0 and is_plugin_mode()
+                         and get_execution_mode() != EXEC_MODE_DIRECT)
+        _extra_evt = dict(evt)
+        _extra_evt["payload"] = _payload  # 确保是 dict（_load_event 返回 JSON 字符串）
+        # 补全 build_devops_agent_prompt 必需的字段（_load_event 不返回 repository/source）
+        from src.repo_key import from_repo_key
+        _extra_evt["repository"] = _extra_evt.get("repository") or from_repo_key(repo_key)
+        _extra_evt["source"] = _extra_evt.get("source") or (repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode")
+        _extra_evt["repo_key"] = repo_key
+        _extra_evt["_pr_sub_scene_id"] = scene_id
+        _extra_evt["_pr_sub_skill"] = qa_skill
+        _extra_evt["_pr_sub_engine_ids"] = qa_engine_ids
+        if _pr_num:
+            _extra_evt["_pr_sub_pr_number"] = _pr_num
+
+        if _is_broadcast:
+            # 复用 _enqueue_pipeline_task：自动构建 prompt/env_extra/会话/init_event_json
+            _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+            _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                                   0, qa_skill, _engine_id, _pseudo_id,
+                                   pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+        else:
+            _kind = runtime_execution_kind(_engine_id)
+            if _kind == EXEC_MODE_DIRECT:
+                _extra_evt["_skill_path"] = qa_skill
+                _extra_evt["_skill_id"] = 0
+                _direct_tid = _create_direct_task(repo_key, seq, "qa", _be, qa_skill,
+                                    qa_skill, _engine_id, _extra_evt, _pseudo_id, skill_id=0)
+                start_direct_agent(_execute_agent, (
+                    repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
+                ))
+            else:
+                _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+                _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                                       0, qa_skill, _engine_id, _pseudo_id,
+                                       pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+
+        # 重派成功：把事件状态改回 running（重派前可能是 failed）
+        from src.api.event_store import update_event_status
+        update_event_status(seq, "running")
+        log.info(f"Pipeline: PR subscription redispatch ok, seq={seq} scene={scene_id} engine={_engine_id}")
+        return True
+    except Exception as e:
+        log.warning(f"Pipeline: PR subscription redispatch failed: {e}")
+        return False
+
+
 def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                                  agent_type: str, main_agent: str):
     """订阅并行分发（event-routing-subscription-design.md §2.2）。
@@ -684,7 +900,7 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         _sub_iss_num = str(issue_id).lstrip("#")
         if _sub_iss_num and _sub_iss_num.isdigit():
             try:
-                from src.api.routes.tasks import _get_issue_title
+                from src.api.issues_center import _get_issue_title
                 _sub_title = _get_issue_title(repo_key, int(_sub_iss_num)) or ""
             except Exception:
                 pass
@@ -811,21 +1027,21 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             if _issue_num and _issue_num.isdigit():
                 _issue_num_int = int(_issue_num)
                 if any(kw in _note_lower for kw in ["/done", "完成任务", "任务完成", "确认完成"]):
-                    from src.api.routes.tasks import confirm_issue_done
+                    from src.api.issues_center import confirm_issue_done
                     confirm_issue_done(repo_key, _issue_num_int, confirmed_by="issue_comment")
                     log.info(f"Issue #{_issue_num} confirmed done via issue comment")
                     from src.api.event_store import append_skipped_event
                     append_skipped_event(repo_key, event_type, "user_confirm_done")
                     return result
                 elif any(kw in _note_lower for kw in ["/cancel", "取消任务"]):
-                    from src.api.routes.tasks import cancel_issue_task
+                    from src.api.issues_center import cancel_issue_task
                     cancel_issue_task(repo_key, _issue_num_int)
                     log.info(f"Issue #{_issue_num} cancelled via issue comment")
                     from src.api.event_store import append_skipped_event
                     append_skipped_event(repo_key, event_type, "user_cancel")
                     return result
                 elif any(kw in _note_lower for kw in ["/resume", "恢复任务"]):
-                    from src.api.routes.tasks import resume_issue_task
+                    from src.api.issues_center import resume_issue_task
                     resume_issue_task(repo_key, _issue_num_int)
                     log.info(f"Issue #{_issue_num} resumed via issue comment")
                     from src.api.event_store import append_skipped_event
@@ -865,7 +1081,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             # 执行副作用后短路：close → close_issue_tasks
             if _d.get("side_effect") == "close_issue_tasks":
                 try:
-                    from src.api.routes.tasks import close_issue_tasks
+                    from src.api.issues_center import close_issue_tasks
                     _ce_id = (evt.get("payload", {}) or {}).get("object_attributes", {}) or {}
                     _ce_num = str(_ce_id.get("iid") or _ce_id.get("number") or "").lstrip("#")
                     if _ce_num.isdigit() and int(_ce_num) > 0:
@@ -932,6 +1148,23 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     _pr_branch = resolve_pr_target_branch(evt)
     if _pr_branch and not evt.get("branch"):
         evt["branch"] = _pr_branch
+    # PR 订阅：PR 无关联 Issue 时，按 target_branch 匹配场景 work_branch
+    if not agent_type and event_type in PR_EVENT_TYPES:
+        _pr_sub_matches = _match_pr_subscription(repo_key, evt, event_type, _pr_branch)
+        if _pr_sub_matches:
+            # 第一个匹配作为主 agent，其余并行分发
+            _first = _pr_sub_matches[0]
+            evt["_pr_sub_scene_id"] = _first[0]
+            evt["_pr_sub_skill"] = _first[1]
+            evt["_pr_sub_engine_ids"] = _first[2]
+            if _first[3]:
+                evt["_pr_sub_sre_skill"] = _first[3]
+                evt["_pr_sub_sre_engine_ids"] = _first[4]
+            agent_type = "qa"
+            log.info(f"Pipeline: PR subscription triggered -> scene={_first[0]} agent=qa branch={_pr_branch}")
+            # 多场景命中：其余场景并行分发 QA
+            for _extra in _pr_sub_matches[1:]:
+                _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
     _sub_agent = _match_repo_subscription(repo_key, event_type, _pr_branch)
     if not agent_type:
         # 主路由为空 → 订阅兜底
@@ -982,7 +1215,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # Issue 事件幂等建档；closed 动作自动完成对应任务（P5 webhook 兜底）。
     # 旁路：失败仅告警，不阻塞事件处理。
     try:
-        from src.api.routes.tasks import ensure_issue_task, close_issue_tasks
+        from src.api.issues_center import ensure_issue_task, close_issue_tasks
         _iid3 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "") or ""
         if _iid3:
             _num3 = str(_iid3).lstrip("#")
@@ -1087,6 +1320,25 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         except Exception:
             pass
     log.info(f"Pipeline: scene resolved -> scene_id={_issue_scene} uid={_issue_scene_uid} issue={_early_issue_id or '(none)'}")
+    # PR 订阅场景：直接从场景 nodes 取 skill，不走 agent_session / issue_scene
+    _is_pr_sub = bool(evt.get("_pr_sub_scene_id"))
+    if _is_pr_sub:
+        skill_name = evt["_pr_sub_skill"]
+        skill_id = 0
+        skill_path = skill_name
+        _issue_scene = evt["_pr_sub_scene_id"]
+        try:
+            from src.user.db import resolve_skill_id, get_skill_by_id
+            _sid = resolve_skill_id(skill_name, repo_key=repo_key)
+            if _sid:
+                skill_id = _sid
+                _sk = get_skill_by_id(_sid)
+                if _sk:
+                    skill_path = _sk.get("skill_path") or skill_name
+        except Exception:
+            pass
+        backend = ""  # PR 订阅不走 agent_session，backend 置空让 pick_engine 自动选
+        log.info(f"Pipeline (PR-sub): skill from scene nodes: {skill_name} sid={skill_id} (scene={_issue_scene})")
     # Issue 级场景优先：scene 非 default 时，用 issue scene 的 skill 覆盖 session 的 skill
     # 智能推荐模式：跳过 skill 解析（场景未知，prompt 不用 skill）
     if _is_scene_recommend:
@@ -1094,7 +1346,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         skill_id = 0
         skill_path = ""
         log.info("Pipeline (plugin): 智能推荐模式, skip skill resolution")
-    elif is_plugin_mode() and _issue_scene and _issue_scene != "default":
+    elif is_plugin_mode() and _issue_scene and _issue_scene != "default" and not _is_pr_sub:
         _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene, user_id=_issue_scene_uid)
         if _pipe_skill:
             skill_name = _pipe_skill
@@ -1110,8 +1362,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_id = 0
             log.info(f"Pipeline (plugin): issue scene skill override: {agent_type}={_pipe_skill} sid={skill_id} (scene={_issue_scene})")
     if not backend or not skill_name:
-        # 智能推荐模式：skill_name 为空是正常的，用 recommender prompt，不走 fallback
-        if _is_scene_recommend:
+        if _is_pr_sub:
+            pass  # PR 订阅已设好 skill，跳过 fallback
+        elif _is_scene_recommend:
             skill_name = ""
             backend = ""
             log.info("Pipeline (plugin): 智能推荐模式, using recommender prompt (no skill)")
@@ -1172,36 +1425,20 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             issue_id = evt.get("issue_id", "")
     else:
         issue_id = resolve_issue_id(payload) or evt.get("issue_id", "")
+    # PR 订阅：用 PR 号 + scene_id 构造伪 issue_id 参与去重（区分不同场景）
+    if not issue_id and evt.get("_pr_sub_scene_id"):
+        pr_obj = payload.get("pull_request", {}) or payload.get("merge_request", {}) or {}
+        obj_attrs = payload.get("object_attributes", {}) or {}
+        pr_num = pr_obj.get("number", pr_obj.get("iid", "")) or obj_attrs.get("iid", "")
+        if pr_num:
+            _sub_scene = evt["_pr_sub_scene_id"]
+            issue_id = f"#pr_{pr_num}_{_sub_scene}"
+            evt["_pr_sub_pr_number"] = pr_num
+            log.info(f"Pipeline: PR subscription pseudo issue_id={issue_id}")
     title = evt.get("title", "") or event_type
     log.info(f"Pipeline: issue_id={issue_id or '(none)'}, title={title}")
 
-    # 5.1 去重检查（2026-08-29 修复）：同 issue + 同 agent_type 已有 running 任务时跳过
-    # 原因：GitHub 对同一 Issue 创建会发多个 webhook（opened/assigned/labeled 等），
-    # 如果 action 不细分会导致同一 issue 产生重复任务。
-    # 豁免：a2a_event（已有自己的去重）
-    if issue_id and agent_type and event_type != "a2a_event":
-        try:
-            with db_lock:
-                _dc = db.cursor()
-                _dc.execute(
-                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
-                    "AND status IN ('running','dispatched') "
-                    "AND event_type != 'a2a_event' "
-                    "ORDER BY seq DESC LIMIT 1",
-                    (repo_key, issue_id, agent_type))
-                _existing_evt = _dc.fetchone()
-                if _existing_evt:
-                    log.info(f"Pipeline: dedup skip — issue={issue_id} agent={agent_type} "
-                             f"already has running event seq={_existing_evt[0]}")
-                    from src.api.event_store import append_skipped_event
-                    append_skipped_event(repo_key, event_type, f"dedup:active_{agent_type}_for_{issue_id}",
-                                         issue_id=issue_id)
-                    result["skipped"] = "duplicate_active_task"
-                    return result
-        except Exception as _de:
-            log.warning(f"Pipeline: dedup check failed: {_de}")
-
-    # 5.5 构建摘要描述
+    # 5.5 构建摘要描述（纯内存操作，放在锁外）
     actor = evt.get("actor", "")
     branch = evt.get("branch", "")
     if event_type == "issue_opened":
@@ -1242,20 +1479,69 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         summary = title or event_type
     log.info(f"Pipeline: summary={summary}")
 
-    # 6. 立即创建 event（status=running），Agent 执行完后再刷新 result/status/agent_log
-    from src.api.event_store import append_event
-    seq = append_event(
-        repo_key=repo_key,
-        event_type=event_type,
-        title=title,
-        issue_id=issue_id or "#0",
-        source=source,
-        agent_type=agent_type,
-        actor=actor,
-        summary=summary,
-        payload=payload,
-        status="running",
-    )
+    # 5.1+6 去重检查 + 写入事件（合并到同一个 db_lock 临界区，消除竞态窗口）
+    # 原因：GitHub 对同一 Issue 创建会发多个 webhook（opened/assigned/labeled 等），
+    # 如果 action 不细分会导致同一 issue 产生重复任务。
+    # 豁免：a2a_event（已有自己的去重）
+    _scene_id_for_event = evt.get("_pr_sub_scene_id", "") or _issue_scene
+    _seq = 0
+    if issue_id and agent_type and event_type != "a2a_event":
+        try:
+            with db_lock:
+                _dc = db.cursor()
+                _dc.execute(
+                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                    "AND status IN ('running','dispatched') "
+                    "AND event_type != 'a2a_event' "
+                    "ORDER BY seq DESC LIMIT 1",
+                    (repo_key, issue_id, agent_type))
+                _existing_evt = _dc.fetchone()
+                if _existing_evt:
+                    log.info(f"Pipeline: dedup skip — issue={issue_id} agent={agent_type} "
+                             f"already has running event seq={_existing_evt[0]}")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, f"dedup:active_{agent_type}_for_{issue_id}",
+                                         issue_id=issue_id)
+                    result["skipped"] = "duplicate_active_task"
+                    return result
+                # dedup 通过 → 直接 INSERT（不再调 append_event 函数，避免重复加锁开销）
+                _dc.execute(
+                    "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (repo_key, issue_id or "#0", event_type, source, agent_type, title, actor, summary,
+                     json.dumps(payload or {}), "running", "", _scene_id_for_event)
+                )
+                db.commit()
+                _seq = _dc.lastrowid or 0
+                # 验证行确实写入（防止 WAL 并发写入冲突时 lastrowid 返回旧值）
+                _dc.execute("SELECT seq FROM events WHERE seq=?", (_seq,))
+                if not _dc.fetchone():
+                    db.rollback()
+                    log.warning(f"Pipeline: INSERT returned lastrowid={_seq} but row not found (WAL conflict?), repo={repo_key}, type={event_type}")
+        except Exception as _de:
+            log.warning(f"Pipeline: dedup+insert failed: {_de}")
+    else:
+        # a2a_event 或无 issue_id/agent_type：直接写入（无需 dedup）
+        from src.api.event_store import append_event
+        _seq = append_event(
+            repo_key=repo_key,
+            event_type=event_type,
+            title=title,
+            issue_id=issue_id or "#0",
+            source=source,
+            agent_type=agent_type,
+            actor=actor,
+            summary=summary,
+            payload=payload,
+            status="running",
+            scene_id=_scene_id_for_event,
+        )
+    seq = _seq
+    # WAL checkpoint 在 db_lock 释放后执行（避免阻塞其他需要 db_lock 的操作）
+    if seq and issue_id and agent_type and event_type != "a2a_event":
+        try:
+            db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception:
+            pass
     log.info(f"Pipeline: event created, seq={seq}, repo_key={repo_key}, agent={agent_type}, issue_id={issue_id or '#0'}")
 
     from src.repo_key import from_repo_key
@@ -1665,8 +1951,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "ACCOUNT": evt.get("account") or repository,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
-    _inject_cloud_credentials(env_extra, repo_key)
-    # 注入场景 work_branch + custom_fields 环境变量（值不暴露在 prompt 文本里）
+    # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -1674,15 +1959,11 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_custom_fields_env(env_extra, repo_key, issue_id)
+    _inject_scene_env(env_extra, repo_key, issue_id)
     # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
         env_extra.update(_evt_ext)
-    # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
-    if agent_type == "sre":
-        # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
-        _apply_comment_repo_override(env_extra, evt)
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
     if agent_type == "coding":
         try:
@@ -1748,33 +2029,48 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
 
 
-def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = "") -> None:
-    """读场景高级选项的 custom_fields，按序号注入环境变量。
+def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
+    """解析 Issue 当前绑定开发场景（issue-219：env 注入 GRAPE_SCENE_ID 用）。
 
-    每个自定义字段对应 GRAPE_CF_1、GRAPE_CF_2...
-    GRAPE_CF_MAP = {"GRAPE_CF_1":"key名","GRAPE_CF_2":"key名"} 供 agent 查映射。
-    值不暴露在 prompt 文本里，agent 通过 printenv 自行读取。
+    优先读 issue 卡片 scene_id（get_issue_scene → issue 单表权威），空则回退
+    managed_repos.dev_scene（与 runtime/repogit._read_scene_work_branch 同源，保证同场景）。
+    未选定返回空串——agent 借此区分「场景未判定」，不回落 default（避免误导）。
     """
-    try:
-        from src.session_manager import db, db_lock
-        import json as _json
-        # 1. 优先读 issue_state.scene_id，空则回退 managed_repos.dev_scene
-        scene_id = ""
-        if issue_id:
-            try:
-                from src.api.session_store import get_issue_scene
-                scene_id, _ = get_issue_scene(repo_key, issue_id)
-            except Exception:
-                scene_id = ""
-        if not scene_id:
+    scene_id = ""
+    if issue_id:
+        try:
+            from src.api.session_store import get_issue_scene
+            scene_id, _ = get_issue_scene(repo_key, issue_id)
+        except Exception:
+            scene_id = ""
+    if not scene_id:
+        try:
+            from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
                 row = c.fetchone()
             scene_id = (row[0] if row else "") or ""
+        except Exception:
+            scene_id = ""
+    return scene_id
+
+
+def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "") -> None:
+    """注入场景相关环境变量：GRAPE_SCENE_ID + 高级选项 custom_fields（GRAPE_CF_1..N / GRAPE_CF_MAP）。
+
+    值不暴露在 prompt 文本里，agent 通过 printenv 自行读取。
+    - GRAPE_SCENE_ID：当前 Issue 绑定的场景标识；未选定注入空串（不回落 default，agent 判「未判定」）。
+    - GRAPE_CF_1..N / GRAPE_CF_MAP：custom_fields 按序号注入 + 键名映射（沿用原行为）。
+    """
+    try:
+        scene_id = _resolve_scene_id(repo_key, issue_id)
+        env_extra["GRAPE_SCENE_ID"] = scene_id
         if not scene_id:
             return
-        # 2. 读 advanced_options
+        from src.session_manager import db, db_lock
+        import json as _json
+        # 读 advanced_options 的 custom_fields
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -1788,7 +2084,7 @@ def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = ""
         fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("key")]
         if not fields:
             return
-        # 3. 按序号注入
+        # 按序号注入
         cf_map = {}
         for i, f in enumerate(fields, 1):
             var_name = f"GRAPE_CF_{i}"
@@ -1796,75 +2092,8 @@ def _inject_custom_fields_env(env_extra: dict, repo_key: str, issue_id: str = ""
             cf_map[var_name] = f.get("key", "")
         env_extra["GRAPE_CF_MAP"] = _json.dumps(cf_map, ensure_ascii=False)
     except Exception as _e:
-        log.warning(f"inject custom_fields env failed: {_e}")
-
-
-def _inject_cloud_credentials(env_extra: dict, repo_key: str) -> dict:
-    """按仓库 owner 注入华为云 AK/SK 到任务环境变量（多用户隔离）。
-
-    cloud-deploy 技能读取 HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK 环境变量；
-    AK/SK 按 user_accounts.username（=GitCode login）分别存储，
-    仓库归谁所有就用谁的凭证（repo_owner → user_accounts）。
-    owner 未配置时注入空值，由技能侧报"请仓库 owner 配置华为云凭证"。
-    """
-    try:
-        from src.repo_key import split_owner_repo
-        owner, _repo = split_owner_repo(repo_key)
-        if not owner:
-            env_extra.setdefault("HUAWEICLOUD_SDK_AK", "")
-            env_extra.setdefault("HUAWEICLOUD_SDK_SK", "")
-            return env_extra
-        from src.user.db import get_user_account
-        acc = get_user_account(owner) or {}
-        ak = (acc.get("huawei_cloud_ak") or "").strip()
-        sk = (acc.get("huawei_cloud_sk") or "").strip()
-        env_extra["HUAWEICLOUD_SDK_AK"] = ak
-        env_extra["HUAWEICLOUD_SDK_SK"] = sk
-        if not (ak and sk):
-            log.warning(f"cloud credentials: repo owner '{owner}' has no Huawei Cloud AK/SK configured, injected empty")
-    except Exception as e:
-        log.warning(f"cloud credentials injection failed for {repo_key}: {e}")
-        env_extra.setdefault("HUAWEICLOUD_SDK_AK", "")
-        env_extra.setdefault("HUAWEICLOUD_SDK_SK", "")
-    return env_extra
-
-
-def _apply_comment_repo_override(env_extra: dict, evt: dict) -> None:
-    """v4.5：评论里指定发布目标仓库（「同步到 signway/xxx」/「to owner/repo」）→ 覆盖默认。
-
-    根据 repo_key provider 分流：GitHub 仓库默认覆盖 GITHUB_PUBLISH_REPO，
-    GitCode 仓库默认覆盖 GITCODE_PUBLISH_REPO。
-    """
-    import re
-    note = ""
-    payload = evt.get("payload") or {}
-    if isinstance(payload, dict):
-        note = str(payload.get("object_attributes", {}).get("note") or "")
-    if not note:
-        return
-    # 从 evt 获取 repo_key 判断 provider
-    _rk = evt.get("repo_key") or ""
-    _is_github = _is_github_repo(_rk)
-    m = re.search(r"(?:到|同步到|push\s*到|to)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", note)
-    if m:
-        repo = m.group(1)
-        # 按平台覆盖（评论提到 github/gitcode 时精确覆盖；否则按 repo_key provider 覆盖）
-        low = note.lower()
-        if "github" in low:
-            env_extra["GITHUB_PUBLISH_REPO"] = repo
-        if "gitcode" in low:
-            env_extra["GITCODE_PUBLISH_REPO"] = repo
-        if "github" not in low and "gitcode" not in low:
-            # 未明确指定平台 → 按 repo_key provider 默认覆盖
-            if _is_github:
-                env_extra["GITHUB_PUBLISH_REPO"] = repo
-            else:
-                env_extra["GITCODE_PUBLISH_REPO"] = repo
-                env_extra["GITHUB_PUBLISH_REPO"] = repo
-    # v4.6：评论指定 ClawHub 组织发布者（「发布到组织 @my-org」/「owner: my-org」/「ownerHandle: xxx」）
-    mo = re.search(r"(?:组织\s*@|owner(?:handle)?\s*[:：]\s*@?)([A-Za-z0-9_.-]+)", note, re.IGNORECASE)
-    if mo:
-        env_extra["CLAWHUB_OWNER_HANDLE"] = mo.group(1)
+        from src.config import log
+        log.warning(f"inject scene env failed: {_e}")
 
 
 def get_prompt_context(repo_key: str) -> str:
@@ -2172,8 +2401,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         "REPO_FULL_NAME": repository,
         "ACCOUNT": exec_account,
     }
-    _inject_cloud_credentials(env_extra, repo_key)
-    # 注入场景 work_branch + custom_fields 环境变量（direct 模式同样注入，保持与 worker 模式一致）
+    # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -2181,12 +2409,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_custom_fields_env(env_extra, repo_key, issue_id)
-    # skill 发布（v4.2/v4.5）：仅 sre 任务、按仓库注入平台令牌 + 发布目标仓库
-    # （direct 模式同样需要——A2A 交办 sre 走本路径，见 _enqueue_pipeline_task 同款逻辑）
-    if agent_type == "sre":
-        # v4.5：评论指定仓库（「到 owner/repo」/「to owner/repo」）覆盖默认目标
-        _apply_comment_repo_override(env_extra, evt)
+    _inject_scene_env(env_extra, repo_key, issue_id)
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
     if agent_type == "coding":
         try:
@@ -2236,6 +2459,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=task_id or f"d_{seq}",
                 repo_key=repo_key, agent_type=agent_type, user_id=0)
+            # CLI 命令按 token 作用域过滤：agent 持 tk_ 会话 token → 只暴露 dual+session_only 命令
+            # （见 grape-cli-mode-filter-design.md；避免 agent 打 user_only 接口 403 重试）
+            env_extra["GRAPE_CLI_MODE"] = "WORKER"
     except Exception as e:
         log.warning(f"Exec agent: issue session token failed: {e}")
 
@@ -2430,10 +2656,16 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             log.warning(f"Multi-task mode stage=done check failed: {_e}")
 
     # 执行完成 → 自动回帖到 Issue（仅 sre 等有实质产出的 Agent，且有关联 Issue）
-    if new_status == "completed" and result_text and issue_id:
+    # PR 订阅的伪 issue_id（#pr_123_scene_id）不是真实 Issue，跳过 Issue 回帖
+    if new_status == "completed" and result_text and issue_id and not evt.get("_pr_sub_pr_number"):
         _issue_num = _issue_num_from(issue_id)
         if _issue_num and repo_gitcode_token:
             _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key)
+    # PR 订阅场景 → 回帖到 PR 评论
+    if new_status == "completed" and result_text and evt.get("_pr_sub_pr_number"):
+        _pr_num = str(evt["_pr_sub_pr_number"])
+        if _pr_num and repo_gitcode_token:
+            _post_result_to_pr(repository, _pr_num, result_text, repo_gitcode_token, agent_type, repo_key)
 
     # SRE 完成后 → 从 result_text 提取部署 URL 并写入 managed_repos.deploy_url
     if new_status == "completed" and agent_type == "sre" and result_text:
@@ -2656,6 +2888,53 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
     except Exception as e:
         log.warning(f"Post all subtasks done failed: {e}")
 
+
+def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_token: str,
+                        agent_type: str, repo_key: str = ""):
+    """PR 订阅场景：Agent 执行完成后，将结果作为评论发回 PR。
+
+    GitCode: POST /repos/{owner}/{repo}/pulls/{pr_number}/comments
+    GitHub:  POST /repos/{owner}/{repo}/issues/{pr_number}/comments（PR 共用 Issue 评论 API）
+    """
+    if not repository or not pr_number or not bot_token:
+        return
+    # 提取 conclusion
+    _conclusion = ""
+    try:
+        from src.api.event_store import parse_agent_output_json
+        _parsed = parse_agent_output_json(result_text)
+        if _parsed and _parsed.get("conclusion"):
+            _conclusion = _parsed["conclusion"]
+    except Exception:
+        pass
+    if not _conclusion:
+        _conclusion = f"PR 审查任务已完成（{agent_type} agent）。"
+    _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
+    _comment += "\n<!-- grape-auto-comment -->"
+    try:
+        import urllib.request, json as _json
+        if _is_github_repo(repo_key):
+            # GitHub: PR 共用 Issue 评论 API
+            _url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments"
+            _data = _json.dumps({"body": _comment}).encode("utf-8")
+            _req = urllib.request.Request(_url, data=_data,
+                headers={"Authorization": f"Bearer {bot_token}",
+                         "Accept": "application/vnd.github+json",
+                         "User-Agent": "Grape-DevOps",
+                         "Content-Type": "application/json"}, method="POST")
+        else:
+            # GitCode: PR 评论 API
+            _url = f"https://gitcode.com/api/v5/repos/{repository}/pulls/{pr_number}/comments"
+            _data = _json.dumps({"body": _comment}).encode("utf-8")
+            _req = urllib.request.Request(_url, data=_data,
+                headers={"Authorization": f"Bearer {bot_token}",
+                         "Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(_req, timeout=15)
+        log.info(f"PR-sub: posted result comment to {repository}/pulls/{pr_number}")
+    except Exception as e:
+        log.warning(f"PR-sub: post result comment failed: {e}")
+
+
 def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token: str,
                                          agent_type: str = "", repository: str = ""):
     """从 VCS Issue 拉取 agent 发的评论，去重后同步到任务会话。
@@ -2779,7 +3058,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     _title = ""
     _issue_num = str(issue_id).lstrip("#")
     try:
-        from src.api.routes.tasks import _get_issue_title
+        from src.api.issues_center import _get_issue_title
         _title = _get_issue_title(repo_key, int(_issue_num)) or ""
     except Exception:
         pass

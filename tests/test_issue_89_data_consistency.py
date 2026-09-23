@@ -15,6 +15,7 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from unittest.mock import patch
+from src.api import issues_center as ic
 import pytest
 
 from src.session_manager import db, db_lock
@@ -82,9 +83,9 @@ class TestPipelineTasksWithoutEvents:
         from src.api.routes import tasks as tasks_mod
 
         # 在 tasks 表插入一条任务，但不创建 events
-        with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=1), \
-             patch.object(tasks_mod, "_get_issue_title", return_value="Test Task"):
-            tasks_mod.ensure_issue_task(REPO, 100, title="Test Task", assignee="alice",
+        with patch.object(ic, "_get_user_id_by_gitcode", return_value=1), \
+             patch.object(ic, "_get_issue_title", return_value="Test Task"):
+            ic.ensure_issue_task(REPO, 100, title="Test Task", assignee="alice",
                                         event_type="issue_opened")
 
         app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "api_key"}
@@ -108,9 +109,9 @@ class TestPipelineTasksWithoutEvents:
         from src.api.event_store import append_event
         from src.api.routes import tasks as tasks_mod
 
-        with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=1), \
-             patch.object(tasks_mod, "_get_issue_title", return_value="Test Task 2"):
-            tasks_mod.ensure_issue_task(REPO, 101, title="Test Task 2", assignee="bob",
+        with patch.object(ic, "_get_user_id_by_gitcode", return_value=1), \
+             patch.object(ic, "_get_issue_title", return_value="Test Task 2"):
+            ic.ensure_issue_task(REPO, 101, title="Test Task 2", assignee="bob",
                                         event_type="issue_opened")
 
         # 创建对应的 event
@@ -145,10 +146,10 @@ class TestCreateTaskTriggersEvent:
         try:
             with patch("src.api.routes.tasks.get_user_token", return_value="fake_token"), \
                  patch("src.api.deps.get_user_token_with_refresh", return_value="fake_token"), \
-                 patch("src.api.routes.tasks._find_open_issue_by_title", return_value=None), \
-                 patch("src.api.routes.tasks._post_gitcode_issue", return_value={"number": 200}), \
-                 patch("src.api.routes.tasks._get_user_id_by_gitcode", return_value=1), \
-                 patch("src.api.routes.tasks._get_issue_title", return_value=""):
+                 patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
+                 patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 200}), \
+                 patch("src.api.issues_center._get_user_id_by_gitcode", return_value=1), \
+                 patch("src.api.issues_center._get_issue_title", return_value=""):
                 client = TestClient(app)
                 r = client.post("/api/issues/owner/issue89-test", json={
                     "repo_key": REPO,

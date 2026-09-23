@@ -75,7 +75,11 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     if not issue_events:
         return None
 
-    # 优先从批量 title_map 取标题（消除 N+1 查询）
+    # PR 订阅伪 issue_id 提前解析（供 title 兜底使用）
+    import re as _re
+    _pr_match = _re.match(r'#pr_(\d+)_', issue_id)
+
+    # 优先从批量 title_map 取标题（消除 N+1）
     title = ""
     if title_map:
         title = title_map.get(issue_id, "")
@@ -91,7 +95,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     }
     def _is_placeholder(t):
         """判断 title 是否为占位符（事件类型名或 A2A 占位标题），不是 Issue 真实标题"""
-        return not t or t in _EVENT_TYPE_NAMES or t.startswith("A2A:") or t.startswith("A2A (订阅):")
+        return not t or t in _EVENT_TYPE_NAMES or t.startswith("A2A:") or t.startswith("A2A (订阅):") or t.startswith("PR 订阅 QA:")
 
     # title_map 已提供有效标题时跳过 DB 查询；否则回退到 DB 查询（兼容无 title_map 的调用）
     if not title_map or _is_placeholder(title):
@@ -137,6 +141,18 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
             if _pt and not _is_placeholder(_pt):
                 title = _pt
                 break
+    # PR 订阅跨 issue 兜底：同一 PR 号的其他事件可能有真实 PR 标题
+    if _is_placeholder(title) and _pr_match:
+        _pr_num = _pr_match.group(1)
+        for _e in events:
+            _eid = _e.get("issue_id", "")
+            if _eid == issue_id:
+                continue
+            if _re.match(rf'#pr_{_pr_num}_', _eid) or _eid == f"#pr_{_pr_num}":
+                _et = _e.get("title", "") or ""
+                if not _is_placeholder(_et):
+                    title = _et
+                    break
     # GitCode API 兜底：tasks/events/payload 都没真实标题 → 调 API 获取并回写 tasks 表
     if _is_placeholder(title):
         try:
@@ -246,7 +262,14 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     # 生命周期阶段（issue_state.stage）：vod/issue/coding/qa/sre/done；无记录默认 vod
     stage = (_st.get("stage") if _st else "") or "vod"
     # Issue 级开发场景（从 stage_map 取，不再回退 get_issue_scene）
+    # PR 订阅事件不写 issue_state，回退从 events 表 scene_id 列取
     scene_id = (_st.get("scene_id") if _st else "") or _scene_id or ""
+    if not scene_id:
+        for _e in issue_events:
+            _sid = _e.get("scene_id") or ""
+            if _sid:
+                scene_id = _sid
+                break
     # 解析场景名称（内置 + 成员自定义）——使用缓存回调
     scene_name = ""
     issue_pipeline_config = None
@@ -269,8 +292,15 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     # 父任务 ID（子任务场景，issue_state.parent_issue_id）
     parent_issue_id = (_st.get("parent_issue_id") if _st else "") or ""
 
+    # PR 订阅伪 issue_id（#pr_{num}_{scene_id}）简化显示
+    if _pr_match:
+        display_issue_id = f"PR#{_pr_match.group(1)}"
+    else:
+        display_issue_id = issue_id
+
     return {
-        "issue_id": issue_id,
+        "issue_id": display_issue_id,
+        "raw_issue_id": issue_id,
         "title": title,
         "stages": stages,
         "statuses": stage_statuses,
@@ -329,7 +359,7 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
         try:
             c.execute(
                 "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
-                "created_at, actor, duration, repo_key "
+                "created_at, actor, duration, repo_key, scene_id "
                 "FROM events WHERE repo_key IN ({}) AND issue_id != '' ORDER BY seq ASC".format(
                     ",".join("?" * len(_repo_keys))
                 ),
@@ -342,7 +372,8 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
     events = [
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
          "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": "",
-         "duration": r[9], "repo_key": r[10] if len(r) > 10 else repo_key}
+         "duration": r[9], "repo_key": r[10] if len(r) > 10 else repo_key,
+         "scene_id": r[11] if len(r) > 11 else ""}
         for r in rows
     ]
 
@@ -411,7 +442,7 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
     for e in events:
         _events_by_issue.setdefault(e["issue_id"], []).append(e)
     pipelines = [_get_issue_pipeline(
-        repo_key, iid, _events_by_issue.get(iid, []),
+        repo_key, iid, events,
         _title_map, _stage_map, _pipe_cfg_cache, _get_pipe_cfg,
         _bot_usernames, _feishu_name_cache
     ) for iid in issue_ids]
@@ -443,7 +474,7 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
     # 不维护 issue_agent_session.status 双份记账，避免状态漂移
     running_issues = _running_issue_ids(_repo_keys)
     for p in pipelines:
-        p["executing"] = p["issue_id"] in running_issues
+        p["executing"] = (p.get("raw_issue_id") or p["issue_id"]) in running_issues
 
     active = pipelines[0] if pipelines else None
     history = pipelines[1:] if len(pipelines) > 1 else []

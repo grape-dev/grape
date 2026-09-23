@@ -1,13 +1,15 @@
 # Scenes 场景接口（/api/scenes）
 
 > 对外公开，认证：`get_current_user_or_api_key`。
-> scope（x-token-scope）：`GET /api/scenes`（list）= **dual**（唯一例外：VOD 技能用 session 调，
-> 故意不归 D 类，见 `docs/weekly-03/token-scope-classification-design.md`）；其余（管理/市场/应用/体验等） =
-> **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> scope（x-token-scope）：**全部为 `user_only`（管理/市场/应用/体验等）**，唯一例外——
+> `GET /api/scenes/{scene_id}`（场景详情）为 **dual**（会话 token `tk_` 可读，供 agent 按
+> `GRAPE_SCENE_ID` 按需取当前场景流水线/节点）。场景清单 `GET /api/scenes`（list）为 user_only，
+> agent 不需要清单（当前场景经 env `GRAPE_SCENE_ID` 注入）。
 
 ## GET /api/scenes — 场景列表
 
-> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）。
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> agent 无需清单——当前场景经 env `GRAPE_SCENE_ID` 注入，取详情走 `GET /api/scenes/{scene_id}`。
 > CLI：`grape scenes list`（operation_id=`scenes_list`，命令名 ≠ 路径，见 README「CLI 命令映射」）。
 
 | Query | `repo`（可选；带 repo 时返回仓库级场景，否则 official） |
@@ -199,7 +201,8 @@
 ---
 
 ## GET /api/scenes/{scene_id} — 场景详情
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）
+> 会话 token 调用供 agent 按 `GRAPE_SCENE_ID`（env 注入）取当前场景详情（nodes/onboarding 等）。
 
 | Path | `{scene_id}` |
 | 出参 | `{scene_id, name, nodes, onboarding, ...}` |

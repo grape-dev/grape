@@ -50,12 +50,12 @@ def test_build_task_chat_prompt_contains_scene_and_context():
     conv = {"conv_type": "task", "issue_number": 7, "title": "Issue #7", "repo_key": "owner/repo"}
     history = [{"role": "user", "content": "📋 任务分配 · Issue #7"}, {"role": "agent", "content": "收到"}]
     prompt = build_task_chat_prompt("我需要澄清一下", "owner/repo", history, conv)
-    assert "## 场景: task" in prompt
-    assert "## 任务背景" in prompt
+    assert "## Scene: task" in prompt
+    assert "## Task Context" in prompt
     assert "Issue: #7" in prompt
-    assert "标题: Issue #7" in prompt
-    assert "对话历史" in prompt
-    assert "Skills: chat" in prompt
+    assert "Title: Issue #7" in prompt
+    assert "## Chat History" in prompt
+    assert "## Current Skill: chat" in prompt
 
 
 def test_build_task_chat_prompt_injects_task_boundary():
@@ -66,18 +66,18 @@ def test_build_task_chat_prompt_injects_task_boundary():
     conv = {"conv_type": "task", "issue_number": 7, "title": "Issue #7", "repo_key": "owner/repo"}
     history = [{"role": "user", "content": "📋 任务分配 · Issue #7"}]
     prompt = build_task_chat_prompt("方式2", "owner/repo", history, conv)
-    assert "当前职责（任务对话）" in prompt
-    assert "澄清" in prompt and "回帖" in prompt
-    assert "不实施 / 不部署 / 不写代码" in prompt
-    assert "不执行 git 命令" in prompt
+    assert "## Current Role (task conversation)" in prompt
+    assert "requirement-clarification" in prompt
+    assert "Do NOT implement / deploy / write code" in prompt
+    assert "/ run git commands" in prompt
     assert "pipeline" in prompt and "coding" in prompt
     # 职责强位置：Role 位于提示开头，场景段之后才是任务数据（职责必经场景前）
-    assert prompt.index("当前职责（任务对话）") < prompt.index("## 场景: task")
+    assert prompt.index("## Current Role (task conversation)") < prompt.index("## Scene: task")
 
 
 def test_build_task_chat_prompt_no_conv_defaults():
     prompt = build_task_chat_prompt("hi", "owner/repo", [], None)
-    assert "## 场景: task" in prompt
+    assert "## Scene: task" in prompt
     assert "Issue: #0" in prompt
 
 
@@ -105,7 +105,7 @@ def test_build_task_chat_prompt_injects_task_description():
     conv = {"conv_type": "task", "issue_number": 7, "title": "Issue #7",
             "repo_key": "gitcode:owner/repo", "id": ""}
     prompt = build_task_chat_prompt("确认一下", "gitcode:owner/repo", [], conv)
-    assert "## 任务描述" in prompt
+    assert "### Task Description" in prompt
     assert "处理登录超时" in prompt
     _clean_tasks()
     _clean()
@@ -118,8 +118,8 @@ def test_build_task_chat_prompt_no_description_ok():
     conv = {"conv_type": "task", "issue_number": 99, "title": "Issue #99",
             "repo_key": "gitcode:owner/repo", "id": ""}
     prompt = build_task_chat_prompt("hi", "gitcode:owner/repo", [], conv)
-    assert "## 任务描述" not in prompt
-    assert "## 场景: task" in prompt
+    assert "### Task Description" not in prompt
+    assert "## Scene: task" in prompt
     assert "Issue: #99" in prompt
     _clean()
 
