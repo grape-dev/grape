@@ -127,12 +127,15 @@ def verify_user(username: str, password: str) -> dict | None:
 # ====== JWT token_version 管理 ======
 
 def get_token_version(user_id: int) -> int:
-    """获取用户的 token_version——JWT verify 时对比，不匹配则 token 失效"""
+    """获取用户的 token_version——JWT verify 时对比，不匹配则 token 失效。
+    用户不存在时返回 -1（不等于任何有效 token 的 ver=0，使旧 token 失效）。"""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT token_version FROM user_accounts WHERE id=?", (user_id,))
         row = c.fetchone()
-    return (row[0] if row and row[0] is not None else 0)
+    if not row:
+        return -1  # 用户不存在 → 任何 token 都失效
+    return (row[0] if row[0] is not None else 0)
 
 
 def increment_token_version(user_id: int) -> None:
