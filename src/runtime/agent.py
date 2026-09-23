@@ -728,8 +728,7 @@ def _cleanup_task_tmp(task: dict):
         "/tmp/.*.so",
         # hermes ACP 隔离目录（ACP 协议自行创建的 hermes-acp-* 前缀，
         # executor.py 只清理 hermes-iso-*，ACP 模式的残留在此兜底）
-        # issue #238: 已迁移到 ~/.cache，同时保留 /tmp 旧路径兜底
-        os.path.expanduser("~/.cache/hermes-acp-*"),
+        # issue #238: hermes-iso-* 已迁移到 ~/.cache；hermes-acp-homes 是持久化目录不清理
         os.path.expanduser("~/.cache/hermes-iso-*"),
         "/tmp/hermes-acp-*",
         "/tmp/hermes-iso-*",
@@ -1097,8 +1096,7 @@ async def _execute_task(client, task, engine_name: str = ""):
         "/tmp/inventory_state.json", "/tmp/inventory*.json", "/tmp/.*.so",
         "/tmp/hermes-acp-*", "/tmp/hermes-iso-*", "/tmp/hermes-results",
         "/tmp/hermes-sandbox-*", "/tmp/hermes-snap-*", "/tmp/tirith-install-*",
-        # issue #238: hermes 隔离目录已迁移到 ~/.cache，同步注册新路径
-        os.path.expanduser("~/.cache/hermes-acp-*"),
+        # issue #238: hermes-iso-* 已迁移到 ~/.cache；hermes-acp-homes 是持久化目录不清理
         os.path.expanduser("~/.cache/hermes-iso-*"),
     ]:
         _res.track_tmp_pattern(pat)
