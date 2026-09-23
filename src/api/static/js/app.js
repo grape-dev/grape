@@ -151,25 +151,10 @@ function loadAgentTypes() {
 
     // Issue #82: 仅在完全无选中仓库时才默认选第一个；
     // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
-    // 只自动选中当前用户自己托管（my_hosted）的仓库，不跳到别人托管的
     if (!current) {
-        const myRepo = managedRepos.find(r => r.my_hosted);
-        if (myRepo) {
-            localStorage.setItem('currentRepo', JSON.stringify({fullName: myRepo.full_name, owner: myRepo.owner, name: myRepo.name, repoKey: myRepo.repo_key || ''}));
-        } else {
-            // 没有自己托管的仓库 → 进仓库选择页，不自动跳到别人的仓库
-            localStorage.removeItem('currentRepo');
-            _pushHistory('repos', null);
-            $('sidebar').style.display = 'none';
-            $('tb').style.display = 'none';
-            $('mainView').style.display = 'flex';
-            $('mainView').style.position = 'fixed';
-            $('mainView').style.inset = '0';
-            $('mainView').style.zIndex = '100';
-            $('pageTitle').textContent = I18N.t('app.current_project');
-            renderRepoSelection(repos);
-            return;
-        }
+      const r = managedRepos[0];
+      if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
+      else localStorage.removeItem('currentRepo');
     }
     nav('dash');
   }
@@ -1210,7 +1195,7 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '34');
+      localStorage.setItem('app_cache_ver', '35');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -1237,13 +1222,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '34') {
+    if (localStorage.getItem('app_cache_ver') !== '35') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '34');
+      localStorage.setItem('app_cache_ver', '35');
     }
 
     const token = localStorage.getItem('token');
