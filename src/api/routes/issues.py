@@ -638,7 +638,8 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
                 break
         from src.api.pipeline_config import get_pipeline_config
         from src.api.session_store import get_issue_scene
-        _scene_id = get_issue_scene(repo_key, _issue_id) or "default"
+        _scene_tuple = get_issue_scene(repo_key, _issue_id)
+        _scene_id = (_scene_tuple[0] if _scene_tuple and _scene_tuple[0] else "") or "default"
         _pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
         _nodes = (_pipe_cfg or {}).get("nodes", [])
         _resume_stage = ""

@@ -1637,7 +1637,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                         _st = get_issue_stage(_rk, _iid)
                         _cur_stage = (_st or {}).get("stage", "") if _st else ""
                         if _cur_stage == _ag:  # 当前 stage 就是完成的 agent → 检查是否最后节点
-                            _scene_id = get_issue_scene(_rk, _iid) or "default"
+                            _scene_tuple = get_issue_scene(_rk, _iid)
+                            _scene_id = (_scene_tuple[0] if _scene_tuple and _scene_tuple[0] else "") or "default"
                             _pipe_cfg = get_pipeline_config(_scene_id, repo_key=_rk)
                             _nodes = (_pipe_cfg or {}).get("nodes", [])
                             for _n in _nodes:
