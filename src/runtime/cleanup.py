@@ -430,8 +430,8 @@ def _sweep_tmp_residuals() -> int:
     """兜底清理 /tmp 及 ~/.cache 下 agent 残留（sweeper 每 15min 调一次）。
 
     清理目标：
-    - hermes-acp-* / hermes-iso-* / hermes-sandbox-* / hermes-snap-*：hermes 引擎隔离目录残留
-      （issue #238: 已从 /tmp 迁移到 ~/.cache，两路径均扫描）
+    - hermes-iso-* / hermes-sandbox-* / hermes-snap-*：hermes 引擎隔离目录残留
+      （issue #238: 已从 /tmp 迁移到 ~/.cache；hermes-acp-homes 是持久化目录不清理）
     - hermes-results：agent call 结果缓存（只增不删）
     - pytest-of-root：测试残留
     - pip-unpack-* / pip-metadata-*：pip 安装临时目录
