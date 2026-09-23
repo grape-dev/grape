@@ -181,9 +181,8 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     if not gitcode_id:
         raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取用户信息"})
 
+    # 按平台 ID 精确匹配，不跨平台 fallback username（同用户名不代表同一人）
     local_user = user_db.get_user_by_gitcode_id(gitcode_id)
-    if not local_user:
-        local_user = user_db.get_user_by_username(gitcode_login)
 
     # 白名单校验：所有用户（含已存在）都必须在白名单内，踢出白名单后立即无法登录
     from src.config import is_gitcode_user_allowed
@@ -337,9 +336,8 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     if not github_id:
         return _oauth_error_redirect(request, "GitHub 登录失败：无法获取用户信息。")
 
+    # 按平台 ID 精确匹配，不跨平台 fallback username（同用户名不代表同一人）
     local_user = user_db.get_user_by_github_id(github_id)
-    if not local_user:
-        local_user = user_db.get_user_by_username(github_login)
 
     # 白名单校验
     from src.config import is_github_user_allowed
