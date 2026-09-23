@@ -457,6 +457,19 @@ def delete_agent_session(repo_key: str, agent_type: str) -> bool:
 
 def ensure_default_agent_sessions(repo_key: str):
     """基于 agent-skill-mapping.json 的 default 场景，为仓库创建默认 Agent 会话"""
+    # 先确保仓库有默认场景（幂等：已有场景则跳过）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM devops_pipeline_scene WHERE repo_key=? AND is_active=1", (repo_key,))
+            _scene_count = c.fetchone()[0]
+        if _scene_count == 0:
+            from src.api.pipeline_config import apply_market_scene_by_name
+            apply_market_scene_by_name(repo_key, "default")
+            log.info(f"ensure_default_agent_sessions: created default scene for {repo_key}")
+    except Exception as _e:
+        log.warning(f"ensure_default_agent_sessions: scene creation skipped: {_e}")
+
     import os
     _path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
     if not os.path.exists(_path):
