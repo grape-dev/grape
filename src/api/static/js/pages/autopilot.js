@@ -979,7 +979,7 @@ function _apPolishInstruction(btn) {
   var instruction = $('apFormInstruction').value.trim();
   if (!instruction) { if (app&&app.showToast) app.showToast('请先填写巡检指令'); return; }
   if (btn) { btn.disabled = true; btn.textContent = '润色中...'; }
-  API.post('/autopilot/polish', {name: name, instruction: instruction}).then(function(d) {
+  API.post('/autopilot/polish', {name: name, instruction: instruction}, 120000).then(function(d) {
     if (d.instruction) {
       $('apFormInstruction').value = d.instruction;
       if (app&&app.showToast) app.showToast('润色完成');
