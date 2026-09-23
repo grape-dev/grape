@@ -535,7 +535,7 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
                 agent_name="Chat Agent",
                 agent_label="[Autopilot:polish]",
                 backend_name=backend_name,
-                max_exec_seconds=60,
+                max_exec_seconds=15,
             ):
                 if evt_type == "text" and isinstance(data, str):
                     parts.append(data)
