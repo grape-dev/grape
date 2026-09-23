@@ -524,6 +524,7 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
 
         def _run_polish():
             parts = []
+            done_text = ""
             for evt_type, data in stream_chat_agent(
                 prompt=polish_prompt,
                 cwd=cwd,
@@ -536,9 +537,11 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
                 backend_name=backend_name,
                 max_exec_seconds=60,
             ):
-                if evt_type == "content" and isinstance(data, str):
+                if evt_type == "text" and isinstance(data, str):
                     parts.append(data)
-            return "".join(parts).strip()
+                elif evt_type == "done" and isinstance(data, dict):
+                    done_text = data.get("text", "") or ""
+            return (done_text or "".join(parts)).strip()
 
         polished = await asyncio.to_thread(_run_polish)
         if not polished:
