@@ -5,7 +5,7 @@
 import pytest
 
 from src.vcs import providers
-from src.vcs.providers import normalize_pulls_nums, translate_inbound, translate_query_state
+from src.vcs.providers import translate_inbound, translate_query_state
 
 OWNER_REPO = "o/r"
 
@@ -30,15 +30,6 @@ def test_t2_pulls_create_github_load():
     assert "inner_issue_nums" not in out
     assert "close_related_issue" not in out
     assert "related_issue_nums" not in out
-
-
-def test_t3_legacy_aliases_normalize_like_neutral():
-    # 旧字段 inner_issue_nums "o/r#5,#6" → 中性 [5,6] → translate（行为与中性字段一致）
-    assert normalize_pulls_nums("o/r#5,#6") == [5, 6]
-    neutral = {"title": "t", "head": "h", "base": "b", "body": "",
-               "related_issue_nums": normalize_pulls_nums("o/r#5,#6"), "auto_close_issues": True}
-    out = translate_inbound("gitcode", "pulls", "create", neutral, {"owner_repo": OWNER_REPO})
-    assert out["inner_issue_nums"] == "o/r#5,o/r#6"
 
 
 def test_t4_issues_create_gitcode_no_repo_field():

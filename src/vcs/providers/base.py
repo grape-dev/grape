@@ -1,7 +1,6 @@
 """中性 Git 契约 base（git-repo-provider-neutral-interface-design.md §4.2）。
 
-- apply_rules：把中性字段 dict 按 (resource, op) 规则翻译为 provider 原生 payload。
-- neutral 常量 / 旧字段解析（related_nums_from_legacy）供各 provider 复用。
+apply_rules：把中性字段 dict 按 (resource, op) 规则翻译为 provider 原生 payload。
 """
 
 
@@ -36,11 +35,3 @@ def apply_rules(rules: dict, neutral: dict, ctx: dict) -> dict:
         if name and val not in (None, ""):
             native[name] = val
     return native
-
-
-def related_nums_from_legacy(value) -> list:
-    """旧字段 inner_issue_nums（"o/r#5,#6"）→ 中性 related_issue_nums（[5,6]）。"""
-    import re
-    if not value:
-        return []
-    return [int(x) for x in re.findall(r"(\d+)", str(value))]

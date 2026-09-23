@@ -15,7 +15,6 @@ from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key
 from src.config import log
 from src.vcs.providers import (
-    normalize_pulls_nums,
     translate_inbound,
     translate_query_state,
 )
@@ -32,10 +31,8 @@ class PRCreateBody(BaseModel):
     head: str = ""
     base: str = ""
     body: str = ""
-    inner_issue_nums: str = ""          # 旧字段（gitcode 专有），别名 → 归一 related_issue_nums
-    close_related_issue: bool = False   # 旧字段（gitcode 专有），别名 → 归一 auto_close_issues
-    related_issue_nums: list = []       # 中性
-    auto_close_issues: bool = False     # 中性
+    related_issue_nums: list = []
+    auto_close_issues: bool = False
 
 
 class PRUpdateBody(BaseModel):
@@ -374,15 +371,13 @@ def list_pulls(owner: str, repo: str, state: str = Query("open"),
 def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(get_current_user_or_api_key),
                 p: str = Depends(_provider)):
     related = list(body.related_issue_nums or [])
-    if not related and body.inner_issue_nums:
-        related = normalize_pulls_nums(body.inner_issue_nums)
     neutral = {
         "title": body.title,
         "head": body.head,
         "base": body.base,
         "body": body.body,
         "related_issue_nums": related,
-        "auto_close_issues": body.auto_close_issues or body.close_related_issue,
+        "auto_close_issues": body.auto_close_issues,
     }
     payload = translate_inbound(p, "pulls", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
     return _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)

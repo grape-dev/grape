@@ -6,7 +6,7 @@ provider 由 token repo_key 前缀决定；每 provider 一个模块，新增 pr
 import re
 
 from . import gitcode, github
-from .base import apply_rules, related_nums_from_legacy
+from .base import apply_rules
 
 _MODULES = {"gitcode": gitcode, "github": github}
 
@@ -26,8 +26,3 @@ def translate_query_state(provider: str, state: str) -> str:
     if mod is None:
         raise ValueError(f"Git provider 未支持: {provider}")
     return mod.query_state(state)
-
-
-def normalize_pulls_nums(inner_issue_nums: str) -> list:
-    """旧字段 inner_issue_nums（"o/r#5,#6"）→ 中性 related_issue_nums（[5,6]）。"""
-    return related_nums_from_legacy(inner_issue_nums)

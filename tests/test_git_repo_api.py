@@ -201,7 +201,7 @@ def test_pulls_mapping(gitcode_calls, _client):
     base = f"/api/git-repo/{OWNER}/{REPO}"
 
     r = client.post(f"{base}/pulls",
-                    json={"title": "feat", "head": "feat/x", "base": "main", "close_related_issue": True})
+                    json={"title": "feat", "head": "feat/x", "base": "main", "auto_close_issues": True})
     assert r.status_code == 200
     last = gitcode_calls[-1]
     assert last["method"] == "POST" and last["body"]["head"] == "feat/x" and last["body"]["close_related_issue"] is True
