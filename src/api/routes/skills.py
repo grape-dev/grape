@@ -242,6 +242,16 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
         s["repo_count"] = stats.get("repo_count", 0)
         s["scenes"] = scenes_map.get(s["id"], [])
         s["category_name"] = cat_map.get(s.get("category_id", 0), "")
+    # 精选技能按 admin 管理台设置的顺序排列
+    if skills:
+        try:
+            from src.featured_order import get_featured_order
+            _order = get_featured_order("skill")
+            if _order:
+                _order_map = {sid: i for i, sid in enumerate(_order)}
+                skills.sort(key=lambda x: _order_map.get(x["id"], 9999))
+        except Exception:
+            pass
     return {"skills": skills}
 
 

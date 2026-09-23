@@ -152,7 +152,7 @@ function _loadSceneMarket() {
     }).catch(() => {});
   }
   // 精选场景非阻塞加载（局部更新精选区，不再全量重建页面）
-  API.get('/scenes/market?sort=latest&limit=5&featured_only=1&scope=official').then(featData => {
+  API.get('/scenes/market?sort=latest&limit=4&featured_only=1&scope=official').then(featData => {
     _sceneMarketFeatured = featData.scenes || [];
     if (_sceneTab === 'official') _renderFeaturedSection();
   }).catch(() => { _sceneMarketFeatured = []; _renderFeaturedSection(); });

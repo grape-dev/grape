@@ -688,7 +688,13 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     repo_key = to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
-    api_token = get_user_token(user["username"])
+    # 按 repo_key 前缀分流 owner token
+    from src.repo_key import parse_repo_key
+    _provider, _, _ = parse_repo_key(repo_key)
+    if _provider == "github":
+        api_token = get_user_github_token(user["username"])
+    else:
+        api_token = get_user_token(user["username"])
     bot_token, bot_username = get_global_bot_credential()
     if not api_token or not bot_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "缺少 API Token，无法自愈"})
