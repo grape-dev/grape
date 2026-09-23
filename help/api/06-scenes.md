@@ -5,6 +5,7 @@
 > `GET /api/scenes/{scene_id}`（场景详情）为 **dual**（会话 token `tk_` 可读，供 agent 按
 > `GRAPE_SCENE_ID` 按需取当前场景流水线/节点）。场景清单 `GET /api/scenes`（list）为 user_only，
 > agent 不需要清单（当前场景经 env `GRAPE_SCENE_ID` 注入）。
+> A2A 交办：服务端校验目标 agent 是否在当前 Issue 场景的 `nodes` 内，不在则返回 `skipped: not_in_scene` 且不派发（nodes=单一事实源）。
 
 ## GET /api/scenes — 场景列表
 
@@ -205,8 +206,30 @@
 > 会话 token 调用供 agent 按 `GRAPE_SCENE_ID`（env 注入）取当前场景详情（nodes/onboarding 等）。
 
 | Path | `{scene_id}` |
-| 出参 | `{scene_id, name, nodes, onboarding, ...}` |
+| 出参 | `{id, name, nodes[], onboarding, scene_type}`（`id`=传入的 scene_id；`nodes`=技能链；`onboarding` 默认 `repo-onboarding`；`scene_type` 默认 `standard`） |
 | 返回 | 200；404 |
+
+**示例（`default` 场景）**：
+
+```json
+{
+  "id": "default",
+  "name": "通用开发",
+  "nodes": [
+    {"id": "vod",    "tag": "需求分析", "skill": "vod-cli",    "mode": "emit", "next": "issue",  "handoff": "a2a",     "enabled": true, "engine_runtime_ids": []},
+    {"id": "issue",  "tag": "任务拆解", "skill": "issue-cli",  "mode": "emit", "next": "coding", "handoff": "a2a",     "enabled": true, "engine_runtime_ids": []},
+    {"id": "coding", "tag": "代码实现", "skill": "coding-cli", "mode": "emit", "next": "qa",     "handoff": "a2a",     "enabled": true, "engine_runtime_ids": []},
+    {"id": "qa",     "tag": "质量审查", "skill": "qa-cli",     "mode": "emit", "next": "sre",    "handoff": "a2a",     "enabled": true, "engine_runtime_ids": []},
+    {"id": "sre",    "tag": "运维部署", "skill": "deploy-cli", "mode": "emit", "next": "done",   "handoff": "complete","enabled": true, "engine_runtime_ids": []}
+  ],
+  "onboarding": "repo-onboarding",
+  "scene_type": "standard"
+}
+```
+
+> `nodes[]` 是流水线的单一事实源：每条含 Agent 阶段（`id`）、对应技能（`skill`）、下游（`next`，`done`=结束）、交办方式（`handoff`）。
+> 删除某节点（如 `qa`）后：详情不再显示、也不会执行；**须同步把上游 `next` 改到下一个存活节点**，
+> 否则该步派发时「node not found」而 `failed`（pipeline_executor）。
 
 ---
 
