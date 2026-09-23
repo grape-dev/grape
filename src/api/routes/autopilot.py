@@ -2,10 +2,12 @@
 
 v3.0 重构：
 - 不再创建 Issue 触发流水线，改为直接执行单个 agent
-- 字段调整: scene_id/description → agent_type/instruction/skill_name
+- 字段调整: scene_id/description → instruction/skill_name
+- agent_type 不再由用户选择，内部固定 'issue'
 - 所有接口加 check_repo_access 仓库归属校验
 - 新增 GET /executions/{id}/findings 返回问题列表
 - 新增 POST /executions/{id}/dispatch 派发问题为真实 Issue
+- 新增 POST /polish 润色巡检指令
 """
 from __future__ import annotations
 
@@ -20,7 +22,8 @@ from src.session_manager import db, db_lock
 
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 
-_VALID_AGENT_TYPES = {"issue", "qa", "sre"}
+# agent_type 不再由用户选择，内部固定为 'issue'
+_FIXED_AGENT_TYPE = "issue"
 
 
 def _validate_cron(cron_expr: str) -> bool:
@@ -104,7 +107,6 @@ def _row_to_task(row) -> dict:
 class CreateTaskBody(BaseModel):
     name: str
     repo_key: str = ""
-    agent_type: str = "issue"
     instruction: str = ""
     skill_name: str = ""
     cron: str = "0 9 * * *"
@@ -117,13 +119,6 @@ class CreateTaskBody(BaseModel):
         if not v or not v.strip():
             raise ValueError("name 不能为空")
         return v.strip()
-
-    @field_validator("agent_type")
-    @classmethod
-    def agent_type_valid(cls, v):
-        if v not in _VALID_AGENT_TYPES:
-            raise ValueError(f"agent_type 必须是 {', '.join(_VALID_AGENT_TYPES)} 之一")
-        return v
 
     @field_validator("instruction")
     @classmethod
@@ -150,19 +145,11 @@ class CreateTaskBody(BaseModel):
 class UpdateTaskBody(BaseModel):
     name: Optional[str] = None
     repo_key: Optional[str] = None
-    agent_type: Optional[str] = None
     instruction: Optional[str] = None
     skill_name: Optional[str] = None
     cron: Optional[str] = None
     max_retry: Optional[int] = None
     enabled: Optional[bool] = None
-
-    @field_validator("agent_type")
-    @classmethod
-    def agent_type_valid(cls, v):
-        if v is not None and v not in _VALID_AGENT_TYPES:
-            raise ValueError(f"agent_type 必须是 {', '.join(_VALID_AGENT_TYPES)} 之一")
-        return v
 
     @field_validator("max_retry")
     @classmethod
@@ -244,12 +231,12 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
             "INSERT INTO autopilot_tasks "
             "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, enabled, next_run_at, created_at, updated_at, created_by) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (body.name, body.repo_key, body.agent_type, body.instruction, body.skill_name,
+            (body.name, body.repo_key, _FIXED_AGENT_TYPE, body.instruction, body.skill_name,
              body.cron, body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str, user.get("id", 0) or 0)
         )
         db.commit()
         task_id = c.lastrowid
-    log.info(f"Autopilot: task created id={task_id} name='{body.name}' agent={body.agent_type} by user={user.get('username', '')}")
+    log.info(f"Autopilot: task created id={task_id} name='{body.name}' by user={user.get('username', '')}")
     return {"id": task_id, "message": "task created", "next_run_at": next_run}
 
 
@@ -478,13 +465,64 @@ async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depend
     return {"ok": False, "message": f"创建 Issue 失败: {result}"}
 
 
-# ====== agent 列表（供前端选择器使用）======
+# ====== 巡检指令润色 ======
 
-@router.get("/agents")
-def list_agents(user: dict = Depends(get_current_user)):
-    """返回可用的 agent 列表（issue/qa/sre）。"""
-    return {"agents": [
-        {"id": "issue", "name": "Issue Agent", "desc": "综合处理：看板巡检/stale清理/周报"},
-        {"id": "qa", "name": "QA Agent", "desc": "漏洞检查/代码质量扫描/PR审查"},
-        {"id": "sre", "name": "SRE Agent", "desc": "定时部署/健康检查/资源巡检"},
-    ]}
+class PolishBody(BaseModel):
+    name: str = ""
+    instruction: str = ""
+
+
+@router.post("/polish")
+async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_user)):
+    """用 LLM 润色巡检指令，返回优化后的指令内容。"""
+    if not body.instruction or not body.instruction.strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "巡检指令不能为空"})
+
+    from src.agent.image_understanding import _load_vlm_config
+    import httpx
+
+    cfg = _load_vlm_config()
+    if not cfg:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "LLM 配置不可用，请联系管理员配置 vlm-config.json"})
+
+    system_prompt = """你是一个 DevOps 巡检指令优化助手。用户会给你一个巡检任务的名称和初步指令，你需要：
+
+1. 补充巡检步骤的细节和顺序（编号列表）
+2. 明确输出要求（分析什么、报告什么）
+3. 加入问题分类标准（严重程度 high/medium/low）
+4. 保持用户原有的核心意图，不要凭空发明新的巡检范围
+5. 输出纯文本，不要 markdown 标题语法（不要用 #），直接输出指令内容
+
+格式参考：
+1. [具体步骤]
+2. [具体步骤]
+...
+输出要求：[明确要求 agent 输出什么]"""
+
+    user_msg = f"任务名称：{body.name}\n初步指令：\n{body.instruction}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{cfg['base_url']}/chat/completions",
+                headers={"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"},
+                json={
+                    "model": cfg["model"],
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 2000,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            polished = data["choices"][0]["message"]["content"].strip()
+            return {"instruction": polished}
+    except httpx.HTTPStatusError as e:
+        log.warning(f"Autopilot polish: LLM API error {e.response.status_code}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"润色服务暂时不可用: {e.response.status_code}"})
+    except Exception as e:
+        log.warning(f"Autopilot polish: {e}")
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"润色失败: {e}"})

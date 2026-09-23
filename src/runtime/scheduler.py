@@ -27,8 +27,8 @@ _BASE_RETRY_DELAY = 10    # 秒：指数退避基数
 _MAX_RETRY_DELAY = 300    # 秒：退避上限
 _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id 集合
 
-# 可选 agent 类型（排除 vod 和 coding）
-_VALID_AGENT_TYPES = {"issue", "qa", "sre"}
+# agent_type 固定为 'issue'，不再由用户选择
+_FIXED_AGENT_TYPE = "issue"
 
 # ====== findings 解析 ======
 
@@ -137,7 +137,7 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
         _create_direct_task,
     )
 
-    agent_type = task.get("agent_type", "issue")
+    agent_type = _FIXED_AGENT_TYPE  # 固定 'issue'，不再从 task 读取
     skill_name = task.get("skill_name", "")
     repository = from_repo_key(repo_key) or repo_key
 
@@ -530,7 +530,7 @@ async def _execute_task(task: dict):
     _RUNNING_TASKS.add(task_id)
     try:
         max_retry = task["max_retry"]
-        agent_type = task.get("agent_type", "issue")
+        agent_type = _FIXED_AGENT_TYPE
 
         for attempt in range(max_retry + 1):
             exec_id = _create_execution(task_id, agent_type)

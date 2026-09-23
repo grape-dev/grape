@@ -14,12 +14,12 @@ var _apDetailId = null;         // 详情页需求ID
 
 // ===== 模板 =====
 var _AP_TEMPLATES = [
-  {id:'issue_patrol', icon:'📋', title:'Issue看板巡检', desc:'每日检查stale issue，提醒更新或关闭', agent_type:'issue', cron:'0 9 * * *', instruction:'1. 列出所有打开的 Issue\n2. 找出超过 7 天无更新的 stale issue\n3. 检查是否有阻塞的 Issue 及其阻塞原因\n4. 汇总巡检报告，包含：stale 数量、阻塞数量、建议关闭列表'},
-  {id:'pr_review', icon:'🔀', title:'PR审查提醒', desc:'标记需要 Review 的过期 PR', agent_type:'qa', cron:'0 10 * * 1-5', instruction:'1. 列出所有打开的 PR\n2. 找出超过 24 小时未审查的 PR\n3. 为每个标记作者和摘要\n4. 提醒团队审查'},
-  {id:'bug_triage', icon:'🐛', title:'Bug 分拣', desc:'评估并优先排序新 Bug 报告', agent_type:'issue', cron:'0 9 * * 1-5', instruction:'1. 列出所有未优先排序的 backlog Issue\n2. 评估每个的严重程度\n3. 设置优先级标签\n4. 添加评估说明'},
-  {id:'weekly_report', icon:'📊', title:'周进度报告', desc:'编写团队周报', agent_type:'issue', cron:'0 17 * * 1', instruction:'1. 收集过去 7 天完成的 Issue\n2. 收集进行中的 Issue\n3. 识别阻塞的 Issue\n4. 编写结构化周报'},
-  {id:'dep_audit', icon:'🛡', title:'依赖审计', desc:'依赖安全漏洞审计', agent_type:'qa', cron:'0 8 * * 1', instruction:'1. 运行依赖审计工具\n2. 识别有安全漏洞的包\n3. 列出过期的依赖\n4. 输出修复建议'},
-  {id:'doc_check', icon:'🔍', title:'文档检查', desc:'检查文档覆盖完整性', agent_type:'issue', cron:'0 14 * * 1', instruction:'1. 列出过去 7 天的代码变更\n2. 检查相关文档是否更新\n3. 识别缺失文档的新功能\n4. 输出文档补全清单'}
+  {id:'issue_patrol', icon:'📋', title:'Issue看板巡检', desc:'每日检查stale issue，提醒更新或关闭', cron:'0 9 * * *', instruction:'1. 列出所有打开的 Issue\n2. 找出超过 7 天无更新的 stale issue\n3. 检查是否有阻塞的 Issue 及其阻塞原因\n4. 汇总巡检报告，包含：stale 数量、阻塞数量、建议关闭列表'},
+  {id:'pr_review', icon:'🔀', title:'PR审查提醒', desc:'标记需要 Review 的过期 PR', cron:'0 10 * * 1-5', instruction:'1. 列出所有打开的 PR\n2. 找出超过 24 小时未审查的 PR\n3. 为每个标记作者和摘要\n4. 提醒团队审查'},
+  {id:'bug_triage', icon:'🐛', title:'Bug 分拣', desc:'评估并优先排序新 Bug 报告', cron:'0 9 * * 1-5', instruction:'1. 列出所有未优先排序的 backlog Issue\n2. 评估每个的严重程度\n3. 设置优先级标签\n4. 添加评估说明'},
+  {id:'weekly_report', icon:'📊', title:'周进度报告', desc:'编写团队周报', cron:'0 17 * * 1', instruction:'1. 收集过去 7 天完成的 Issue\n2. 收集进行中的 Issue\n3. 识别阻塞的 Issue\n4. 编写结构化周报'},
+  {id:'dep_audit', icon:'🛡', title:'依赖审计', desc:'依赖安全漏洞审计', cron:'0 8 * * 1', instruction:'1. 运行依赖审计工具\n2. 识别有安全漏洞的包\n3. 列出过期的依赖\n4. 输出修复建议'},
+  {id:'doc_check', icon:'🔍', title:'文档检查', desc:'检查文档覆盖完整性', cron:'0 14 * * 1', instruction:'1. 列出过去 7 天的代码变更\n2. 检查相关文档是否更新\n3. 识别缺失文档的新功能\n4. 输出文档补全清单'}
 ];
 
 // ===== 入口 =====
@@ -151,13 +151,12 @@ function _apRenderTable() {
     return;
   }
   // 表格 — CSS Grid 布局（参照 multica ListGrid）
-  var gridCols = '32px minmax(120px,1fr) 120px 130px 110px 110px 60px 36px';
+  var gridCols = '32px minmax(120px,1fr) 130px 110px 110px 60px 36px';
   var html = '<div style="display:grid;grid-template-columns:' + gridCols + ';gap:0;font-size:12px">' +
     // Header
     '<div style="display:contents">' +
       '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600"></div>' +
       '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer" onclick="_apSortField=\'name\';_apToggleSortDir()">名称 ' + (_apSortField==='name'?(_apSortDir==='asc'?'↑':'↓'):'') + '</div>' +
-      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600">Agent</div>' +
       '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600">时间表</div>' +
       '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer" onclick="_apSortField=\'lastRun\';_apToggleSortDir()">上次 ' + (_apSortField==='lastRun'?(_apSortDir==='asc'?'↑':'↓'):'') + '</div>' +
       '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer" onclick="_apSortField=\'nextRun\';_apToggleSortDir()">下次 ' + (_apSortField==='nextRun'?(_apSortDir==='asc'?'↑':'↓'):'') + '</div>' +
@@ -180,10 +179,6 @@ function _apRenderTable() {
       // name
       '<div style="padding:0 8px;height:44px;display:flex;align-items:center;border-bottom:1px solid var(--b);cursor:pointer;overflow:hidden' + rowBg + '" onclick="event.stopPropagation();_apShowDetail(' + t.id + ')">' +
         '<span style="font-weight:500;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">' + _esc(t.name) + '</span>' +
-      '</div>' +
-      // agent
-      '<div style="padding:0 8px;height:44px;display:flex;align-items:center;border-bottom:1px solid var(--b)' + rowBg + '">' +
-        '<span style="font-size:11px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">' + _esc(t.agent_type) + '</span>' +
       '</div>' +
       // cron
       '<div style="padding:0 8px;height:44px;display:flex;align-items:center;border-bottom:1px solid var(--b)' + rowBg + '">' +
@@ -341,21 +336,12 @@ function _apEdit(id) {
 
 function _apShowDialog(tpl, existing) {
   var name = existing ? existing.name : (tpl ? tpl.title : '');
-  var agentType = existing ? (existing.agent_type || 'issue') : (tpl ? tpl.agent_type : 'issue');
   var skillName = existing ? (existing.skill_name || '') : '';
   var instruction = existing ? (existing.instruction || '') : (tpl ? tpl.instruction : '');
   var cron = existing ? existing.cron : (tpl ? tpl.cron : '0 9 * * *');
   var maxRetry = existing ? (existing.max_retry || 3) : 3;
   var title = existing ? '编辑自动化' : '新建自动化';
   var btnText = existing ? '保存' : '创建';
-
-  var agentOpts = [
-    {id:'issue', name:'Issue Agent', desc:'综合处理：看板巡检/stale清理/周报'},
-    {id:'qa', name:'QA Agent', desc:'漏洞检查/代码质量扫描/PR审查'},
-    {id:'sre', name:'SRE Agent', desc:'定时部署/健康检查/资源巡检'}
-  ].map(function(a) {
-    return '<option value="' + a.id + '"' + (a.id===agentType?' selected':'') + '>' + a.name + ' — ' + a.desc + '</option>';
-  }).join('');
 
   // Shared input style
   var _inp = 'width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t);outline:none;min-width:0';
@@ -383,7 +369,7 @@ function _apShowDialog(tpl, existing) {
       '</div>' +
       // Body: two columns (left=content, right=config)
       '<div style="flex:1;min-height:0;display:flex;flex-direction:row;overflow:hidden">' +
-        // Left column: name + agent + skill + instruction
+        // Left column: name + skill + instruction
         '<div style="flex:1;min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--b);overflow-y:auto">' +
           '<div style="padding:16px 20px 8px">' +
             '<label style="' + _lbl2 + '">任务名称 <span style="color:var(--r)">*</span></label>' +
@@ -391,18 +377,17 @@ function _apShowDialog(tpl, existing) {
             '<div style="' + _hint + '">定时任务的名称，用于列表展示</div>' +
           '</div>' +
           '<div style="padding:8px 20px">' +
-            '<label style="' + _lbl2 + '">执行 Agent <span style="color:var(--r)">*</span></label>' +
-            '<select id="apFormAgent" style="' + _inp + '">' + agentOpts + '</select>' +
-            '<div style="' + _hint + '">选择执行巡检的 Agent 类型（issue/qa/sre）</div>' +
-          '</div>' +
-          '<div style="padding:8px 20px">' +
             '<label style="' + _lbl2 + '">Skill（可选）</label>' +
             '<input id="apFormSkill" type="text" value="' + _esc(skillName) + '" placeholder="留空=纯指令模式" style="' + _inp + '">' +
             '<div style="' + _hint + '">填写 skill 名可加载 SKILL.md（如 issue-advance），留空则按巡检指令直接执行</div>' +
           '</div>' +
           '<div style="padding:8px 20px 16px;flex:1;display:flex;flex-direction:column;min-height:0">' +
-            '<label style="' + _lbl2 + '">巡检指令 <span style="color:var(--r)">*</span></label>' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">' +
+              '<label style="' + _lbl2 + ';margin-bottom:0">巡检指令 <span style="color:var(--r)">*</span></label>' +
+              '<button type="button" class="bt bt-s bt-o" onclick="_apPolishInstruction(this)" id="apPolishBtn" style="font-size:11px;padding:4px 10px">✨ 润色</button>' +
+            '</div>' +
             '<textarea id="apFormInstruction" rows="6" placeholder="描述巡检的具体步骤和要求" style="' + _inp + ';resize:none;flex:1;min-height:120px;font-family:inherit">' + _esc(instruction) + '</textarea>' +
+            '<div style="' + _hint + '">写个大概，点润色可让 AI 优化指令内容</div>' +
           '</div>' +
         '</div>' +
         // Right column: schedule + retry
@@ -988,10 +973,27 @@ function _apUpdatePreview() {
   el.innerHTML = html;
 }
 
+// ===== 润色指令 =====
+function _apPolishInstruction(btn) {
+  var name = $('apFormName').value.trim();
+  var instruction = $('apFormInstruction').value.trim();
+  if (!instruction) { if (app&&app.showToast) app.showToast('请先填写巡检指令'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = '润色中...'; }
+  API.post('/autopilot/polish', {name: name, instruction: instruction}).then(function(d) {
+    if (d.instruction) {
+      $('apFormInstruction').value = d.instruction;
+      if (app&&app.showToast) app.showToast('润色完成');
+    }
+    if (btn) { btn.disabled = false; btn.textContent = '✨ 润色'; }
+  }).catch(function(e) {
+    if (app&&app.showToast) app.showToast('润色失败: ' + (e.message||e));
+    if (btn) { btn.disabled = false; btn.textContent = '✨ 润色'; }
+  });
+}
+
 // ===== 提交表单 =====
 function _apSubmitForm() {
   var name = $('apFormName').value.trim();
-  var agentType = $('apFormAgent').value;
   var skillName = $('apFormSkill').value.trim();
   var instruction = $('apFormInstruction').value.trim();
   var retry = parseInt($('apFormRetry').value) || 3;
@@ -1001,7 +1003,6 @@ function _apSubmitForm() {
   var body = {
     name: name,
     repo_key: 'gitcode:' + repo,
-    agent_type: agentType,
     instruction: instruction,
     skill_name: skillName,
     cron: _apFormCron,
@@ -1070,7 +1071,6 @@ function _apDetailHTML(t) {
       '<div class="cd-h"><h2>需求信息</h2></div>' +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px">' +
         '<div><span style="color:var(--t2)">名称:</span> <b>' + _esc(t.name) + '</b></div>' +
-        '<div><span style="color:var(--t2)">Agent:</span> ' + _esc(t.agent_type) + '</div>' +
         '<div><span style="color:var(--t2)">仓库:</span> ' + _esc(t.repo_key) + '</div>' +
         '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(t.skill_name||'—') + '</div>' +
         '<div><span style="color:var(--t2)">最大重试:</span> ' + (t.max_retry||3) + '</div>' +
@@ -1138,7 +1138,6 @@ function _apLoadExecutions(taskId) {
     var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
       '<thead><tr style="border-bottom:2px solid var(--b);text-align:left;color:var(--t2)">' +
         '<th style="padding:8px">状态</th>' +
-        '<th style="padding:8px">Agent</th>' +
         '<th style="padding:8px">重试</th>' +
         '<th style="padding:8px">开始时间</th>' +
         '<th style="padding:8px">结果/错误</th>' +
@@ -1152,7 +1151,6 @@ function _apLoadExecutions(taskId) {
         : '—';
       html += '<tr style="border-bottom:1px solid var(--b)">' +
         '<td style="padding:8px">' + icon + ' ' + _esc(e.status) + '</td>' +
-        '<td style="padding:8px;color:var(--t2)">' + _esc(e.agent_type || '—') + '</td>' +
         '<td style="padding:8px">' + (e.retry_count||0) + '</td>' +
         '<td style="padding:8px;color:var(--t2);white-space:nowrap">' + _apFormatTime(e.started_at || e.created_at) + '</td>' +
         '<td style="padding:8px">' + result + '</td>' +
