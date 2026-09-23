@@ -47,7 +47,7 @@ class TestDClassEndpoints:
 
     @pytest.mark.parametrize("path", [
         "/api/skills",
-        "/api/skills/by-id/1",
+        "/api/skills",
         "/api/repos/member",
         "/api/repos/managed",
         "/api/auth/profile",
