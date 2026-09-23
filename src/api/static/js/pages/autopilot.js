@@ -1134,34 +1134,100 @@ function _apLoadExecutions(taskId) {
       el.innerHTML = '<div style="padding:24px;text-align:center;color:var(--t3)">暂无执行记录</div>';
       return;
     }
-    var statusIcons = {success:'✅', failed:'❌', running:'🔄', pending:'⏳', retrying:'🔁', skipped:'⏭'};
-    var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
-      '<thead><tr style="border-bottom:2px solid var(--b);text-align:left;color:var(--t2)">' +
-        '<th style="padding:8px">状态</th>' +
-        '<th style="padding:8px">重试</th>' +
-        '<th style="padding:8px">开始时间</th>' +
-        '<th style="padding:8px">结果/错误</th>' +
-        '<th style="padding:8px">操作</th>' +
-      '</tr></thead><tbody>';
+    var statusIcons = {success:'✅', failed:'❌', running:'🔄', pending:'⏳', retrying:'🔁', skipped:'⏭', dispatched:'📤'};
+    var statusColors = {success:'#28a745', failed:'#dc3545', running:'#3168e0', pending:'var(--t3)', retrying:'#e8a000', skipped:'var(--t3)', dispatched:'#3168e0'};
+
+    var html = '<style>' +
+      '.ap-exec-row{border-bottom:1px solid var(--b);cursor:pointer;transition:background .15s}' +
+      '.ap-exec-row:hover{background:rgba(0,0,0,0.02)}' +
+      '.ap-exec-detail{max-height:0;overflow:hidden;transition:max-height .3s ease,opacity .2s ease;opacity:0}' +
+      '.ap-exec-detail.open{max-height:800px;opacity:1}' +
+      '</style>';
+
     execs.forEach(function(e) {
       var icon = statusIcons[e.status] || '•';
-      var result = e.error ? '<span style="color:var(--r)">' + _esc(e.error.substring(0,80)) + '</span>' : _esc((e.result||'').substring(0,80));
-      var findingsBtn = e.has_findings
-        ? '<button class="bt bt-s bt-o" onclick="_apShowFindings(' + e.id + ')" style="font-size:11px">查看问题</button>'
-        : '—';
-      html += '<tr style="border-bottom:1px solid var(--b)">' +
-        '<td style="padding:8px">' + icon + ' ' + _esc(e.status) + '</td>' +
-        '<td style="padding:8px">' + (e.retry_count||0) + '</td>' +
-        '<td style="padding:8px;color:var(--t2);white-space:nowrap">' + _apFormatTime(e.started_at || e.created_at) + '</td>' +
-        '<td style="padding:8px">' + result + '</td>' +
-        '<td style="padding:8px">' + findingsBtn + '</td>' +
-      '</tr>';
+      var color = statusColors[e.status] || 'var(--t3)';
+      var result = e.error ? _esc(e.error.substring(0,100)) : _esc((e.result||'').substring(0,100));
+      var time = _apFormatTime(e.started_at || e.created_at);
+      var hasFindings = e.has_findings;
+      var eid = e.id;
+
+      html += '<div class="ap-exec-row" onclick="_apToggleExecDetail(' + eid + ', this)">' +
+        '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px">' +
+          '<span style="font-size:14px;flex-shrink:0">' + icon + '</span>' +
+          '<span style="font-size:12px;font-weight:600;color:' + color + ';min-width:70px">' + _esc(e.status) + '</span>' +
+          '<span style="font-size:11px;color:var(--t3);white-space:nowrap">' + time + '</span>' +
+          '<span style="flex:1;font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + result + '</span>' +
+          (hasFindings ? '<span style="font-size:10px;background:rgba(49,104,224,0.12);color:#3168e0;padding:2px 8px;border-radius:8px;flex-shrink:0">有问题</span>' : '') +
+          '<span style="font-size:10px;color:var(--t3);flex-shrink:0">重试 ' + (e.retry_count||0) + '</span>' +
+          '<span class="ap-exec-arrow" style="font-size:10px;color:var(--t3);transition:transform .3s;flex-shrink:0">▼</span>' +
+        '</div>' +
+        '<div class="ap-exec-detail" id="apExecDetail_' + eid + '">' +
+          '<div style="padding:4px 12px 14px 36px">' +
+            '<div style="font-size:11px;color:var(--t3);margin-bottom:6px">执行结果:</div>' +
+            '<pre style="white-space:pre-wrap;font-size:12px;color:var(--t);background:var(--bg);border-radius:8px;padding:10px 12px;max-height:300px;overflow-y:auto;margin-bottom:12px;font-family:inherit">' + _esc(e.result || e.error || '(无)') + '</pre>' +
+            '<div id="apExecFindings_' + eid + '"></div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
     });
-    html += '</tbody></table>';
     el.innerHTML = html;
   }).catch(function(e) {
     var el = $('apExecList');
     if (el) el.innerHTML = '<div class="error">加载失败: ' + _esc(e.message||e) + '</div>';
+  });
+}
+
+function _apToggleExecDetail(execId, rowEl) {
+  var detail = $('apExecDetail_' + execId);
+  if (!detail) return;
+  var isOpen = detail.classList.contains('open');
+  if (isOpen) {
+    detail.classList.remove('open');
+    var arrow = rowEl.querySelector('.ap-exec-arrow');
+    if (arrow) arrow.style.transform = 'rotate(0deg)';
+  } else {
+    detail.classList.add('open');
+    var arrow = rowEl.querySelector('.ap-exec-arrow');
+    if (arrow) arrow.style.transform = 'rotate(180deg)';
+    // 懒加载 findings
+    var findingsContainer = $('apExecFindings_' + execId);
+    if (findingsContainer && !findingsContainer.dataset.loaded) {
+      findingsContainer.dataset.loaded = '1';
+      _apLoadFindingsInline(execId, findingsContainer);
+    }
+  }
+}
+
+function _apLoadFindingsInline(execId, container) {
+  API.get('/autopilot/executions/' + execId + '/findings').then(function(d) {
+    var findings = d.findings || [];
+    if (findings.length === 0) {
+      container.innerHTML = '<div style="font-size:11px;color:var(--t3)">未发现问题</div>';
+      return;
+    }
+    var sevIcons = {high:'🔴', medium:'🟡', low:'🔵'};
+    var sevColors = {high:'#dc3545', medium:'#e8a000', low:'#3168e0'};
+    var html = '<div style="font-size:11px;color:var(--t3);margin-bottom:6px">发现问题 (' + findings.length + '):</div>';
+    findings.forEach(function(f) {
+      var icon = sevIcons[f.severity] || '•';
+      var color = sevColors[f.severity] || 'var(--t3)';
+      var dispatchBtn = f.dispatched_issue_number
+        ? '<span style="font-size:10px;color:var(--t3)">已派发 #' + _esc(f.dispatched_issue_number) + '</span>'
+        : '<button class="bt bt-s bt-p" onclick="_apDispatchFinding(' + execId + ',\'' + _esc(f.id) + '\',this)" style="font-size:10px;padding:2px 8px">派发</button>';
+      html += '<div style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--b)">' +
+        '<span style="font-size:12px;flex-shrink:0">' + icon + '</span>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:12px;font-weight:500;color:var(--t)">' + _esc(f.title) + '</div>' +
+          '<div style="font-size:11px;color:var(--t2);margin-top:2px;white-space:pre-wrap">' + _esc(f.description || '') + '</div>' +
+          '<div style="font-size:10px;color:' + color + ';margin-top:2px">' + _esc(f.severity || 'medium') + (f.category ? ' · ' + _esc(f.category) : '') + '</div>' +
+        '</div>' +
+        '<div style="flex-shrink:0;align-self:center">' + dispatchBtn + '</div>' +
+      '</div>';
+    });
+    container.innerHTML = html;
+  }).catch(function() {
+    container.innerHTML = '<div style="font-size:11px;color:var(--t3)">加载问题失败</div>';
   });
 }
 
