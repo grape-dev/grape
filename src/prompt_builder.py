@@ -633,13 +633,34 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
 
+    # VOD issue_opened：用户已选场景时跳过查重（复制需求选不同场景流水线不应被判重复）
+    _user_selected_scene = False
+    if agent_type == "vod" and evt_type == "issue_opened":
+        _issue_id_for_scene = evt.get("issue_id", "") or str(number or "")
+        if _issue_id_for_scene and _rk:
+            try:
+                from src.api.session_store import get_issue_scene
+                _scene_tuple = get_issue_scene(_rk, _issue_id_for_scene)
+                if _scene_tuple and _scene_tuple[0]:
+                    _user_selected_scene = True
+            except Exception:
+                pass
+
     try:
         from src.api.event_store import get_issue_summary
         repo_key = f"{evt['source']}:{evt['repository']}"
         _current_issue = str(evt.get("issue_id") or number or "").lstrip("#")
         issue_summary = get_issue_summary(repo_key, exclude_issue=_current_issue)
         if issue_summary:
-            parts.append(issue_summary)
+            if _user_selected_scene:
+                parts.append(issue_summary)
+                parts.append(
+                    "\n⚠️ **重要：用户已为此 Issue 指定了开发场景，请直接按场景流水线执行，"
+                    "不要因为标题或内容与已有 Issue 相似而判断为重复需求或跳过执行。"
+                    "复制需求使用不同场景流水线是正常操作。**"
+                )
+            else:
+                parts.append(issue_summary)
     except Exception:
         pass
 
