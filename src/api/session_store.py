@@ -192,17 +192,31 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
 
 
 def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
-    """读取 Issue 级开发场景。issue_state.scene_id 为空时返回 ("", 0)。
+    """读取 Issue 级开发场景。issue_state.scene_id 为空时回退到 issue 表。
 
-    不再回退到仓库级 dev_scene——新架构下每个 Issue 独立选场景（用户手选 / 智能推荐），
-    仓库级默认场景已退役。
     返回 (scene_id, scene_user_id)：
-    - issue_state.scene_id 非空 → 用该值 + scene_user_id
-    - 否则返回 ("", 0)，由调用方决定走智能推荐
+    - get_issue_stage 返回 scene_id → 用该值 + scene_user_id
+    - 否则从 issue 表回退读 scene_id/scene_user_id
+    - 都没有 → ("", 0)，由调用方决定走智能推荐
     """
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
+    # 回退：从 issue 表直接读 scene_id（Phase C3 权威源）
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scene_id, scene_user_id FROM issue "
+                "WHERE repo_key=? AND issue_number=?",
+                (repo_key, _num)
+            )
+            r = c.fetchone()
+            if r and r[0]:
+                return r[0], r[1] or 0
+    except Exception:
+        pass
     return "", 0
 
 
