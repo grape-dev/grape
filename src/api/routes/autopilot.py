@@ -520,23 +520,27 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
 请直接输出优化后的指令内容，不要加任何解释说明。"""
 
     try:
-        result_parts = []
-        for evt_type, data in stream_chat_agent(
-            prompt=polish_prompt,
-            cwd=cwd,
-            session_id=runtime_session_id,
-            account=user.get("username", ""),
-            user_id=user.get("id", 0),
-            user_token=user_token,
-            agent_name="Chat Agent",
-            agent_label="[Autopilot:polish]",
-            backend_name=backend_name,
-            max_exec_seconds=60,
-        ):
-            if evt_type == "content" and isinstance(data, str):
-                result_parts.append(data)
+        import asyncio
 
-        polished = "".join(result_parts).strip()
+        def _run_polish():
+            parts = []
+            for evt_type, data in stream_chat_agent(
+                prompt=polish_prompt,
+                cwd=cwd,
+                session_id=runtime_session_id,
+                account=user.get("username", ""),
+                user_id=user.get("id", 0),
+                user_token=user_token,
+                agent_name="Chat Agent",
+                agent_label="[Autopilot:polish]",
+                backend_name=backend_name,
+                max_exec_seconds=60,
+            ):
+                if evt_type == "content" and isinstance(data, str):
+                    parts.append(data)
+            return "".join(parts).strip()
+
+        polished = await asyncio.to_thread(_run_polish)
         if not polished:
             raise HTTPException(status_code=500, detail={"code": 500, "message": "润色结果为空，agent 可能未返回内容"})
 
