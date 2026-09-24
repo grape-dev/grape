@@ -660,11 +660,14 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
 
 # ====== Runtime Devices（设备级分页端点，Issue #185）======
 
-@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size.")
-def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20):
+@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245).")
+def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20,
+                        scope: str = "", type: str = "", q: str = ""):
     """设备级视图：按 credential_id 分组，返回每个设备及其承载的引擎列表。
 
     分页（Issue #185）：page/page_size 参数对设备列表切片，total 为过滤后设备总数。
+    筛选（Issue #245）：scope/type/q 参数在分页切片前过滤，total 始终为筛选后总数，
+    保证底部页码总条数与实际展示数据一致（修复前端二次过滤导致 total 不更新）。
     可见性过滤与 agent-runtimes 端点一致（global + personal + repo-level）。
     """
     from src.user import db as user_db
@@ -697,12 +700,59 @@ def get_runtime_devices(user: dict = Depends(require_no_session_token), page: in
     devices = _build_runtime_devices(_db, _dl, cred_map, _visible_credential,
                                      valid_users, _local_runtimes, now)
 
-    # 分页切片
+    # Issue #245: 筛选从迁移到后端——前端二次过滤会让 _rtDevTotal 与展示数据不一致
+    # avail_scopes / avail_types 取自全部可见设备（不依赖当前筛选/页），供前端生成筛选标签，
+    # 避免后端过滤后当前页只剩单一 scope/type 导致筛选标签消失无法切换
+    _avail_scopes = list(set(
+        ("local" if d.get("credential_id") == 0 else (d.get("scope") or "global"))
+        for d in devices
+    ))
+    _avail_types = list(set(
+        _t for d in devices for _t in _device_engine_types(d)
+    ))
+
+    # type 筛选：设备任一引擎名 includes(type)（小写，与前端 _availTypes 逻辑一致）
+    if type:
+        _tlow = type.lower()
+        devices = [d for d in devices if any(
+            _tlow in (r.get("name") or "").lower() for r in d.get("runtimes", [])
+        )]
+
+    # q 搜索：匹配 name/device_name/owner/worker_ip/runtimes[].name（与前端原 haystack 一致）
+    if q:
+        _qlow = q.lower()
+        devices = [d for d in devices if _qlow in " ".join([
+            d.get("name") or "", d.get("device_name") or "", d.get("owner") or "",
+            d.get("worker_ip") or "",
+            " ".join((r.get("name") or "") for r in d.get("runtimes", []))
+        ]).lower()]
+
+    # scope 筛选（credential_id=0 → local，否则取 d.scope；与 renderWorkers 原前端逻辑一致）
+    if scope:
+        devices = [d for d in devices if (
+            ("local" if d.get("credential_id") == 0 else (d.get("scope") or "global")) == scope
+        )]
+
+    # 分页切片（total 为筛选后总数）
     total = len(devices)
     _page = max(page, 1)
     _offset = (_page - 1) * page_size
     paged_devices = devices[_offset:_offset + page_size]
-    return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size}
+    return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size,
+            "avail_scopes": _avail_scopes, "avail_types": _avail_types}
+
+
+def _device_engine_types(d: dict) -> list:
+    """从设备的引擎列表派生引擎类型标签（与前端 _availTypes 的 includes 判定一致）。"""
+    _KNOWN = [("hermes", "hermes"), ("opencode", "opencode"),
+              ("codearts", "codearts"), ("codex", "codex")]
+    found = []
+    for rt in d.get("runtimes", []):
+        n = (rt.get("name") or "").lower()
+        for _kw, _label in _KNOWN:
+            if _kw in n and _label not in found:
+                found.append(_label)
+    return found
 
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
