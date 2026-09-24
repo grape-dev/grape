@@ -229,7 +229,6 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
 
 
-
 def _worker_probe_once():
     """同步执行一轮引擎探测，结果写入 _worker_probe_results。
 
@@ -243,13 +242,13 @@ def _worker_probe_once():
                 with _worker_probe_lock:
                     _worker_probe_results[eng["name"]] = {
                         "status": "skip", "latency": 0,
-                        "last_probe": _datetime.datetime.utcnow().isoformat() + "Z",
+                        "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
                         "error": "not installed",
                     }
                 continue
             log.info(f"worker engine probe: testing {eng['name']}...")
             result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
-            result["last_probe"] = _datetime.datetime.utcnow().isoformat() + "Z"
+            result["last_probe"] = _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z"
             with _worker_probe_lock:
                 _worker_probe_results[eng["name"]] = result
             log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
@@ -268,13 +267,13 @@ def _worker_probe_loop():
                     with _worker_probe_lock:
                         _worker_probe_results[eng["name"]] = {
                             "status": "skip", "latency": 0,
-                            "last_probe": _datetime.datetime.utcnow().isoformat() + "Z",
+                            "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
                             "error": "not installed",
                         }
                     continue
                 log.info(f"worker engine probe: testing {eng['name']}...")
                 result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
-                result["last_probe"] = _datetime.datetime.utcnow().isoformat() + "Z"
+                result["last_probe"] = _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z"
                 with _worker_probe_lock:
                     _worker_probe_results[eng["name"]] = result
                 log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
@@ -306,9 +305,88 @@ def _collect_worker_metrics() -> dict:
     返回 {cpu_percent, memory_percent, disk_percent, load_avg}。
     采集失败的字段保持 0.0 / 空字符串。
     CPU 使用两次调用的差值计算，首次调用返回 0.0（无基准）。
+
+    Windows：/proc 不可用，用 wmic / shutil.disk_usage 采集（降级）。
     """
+    from src.runtime.os_adapter import is_windows, temp_dir as _os_temp
     metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "bandwidth_percent": 0.0, "load_avg": "", "spec": ""}
 
+    if is_windows():
+        # Windows: wmic 采集 CPU/MEM（降级模式，无 /proc）
+        # spec: CPU 核数 + 总内存
+        if not hasattr(_collect_worker_metrics, "_spec"):
+            try:
+                _cpu_count = os.cpu_count() or 1
+                import subprocess as _ws
+                _r = _ws.run(["wmic", "ComputerSystem", "get", "TotalPhysicalMemory"],
+                             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
+                _mem_bytes = 0
+                for _line in (_r.stdout or "").split("\n"):
+                    _line = _line.strip()
+                    if _line.isdigit():
+                        _mem_bytes = int(_line)
+                        break
+                if _mem_bytes > 0:
+                    _mem_gb = _mem_bytes // (1024**3)
+                    _mem_label = f"{_mem_gb}G" if _mem_gb >= 1 else f"{_mem_bytes // (1024**2)}MB"
+                else:
+                    _mem_label = "?"
+                _collect_worker_metrics._spec = f"{_cpu_count}C{_mem_label}"
+            except Exception:
+                _collect_worker_metrics._spec = ""
+        metrics["spec"] = _collect_worker_metrics._spec
+
+        # CPU: wmic 取 LoadPercentage
+        try:
+            import subprocess as _ws
+            _r = _ws.run(["wmic", "CPU", "get", "LoadPercentage"],
+                         capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
+            for _line in (_r.stdout or "").split("\n"):
+                _line = _line.strip()
+                if _line.isdigit():
+                    metrics["cpu_percent"] = float(_line)
+                    break
+        except Exception:
+            pass
+
+        # MEM: wmic 取 FreePhysicalMemory / TotalVisibleMemorySize
+        try:
+            import subprocess as _ws
+            _r = _ws.run(["wmic", "OS", "get", "FreePhysicalMemory,TotalVisibleMemorySize"],
+                         capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
+            _vals = []
+            for _line in (_r.stdout or "").split("\n"):
+                _parts = _line.split()
+                if len(_parts) == 2 and all(p.isdigit() for p in _parts):
+                    _vals = [int(p) for p in _parts]
+                    break
+            if len(_vals) == 2 and _vals[1] > 0:
+                metrics["memory_percent"] = round((_vals[1] - _vals[0]) / _vals[1] * 100, 1)
+        except Exception:
+            pass
+
+        # DISK: shutil.disk_usage（C 盘）
+        try:
+            du = _shutil.disk_usage("C:\\")
+            if du.total > 0:
+                metrics["disk_percent"] = round(du.used / du.total * 100, 1)
+        except Exception:
+            pass
+
+        # TMP: 临时目录使用率
+        try:
+            _tmp = _os_temp()
+            tu = _shutil.disk_usage(_tmp)
+            if tu.total > 0:
+                metrics["tmp_percent"] = round(tu.used / tu.total * 100, 1)
+        except Exception:
+            pass
+
+        # load_avg: Windows 无等价指标，保持空
+        # bandwidth: Windows 无 /proc/net/dev 等价，保持 0.0
+        return metrics
+
+    # ===== Unix: /proc 采集（保持原有行为不变）=====
     # spec: CPU 核数 + 总内存（如 "4C8G"），首次采集后缓存
     if not hasattr(_collect_worker_metrics, "_spec"):
         try:
@@ -497,7 +575,7 @@ def _discover_local_runtimes() -> list[dict]:
         if cli:
             try:
                 import subprocess
-                res = subprocess.run([cli, "--version"], capture_output=True, text=True, timeout=5)
+                res = subprocess.run([cli, "--version"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
                 healthy = res.returncode == 0
                 if healthy:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
@@ -516,28 +594,16 @@ def _remap_cwd(path: str) -> str:
     支持多组映射，用逗号分隔：
       RUNTIME_CWD_PREFIX_MAP=/home/grape=/home/lvjuntao,/opt/data=/data
     未配置时默认将 CHAT_CWD_BASE 映射到当前用户的 home 目录。
+
+    Windows 上 Unix 风格路径前缀（/home/grape）映射到 %USERPROFILE%。
     """
     if not path:
         return path
+    from src.runtime.os_adapter import remap_cwd as _os_remap
     import os as _os
     mapping = _os.environ.get("RUNTIME_CWD_PREFIX_MAP", "")
     if not mapping:
-        local_home = _os.path.expanduser("~")
-        if path.startswith(local_home):
-            # 已是本机路径（服务端和 worker 同用户，或本地 direct 执行）
-            return path
-        # 1. grape-workspaces 标记段匹配（event pipeline 路径）
-        #    /home/{任意用户}/grape-workspaces → local_home/grape-workspaces
-        marker = "/grape-workspaces"
-        idx = path.find(marker)
-        if idx > 0:
-            return local_home + path[idx:]
-        # 2. /home/grape 前缀匹配（chat 逻辑路径，chat.py CHAT_CWD_BASE）
-        #    /home/grape/chat/... → local_home/chat/...
-        default_src = "/home/grape"
-        if path.startswith(default_src) and local_home != default_src:
-            return local_home + path[len(default_src):]
-        return path
+        return _os_remap(path)
     for pair in mapping.split(","):
         pair = pair.strip()
         if "=" not in pair:
@@ -570,24 +636,17 @@ def _scan_local_skills() -> list[dict]:
     不扫描 grape-workspaces 下的临时 .skills 目录（task 物化的，非持久）。
     """
     import os as _os
+    from src.runtime.os_adapter import engine_skill_dirs, extra_skill_dirs
 
-    home = _os.path.expanduser("~")
-
-    # per-engine 专属 skill 目录
+    # per-engine 专属 skill 目录（跨平台）
     engine_dirs = {
-        "hermes": [_os.path.join(home, ".hermes", "skills")],
-        "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
-        "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
+        "hermes": engine_skill_dirs("hermes"),
+        "opencode": engine_skill_dirs("opencode"),
+        "codearts": engine_skill_dirs("codearts"),
     }
 
-    # 用户自建 skill 目录（通过环境变量配置，可选）
-    extra_dirs = []
-    extra = _os.environ.get("RUNTIME_EXTRA_SKILL_DIRS", "")
-    if extra:
-        for d in extra.split(":"):
-            d = d.strip()
-            if d and _os.path.isdir(d):
-                extra_dirs.append(d)
+    # 用户自建 skill 目录（通过环境变量配置，可选，跨平台分隔符）
+    extra_dirs = extra_skill_dirs()
 
     def _scan_dir(base_dir: str) -> list[str]:
         """扫描目录下含 SKILL.md 的子目录，返回 skill_name 列表。
@@ -711,32 +770,35 @@ def _cleanup_task_tmp(task: dict):
     只清理已知的 agent 工作产物前缀，不碰其他进程的文件。"""
     import shutil as _shutil
     import glob as _glob
+    from src.runtime.os_adapter import is_windows, temp_dir as _os_temp
+    _tmp = _os_temp()
     tmp_patterns = [
-        "/tmp/tf-deploy-*",
-        "/tmp/tf-sys-xhy*",
-        "/tmp/blog-build-*",
-        "/tmp/blog-deploy*",
-        "/tmp/blog-gen*",
-        "/tmp/blog-publish-*",
-        "/tmp/blog-sys-*.tar.gz",
-        "/tmp/ptmpl_*",
-        "/tmp/tf-state-backup.json",
-        "/tmp/inventory_state.json",
-        "/tmp/inventory*.json",
+        f"{_tmp}/tf-deploy-*",
+        f"{_tmp}/tf-sys-xhy*",
+        f"{_tmp}/blog-build-*",
+        f"{_tmp}/blog-deploy*",
+        f"{_tmp}/blog-gen*",
+        f"{_tmp}/blog-publish-*",
+        f"{_tmp}/blog-sys-*.tar.gz",
+        f"{_tmp}/ptmpl_*",
+        f"{_tmp}/tf-state-backup.json",
+        f"{_tmp}/inventory_state.json",
+        f"{_tmp}/inventory*.json",
         # bun/opencode 的 JIT .so 缓存——按 cwd 生成不同 hash，
         # 前缀会变化（.39ee*/.3cdc*/.3cdf*/.dccf* 等），必须用通配 /tmp/.*.so 全清。
-        "/tmp/.*.so",
+        # Windows 上 bun 使用 .dll 缓存而非 .so，此 pattern 无匹配（无副作用）。
+        f"{_tmp}/.*.so",
         # hermes ACP 隔离目录（ACP 协议自行创建的 hermes-acp-* 前缀，
         # executor.py 只清理 hermes-iso-*，ACP 模式的残留在此兜底）
-        "/tmp/hermes-acp-*",
-        "/tmp/hermes-iso-*",
+        f"{_tmp}/hermes-acp-*",
+        f"{_tmp}/hermes-iso-*",
         # hermes results 缓存（agent 执行后的 call 结果文件，堆积不清理）
-        "/tmp/hermes-results",
+        f"{_tmp}/hermes-results",
         # hermes sandbox 临时目录
-        "/tmp/hermes-sandbox-*",
-        "/tmp/hermes-snap-*",
+        f"{_tmp}/hermes-sandbox-*",
+        f"{_tmp}/hermes-snap-*",
         # tirith 安全扫描安装残留
-        "/tmp/tirith-install-*",
+        f"{_tmp}/tirith-install-*",
     ]
     cleaned = 0
     for pattern in tmp_patterns:
@@ -750,12 +812,15 @@ def _cleanup_task_tmp(task: dict):
             except Exception:
                 pass
     if cleaned:
-        log.info(f"cleaned {cleaned} temp files/dirs from /tmp after task")
+        log.info(f"cleaned {cleaned} temp files/dirs from {_tmp} after task")
 
 
 def _kill_stale_engine(task: dict, backend: str = "opencode"):
     """超时/终止后杀掉对应引擎子进程（opencode run / hermes acp / hermes chat / codearts run）。
-    按 cwd 匹配，避免误杀其他任务。SIGTERM 后 3s SIGKILL 兜底。"""
+    按 cwd 匹配，避免误杀其他任务。SIGTERM 后 3s SIGKILL 兜底。
+
+    Windows 用 taskkill /T /F（无 cwd 精确匹配，按 CommandLine 匹配）。"""
+    from src.runtime.os_adapter import is_windows, find_process_by_cwd, kill_process_tree
     import subprocess, signal, time as _time
     cwd = _remap_cwd(task.get("cwd") or os.getcwd())
     # hermes ACP 模式用 `hermes acp`，CLI 模式用 `hermes chat`；两个模式都匹配
@@ -764,12 +829,44 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
         "codearts": ["codearts run"],
         "codex": ["codex exec"],
     }.get(backend, ["opencode run"])
+
+    if is_windows():
+        # Windows: wmic 查 CommandLine 匹配，taskkill /T /F 终止进程树
+        killed_any = False
+        for pattern in patterns:
+            try:
+                out = subprocess.run(
+                    ["wmic", "process", "where",
+                     f"CommandLine like '%{pattern}%'",
+                     "get", "ProcessId"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
+                )
+                for line in (out.stdout or "").strip().split("\n"):
+                    line = line.strip()
+                    if not line.isdigit():
+                        continue
+                    pid = int(line)
+                    kill_process_tree(pid, force=False)
+                    log.info(f"killed {backend} pid={pid} (pattern={pattern})")
+                    killed_any = True
+                    # 3s 后强制杀
+                    import threading
+                    def _force_kill_win(p, delay=3):
+                        _time.sleep(delay)
+                        kill_process_tree(p, force=True)
+                    threading.Thread(target=_force_kill_win, args=(pid,), daemon=True).start()
+            except Exception as e:
+                log.warning(f"_kill_stale_engine({backend}, pattern={pattern}) failed: {e}")
+        if not killed_any:
+            log.info(f"_kill_stale_engine({backend}): no matching process found for cwd={cwd}")
+        return
+
     killed_any = False
     for pattern in patterns:
         try:
             out = subprocess.run(
                 ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
             )
             for pid_str in out.stdout.strip().split():
                 if not pid_str:
@@ -1450,9 +1547,12 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     upgrade_target_version = ""
     upgrade_fail_count = 0
     last_upgrade_attempt = 0.0
+    last_version_check = 0.0
     _local_ver_cached = ""
     UPGRADE_BACKOFF_BASE = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_BASE", "60"))
     UPGRADE_BACKOFF_MAX = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_MAX", "1800"))
+    UPGRADE_MAX_RETRIES = int(os.environ.get("RUNTIME_UPGRADE_MAX_RETRIES", "5"))
+    VERSION_CHECK_INTERVAL = float(os.environ.get("RUNTIME_VERSION_CHECK_INTERVAL", "3600"))
 
     while True:
         # ---- 定期重注册（防 id 静默失效）----
@@ -1654,8 +1754,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             active_task_objs.pop(_tid, None)
             else:
                 heartbeat_fail_streak += 1
-                log.warning(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), resetting session")
-                await client.reset_session()
+                if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
+                    log.warning(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), resetting session")
+                    await client.reset_session()
+                else:
+                    log.debug(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), will retry")
             last_heartbeat = now
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
@@ -1670,31 +1773,32 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
                     await asyncio.sleep(backoff)
 
-            # ---- 版本对比 + 自动升级 ----
+            # ---- 版本对比 + 自动升级（每小时检查一次，不是每次心跳）----
             if ok is not None and ok.get("status") == "ok":
                 _latest = ok.get("latest_version", "")
-                if not _local_ver_cached:
-                    _local_ver_cached = _read_local_worker_version()
-                _local_ver = _local_ver_cached
-                if _latest and _latest != _local_ver:
-                    if not pending_upgrade:
-                        log.info(f"Version mismatch: local={_local_ver} "
-                                 f"server={_latest}, will upgrade when idle")
-                    pending_upgrade = True
-                    upgrade_target_version = _latest
-                elif _latest:
-                    if pending_upgrade and _latest == _local_ver:
-                        pending_upgrade = False
-                        log.info("Version now matches, clearing pending_upgrade")
-                else:
-                    # Server disabled auto-upgrade (empty latest_version):
-                    # clear any stale pending flag so worker stops retrying
-                    # downloads forever. (2026-09-15: worker with pending state
-                    # kept re-downloading the 26MB package on backoff.)
-                    if pending_upgrade:
-                        pending_upgrade = False
-                        log.info("Auto-upgrade disabled by server (empty latest_version), "
-                                 "clearing pending_upgrade")
+                if now - last_version_check >= VERSION_CHECK_INTERVAL or not _local_ver_cached:
+                    last_version_check = now
+                    if not _local_ver_cached:
+                        _local_ver_cached = _read_local_worker_version()
+                    _local_ver = _local_ver_cached
+                    if _latest and _latest != _local_ver:
+                        if not pending_upgrade:
+                            log.info(f"Version mismatch: local={_local_ver} "
+                                     f"server={_latest}, will upgrade when idle")
+                        pending_upgrade = True
+                        upgrade_target_version = _latest
+                    elif _latest:
+                        if pending_upgrade and _latest == _local_ver:
+                            pending_upgrade = False
+                            log.info("Version now matches, clearing pending_upgrade")
+                    else:
+                        # Server disabled auto-upgrade (empty latest_version):
+                        # clear any stale pending flag so worker stops retrying
+                        # downloads forever.
+                        if pending_upgrade:
+                            pending_upgrade = False
+                            log.info("Auto-upgrade disabled by server (empty latest_version), "
+                                     "clearing pending_upgrade")
 
         # ---- 升级执行（待升级 && 无活跃任务 && 退避已过）----
         if pending_upgrade and not active_tasks:
@@ -1702,18 +1806,34 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             _backoff = min(UPGRADE_BACKOFF_BASE * (2 ** upgrade_fail_count), UPGRADE_BACKOFF_MAX)
             if _now - last_upgrade_attempt >= _backoff:
                 last_upgrade_attempt = _now
-                log.info(f"Starting auto-upgrade to {upgrade_target_version} "
-                         f"(attempt {upgrade_fail_count + 1})")
+                # 随机延迟 0~60s：多 worker 同时检测到版本差异时错开下载时机
+                # 避免所有 worker 同时下载 35MB 包导致主控带宽瞬时占满
+                if upgrade_fail_count == 0:
+                    import random as _rand
+                    _jitter = _rand.uniform(0, 60)
+                    log.info(f"Auto-upgrade to {upgrade_target_version} "
+                             f"(attempt {upgrade_fail_count + 1}), "
+                             f"jitter {_jitter:.0f}s to stagger downloads")
+                    await asyncio.sleep(_jitter)
+                else:
+                    log.info(f"Starting auto-upgrade to {upgrade_target_version} "
+                             f"(attempt {upgrade_fail_count + 1})")
                 _upgrade_ok = await _perform_upgrade(
                     os.environ.get("RUNTIME_SERVER_URL", ""),
                     os.environ.get("RUNTIME_TOKEN", "")
                 )
                 if not _upgrade_ok:
                     upgrade_fail_count += 1
-                    pending_upgrade = False
-                    _next = min(UPGRADE_BACKOFF_BASE * (2 ** upgrade_fail_count), UPGRADE_BACKOFF_MAX)
-                    log.warning(f"Auto-upgrade failed (count={upgrade_fail_count}), "
-                                f"will retry in {_next:.0f}s")
+                    if upgrade_fail_count >= UPGRADE_MAX_RETRIES:
+                        # 超过最大重试次数 → 放弃升级，等下次版本检查重新触发
+                        pending_upgrade = False
+                        log.warning(f"Auto-upgrade gave up after {upgrade_fail_count} failures, "
+                                    f"will retry on next version check ({VERSION_CHECK_INTERVAL:.0f}s)")
+                    else:
+                        # 保持 pending_upgrade = True，用指数退避控制重试频率
+                        _next = min(UPGRADE_BACKOFF_BASE * (2 ** upgrade_fail_count), UPGRADE_BACKOFF_MAX)
+                        log.warning(f"Auto-upgrade failed (count={upgrade_fail_count}/{UPGRADE_MAX_RETRIES}), "
+                                    f"will retry in {_next:.0f}s")
 
         # ---- sid 看门狗：清理幽灵 sid ----
         # active_tasks 里的任务如果已在服务端终态（failed/cancelled/completed/not_found），
@@ -1754,70 +1874,102 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
 
 def _read_local_worker_version() -> str:
-    """读取本机 Worker 安装包版本（install-worker.sh 写入）。
+    """读取本机 Worker 安装包版本（install-worker.sh / .ps1 写入）。
 
-    路径与 install-worker.sh 的 VERSION_FILE 保持一致：
+    路径与安装脚本的 VERSION_FILE 保持一致：
     - root 模式（uid=0 或 RUNTIME_ROOT_MODE=1）：/etc/grape/worker.version
     - 非 root 模式：$HOME/.grape/worker.version
+    - Windows：$HOME/.grape/worker.version（Windows 无 root 模式）
     """
-    if os.environ.get("RUNTIME_ROOT_MODE") == "1" or os.geteuid() == 0:
-        version_path = "/etc/grape/worker.version"
+    from src.runtime.os_adapter import is_windows, version_file
+    if is_windows():
+        vp = version_file()
+    elif os.environ.get("RUNTIME_ROOT_MODE") == "1" or (hasattr(os, "geteuid") and os.geteuid() == 0):
+        vp = "/etc/grape/worker.version"
     else:
-        version_path = os.path.join(os.path.expanduser("~"), ".grape", "worker.version")
+        vp = os.path.join(os.path.expanduser("~"), ".grape", "worker.version")
     try:
-        with open(version_path, "r", encoding="utf-8") as f:
+        with open(vp, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
         return ""
 
 
 async def _perform_upgrade(server: str, token: str) -> bool:
-    """下载并执行 install-worker.sh 升级 worker。
+    """下载并执行安装脚本升级 worker（跨平台）。
 
-    成功时 worker 被 install-worker.sh 重启（本进程被杀，不会返回）。
+    成功时 worker 被安装脚本重启（本进程被杀，不会返回）。
     失败时返回 False，worker 继续运行当前版本。
 
-    流程：
-    1. 从服务端 GET /api/runtime/install 下载 install-worker.sh
-    2. 在线程中执行 bash install-worker.sh（token 通过环境变量传递，避免命令行暴露）
-    3. install-worker.sh 幂等：下载包→解压→建 venv→写配置→重启 worker
-    4. 如果 subprocess.run 返回（未被杀），检查 returncode 判断成功/失败
+    Linux: 下载 install-worker.sh → bash 执行
+    Windows: 下载 install-worker.ps1 → PowerShell 执行
     """
-    import subprocess, tempfile
+    import subprocess, tempfile, sys as _sys
     if not server or not token:
         log.error("Auto-upgrade: missing server or token, skipping upgrade")
         return False
-    install_script_url = f"{server.rstrip('/')}/api/runtime/install"
-    fd, tmp_script = tempfile.mkstemp(suffix=".sh")
+
+    is_win = _sys.platform == "win32"
+    if is_win:
+        install_script_url = f"{server.rstrip('/')}/api/runtime/install.ps1"
+        suffix = ".ps1"
+    else:
+        install_script_url = f"{server.rstrip('/')}/api/runtime/install"
+        suffix = ".sh"
+
+    fd, tmp_script = tempfile.mkstemp(suffix=suffix)
     try:
         os.close(fd)
-        r = await asyncio.to_thread(
-            subprocess.run,
-            ["curl", "-fsSL", "--connect-timeout", "15", install_script_url, "-o", tmp_script],
-            capture_output=True, text=True, timeout=30
-        )
+
+        if is_win:
+            # Windows: 用 PowerShell 下载
+            r = await asyncio.to_thread(
+                subprocess.run,
+                ["powershell", "-NoProfile", "-Command",
+                 f"irm {install_script_url} -OutFile '{tmp_script}'"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
+            )
+        else:
+            r = await asyncio.to_thread(
+                subprocess.run,
+                ["curl", "-fsSL", "--connect-timeout", "15", install_script_url, "-o", tmp_script],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
+            )
         if r.returncode != 0:
-            log.error(f"Auto-upgrade: download install-worker.sh failed: {r.stderr[-300:]}")
+            log.error(f"Auto-upgrade: download install script failed: {r.stderr[-300:]}")
             return False
+
         _install_dir = os.environ.get("RUNTIME_INSTALL_DIR", "")
         if not _install_dir:
             _here = os.path.dirname(os.path.abspath(__file__))
             _install_dir = os.path.dirname(os.path.dirname(_here))
-        log.info(f"Auto-upgrade: running install-worker.sh (dir={_install_dir})")
+
         _upgrade_env = dict(os.environ)
         _upgrade_env["TOKEN"] = token
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["bash", tmp_script, "--server", server, "--dir", _install_dir],
-            capture_output=True, text=True, timeout=600, env=_upgrade_env
-        )
+
+        if is_win:
+            log.info(f"Auto-upgrade: running install-worker.ps1 (dir={_install_dir})")
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp_script,
+                 "-Token", token, "-Server", server, "-Dir", _install_dir],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_upgrade_env
+            )
+        else:
+            log.info(f"Auto-upgrade: running install-worker.sh (dir={_install_dir})")
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["bash", tmp_script, "--server", server, "--dir", _install_dir],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_upgrade_env
+            )
+
         if result.returncode == 0:
-            log.info(f"Auto-upgrade: install-worker.sh succeeded (rc=0), waiting for restart")
+            log.info(f"Auto-upgrade: install script succeeded (rc=0), waiting for restart")
             return True
-        log.error(f"Auto-upgrade: install-worker.sh failed rc={result.returncode}: stderr={result.stderr[-500:]}")
+        log.error(f"Auto-upgrade: install script failed rc={result.returncode}: stderr={result.stderr[-500:]}")
         return False
     except subprocess.TimeoutExpired:
-        log.error("Auto-upgrade: install-worker.sh timed out (600s)")
+        log.error("Auto-upgrade: install script timed out (600s)")
         return False
     except Exception as e:
         log.error(f"Auto-upgrade failed: {e}")
@@ -1868,17 +2020,53 @@ def _check_opencode_api_keys():
     log.warning(
         "  修复方法（任选一）:"
     )
-    log.warning(
-        "  ① 追加 key 到 runtime.env: "
-        f"echo '{missing[0]}=<your-key>' >> /etc/grape/runtime.env && systemctl restart runtime-agent"
-    )
-    log.warning(
-        "  ② 重装时传入 key: export " + "=xxx ".join(missing) +
-        "=xxx && curl -sSL <server>/api/runtime/install | bash -s -- --token <token>"
-    )
+    from src.runtime.os_adapter import is_windows
+    if is_windows():
+        log.warning(
+            "  ① 追加 key 到 runtime.env: "
+            f"Add-Content $HOME\\.grape\\runtime.env '{missing[0]}=<your-key>'; restart-worker"
+        )
+        log.warning(
+            "  ② 重装时传入 key: $env:" + "='xxx'; $env:".join(missing) +
+            "='xxx'; irm <server>/api/runtime/install.ps1 | iex"
+        )
+    else:
+        log.warning(
+            "  ① 追加 key 到 runtime.env: "
+            f"echo '{missing[0]}=<your-key>' >> /etc/grape/runtime.env && systemctl restart runtime-agent"
+        )
+        log.warning(
+            "  ② 重装时传入 key: export " + "=xxx ".join(missing) +
+            "=xxx && curl -sSL <server>/api/runtime/install | bash -s -- --token <token>"
+        )
 
 
 def main():
+    # Windows: 确保 stderr/stdout 使用 UTF-8 编码（避免 GBK 中文乱码）
+    if sys.platform == "win32":
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    # 单实例保护：杀掉已运行的旧 worker 进程，避免双进程竞争 claim
+    from src.runtime.os_adapter import kill_existing_worker, pid_file, config_dir
+    try:
+        _killed = kill_existing_worker()
+        if _killed:
+            log.warning("Killed existing worker process (single-instance protection)")
+    except Exception as _ke:
+        log.warning(f"kill_existing_worker failed: {_ke}")
+    # 写入当前进程 PID
+    try:
+        _cfg_dir = config_dir()
+        os.makedirs(_cfg_dir, exist_ok=True)
+        with open(pid_file(), "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
     token = os.environ.get("RUNTIME_TOKEN", "")
     server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
     poll = _env_float("RUNTIME_POLL_INTERVAL", 3)
@@ -1894,20 +2082,31 @@ def main():
 
     # 清理上次崩溃残留的 codearts 临时目录（方案 G: per-task 独立数据目录）
     import shutil as _sh
-    _codearts_tasks_dir = os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
-    # fallback：如果 /var/cache 不可写，改用用户目录
-    try:
-        if not os.path.isdir(_codearts_tasks_dir):
+    from src.runtime.os_adapter import is_windows, codearts_tasks_dir as _os_codearts_dir
+    _codearts_tasks_dir = os.environ.get("CODEARTS_TASKS_DIR", _os_codearts_dir())
+    if is_windows():
+        # Windows: 直接使用 LOCALAPPDATA 下的目录，无需权限回退
+        try:
             os.makedirs(_codearts_tasks_dir, exist_ok=True)
-            try:
-                os.chmod(_codearts_tasks_dir, 0o1777)
-            except PermissionError:
-                pass
             log.info(f"created codearts tasks dir: {_codearts_tasks_dir}")
-    except PermissionError:
-        _codearts_tasks_dir = os.path.expanduser("~/.cache/codearts-tasks")
-        os.makedirs(_codearts_tasks_dir, exist_ok=True)
-        log.info(f"codearts tasks dir fallback (no /var/cache access): {_codearts_tasks_dir}")
+        except Exception as e:
+            _codearts_tasks_dir = os.path.join(os.path.expanduser("~"), ".cache", "codearts-tasks")
+            os.makedirs(_codearts_tasks_dir, exist_ok=True)
+            log.info(f"codearts tasks dir fallback: {_codearts_tasks_dir}")
+    else:
+        # fallback：如果 /var/cache 不可写，改用用户目录
+        try:
+            if not os.path.isdir(_codearts_tasks_dir):
+                os.makedirs(_codearts_tasks_dir, exist_ok=True)
+                try:
+                    os.chmod(_codearts_tasks_dir, 0o1777)
+                except PermissionError:
+                    pass
+                log.info(f"created codearts tasks dir: {_codearts_tasks_dir}")
+        except PermissionError:
+            _codearts_tasks_dir = os.path.expanduser("~/.cache/codearts-tasks")
+            os.makedirs(_codearts_tasks_dir, exist_ok=True)
+            log.info(f"codearts tasks dir fallback (no /var/cache access): {_codearts_tasks_dir}")
 
     from src.runtime.client import RuntimeClient
 
@@ -1919,8 +2118,13 @@ def main():
             latest = await client.latest_version()
             local = _read_local_worker_version()
             if latest and local and latest != local:
-                log.warning(f"Worker 包版本不一致: 本地={local} 服务端={latest}，"
-                            f"请重新执行一键安装命令升级: curl -sSL {server}/api/runtime/install | bash -s -- --token <token>")
+                from src.runtime.os_adapter import is_windows
+                if is_windows():
+                    log.warning(f"Worker 包版本不一致: 本地={local} 服务端={latest}，"
+                                f"请重新执行一键安装命令升级: irm {server}/api/runtime/install.ps1 | iex")
+                else:
+                    log.warning(f"Worker 包版本不一致: 本地={local} 服务端={latest}，"
+                                f"请重新执行一键安装命令升级: curl -sSL {server}/api/runtime/install | bash -s -- --token <token>")
         except Exception as e:
             log.warning(f"Worker 版本自检失败: {e}")
 
@@ -1928,7 +2132,10 @@ def main():
         installed = [r for r in runtimes if r.get("installed")]
         if not installed:
             log.warning("No runtimes installed locally, registering empty")
-        device = os.environ.get("RUNTIME_DEVICE_NAME", os.uname().nodename if hasattr(os, "uname") else "host")
+        device = os.environ.get("RUNTIME_DEVICE_NAME", "")
+        if not device:
+            from src.runtime.os_adapter import hostname as _hostname
+            device = _hostname()
         _local_skills = _scan_local_skills()
         ids, probe_url = await client.register(installed, device_name=device,
                                                cli_version=_read_local_worker_version(),
