@@ -43,7 +43,7 @@ function switchSidebarTab(tab) {
       const hosted = repos.filter(r => r.is_hosted);
       if (hosted.length > 0) {
         let saved = null;
-        try { saved = JSON.parse(localStorage.getItem('currentRepo') || 'null'); } catch (e) { saved = null; }
+        try { saved = app.currentRepo(); } catch (e) { saved = null; }
         const matched = saved && hosted.find(r => r.full_name === saved.fullName);
         const target = matched || hosted[0];
         selectRepo(target.full_name, target.owner, target.name, target.repo_key);
@@ -441,7 +441,7 @@ function hostNoPermission() {
 }
 
 function selectRepo(fullName, owner, name, repoKey) {
-  localStorage.setItem('currentRepo', JSON.stringify({fullName, owner, name, repoKey: repoKey || ''}));
+  sessionStorage.setItem('currentRepo', JSON.stringify({fullName, owner, name, repoKey: repoKey || ''}));
   const sidebar = document.getElementById('sidebar');
   const mainView = document.getElementById('mainView');
   const tb = document.getElementById('tb');
@@ -481,7 +481,7 @@ function _doUnhost(fullName) {
     app.loadProfile().then(() => {
       const cur = app.currentRepo();
       const wasCurrent = cur && cur.fullName === fullName;
-      if (wasCurrent) localStorage.removeItem('currentRepo');
+      if (wasCurrent) sessionStorage.removeItem('currentRepo');
       app.initSidebarRepos();
       API.get('/repos/managed').then(md => {
         const remaining = md.repos || [];

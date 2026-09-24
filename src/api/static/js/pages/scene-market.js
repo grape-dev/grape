@@ -1041,7 +1041,7 @@ function _selectRepoAndNav(fullName, owner, name) {
 
 function _currentRepoFullName() {
   try {
-    const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+    const c = app.currentRepo();
     return c ? (c.fullName || '') : '';
   } catch { return ''; }
 }
