@@ -309,7 +309,7 @@ def _collect_worker_metrics() -> dict:
     Windows：/proc 不可用，用 wmic / shutil.disk_usage 采集（降级）。
     """
     from src.runtime.os_adapter import is_windows, temp_dir as _os_temp
-    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "bandwidth_percent": 0.0, "load_avg": "", "spec": ""}
+    metrics = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "tmp_percent": 0.0, "bandwidth_percent": 0.0, "bandwidth_mbps": 0.0, "load_avg": "", "spec": ""}
 
     if is_windows():
         # Windows: wmic 采集 CPU/MEM（降级模式，无 /proc）
@@ -491,7 +491,8 @@ def _collect_worker_metrics() -> dict:
             _db = (_rx + _tx) - _pbytes
             if _dt > 0 and _db >= 0:
                 _mbps = _db * 8 / _dt / 1e6
-                _thr = float(os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "1000"))
+                metrics["bandwidth_mbps"] = round(_mbps, 1)
+                _thr = float(os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "10"))
                 if _thr > 0:
                     metrics["bandwidth_percent"] = round(min(_mbps / _thr * 100, 100.0), 1)
         _collect_worker_metrics._bw_prev = (_now_bw, _rx + _tx)
@@ -1922,23 +1923,13 @@ async def _perform_upgrade(server: str, token: str) -> bool:
         os.close(fd)
 
         if is_win:
-            # Windows: 用 PowerShell 下载（Invoke-WebRequest 比 irm 更可靠）
+            # Windows: 用 PowerShell 下载
             r = await asyncio.to_thread(
                 subprocess.run,
                 ["powershell", "-NoProfile", "-Command",
-                 f"Invoke-WebRequest -Uri '{install_script_url}' -OutFile '{tmp_script}' -UseBasicParsing"],
+                 f"irm {install_script_url} -OutFile '{tmp_script}'"],
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
             )
-            # Windows PowerShell 5.1 默认用 GBK 读 .ps1 文件，中文注释乱码导致语法错误
-            # 下载后检测并补 UTF-8 BOM
-            try:
-                with open(tmp_script, "rb") as f:
-                    raw = f.read()
-                if not raw.startswith(b"\xef\xbb\xbf"):
-                    with open(tmp_script, "wb") as f:
-                        f.write(b"\xef\xbb\xbf" + raw)
-            except Exception:
-                pass
         else:
             r = await asyncio.to_thread(
                 subprocess.run,
