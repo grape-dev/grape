@@ -1039,11 +1039,14 @@ async def _materialize_files(client, tid, files_dict, file_urls, dest_dir, tag="
             pass
 
 
-def _cleanup_task_workdir(task: dict):
+def _cleanup_task_workdir(task: dict, env: dict | None = None):
     """任务结束后清理工位：删轻文件（.skills/.project-info/.knowledge）+ 安全卸载 worktree。
 
     轻文件直接删（下次派单重新物化）；worktree 走 remove_issue_worktree_if_pushed（确认已 push）。
     清理失败只告警，不影响任务结果上报与后续流水线。
+
+    Issue #242: coding agent 有关联仓库 worktree 时，同步清理关联 worktree。
+    PR 提交由 _submit_linked_repo_prs 在 cleanup 前独立完成（不在此函数内重复）。
     """
     import os as _os
     import shutil as _shutil
@@ -1064,6 +1067,23 @@ def _cleanup_task_workdir(task: dict):
             repogit.remove_issue_worktree_if_pushed(
                 task.get("repo_key") or "", task.get("agent_type") or "",
                 _num, token=task.get("repo_gitcode_token") or "")
+            # Issue #242: 清理关联仓库 worktree（coding agent 多仓库）
+            _ag = task.get("agent_type") or ""
+            if _ag == "coding":
+                _linked_wt = (env or {}).get("GRAPE_LINKED_WORKTREES", "") if env else ""
+                if not _linked_wt:
+                    _linked_wt = (task.get("env_extra") or {}).get("GRAPE_LINKED_WORKTREES", "") if isinstance(task.get("env_extra"), dict) else ""
+                if _linked_wt:
+                    import json as _json_lr
+                    try:
+                        for _wt_info in (_json_lr.loads(_linked_wt) if _linked_wt else []):
+                            _lrk = _wt_info.get("repo_key") or ""
+                            if _lrk:
+                                repogit.remove_issue_worktree_if_pushed(
+                                    _lrk, "coding", _num,
+                                    token=task.get("repo_gitcode_token") or "")
+                    except Exception as _le:
+                        log.warning(f"linked worktree cleanup failed: {_le}")
     except Exception as e:
         log.warning(f"workdir cleanup failed for task {task.get('id')}: {e}")
     # 连空 cwd 目录一起删（non-git agent 删完物化文件后为空；git agent 的 worktree 已被整目录删掉）
@@ -1072,6 +1092,142 @@ def _cleanup_task_workdir(task: dict):
             _shutil.rmtree(cwd, ignore_errors=True)
     except Exception:
         pass
+
+
+def _submit_linked_repo_prs(task: dict, env: dict):
+    """Issue #242: coding agent 成功完成后，遍历 GRAPE_LINKED_WORKTREES，
+    对每个有改动的关联仓库 worktree 执行 push + create_pr_for_repo 提交 PR。
+
+    闭环多仓库 PR 提交流程：coding agent 在关联 worktree 中完成开发后，
+    本函数自动 push 改动并向每个关联仓库创建 PR。
+    失败只告警，不阻塞任务完成与主仓库 PR 流程。
+    """
+    import os as _os
+    import json as _json
+    import subprocess as _sp
+
+    if (task.get("agent_type") or "") != "coding":
+        return
+    _linked_wt_json = env.get("GRAPE_LINKED_WORKTREES", "")
+    if not _linked_wt_json:
+        return
+    try:
+        _wts = _json.loads(_linked_wt_json)
+    except Exception:
+        return
+    if not _wts or not isinstance(_wts, list):
+        return
+
+    _token = task.get("repo_gitcode_token") or ""
+    _issue_num = ""
+    try:
+        from src.runtime import repogit
+        _issue_num = repogit.issue_num_from(task.get("issue_id") or "")
+    except Exception:
+        pass
+    if not _issue_num:
+        log.warning("linked PR: cannot determine issue_num, skip")
+        return
+
+    _wt_branch = f"feat/issue-{_issue_num}"
+    _bot_name = env.get("BOT_USERNAME") or "grape_bot"
+    _results = []
+
+    for wt in _wts:
+        if not isinstance(wt, dict):
+            continue
+        _rk = wt.get("repo_key") or ""
+        _wt_dir = wt.get("dir") or ""
+        _base_branch = wt.get("branch") or "main"
+        if not _rk or not _wt_dir or not _os.path.isdir(_wt_dir):
+            log.warning(f"linked PR: skip invalid worktree: rk={_rk} dir={_wt_dir}")
+            continue
+
+        try:
+            # 1. git identity（防 commit 被拒）
+            _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],
+                    capture_output=True, text=True, timeout=10)
+            _sp.run(["git", "-C", _wt_dir, "config", "user.email",
+                     f"{_bot_name}@noreply.git.com"],
+                    capture_output=True, text=True, timeout=10)
+
+            # 2. stage 未提交改动
+            _sp.run(["git", "-C", _wt_dir, "add", "-A"],
+                    capture_output=True, text=True, timeout=60)
+            _r_diff = _sp.run(["git", "-C", _wt_dir, "diff", "--cached", "--quiet"],
+                              capture_output=True, text=True, timeout=30)
+            _has_staged = _r_diff.returncode != 0
+
+            # 3. 检查是否有领先于 base 分支的提交（origin/{base}..HEAD）
+            _r_ahead = _sp.run(
+                ["git", "-C", _wt_dir, "rev-list", "--count",
+                 f"origin/{_base_branch}..HEAD"],
+                capture_output=True, text=True, timeout=15)
+            _ahead = 0
+            if _r_ahead.returncode == 0:
+                try:
+                    _ahead = int((_r_ahead.stdout or "0").strip() or "0")
+                except ValueError:
+                    _ahead = 0
+            else:
+                # origin/{base} 不存在 → 无法比较，保守认为有改动（push 会建远程分支）
+                _ahead = 1
+
+            if not _has_staged and _ahead == 0:
+                log.info(f"linked PR: no changes in {_rk}, skip")
+                _results.append({"repo_key": _rk, "status": "skipped", "reason": "no changes"})
+                continue
+
+            # 4. commit staged changes
+            if _has_staged:
+                _msg = f"feat: #{_issue_num} linked repo changes"
+                _r_commit = _sp.run(["git", "-C", _wt_dir, "commit", "-m", _msg],
+                                    capture_output=True, text=True, timeout=60)
+                if _r_commit.returncode != 0:
+                    log.warning(f"linked PR: commit failed {_rk}: {(_r_commit.stderr or '')[:200]}")
+                    _results.append({"repo_key": _rk, "status": "failed", "reason": "commit failed"})
+                    continue
+
+            # 5. push（token 经 http.extraheader 注入，不落盘）
+            from src.runtime.repogit import _run_git
+            _r_push = _run_git(
+                ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
+                token=_token, timeout=120)
+            if _r_push is None or _r_push.returncode != 0:
+                _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
+                log.warning(f"linked PR: push failed {_rk}: {_err}")
+                _results.append({"repo_key": _rk, "status": "failed", "reason": f"push: {_err[:100]}"})
+                continue
+
+            # 6. create PR
+            from src.vcs.api_client import create_pr_for_repo
+            _pr_title = f"feat: #{_issue_num} linked repo ({_rk})"
+            _pr_body = (f"跨仓库需求开发 PR（Issue #{_issue_num}）\n\n"
+                        f"由 coding agent 自动提交，关联主仓库 {_rk}。\n\n"
+                        f"Closes #{_issue_num}")
+            _pr_result = create_pr_for_repo(
+                repo_key=_rk, token=_token,
+                title=_pr_title, head=_wt_branch, base=_base_branch,
+                body=_pr_body)
+            if isinstance(_pr_result, dict) and "error" not in _pr_result:
+                _pr_num = _pr_result.get("number") or ""
+                _pr_url = _pr_result.get("html_url") or ""
+                log.info(f"linked PR: created #{_pr_num} for {_rk}: {_pr_url}")
+                _results.append({"repo_key": _rk, "status": "created",
+                                 "pr_number": _pr_num, "pr_url": _pr_url})
+            else:
+                _err = _pr_result.get("error", "unknown") if isinstance(_pr_result, dict) else "unknown"
+                log.warning(f"linked PR: create_pr failed {_rk}: {_err}")
+                _results.append({"repo_key": _rk, "status": "failed", "reason": f"PR create: {_err}"})
+        except Exception as e:
+            log.warning(f"linked PR: error for {_rk}: {e}")
+            _results.append({"repo_key": _rk, "status": "error", "reason": str(e)[:200]})
+
+    task["_linked_pr_results"] = _results
+    _created = [r for r in _results if r.get("status") == "created"]
+    _skipped = [r for r in _results if r.get("status") == "skipped"]
+    _failed = [r for r in _results if r.get("status") in ("failed", "error")]
+    log.info(f"linked PR summary: {len(_created)} created, {len(_skipped)} skipped, {len(_failed)} failed")
 
 
 async def _execute_task(client, task, engine_name: str = ""):
@@ -1162,6 +1318,25 @@ async def _execute_task(client, task, engine_name: str = ""):
                 env["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
+    # Issue #242: 关联仓库 worktree 初始化（coding agent 多仓库并行操作）
+    try:
+        from src.runtime import repogit
+        _linked_repos_env = env.get("GRAPE_LINKED_REPOS", "")
+        if _linked_repos_env and task.get("agent_type") == "coding":
+            import json as _json_lr
+            _linked_repos_list = _json_lr.loads(_linked_repos_env) if _linked_repos_env else []
+            if _linked_repos_list:
+                _num_lr = repogit.issue_num_from(task.get("issue_id") or "")
+                _wt_list = repogit.ensure_linked_repo_worktrees(
+                    _linked_repos_list, "coding", _num_lr,
+                    token=task.get("repo_gitcode_token") or "")
+                if _wt_list:
+                    env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
+                        [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
+                         for w in _wt_list], ensure_ascii=False)
+                    log.info(f"linked repos: {len(_wt_list)} worktrees initialized for issue={_num_lr}")
+    except Exception as e:
+        log.warning(f"linked repos worktree init failed: {e}")
     skill_dir = _os.path.join(cwd, ".skills")
     prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
                                        .replace("{{SERVER_URL}}", task.get("server_url") or "")
@@ -1381,7 +1556,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                     log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
                     _kill_stale_engine(task, _backend_for_engine(engine_name))
                     _res.dispose()
-                    _cleanup_task_workdir(task)
+                    _cleanup_task_workdir(task, env)
                     return {"_error": "task terminated by server (aborted during execution)", "_started": started}
                 batch = []
                 _last_flush = _now
@@ -1391,16 +1566,22 @@ async def _execute_task(client, task, engine_name: str = ""):
                 log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
                 _kill_stale_engine(task, _backend_for_engine(engine_name))
                 _res.dispose()
-                _cleanup_task_workdir(task)
+                _cleanup_task_workdir(task, env)
                 return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
+        # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（在 cleanup 删 worktree 之前执行）
+        if done is not None and not (isinstance(done, dict) and done.get("_error")):
+            try:
+                _submit_linked_repo_prs(task, env)
+            except Exception as _e:
+                log.warning(f"linked PR submission failed for task {tid}: {_e}")
         # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
         _res.dispose()
-        _cleanup_task_workdir(task)
+        _cleanup_task_workdir(task, env)
         return done
     except Exception as e:
         log.warning(f"task {tid} stream failed: {e}")
         _res.dispose()
-        _cleanup_task_workdir(task)
+        _cleanup_task_workdir(task, env)
         return {"_error": str(e), "_started": started}
 
 

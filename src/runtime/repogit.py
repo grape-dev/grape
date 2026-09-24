@@ -101,6 +101,55 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
             return None
 
 
+def ensure_repo_base_multi(linked_repos: list, token: str = "") -> dict:
+    """批量初始化多个关联仓库的 bare mirror（Issue #242）。
+
+    Args:
+        linked_repos: [{repo_key, branch}] 列表
+        token: git token（共用主仓库 token；关联仓库可能需要不同 token）
+    Returns:
+        {repo_key: base_dir_or_None} 映射
+    """
+    result = {}
+    for lr in (linked_repos or []):
+        if not isinstance(lr, dict):
+            continue
+        rk = lr.get("repo_key") or ""
+        if not rk:
+            continue
+        base = ensure_repo_base(rk, token=token)
+        result[rk] = base
+    return result
+
+
+def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
+                                  token: str = "") -> list:
+    """为关联仓库列表创建 Issue 级 worktree（Issue #242）。
+
+    遍历 linked_repos，为每个 repo_key 调用 ensure_issue_worktree。
+    每个仓库使用各自的 branch 配置（linked_repos 中的 branch 字段）。
+
+    Returns:
+        [{repo_key, branch, worktree_dir}] 成功创建的 worktree 列表
+    """
+    if not is_git_agent(agent_type):
+        return []
+    worktrees = []
+    for lr in (linked_repos or []):
+        if not isinstance(lr, dict):
+            continue
+        rk = lr.get("repo_key") or ""
+        branch = lr.get("branch") or ""
+        if not rk:
+            continue
+        wt = ensure_issue_worktree(rk, agent_type, issue_num, token=token, work_branch=branch)
+        if wt:
+            worktrees.append({"repo_key": rk, "branch": branch, "worktree_dir": wt})
+        else:
+            log.warning(f"repogit: linked repo worktree failed for {rk} issue={issue_num}")
+    return worktrees
+
+
 def _read_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
     """读场景高级选项的 work_branch。
 

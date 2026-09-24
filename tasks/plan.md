@@ -1,25 +1,41 @@
-# Plan — Issue #238: Hermes ACP 临时目录权限修复
+# Implementation Plan: Issue #242 — 跨仓库需求开发
 
-## 任务类型：bug 修复（简单 — 单文件 <10 行变更 ×2）
+## Overview
 
-## 任务拆解
+扩展现有场景模型，将单仓库绑定升级为「主仓库 + 关联仓库」模式。在场景数据模型、API 路由、A2A handoff、repogit worktree、PR 提交机制和前端 UI 各层支持多仓库并行操作。
 
-| # | 任务 | 文件 | 状态 |
-|---|------|------|------|
-| 1 | hermes_acp.py: 临时目录根路径 /tmp → ~/.cache | src/agent/hermes_acp.py ~89 | ✅ |
-| 2 | executor.py: mkdtemp 指定 dir=~/.cache/hermes-iso | src/agent/executor.py ~459 | ✅ |
-| 3 | py_compile 语法校验 | 两文件 | ✅ |
-| 4 | 路径创建逻辑功能验证 | python3 -c 模拟 | ✅ |
-| 5 | 自审查（五轴） | — | ⬜ |
-| 6 | 建 PR + body/label | — | ⬜ |
-| 7 | Issue 评论告知 | — | ⬜ |
-| 8 | A2A 通知 QA | — | ⬜ |
+## Architecture Decisions
 
-## 依赖
+1. **linked_repos 存储方式**：JSON 字段 `linked_repos`（TEXT），存储 `[{repo_key, branch}]` 数组。与现有 `advanced_options` JSON 字段保持一致，避免 JOIN 开销。
+2. **多仓库 worktree 隔离**：每个 repo 独立 worktree（repogit 已按 repo_key 隔离，扩展即可）。
+3. **PR 提交触发方**：coding agent 自动遍历 linked_repos 中有改动的仓库分别提交。
+4. **分支策略**：各仓库独立分支名（用户在 linked_repos 中为每仓库指定）。
 
-无外部依赖，仅用 Python 标准库（os.path/tempfile/shutil），已在文件内 import。
+## Task List
 
-## 风险
+### Phase 1: 数据模型 + API 基础
+- [x] Task 1: DB schema 迁移 — devops_pipeline_scene 新增 linked_repos 列
+- [x] Task 2: pipeline_config.py 查询/创建/更新 linked_repos
+- [x] Task 3: scenes.py Request 模型 + CRUD 路由 + 高级选项 API
 
-- **低**：`~/.cache` 在极端环境下可能不可写（无家目录的用户），但 grape/gtd 均有正常家目录，风险可忽略。
-- **低**：已有 `/tmp/hermes-acp-homes` 残留目录不影响新逻辑（新路径独立）。
+### Phase 2: A2A + Runtime 扩展
+- [x] Task 4: webhook.py / event_pipeline.py — A2A dispatch 注入 linked_repos
+- [x] Task 5: repogit.py — 多 repo_key bare mirror + worktree 支持
+- [x] Task 6: agent.py — coding agent 多仓库 worktree 初始化
+
+### Phase 3: 前端 + 测试
+- [x] Task 7: 前端场景详情页关联仓库配置 UI
+- [x] Task 8: 测试覆盖
+
+### Checkpoint: Complete
+- [x] 所有测试通过
+- [x] 自审查通过
+- [x] PR 创建
+
+## Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| 多仓库并行操作资源开销 | Med | 限制关联仓库数量上限（5 个） |
+| 关联仓库 token 权限不足 | Med | A2A 前校验，不足时标注跳过 |
+| DB schema 变更兼容性 | Low | linked_repos 为新增可空字段，向后兼容 |
