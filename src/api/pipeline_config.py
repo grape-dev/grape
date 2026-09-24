@@ -273,14 +273,17 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
         data = _load_pipelines_file()
         file_scene = data.get("scenes", {}).get(scene_id) or data.get("scenes", {}).get("default")
         if file_scene:
+            _name = file_scene.get("name", scene_id)
             return {
-                "name": file_scene.get("name", scene_id),
+                "name": _name,
+                "display_name": _name,
                 "nodes": file_scene.get("nodes", []),
                 "onboarding": file_scene.get("onboarding", "repo-onboarding"),
             }
         return None
     return {
         "name": scene.get("name", scene_id) or scene_id,
+        "display_name": scene.get("display_name") or scene.get("name", scene_id) or scene_id,
         "nodes": scene.get("nodes") or [],
         "onboarding": scene.get("onboarding", "repo-onboarding"),
         "scene_type": scene.get("scene_type", "standard"),
