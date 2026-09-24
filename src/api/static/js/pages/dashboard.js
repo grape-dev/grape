@@ -67,17 +67,9 @@ function renderDashboard(data) {
 
   // 空状态卡片点击"创建新场景"
   window._enterCreateFromEmpty = function() {
-    const tmpData = {
-      agents: [], scene_nodes: [], repo: 'gitcode:' + owner + '/' + name,
-      _scenes: [{ id: '__tmp__', name: I18N.t('dashboard.create_custom_scene'), scope: 'user' }],
-      dev_scene: '__tmp__', agent_engines: {}, metrics: m,
-    };
-    renderDashboard(tmpData);
-    setTimeout(function() {
-      if (typeof enterCreateMode === 'function') {
-        enterCreateMode();
-      }
-    }, 50);
+    if (typeof enterCreateMode === 'function') {
+      enterCreateMode();
+    }
   };
 
   // 场景列表为空 → 渲染空状态卡片

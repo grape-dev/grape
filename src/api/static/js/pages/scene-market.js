@@ -93,6 +93,9 @@ function _switchSceneTab(tab) {
   _sceneMarketPage = 1;
   _sceneMarketQ = '';
   _sceneMarketActiveCat = 0;
+  // 切 tab 时清空旧场景数据，防止新 tab 列表加载回来前用旧数据渲染出"占位场景"
+  _sceneMarketScenes = [];
+  _sceneMarketTotal = 0;
   // Issue #63: 页面内 tab 切换——取消旧 tab 请求 + 更新标识
   if (window._tabAbortController) window._tabAbortController.abort();
   window._tabAbortController = new AbortController();
