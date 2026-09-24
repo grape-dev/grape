@@ -148,7 +148,7 @@ _advanced_options_cache: dict = {}  # (repo_key, issue_id) -> (options_str, time
 def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
     """注入场景高级选项指引（仅执行类 agent coding/qa/sre）。
 
-    值不暴露在 prompt 文本里——通过环境变量注入（GRAPE_WORK_BRANCH / GRAPE_CF_N / GRAPE_CF_MAP），
+    值不暴露在 prompt 文本里——通过环境变量注入（GRAPE_WORK_BRANCH / 自定义变量名），
     prompt 只输出固定指引文本，agent 自行 printenv 读取。
 
     优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene。
@@ -192,9 +192,9 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
         opts = _json.loads(row[0]) if row[0] else {}
         if not opts:
             return ""
-        # 3. 判断有哪些配置项（决定是否输出指引）
+        # 3. 判断有哪些配置项（决定是否输出指引；自定义变量指引按 Issue #236 移除，使用方式见技能 SKILL.md）
         wb = opts.get("work_branch", "")
-        fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("key")]
+        fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("name")]
         has_any = bool(wb) or bool(fields)
         if not has_any:
             return ""
@@ -203,8 +203,6 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
         lines.append("Custom scene options are injected as environment variables. Before executing, you MUST read the following environment variables:")
         if wb:
             lines.append("- GRAPE_WORK_BRANCH: work baseline branch (printenv GRAPE_WORK_BRANCH)")
-        if fields:
-            lines.append("- GRAPE_CF_MAP: custom config key mapping (printenv GRAPE_CF_MAP); read the corresponding environment variable named in the mapping to get its value")
         lines.append("Read all configured options first, then start working.")
         result = "\n".join(lines)
         _advanced_options_cache[_cache_key] = (result, now)

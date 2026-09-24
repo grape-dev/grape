@@ -695,21 +695,25 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
   };
 
   // 添加自定义配置项
-  window._applyAddCustomField = function(key, value, readOnlyKey) {
+  window._applyAddCustomField = function(name, value, readOnlyKey, isSecret, valueExist) {
     var container = document.getElementById('applyAdvCustomFields');
     if (!container) return;
     var row = document.createElement('div');
     row.className = 'adv-kv';
     row.style.cssText = 'display:flex;gap:8px;align-items:center';
-    var keyInputAttrs = readOnlyKey ? 'readonly style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#eee;color:#86868b;cursor:not-allowed"' : 'style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'"';
+    var isSec = _cfComputeIsSecret(name, isSecret);
+    var keyInputAttrs = readOnlyKey ? 'readonly style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#eee;color:#86868b;cursor:not-allowed"' : 'style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))"';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     // 有值（回填/华为云注入）→ 默认隐藏；空值（手动新增）→ 默认可见方便输入
-    var hasValue = !!(value && String(value).trim());
-    var valType = (readOnlyKey || hasValue) ? 'password' : 'text';
-    var eyeIcon = (readOnlyKey || hasValue) ? '👁' : '🙈';
+    var hasValue = !!valueExist || !!(value && String(value).trim());
+    var val = (isSec && hasValue && !value) ? '********' : (value || '');
+    var valType = (readOnlyKey || isSec || hasValue) ? 'password' : 'text';
+    var eyeIcon = (readOnlyKey || isSec || hasValue) ? '👁' : '🙈';
+    var secChecked = (isSec && !readOnlyKey) ? ' checked' : '';
+    var secHtml = readOnlyKey ? '' : '<input type="checkbox" class="adv-kv-sec" title="密钥（不回显明文）"' + secChecked + '>';
     row.innerHTML =
-      '<input class="adv-kv-key" placeholder="key" ' + keyInputAttrs + ' value="' + (key || '') + '">' +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + valType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (value || '') + '">' +
+      '<input class="adv-kv-key" placeholder="name" ' + keyInputAttrs + ' value="' + (name || '') + '">' + secHtml +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + valType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + eyeIcon + '</button>' +
       '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>';
     container.appendChild(row);
@@ -732,9 +736,9 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
       var hw = (credData && credData.huawei_cloud) || {};
       var ak = hw.ak || '';
       var sk = hw.sk || '';
-      // 添加 AK 行（key 只读）
+      // 添加 AK 行（name 只读）
       window._applyAddCustomField('HUAWEICLOUD_SDK_AK', ak, true);
-      // 添加 SK 行（key 只读）
+      // 添加 SK 行（name 只读）
       window._applyAddCustomField('HUAWEICLOUD_SDK_SK', sk, true);
     }).catch(function() {
       // 获取失败也添加空行，让用户手动填写
@@ -809,22 +813,23 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
         }
       }
       var fields = d.custom_fields || [];
-      // 华为云场景已自动注入 AK/SK 行，回填时跳过这些 key 避免重复
+      // 华为云场景已自动注入 AK/SK 行，回填时跳过这些 name 避免重复
       var hwKeys = isHwCloudScene ? ['HUAWEICLOUD_SDK_AK', 'HUAWEICLOUD_SDK_SK'] : [];
       fields.forEach(function(f) {
-        if (hwKeys.indexOf(f.key) >= 0) {
+        var fname = f.name || f.key || '';
+        if (hwKeys.indexOf(fname) >= 0) {
           // 已有 AK/SK 行 → 只更新 value，不新增行
           var rows = document.querySelectorAll('#applyAdvCustomFields .adv-kv');
           for (var i = 0; i < rows.length; i++) {
             var k = (rows[i].querySelector('.adv-kv-key') || {}).value || '';
-            if (k === f.key) {
+            if (k === fname) {
               var valInput = rows[i].querySelector('.adv-kv-val');
               if (valInput) valInput.value = f.value || '';
               return;
             }
           }
         }
-        window._applyAddCustomField(f.key, f.value);
+        window._applyAddCustomField(fname, f.value !== undefined ? f.value : '', false, f.is_secret, f.value_exist);
       });
     }).catch(function() {});
   }
@@ -833,14 +838,10 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
   document.getElementById('applyConfirmBtn').onclick = function() {
     var workBranch = (document.getElementById('applyAdvWorkBranch') || {}).value || '';
     if (!workBranch) { app.showToast && app.showToast(I18N.t('dashboard.branch_required')||'工作分支不能为空'); return; }
-    var fields = [];
-    document.querySelectorAll('#applyAdvCustomFields .adv-kv').forEach(function(row) {
-      var k = (row.querySelector('.adv-kv-key') || {}).value || '';
-      var v = (row.querySelector('.adv-kv-val') || {}).value || '';
-      if (k.trim()) fields.push({ key: k.trim(), value: v.trim() });
-    });
+    var _collected = _cfCollectFields('#applyAdvCustomFields');
+    if (_collected.error) { app.showToast && app.showToast(_collected.error); return; }
     modal.remove();
-    _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, fields);
+    _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, _collected.fields);
   };
 }
 

@@ -1688,11 +1688,11 @@ def app_current_repo():
     return None
 
 
-# ===== 场景高级选项：工作分支 + 自定义 key:value =====
+# ===== 场景高级选项：工作分支 + 自定义 {name, value, is_secret} =====
 
 class AdvancedOptionsRequest(BaseModel):
     work_branch: str = "main"
-    custom_fields: list = []   # [{key: str, value: str}]
+    custom_fields: list = []   # [{name: str, value: str, is_secret: bool?}]
 
 
 @router.get("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_get", summary="Get scene advanced options", description="Reads scene advanced options (work branch + custom key:value).")
@@ -1724,9 +1724,20 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
             opts = _json.loads(row[0])
         except Exception:
             opts = {}
+        from src.scene_custom_env import normalize_custom_field
+        _fields = []
+        for f in (opts.get("custom_fields", []) or []):
+            _nf = normalize_custom_field(f)
+            if not _nf.get("name"):
+                continue
+            if _nf.get("is_secret"):
+                # secret 项不回显明文 value，仅通知前端已有值
+                _fields.append({"name": _nf["name"], "value_exist": bool(_nf.get("value")), "is_secret": True})
+            else:
+                _fields.append({"name": _nf["name"], "value": _nf.get("value", ""), "is_secret": False})
         return {
             "work_branch": opts.get("work_branch", "main") or "main",
-            "custom_fields": opts.get("custom_fields", []) or [],
+            "custom_fields": _fields,
         }
     return {"work_branch": "main", "custom_fields": []}
 
@@ -1756,22 +1767,40 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
     if not existing:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
 
-    # 校验 custom_fields key 非空且不重复
-    seen_keys = set()
+    # 校验 custom_fields name 非空/大写/保留冲突且不重复
+    from src.scene_custom_env import custom_env_error, normalize_custom_field
+    seen_names = set()
     for f in (body.custom_fields or []):
-        _k = (f.get("key") or "").strip() if isinstance(f, dict) else ""
-        if not _k:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "配置项 key 不能为空"})
-        if _k in seen_keys:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": f"配置项 key '{_k}' 重复"})
-        seen_keys.add(_k)
+        _n = (f.get("name") or "").strip() if isinstance(f, dict) else ""
+        _err = custom_env_error(_n)
+        if _err:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": _err})
+        if _n in seen_names:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"配置项 name '{_n}' 重复"})
+        seen_names.add(_n)
 
+    _custom_fields = [normalize_custom_field(f) for f in (body.custom_fields or []) if isinstance(f, dict)]
+    _custom_fields = [f for f in _custom_fields if f.get("name")]
+    # secret 项 value 为空（前端掩码 ******** → 置空）时保留旧值，视为未修改
+    if _custom_fields:
+        try:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "SELECT advanced_options FROM devops_pipeline_scene "
+                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                    (scene_id, repo_key))
+                _row = _c.fetchone()
+            _old = _json.loads(_row[0]) if (_row and _row[0]) else {}
+            _old_map = {f.get("name"): f.get("value", "") for f in (_old.get("custom_fields", []) or []) if f.get("name")}
+            for _f in _custom_fields:
+                if _f.get("is_secret") and not _f.get("value") and _f["name"] in _old_map:
+                    _f["value"] = _old_map[_f["name"]]
+        except Exception:
+            pass
     opts = {
         "work_branch": body.work_branch.strip(),
-        "custom_fields": [
-            {"key": (f.get("key") or "").strip(), "value": (f.get("value") or "").strip()}
-            for f in (body.custom_fields or []) if isinstance(f, dict)
-        ],
+        "custom_fields": _custom_fields,
     }
     opts_json = _json.dumps(opts, ensure_ascii=False)
     now = datetime.now(timezone.utc).isoformat()
