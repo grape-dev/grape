@@ -1,12 +1,15 @@
-# Todo — Issue #238
+# TODO: Issue #242 跨仓库需求开发
 
-- [x] 修改 hermes_acp.py: /tmp → ~/.cache/hermes-acp-homes
-- [x] 修改 executor.py: mkdtemp(dir=~/.cache/hermes-iso)
-- [x] 修改 sandbox.py: bwrap bind 路径同步迁移到 ~/.cache/hermes-acp-homes（自审查发现一致性缺陷）
-- [x] 修改 cleanup.py + agent.py: 清理 glob 模式同步新增 ~/.cache/hermes-iso-*（自审查发现清理遗漏）
-- [x] py_compile 语法校验通过
-- [x] 功能验证：目录创建 + 清理逻辑正常
-- [x] 五轴自审查（发现并修复清理逻辑 + sandbox 一致性问题）
-- [ ] 建 PR (base: multitask)
-- [ ] Issue 评论告知
-- [ ] A2A 通知 QA
+## Phase 1: 数据模型 + API
+- [x] DB: devops_pipeline_scene 新增 linked_repos TEXT DEFAULT '[]'
+- [x] pipeline_config.py: _query_scenes_from_db / _query_scene_by_id / create_custom_scene / update_custom_scene 支持 linked_repos
+- [x] scenes.py: CreateSceneRequest / UpdateSceneRequest / AdvancedOptionsRequest 增加 linked_repos；list_scenes / create_scene / update_scene 传递
+
+## Phase 2: A2A + Runtime
+- [x] event_pipeline.py: _inject_scene_env 注入 GRAPE_LINKED_REPOS 环境变量
+- [x] repogit.py: ensure_repo_base_multi 批量初始化 + 多 worktree 支持
+- [x] agent.py: coding agent 初始化时遍历 linked_repos 建 worktree
+
+## Phase 3: 前端 + 测试
+- [x] dashboard.js: 场景详情高级选项区增加关联仓库配置 UI
+- [x] tests/test_linked_repos.py: 场景 CRUD + linked_repos 解析测试
