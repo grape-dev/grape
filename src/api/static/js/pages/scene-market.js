@@ -383,19 +383,9 @@ function _renderSceneMarketPage() {
 
   let html = '';
 
-  // 精选场景横向滚动
+  // 精选场景：≥4 张铺满一行，≤3 张横向滚动（可留白）
   if (featured.length > 0) {
-    html += `<div id="sceneMarketFeatured" class="apple-card">
-      <div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>
-      <div class="scn-scroll-wrap">
-        <div id="featured-scenes" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-scenes')">
-          ${featured.map(s => _renderSceneCard(s)).join('')}
-        </div>
-        <button class="scn-scroll-btn scn-scroll-prev" id="featured-scenes-prev" onclick="document.getElementById('featured-scenes').scrollBy({left:-314,behavior:'smooth'})">◀</button>
-        <button class="scn-scroll-btn scn-scroll-next" id="featured-scenes-next" onclick="document.getElementById('featured-scenes').scrollBy({left:314,behavior:'smooth'})">▶</button>
-      </div>
-    </div>`;
-    setTimeout(() => _updateScrollBtns('featured-scenes'), 100);
+    html += `<div id="sceneMarketFeatured" class="apple-card">${_renderFeaturedInner(featured)}</div>`;
   }
 
   // 全部场景
@@ -448,6 +438,13 @@ function _renderSceneMarketPage() {
   el.innerHTML = html;
 }
 
+// 精选区内部 HTML：对齐精选技能 feat-row 布局
+function _renderFeaturedInner(featured) {
+  const cards = featured.map(s => _renderSceneCard(s)).join('');
+  const head = `<div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>`;
+  return head + `<div id="featured-scenes" class="feat-row">${cards}</div>`;
+}
+
 // Issue #196: 精选区局部刷新（不重建整个页面）
 function _renderFeaturedSection() {
   const featured = _sceneMarketFeatured;
@@ -462,27 +459,17 @@ function _renderFeaturedSection() {
     return;
   }
 
-  const innerHtml = `<div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>
-    <div class="scn-scroll-wrap">
-      <div id="featured-scenes" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-scenes')">
-        ${featured.map(s => _renderSceneCard(s)).join('')}
-      </div>
-      <button class="scn-scroll-btn scn-scroll-prev" id="featured-scenes-prev" onclick="document.getElementById('featured-scenes').scrollBy({left:-314,behavior:'smooth'})">◀</button>
-      <button class="scn-scroll-btn scn-scroll-next" id="featured-scenes-next" onclick="document.getElementById('featured-scenes').scrollBy({left:314,behavior:'smooth'})">▶</button>
-    </div>`;
+  const innerHtml = _renderFeaturedInner(featured);
 
   if (existing) {
-    // 已有精选区 → 仅更新内容
     existing.innerHTML = innerHtml;
   } else if (allScenesCard) {
-    // 无精选区 → 在「全部场景」卡片前插入
     const wrapper = document.createElement('div');
     wrapper.id = 'sceneMarketFeatured';
     wrapper.className = 'apple-card';
     wrapper.innerHTML = innerHtml;
     container.insertBefore(wrapper, allScenesCard);
   }
-  setTimeout(() => _updateScrollBtns('featured-scenes'), 100);
 }
 
 // 精选区滚动按钮动态显示/隐藏
@@ -498,7 +485,7 @@ function _updateScrollBtns(trackId) {
 }
 
 window.addEventListener('resize', function() {
-  ['featured-scenes', 'featured-skills'].forEach(function(id) {
+  ['featured-skills'].forEach(function(id) {
     if (document.getElementById(id)) _updateScrollBtns(id);
   });
 });
