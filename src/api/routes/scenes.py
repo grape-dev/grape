@@ -341,6 +341,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         "recommended_template": scene["recommended_template"],
         "scope": scene.get("scope", "official"),
         "nodes_raw": nodes,
+        "preset_custom_fields": scene.get("preset_custom_fields", "[]"),
     }
 
 
@@ -1799,6 +1800,7 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
                 "is_secret": _nf.get("is_secret", False),
                 "scope": _nf.get("scope", ["all"]),
                 "preset": _nf.get("preset", False),
+                "description": _nf.get("description", ""),
             })
         return {
             "work_branch": opts.get("work_branch", "main") or "main",
@@ -1926,6 +1928,7 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
                 "scope": _pdecl.get("scope", ["all"]) or ["all"],
                 "preset": True,
                 "default_value": _pdecl.get("default_value", ""),
+                "description": _pdecl.get("description", ""),
             })
     # 2) preset 项字段锁定：name/scope/is_secret/preset 以声明为准，仅 value 取前端提交（或旧值）
     for _f in _custom_fields:
@@ -1938,6 +1941,7 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
         _f["scope"] = _pdecl.get("scope", ["all"]) or ["all"]
         if "is_secret" in _pdecl:
             _f["is_secret"] = _pdecl.get("is_secret", False)
+        _f["description"] = _pdecl.get("description", "")
         if not _f.get("value") or _f.get("value") in ("********", "#####"):
             _f["value"] = _old_v or _pdecl.get("default_value", "")
     # 3) 非 preset 项显式标注 preset=false

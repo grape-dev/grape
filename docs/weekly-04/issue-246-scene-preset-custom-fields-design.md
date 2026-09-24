@@ -67,14 +67,21 @@ grape-skills 仓库 `scenes/*/scene.json` 顶层新增：
   "name": "agent-dev",
   "nodes": [ ... ],
   "custom_fields": [
-    {"name": "AI_MODEL",     "is_secret": false, "scope": ["all"],  "default_value": ""},
-    {"name": "AI_BASE_URL",  "is_secret": false, "scope": ["all"],  "default_value": ""},
-    {"name": "AI_API_KEY",   "is_secret": true,  "scope": ["coding"], "default_value": ""}
+    {"name": "AI_MODEL",     "is_secret": false, "scope": ["all"],   "default_value": "", "description": "模型名称，如 gpt-4o"},
+    {"name": "AI_BASE_URL",  "is_secret": false, "scope": ["all"],   "default_value": "", "description": "LLM API 基址"},
+    {"name": "AI_API_KEY",   "is_secret": true,  "scope": ["coding"], "default_value": "", "description": "LLM API 密钥"}
   ]
 }
 ```
 
-字段与原 custom_fields 结构一致（name/is_secret/scope），新增 `default_value`。`name` 复用 #236 大写/保留校验规则。
+字段与原 custom_fields 结构一致（name/is_secret/scope），新增 `default_value` 与 `description`。`name` 复用 #236 大写/保留校验规则。
+
+- **`description`（评审补充 2026-09-24，✅ 已实现）**：预置参数用途说明，两处展示：
+  1. **高级选项页**：preset 只读行 name 下方小字 hint（用户填值时的说明）
+  2. **scene-detail 详情页「场景参数」区块**（见 3.9）：展示该场景依赖的参数名 + description + scope + 是否密钥 + 默认值，告诉用户场景依赖哪些参数及作用
+  声明侧可选；`scene_sync` 原样序列化整个 custom_fields 数组（`json.dumps`），**自动透传**，无需额外同步逻辑。
+
+> 数据链路确认：description 由 `scene_sync`（原样 JSON）→ `scene_market.preset_custom_fields` → `_merge_preset_custom_fields`（normalize 透传）→ `get_advanced_options` 返回 → 前端渲染。
 
 ### 3.3 同步与预置来源（已实现）
 
@@ -115,8 +122,8 @@ PUT  /scenes/{scene_id}/advanced-options  {work_branch, custom_fields: 前端收
 ### 3.6 API 返回 preset 标记（已实现）
 
 `get_advanced_options`（scenes.py L1698）返回 custom_fields 项增加 `preset: true/false`：
-- preset 项：`{name, value(明文/掩码), is_secret, scope, preset: true}`，前端渲染只读 name label + 值输入框（不可删、不可改名、scope 不可改）
-- 用户自定义项：`preset: false`，保持现有可编辑行
+- preset 项：`{name, value(明文/掩码), is_secret, scope, preset: true, description}`，前端渲染只读 name label + 值输入框（不可删、不可改名、scope 不可改），description 显示为小字 hint
+- 用户自定义项：`preset: false`，保持现有可编辑行（无 description）
 
 ### 3.7 保存校验（防绕过，已实现）
 
@@ -124,6 +131,7 @@ PUT  /scenes/{scene_id}/advanced-options  {work_branch, custom_fields: 前端收
 - **不可删**：库内 preset 声明全部保留——前端未提交某个 preset 行 → 后端按声明 + 旧值自动补回
 - **不可改名**：preset 项 name 以库内声明为准（忽略前端提交的已改名项，原 name 保留）
 - **is_secret/scope 锁定**：以 preset 声明为准（忽略前端篡改）
+- **description 透传**：preset 项 description 以库内声明为准（忽略前端修改；用户自定义项无 description）
 - **值可更新**：用户提交的值生效；secret 空值/掩码 → 沿用旧值或 default_value
 - 非 preset 用户自定义项显式标注 `preset:false`
 
@@ -131,22 +139,36 @@ PUT  /scenes/{scene_id}/advanced-options  {work_branch, custom_fields: 前端收
 
 `_inject_scene_env`（event_pipeline.py:2059）**零改动**——preset 项与用户自定义项同存于 `advanced_options.custom_fields`，按现有 scope/agent_type 过滤 + is_secret 明文注入逻辑执行。
 
+### 3.9 scene-detail 详情页「场景参数」区块（评审补充 2026-09-24，✅ 已实现）
+
+场景市场详情页（`renderSceneDetail`，scene-market.js）在「执行流程 → 技能套件」之后、「样例项目模板」之前新增「场景参数」区块：
+
+- 数据来源：`get_scene_market_detail`（scenes.py L232）返回新增 `preset_custom_fields`（scene_market 列）。
+- 展示内容（每条预置参数一行）：
+  - 参数名（`code` 样式高亮）
+  - `🔒 密钥` 徽标（is_secret）
+  - scope 标签（VOD/Issue/Coding/QA/SRE/全部）
+  - 默认值（有则显示 `默认: xxx`）
+  - description 说明（参数用途小字）
+- 价值：用户在应用场景前即了解该场景依赖哪些参数、各自作用，避免重复跑应用后才发现。
+- 渲染：`s.preset_custom_fields`（JSON 字符串/数组兼容）解析后 forEach 渲染；无声明时区块不显示（功能无感）。
+
 ---
 
 ## 4. 各模块改动清单（✅ 已实施）
 
 | 模块 | 改动类型 | 说明 |
 |------|---------|------|
-| `scenes/*/scene.json`（grape-skills） | 新增（待配套） | 顶层 `custom_fields` 声明数组 |
+| `scenes/*/scene.json`（grape-skills） | 新增（待配套） | 顶层 `custom_fields` 声明数组（含可选 `description`） |
 | `src/api/db_setup.py` | ✅ 修改 | `scene_market` 加 `preset_custom_fields TEXT DEFAULT '[]'`（DDL + `_ensure_column` 迁移） |
-| `src/storage/scene_sync.py` | ✅ 修改 | 同步时写 `scene_market.preset_custom_fields`（nodes_json 不变） |
+| `src/storage/scene_sync.py` | ✅ 修改 | 同步时写 `scene_market.preset_custom_fields`（nodes_json 不变；原样序列化含 description） |
 | `src/user/db.py` | ✅ 修改 | `get_scene_market_by_id` 返回 `preset_custom_fields` |
-| `src/api/routes/scenes.py` | ✅ 修改 | `_merge_preset_custom_fields` helper + `apply_market_scene` 调用；`get_advanced_options` 返回 preset 标记；`save_advanced_options` preset 保护 |
-| `src/api/static/js/pages/scene-market.js` | ✅ 修改 | `_applyAddCustomField` 支持 preset 只读行 |
-| `src/api/static/js/pages/dashboard.js` | ✅ 修改 | 两处 `_addCustomFieldInline` 支持 preset 只读行（只读 name label + 值输入框） |
+| `src/api/routes/scenes.py` | ✅ 修改 | `_merge_preset_custom_fields` helper + `apply_market_scene` 调用；`get_advanced_options` 返回 preset 标记 + description；`get_scene_market_detail` 返回 preset_custom_fields；`save_advanced_options` preset 保护（description 声明锁定） |
+| `src/api/static/js/pages/scene-market.js` | ✅ 修改 | `_applyAddCustomField` 支持 preset 只读行 + description hint；`_renderSceneDetailPage` 增加「场景参数」区块 |
+| `src/api/static/js/pages/dashboard.js` | ✅ 修改 | 两处 `_addCustomFieldInline` 支持 preset 只读行（只读 name label + 值输入框 + description hint） |
 | `src/api/static/js/app.js` | ✅ 修改 | `_cfCollectFields` 收集 preset 标记 |
 | `src/api/event_pipeline.py` | 无改动 | `_inject_scene_env` 复用 |
-| `src/scene_custom_env.py` | ✅ 修改 | `normalize_custom_field` 透传 preset/default_value |
+| `src/scene_custom_env.py` | ✅ 修改 | `normalize_custom_field` 透传 preset/default_value + description |
 
 > 待配套（grape-skills 仓库）：目标场景 `scenes/*/scene.json` 增加 `custom_fields` 声明——未声明时 preset 列表为空，功能无感启用。
 
@@ -168,6 +190,7 @@ PUT  /scenes/{scene_id}/advanced-options  {work_branch, custom_fields: 前端收
 - ✅ get_advanced_options：preset 项返回 `preset:true`、自定义项 `preset:false`
 - ✅ save_advanced_options：preset 项不可删、不可改名、scope 锁定为声明值、值可更新、secret 空值沿用旧值
 - ✅ default_value：空值时预置项以 default_value 注入
+- ✅ description：normalize 透传 + get 返回 + scene-detail「场景参数」展示 + save 以声明锁定（`test_description_persisted_and_locked`）
 
 回归：`tests/test_scene_env.py`（19 用例）+ `tests/test_scene_preset.py`（6 用例）全通过；`scene_apply_enable`/`scene_skill_market` 既有失败为改动前基线（已 stash 对照确认，非本次引入）
 

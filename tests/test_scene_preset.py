@@ -159,3 +159,25 @@ def test_merge_preset_default_value_applied():
     ao = _read_ao()
     assert ao["custom_fields"][0]["value"] == "http://localhost:8080"
     assert ao["custom_fields"][0]["preset"] is True
+
+
+def test_description_persisted_and_locked():
+    """description 透传：merge 入库、get 返回、save 以声明锁定（忽略前端篡改）。"""
+    from src.api.routes.scenes import _merge_preset_custom_fields, get_advanced_options, save_advanced_options
+    preset = json.dumps([
+        {"name": "AI_MODEL", "is_secret": False, "scope": ["all"], "default_value": "", "description": "模型名称，如 gpt-4o"},
+    ])
+    _seed_scene("s1")
+    _merge_preset_custom_fields("s1", RK, preset)
+    # merge 后 GET 返回 description
+    d1 = get_advanced_options("s1", user={"user_id": 0}, repo="org/presetenv")
+    item1 = [x for x in d1["custom_fields"] if x["name"] == "AI_MODEL"][0]
+    assert item1["description"] == "模型名称，如 gpt-4o"
+    # save 时前端传入篡改 description → 后端以声明锁定为原值
+    save_advanced_options(
+        "s1",
+        _Body("main", [{"name": "AI_MODEL", "value": "gpt-4o", "is_secret": False, "scope": ["all"], "preset": True, "description": "HACKED"}]),
+        user={"user_id": 0}, repo="org/presetenv")
+    d2 = get_advanced_options("s1", user={"user_id": 0}, repo="org/presetenv")
+    item2 = [x for x in d2["custom_fields"] if x["name"] == "AI_MODEL"][0]
+    assert item2["description"] == "模型名称，如 gpt-4o"

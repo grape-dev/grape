@@ -808,7 +808,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
   };
 
-window._addCustomFieldInline = function(name, value, isSecret, scope, preset) {
+window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
@@ -819,9 +819,13 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset) {
     var _val = (value || '');
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
-    // preset 项：name 只读 label（不可改名/增删），scope 组隐藏，不显示删除按钮
+    var _desc = (description || '').trim();
+    // preset 项：name 只读 label（不可改名/增删），scope 组隐藏，不显示删除按钮；description 小字 hint
     var _nameEl = preset
-      ? '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;min-width:120px;font-size:12px;display:inline-flex;align-items:center">' + (name || '') + '</span>'
+      ? '<span style="display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center;min-width:140px">' +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + (name || '') + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+        '</span>'
       : '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">';
     row.innerHTML = _nameEl +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + _val + '">' +
@@ -1539,7 +1543,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (el2) el2.style.display = el2.style.display === 'none' ? 'block' : 'none';
   };
 
-  window._addCustomFieldInline = function(name, value, isSecret, scope, preset) {
+  window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
@@ -1550,8 +1554,12 @@ function _enterCreateStandardMode(data, owner, name) {
     var _val = (value || '');
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
+    var _desc = (description || '').trim();
     var _nameEl = preset
-      ? '<span class="adv-kv-key-static" style="flex:0 0 120px;font-weight:600;color:#1d1d1f;font-size:12px;display:inline-flex;align-items:center">' + (name || '') + '</span>'
+      ? '<span style="flex:0 0 150px;display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center">' +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + (name || '') + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+        '</span>'
       : '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">';
     row.innerHTML = _nameEl +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
@@ -1650,7 +1658,7 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
     var container = document.getElementById('advCustomFieldsInline');
     if (container) {
       container.innerHTML = '';
-      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset); });
+      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset, f.description); });
     }
   }).catch(function() {});
 }

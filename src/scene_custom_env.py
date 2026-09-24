@@ -124,8 +124,10 @@ def normalize_custom_field(f: dict) -> dict:
     scope = normalize_scope(f.get("scope") if isinstance(f, dict) else None)
     preset = bool(f.get("preset")) if isinstance(f, dict) else False
     default_value = (f.get("default_value") or "") if isinstance(f, dict) else ""
+    description = (f.get("description") or "") if isinstance(f, dict) else ""
     name = name.strip()
     return {
         "name": name, "value": value, "is_secret": is_secret,
         "scope": scope, "preset": preset, "default_value": default_value,
+        "description": description,
     }
