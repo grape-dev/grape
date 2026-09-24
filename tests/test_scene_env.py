@@ -1,7 +1,7 @@
 """GRAPE_SCENE_ID 环境变量注入测试（issue-219：场景标识统一 env 注入）。
 
 覆盖：issue 场景来源 / 仓库级 dev_scene 回退 / 空场景注入空串 /
-custom_fields（GRAPE_CF_* / GRAPE_CF_MAP）沿用。"""
+custom_fields 直接注入（Issue #236：name 直接作为变量名注入 + 冲突/大写兜底 + secret 不回显）。"""
 import json
 import pytest
 
@@ -65,11 +65,110 @@ def _inject(issue_id="5"):
 
 def test_injects_scene_id_and_custom_fields_from_issue_scene():
     _seed_issue(5, "devops-scene")
-    _seed_scene("devops-scene", '{"work_branch": "main", "custom_fields": [{"key": "env", "value": "prod"}]}')
+    _seed_scene("devops-scene", '{"work_branch": "main", "custom_fields": [{"name": "ENV", "value": "prod"}]}')
     env = _inject()
     assert env["GRAPE_SCENE_ID"] == "devops-scene"
-    assert env["GRAPE_CF_1"] == "prod"
-    assert json.loads(env["GRAPE_CF_MAP"]) == {"GRAPE_CF_1": "env"}
+    assert env["ENV"] == "prod"
+
+
+def test_injects_custom_field_name_as_var_name_directly():
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{"custom_fields": [{"name": "MY_API_KEY", "value": "xxx"}]}')
+    env = _inject()
+    assert env["MY_API_KEY"] == "xxx"
+    assert "GRAPE_CF_1" not in env
+    assert "GRAPE_CF_MAP" not in env
+
+
+def test_custom_field_conflict_with_reserved_skipped():
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{"custom_fields": [{"name": "PATH", "value": "x"}, {"name": "GRAPE_XXX", "value": "y"}, {"name": "GOOD_KEY", "value": "z"}]}')
+    env = _inject()
+    assert "PATH" not in env
+    assert "GRAPE_XXX" not in env
+    assert env["GOOD_KEY"] == "z"
+
+
+def test_custom_field_lowercase_skipped_at_runtime():
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{"custom_fields": [{"name": "my_key", "value": "x"}]}')
+    env = _inject()
+    assert "my_key" not in env
+
+
+def test_secret_masked_from_get_but_injected():
+    """secret 项：get_advanced_options 不回显明文 value（仅 value_exist），注入仍用明文。"""
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{"custom_fields": [{"name": "DEPLOY_SECRET", "value": "ultra-secret", "is_secret": true}]}')
+    env = _inject()
+    assert env["DEPLOY_SECRET"] == "ultra-secret"
+
+    from src.scene_custom_env import normalize_custom_field
+    f = normalize_custom_field({"name": "DEPLOY_SECRET", "value": "ultra-secret", "is_secret": True})
+    assert f["is_secret"] is True
+    f2 = normalize_custom_field({"name": "DEPLOY_URL", "value": "http://x"})
+    assert f2["is_secret"] is False
+    f3 = normalize_custom_field({"name": "MY_API_KEY", "value": "k"})
+    assert f3["is_secret"] is True  # _KEY 后缀自动识别
+
+
+def test_save_advanced_options_validates_uppercase_and_reserved():
+    from fastapi import HTTPException
+    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{}')
+
+    def _save(fields):
+        return save_advanced_options("devops-scene",
+                                     _Body(work_branch="main", custom_fields=fields),
+                                     user={"user_id": 0}, repo="org/sceneenv")
+
+    class _Body:
+        def __init__(self, work_branch="", custom_fields=None):
+            self.work_branch = work_branch
+            self.custom_fields = custom_fields or []
+
+    # 小写拒绝
+    try:
+        _save([{"name": "bad_key", "value": "1"}])
+        assert False, "lowercase name should be rejected"
+    except HTTPException as e:
+        assert e.status_code == 400
+    # 保留变量拒绝
+    try:
+        _save([{"name": "PATH", "value": "1"}])
+        assert False, "reserved name should be rejected"
+    except HTTPException as e:
+        assert e.status_code == 400
+    # 正常保存 secret 项
+    _save([{"name": "GOOD_KEY", "value": "1", "is_secret": True}])
+    d = get_advanced_options("devops-scene", user={"user_id": 0}, repo="org/sceneenv")
+    assert d["custom_fields"][0]["name"] == "GOOD_KEY"
+    assert d["custom_fields"][0]["is_secret"] is True
+    assert "value" not in d["custom_fields"][0]
+
+
+def test_secret_blank_value_preserves_old_value():
+    from fastapi import HTTPException
+    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{}')
+
+    class _Body:
+        def __init__(self, work_branch="", custom_fields=None):
+            self.work_branch = work_branch
+            self.custom_fields = custom_fields or []
+
+    save_advanced_options("devops-scene",
+                          _Body(work_branch="main", custom_fields=[{"name": "DEPLOY_SECRET", "value": "orig", "is_secret": True}]),
+                          user={"user_id": 0}, repo="org/sceneenv")
+    # 掩码已存在 → 前端提交空 value + is_secret → 后端保留旧值
+    save_advanced_options("devops-scene",
+                          _Body(work_branch="main", custom_fields=[{"name": "DEPLOY_SECRET", "value": "", "is_secret": True}]),
+                          user={"user_id": 0}, repo="org/sceneenv")
+    d = get_advanced_options("devops-scene", user={"user_id": 0}, repo="org/sceneenv")
+    assert d["custom_fields"][0]["name"] == "DEPLOY_SECRET"
+    assert d["custom_fields"][0]["value_exist"] is True
 
 
 def test_fallback_to_repo_dev_scene():
@@ -77,7 +176,7 @@ def test_fallback_to_repo_dev_scene():
     _seed_scene("repo-scene", '{"custom_fields": []}')
     env = _inject()
     assert env["GRAPE_SCENE_ID"] == "repo-scene"
-    assert "GRAPE_CF_MAP" not in env
+    assert "ENV" not in env
 
 
 def test_empty_when_no_scene():
@@ -91,7 +190,7 @@ def test_scene_with_work_branch_only_sets_scene_id():
     _seed_scene("devops-scene", '{"work_branch": "main"}')
     env = _inject()
     assert env["GRAPE_SCENE_ID"] == "devops-scene"
-    assert "GRAPE_CF_1" not in env
+    assert "MY_API_KEY" not in env
     assert "GRAPE_CF_MAP" not in env
 
 
