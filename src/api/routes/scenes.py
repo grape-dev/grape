@@ -1805,7 +1805,7 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
 
     # 校验 linked_repos 格式：[{repo_key, branch}]，上限 5 个
     _linked_repos = []
-    for lr in (body.linked_repos or []):
+    for lr in (getattr(body, 'linked_repos', None) or []):
         if not isinstance(lr, dict):
             continue
         _rk = (lr.get("repo_key") or "").strip()
