@@ -520,7 +520,7 @@ def _redact_path(path: str) -> str:
 # 健康探针路径不记请求日志（参考 multica isHealthProbePath）
 _LOG_SKIP_PATHS = frozenset({"/health", "/healthz", "/readyz", "/metrics"})
 # Worker 轮询路径跳过请求日志（13 台 worker × 3s × 3 请求 = ~24 行/秒, 膨胀日志）
-_LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/")
+_LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/", "/api/ping")
 
 
 @app.middleware("http")
@@ -630,6 +630,15 @@ async def request_id_and_log_middleware(request: Request, call_next):
         request_id_var.reset(token_rid)
         repo_var.reset(token_repo)
         user_var.reset(token_uid)
+
+@app.get("/api/ping", include_in_schema=False)
+async def api_ping():
+    """前端会话保活 / Failed to fetch 恢复预检的轻量探针（无鉴权、不查 DB、浏览器可达）。
+
+    - `/health` 仅 loopback（nginx 外网 403），浏览器用不了；
+    - 本端点对任何来源返回 200，零 IO，供 heartbeat 60s 与 unhandledrejection 恢复预检。
+    """
+    return {"ok": True, "ts": _dt.now(_tz.utc).isoformat()}
 
 app.include_router(auth.router)
 app.include_router(repos.router)
