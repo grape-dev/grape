@@ -37,31 +37,15 @@ function _cfComputeIsSecret(name, isSecret) {
   return _cfIsSecretName(name);
 }
 const _CF_SCOPE_AGENTS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
-// 渲染 scope 多选下拉（select2，聚合成紧凑标签）；scope 为数组（默认 ['all']）
+// 渲染 scope 多选 checkbox 组，返回 HTML；scope 为数组（默认 ['all']）
 function _cfScopeHtml(scope) {
   const sel = Array.isArray(scope) ? scope : [scope || 'all'];
   const hasAll = sel.indexOf('all') >= 0;
-  const labels = { all: 'all', vod: 'vod', issue: 'issue', coding: 'coding', qa: 'qa', sre: 'sre' };
-  let html = '<select class="adv-kv-scope-sel" multiple style="min-width:120px;max-width:200px">';
-  _CF_SCOPE_AGENTS.forEach(a => {
+  return _CF_SCOPE_AGENTS.map(a => {
     const checked = (a === 'all') ? hasAll : (sel.indexOf(a) >= 0 && !hasAll);
-    html += '<option value="' + a + '"' + (checked ? ' selected' : '') + '>' + labels[a] + '</option>';
-  });
-  html += '</select>';
-  return html;
-}
-// 初始化一行内的 scope select2 多选下拉（若没有 select2 则保持原生多选）
-function _cfInitScopeSel(row) {
-  const sel = row.querySelector('.adv-kv-scope-sel');
-  if (!sel) return;
-  if (window.jQuery && jQuery.fn && jQuery.fn.select2) {
-    jQuery(sel).select2({
-      placeholder: 'scope',
-      width: 'style',
-      dropdownAutoWidth: true,
-      multiple: true
-    });
-  }
+    return '<label class="adv-kv-scope-lbl" style="font-size:11px;color:#86868b;display:inline-flex;align-items:center;gap:2px;white-space:nowrap">' +
+      '<input type="checkbox" class="adv-kv-scope" value="' + a + '"' + (checked ? ' checked' : '') + '>' + a + '</label>';
+  }).join('');
 }
 // 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret, scope}
 // 密钥标记由 value 输入框类型承载：type=password（隐藏/👁）→ 密钥；type=text（明文/🙈）→ 非密钥
@@ -78,13 +62,11 @@ function _cfCollectFields(prefix) {
     const err = _cfNameError(n);
     if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
     const isSec = vEl.type === 'password';
-    // scope：多选下拉选中值数组；含 all 或空 → ["all"]
-    const selEl = row.querySelector('.adv-kv-scope-sel');
-    let scope = ['all'];
-    if (selEl) {
-      const vals = Array.prototype.slice.call(selEl.selectedOptions || []).map(o => o.value);
-      scope = (vals.indexOf('all') >= 0 || !vals.length) ? ['all'] : vals;
-    }
+    // scope：.adv-kv-scope checkbox 选中值数组；含 all 或空 → ["all"]
+    const checked = Array.prototype.slice.call(row.querySelectorAll('.adv-kv-scope:checked'))
+      .map(cb => cb.value);
+    const hasAll = checked.indexOf('all') >= 0;
+    const scope = hasAll ? ['all'] : (checked.length ? checked : ['all']);
     fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope });
   }
   return { fields: fields };

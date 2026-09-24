@@ -813,7 +813,7 @@ window._addCustomFieldInline = function(name, value, isSecret, scope) {
     if (!container) return;
     var row = document.createElement('div');
     row.className = 'adv-kv';
-    row.style.cssText = 'display:flex;gap:8px;align-items:center';
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     var _isSec = _cfComputeIsSecret(name, isSecret);
     var _val = (value || '');
@@ -822,10 +822,9 @@ window._addCustomFieldInline = function(name, value, isSecret, scope) {
     row.innerHTML = '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">' +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
-      _cfScopeHtml(scope) +
-      '<button class="adv-del" onclick="this.parentElement.remove()">×</button>';
+      '<button class="adv-del" onclick="this.parentElement.remove()">×</button>' +
+      '<span style="display:flex;gap:4px;align-items:center;flex:1 1 100%">' + _cfScopeHtml(scope) + '</span>';
     container.appendChild(row);
-    _cfInitScopeSel(row);
   };
 
   window._createNewBranchInline = function(owner, name) {
@@ -1540,7 +1539,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (!container) return;
     var row = document.createElement('div');
     row.className = 'adv-kv';
-    row.style.cssText = 'display:flex;gap:8px;align-items:center';
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     var _isSec = _cfComputeIsSecret(name, isSecret);
     var _val = (value || '');
@@ -1549,10 +1548,9 @@ function _enterCreateStandardMode(data, owner, name) {
     row.innerHTML = '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">' +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
-      _cfScopeHtml(scope) +
-      '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>';
+      '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>' +
+      '<span style="display:flex;gap:4px;align-items:center;flex:1 1 100%">' + _cfScopeHtml(scope) + '</span>';
     container.appendChild(row);
-    _cfInitScopeSel(row);
   };
 
   window._createNewBranchInline = function(owner, name) {
