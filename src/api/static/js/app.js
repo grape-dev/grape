@@ -37,16 +37,8 @@ function _cfComputeIsSecret(name, isSecret) {
   return _cfIsSecretName(name);
 }
 const _CF_SCOPE_AGENTS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
-// 根据 all 是否选中，切换行内非 all checkbox 的 disabled 状态
-function _cfSyncScopeDisabled(row) {
-  const allBox = row.querySelector('.adv-kv-scope[value="all"]');
-  const allOn = !!(allBox && allBox.checked);
-  row.querySelectorAll('.adv-kv-scope').forEach(b => {
-    if (b.value === 'all') return;
-    b.disabled = allOn;
-  });
-}
-// scope checkbox 互斥联动：勾选 all → 取消并禁用其它；勾选具体 agent → 取消 all
+// scope checkbox 互斥联动：勾选 all → 取消其它；勾选具体 agent → 取消 all
+// （不做 disabled 置灰，其它选项始终可选）
 function _cfScopeToggle(cb) {
   const row = cb.closest('.adv-kv');
   if (!row) return;
@@ -59,19 +51,15 @@ function _cfScopeToggle(cb) {
       if (allBox) allBox.checked = false;
     }
   }
-  _cfSyncScopeDisabled(row);
 }
 // 渲染 scope 多选 checkbox 组，返回 HTML；scope 为数组（默认 ['all']）
-// 互斥体现：scope 含 all 时其它选项 disabled；否则 all disabled 恒隐藏语义（不勾即 all）
 function _cfScopeHtml(scope) {
   const sel = Array.isArray(scope) ? scope : [scope || 'all'];
   const hasAll = sel.indexOf('all') >= 0;
   return _CF_SCOPE_AGENTS.map(a => {
     const checked = (a === 'all') ? hasAll : (sel.indexOf(a) >= 0 && !hasAll);
-    const disabled = hasAll && a !== 'all';
     return '<label class="adv-kv-scope-lbl" style="font-size:11px;color:#86868b;display:inline-flex;align-items:center;gap:2px;white-space:nowrap">' +
-      '<input type="checkbox" class="adv-kv-scope" value="' + a + '"' + (checked ? ' checked' : '') +
-      (disabled ? ' disabled' : '') + ' onchange="_cfScopeToggle(this)">' + a + '</label>';
+      '<input type="checkbox" class="adv-kv-scope" value="' + a + '"' + (checked ? ' checked' : '') + ' onchange="_cfScopeToggle(this)">' + a + '</label>';
   }).join('');
 }
 // 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret, scope}

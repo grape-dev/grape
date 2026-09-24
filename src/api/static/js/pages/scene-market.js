@@ -714,7 +714,6 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
       '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>' +
       (readOnlyKey ? '' : '<span style="display:flex;gap:4px;align-items:center;flex:1 1 100%">' + _cfScopeHtml(scope) + '</span>');
     container.appendChild(row);
-    _cfSyncScopeDisabled(row);
   };
 
   // 华为云 Skill 场景：自动注入 AK/SK 配置项
