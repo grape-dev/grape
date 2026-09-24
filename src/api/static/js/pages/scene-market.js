@@ -695,7 +695,7 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
   };
 
   // 添加自定义配置项
-  window._applyAddCustomField = function(name, value, readOnlyKey, isSecret, scope, valueExist) {
+  window._applyAddCustomField = function(name, value, readOnlyKey, isSecret, scope, valueExist, preset) {
     var container = document.getElementById('applyAdvCustomFields');
     if (!container) return;
     var row = document.createElement('div');
@@ -707,12 +707,15 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
     var val = (value || '');
     var valType = (readOnlyKey || isSec) ? 'password' : 'text';
     var eyeIcon = (readOnlyKey || isSec) ? '👁' : '🙈';
-    row.innerHTML =
-      '<input class="adv-kv-key" placeholder="name" ' + keyInputAttrs + ' value="' + (name || '') + '">' +
+    var nameEl = preset
+      ? '<span class="adv-kv-key-static" style="flex:1;font-weight:600;color:#1d1d1f;padding:7px 12px;font-size:13px">' + (name || '') + '</span>'
+      : '<input class="adv-kv-key" placeholder="name" ' + keyInputAttrs + ' value="' + (name || '') + '">';
+    row.innerHTML = nameEl +
       '<input class="adv-kv-val" id="' + valId + '" type="' + valType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + eyeIcon + '</button>' +
-      (readOnlyKey ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
-      '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>';
+      ((readOnlyKey || preset) ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
+      (preset ? '<input type="hidden" class="adv-kv-preset" value="1">'
+               : '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>');
     container.appendChild(row);
   };
 
@@ -826,7 +829,7 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
             }
           }
         }
-        window._applyAddCustomField(fname, f.value !== undefined ? f.value : '', false, f.is_secret, f.scope, f.value_exist);
+        window._applyAddCustomField(fname, f.value !== undefined ? f.value : '', false, f.is_secret, f.scope, f.value_exist, f.preset);
       });
     }).catch(function() {});
   }
