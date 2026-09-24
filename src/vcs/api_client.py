@@ -205,6 +205,18 @@ class VcsApiClient:
             return {"error": str(e)}
 
 
+
+def create_pr_for_repo(repo_key: str, token: str, title: str, head: str, base: str,
+                        body: str = "") -> dict:
+    """为指定仓库创建 PR（Issue #242 多仓库 PR 提交）。
+
+    根据 repo_key 前缀自动选择 VCS 平台，复用 VcsApiClient.create_pr。
+    """
+    from src.repo_key import parse_repo_key
+    provider, owner, repo = parse_repo_key(repo_key)
+    client = VcsApiClient(provider=provider, token=token, owner=owner, repo=repo)
+    return client.create_pr(title=title, head=head, base=base, body=body)
+
 def create_client(repo_key: str, token: str = "") -> "VcsApiClient":
     """从 repo_key 创建 VcsApiClient。
 

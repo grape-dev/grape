@@ -1960,6 +1960,13 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     except Exception:
         pass
     _inject_scene_env(env_extra, repo_key, issue_id)
+    # Issue #242: 注入关联仓库列表（coding agent 读取后初始化多仓库 worktree）
+    try:
+        _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
+        if _linked_repos:
+            env_extra["GRAPE_LINKED_REPOS"] = json.dumps(_linked_repos, ensure_ascii=False)
+    except Exception:
+        pass
     # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
@@ -2094,6 +2101,46 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "") -> Non
     except Exception as _e:
         from src.config import log
         log.warning(f"inject scene env failed: {_e}")
+
+
+def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
+    """读取场景关联仓库列表（Issue #242）。
+
+    优先读 issue_state.scene_id 对应场景的 linked_repos 列，
+    空则读 advanced_options JSON 中的 linked_repos。
+    返回 [{repo_key, branch}] 列表。
+    """
+    try:
+        scene_id = _resolve_scene_id(repo_key, issue_id)
+        if not scene_id:
+            return []
+        from src.session_manager import db, db_lock
+        import json as _json
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+        if not row:
+            return []
+        # 优先读独立列
+        if row[0]:
+            try:
+                return _json.loads(row[0]) or []
+            except Exception:
+                pass
+        # 回退读 advanced_options JSON
+        if row[1]:
+            try:
+                opts = _json.loads(row[1])
+                return opts.get("linked_repos", []) or []
+            except Exception:
+                pass
+        return []
+    except Exception:
+        return []
 
 
 def get_prompt_context(repo_key: str) -> str:
@@ -2410,6 +2457,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception:
         pass
     _inject_scene_env(env_extra, repo_key, issue_id)
+    # Issue #242: 注入关联仓库列表（coding agent 读取后初始化多仓库 worktree）
+    try:
+        _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
+        if _linked_repos:
+            env_extra["GRAPE_LINKED_REPOS"] = json.dumps(_linked_repos, ensure_ascii=False)
+    except Exception:
+        pass
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
     if agent_type == "coding":
         try:

@@ -1162,6 +1162,25 @@ async def _execute_task(client, task, engine_name: str = ""):
                 env["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
+    # Issue #242: 关联仓库 worktree 初始化（coding agent 多仓库并行操作）
+    try:
+        from src.runtime import repogit
+        _linked_repos_env = env.get("GRAPE_LINKED_REPOS", "")
+        if _linked_repos_env and task.get("agent_type") == "coding":
+            import json as _json_lr
+            _linked_repos_list = _json_lr.loads(_linked_repos_env) if _linked_repos_env else []
+            if _linked_repos_list:
+                _num_lr = repogit.issue_num_from(task.get("issue_id") or "")
+                _wt_list = repogit.ensure_linked_repo_worktrees(
+                    _linked_repos_list, "coding", _num_lr,
+                    token=task.get("repo_gitcode_token") or "")
+                if _wt_list:
+                    env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
+                        [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
+                         for w in _wt_list], ensure_ascii=False)
+                    log.info(f"linked repos: {len(_wt_list)} worktrees initialized for issue={_num_lr}")
+    except Exception as e:
+        log.warning(f"linked repos worktree init failed: {e}")
     skill_dir = _os.path.join(cwd, ".skills")
     prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
                                        .replace("{{SERVER_URL}}", task.get("server_url") or "")

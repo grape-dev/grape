@@ -108,6 +108,7 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "created_by": s.get("created_by") or "",
                        "scene_type": s.get("scene_type") or "standard",
                        "pr_subscription_enabled": bool(s.get("pr_subscription_enabled", 0)),
+                       "linked_repos": s.get("linked_repos") or [],
                        "pipeline": cfg})
     return {"scenes": result}
 
@@ -965,6 +966,7 @@ class CreateMarketSceneRequest(BaseModel):
     file_id: int = 0  # uploaded_files 表 id（图标临时文件）
     category_id: int = 1
     recommended_template: str = ""
+    linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
 
 @router.post("/market", operation_id="scenes_market_create", summary="Create market scene", description="Creates a user custom scene in scene_market. scope=repo: repo scene visible to all repo users.")
@@ -1058,6 +1060,7 @@ class UpdateMarketSceneRequest(BaseModel):
     file_id: int = 0  # 新上传的图标临时文件 id（0=未更换图标）
     category_id: int = 0
     recommended_template: str = ""
+    linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
 
 @router.put("/market/{market_id}", operation_id="scenes_market_update", summary="Update market scene", description="Updates a custom market scene (scope != official).")
@@ -1396,6 +1399,7 @@ class CreateSceneRequest(BaseModel):
     icon: str = ""
     scene_type: str = "standard"  # deprecated, 保留向后兼容
     pr_subscription_enabled: bool = False
+    linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
 class UpdateSceneRequest(BaseModel):
     name: str | None = None
@@ -1403,6 +1407,7 @@ class UpdateSceneRequest(BaseModel):
     nodes: list[SceneNodeInput] = []
     icon: str | None = None
     pr_subscription_enabled: bool | None = None
+    linked_repos: list | None = None  # None=不更新；[] = 清空关联仓库
 
 class ApplySceneRequest(BaseModel):
     scene_id: str
@@ -1506,7 +1511,8 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
             scene_id=scene_id, name=body.name, description=body.description,
             repo_key=repo_key, nodes=nodes_json, created_by=user.get("username") or "",
             icon=body.icon or "", scene_type="standard",
-            pr_subscription_enabled=1 if body.pr_subscription_enabled else 0)
+            pr_subscription_enabled=1 if body.pr_subscription_enabled else 0,
+            linked_repos=body.linked_repos or [])
     except Exception as e:
         err_upper = str(e).upper()
         if "UNIQUE" in err_upper or "DUPLICATE" in err_upper:
@@ -1565,7 +1571,8 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     update_custom_scene(
         scene_id=scene_id, repo_key=repo_key, nodes=_update_nodes,
         name=body.name, description=body.description, icon=body.icon,
-        pr_subscription_enabled=1 if _pr_sub_on else 0 if _pr_sub_on is not None else None)
+        pr_subscription_enabled=1 if _pr_sub_on else 0 if _pr_sub_on is not None else None,
+        linked_repos=body.linked_repos)
 
     log.info(f"Scene updated: id={scene_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}
@@ -1693,6 +1700,7 @@ def app_current_repo():
 class AdvancedOptionsRequest(BaseModel):
     work_branch: str = "main"
     custom_fields: list = []   # [{key: str, value: str}]
+    linked_repos: list = []    # [{repo_key: str, branch: str}] — Issue #242
 
 
 @router.get("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_get", summary="Get scene advanced options", description="Reads scene advanced options (work branch + custom key:value).")
@@ -1727,8 +1735,18 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
         return {
             "work_branch": opts.get("work_branch", "main") or "main",
             "custom_fields": opts.get("custom_fields", []) or [],
+            "linked_repos": opts.get("linked_repos", []) or [],
         }
-    return {"work_branch": "main", "custom_fields": []}
+    # linked_repos 也可能存在独立列中（create_scene 直接写入）
+    _linked_repos = []
+    try:
+        from src.api.pipeline_config import _query_scene_by_id
+        _scene = _query_scene_by_id(scene_id, repo_key=repo_key)
+        if _scene:
+            _linked_repos = _scene.get("linked_repos") or []
+    except Exception:
+        pass
+    return {"work_branch": "main", "custom_fields": [], "linked_repos": _linked_repos}
 
 
 @router.put("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_set", summary="Save scene advanced options", description="Saves scene advanced options (work branch + custom key:value).")
@@ -1766,12 +1784,25 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"配置项 key '{_k}' 重复"})
         seen_keys.add(_k)
 
+    # 校验 linked_repos 格式：[{repo_key, branch}]，上限 5 个
+    _linked_repos = []
+    for lr in (body.linked_repos or []):
+        if not isinstance(lr, dict):
+            continue
+        _rk = (lr.get("repo_key") or "").strip()
+        _br = (lr.get("branch") or "").strip()
+        if _rk:
+            _linked_repos.append({"repo_key": _rk, "branch": _br or "main"})
+    if len(_linked_repos) > 5:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "关联仓库数量不能超过 5 个"})
+
     opts = {
         "work_branch": body.work_branch.strip(),
         "custom_fields": [
             {"key": (f.get("key") or "").strip(), "value": (f.get("value") or "").strip()}
             for f in (body.custom_fields or []) if isinstance(f, dict)
         ],
+        "linked_repos": _linked_repos,
     }
     opts_json = _json.dumps(opts, ensure_ascii=False)
     now = datetime.now(timezone.utc).isoformat()
@@ -1785,11 +1816,18 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
                 (opts_json, now, scene_id, repo_key))
             if c.rowcount == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在或未激活"})
+            # Issue #242: 同步写入独立 linked_repos 列（便于查询时直接读取）
+            try:
+                c.execute(
+                    "UPDATE devops_pipeline_scene SET linked_repos=? WHERE scene_id=? AND repo_key=? AND is_active=1",
+                    (_json.dumps(_linked_repos, ensure_ascii=False), scene_id, repo_key))
+            except Exception:
+                pass  # 列不存在时忽略（兼容旧库）
             db.commit()
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
 
-    log.info(f"Advanced options saved: scene={scene_id} repo={repo_key} work_branch={body.work_branch}")
+    log.info(f"Advanced options saved: scene={scene_id} repo={repo_key} work_branch={body.work_branch} linked_repos={len(_linked_repos)}")
     return {"message": "高级选项已保存"}
