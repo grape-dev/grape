@@ -41,6 +41,7 @@ configs/project-templates.json
 DEPLOYMENT-REMOTE.md
 DEPLOYMENT-WORKER.md
 DEPLOYMENT-TEST.md
+DEPLOYMENT-CLUSTER.md
 ADD-WHITELIST.md
 .huaweicloud/
 opencode-incident-*.md

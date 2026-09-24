@@ -1295,7 +1295,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         try:
             _cfg = get_pipeline_config(_scene_id, repo_key=_rk)
             if _cfg:
-                _scene_name = _cfg.get("name", _scene_id)
+                _scene_name = _cfg.get("display_name") or _cfg.get("name", _scene_id)
         except Exception:
             pass
         _has_running_agent = bool(r[3]) and _stage in ("vod", "issue", "coding", "qa", "sre") and ((_rk, _issue_id) in _running)

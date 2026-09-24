@@ -279,7 +279,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
             from src.api.pipeline_config import get_pipeline_config
             _cfg = get_pipeline_config(scene_id, repo_key=repo_key)
         if _cfg:
-            scene_name = _cfg.get("name", scene_id)
+            scene_name = _cfg.get("display_name") or _cfg.get("name", scene_id)
             issue_pipeline_config = _cfg
 
     # 总执行时长：所有已完成事件的 duration 之和

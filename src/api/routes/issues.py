@@ -77,7 +77,7 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
             return ""
         if sid not in _scene_name_cache:
             cfg = get_pipeline_config(sid, repo_key=repo_keys[0] if repo_keys else "")
-            _scene_name_cache[sid] = (cfg or {}).get("name", sid)
+            _scene_name_cache[sid] = (cfg or {}).get("display_name") or (cfg or {}).get("name", sid)
         return _scene_name_cache[sid]
 
     for pr_num, ev in _pr_map.items():
@@ -712,7 +712,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     nodes, _ = compute_node_statuses(nodes, events, _current_stage)
     return {
         "scene_id": _scene_id,
-        "scene_name": (pipe_cfg or {}).get("name", _scene_id),
+        "scene_name": (pipe_cfg or {}).get("display_name") or (pipe_cfg or {}).get("name", _scene_id),
         "current_stage": _current_stage,
         "nodes": nodes,
         "events": events,

@@ -1688,11 +1688,11 @@ def app_current_repo():
     return None
 
 
-# ===== 场景高级选项：工作分支 + 自定义 key:value =====
+# ===== 场景高级选项：工作分支 + 自定义 {name, value, is_secret} =====
 
 class AdvancedOptionsRequest(BaseModel):
     work_branch: str = "main"
-    custom_fields: list = []   # [{key: str, value: str}]
+    custom_fields: list = []   # [{name: str, value: str, is_secret: bool?}]
 
 
 @router.get("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_get", summary="Get scene advanced options", description="Reads scene advanced options (work branch + custom key:value).")
@@ -1724,9 +1724,16 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
             opts = _json.loads(row[0])
         except Exception:
             opts = {}
+        from src.scene_custom_env import normalize_custom_field
+        _fields = []
+        for f in (opts.get("custom_fields", []) or []):
+            _nf = normalize_custom_field(f)
+            if not _nf.get("name"):
+                continue
+            _fields.append({"name": _nf["name"], "value": _nf.get("value", ""), "is_secret": _nf.get("is_secret", False), "scope": _nf.get("scope", ["all"])})
         return {
             "work_branch": opts.get("work_branch", "main") or "main",
-            "custom_fields": opts.get("custom_fields", []) or [],
+            "custom_fields": _fields,
         }
     return {"work_branch": "main", "custom_fields": []}
 
@@ -1756,22 +1763,57 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
     if not existing:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
 
-    # 校验 custom_fields key 非空且不重复
-    seen_keys = set()
+    # 校验 custom_fields name 非空/大写/保留冲突且不重复
+    from src.scene_custom_env import custom_env_error, normalize_custom_field
+    seen_names = set()
     for f in (body.custom_fields or []):
-        _k = (f.get("key") or "").strip() if isinstance(f, dict) else ""
-        if not _k:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "配置项 key 不能为空"})
-        if _k in seen_keys:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": f"配置项 key '{_k}' 重复"})
-        seen_keys.add(_k)
+        _n = (f.get("name") or "").strip() if isinstance(f, dict) else ""
+        _err = custom_env_error(_n)
+        if _err:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": _err})
+        if _n in seen_names:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"配置项 name '{_n}' 重复"})
+        seen_names.add(_n)
+        # scope 校验：数组内每项必须为合法枚举；全部非法 → 400（部分非法在 normalize 时剔除）
+        _raw_scope = f.get("scope") if isinstance(f, dict) else None
+        if _raw_scope:
+            from src.scene_custom_env import _SCOPE_SET
+            _items = _raw_scope if isinstance(_raw_scope, (list, tuple, set)) else [_raw_scope]
+            _valid_items = {(str(x) or "").strip().lower() for x in _items if x not in (None, "")}
+            if _valid_items and not (_valid_items & _SCOPE_SET):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 400, "message": f"配置项 '{_n}' 的 scope 非法，可选值: all/vod/issue/coding/qa/sre"})
 
+    _custom_fields = [normalize_custom_field(f) for f in (body.custom_fields or []) if isinstance(f, dict)]
+    _custom_fields = [f for f in _custom_fields if f.get("name")]
+    # 前端掩码回显（value=********）→ keep_value 标记：value 视为未修改，保留旧值（不受 is_secret 限制）
+    if _custom_fields:
+        try:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "SELECT advanced_options FROM devops_pipeline_scene "
+                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                    (scene_id, repo_key))
+                _row = _c.fetchone()
+            _old = _json.loads(_row[0]) if (_row and _row[0]) else {}
+            _old_map = {f.get("name"): f.get("value", "") for f in (_old.get("custom_fields", []) or []) if f.get("name")}
+            _keep_map = {
+                (f.get("name") or "").strip()
+                for f in (body.custom_fields or []) if isinstance(f, dict) and f.get("keep_value")
+            }
+            for _f in _custom_fields:
+                # keep_value（掩码未改）或 secret 空值（清空无效）→ 保留旧值
+                if ((_f["name"] in _keep_map)
+                        or (_f.get("is_secret") and not _f.get("value"))) \
+                        and _f["name"] in _old_map:
+                    _f["value"] = _old_map[_f["name"]]
+        except Exception:
+            pass
     opts = {
         "work_branch": body.work_branch.strip(),
-        "custom_fields": [
-            {"key": (f.get("key") or "").strip(), "value": (f.get("value") or "").strip()}
-            for f in (body.custom_fields or []) if isinstance(f, dict)
-        ],
+        "custom_fields": _custom_fields,
     }
     opts_json = _json.dumps(opts, ensure_ascii=False)
     now = datetime.now(timezone.utc).isoformat()

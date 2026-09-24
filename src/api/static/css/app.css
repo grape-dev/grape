@@ -815,3 +815,6 @@
   .sb.collapsed{width:232px;overflow:visible}
   .sb.collapsed .sb-h,.sb.collapsed .sb-sel,.sb.collapsed .sb-nav,.sb.collapsed .sb-ft{opacity:1;overflow:visible;white-space:normal}
 }
+
+/* Issue #236: 场景自定义环境变量 name 输入非法标红 + 密钥勾选紧凑样式 */
+.cf-invalid{border:1px solid #ff3b30!important;background:#fff5f5!important}
