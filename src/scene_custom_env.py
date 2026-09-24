@@ -48,10 +48,14 @@ def is_secret_name(name: str) -> bool:
     return any(up.endswith(s) for s in _SECRET_SUFFIXES)
 
 
-def compute_is_secret(name: str, is_secret: bool = False) -> bool:
-    """最终密钥判定：手动标记优先，未标记时按命名约定自动识别。"""
-    if is_secret:
-        return True
+def compute_is_secret(name: str, is_secret: bool | None = None) -> bool:
+    """最终密钥判定。
+
+    三态语义：是_secret=None（未显式指定）→ 按命名约定自动识别；
+    显式 True/False → 尊重用户选择（True 强制密钥、False 强制取消自动识别）。
+    """
+    if is_secret is not None:
+        return bool(is_secret)
     return is_secret_name(name)
 
 
@@ -75,9 +79,10 @@ def normalize_custom_field(f: dict) -> dict:
 
     输入可能来自旧数据（{key,...}）或新前端（{name,...}）；name 缺失时回退 key
     （仅作读取容错，写入侧仍以 name 为准）。
+    is_secret 语义：dict 中显式存在 → 尊重该值（True/False）；未显式给 → 按命名约定自动识别。
     """
     name = ((f.get("name") or f.get("key") or "") if isinstance(f, dict) else "") or ""
     value = (f.get("value") or "") if isinstance(f, dict) else ""
-    is_secret = bool(f.get("is_secret")) if isinstance(f, dict) else False
+    is_secret = compute_is_secret(name, f.get("is_secret") if isinstance(f, dict) else None)
     name = name.strip()
-    return {"name": name, "value": value, "is_secret": compute_is_secret(name, is_secret)}
+    return {"name": name, "value": value, "is_secret": is_secret}

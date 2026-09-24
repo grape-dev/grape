@@ -171,6 +171,34 @@ def test_secret_blank_value_preserves_old_value():
     assert d["custom_fields"][0]["value_exist"] is True
 
 
+def test_unchecking_secret_keeps_value_and_returns_plaintext():
+    """取消密钥勾选：keep_value 保留旧值 + is_secret=false → get 返回明文 value。"""
+    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{}')
+
+    class _Body:
+        def __init__(self, work_branch="", custom_fields=None):
+            self.work_branch = work_branch
+            self.custom_fields = custom_fields or []
+
+    # 先存为 secret
+    save_advanced_options("devops-scene",
+                          _Body(work_branch="main", custom_fields=[{"name": "MY_KEY", "value": "real-value", "is_secret": True}]),
+                          user={"user_id": 0}, repo="org/sceneenv")
+    # 用户取消勾选 + 掩码未改 → keep_value=true, is_secret=false → 值保留、变为明文
+    save_advanced_options("devops-scene",
+                          _Body(work_branch="main", custom_fields=[{"name": "MY_KEY", "value": "********", "is_secret": False, "keep_value": True}]),
+                          user={"user_id": 0}, repo="org/sceneenv")
+    d = get_advanced_options("devops-scene", user={"user_id": 0}, repo="org/sceneenv")
+    item = d["custom_fields"][0]
+    assert item["name"] == "MY_KEY"
+    assert item["is_secret"] is False
+    assert item["value"] == "real-value"
+    # 掩码字面量不应被写入库
+    assert item["value"] != "********"
+
+
 def test_fallback_to_repo_dev_scene():
     _seed_repo("repo-scene")
     _seed_scene("repo-scene", '{"custom_fields": []}')

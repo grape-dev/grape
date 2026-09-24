@@ -1781,7 +1781,7 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
 
     _custom_fields = [normalize_custom_field(f) for f in (body.custom_fields or []) if isinstance(f, dict)]
     _custom_fields = [f for f in _custom_fields if f.get("name")]
-    # secret 项 value 为空（前端掩码 ******** → 置空）时保留旧值，视为未修改
+    # 前端掩码回显（value=********）→ keep_value 标记：value 视为未修改，保留旧值（不受 is_secret 限制）
     if _custom_fields:
         try:
             with db_lock:
@@ -1793,8 +1793,15 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
                 _row = _c.fetchone()
             _old = _json.loads(_row[0]) if (_row and _row[0]) else {}
             _old_map = {f.get("name"): f.get("value", "") for f in (_old.get("custom_fields", []) or []) if f.get("name")}
+            _keep_map = {
+                (f.get("name") or "").strip()
+                for f in (body.custom_fields or []) if isinstance(f, dict) and f.get("keep_value")
+            }
             for _f in _custom_fields:
-                if _f.get("is_secret") and not _f.get("value") and _f["name"] in _old_map:
+                # keep_value（掩码未改）或 secret 空值（清空无效）→ 保留旧值
+                if ((_f["name"] in _keep_map)
+                        or (_f.get("is_secret") and not _f.get("value"))) \
+                        and _f["name"] in _old_map:
                     _f["value"] = _old_map[_f["name"]]
         except Exception:
             pass

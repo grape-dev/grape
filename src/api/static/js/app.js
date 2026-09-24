@@ -51,10 +51,27 @@ function _cfCollectFields(prefix) {
     if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
     const isSec = !!(sEl && sEl.checked);
     let v = (vEl.value || '').trim();
-    if (isSec && v === '********') v = ''; // 掩码 → 未修改，后端保留旧值
-    fields.push({ name: n, value: v, is_secret: isSec });
+    // 掩码 ******** 统一视为「未修改」：后端保留旧值（与勾选状态无关）
+    const keepValue = v === '********';
+    if (keepValue) v = '';
+    const f = { name: n, value: v, is_secret: isSec };
+    if (keepValue) f.keep_value = true;
+    fields.push(f);
   }
   return { fields: fields };
+}
+
+// 密钥勾选切换联动：值仍为掩码 ******** 时提示「未修改将保留旧值」，并切换 value 输入框类型
+function _cfToggleSecret(cb) {
+    const row = cb.closest('.adv-kv');
+    if (!row) return;
+    const vEl = row.querySelector('.adv-kv-val');
+    if (!vEl) return;
+    const masked = vEl.value === '********';
+    vEl.type = (cb.checked || masked) ? 'password' : 'text';
+    if (!cb.checked && masked && window.app && app.showToast) {
+        app.showToast('已取消密钥标记，保存后 value 显示为明文（当前掩码未修改，将保留原值）');
+    }
 }
 
 const app = (() => {

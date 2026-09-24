@@ -710,7 +710,7 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
     var valType = (readOnlyKey || isSec || hasValue) ? 'password' : 'text';
     var eyeIcon = (readOnlyKey || isSec || hasValue) ? '👁' : '🙈';
     var secChecked = (isSec && !readOnlyKey) ? ' checked' : '';
-    var secHtml = readOnlyKey ? '' : '<input type="checkbox" class="adv-kv-sec" title="密钥（不回显明文）"' + secChecked + '>';
+    var secHtml = readOnlyKey ? '' : '<input type="checkbox" class="adv-kv-sec" title="密钥（不回显明文）"' + secChecked + ' onchange="_cfToggleSecret(this)">';
     row.innerHTML =
       '<input class="adv-kv-key" placeholder="name" ' + keyInputAttrs + ' value="' + (name || '') + '">' + secHtml +
       '<input class="adv-kv-val" id="' + valId + '" type="' + valType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + val + '">' +
