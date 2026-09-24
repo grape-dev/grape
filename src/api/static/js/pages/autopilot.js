@@ -36,7 +36,6 @@ function _apListHTML() {
   return '<div class="cd">' +
     '<div class="cd-h" style="display:flex;justify-content:space-between;align-items:center">' +
       '<div style="display:flex;align-items:center;gap:12px">' +
-        '<button class="bt bt-s bt-o" onclick="app.nav(\'dash\')" style="font-size:12px">← 返回</button>' +
         '<h2><span style="margin-right:6px">⏰</span>自动化</h2>' +
       '</div>' +
       '<button class="bt bt-p" onclick="_apShowCreate()">+ 新建需求</button>' +
