@@ -814,18 +814,21 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
   };
 
-  window._addCustomFieldInline = function(key, value) {
+window._addCustomFieldInline = function(name, value, isSecret, scope) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
     row.className = 'adv-kv';
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
-    var _hasVal = !!(value && String(value).trim());
-    var _vType = _hasVal ? 'password' : 'text';
-    var _vEye = _hasVal ? '👁' : '🙈';
-    row.innerHTML = '<input class="adv-kv-key" placeholder="key" value="' + (key || '') + '">' +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + (value || '') + '">' +
+    var _isSec = _cfComputeIsSecret(name, isSecret);
+    var _val = (value || '');
+    var _vType = _isSec ? 'password' : 'text';
+    var _vEye = _isSec ? '👁' : '🙈';
+    row.innerHTML = '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
+      '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>' +
       '<button class="adv-del" onclick="this.parentElement.remove()">×</button>';
     container.appendChild(row);
   };
@@ -896,12 +899,8 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   window._saveAdvancedOptionsInline = function(sceneId, repoParam) {
     var workBranch = (document.getElementById('advWorkBranchInline') || {}).value || '';
     if (!workBranch) { app.showToast && app.showToast(I18N.t('dashboard.branch_required')||'工作分支不能为空'); return; }
-    var fields = [];
-    document.querySelectorAll('#advCustomFieldsInline .adv-kv').forEach(function(row) {
-      var k = (row.querySelector('.adv-kv-key') || {}).value || '';
-      var v = (row.querySelector('.adv-kv-val') || {}).value || '';
-      if (k.trim()) fields.push({ key: k.trim(), value: v.trim() });
-    });
+    var _collected = _cfCollectFields('#advCustomFieldsInline');
+    if (_collected.error) { app.showToast && app.showToast(_collected.error); return; }
     // Issue #242: 收集关联仓库
     var linkedRepos = [];
     document.querySelectorAll('#advLinkedReposInline .adv-kv').forEach(function(row) {
@@ -911,7 +910,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
       var bn = br ? br.value.trim() : '';
       if (rk) linkedRepos.push({ repo_key: rk, branch: bn || 'main' });
     });
-    API.put('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(repoParam), { work_branch: workBranch, custom_fields: fields, linked_repos: linkedRepos })
+    API.put('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(repoParam), { work_branch: workBranch, custom_fields: _collected.fields, linked_repos: linkedRepos })
       .then(function() { app.showToast && app.showToast(I18N.t('dashboard.adv_options_saved')||'高级选项已保存'); })
       .catch(function(e) { app.showToast && app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '保存失败'); });
   };
@@ -1595,19 +1594,21 @@ function _enterCreateStandardMode(data, owner, name) {
     if (el2) el2.style.display = el2.style.display === 'none' ? 'block' : 'none';
   };
 
-  window._addCustomFieldInline = function(key, value) {
+  window._addCustomFieldInline = function(name, value, isSecret, scope) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
     row.className = 'adv-kv';
-    row.style.cssText = 'display:flex;gap:8px;align-items:center';
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
-    var _hasVal = !!(value && String(value).trim());
-    var _vType = _hasVal ? 'password' : 'text';
-    var _vEye = _hasVal ? '👁' : '🙈';
-    row.innerHTML = '<input class="adv-kv-key" placeholder="key" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (key || '') + '">' +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (value || '') + '">' +
+    var _isSec = _cfComputeIsSecret(name, isSecret);
+    var _val = (value || '');
+    var _vType = _isSec ? 'password' : 'text';
+    var _vEye = _isSec ? '👁' : '🙈';
+    row.innerHTML = '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
+      '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>' +
       '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>';
     container.appendChild(row);
   };
@@ -1649,12 +1650,9 @@ function _enterCreateStandardMode(data, owner, name) {
       window._dashboardEditing = false;
       // 收集高级选项
       var workBranch = (document.getElementById('advWorkBranchInline') || {}).value || 'main';
-      var fields = [];
-      document.querySelectorAll('#advCustomFieldsInline .adv-kv').forEach(function(row) {
-        var k = (row.querySelector('.adv-kv-key') || {}).value || '';
-        var v = (row.querySelector('.adv-kv-val') || {}).value || '';
-        if (k.trim()) fields.push({ key: k.trim(), value: v.trim() });
-      });
+      var _collectedFields = _cfCollectFields('#advCustomFieldsInline');
+      if (_collectedFields.error) { app.showToast && app.showToast(_collectedFields.error); return; }
+      var fields = _collectedFields.fields;
       // 有高级选项就一并保存，然后刷新 dashboard 跳项目场景
       var advPromise = (workBranch || fields.length) ?
         API.put('/scenes/' + encodeURIComponent(r.scene_id) + '/advanced-options?repo=' + encodeURIComponent(owner + '/' + name), { work_branch: workBranch, custom_fields: fields }) :
@@ -1708,7 +1706,7 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
     var container = document.getElementById('advCustomFieldsInline');
     if (container) {
       container.innerHTML = '';
-      fields.forEach(function(f) { window._addCustomFieldInline(f.key, f.value); });
+      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope); });
     }
     // Issue #242: 加载关联仓库
     var linkedRepos = d.linked_repos || [];

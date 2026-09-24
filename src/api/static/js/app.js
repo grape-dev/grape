@@ -1,3 +1,91 @@
+// ═══════════════════════════════════════════════════════════════
+// 场景自定义环境变量（custom_fields）前端共享校验规则（Issue #236）
+// 供 dashboard.js / scene-market.js 复用：大写校验 + 保留冲突校验 + 密钥识别
+// ═══════════════════════════════════════════════════════════════
+const _CF_RESERVED_ENV_NAMES = [
+  'PATH','HOME','USER','USERNAME','SHELL','LANG','LANGUAGE','LC_ALL','LC_CTYPE',
+  'PWD','OLDPWD','HOSTNAME','HOST','TERM','TMPDIR','TMP','TEMP','EDITOR','VISUAL',
+  'SHLVL','PS1','OSTYPE','MACHTYPE','LOGNAME','MAIL','WINDIR','SYSTEMROOT','COMSPEC',
+  'NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE','REPO_FULL_NAME','ACCOUNT',
+  'BOT_USERNAME','ISSUE_NUMBER','PR_NUMBER','GIT_ASKPASS','GRAPE_SERVER_URL',
+  'GRAPE_WORK_BRANCH','GRAPE_SCENE_ID','GRAPE_SESSION_TOKEN','GRAPE_CLI_MODE',
+  'BOT_GITCODE_TOKEN','USER_ID','CONVERSATION_ID'
+];
+const _CF_SECRET_SUFFIXES = ['_KEY','_SK','_SECRET','_TOKEN','_PASSWORD','_PWD','_CREDENTIALS'];
+
+function _cfIsReservedName(name) {
+  const n = (name || '').trim().toUpperCase();
+  return n.startsWith('GRAPE_') || _CF_RESERVED_ENV_NAMES.indexOf(n) >= 0;
+}
+function _cfIsUpperName(name) {
+  return /^[A-Z][A-Z0-9_]*$/.test((name || '').trim());
+}
+function _cfIsSecretName(name) {
+  const up = (name || '').trim().toUpperCase();
+  return _CF_SECRET_SUFFIXES.some(s => up.endsWith(s));
+}
+function _cfNameError(name) {
+  const n = (name || '').trim();
+  if (!n) return '自定义环境变量名不能为空';
+  if (!_cfIsUpperName(n)) return '自定义环境变量名需使用大写字母（如 MY_API_KEY），当前：' + n;
+  if (_cfIsReservedName(n)) return '变量名 "' + n + '" 与系统保留环境变量冲突，请更换名称';
+  return '';
+}
+function _cfComputeIsSecret(name, isSecret) {
+  if (isSecret === true) return true;
+  if (isSecret === false) return false;
+  return _cfIsSecretName(name);
+}
+const _CF_SCOPE_AGENTS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
+// scope checkbox 互斥联动：勾选 all → 取消其它；勾选具体 agent → 取消 all
+// （不做 disabled 置灰，其它选项始终可选）
+function _cfScopeToggle(cb) {
+  const row = cb.closest('.adv-kv');
+  if (!row) return;
+  const boxes = row.querySelectorAll('.adv-kv-scope');
+  if (cb.value === 'all') {
+    if (cb.checked) boxes.forEach(b => { if (b.value !== 'all') b.checked = false; });
+  } else {
+    if (cb.checked) {
+      const allBox = row.querySelector('.adv-kv-scope[value="all"]');
+      if (allBox) allBox.checked = false;
+    }
+  }
+}
+// 渲染 scope 多选 checkbox 组，返回 HTML；scope 为数组（默认 ['all']）
+function _cfScopeHtml(scope) {
+  const sel = Array.isArray(scope) ? scope : [scope || 'all'];
+  const hasAll = sel.indexOf('all') >= 0;
+  return _CF_SCOPE_AGENTS.map(a => {
+    const checked = (a === 'all') ? hasAll : (sel.indexOf(a) >= 0 && !hasAll);
+    return '<label class="adv-kv-scope-lbl" style="font-size:11px;color:#86868b;display:inline-flex;align-items:center;gap:2px;white-space:nowrap">' +
+      '<input type="checkbox" class="adv-kv-scope" value="' + a + '"' + (checked ? ' checked' : '') + ' onchange="_cfScopeToggle(this)">' + a + '</label>';
+  }).join('');
+}
+// 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret, scope}
+// 密钥标记由 value 输入框类型承载：type=password（隐藏/👁）→ 密钥；type=text（明文/🙈）→ 非密钥
+function _cfCollectFields(prefix) {
+  const rows = document.querySelectorAll(prefix + ' .adv-kv');
+  const fields = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const nEl = row.querySelector('.adv-kv-key');
+    const vEl = row.querySelector('.adv-kv-val');
+    if (!nEl || !vEl) continue;
+    const n = (nEl.value || '').trim();
+    if (!n) continue;
+    const err = _cfNameError(n);
+    if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
+    const isSec = vEl.type === 'password';
+    // scope：互斥后选中即入池；什么都不选 → ["all"]（全量）
+    const checked = Array.prototype.slice.call(row.querySelectorAll('.adv-kv-scope:checked'))
+      .map(cb => cb.value);
+    const scope = checked.length ? checked : ['all'];
+    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope });
+  }
+  return { fields: fields };
+}
+
 const app = (() => {
   const $ = id => document.getElementById(id);
   const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail'];
