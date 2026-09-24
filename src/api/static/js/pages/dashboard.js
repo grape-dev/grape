@@ -808,7 +808,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
   };
 
-  window._addCustomFieldInline = function(name, value, isSecret, valueExist) {
+window._addCustomFieldInline = function(name, value, isSecret, valueExist) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
@@ -817,20 +817,14 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     var _isSec = _cfComputeIsSecret(name, isSecret);
     var _hasVal = !!valueExist || !!(value && String(value).trim());
-    var _val = (_isSec && _hasVal && !value) ? '********' : (value || '');
+    var _val = (value || '');
     var _vType = (_isSec || _hasVal) ? 'password' : 'text';
     var _vEye = (_isSec || _hasVal) ? '👁' : '🙈';
-    var _secChecked = _isSec ? ' checked' : '';
-    row.innerHTML = '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))"><input type="checkbox" class="adv-kv-sec" title="密钥（不回显明文）"' + _secChecked + ' onchange="_cfToggleSecret(this)">' +
+    row.innerHTML = '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">' +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
       '<button class="adv-del" onclick="this.parentElement.remove()">×</button>';
     container.appendChild(row);
-    if (_secChecked && _hasVal) {
-      // 密钥含已有值时回显掩码；切换密钥勾选时同步切换输入框 type 与掩码
-      var _input = document.getElementById(valId);
-      if (_input) _input.dataset.mask = '1';
-    }
   };
 
   window._createNewBranchInline = function(owner, name) {
@@ -1540,7 +1534,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (el2) el2.style.display = el2.style.display === 'none' ? 'block' : 'none';
   };
 
-window._addCustomFieldInline = function(name, value, isSecret, valueExist) {
+  window._addCustomFieldInline = function(name, value, isSecret, valueExist) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
