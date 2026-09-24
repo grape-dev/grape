@@ -341,6 +341,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         "recommended_template": scene["recommended_template"],
         "scope": scene.get("scope", "official"),
         "nodes_raw": nodes,
+        "preset_custom_fields": scene.get("preset_custom_fields", "[]"),
     }
 
 
@@ -481,6 +482,12 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
                 log.info(f"apply_market_scene: UPDATE market_scene_id={market_id} WHERE id={db_id}, rowcount={c.rowcount}")
         except Exception as _e:
             log.warning(f"apply_market_scene: link market_scene_id failed: {_e}")
+
+    # 合并预置自定义参数（Issue #246）：仅追加缺失项，不覆盖用户已有配置
+    try:
+        _merge_preset_custom_fields(scene_id, repo_key, scene.get("preset_custom_fields", "[]"))
+    except Exception as _e:
+        log.warning(f"apply_market_scene: merge preset custom fields failed: {_e}")
 
     log.info(f"Market scene applied: market_id={market_id}, scene_id={scene_id}, repo={repo_key}")
     return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id}
@@ -1690,6 +1697,62 @@ def app_current_repo():
 
 # ===== 场景高级选项：工作分支 + 自定义 {name, value, is_secret} =====
 
+def _merge_preset_custom_fields(scene_id: str, repo_key: str, preset_json: str = "[]") -> None:
+    """将场景预置自定义参数声明合并到 devops_pipeline_scene.advanced_options（Issue #246）。
+
+    - preset 声明来自 scene_market.preset_custom_fields（scene.json custom_fields 数组）
+    - 仅在 custom_fields 中不存在同名项时追加（不覆盖用户已有配置）
+    - preset 项标注 preset=true，preyset 声明持久化为 advanced_options.preset_custom_fields
+    """
+    import json as _j
+    from src.session_manager import db, db_lock
+    from src.scene_custom_env import normalize_custom_field
+
+    try:
+        preset_decls = _j.loads(preset_json) if preset_json else []
+    except Exception:
+        preset_decls = []
+    if not preset_decls:
+        return
+
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT advanced_options FROM devops_pipeline_scene "
+            "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+            (scene_id, repo_key))
+        row = c.fetchone()
+    opts = _j.loads(row[0]) if (row and row[0]) else {}
+
+    existing = {(f.get("name") or "").strip() for f in (opts.get("custom_fields", []) or [])}
+    _normalized_presets = []
+    appended = 0
+    for _p in preset_decls:
+        _pf = normalize_custom_field(_p)
+        _pf["preset"] = True
+        _pf["value"] = _pf.get("default_value", "")
+        _normalized_presets.append(_pf)
+        if not _pf.get("name") or _pf["name"] in existing:
+            continue
+        opts.setdefault("custom_fields", []).append(_pf)
+        existing.add(_pf["name"])
+        appended += 1
+    # 声明持久化，供 preset 变更/重启用
+    opts["preset_custom_fields"] = preset_decls
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE devops_pipeline_scene SET advanced_options=?, updated_at=? "
+            "WHERE scene_id=? AND repo_key=? AND is_active=1",
+            (_j.dumps(opts, ensure_ascii=False), now, scene_id, repo_key))
+        db.commit()
+    if appended:
+        log.info(f"merge_preset_custom_fields: scene={scene_id} repo={repo_key} appended={appended}")
+
+
 class AdvancedOptionsRequest(BaseModel):
     work_branch: str = "main"
     custom_fields: list = []   # [{name: str, value: str, is_secret: bool?}]
@@ -1730,7 +1793,15 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
             _nf = normalize_custom_field(f)
             if not _nf.get("name"):
                 continue
-            _fields.append({"name": _nf["name"], "value": _nf.get("value", ""), "is_secret": _nf.get("is_secret", False), "scope": _nf.get("scope", ["all"])})
+            # preset 项：scope/is_secret/preset 锁定展示；value 正常返回（前端按 is_secret 掩码）
+            _fields.append({
+                "name": _nf["name"],
+                "value": _nf.get("value", ""),
+                "is_secret": _nf.get("is_secret", False),
+                "scope": _nf.get("scope", ["all"]),
+                "preset": _nf.get("preset", False),
+                "description": _nf.get("description", ""),
+            })
         return {
             "work_branch": opts.get("work_branch", "main") or "main",
             "custom_fields": _fields,
@@ -1787,6 +1858,39 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
 
     _custom_fields = [normalize_custom_field(f) for f in (body.custom_fields or []) if isinstance(f, dict)]
     _custom_fields = [f for f in _custom_fields if f.get("name")]
+    # 读库内现有 advanced_options（preset 声明 + 既有值），预置参数保护
+    from src.scene_custom_env import normalize_scope as _normalize_scope
+    _old_ao = {}
+    _old_cf_map = {}      # name -> 完整旧项
+    _preset_decl_map = {} # name -> preset 声明（preset_custom_fields 来源）
+    try:
+        with db_lock:
+            _c2 = db.cursor()
+            _c2.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            _row2 = _c2.fetchone()
+        if _row2 and _row2[0]:
+            _old_ao = _json.loads(_row2[0]) or {}
+        for _f in (_old_ao.get("custom_fields", []) or []):
+            _nf = normalize_custom_field(_f)
+            if _nf.get("name"):
+                _old_cf_map[_nf["name"]] = _nf
+        # preset 声明：优先库内 preset_custom_fields，其次 custom_fields 里的 preset:true 项
+        for _pf in (_old_ao.get("preset_custom_fields", []) or []):
+            _pf = normalize_custom_field(_pf) if isinstance(_pf, dict) else {}
+            if _pf.get("name"):
+                _pf["preset"] = True
+                _preset_decl_map[_pf["name"]] = _pf
+        for _f in (_old_ao.get("custom_fields", []) or []):
+            _nf = normalize_custom_field(_f)
+            if _nf.get("preset") and _nf.get("name") and _nf["name"] not in _preset_decl_map:
+                _nf["preset"] = True
+                _preset_decl_map[_nf["name"]] = _nf
+    except Exception:
+        pass
+
     # 前端掩码回显（value=********）→ keep_value 标记：value 视为未修改，保留旧值（不受 is_secret 限制）
     if _custom_fields:
         try:
@@ -1811,6 +1915,40 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
                     _f["value"] = _old_map[_f["name"]]
         except Exception:
             pass
+
+    # ── preset 保护：合并声明、锁定字段、禁止丢失 ──
+    # 1) 库内 preset 声明全部保留（前端未提交也不能删）
+    for _pname, _pdecl in _preset_decl_map.items():
+        if _pname not in {f.get("name") for f in _custom_fields}:
+            _existing = _old_cf_map.get(_pname)
+            _custom_fields.append({
+                "name": _pname,
+                "value": (_existing.get("value", "") if _existing else _pdecl.get("default_value", "")),
+                "is_secret": _pdecl.get("is_secret", False),
+                "scope": _pdecl.get("scope", ["all"]) or ["all"],
+                "preset": True,
+                "default_value": _pdecl.get("default_value", ""),
+                "description": _pdecl.get("description", ""),
+            })
+    # 2) preset 项字段锁定：name/scope/is_secret/preset 以声明为准，仅 value 取前端提交（或旧值）
+    for _f in _custom_fields:
+        _pdecl = _preset_decl_map.get(_f.get("name"))
+        if not _pdecl:
+            continue
+        _old_v = _old_cf_map.get(_f["name"], {}).get("value", "")
+        _f["preset"] = True
+        _f["name"] = _pdecl["name"]
+        _f["scope"] = _pdecl.get("scope", ["all"]) or ["all"]
+        if "is_secret" in _pdecl:
+            _f["is_secret"] = _pdecl.get("is_secret", False)
+        _f["description"] = _pdecl.get("description", "")
+        if not _f.get("value") or _f.get("value") in ("********", "#####"):
+            _f["value"] = _old_v or _pdecl.get("default_value", "")
+    # 3) 非 preset 项显式标注 preset=false
+    for _f in _custom_fields:
+        if _f.get("name") not in _preset_decl_map:
+            _f["preset"] = False
+
     opts = {
         "work_branch": body.work_branch.strip(),
         "custom_fields": _custom_fields,
