@@ -825,6 +825,7 @@ window._addCustomFieldInline = function(name, value, isSecret, scope) {
       '<button class="adv-del" onclick="this.parentElement.remove()">×</button>' +
       '<span style="display:flex;gap:4px;align-items:center;flex:1 1 100%">' + _cfScopeHtml(scope) + '</span>';
     container.appendChild(row);
+    _cfSyncScopeDisabled(row);
   };
 
   window._createNewBranchInline = function(owner, name) {
@@ -1551,6 +1552,7 @@ function _enterCreateStandardMode(data, owner, name) {
       '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>' +
       '<span style="display:flex;gap:4px;align-items:center;flex:1 1 100%">' + _cfScopeHtml(scope) + '</span>';
     container.appendChild(row);
+    _cfSyncScopeDisabled(row);
   };
 
   window._createNewBranchInline = function(owner, name) {
