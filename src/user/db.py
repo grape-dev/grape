@@ -2334,6 +2334,12 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
     where_sql = " AND ".join(where)
     order_by = "updated_at DESC" if sort != "hot" else "like_count DESC"
 
+    # 精选模式：优先按 admin 管理台设置的排序返回
+    featured_ordered_ids = []
+    if limit and limit > 0 and featured_only:
+        from src.featured_order import get_featured_order
+        featured_ordered_ids = get_featured_order("scene")
+
     with db_lock:
         c = db.cursor()
         # 总数
@@ -2355,6 +2361,20 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
             params,
         )
         rows = c.fetchall()
+
+    # 精选模式且有 admin 排序：按 admin 顺序重排结果
+    if featured_ordered_ids and limit and limit > 0:
+        row_map = {r[0]: r for r in rows}
+        reordered = []
+        for item_id in featured_ordered_ids:
+            r = row_map.get(item_id)
+            if r:
+                reordered.append(r)
+        # admin 排序中不存在的精选场景，追加到末尾（保持原 updated_at 顺序）
+        for r in rows:
+            if r[0] not in featured_ordered_ids:
+                reordered.append(r)
+        rows = reordered[:limit]
     result = []
     for r in rows:
         result.append({
@@ -2379,7 +2399,7 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
             "SELECT id, name, display_name, version, description, market_description, "
             "icon, obs_icon_key, category_id, is_featured, like_count, source, source_user_id, "
             "recommended_template, nodes_json, onboarding, is_active, created_at, updated_at, "
-            "scope, repo_key "
+            "scope, repo_key, preset_custom_fields "
             "FROM scene_market WHERE id=?",
             (market_id,),
         )
@@ -2397,6 +2417,7 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
         "onboarding": row[15] or "repo-onboarding", "is_active": row[16],
         "created_at": str(row[17] or ""), "updated_at": str(row[18] or ""),
         "scope": row[19] or "official", "repo_key": row[20] or "",
+        "preset_custom_fields": row[21] or "[]",
     }
 
 
@@ -2900,18 +2921,62 @@ def get_scene_repos(market_scene_id: int) -> list[dict]:
 
 
 def get_featured_skills(limit: int = 5) -> list[dict]:
-    """精选技能列表：is_featured=1 的 official 技能，按 like_count 降序"""
+    """精选技能列表：is_featured=1 的 official 技能。
+
+    排序优先级：
+    1. admin 管理台 admin_featured_config 表的 sort_order（与管理台设置一致）
+    2. 降级：按 like_count 降序
+    """
+    from src.featured_order import get_featured_order
+
+    ordered_ids = get_featured_order("skill")
+
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT id, skill_name, display_name, description, agent_type, "
-            "is_featured, like_count, category_id "
-            "FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
-            "ORDER BY like_count DESC LIMIT ?",
-            (limit,)
-        )
-        return [{"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
-                 "description": r[3] or "", "agent_type": r[4] or "",
-                 "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
-                for r in c.fetchall()]
+        if ordered_ids:
+            # 按 admin 排序返回——查全部精选技能后在 Python 中按 ordered_ids 排序
+            placeholders = ",".join("?" * len(ordered_ids))
+            c.execute(
+                f"SELECT id, skill_name, display_name, description, agent_type, "
+                f"is_featured, like_count, category_id "
+                f"FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
+                f"AND id IN ({placeholders})",
+                ordered_ids
+            )
+            rows = {r[0]: r for r in c.fetchall()}
+            result = []
+            for item_id in ordered_ids:
+                r = rows.get(item_id)
+                if r:
+                    result.append({"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
+                                   "description": r[3] or "", "agent_type": r[4] or "",
+                                   "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0})
+            # admin 排序中不存在的精选技能（如新加的），追加到末尾
+            if len(result) < limit:
+                c.execute(
+                    "SELECT id, skill_name, display_name, description, agent_type, "
+                    "is_featured, like_count, category_id "
+                    "FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
+                    f"AND id NOT IN ({placeholders}) "
+                    "ORDER BY like_count DESC",
+                    ordered_ids
+                )
+                for r in c.fetchall():
+                    result.append({"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
+                                   "description": r[3] or "", "agent_type": r[4] or "",
+                                   "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0})
+            return result[:limit]
+        else:
+            # 降级：按 like_count 降序
+            c.execute(
+                "SELECT id, skill_name, display_name, description, agent_type, "
+                "is_featured, like_count, category_id "
+                "FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
+                "ORDER BY like_count DESC LIMIT ?",
+                (limit,)
+            )
+            return [{"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
+                     "description": r[3] or "", "agent_type": r[4] or "",
+                     "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
+                    for r in c.fetchall()]
 

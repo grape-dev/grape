@@ -153,11 +153,24 @@ if [ ! -x "$VENV/bin/python" ]; then
   "$PY" -m venv "$VENV"
 fi
 # 确保 venv 内有 pip（某些系统 ensurepip 缺失导致 venv 无 pip）
-if [ ! -x "$VENV/bin/pip" ]; then
-  log "venv 缺 pip, 手动安装 ensurepip..."
-  "$VENV/bin/python" -m ensurepip --upgrade 2>/dev/null || \
-    "$VENV/bin/python" -m pip install --upgrade pip 2>/dev/null || \
-    curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>/dev/null || true
+# 某些旧 venv 只有 pip3 没有 pip 软链接，统一用 PIP_CMD 变量
+PIP_CMD="$VENV/bin/pip"
+if [ ! -x "$PIP_CMD" ]; then
+  if [ -x "$VENV/bin/pip3" ]; then
+    log "venv 无 pip（有 pip3），使用 pip3 作为替代"
+    PIP_CMD="$VENV/bin/pip3"
+    # 尝试修复 pip 软链接（不影响 pip3 使用）
+    "$VENV/bin/python" -m pip install --upgrade pip 2>/dev/null || true
+  else
+    log "venv 缺 pip, 手动安装 ensurepip..."
+    "$VENV/bin/python" -m ensurepip --upgrade 2>/dev/null || \
+      "$VENV/bin/python" -m pip install --upgrade pip 2>/dev/null || \
+      curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>/dev/null || true
+    # 再次检查
+    if [ ! -x "$PIP_CMD" ] && [ -x "$VENV/bin/pip3" ]; then
+      PIP_CMD="$VENV/bin/pip3"
+    fi
+  fi
 fi
 if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
@@ -165,12 +178,12 @@ if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   # 优先离线安装：包内已带依赖 wheels（grape-worker/wheels/），免网络下载
   if [ -d "$INSTALL_DIR/wheels" ] && ls "$INSTALL_DIR/wheels"/*.whl >/dev/null 2>&1; then
     log "离线安装依赖（包内 wheels: $(ls "$INSTALL_DIR/wheels"/*.whl | wc -l) 个，免网络）"
-    if "$VENV/bin/pip" install --quiet --no-index --find-links "$INSTALL_DIR/wheels" \
+    if "$PIP_CMD" install --quiet --no-index --find-links "$INSTALL_DIR/wheels" \
         -r "$INSTALL_DIR/requirements-worker.txt"; then
       log "依赖离线安装完成"
     else
       log "离线安装失败（可能平台/Python 版本不匹配），回退在线安装..."
-      if ! "$VENV/bin/pip" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
+      if ! "$PIP_CMD" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
           -r "$INSTALL_DIR/requirements-worker.txt"; then
         log "依赖安装失败。请检查网络后重试，或指定可用镜像："
         log "  PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple bash -c 'curl -fsSL $SERVER/api/runtime/install | bash -s -- --token <token> --server $SERVER'"
@@ -179,7 +192,7 @@ if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
     fi
   else
     log "包内无离线 wheels，在线安装依赖（镜像: $PIP_INDEX，首次需数分钟）"
-    if ! "$VENV/bin/pip" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
+    if ! "$PIP_CMD" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
         -r "$INSTALL_DIR/requirements-worker.txt"; then
       fail "依赖安装失败（aiohttp 未装好 worker 无法启动）：请重试本安装命令，或设置 PIP_INDEX_URL 环境变量指定可用 pip 镜像"
     fi
@@ -188,14 +201,14 @@ fi
 
 # ===== 4.5 安装 grape CLI（独立项目 grape-cli；优先随包离线 wheel，失败回退在线）=====
 _install_grape_online() {
-  "$VENV/bin/pip" install -q --no-cache-dir \
+  "$PIP_CMD" install -q --no-cache-dir \
       git+https://gitcode.com/grape-dev/grape-cli.git 2>/dev/null \
     && chmod +x "$VENV/bin/grape" 2>/dev/null || true \
     && log "grape CLI 已装（在线）: $VENV/bin/grape" \
     || log "警告: grape-cli 在线安装失败，agent 内暂无 \`grape\`；不影响 worker 运行"; return 0
 }
 if ls "$INSTALL_DIR/wheels"/grape-*.whl >/dev/null 2>&1; then
-  if "$VENV/bin/pip" install -q --no-index --find-links "$INSTALL_DIR/wheels" grape 2>/dev/null; then
+  if "$PIP_CMD" install -q --no-index --find-links "$INSTALL_DIR/wheels" grape 2>/dev/null; then
     chmod +x "$VENV/bin/grape" 2>/dev/null || true
     log "grape CLI 已装（离线 wheel，随包）: $VENV/bin/grape"
   else

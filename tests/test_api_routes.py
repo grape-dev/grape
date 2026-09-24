@@ -353,6 +353,126 @@ class TestDashboard:
         assert len(d["agents"]) == 5  # VOD/Issue/Coding/QA/SRE
         assert "agent_engines" in d  # Scene Center: engine 列表替代 activity
 
+    def test_dashboard_agent_engines_includes_offline(self):
+        """Issue #227: agent_engines 应返回全部引擎（含 offline），不能按状态过滤。"""
+        import datetime as _dt
+        from src.session_manager import db, db_lock
+        _tz = _dt.timezone.utc
+        _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
+        _stale = (_dt.datetime.now(_tz) - _dt.timedelta(minutes=20)).isoformat()
+        _ids = []
+        with db_lock:
+            c = db.cursor()
+            # 清理可能残留的同名引擎
+            for n in ("test-offline-eng", "test-online-eng", "test-recentlylost-eng"):
+                c.execute("SELECT id FROM agent_runtimes WHERE name=?", (n,))
+                for row in c.fetchall():
+                    c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (row[0],))
+                c.execute("DELETE FROM agent_runtimes WHERE name=?", (n,))
+            for n in ("cred-offline", "cred-online", "cred-recentlylost"):
+                c.execute("DELETE FROM runtime_credentials WHERE name=?", (n,))
+            # 3 个凭证（global scope, active）
+            creds = {}
+            for cn in ("cred-online", "cred-recentlylost", "cred-offline"):
+                c.execute(
+                    "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
+                    "VALUES (?,?,?,?,?,?, 'active')",
+                    ("h"+cn, cn, "dev-"+cn, "global", "", "tester"))
+                creds[cn] = c.lastrowid
+            # online 引擎：status=online + 心跳新鲜
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-online-eng", "test-online-eng", creds["cred-online"], "online", 1, 1, _fresh, "global", ""))
+            _ids.append(c.lastrowid)
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (_ids[-1],))
+            # recently_lost 引擎：status=online + 心跳超时
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-recentlylost-eng", "test-recentlylost-eng", creds["cred-recentlylost"], "online", 1, 1, _stale, "global", ""))
+            _ids.append(c.lastrowid)
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (_ids[-1],))
+            # offline 引擎：status=offline + 无心跳
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-offline-eng", "test-offline-eng", creds["cred-offline"], "offline", 0, 1, "", "global", ""))
+            _ids.append(c.lastrowid)
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (_ids[-1],))
+            db.commit()
+        try:
+            r = client.get("/api/dashboard/org/test", headers=_headers)
+            assert r.status_code == 200
+            d = r.json()
+            ae = d["agent_engines"]
+            # tag="all" 的引擎应出现在每个 agent_type 下
+            all_engines = []
+            for atype in ("vod", "issue", "coding", "qa", "sre"):
+                all_engines.extend(ae.get(atype, []))
+            statuses = {e["status"] for e in all_engines}
+            # 必须包含 offline（Issue #227 核心验收点）
+            assert "offline" in statuses, f"offline engines missing from agent_engines, got statuses: {statuses}"
+            # 三种状态都应出现
+            assert "online" in statuses, f"online engines missing, got: {statuses}"
+            assert "recently_lost" in statuses, f"recently_lost engines missing, got: {statuses}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                for rid in _ids:
+                    c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+                    c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
+                for cn in ("cred-online", "cred-recentlylost", "cred-offline"):
+                    c.execute("DELETE FROM runtime_credentials WHERE name=?", (cn,))
+                db.commit()
+
+    def test_dashboard_agent_engines_dedup(self):
+        """Issue #227: 同一 runtime_id 跨 scope 查询时应去重。"""
+        import datetime as _dt
+        from src.session_manager import db, db_lock
+        _tz = _dt.timezone.utc
+        _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
+        _ids = []
+        with db_lock:
+            c = db.cursor()
+            for n in ("test-dedup-eng",):
+                c.execute("SELECT id FROM agent_runtimes WHERE name=?", (n,))
+                for row in c.fetchall():
+                    c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (row[0],))
+                c.execute("DELETE FROM agent_runtimes WHERE name=?", (n,))
+            for n in ("cred-dedup",):
+                c.execute("DELETE FROM runtime_credentials WHERE name=?", (n,))
+            c.execute(
+                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
+                "VALUES (?,?,?,?,?,?, 'active')",
+                ("hcred-dedup", "cred-dedup", "dev-dedup", "global", "", "tester"))
+            cid = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-dedup-eng", "test-dedup-eng", cid, "online", 1, 1, _fresh, "global", ""))
+            _ids.append(c.lastrowid)
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (_ids[-1],))
+            db.commit()
+        try:
+            r = client.get("/api/dashboard/org/test", headers=_headers)
+            assert r.status_code == 200
+            d = r.json()
+            ae = d["agent_engines"]
+            for atype in ("vod", "issue", "coding", "qa", "sre"):
+                engines = ae.get(atype, [])
+                ids = [e["id"] for e in engines]
+                # 同一 runtime_id 不应重复出现
+                assert len(ids) == len(set(ids)), f"Duplicate engine ids found for {atype}: {ids}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                for rid in _ids:
+                    c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+                    c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
+                c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-dedup",))
+                db.commit()
+
 
 # ===================== 5. Pipeline =====================
 class TestPipeline:
@@ -830,6 +950,72 @@ class TestSettings:
         r = client.put("/api/settings/credentials", json={"huawei_cloud_ak": "test_ak"}, headers=_headers)
         assert r.status_code == 200
 
+    def test_clear_credentials_empty_string(self):
+        """Issue #237：传空字符串应清除已有凭据"""
+        uname = "test_api"
+        # 1. 先写入 AK/SK
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "real_ak_123", "huawei_cloud_sk": "real_sk_456"
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["huawei_cloud_ak"] == "real_ak_123"
+        assert acc["huawei_cloud_sk"] == "real_sk_456"
+        # 2. 传空字符串清除
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "", "huawei_cloud_sk": ""
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["huawei_cloud_ak"] == ""
+        assert acc["huawei_cloud_sk"] == ""
+        # 3. GET 端点反映清除后的状态
+        r = client.get("/api/settings/credentials", headers=_headers)
+        hw = r.json()["huawei_cloud"]
+        assert hw["ak_exists"] is False
+        assert hw["sk_exists"] is False
+
+    def test_credentials_not_modified_when_omitted(self):
+        """Issue #237：未传字段不应修改已有值"""
+        uname = "test_api"
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "keep_this_ak"
+        }, headers=_headers)
+        # 只传 SK，不传 AK → AK 应保持不变
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_sk": "new_sk"
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["huawei_cloud_ak"] == "keep_this_ak"
+        assert acc["huawei_cloud_sk"] == "new_sk"
+
+    def test_placeholder_rejected_on_clear(self):
+        """Issue #237：占位符值应被拒绝，不覆盖已有值"""
+        uname = "test_api"
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "existing_ak"
+        }, headers=_headers)
+        # 传占位符 → 应被拒绝，已有值保持不变
+        client.put("/api/settings/credentials", json={
+            "huawei_cloud_ak": "AK-demo-access-key-xxxx"
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["huawei_cloud_ak"] == "existing_ak"
+
+    def test_clear_github_token(self):
+        """Issue #237：传空字符串清除 GitHub token"""
+        uname = "test_api"
+        # 先写入 github token（直接写 DB，跳过网络验证）
+        acc = user_db.get_user_account(uname) or {}
+        acc["github_api_token"] = "ghp_test_token"
+        acc["github_login"] = "testuser"
+        user_db.save_user_account(uname, acc)
+        # 传空字符串清除
+        client.put("/api/settings/credentials", json={
+            "github_token": ""
+        }, headers=_headers)
+        acc = user_db.get_user_account(uname)
+        assert acc["github_api_token"] == ""
+        assert acc["github_login"] == ""
+
     def test_notifications(self):
         r = client.get("/api/settings/notifications", headers=_headers)
         assert r.status_code == 200
@@ -900,6 +1086,108 @@ class TestSettings:
         assert d["page"] == 1
         assert d["page_size"] == 10
         assert len(d["devices"]) <= 10
+
+    def test_runtime_devices_filter_scope(self):
+        """Issue #245: scope 筛选后 total 与筛选结果一致"""
+        # 先取全量 total
+        r_all = client.get("/api/settings/runtime-devices?page=1&page_size=100", headers=_headers)
+        assert r_all.status_code == 200
+        d_all = r_all.json()
+        total_all = d_all["total"]
+        # avail_scopes 应存在
+        assert "avail_scopes" in d_all
+        avail = d_all["avail_scopes"] or []
+        if not avail:
+            return  # 测试库无设备，跳过
+        # 选一个存在的 scope 过滤
+        target_scope = avail[0]
+        r_f = client.get(f"/api/settings/runtime-devices?page=1&page_size=100&scope={target_scope}",
+                         headers=_headers)
+        assert r_f.status_code == 200
+        d_f = r_f.json()
+        # 筛选后 total <= 全量 total
+        assert d_f["total"] <= total_all
+        # 每个返回设备的 scope 应匹配（local → credential_id==0）
+        for dev in d_f["devices"]:
+            if target_scope == "local":
+                assert dev["credential_id"] == 0
+            else:
+                assert (dev.get("scope") or "global") == target_scope
+        # avail_scopes 取自全部可见设备（不依赖当前筛选），target_scope 仍应存在
+        assert target_scope in (d_f["avail_scopes"] or [])
+
+    def test_runtime_devices_filter_type(self):
+        """Issue #245: type 筛选后 total 与筛选结果一致"""
+        r_all = client.get("/api/settings/runtime-devices?page=1&page_size=100", headers=_headers)
+        d_all = r_all.json()
+        # 从全量设备中提取一个引擎 type 关键字
+        types = set()
+        for dev in d_all["devices"]:
+            for rt in dev.get("runtimes", []):
+                n = (rt.get("name") or "").lower()
+                for kw in ("opencode", "hermes", "codearts", "codex"):
+                    if kw in n:
+                        types.add(kw)
+        if not types:
+            return  # 测试库无引擎，跳过
+        target_type = next(iter(types))
+        r_f = client.get(f"/api/settings/runtime-devices?page=1&page_size=100&type={target_type}",
+                         headers=_headers)
+        assert r_f.status_code == 200
+        d_f = r_f.json()
+        # 筛选后 total <= 全量 total
+        assert d_f["total"] <= d_all["total"]
+        # 每个返回设备应至少有一个引擎名包含 type 关键字
+        for dev in d_f["devices"]:
+            names = " ".join((rt.get("name") or "").lower() for rt in dev.get("runtimes", []))
+            assert target_type in names
+
+    def test_runtime_devices_filter_q(self):
+        """Issue #245: q 搜索筛选后 total 与筛选结果一致"""
+        r_all = client.get("/api/settings/runtime-devices?page=1&page_size=100", headers=_headers)
+        d_all = r_all.json()
+        if not d_all["devices"]:
+            return
+        # 取第一个设备的 name 作为搜索关键字
+        sample = d_all["devices"][0]
+        keyword = (sample.get("name") or sample.get("device_name") or "").strip()
+        if not keyword:
+            return
+        # 用 name 的一部分做模糊搜索
+        q = keyword[:3] if len(keyword) >= 3 else keyword
+        r_f = client.get(f"/api/settings/runtime-devices?page=1&page_size=100&q={q}", headers=_headers)
+        assert r_f.status_code == 200
+        d_f = r_f.json()
+        # 筛选后 total <= 全量 total
+        assert d_f["total"] <= d_all["total"]
+        assert d_f["total"] >= 1
+        # 每个返回设备应匹配关键字
+        for dev in d_f["devices"]:
+            hay = " ".join([
+                dev.get("name") or "", dev.get("device_name") or "",
+                dev.get("owner") or "", dev.get("worker_ip") or "",
+                " ".join((rt.get("name") or "") for rt in dev.get("runtimes", []))
+            ]).lower()
+            assert q.lower() in hay
+
+    def test_runtime_devices_filter_total_consistency(self):
+        """Issue #245: 筛选后 total 与分页切片数据一致性（跨页验证）"""
+        r_all = client.get("/api/settings/runtime-devices?page=1&page_size=100", headers=_headers)
+        d_all = r_all.json()
+        if d_all["total"] <= 1:
+            return
+        # 用 page_size=1 分页，验证 total 跨页不变
+        r_p1 = client.get("/api/settings/runtime-devices?page=1&page_size=1", headers=_headers)
+        r_p2 = client.get("/api/settings/runtime-devices?page=2&page_size=1", headers=_headers)
+        assert r_p1.status_code == 200 and r_p2.status_code == 200
+        d_p1, d_p2 = r_p1.json(), r_p2.json()
+        assert d_p1["total"] == d_all["total"] == d_p2["total"]
+        assert len(d_p1["devices"]) == 1
+        # 第一页和第二页不应是同一设备
+        if d_all["total"] >= 2:
+            id1 = d_p1["devices"][0].get("credential_id")
+            id2 = d_p2["devices"][0].get("credential_id")
+            assert id1 != id2
 
 
 # ===================== 10. Skills =====================

@@ -47,7 +47,7 @@
   },
   "empty": {
     "no_repo_selected": "未选择仓库，请先在仓库页面选择当前仓库。",
-    "no_skills": "当前页签暂无技能。",
+    "no_skills": "当前分类暂无技能",
     "no_sub_skills": "（暂无子技能）",
     "no_content": "(无内容)",
     "no_detail": "(无详细内容)"
@@ -263,5 +263,7 @@
   "scene_detail": "查看详情",
   "no_repo_selected": "请先选择仓库",
   "no_scenes_custom": "暂无场景，点击创建或导入",
-  "category_general": "通用"
+  "category_general": "通用",
+  "scene_params": "场景参数",
+  "scene_params_hint": "应用场景时需配置，Agent 将通过环境变量读取"
 }

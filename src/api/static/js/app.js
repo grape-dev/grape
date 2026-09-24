@@ -1,3 +1,95 @@
+// ═══════════════════════════════════════════════════════════════
+// 场景自定义环境变量（custom_fields）前端共享校验规则（Issue #236）
+// 供 dashboard.js / scene-market.js 复用：大写校验 + 保留冲突校验 + 密钥识别
+// ═══════════════════════════════════════════════════════════════
+const _CF_RESERVED_ENV_NAMES = [
+  'PATH','HOME','USER','USERNAME','SHELL','LANG','LANGUAGE','LC_ALL','LC_CTYPE',
+  'PWD','OLDPWD','HOSTNAME','HOST','TERM','TMPDIR','TMP','TEMP','EDITOR','VISUAL',
+  'SHLVL','PS1','OSTYPE','MACHTYPE','LOGNAME','MAIL','WINDIR','SYSTEMROOT','COMSPEC',
+  'NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE','REPO_FULL_NAME','ACCOUNT',
+  'BOT_USERNAME','ISSUE_NUMBER','PR_NUMBER','GIT_ASKPASS','GRAPE_SERVER_URL',
+  'GRAPE_WORK_BRANCH','GRAPE_SCENE_ID','GRAPE_SESSION_TOKEN','GRAPE_CLI_MODE',
+  'BOT_GITCODE_TOKEN','USER_ID','CONVERSATION_ID'
+];
+const _CF_SECRET_SUFFIXES = ['_KEY','_SK','_SECRET','_TOKEN','_PASSWORD','_PWD','_CREDENTIALS'];
+
+function _cfIsReservedName(name) {
+  const n = (name || '').trim().toUpperCase();
+  return n.startsWith('GRAPE_') || _CF_RESERVED_ENV_NAMES.indexOf(n) >= 0;
+}
+function _cfIsUpperName(name) {
+  return /^[A-Z][A-Z0-9_]*$/.test((name || '').trim());
+}
+function _cfIsSecretName(name) {
+  const up = (name || '').trim().toUpperCase();
+  return _CF_SECRET_SUFFIXES.some(s => up.endsWith(s));
+}
+function _cfNameError(name) {
+  const n = (name || '').trim();
+  if (!n) return '自定义环境变量名不能为空';
+  if (!_cfIsUpperName(n)) return '自定义环境变量名需使用大写字母（如 MY_API_KEY），当前：' + n;
+  if (_cfIsReservedName(n)) return '变量名 "' + n + '" 与系统保留环境变量冲突，请更换名称';
+  return '';
+}
+function _cfComputeIsSecret(name, isSecret) {
+  if (isSecret === true) return true;
+  if (isSecret === false) return false;
+  return _cfIsSecretName(name);
+}
+const _CF_SCOPE_AGENTS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
+// scope checkbox 互斥联动：勾选 all → 取消其它；勾选具体 agent → 取消 all
+// （不做 disabled 置灰，其它选项始终可选）
+function _cfScopeToggle(cb) {
+  const row = cb.closest('.adv-kv');
+  if (!row) return;
+  const boxes = row.querySelectorAll('.adv-kv-scope');
+  if (cb.value === 'all') {
+    if (cb.checked) boxes.forEach(b => { if (b.value !== 'all') b.checked = false; });
+  } else {
+    if (cb.checked) {
+      const allBox = row.querySelector('.adv-kv-scope[value="all"]');
+      if (allBox) allBox.checked = false;
+    }
+  }
+}
+// 渲染 scope 多选 checkbox 组，返回 HTML；scope 为数组（默认 ['all']）
+function _cfScopeHtml(scope) {
+  const sel = Array.isArray(scope) ? scope : [scope || 'all'];
+  const hasAll = sel.indexOf('all') >= 0;
+  return _CF_SCOPE_AGENTS.map(a => {
+    const checked = (a === 'all') ? hasAll : (sel.indexOf(a) >= 0 && !hasAll);
+    return '<label class="adv-kv-scope-lbl" style="font-size:11px;color:#86868b;display:inline-flex;align-items:center;gap:2px;white-space:nowrap">' +
+      '<input type="checkbox" class="adv-kv-scope" value="' + a + '"' + (checked ? ' checked' : '') + ' onchange="_cfScopeToggle(this)">' + a + '</label>';
+  }).join('');
+}
+// 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret, scope}
+// 密钥标记由 value 输入框类型承载：type=password（隐藏/👁）→ 密钥；type=text（明文/🙈）→ 非密钥
+function _cfCollectFields(prefix) {
+  const rows = document.querySelectorAll(prefix + ' .adv-kv');
+  const fields = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const vEl = row.querySelector('.adv-kv-val');
+    if (!vEl) continue;
+    const nEl = row.querySelector('.adv-kv-key');
+    const staticEl = row.querySelector('.adv-kv-key-static');
+    const isPreset = !!row.querySelector('.adv-kv-preset');
+    const n = nEl ? (nEl.value || '').trim() : (staticEl ? (staticEl.textContent || '').trim() : '');
+    if (!n) continue;
+    if (!isPreset) {
+      const err = _cfNameError(n);
+      if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
+    }
+    const isSec = vEl.type === 'password';
+    // scope：互斥后选中即入池；什么都不选 → ["all"]（全量）
+    const checked = Array.prototype.slice.call(row.querySelectorAll('.adv-kv-scope:checked'))
+      .map(cb => cb.value);
+    const scope = checked.length ? checked : ['all'];
+    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope, preset: isPreset });
+  }
+  return { fields: fields };
+}
+
 const app = (() => {
   const $ = id => document.getElementById(id);
   const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail'];
@@ -21,9 +113,24 @@ const app = (() => {
     } catch (e) {}
   }
 
+  // Issue #231: currentRepo 从 localStorage 迁移到 sessionStorage，实现页签级项目选择隔离。
+  // localStorage 跨页签共享会导致页签2切换项目后页签1对话列表串扰；sessionStorage 页签级隔离，
+  // 刷新保留、关闭清除，符合「每个页签独立维护当前选中项目」的期望。
+  // 一次性迁移逻辑见 _migrateCurrentRepo()，在 init() 最先执行，兼容已有用户会话无感知。
+  function _migrateCurrentRepo() {
+    try {
+      const inSession = sessionStorage.getItem('currentRepo');
+      const inLocal = localStorage.getItem('currentRepo');
+      if (!inSession && inLocal) {
+        sessionStorage.setItem('currentRepo', inLocal);
+        localStorage.removeItem('currentRepo');
+      }
+    } catch (e) {}
+  }
+
   function currentRepo() {
     try {
-      const r = JSON.parse(localStorage.getItem('currentRepo'));
+      const r = JSON.parse(sessionStorage.getItem('currentRepo'));
       if (r && r.fullName) {
         // GitCode 仓库 name 是显示名（可≠URL path，如 shelltest 显示 skillstest）——
         // 所有 API 路径/链接都用 owner/name 拼接，必须强制 URL 语义（fullName 拆分），
@@ -31,7 +138,7 @@ const app = (() => {
         const parts = String(r.fullName).split('/');
         if (parts.length === 2 && r.name !== parts[1]) {
           r.name = parts[1];
-          localStorage.setItem('currentRepo', JSON.stringify(r));
+          sessionStorage.setItem('currentRepo', JSON.stringify(r));
         }
       }
       return r;
@@ -153,8 +260,8 @@ function loadAgentTypes() {
     // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
     if (!current) {
       const r = managedRepos[0];
-      if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
-      else localStorage.removeItem('currentRepo');
+      if (r) sessionStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
+      else sessionStorage.removeItem('currentRepo');
     }
     nav('dash');
   }
@@ -194,7 +301,7 @@ function loadAgentTypes() {
     }
     const parts = val.split('/');
     const _rk = (window._managedRepoMap && window._managedRepoMap[val]) || '';
-    localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
+    sessionStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
     // 同步侧边栏下拉选中项
     const sel = $('repoSelect');
     if (sel) sel.value = val;
@@ -1074,6 +1181,7 @@ function loadAgentTypes() {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     localStorage.removeItem('currentRepo');
+    sessionStorage.removeItem('currentRepo');
     localStorage.removeItem(REPO_CACHE_KEY);
     API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
     // refresh_token cookie 由服务端 logout 清除
@@ -1161,10 +1269,13 @@ function loadAgentTypes() {
   }
 
   function init() {
+    // Issue #231: 最先执行 currentRepo 迁移（localStorage → sessionStorage），
+    // 必须在 cache 版本检查之前，避免 localStorage.clear() 抹掉待迁移值，保证已有用户无感知。
+    _migrateCurrentRepo();
     console.log("[init] start", JSON.stringify({
       hasToken: !!localStorage.getItem('token'),
       cacheVer: localStorage.getItem('app_cache_ver'),
-      currentRepo: localStorage.getItem('currentRepo'),
+      currentRepo: sessionStorage.getItem('currentRepo'),
       url: window.location.href
     }));
     // 同步可折叠分组的持久化状态（Issue #66）
@@ -1195,12 +1306,13 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '35');
+      localStorage.setItem('app_cache_ver', '36');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
+      sessionStorage.removeItem('currentRepo');
       if (p.get('first_login') === '1') {
-        localStorage.removeItem('currentRepo');
+        sessionStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
         $('sidebar').style.display = 'none';
         $('tb').style.display = 'none';
@@ -1222,13 +1334,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '35') {
+    if (localStorage.getItem('app_cache_ver') !== '36') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '35');
+      localStorage.setItem('app_cache_ver', '36');
     }
 
     const token = localStorage.getItem('token');

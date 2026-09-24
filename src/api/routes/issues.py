@@ -34,7 +34,6 @@ def _num_from_issue_id(issue_id: str) -> str:
 def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
     """查 PR 订阅事件（issue_id LIKE '#pr_%'），按 PR 号聚合为伪卡片。"""
     from src.session_manager import db, db_lock
-    from src.repo_key import from_repo_key
     items = []
     placeholders = ",".join("?" * len(repo_keys))
     with db_lock:
@@ -78,7 +77,7 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
             return ""
         if sid not in _scene_name_cache:
             cfg = get_pipeline_config(sid, repo_key=repo_keys[0] if repo_keys else "")
-            _scene_name_cache[sid] = (cfg or {}).get("name", sid)
+            _scene_name_cache[sid] = (cfg or {}).get("display_name") or (cfg or {}).get("name", sid)
         return _scene_name_cache[sid]
 
     for pr_num, ev in _pr_map.items():
@@ -111,7 +110,7 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
             "stage": "",
             "is_running": _status == "running",
             "agent_statuses": [],
-            "repo_key": from_repo_key(repo_keys[0] if repo_keys else ""),
+            "repo_key": repo_keys[0] if repo_keys else "",
             "is_pr_event": True,
             "pr_seq": ev["seq"],
             "qa_history": [{**qa, "scene_name": _get_scene_name(qa.get("scene_id", ""))} for qa in _pr_history.get(pr_num, [])],
@@ -713,7 +712,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     nodes, _ = compute_node_statuses(nodes, events, _current_stage)
     return {
         "scene_id": _scene_id,
-        "scene_name": (pipe_cfg or {}).get("name", _scene_id),
+        "scene_name": (pipe_cfg or {}).get("display_name") or (pipe_cfg or {}).get("name", _scene_id),
         "current_stage": _current_stage,
         "nodes": nodes,
         "events": events,
@@ -981,16 +980,22 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter
     from src.repo_key import to_repo_key
+    clauses = []
+    params = []
     if repo_key:
-        repo_key = to_repo_key(repo_key)
-    clauses = ["user_id=?"]
-    params = [user["id"]]
+        # 跨 provider 双查：前端传入 owner/repo 无 provider 信息，
+        # to_repo_key 默认 gitcode: 前缀会漏查 GitHub 仓库数据。
+        _rk = to_repo_key(repo_key)
+        _rk_alt = ("github:" + repo_key) if _rk.startswith("gitcode:") else ("gitcode:" + repo_key)
+        _rk_list = [_rk, _rk_alt]
+        _rk_ph = ",".join("?" * len(_rk_list))
+        clauses.append(f"repo_key IN ({_rk_ph})")
+        params.extend(_rk_list)
+    clauses.append("user_id=?")
+    params.append(user["id"])
     if status:
         clauses.append("status=?")
         params.append(status)
-    if repo_key:
-        clauses.append("repo_key=?")
-        params.append(repo_key)
     _build_assignee_filter(assignees, clauses, params)
     where = " AND ".join(clauses)
     _order_dir = "DESC" if sort_order == "desc" else "ASC"

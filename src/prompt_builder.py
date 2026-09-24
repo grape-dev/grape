@@ -148,7 +148,7 @@ _advanced_options_cache: dict = {}  # (repo_key, issue_id) -> (options_str, time
 def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
     """注入场景高级选项指引（仅执行类 agent coding/qa/sre）。
 
-    值不暴露在 prompt 文本里——通过环境变量注入（GRAPE_WORK_BRANCH / GRAPE_CF_N / GRAPE_CF_MAP），
+    值不暴露在 prompt 文本里——通过环境变量注入（GRAPE_WORK_BRANCH / 自定义变量名），
     prompt 只输出固定指引文本，agent 自行 printenv 读取。
 
     优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene。
@@ -192,9 +192,9 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
         opts = _json.loads(row[0]) if row[0] else {}
         if not opts:
             return ""
-        # 3. 判断有哪些配置项（决定是否输出指引）
+        # 3. 判断有哪些配置项（决定是否输出指引；自定义变量指引按 Issue #236 移除，使用方式见技能 SKILL.md）
         wb = opts.get("work_branch", "")
-        fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("key")]
+        fields = [f for f in (opts.get("custom_fields", []) or []) if f.get("name")]
         has_any = bool(wb) or bool(fields)
         if not has_any:
             return ""
@@ -203,8 +203,6 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
         lines.append("Custom scene options are injected as environment variables. Before executing, you MUST read the following environment variables:")
         if wb:
             lines.append("- GRAPE_WORK_BRANCH: work baseline branch (printenv GRAPE_WORK_BRANCH)")
-        if fields:
-            lines.append("- GRAPE_CF_MAP: custom config key mapping (printenv GRAPE_CF_MAP); read the corresponding environment variable named in the mapping to get its value")
         lines.append("Read all configured options first, then start working.")
         result = "\n".join(lines)
         _advanced_options_cache[_cache_key] = (result, now)
@@ -633,13 +631,34 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
 
+    # VOD issue_opened：用户已选场景时跳过查重（复制需求选不同场景流水线不应被判重复）
+    _user_selected_scene = False
+    if agent_type == "vod" and evt_type == "issue_opened":
+        _issue_id_for_scene = evt.get("issue_id", "") or str(number or "")
+        if _issue_id_for_scene and _rk:
+            try:
+                from src.api.session_store import get_issue_scene
+                _scene_tuple = get_issue_scene(_rk, _issue_id_for_scene)
+                if _scene_tuple and _scene_tuple[0]:
+                    _user_selected_scene = True
+            except Exception:
+                pass
+
     try:
         from src.api.event_store import get_issue_summary
         repo_key = f"{evt['source']}:{evt['repository']}"
         _current_issue = str(evt.get("issue_id") or number or "").lstrip("#")
         issue_summary = get_issue_summary(repo_key, exclude_issue=_current_issue)
         if issue_summary:
-            parts.append(issue_summary)
+            if _user_selected_scene:
+                parts.append(issue_summary)
+                parts.append(
+                    "\n⚠️ **重要：用户已为此 Issue 指定了开发场景，请直接按场景流水线执行，"
+                    "不要因为标题或内容与已有 Issue 相似而判断为重复需求或跳过执行。"
+                    "复制需求使用不同场景流水线是正常操作。**"
+                )
+            else:
+                parts.append(issue_summary)
     except Exception:
         pass
 

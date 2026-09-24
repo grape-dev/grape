@@ -47,7 +47,7 @@
   },
   "empty": {
     "no_repo_selected": "No repo selected. Please select a current repo on the Repos page.",
-    "no_skills": "No skills in this tab.",
+    "no_skills": "No skills in this category",
     "no_sub_skills": "(No sub-skills)",
     "no_content": "(No content)",
     "no_detail": "(No detailed content)"
@@ -263,5 +263,7 @@
   "scene_detail": "Details",
   "no_repo_selected": "Please select a repo first",
   "no_scenes_custom": "No scenes yet. Create or import one.",
-  "category_general": "General"
+  "category_general": "General",
+  "scene_params": "Scene Parameters",
+  "scene_params_hint": "Required when applying; Agent reads via env vars"
 }

@@ -57,7 +57,8 @@ class CodeArtsRuntime(AgentRuntime):
         return args
 
     def get_env(self, account: str = "", user_id: int = 0) -> dict:
-        home = os.path.expanduser("~")
+        from src.runtime.os_adapter import home_dir
+        home = home_dir()
         env = os.environ.copy()
         # codearts 启动时检查 AK/SK（华为云认证），不给就拒。
         # 但我们走自定义 provider（opengw），给 dummy 值绕过检查即可。

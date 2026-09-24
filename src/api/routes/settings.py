@@ -77,7 +77,7 @@ _PLACEHOLDER_VALUES = {
 def _is_placeholder(value: str) -> bool:
     v = (value or "").strip()
     if not v:
-        return True  # 空 = 无值（不写）
+        return False  # 空字符串不是占位符（清除语义由调用方处理）
     if v in _PLACEHOLDER_VALUES:
         return True
     if v.startswith(("AK-demo-", "SK-demo-", "ghp_devopsbot_")):
@@ -85,36 +85,57 @@ def _is_placeholder(value: str) -> bool:
     return "xxxx" in v.lower()
 
 
-@router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected.")
+@router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected. Sending an empty string explicitly clears the field; omitting a field leaves it unchanged.")
 def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_session_token)):
     acc = user_db.get_user_account(user["username"]) or {}
-    if body.huawei_cloud_ak and not _is_placeholder(body.huawei_cloud_ak):
-        acc["huawei_cloud_ak"] = body.huawei_cloud_ak.strip()
-    if body.huawei_cloud_sk and not _is_placeholder(body.huawei_cloud_sk):
-        acc["huawei_cloud_sk"] = body.huawei_cloud_sk.strip()
-    if body.codearts_ak and not _is_placeholder(body.codearts_ak):
-        acc["CODEARTS_CLI_AK"] = body.codearts_ak.strip()
-    if body.codearts_sk and not _is_placeholder(body.codearts_sk):
-        acc["CODEARTS_CLI_SK"] = body.codearts_sk.strip()
-    if body.github_token and not _is_placeholder(body.github_token):
-        _gh_tok = body.github_token.strip()
-        acc["github_api_token"] = _gh_tok
-        # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
-        try:
-            import requests as _req
-            _resp = _req.get("https://api.github.com/user",
-                             headers={"Authorization": f"Bearer {_gh_tok}", "Accept": "application/vnd.github+json"},
-                             timeout=10)
-            if _resp.status_code == 200:
-                _gh_user = _resp.json()
-                acc["github_login"] = _gh_user.get("login", "")
-                # 关联到用户表
-                user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
-                log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
-            else:
-                log.warning(f"GitHub token validation failed: {_resp.status_code}")
-        except Exception as _e:
-            log.warning(f"GitHub token validation error: {_e}")
+    # 区分「未传字段」（不修改）与「传空字符串」（清除）：
+    # model_dump(exclude_unset=True) 仅含请求体中显式传递的字段，未传字段取默认值时不包含在内。
+    explicit = body.model_dump(exclude_unset=True)
+
+    def _apply_credential(field: str, acc_key: str):
+        """统一凭据写入逻辑（Issue #237）：
+        - 字段未传 → 不修改（保持已有值）
+        - 字段传空字符串 → 清除（置空）
+        - 字段传非空非占位符值 → 写入
+        - 字段传占位符/demo 值 → 拒绝写入（保持已有值）
+        """
+        if field not in explicit:
+            return
+        v = (explicit[field] or "").strip()
+        if v and not _is_placeholder(v):
+            acc[acc_key] = v
+        elif not v:
+            acc[acc_key] = ""
+
+    _apply_credential("huawei_cloud_ak", "huawei_cloud_ak")
+    _apply_credential("huawei_cloud_sk", "huawei_cloud_sk")
+    _apply_credential("codearts_ak", "CODEARTS_CLI_AK")
+    _apply_credential("codearts_sk", "CODEARTS_CLI_SK")
+
+    # GitHub Token（写入时需验证 token 并获取用户信息；清除时无需验证）
+    if "github_token" in explicit:
+        _gh_tok = (explicit["github_token"] or "").strip()
+        if _gh_tok and not _is_placeholder(_gh_tok):
+            acc["github_api_token"] = _gh_tok
+            # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
+            try:
+                import requests as _req
+                _resp = _req.get("https://api.github.com/user",
+                                 headers={"Authorization": f"Bearer {_gh_tok}", "Accept": "application/vnd.github+json"},
+                                 timeout=10)
+                if _resp.status_code == 200:
+                    _gh_user = _resp.json()
+                    acc["github_login"] = _gh_user.get("login", "")
+                    # 关联到用户表
+                    user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
+                    log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
+                else:
+                    log.warning(f"GitHub token validation failed: {_resp.status_code}")
+            except Exception as _e:
+                log.warning(f"GitHub token validation error: {_e}")
+        elif not _gh_tok:
+            acc["github_api_token"] = ""
+            acc["github_login"] = ""
     user_db.save_user_account(user["username"], acc)
     return {"message": "凭据已更新"}
 
@@ -639,11 +660,14 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
 
 # ====== Runtime Devices（设备级分页端点，Issue #185）======
 
-@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size.")
-def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20):
+@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245).")
+def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20,
+                        scope: str = "", type: str = "", q: str = ""):
     """设备级视图：按 credential_id 分组，返回每个设备及其承载的引擎列表。
 
     分页（Issue #185）：page/page_size 参数对设备列表切片，total 为过滤后设备总数。
+    筛选（Issue #245）：scope/type/q 参数在分页切片前过滤，total 始终为筛选后总数，
+    保证底部页码总条数与实际展示数据一致（修复前端二次过滤导致 total 不更新）。
     可见性过滤与 agent-runtimes 端点一致（global + personal + repo-level）。
     """
     from src.user import db as user_db
@@ -676,12 +700,59 @@ def get_runtime_devices(user: dict = Depends(require_no_session_token), page: in
     devices = _build_runtime_devices(_db, _dl, cred_map, _visible_credential,
                                      valid_users, _local_runtimes, now)
 
-    # 分页切片
+    # Issue #245: 筛选从迁移到后端——前端二次过滤会让 _rtDevTotal 与展示数据不一致
+    # avail_scopes / avail_types 取自全部可见设备（不依赖当前筛选/页），供前端生成筛选标签，
+    # 避免后端过滤后当前页只剩单一 scope/type 导致筛选标签消失无法切换
+    _avail_scopes = list(set(
+        ("local" if d.get("credential_id") == 0 else (d.get("scope") or "global"))
+        for d in devices
+    ))
+    _avail_types = list(set(
+        _t for d in devices for _t in _device_engine_types(d)
+    ))
+
+    # type 筛选：设备任一引擎名 includes(type)（小写，与前端 _availTypes 逻辑一致）
+    if type:
+        _tlow = type.lower()
+        devices = [d for d in devices if any(
+            _tlow in (r.get("name") or "").lower() for r in d.get("runtimes", [])
+        )]
+
+    # q 搜索：匹配 name/device_name/owner/worker_ip/runtimes[].name（与前端原 haystack 一致）
+    if q:
+        _qlow = q.lower()
+        devices = [d for d in devices if _qlow in " ".join([
+            d.get("name") or "", d.get("device_name") or "", d.get("owner") or "",
+            d.get("worker_ip") or "",
+            " ".join((r.get("name") or "") for r in d.get("runtimes", []))
+        ]).lower()]
+
+    # scope 筛选（credential_id=0 → local，否则取 d.scope；与 renderWorkers 原前端逻辑一致）
+    if scope:
+        devices = [d for d in devices if (
+            ("local" if d.get("credential_id") == 0 else (d.get("scope") or "global")) == scope
+        )]
+
+    # 分页切片（total 为筛选后总数）
     total = len(devices)
     _page = max(page, 1)
     _offset = (_page - 1) * page_size
     paged_devices = devices[_offset:_offset + page_size]
-    return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size}
+    return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size,
+            "avail_scopes": _avail_scopes, "avail_types": _avail_types}
+
+
+def _device_engine_types(d: dict) -> list:
+    """从设备的引擎列表派生引擎类型标签（与前端 _availTypes 的 includes 判定一致）。"""
+    _KNOWN = [("hermes", "hermes"), ("opencode", "opencode"),
+              ("codearts", "codearts"), ("codex", "codex")]
+    found = []
+    for rt in d.get("runtimes", []):
+        n = (rt.get("name") or "").lower()
+        for _kw, _label in _KNOWN:
+            if _kw in n and _label not in found:
+                found.append(_label)
+    return found
 
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）

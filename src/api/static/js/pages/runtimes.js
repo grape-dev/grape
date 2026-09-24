@@ -27,6 +27,9 @@ let _rtPageSize = 20;   // 每页条数
 let _rtTotal = 0;       // 服务端返回的过滤后总数
 let _rtDevPage = 1;     // Workers 当前页码
 let _rtDevTotal = 0;    // Workers 总数
+// Issue #245: Workers 筛选标签由后端 runtime-devices 返回（不依赖当前页数据）
+let _rtDevAvailScopes = [];
+let _rtDevAvailTypes = [];
 
 // 来源徽章配置（Issue #185: 统一列表每张卡片标注来源）
 const _SCOPE_BADGE = {
@@ -95,11 +98,17 @@ function _loadRuntimesData() {
 }
 
 // Issue #185: Workers 设备分页加载（独立端点）
+// Issue #245: 筛选条件传给后端，total 由后端返回筛选后总数（移除前端二次过滤）
 function _loadRuntimeDevices() {
   var qs = '?page=' + _rtDevPage + '&page_size=' + _rtPageSize;
+  if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
+  if (_rtFilterType) qs += '&type=' + encodeURIComponent(_rtFilterType);
+  if (_runtimeSearch) qs += '&q=' + encodeURIComponent(_runtimeSearch);
   API.get('/settings/runtime-devices' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtDevTotal = d.total || 0;
+    _rtDevAvailScopes = d.avail_scopes || [];
+    _rtDevAvailTypes = d.avail_types || [];
     // 合并到 __runtimeData 供 renderWorkers 使用
     if (__runtimeData) {
       __runtimeData.devices = d.devices || [];
@@ -259,18 +268,22 @@ function renderRuntimes(data) {
       <button onclick="openAddDevicePanel()" style="margin-left:auto;display:inline-flex;align-items:center;gap:7px;padding:8px 18px;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 12px rgba(59,130,246,.35);transition:all .2s;position:relative;overflow:hidden" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 20px rgba(59,130,246,.45)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 2px 12px rgba(59,130,246,.35)'><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M12 5v14M5 12h14"/></svg>${I18N.t('runtimes.action.add_device')}</button>
     </div>`;
   // 过滤标签栏
-  const _availTypes = [...new Set((_runtimeTab === 'engines' ? (data.runtimes||[]) : devices).map(e => {
-    const n = ((e.instance_name || e.name || '')).toLowerCase();
-    if (n.includes('hermes')) return 'hermes';
-    if (n.includes('opencode')) return 'opencode';
-    if (n.includes('codearts')) return 'codearts';
-    if (n.includes('codex')) return 'codex';
-    return '';
-  }).filter(Boolean))];
+  // Issue #245: Workers tab 的筛选标签由后端 runtime-devices 返回（不依赖当前页数据）；
+  // Engines tab 仍从当前 runtimes 列表派生
+  const _availTypes = _runtimeTab === 'engines'
+    ? [...new Set((data.runtimes||[]).map(e => {
+        const n = ((e.instance_name || e.name || '')).toLowerCase();
+        if (n.includes('hermes')) return 'hermes';
+        if (n.includes('opencode')) return 'opencode';
+        if (n.includes('codearts')) return 'codearts';
+        if (n.includes('codex')) return 'codex';
+        return '';
+      }).filter(Boolean))]
+    : (_rtDevAvailTypes || []);
   const _allScopes = ['local','user','repo','global'];
   const _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
-  // 筛选标签从后端返回的 avail_scopes 生成（不再依赖当前页数据）
-  const _availScopes = data.avail_scopes || [];
+  // 筛选标签从后端返回的 avail_scopes 生成（不依赖当前页数据）
+  const _availScopes = _runtimeTab === 'engines' ? (data.avail_scopes || []) : (_rtDevAvailScopes || []);
   const _hasScope = (sc) => _availScopes.includes(sc);
   const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
   // 收集可用场景和标签（从引擎数据提取）
@@ -372,23 +385,9 @@ function renderEngines(data, devices) {
 }
 
 function renderWorkers(data, devices) {
-  // 搜索 + 类型 + scope 过滤（Issue #185: 统一扁平列表，不再按 scope 分区）
-  const q = (_runtimeSearch || '').toLowerCase().trim();
-  const fDevices = devices.filter(d => {
-    if (q) {
-      const hay = [d.name, d.device_name, d.owner, d.worker_ip, (d.runtimes||[]).map(r=>r.name).join(' ')].join(' ').toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    if (_rtFilterType) {
-      const names = (d.runtimes||[]).map(r => (r.name||'').toLowerCase()).join(' ');
-      if (!names.includes(_rtFilterType)) return false;
-    }
-    if (_rtFilterScope) {
-      const sc = d.credential_id === 0 ? 'local' : (d.scope || 'global');
-      if (sc !== _rtFilterScope) return false;
-    }
-    return true;
-  });
+  // Issue #245: scope/type/q 筛选已迁移到后端（runtime-devices 端点），
+  // _rtDevTotal 由后端返回筛选后总数；此处仅保留排序，不再做本地二次过滤
+  const fDevices = devices.slice();
   // 排序：按健康 → 按名称
   _sortByHealth(fDevices);
   _sortByName(fDevices);
@@ -658,6 +657,7 @@ function doCreateCredentialInPanel() {
   API.post('/settings/runtime-credentials', { name, scope, repo_key }).then(d => {
     var token = d.token || '';
     var oneCmd = 'curl -fsSL ' + window.location.origin + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + window.location.origin;
+    var winCmd = '& ([scriptblock]::Create((irm ' + window.location.origin + '/api/runtime/install.ps1))) -Token ' + token + ' -Server ' + window.location.origin;
     var runCmd = 'RUNTIME_TOKEN=' + token + ' python -m runtime.agent';
     if (area) area.innerHTML =
       '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
@@ -669,11 +669,16 @@ function doCreateCredentialInPanel() {
         // Token
         '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">Token</label>' +
         '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:12px;margin-bottom:14px">' + token + '</code>' +
-        // 一键安装
-        '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">' + I18N.t('runtimes.credential.install_hint') + '</div>' +
+        // Linux 一键安装
+        '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">🐧 ' + I18N.t('runtimes.credential.install_hint') + '</div>' +
         '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:11px;margin-bottom:6px">' + oneCmd + '</code>' +
-        '<button class="bt bt-p" style="width:100%;justify-content:center;margin-bottom:12px" onclick="copyText(\'' + oneCmd.replace(/'/g, "\\'") + '\')">' + I18N.t('runtimes.action.copy_one_cmd') + '</button>' +
+        '<button class="bt bt-p" style="width:100%;justify-content:center;margin-bottom:8px" onclick="copyText(\'' + oneCmd.replace(/'/g, "\\'") + '\')">' + I18N.t('runtimes.action.copy_one_cmd') + '</button>' +
         '<div style="font-size:11px;color:var(--t2);margin-bottom:14px;line-height:1.5">' + I18N.t('runtimes.credential.install_desc') + '</div>' +
+        // Windows 安装
+        '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">' + I18N.t('runtimes.credential.win_install_hint') + '</div>' +
+        '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:11px;margin-bottom:6px">' + winCmd + '</code>' +
+        '<button class="bt bt-p" style="width:100%;justify-content:center;margin-bottom:8px" onclick="copyText(\'' + winCmd.replace(/'/g, "\\'") + '\')">' + I18N.t('runtimes.action.copy_win_cmd') + '</button>' +
+        '<div style="font-size:11px;color:var(--t2);margin-bottom:14px;line-height:1.5">' + I18N.t('runtimes.credential.win_install_desc') + '</div>' +
         // 手动启动
         '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">' + I18N.t('runtimes.credential.manual_start') + '</div>' +
         '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:11px;margin-bottom:6px">' + runCmd + '</code>' +

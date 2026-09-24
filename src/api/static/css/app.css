@@ -276,7 +276,11 @@
 .msg th,.msg td{border:1px solid var(--b);padding:4px 8px}
 .msg th{background:var(--bg);font-weight:600}
 .msg a{color:var(--a)}
+.msg a:hover{text-decoration:underline}
 .msg hr{border:none;border-top:1px solid var(--b);margin:8px 0}
+/* Issue #233: 蓝色背景用户消息气泡内链接高对比度样式（WCAG AA ≥4.5:1） */
+.chat-body .msg.l a,.chat-body .msg.l a:link,.chat-body .msg.l a:visited{color:#fff;text-decoration:underline}
+.chat-body .msg.l a:hover{text-decoration:underline;background-color:rgba(255,255,255,.18);border-radius:2px}
 
 /* ===== Template card video link ===== */
 .tmpl-card-foot{gap:8px}
@@ -811,3 +815,6 @@
   .sb.collapsed{width:232px;overflow:visible}
   .sb.collapsed .sb-h,.sb.collapsed .sb-sel,.sb.collapsed .sb-nav,.sb.collapsed .sb-ft{opacity:1;overflow:visible;white-space:normal}
 }
+
+/* Issue #236: 场景自定义环境变量 name 输入非法标红 + 密钥勾选紧凑样式 */
+.cf-invalid{border:1px solid #ff3b30!important;background:#fff5f5!important}

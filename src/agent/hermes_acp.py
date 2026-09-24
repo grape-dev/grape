@@ -245,30 +245,25 @@ class HermesACPBackend:
         # 用 select + 非阻塞 read 代替。
         import select as _select
         _fd = proc.stdout.fileno()
-        import fcntl as _fcntl
-        _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
-        _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | os.O_NONBLOCK)
+        # Windows 没有 fcntl
+        import sys as _sys
+        if _sys.platform != "win32":
+            import fcntl as _fcntl
+            _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
+            _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | os.O_NONBLOCK)
 
         _read_buf = b""
 
         def _reader():
             nonlocal _read_buf
             try:
-                while True:
-                    readable, _, _ = _select.select([_fd], [], [], 0.5)
-                    if not readable:
-                        if proc.poll() is not None:
+                if _sys.platform == "win32":
+                    # Windows: 直接用 Popen.stdout.readline() 阻塞读
+                    # reader 在独立线程，阻塞不影响主线程
+                    while True:
+                        line = proc.stdout.readline()
+                        if not line:
                             break
-                        continue
-                    try:
-                        chunk = proc.stdout.read(4096)
-                    except (BlockingIOError, OSError):
-                        continue
-                    if not chunk:
-                        break
-                    _read_buf += chunk
-                    while b"\n" in _read_buf:
-                        line, _read_buf = _read_buf.split(b"\n", 1)
                         line_str = line.decode("utf-8", errors="replace").strip()
                         if not line_str:
                             continue
@@ -276,6 +271,30 @@ class HermesACPBackend:
                             client.handle_line(line_str)
                         except Exception as e:
                             log.warning(f"{label}hermes ACP handle_line error: {e}")
+                else:
+                    # Linux: select 轮询 + 非阻塞 read 批量读
+                    while True:
+                        readable, _, _ = _select.select([_fd], [], [], 0.5)
+                        if not readable:
+                            if proc.poll() is not None:
+                                break
+                            continue
+                        try:
+                            chunk = proc.stdout.read(4096)
+                        except (BlockingIOError, OSError):
+                            continue
+                        if not chunk:
+                            break
+                        _read_buf += chunk
+                        while b"\n" in _read_buf:
+                            line, _read_buf = _read_buf.split(b"\n", 1)
+                            line_str = line.decode("utf-8", errors="replace").strip()
+                            if not line_str:
+                                continue
+                            try:
+                                client.handle_line(line_str)
+                            except Exception as e:
+                                log.warning(f"{label}hermes ACP handle_line error: {e}")
             except Exception as e:
                 log.warning(f"{label}hermes ACP reader exception: {e}")
             finally:
@@ -284,6 +303,22 @@ class HermesACPBackend:
 
         reader_thread = threading.Thread(target=_reader, daemon=True)
         reader_thread.start()
+
+        # stderr reader 线程：持续排空 stderr 管道，防止管道缓冲区满导致死锁
+        # Windows 管道缓冲区约 4KB，hermes ACP 启动时输出大量 stderr 日志
+        # 不排空会导致 hermes 进程阻塞在 stderr 写入上，stdout 不再输出 → 管道死锁
+        _stderr_chunks = []
+        def _stderr_reader():
+            try:
+                while True:
+                    line = proc.stderr.readline()
+                    if not line:
+                        break
+                    _stderr_chunks.append(line.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+        stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
+        stderr_thread.start()
 
         try:
             # ── 1. initialize 握手 ──
@@ -458,7 +493,7 @@ class HermesACPBackend:
 
             stderr_output = ""
             try:
-                stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
+                stderr_output = "".join(_stderr_chunks)[:500]
             except Exception:
                 pass
 
@@ -974,10 +1009,10 @@ def _build_overlay_home(iso_home: str, src_home: str):
         if os.path.isfile(src_cfg):
             try:
                 import re
-                with open(src_cfg, "r") as f:
+                with open(src_cfg, "r", encoding="utf-8") as f:
                     cfg_text = f.read()
                 cfg_text = re.sub(r'(tool_progress:\s*)\w+', r'\g<1>new', cfg_text)
-                with open(dst_cfg, "w") as f:
+                with open(dst_cfg, "w", encoding="utf-8") as f:
                     f.write(cfg_text)
             except Exception:
                 shutil.copy2(src_cfg, dst_cfg)
@@ -988,7 +1023,7 @@ def _build_overlay_home(iso_home: str, src_home: str):
         env_body = ""
         if os.path.isfile(src_env):
             try:
-                with open(src_env, "r") as f:
+                with open(src_env, "r", encoding="utf-8") as f:
                     for line in f:
                         stripped = line.strip()
                         if stripped.startswith("HERMES_HOME=") or stripped.startswith("export HERMES_HOME="):
@@ -1001,7 +1036,7 @@ def _build_overlay_home(iso_home: str, src_home: str):
             env_body += "\n"
         env_body += f"HERMES_HOME='{iso_home}'\n"
         try:
-            with open(dst_envf, "w") as f:
+            with open(dst_envf, "w", encoding="utf-8") as f:
                 f.write(env_body)
             os.chmod(dst_envf, 0o600)
         except Exception:

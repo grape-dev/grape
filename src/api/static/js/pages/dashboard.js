@@ -67,17 +67,9 @@ function renderDashboard(data) {
 
   // 空状态卡片点击"创建新场景"
   window._enterCreateFromEmpty = function() {
-    const tmpData = {
-      agents: [], scene_nodes: [], repo: 'gitcode:' + owner + '/' + name,
-      _scenes: [{ id: '__tmp__', name: I18N.t('dashboard.create_custom_scene'), scope: 'user' }],
-      dev_scene: '__tmp__', agent_engines: {}, metrics: m,
-    };
-    renderDashboard(tmpData);
-    setTimeout(function() {
-      if (typeof enterCreateMode === 'function') {
-        enterCreateMode();
-      }
-    }, 50);
+    if (typeof enterCreateMode === 'function') {
+      enterCreateMode();
+    }
   };
 
   // 场景列表为空 → 渲染空状态卡片
@@ -808,19 +800,31 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
   };
 
-  window._addCustomFieldInline = function(key, value) {
+window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
     row.className = 'adv-kv';
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
-    var _hasVal = !!(value && String(value).trim());
-    var _vType = _hasVal ? 'password' : 'text';
-    var _vEye = _hasVal ? '👁' : '🙈';
-    row.innerHTML = '<input class="adv-kv-key" placeholder="key" value="' + (key || '') + '">' +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + (value || '') + '">' +
+    var _isSec = _cfComputeIsSecret(name, isSecret);
+    var _val = (value || '');
+    var _vType = _isSec ? 'password' : 'text';
+    var _vEye = _isSec ? '👁' : '🙈';
+    var _desc = (description || '').trim();
+    // preset 项：name 只读 label（不可改名/增删），scope 组隐藏，不显示删除按钮；description 小字 hint
+    var _nameEl = preset
+      ? '<span style="display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center;min-width:140px">' +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + (name || '') + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+        '</span>'
+      : '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">';
+    row.innerHTML = _nameEl +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
-      '<button class="adv-del" onclick="this.parentElement.remove()">×</button>';
+      (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
+      (preset ? '' : '<button class="adv-del" onclick="this.parentElement.remove()">×</button>') +
+      (preset ? '<input type="hidden" class="adv-kv-preset" value="1">' : '');
     container.appendChild(row);
   };
 
@@ -845,13 +849,9 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   window._saveAdvancedOptionsInline = function(sceneId, repoParam) {
     var workBranch = (document.getElementById('advWorkBranchInline') || {}).value || '';
     if (!workBranch) { app.showToast && app.showToast(I18N.t('dashboard.branch_required')||'工作分支不能为空'); return; }
-    var fields = [];
-    document.querySelectorAll('#advCustomFieldsInline .adv-kv').forEach(function(row) {
-      var k = (row.querySelector('.adv-kv-key') || {}).value || '';
-      var v = (row.querySelector('.adv-kv-val') || {}).value || '';
-      if (k.trim()) fields.push({ key: k.trim(), value: v.trim() });
-    });
-    API.put('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(repoParam), { work_branch: workBranch, custom_fields: fields })
+    var _collected = _cfCollectFields('#advCustomFieldsInline');
+    if (_collected.error) { app.showToast && app.showToast(_collected.error); return; }
+    API.put('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(repoParam), { work_branch: workBranch, custom_fields: _collected.fields })
       .then(function() { app.showToast && app.showToast(I18N.t('dashboard.adv_options_saved')||'高级选项已保存'); })
       .catch(function(e) { app.showToast && app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '保存失败'); });
   };
@@ -1167,7 +1167,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
 
 // 引擎 modal 实现（从原有逻辑提取，参数化）
 function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId) {
-  const allEngines = (agentEngines[agentType] || []).filter(e => e.status === 'online' || e.status === 'recently_lost');
+  const allEngines = (agentEngines[agentType] || []);
   const node = editNodes.find(n => n.id === agentType);
   if (!node) return;
   let currentIds = node.engine_runtime_ids || [];
@@ -1195,7 +1195,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
     currentIds = (window._engCurIds || []).slice();
     const q = (filter || '').toLowerCase().trim();
     const filtered = sorted.filter(e => {
-      if (q) { const hay = [e.name, e.alias, e.device, e.cred_name, e.scope_label, (e.tags||[]).join(' ')].join(' ').toLowerCase(); if (!hay.includes(q)) return false; }
+      if (q) { const hay = [e.name, e.alias, e.scope_label, (e.tags||[]).join(' ')].join(' ').toLowerCase(); if (!hay.includes(q)) return false; }
       if (_engFilterType) { const ename = (e.name || '').toLowerCase(); if (!ename.includes(_engFilterType)) return false; }
       if (_engFilterScope && (e.scope || 'global') !== _engFilterScope) return false;
       if (_engFilterScene.length > 0) {
@@ -1218,7 +1218,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
         return `<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:${checked ? 'rgba(0,113,227,.06)' : '#f5f5f7'};transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">
           <input type="checkbox" data-eid="${e.id}" ${checked ? 'checked' : ''} onchange="if(this.checked){window._engCurIds.push(${e.id})}else{window._engCurIds=window._engCurIds.filter(x=>x!==${e.id})}" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">
           <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">${e.alias || e.name}${e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + e.name + ')</span>' : ''}${_tagBadge(e.tags)}${_sceneBadge(e.scene_tags)}${_scopeBadge(e.scope)}</div><div style="font-size:10px;color:#86868b;margin-top:3px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div></div>
-          <span style="font-size:11px;font-weight:500;color:${e.status === 'recently_lost' ? '#f59e0b' : '#34c759'}">${e.status === 'recently_lost' ? '失联' : I18N.t('dashboard.online')||'在线'}</span>
+          <span style="font-size:11px;font-weight:500;color:${(() => { const _sc = {online:'#34c759', recently_lost:'#f59e0b', offline:'#86868b', about_to_gc:'#ff3b30'}; return _sc[e.status] || '#86868b'; })()}">${(() => { const _sl = {online: I18N.t('dashboard.online')||'在线', recently_lost:'失联', offline:'离线', about_to_gc:'待回收'}; return _sl[e.status] || '离线'; })()}</span>
         </label>`;
       }).join('');
     });
@@ -1304,9 +1304,9 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
   overlay.innerHTML = `<div id="engModalBox" style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">
     <h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${I18N.t('dashboard.select_engine')||'选择引擎'} — ${title}</h3>
-    <div style="font-size:12px;color:#86868b;margin-bottom:12px">${I18N.t('dashboard.engines_available', {count: allEngines.length})||'可用引擎: '+allEngines.length}</div>
+    <div style="font-size:12px;color:#86868b;margin-bottom:12px">${I18N.t('dashboard.engines_available', {count: allEngines.length})||'已注册引擎: '+allEngines.length}</div>
     <div id="engFilterTags" style="flex-shrink:0">${_renderFilterTags()}</div>
-    <div style="margin-bottom:12px;flex-shrink:0"><input id="engSearchInput" placeholder="搜索引擎名称/设备/标签..." style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>
+    <div style="margin-bottom:12px;flex-shrink:0"><input id="engSearchInput" placeholder="搜索引擎名称/标签..." style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>
     <div id="engListContainer" style="display:flex;flex-direction:column;gap:4px;flex:1;overflow-y:auto;min-height:0">${_renderEngineList('')}</div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;flex-shrink:0">
       <button class="ap-btn" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')||'取消'}</button>
@@ -1535,20 +1535,30 @@ function _enterCreateStandardMode(data, owner, name) {
     if (el2) el2.style.display = el2.style.display === 'none' ? 'block' : 'none';
   };
 
-  window._addCustomFieldInline = function(key, value) {
+  window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
     row.className = 'adv-kv';
-    row.style.cssText = 'display:flex;gap:8px;align-items:center';
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
-    var _hasVal = !!(value && String(value).trim());
-    var _vType = _hasVal ? 'password' : 'text';
-    var _vEye = _hasVal ? '👁' : '🙈';
-    row.innerHTML = '<input class="adv-kv-key" placeholder="key" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (key || '') + '">' +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (value || '') + '">' +
+    var _isSec = _cfComputeIsSecret(name, isSecret);
+    var _val = (value || '');
+    var _vType = _isSec ? 'password' : 'text';
+    var _vEye = _isSec ? '👁' : '🙈';
+    var _desc = (description || '').trim();
+    var _nameEl = preset
+      ? '<span style="flex:0 0 150px;display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center">' +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + (name || '') + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+        '</span>'
+      : '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">';
+    row.innerHTML = _nameEl +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
-      '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>';
+      (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
+      (preset ? '' : '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>') +
+      (preset ? '<input type="hidden" class="adv-kv-preset" value="1">' : '');
     container.appendChild(row);
   };
 
@@ -1589,12 +1599,9 @@ function _enterCreateStandardMode(data, owner, name) {
       window._dashboardEditing = false;
       // 收集高级选项
       var workBranch = (document.getElementById('advWorkBranchInline') || {}).value || 'main';
-      var fields = [];
-      document.querySelectorAll('#advCustomFieldsInline .adv-kv').forEach(function(row) {
-        var k = (row.querySelector('.adv-kv-key') || {}).value || '';
-        var v = (row.querySelector('.adv-kv-val') || {}).value || '';
-        if (k.trim()) fields.push({ key: k.trim(), value: v.trim() });
-      });
+      var _collectedFields = _cfCollectFields('#advCustomFieldsInline');
+      if (_collectedFields.error) { app.showToast && app.showToast(_collectedFields.error); return; }
+      var fields = _collectedFields.fields;
       // 有高级选项就一并保存，然后刷新 dashboard 跳项目场景
       var advPromise = (workBranch || fields.length) ?
         API.put('/scenes/' + encodeURIComponent(r.scene_id) + '/advanced-options?repo=' + encodeURIComponent(owner + '/' + name), { work_branch: workBranch, custom_fields: fields }) :
@@ -1643,7 +1650,7 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
     var container = document.getElementById('advCustomFieldsInline');
     if (container) {
       container.innerHTML = '';
-      fields.forEach(function(f) { window._addCustomFieldInline(f.key, f.value); });
+      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset, f.description); });
     }
   }).catch(function() {});
 }

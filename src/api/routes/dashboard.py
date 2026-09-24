@@ -13,10 +13,10 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 _BW_SNAPSHOT = {"ts": 0.0, "bytes": 0}
 
 
-def _local_bandwidth_percent() -> float:
-    """psutil.net_io_counters() 汇总非 loopback 网卡吞吐，两次调用差分算速率，
-    与 RUNTIME_BANDWIDTH_THRESHOLD_MBPS（默认 1000 Mbps）阈值比较得出占用率。
-    首次调用无基准返回 0.0（与 CPU 采集行为一致）。"""
+def _local_bandwidth() -> tuple:
+    """psutil.net_io_counters() 汇总非 loopback 网卡吞吐，两次调用差分算速率。
+    返回 (percent, mbps)：percent 基于 RUNTIME_BANDWIDTH_THRESHOLD_MBPS（默认 10）。
+    首次调用无基准返回 (0.0, 0.0)。"""
     global _BW_SNAPSHOT
     try:
         import os as _os
@@ -34,18 +34,19 @@ def _local_bandwidth_percent() -> float:
         _BW_SNAPSHOT["ts"] = _now
         _BW_SNAPSHOT["bytes"] = _cur_bytes
         if _prev_ts <= 0 or _prev_bytes <= 0:
-            return 0.0
+            return 0.0, 0.0
         _dt = _now - _prev_ts
         _db = _cur_bytes - _prev_bytes
         if _dt <= 0 or _db < 0:
-            return 0.0
+            return 0.0, 0.0
         _mbps = _db * 8 / _dt / 1e6
-        _thr = float(_os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "1000"))
+        _thr = float(_os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "10"))
         if _thr <= 0:
-            return 0.0
-        return round(min(_mbps / _thr * 100, 100.0), 1)
+            return 0.0, round(_mbps, 1)
+        _pct = round(min(_mbps / _thr * 100, 100.0), 1)
+        return _pct, round(_mbps, 1)
     except Exception:
-        return 0.0
+        return 0.0, 0.0
 
 
 # ===== 运维可观察性端点（必须在 /{owner}/{repo} 之前注册，否则被通配路由拦截）=====
@@ -194,12 +195,13 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
         # interval=None 非阻塞：返回自上次调用以来的平均值（10s 刷新间隔内的 CPU 均值）
         # 首次调用返回 0.0（无基准），后续调用返回真实值
         _local_cpu = _local_mem = _local_disk = _local_tmp = 0.0
-        _local_bandwidth = 0.0
+        _local_bw_pct = 0.0
+        _local_bw_mbps = 0.0
         _local_load = ""
         try:
             import psutil as _ps
             _local_cpu = _ps.cpu_percent(interval=None)
-            _local_bandwidth = _local_bandwidth_percent()
+            _local_bw_pct, _local_bw_mbps = _local_bandwidth()
             # MEM 用 /proc/meminfo 读取实际进程占用（total - free - buffers - cached，不含缓存）
             try:
                 with open("/proc/meminfo") as _mf:
@@ -278,6 +280,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                     "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
                     "disk_percent": wdisk or 0, "tmp_percent": wtmp or 0,
                     "bandwidth_percent": wbw or 0,
+                    "bandwidth_mbps": 0,
                     "load_avg": wload or "",
                     "owner_name": wowner or "",
                 })
@@ -308,11 +311,24 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                         "last_seen_at": "", "last_ip": "127.0.0.1",
                         "cpu_percent": _local_cpu, "memory_percent": _local_mem,
                         "disk_percent": _local_disk, "tmp_percent": _local_tmp,
-                        "bandwidth_percent": _local_bandwidth,
+                        "bandwidth_percent": _local_bw_pct,
+                        "bandwidth_mbps": _local_bw_mbps,
                         "load_avg": _local_load, "owner_name": "",
                     })
                     worker_total += 1
                     worker_online += 1
+                else:
+                    # 本机直连设备已在 worker_list 中（hostname 匹配），更新实时指标
+                    for w in worker_list:
+                        if w.get("device_name") == (_local_hostname or "本机直连"):
+                            w["cpu_percent"] = _local_cpu
+                            w["memory_percent"] = _local_mem
+                            w["disk_percent"] = _local_disk
+                            w["tmp_percent"] = _local_tmp
+                            w["bandwidth_percent"] = _local_bw_pct
+                            w["bandwidth_mbps"] = _local_bw_mbps
+                            w["load_avg"] = _local_load
+                            break
         except Exception:
             pass
 
@@ -1132,8 +1148,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
             ag["enabled_in_scene"] = False
             ag["engine_runtime_ids"] = []
 
-    # 获取可用引擎列表（供前端 engine 下拉）
+    # 获取已注册引擎列表（供前端 engine 下拉）
     # 按 agent_type 标签过滤：只返回 tags 包含该 agent_type 或 "all" 的引擎
+    # 返回全部引擎（含 offline/about_to_gc），前端通过状态徽章区分
     agent_engines = {}
     try:
         from src.runtime.engine_select import query_engines
@@ -1148,6 +1165,14 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
             from src.runtime.health import derive_runtime_health
             import time as _time
             _now = _time.time()
+            _seen_ids = set()
+            _deduped = []
+            for e in engines:
+                _rid = e["runtime_id"]
+                if _rid in _seen_ids:
+                    continue
+                _seen_ids.add(_rid)
+                _deduped.append(e)
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
@@ -1157,7 +1182,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_no_session
                                      "scope": e.get("scope", "global"),
                                      "scope_label": _scope_labels.get(e.get("scope", "global"), ""),
                                      "alias": e.get("alias", "")}
-                                    for e in engines]
+                                    for e in _deduped]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")
 

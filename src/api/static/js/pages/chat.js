@@ -35,7 +35,7 @@ function linkifyIssueNumbers(text, repoKey) {
   return text.replace(/(Issue\s*#(\d+))/gi, (match, full, num) => {
     if (repoKey) {
       const url = _vcsUrl(repoKey, '/issues/' + num);
-      return `<a href="${url}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${full}</a>`;
+      return `<a href="${url}" target="_blank" rel="noopener">${full}</a>`;
     }
     return match; // 无仓库信息时保持原文
   });
@@ -227,7 +227,7 @@ function _renderSkillListItems(container) {
   container.innerHTML = '<div style="padding:8px;text-align:center;color:var(--t3);font-size:11px">' + I18N.t('common.loading') + '</div>';
   let repo = '';
   try {
-    const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+    const c = app.currentRepo();
     repo = c ? (c.fullName || '') : '';
   } catch {}
   const scope = _chatSkillScope || 'official';

@@ -34,3 +34,45 @@ def test_install_script_exists_on_disk():
     assert "RUNTIME_TOKEN=$TOKEN" in content
     assert "RUNTIME_SERVER_URL=$SERVER" in content
     assert "runtime-agent" in content
+
+
+def test_install_ps1_endpoint_returns_script():
+    """GET /api/runtime/install.ps1 返回 PowerShell 安装脚本内容。"""
+    from fastapi.testclient import TestClient
+    from src.api.main import app
+    client = TestClient(app)
+    r = client.get("/api/runtime/install.ps1")
+    assert r.status_code == 200
+    assert "text/plain" in r.headers.get("content-type", "")
+    body = r.text
+    # 应含 PowerShell 脚本关键内容
+    assert "install-worker" in body
+    assert "Token" in body or "-Token" in body
+    assert "RUNTIME_SERVER_URL" in body
+    assert "src.runtime.agent" in body
+    # 不应硬编码任何真实 rta_ token
+    assert "rta_" not in body or "rta_" in body.split("$Token")[0]  # token 由参数注入
+
+
+def test_install_ps1_script_exists_on_disk():
+    """PowerShell 脚本文件应存在于仓库 scripts/ 目录。"""
+    p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-worker.ps1")
+    assert os.path.isfile(p), "scripts/install-worker.ps1 应存在"
+    content = open(p, encoding="utf-8").read()
+    # 核心要素
+    assert "install-worker" in content
+    assert "Token" in content
+    assert "RUNTIME_SERVER_URL" in content
+    assert "runtime-agent" in content
+    assert "venv" in content
+    assert "Start-Process" in content
+
+
+def test_start_worker_ps1_exists_on_disk():
+    """PowerShell 启动脚本应存在。"""
+    p = os.path.join(os.path.dirname(__file__), "..", "scripts", "start-worker.ps1")
+    assert os.path.isfile(p), "scripts/start-worker.ps1 应存在"
+    content = open(p, encoding="utf-8").read()
+    assert "src.runtime.agent" in content
+    assert "Restart" in content or "restart" in content.lower()
+    assert "daemon" in content.lower() or "NoDaemon" in content

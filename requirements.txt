@@ -16,3 +16,8 @@ esdk-obs-python>=3.26
 python-jose[cryptography]>=3.3
 prometheus_client>=0.20
 psutil>=5.9
+croniter>=3.0
+# DevBox cloud sandbox SDK (optional — install to enable devbox sandbox provider)
+# Install from source: pip install /path/to/devspace-devbox/python-sdk
+# Or: pip install devbox-sdk (when published to PyPI)
+# devbox-sdk>=0.1.0  # requires Python >=3.10 (worker venv, not grape main 3.9)

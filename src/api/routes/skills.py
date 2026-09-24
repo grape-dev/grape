@@ -53,7 +53,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
-def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "", scope: str = "",
+def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
                 agent_type: str = "", category_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
@@ -242,6 +242,16 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
         s["repo_count"] = stats.get("repo_count", 0)
         s["scenes"] = scenes_map.get(s["id"], [])
         s["category_name"] = cat_map.get(s.get("category_id", 0), "")
+    # 精选技能按 admin 管理台设置的顺序排列
+    if skills:
+        try:
+            from src.featured_order import get_featured_order
+            _order = get_featured_order("skill")
+            if _order:
+                _order_map = {sid: i for i, sid in enumerate(_order)}
+                skills.sort(key=lambda x: _order_map.get(x["id"], 9999))
+        except Exception:
+            pass
     return {"skills": skills}
 
 
@@ -968,7 +978,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
 
 
 @router.get("/{skill_id}/sub/{sub_name}", operation_id="skills_sub_get", summary="Read sub-skill SKILL.md", description="Reads a sub-skill's SKILL.md content.")
-def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
+def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """读取技能包子技能的 SKILL.md 内容"""
     from src.session_manager import db, db_lock
 
@@ -1018,7 +1028,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no
 
 
 @router.get("/package-sub/{pkg_id}/{sub_name}", operation_id="skills_package_sub_get", summary="Get sub-skill detail from package", description="Returns a sub-skill detail from a package (same shape as skill detail).")
-def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
+def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """返回技能包子技能详情（格式与 skill detail 一致，支持导航到独立详情页）"""
     from src.session_manager import db, db_lock
     import re as _re

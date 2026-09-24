@@ -201,7 +201,7 @@ def test_pulls_mapping(gitcode_calls, _client):
     base = f"/api/git-repo/{OWNER}/{REPO}"
 
     r = client.post(f"{base}/pulls",
-                    json={"title": "feat", "head": "feat/x", "base": "main", "close_related_issue": True})
+                    json={"title": "feat", "head": "feat/x", "base": "main", "auto_close_issues": True})
     assert r.status_code == 200
     last = gitcode_calls[-1]
     assert last["method"] == "POST" and last["body"]["head"] == "feat/x" and last["body"]["close_related_issue"] is True
@@ -259,7 +259,7 @@ def test_no_token_502(monkeypatch, _client):
 
 def _repo_token_call(user):
     import src.api.git_repo_api as m
-    return m._repo_token(OWNER, REPO, user)
+    return m._repo_token(OWNER, REPO, user, "gitcode")
 
 
 def test_repo_token_chat_session_uses_user_token(monkeypatch):
@@ -294,10 +294,10 @@ def test_repo_token_api_key_not_applicable():
     import pytest as _p
     from fastapi import HTTPException
     with _p.raises(HTTPException) as ei:
-        m._repo_token(OWNER, REPO, {"auth_type": "api_key", "id": 9, "username": "someone"})
+        m._repo_token(OWNER, REPO, {"auth_type": "api_key", "id": 9, "username": "someone"}, "gitcode")
     assert ei.value.status_code == 403
     with _p.raises(HTTPException) as ei2:
-        m._repo_token(OWNER, REPO, {"auth_type": "jwt", "id": 9, "username": "someone"})
+        m._repo_token(OWNER, REPO, {"auth_type": "jwt", "id": 9, "username": "someone"}, "gitcode")
     assert ei2.value.status_code == 403
 
 
@@ -308,7 +308,7 @@ def test_repo_token_all_missing_502(monkeypatch):
     import pytest as _p
     from fastapi import HTTPException
     with _p.raises(HTTPException) as ei:
-        m._repo_token(OWNER, REPO, {"auth_type": "session_token", "agent_type": "vod", "user_id": 0})
+        m._repo_token(OWNER, REPO, {"auth_type": "session_token", "agent_type": "vod", "user_id": 0}, "gitcode")
     assert ei.value.status_code == 502
 
 

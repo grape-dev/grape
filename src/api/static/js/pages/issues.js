@@ -520,9 +520,9 @@ window._jumpToPipeline = function(nodeId) {
   const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
   const parts = repoKey.split('/');
   if (parts.length < 2) { console.warn('jumpToPipeline: bad repo_key', t.repo_key); return; }
-  // 设置当前 repo 到 localStorage（app.currentRepo 从这里读）
+  // 设置当前 repo 到 sessionStorage（app.currentRepo 从这里读）
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
-  localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+  sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   // 导航到流水线页面
   if (typeof app !== 'undefined' && app.nav) {
     app.nav('pipe');
@@ -542,13 +542,13 @@ window._jumpToNodeEvent = function(seq) {
   window._eventFromTask = (t && t.id) ? { taskId: t.id } : null;
   // 标记本次进入事件页来自任务详情，供 app.nav('event') 路由入口识别
   window._eventNavFromTask = true;
-  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
+  // 设置当前 repo 到 sessionStorage（与 _jumpToPipePage 一致）
   if (t && t.repo_key) {
     const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
     const parts = repoKey.split('/');
     if (parts.length >= 2) {
       const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
-      localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+      sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
     }
   }
   // 直接修改 hash 跳转事件详情页（#event/seq），触发 hashchange → app.nav('event', seq)
@@ -563,7 +563,7 @@ window._jumpToPipePage = function() {
   const parts = repoKey.split('/');
   if (parts.length < 2) return;
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
-  localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+  sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   if (typeof app !== 'undefined' && app.nav) {
     // 传递 issue_number 让流水线页高亮对应任务
     var issueNum = t.issue_number || '';
@@ -745,7 +745,7 @@ function _renderBoard(filtered) {
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee ? '👤 ' + t.assignee : (t.repo_key || '')}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee ? '👤 ' + t.assignee : ((t.repo_key || '').replace(/^(github|gitcode):/, ''))}</span>
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
           </div>
         </div>`;
@@ -1538,7 +1538,7 @@ function openTaskCreateModal() {
       const opt = document.createElement('option');
       opt.value = s.id;
       const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
-      opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
+      opt.textContent = (s.display_name || s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
       sel.appendChild(opt);
     });
   }).catch(function(){});
@@ -1651,7 +1651,7 @@ function openTaskCopyModal(taskId) {
       const opt = document.createElement('option');
       opt.value = s.id;
       const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
-      opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
+      opt.textContent = (s.display_name || s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
       sel.appendChild(opt);
     });
   }).catch(function(){});

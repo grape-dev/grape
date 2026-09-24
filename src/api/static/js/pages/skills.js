@@ -95,7 +95,7 @@ function _backToSkillList() {
 
 function _currentRepo() {
   try {
-    const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+    const c = app.currentRepo();
     return c ? (c.fullName || '') : '';
   } catch { return ''; }
 }
@@ -560,6 +560,123 @@ function toggleSkillLike(skillId, el) {
 // ══════════════════════════════════════════
 // 技能详情页
 // ══════════════════════════════════════════
+
+/**
+ * Issue #232: 解析技能内容中的 YAML front matter 并渲染。
+ * - front matter（--- 包裹的元数据）→ 渲染为表格
+ * - 正文部分 → 继续用 renderMarkdown 渲染
+ * 返回拼接后的 HTML 字符串。
+ */
+function _renderSkillContent(rawContent) {
+  if (!rawContent) return '';
+
+  // 匹配文件开头的 YAML front matter：---\n...\n---
+  var fmMatch = rawContent.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (!fmMatch) {
+    // 没有 front matter，直接渲染全部内容
+    return renderMarkdown(rawContent);
+  }
+
+  var fmText = fmMatch[1];           // front matter 原始文本
+  var bodyText = rawContent.slice(fmMatch[0].length);  // front matter 之后的正文
+
+  // 解析 YAML front matter 为 key-value 对
+  var entries = _parseYAMLFrontMatter(fmText);
+  if (entries.length === 0) {
+    // 解析失败，回退到直接渲染全部内容
+    return renderMarkdown(rawContent);
+  }
+
+  // 构建 front matter 表格 HTML
+  var fmHtml = '<table class="fm-table"><tbody>';
+  for (var i = 0; i < entries.length; i++) {
+    var entry = entries[i];
+    fmHtml += '<tr><th>' + _escapeHtml(entry.key) + '</th><td>' + _escapeHtml(entry.value) + '</td></tr>';
+  }
+  fmHtml += '</tbody></table>';
+
+  // 正文部分用 markdown 渲染
+  var bodyHtml = bodyText.trim() ? renderMarkdown(bodyText) : '';
+
+  return fmHtml + bodyHtml;
+}
+
+/**
+ * 轻量级 YAML front matter 解析器。
+ * 支持简单 key: value、多行值（| 或 >）、列表（- item）。
+ * 返回 [{key, value}] 数组，value 为展示用纯文本。
+ */
+function _parseYAMLFrontMatter(text) {
+  var lines = text.split(/\r?\n/);
+  var entries = [];
+  var i = 0;
+
+  while (i < lines.length) {
+    var line = lines[i];
+
+    // 跳过空行和注释
+    if (!line.trim() || line.trim().indexOf('#') === 0) {
+      i++;
+      continue;
+    }
+
+    // 匹配 key: value 或 key: | 或 key: > 或 key:
+    var kvMatch = line.match(/^(\w[\w.-]*)\s*:\s*(.*)$/);
+    if (!kvMatch) {
+      i++;
+      continue;
+    }
+
+    var key = kvMatch[1];
+    var valPart = kvMatch[2].trim();
+    var value = '';
+
+    if (valPart === '|' || valPart === '>' || valPart === '|-' || valPart === '>-') {
+      // 多行值——收集后续缩进行
+      i++;
+      var multiline = [];
+      while (i < lines.length) {
+        var ml = lines[i];
+        if (ml.trim() === '') { multiline.push(''); i++; continue; }
+        if (/^\s/.test(ml)) {
+          multiline.push(ml.replace(/^\s{2}/, ''));  // 去掉一级缩进
+          i++;
+        } else {
+          break;
+        }
+      }
+      value = multiline.join('\n').trim();
+    } else if (valPart === '') {
+      // 值为空，可能后面跟列表或子结构
+      i++;
+      var listItems = [];
+      while (i < lines.length) {
+        var li = lines[i];
+        // 列表项：以 - 开头且缩进
+        if (/^\s+-\s+/.test(li)) {
+          listItems.push(li.replace(/^\s+-\s+/, '').trim());
+          i++;
+        } else if (/^\s{2,}\w/.test(li) && !/^\s+-\s/.test(li)) {
+          // 可能是嵌套 key: value，也当列表项收集
+          listItems.push(li.trim());
+          i++;
+        } else {
+          break;
+        }
+      }
+      value = listItems.length > 0 ? listItems.join(', ') : '';
+    } else {
+      // 单行值
+      value = valPart;
+      i++;
+    }
+
+    entries.push({ key: key, value: value });
+  }
+
+  return entries;
+}
+
 function renderSkillDetail(data) {
   const el = _skillsContainer();
   if (!el) return;
@@ -586,6 +703,9 @@ function renderSkillDetail(data) {
   const descMatch = rawContent.match(/^---[\s\S]*?^description:\s*\|?\s*\n([\s\S]*?)^\w/m);
   const fnDesc = descMatch ? descMatch[1].trim() : (data.description || '—');
 
+  // Issue #232: 解析 YAML front matter 并渲染为表格，正文部分继续用 markdown 渲染
+  const contentHtml = _renderSkillContent(rawContent);
+
   el.innerHTML = `
     <button class="det-back" onclick="_backFromSkillDetail()">← ${I18N.t('common.back')||'返回'}</button>
     <div class="det">
@@ -601,7 +721,7 @@ function renderSkillDetail(data) {
       <p class="det-sum">${data.description || ''}</p>
       <div class="fn-card">
         <div class="fn-label">${I18N.t('skills.info_function')||'内容说明'}</div>
-        <div class="fn-body">${renderMarkdown(rawContent)}</div>
+        <div class="fn-body">${contentHtml}</div>
       </div>
       <div class="info-grid">
         <div class="info-cell"><div class="il">${I18N.t('skills.info_scenes')||'场景'}</div><div class="iv">${scenesStr}</div></div>
