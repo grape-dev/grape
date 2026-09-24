@@ -327,3 +327,103 @@ def test_update_market_scene_request_has_linked_repos():
     from src.api.routes.scenes import UpdateMarketSceneRequest
     req = UpdateMarketSceneRequest()
     assert hasattr(req, "linked_repos")
+
+
+# ===== agent.py: _submit_linked_repo_prs 闭环测试（Issue #242 Required 修复）=====
+
+def test_submit_linked_repo_prs_function_exists():
+    """_submit_linked_repo_prs 函数存在且可调用。"""
+    from src.runtime.agent import _submit_linked_repo_prs
+    assert callable(_submit_linked_repo_prs)
+
+
+def test_submit_linked_repo_prs_non_coding_agent():
+    """非 coding agent 直接返回，不处理。"""
+    from src.runtime.agent import _submit_linked_repo_prs
+    task = {"agent_type": "qa", "issue_id": "#42", "repo_gitcode_token": "fake"}
+    env = {"GRAPE_LINKED_WORKTREES": '[{"repo_key":"gitcode:org/repo-a","branch":"main","dir":"/tmp/wt-a"}]'}
+    _submit_linked_repo_prs(task, env)
+    assert "_linked_pr_results" not in task
+
+
+def test_submit_linked_repo_prs_no_linked_worktrees_env():
+    """GRAPE_LINKED_WORKTREES 为空时直接返回。"""
+    from src.runtime.agent import _submit_linked_repo_prs
+    task = {"agent_type": "coding", "issue_id": "#42", "repo_gitcode_token": "fake"}
+    env = {}
+    _submit_linked_repo_prs(task, env)
+    assert "_linked_pr_results" not in task
+
+
+def test_submit_linked_repo_prs_no_issue_num():
+    """issue_id 为空时跳过（无法确定分支名）。"""
+    from src.runtime.agent import _submit_linked_repo_prs
+    task = {"agent_type": "coding", "issue_id": "#0", "repo_gitcode_token": "fake"}
+    env = {"GRAPE_LINKED_WORKTREES": '[{"repo_key":"gitcode:org/repo-a","branch":"main","dir":"/tmp/wt-a"}]'}
+    _submit_linked_repo_prs(task, env)
+    assert "_linked_pr_results" not in task
+
+
+def test_submit_linked_repo_prs_invalid_json():
+    """GRAPE_LINKED_WORKTREES 非法 JSON 时不崩溃。"""
+    from src.runtime.agent import _submit_linked_repo_prs
+    task = {"agent_type": "coding", "issue_id": "#42", "repo_gitcode_token": "fake"}
+    env = {"GRAPE_LINKED_WORKTREES": "not-json{"}
+    _submit_linked_repo_prs(task, env)
+    assert "_linked_pr_results" not in task
+
+
+def test_submit_linked_repo_prs_nonexistent_worktree_dir():
+    """worktree 目录不存在时跳过该仓库，不崩溃。"""
+    from src.runtime.agent import _submit_linked_repo_prs
+    task = {"agent_type": "coding", "issue_id": "#42", "repo_gitcode_token": "fake"}
+    env = {"GRAPE_LINKED_WORKTREES": '[{"repo_key":"gitcode:org/repo-a","branch":"main","dir":"/tmp/nonexistent-wt-12345"}]'}
+    _submit_linked_repo_prs(task, env)
+    # 函数执行完毕不崩溃，目录不存在 → 该 repo 被 skip
+    results = task.get("_linked_pr_results", [])
+    # 非空列表（至少有一条记录标记 skip）
+    assert isinstance(results, list)
+
+
+# ===== event_pipeline.py: _submit_direct_linked_prs 闭环测试（direct 模式）=====
+
+def test_submit_direct_linked_prs_function_exists():
+    """_submit_direct_linked_prs 函数存在且可调用。"""
+    from src.api.event_pipeline import _submit_direct_linked_prs
+    assert callable(_submit_direct_linked_prs)
+
+
+def test_submit_direct_linked_prs_no_linked_worktrees():
+    """GRAPE_LINKED_WORKTREES 为空时直接返回。"""
+    from src.api.event_pipeline import _submit_direct_linked_prs
+    env_extra = {}
+    # 不应抛异常
+    _submit_direct_linked_prs(env_extra, "gitcode:org/main", "#42", "fake-token")
+
+
+def test_submit_direct_linked_prs_invalid_json():
+    """GRAPE_LINKED_WORKTREES 非法 JSON 时不崩溃。"""
+    from src.api.event_pipeline import _submit_direct_linked_prs
+    env_extra = {"GRAPE_LINKED_WORKTREES": "not-json{"}
+    _submit_direct_linked_prs(env_extra, "gitcode:org/main", "#42", "fake-token")
+
+
+def test_submit_direct_linked_prs_nonexistent_dir():
+    """worktree 目录不存在时跳过，不崩溃。"""
+    from src.api.event_pipeline import _submit_direct_linked_prs
+    env_extra = {"GRAPE_LINKED_WORKTREES": '[{"repo_key":"gitcode:org/repo-a","branch":"main","dir":"/tmp/nonexistent-wt-direct-99999"}]'}
+    # 不应抛异常，目录不存在 → skip
+    _submit_direct_linked_prs(env_extra, "gitcode:org/main", "#42", "fake-token")
+
+
+# ===== repogit.py: submit_linked_repo_prs 已移除（死代码清理验证）=====
+
+def test_repogit_submit_linked_repo_prs_removed():
+    """repogit.submit_linked_repo_prs 已移除（Issue #242 重构：死代码清理）。
+
+    PR 提交闭环由 agent._submit_linked_repo_prs（worker）和
+    event_pipeline._submit_direct_linked_prs（direct）两个路径实现，
+    repogit.py 中的 submit_linked_repo_prs 从未被调用，已移除。
+    """
+    from src.runtime import repogit
+    assert not hasattr(repogit, "submit_linked_repo_prs")

@@ -840,15 +840,38 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     row.style.alignItems = 'center';
     var selId = 'lrRepo_' + Math.random().toString(36).slice(2,8);
     var brId = 'lrBranch_' + Math.random().toString(36).slice(2,8);
-    var opts = (window._linkedRepoOptions || []).map(function(r) {
+    // 用 DOM API 构造 select/option，避免 HTML 字符串拼接导致 XSS（Issue #242 审查 Optional 加固）
+    var sel = document.createElement('select');
+    sel.className = 'adv-kv-key';
+    sel.id = selId;
+    sel.style.cssText = 'flex:0 0 200px;padding:8px 12px;border:none;border-radius:12px;font-size:12px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer';
+    var defOpt = document.createElement('option');
+    defOpt.value = '';
+    defOpt.textContent = '选择仓库';
+    sel.appendChild(defOpt);
+    (window._linkedRepoOptions || []).forEach(function(r) {
       var rk = r.repo_key || r.full_name || '';
       var fn = r.full_name || rk;
-      var s = rk === repoKey ? ' selected' : '';
-      return '<option value="' + rk + '"' + s + '>' + fn + '</option>';
-    }).join('');
-    row.innerHTML = '<select class="adv-kv-key" id="' + selId + '" style="flex:0 0 200px;padding:8px 12px;border:none;border-radius:12px;font-size:12px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer"><option value="">选择仓库</option>' + opts + '</select>' +
-      '<input class="adv-kv-val" id="' + brId + '" type="text" placeholder="分支（默认 main）" value="' + (branch || '') + '" style="flex:1">' +
-      '<button class="adv-del" onclick="this.parentElement.remove()">×</button>';
+      var opt = document.createElement('option');
+      opt.value = rk;
+      opt.textContent = fn;
+      if (rk === repoKey) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    var inp = document.createElement('input');
+    inp.className = 'adv-kv-val';
+    inp.id = brId;
+    inp.type = 'text';
+    inp.placeholder = '分支（默认 main）';
+    inp.value = branch || '';
+    inp.style.flex = '1';
+    var delBtn = document.createElement('button');
+    delBtn.className = 'adv-del';
+    delBtn.textContent = '×';
+    delBtn.onclick = function() { this.parentElement.remove(); };
+    row.appendChild(sel);
+    row.appendChild(inp);
+    row.appendChild(delBtn);
     container.appendChild(row);
   };
 
