@@ -1204,8 +1204,8 @@ function _renderSceneDetailPage(s) {
   } catch (e) { presetFields = []; }
   if (presetFields.length > 0) {
     var _scopeLabels = {vod:'VOD', issue:'Issue', coding:'Coding', qa:'QA', sre:'SRE', all:'全部'};
-    html += `<div class="cd-h" style="margin:24px 0 12px"><h2 style="font-size:16px;font-weight:600">${I18N.t('skills.scene_params')||'场景参数'}</h2>
-      <span style="font-size:11px;color:#86868b;font-weight:400;margin-left:8px">${I18N.t('skills.scene_params_hint')||'应用场景时需配置，Agent 将通过环境变量读取'}</span></div>`;
+    html += `<div class="cd-h" style="margin:24px 0 12px"><h2 style="font-size:16px;font-weight:600">${I18N.t('scene_params')||'场景参数'}</h2>
+      <span style="font-size:11px;color:#86868b;font-weight:400;margin-left:8px">${I18N.t('scene_params_hint')||'应用场景时需配置，Agent 将通过环境变量读取'}</span></div>`;
     html += `<div class="det-card-wrap"><div style="display:flex;flex-direction:column;gap:10px">`;
     presetFields.forEach(function(p) {
       var _pn = p.name || p.key || '';

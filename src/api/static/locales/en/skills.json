@@ -263,5 +263,7 @@
   "scene_detail": "Details",
   "no_repo_selected": "Please select a repo first",
   "no_scenes_custom": "No scenes yet. Create or import one.",
-  "category_general": "General"
+  "category_general": "General",
+  "scene_params": "Scene Parameters",
+  "scene_params_hint": "Required when applying; Agent reads via env vars"
 }
