@@ -1730,7 +1730,7 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
             _nf = normalize_custom_field(f)
             if not _nf.get("name"):
                 continue
-            _fields.append({"name": _nf["name"], "value": _nf.get("value", ""), "is_secret": _nf.get("is_secret", False)})
+            _fields.append({"name": _nf["name"], "value": _nf.get("value", ""), "is_secret": _nf.get("is_secret", False), "scope": _nf.get("scope", ["all"])})
         return {
             "work_branch": opts.get("work_branch", "main") or "main",
             "custom_fields": _fields,

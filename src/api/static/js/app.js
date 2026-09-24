@@ -37,6 +37,20 @@ function _cfComputeIsSecret(name, isSecret) {
   return _cfIsSecretName(name);
 }
 const _CF_SCOPE_AGENTS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
+// scope checkbox 互斥联动：勾选具体 agent 自动取消 all；勾选 all 自动取消其它
+function _cfScopeToggle(cb) {
+  const row = cb.closest('.adv-kv');
+  if (!row) return;
+  const boxes = row.querySelectorAll('.adv-kv-scope');
+  if (cb.value === 'all') {
+    if (cb.checked) boxes.forEach(b => { if (b.value !== 'all') b.checked = false; });
+  } else {
+    if (cb.checked) {
+      const allBox = row.querySelector('.adv-kv-scope[value="all"]');
+      if (allBox) allBox.checked = false;
+    }
+  }
+}
 // 渲染 scope 多选 checkbox 组，返回 HTML；scope 为数组（默认 ['all']）
 function _cfScopeHtml(scope) {
   const sel = Array.isArray(scope) ? scope : [scope || 'all'];
@@ -44,7 +58,7 @@ function _cfScopeHtml(scope) {
   return _CF_SCOPE_AGENTS.map(a => {
     const checked = (a === 'all') ? hasAll : (sel.indexOf(a) >= 0 && !hasAll);
     return '<label class="adv-kv-scope-lbl" style="font-size:11px;color:#86868b;display:inline-flex;align-items:center;gap:2px;white-space:nowrap">' +
-      '<input type="checkbox" class="adv-kv-scope" value="' + a + '"' + (checked ? ' checked' : '') + '>' + a + '</label>';
+      '<input type="checkbox" class="adv-kv-scope" value="' + a + '"' + (checked ? ' checked' : '') + ' onchange="_cfScopeToggle(this)">' + a + '</label>';
   }).join('');
 }
 // 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret, scope}
@@ -62,11 +76,10 @@ function _cfCollectFields(prefix) {
     const err = _cfNameError(n);
     if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
     const isSec = vEl.type === 'password';
-    // scope：.adv-kv-scope checkbox 选中值数组；含 all 或空 → ["all"]
+    // scope：互斥后选中即入池；什么都不选 → ["all"]（全量）
     const checked = Array.prototype.slice.call(row.querySelectorAll('.adv-kv-scope:checked'))
       .map(cb => cb.value);
-    const hasAll = checked.indexOf('all') >= 0;
-    const scope = hasAll ? ['all'] : (checked.length ? checked : ['all']);
+    const scope = checked.length ? checked : ['all'];
     fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope });
   }
   return { fields: fields };

@@ -310,3 +310,26 @@ def test_scope_invalid_all_400():
         assert False, "invalid scope should be rejected"
     except HTTPException as e:
         assert e.status_code == 400
+
+
+def test_scope_persisted_through_get_for_refill():
+    """保存带 scope 的字段后，get 必须原样返回 scope（看护回填丢失 bug）。"""
+    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{}')
+
+    class _Body:
+        def __init__(self, work_branch="", custom_fields=None):
+            self.work_branch = work_branch
+            self.custom_fields = custom_fields or []
+
+    save_advanced_options("devops-scene",
+                          _Body(work_branch="main", custom_fields=[
+                              {"name": "HUAWEI_AK", "value": "ak", "is_secret": True, "scope": ["sre"]},
+                              {"name": "CICD_ENV", "value": "v", "scope": ["coding", "qa"]},
+                          ]),
+                          user={"user_id": 0}, repo="org/sceneenv")
+    d = get_advanced_options("devops-scene", user={"user_id": 0}, repo="org/sceneenv")
+    by_name = {x["name"]: x for x in d["custom_fields"]}
+    assert by_name["HUAWEI_AK"]["scope"] == ["sre"]
+    assert by_name["CICD_ENV"]["scope"] == ["coding", "qa"]
