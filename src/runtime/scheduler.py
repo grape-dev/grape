@@ -37,6 +37,12 @@ _FINDINGS_PATTERN = re.compile(
     re.DOTALL
 )
 
+# 宽松匹配：不要求结尾完整 -->，-- 即可（chunk 可能拆断 --> 为 --\n>）
+_FINDINGS_PATTERN_LOOSE = re.compile(
+    r'<!--\s*autopilot[\s\-]*findings\s*\n(.*?)(?:\n-->|\n--\s*$)',
+    re.DOTALL
+)
+
 _FINDINGS_FORMAT_TEMPLATE = """\
 请在执行结果的末尾输出问题列表，用 HTML 注释标记包裹（必须严格按以下格式，不要在标记头或 JSON 的 key 中插入换行符）：
 
@@ -60,20 +66,30 @@ def parse_findings(agent_output: str) -> dict:
     解析失败时 findings 为空列表。
     """
     # 宽松匹配：允许 autopilot 和 -findings 之间有换行/空格
+    # 先尝试严格匹配（结尾 -->），再降级宽松匹配（结尾 --，chunk 可能拆断 -->）
     match = re.search(
         r'<!--\s*autopilot[\s\-]*findings\s*\n(.*?)\n-->',
         agent_output or "",
         re.DOTALL
     )
     if not match:
+        match = re.search(
+            r'<!--\s*autopilot[\s\-]*findings\s*\n(.*?)(?:\n-->|\n--\s*$)',
+            agent_output or "",
+            re.DOTALL
+        )
+    if not match:
         return {"summary": "", "findings": [], "parse_error": "no findings block found"}
 
     try:
         raw = match.group(1).strip()
-        # 容错：清理 agent 输出中 JSON key 前多余的换行符
-        # 如 "\"\\nseverity\"" → "\"severity\""
-        raw = re.sub(r'"\s*\\n\s*', '"', raw)
-        raw = re.sub(r'\\n\s*"', '"', raw)
+        # 复用 hermes_acp 的 JSON 修复函数（兜底：hermes ACP flush 边界导致字段名断裂等）
+        try:
+            from src.agent.hermes_acp import _fix_json_newlines, _ensure_closed
+            raw = _fix_json_newlines(raw)
+            raw = _ensure_closed(raw)
+        except ImportError:
+            pass  # hermes_acp 不可用时回退原有容错
         data = json.loads(raw)
         findings = data.get("findings", [])
         valid = []
@@ -272,21 +288,8 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     # 广播模式设 pool_tag
     _pool_tag = agent_type if engine_id == 0 else ""
 
-    # 限定 opencode 引擎认领（定时任务轻量，opencode 最快，复用智能推荐逻辑）
+    # 广播模式不限定引擎类型，由场景 engine_runtime_ids 或全量广播
     _pool_engine_ids = ""
-    if engine_id == 0:
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT id FROM agent_runtimes WHERE name='opencode' AND status='online'")
-                _oc_ids = [r[0] for r in c.fetchall()]
-            if _oc_ids:
-                _pool_engine_ids = json.dumps(_oc_ids)
-                log.info(f"Autopilot exec {exec_id}: 限定 opencode engines={_oc_ids}")
-            else:
-                log.info(f"Autopilot exec {exec_id}: 无 online opencode，不限定（兜底放行）")
-        except Exception as _oe:
-            log.warning(f"Autopilot exec {exec_id}: opencode 过滤失败: {_oe}")
 
     log.info(f"Autopilot exec {exec_id}: enqueuing remote agent={agent_type} engine={inst_name} pool_tag={_pool_tag}")
 

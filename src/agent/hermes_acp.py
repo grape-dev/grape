@@ -480,6 +480,10 @@ class HermesACPBackend:
                 _fixed = _robust_join_json(collected_text)
                 if _fixed and _detect_structured_output(_fixed):
                     full_text = _fixed
+            elif _detect_findings_block(full_text):
+                _fixed = _robust_join_findings(collected_text)
+                if _fixed and _detect_findings_block(_fixed):
+                    full_text = _fixed
 
             yield ("done", {
                 "exit_code": exit_code,
@@ -795,9 +799,24 @@ def _detect_structured_output(text: str) -> bool:
     return '"actions"' in compact and '"conclusion"' in compact and '"issue_summary"' in compact
 
 
+def _detect_findings_block(text: str) -> bool:
+    """检测 agent 输出中是否包含 autopilot findings JSON 块。
+
+    与 _detect_structured_output 同理：去空白后按字段特征匹配，
+    不依赖 HTML 注释标记完整性（<!-- --> 可能被 chunk 拆断）。
+    """
+    if not text:
+        return False
+    compact = re.sub(r'\s+', '', text)
+    return '"summary"' in compact and '"findings"' in compact
+
+
 # ── JSON 鲁棒拼接辅助函数（源头预防 flush 边界损坏）──
 
 _KNOWN_JSON_FIELDS = ("actions", "conclusion", "artifacts", "next_step", "issue_summary")
+
+_FINDINGS_JSON_FIELDS = ("summary", "findings", "id", "title", "severity",
+                         "category", "description", "suggested_assignee", "suggested_skill")
 
 
 def _robust_join_json(chunks: list) -> str:
@@ -819,6 +838,38 @@ def _robust_join_json(chunks: list) -> str:
             json_part = json_part[:idx]
     # 修复 1: 断裂字段名（\n 在字段名中间）
     for field in _KNOWN_JSON_FIELDS:
+        for i in range(1, len(field)):
+            broken = field[:i] + '\n' + field[i:]
+            if broken in json_part:
+                json_part = json_part.replace(broken, field)
+    # 修复 2: 字符串外 \n 去除，字符串内裸 \n 转义
+    json_part = _fix_json_newlines(json_part)
+    # 修复 3: 补闭合 } 如果缺失
+    json_part = _ensure_closed(json_part)
+    return full[:start] + json_part
+
+
+def _robust_join_findings(chunks: list) -> str:
+    """拼接 collected_text，修复 autopilot findings JSON 的 flush 边界损坏。
+
+    与 _robust_join_json 逻辑相同，适配 findings 格式：
+    - 起点匹配 {"summary"（而非 {"actions"）
+    - 字段名列表使用 _FINDINGS_JSON_FIELDS
+    - 尾部标记清理包含 --> 和 --\n>（注释标记可能被 chunk 拆断）
+    """
+    full = "\n".join(chunks)
+    m = re.search(r'\{\s*"summary"', full)
+    if not m:
+        return full
+    start = m.start()
+    json_part = full[start:]
+    # 去掉尾部非 JSON 标记：HTML 注释结束符（可能被 chunk 拆断）+ 其他杂标记
+    for marker in ('-->', '--\n>', '\n---', '\n\n['):
+        idx = json_part.rfind(marker)
+        if idx > 0:
+            json_part = json_part[:idx]
+    # 修复 1: 断裂字段名（\n 在字段名中间）
+    for field in _FINDINGS_JSON_FIELDS:
         for i in range(1, len(field)):
             broken = field[:i] + '\n' + field[i:]
             if broken in json_part:
