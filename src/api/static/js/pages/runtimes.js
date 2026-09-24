@@ -658,6 +658,7 @@ function doCreateCredentialInPanel() {
   API.post('/settings/runtime-credentials', { name, scope, repo_key }).then(d => {
     var token = d.token || '';
     var oneCmd = 'curl -fsSL ' + window.location.origin + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + window.location.origin;
+    var winCmd = '& ([scriptblock]::Create((irm ' + window.location.origin + '/api/runtime/install.ps1))) -Token ' + token + ' -Server ' + window.location.origin;
     var runCmd = 'RUNTIME_TOKEN=' + token + ' python -m runtime.agent';
     if (area) area.innerHTML =
       '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
@@ -669,11 +670,16 @@ function doCreateCredentialInPanel() {
         // Token
         '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">Token</label>' +
         '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:12px;margin-bottom:14px">' + token + '</code>' +
-        // 一键安装
-        '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">' + I18N.t('runtimes.credential.install_hint') + '</div>' +
+        // Linux 一键安装
+        '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">🐧 ' + I18N.t('runtimes.credential.install_hint') + '</div>' +
         '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:11px;margin-bottom:6px">' + oneCmd + '</code>' +
-        '<button class="bt bt-p" style="width:100%;justify-content:center;margin-bottom:12px" onclick="copyText(\'' + oneCmd.replace(/'/g, "\\'") + '\')">' + I18N.t('runtimes.action.copy_one_cmd') + '</button>' +
+        '<button class="bt bt-p" style="width:100%;justify-content:center;margin-bottom:8px" onclick="copyText(\'' + oneCmd.replace(/'/g, "\\'") + '\')">' + I18N.t('runtimes.action.copy_one_cmd') + '</button>' +
         '<div style="font-size:11px;color:var(--t2);margin-bottom:14px;line-height:1.5">' + I18N.t('runtimes.credential.install_desc') + '</div>' +
+        // Windows 安装
+        '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">' + I18N.t('runtimes.credential.win_install_hint') + '</div>' +
+        '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:11px;margin-bottom:6px">' + winCmd + '</code>' +
+        '<button class="bt bt-p" style="width:100%;justify-content:center;margin-bottom:8px" onclick="copyText(\'' + winCmd.replace(/'/g, "\\'") + '\')">' + I18N.t('runtimes.action.copy_win_cmd') + '</button>' +
+        '<div style="font-size:11px;color:var(--t2);margin-bottom:14px;line-height:1.5">' + I18N.t('runtimes.credential.win_install_desc') + '</div>' +
         // 手动启动
         '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">' + I18N.t('runtimes.credential.manual_start') + '</div>' +
         '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:11px;margin-bottom:6px">' + runCmd + '</code>' +

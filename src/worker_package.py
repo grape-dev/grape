@@ -31,6 +31,7 @@ MANIFEST = [
     "src/__init__.py",
     "src/config.py",
     "src/repo_key.py",
+    "src/prompt_builder.py",
     "src/session_manager.py",
     "src/mysql_compat.py",
     "src/user/__init__.py",
@@ -322,7 +323,7 @@ def package_version() -> str:
     try:
         if os.path.isdir(os.path.join(ROOT, ".git")) or os.path.isfile(os.path.join(ROOT, ".git")):
             r = subprocess.run(
-                ["git", "-C", ROOT, "rev-parse", "--short", "HEAD"],
+                ["git", "-C", ROOT, "rev-parse", "--short=12", "HEAD"],
                 capture_output=True, text=True, timeout=5,
             )
             if r.returncode == 0 and r.stdout.strip():
@@ -342,6 +343,47 @@ def package_version() -> str:
     ver = f"{base}-w{_wheels_fingerprint()}-p{py}"
     _cached_package_version = ver
     _cached_package_version_ts = _now
+    return ver
+
+
+# 缓存：worker 代码版本（仅 git commit，不含 wheels/python 指纹）
+_cached_code_version = ""
+_cached_code_version_ts = 0.0
+
+def worker_code_version() -> str:
+    """Worker 代码版本：仅 git commit hash（不含 wheels/python 指纹）。
+
+    用于自动升级版本对比——只在代码变更时触发升级，
+    wheels/python 变化不触发（避免无限升级循环）。
+
+    带 TTL 缓存（60s），与 package_version 共享缓存周期。
+    """
+    import time
+    global _cached_code_version, _cached_code_version_ts
+    _now = time.monotonic()
+    if _cached_code_version and (_now - _cached_code_version_ts) < _PACKAGE_VERSION_TTL:
+        return _cached_code_version
+    ver = ""
+    try:
+        if os.path.isdir(os.path.join(ROOT, ".git")) or os.path.isfile(os.path.join(ROOT, ".git")):
+            r = subprocess.run(
+                ["git", "-C", ROOT, "rev-parse", "--short=12", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                ver = "git-" + r.stdout.strip()
+                d = subprocess.run(
+                    ["git", "-C", ROOT, "status", "--porcelain", "-uno"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if d.returncode == 0 and d.stdout.strip():
+                    ver += "-dirty"
+    except Exception:
+        pass
+    if not ver:
+        ver = "h-" + _manifest_version()[:12]
+    _cached_code_version = ver
+    _cached_code_version_ts = _now
     return ver
 
 
@@ -440,7 +482,10 @@ def build_package() -> str:
                     tar.add(path, arcname=f"grape-worker/{arc}", filter=_tar_filter)
                     with open(path, "rb") as fh:
                         members.append((f"grape-worker/{arc}", fh.read()))
-            vdata = ver.encode("utf-8")
+            # 包内 VERSION 文件写入代码版本（仅 git commit，不含 wheels/python 指纹）
+            # worker 端读此文件与主控 heartbeat 中的 latest_version 对比
+            _code_ver = worker_code_version()
+            vdata = _code_ver.encode("utf-8")
             info = tarfile.TarInfo("grape-worker/VERSION")
             info.size = len(vdata)
             tar.addfile(info, io.BytesIO(vdata))
