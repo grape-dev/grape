@@ -711,9 +711,10 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
       '<input class="adv-kv-key" placeholder="name" ' + keyInputAttrs + ' value="' + (name || '') + '">' +
       '<input class="adv-kv-val" id="' + valId + '" type="' + valType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + eyeIcon + '</button>' +
-      '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>' +
-      (readOnlyKey ? '' : '<span style="display:flex;gap:4px;align-items:center;flex:1 1 100%">' + _cfScopeHtml(scope) + '</span>');
+      (readOnlyKey ? '' : _cfScopeHtml(scope)) +
+      '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>';
     container.appendChild(row);
+    _cfInitScopeSel(row);
   };
 
   // 华为云 Skill 场景：自动注入 AK/SK 配置项
