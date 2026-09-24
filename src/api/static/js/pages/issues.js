@@ -1538,7 +1538,7 @@ function openTaskCreateModal() {
       const opt = document.createElement('option');
       opt.value = s.id;
       const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
-      opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
+      opt.textContent = (s.display_name || s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
       sel.appendChild(opt);
     });
   }).catch(function(){});
@@ -1651,7 +1651,7 @@ function openTaskCopyModal(taskId) {
       const opt = document.createElement('option');
       opt.value = s.id;
       const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
-      opt.textContent = (s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
+      opt.textContent = (s.display_name || s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
       sel.appendChild(opt);
     });
   }).catch(function(){});
