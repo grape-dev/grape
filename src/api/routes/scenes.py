@@ -1774,6 +1774,16 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
         if _n in seen_names:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"配置项 name '{_n}' 重复"})
         seen_names.add(_n)
+        # scope 校验：数组内每项必须为合法枚举；全部非法 → 400（部分非法在 normalize 时剔除）
+        _raw_scope = f.get("scope") if isinstance(f, dict) else None
+        if _raw_scope:
+            from src.scene_custom_env import _SCOPE_SET
+            _items = _raw_scope if isinstance(_raw_scope, (list, tuple, set)) else [_raw_scope]
+            _valid_items = {(str(x) or "").strip().lower() for x in _items if x not in (None, "")}
+            if _valid_items and not (_valid_items & _SCOPE_SET):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 400, "message": f"配置项 '{_n}' 的 scope 非法，可选值: all/vod/issue/coding/qa/sre"})
 
     _custom_fields = [normalize_custom_field(f) for f in (body.custom_fields or []) if isinstance(f, dict)]
     _custom_fields = [f for f in _custom_fields if f.get("name")]

@@ -56,10 +56,10 @@ def _seed_scene(scene_id, advanced_options=None):
         db.commit()
 
 
-def _inject(issue_id="5"):
+def _inject(issue_id="5", agent_type=""):
     from src.api.event_pipeline import _inject_scene_env
     env_extra = {}
-    _inject_scene_env(env_extra, RK, issue_id)
+    _inject_scene_env(env_extra, RK, issue_id, agent_type)
     return env_extra
 
 
@@ -253,3 +253,60 @@ def test_resolve_scene_id_helper():
     _seed_issue(5, "devops-scene")
     assert _resolve_scene_id(RK, "#5") == "devops-scene"   # issue 场景（# 前缀兼容）
     assert _resolve_scene_id(RK, "") == ""           # 无 issue → 空
+
+
+def test_scope_single_agent_filtered():
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{"custom_fields": [{"name": "HUAWEI_AK", "value": "ak", "scope": ["sre"]}]}')
+    env_coding = _inject(agent_type="coding")
+    assert "HUAWEI_AK" not in env_coding
+    env_sre = _inject(agent_type="sre")
+    assert env_sre["HUAWEI_AK"] == "ak"
+
+
+def test_scope_multi_agent_injected_to_any():
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{"custom_fields": [{"name": "CICD_ENV", "value": "x", "scope": ["coding", "qa"]}]}')
+    assert _inject(agent_type="coding")["CICD_ENV"] == "x"
+    assert _inject(agent_type="qa")["CICD_ENV"] == "x"
+    assert "CICD_ENV" not in _inject(agent_type="sre")
+
+
+def test_scope_all_default_and_missing_injects_everywhere():
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{"custom_fields": [{"name": "V", "value": "1", "scope": ["all"]}, {"name": "W", "value": "2"}]}')
+    for at in ("vod", "issue", "coding", "qa", "sre"):
+        env = _inject(agent_type=at)
+        assert env["V"] == "1"
+        assert env["W"] == "2"
+
+
+def test_scope_empty_and_unspecified_normalize_to_all():
+    from src.scene_custom_env import normalize_scope
+    assert normalize_scope(None) == ["all"]
+    assert normalize_scope([]) == ["all"]
+    assert normalize_scope("sre") == ["sre"]            # 旧单值字符串兼容
+    assert normalize_scope("all") == ["all"]
+    assert normalize_scope(["coding", "qa"]) == ["coding", "qa"]
+    assert normalize_scope(["all", "sre"]) == ["all"]   # 含 all → 收敛 all
+    assert normalize_scope(["coding", "bad"]) == ["coding"]  # 非法项剔除
+
+
+def test_scope_invalid_all_400():
+    from fastapi import HTTPException
+    from src.api.routes.scenes import save_advanced_options
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{}')
+
+    class _Body:
+        def __init__(self, work_branch="", custom_fields=None):
+            self.work_branch = work_branch
+            self.custom_fields = custom_fields or []
+
+    try:
+        save_advanced_options("devops-scene",
+                              _Body(work_branch="main", custom_fields=[{"name": "X", "value": "1", "scope": ["hacker"]}]),
+                              user={"user_id": 0}, repo="org/sceneenv")
+        assert False, "invalid scope should be rejected"
+    except HTTPException as e:
+        assert e.status_code == 400

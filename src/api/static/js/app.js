@@ -36,7 +36,18 @@ function _cfComputeIsSecret(name, isSecret) {
   if (isSecret === false) return false;
   return _cfIsSecretName(name);
 }
-// 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret}
+const _CF_SCOPE_AGENTS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
+// 渲染 scope 多选 checkbox 组，返回 HTML；scope 为数组（默认 ['all']）
+function _cfScopeHtml(scope) {
+  const sel = Array.isArray(scope) ? scope : [scope || 'all'];
+  const hasAll = sel.indexOf('all') >= 0;
+  return _CF_SCOPE_AGENTS.map(a => {
+    const checked = (a === 'all') ? hasAll : (sel.indexOf(a) >= 0 && !hasAll);
+    return '<label class="adv-kv-scope-lbl" style="font-size:11px;color:#86868b;display:inline-flex;align-items:center;gap:2px;white-space:nowrap">' +
+      '<input type="checkbox" class="adv-kv-scope" value="' + a + '"' + (checked ? ' checked' : '') + '>' + a + '</label>';
+  }).join('');
+}
+// 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret, scope}
 // 密钥标记由 value 输入框类型承载：type=password（隐藏/👁）→ 密钥；type=text（明文/🙈）→ 非密钥
 function _cfCollectFields(prefix) {
   const rows = document.querySelectorAll(prefix + ' .adv-kv');
@@ -51,7 +62,12 @@ function _cfCollectFields(prefix) {
     const err = _cfNameError(n);
     if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
     const isSec = vEl.type === 'password';
-    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec });
+    // scope：.adv-kv-scope checkbox 选中值数组；含 all 或空 → ["all"]
+    const checked = Array.prototype.slice.call(row.querySelectorAll('.adv-kv-scope:checked'))
+      .map(cb => cb.value);
+    const hasAll = checked.indexOf('all') >= 0;
+    const scope = hasAll ? ['all'] : (checked.length ? checked : ['all']);
+    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope });
   }
   return { fields: fields };
 }

@@ -1959,7 +1959,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_scene_env(env_extra, repo_key, issue_id)
+    _inject_scene_env(env_extra, repo_key, issue_id, agent_type)
     # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
@@ -2056,13 +2056,16 @@ def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
     return scene_id
 
 
-def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "") -> None:
+def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
+                      agent_type: str = "") -> None:
     """注入场景相关环境变量：GRAPE_SCENE_ID + 高级选项 custom_fields（Issue #236 直接注入）。
 
     值不暴露在 prompt 文本里，agent 通过 printenv / os.environ 直接读取。
     - GRAPE_SCENE_ID：当前 Issue 绑定的场景标识；未选定注入空串（不回落 default，agent 判「未判定」）。
     - custom_fields：以自定义变量名（name）直接作为环境变量名注入（如 MY_API_KEY=xxx）。
       注入前做二次冲突/大写校验（兜底存量或旁路数据），冲突项跳过并告警。
+      scope 过滤：字段 scope 含 "all" 或含当前 agent_type 才注入；scope 为空/未传
+      agent_type 时全量注入（保持现状行为）。
     """
     try:
         scene_id = _resolve_scene_id(repo_key, issue_id)
@@ -2070,7 +2073,7 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "") -> Non
         if not scene_id:
             return
         from src.session_manager import db, db_lock
-        from src.scene_custom_env import is_upper_name, is_reserved_name
+        from src.scene_custom_env import is_upper_name, is_reserved_name, normalize_scope
         import json as _json
         from src.config import log
         # 读 advanced_options 的 custom_fields
@@ -2091,6 +2094,10 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "") -> Non
                 continue
             if not is_upper_name(name) or is_reserved_name(name):
                 log.warning(f"scene custom env '{name}' rejected: reserved or not uppercase")
+                continue
+            # scope 多选过滤：["all"] 或包含当前 agent_type 才注入
+            scope = normalize_scope(f.get("scope"))
+            if agent_type and "all" not in scope and agent_type not in scope:
                 continue
             env_extra[name] = str(f.get("value", ""))
     except Exception as _e:
@@ -2411,7 +2418,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_scene_env(env_extra, repo_key, issue_id)
+    _inject_scene_env(env_extra, repo_key, issue_id, agent_type)
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
     if agent_type == "coding":
         try:
