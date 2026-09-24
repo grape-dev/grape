@@ -704,11 +704,10 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
     var isSec = _cfComputeIsSecret(name, isSecret);
     var keyInputAttrs = readOnlyKey ? 'readonly style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#eee;color:#86868b;cursor:not-allowed"' : 'style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))"';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
-    // 有值（回填/华为云注入）→ 默认隐藏；空值（手动新增）→ 默认可见方便输入
-    var hasValue = !!valueExist || !!(value && String(value).trim());
+    var isSec = _cfComputeIsSecret(name, isSecret);
     var val = (value || '');
-    var valType = (readOnlyKey || isSec || hasValue) ? 'password' : 'text';
-    var eyeIcon = (readOnlyKey || isSec || hasValue) ? '👁' : '🙈';
+    var valType = (readOnlyKey || isSec) ? 'password' : 'text';
+    var eyeIcon = (readOnlyKey || isSec) ? '👁' : '🙈';
     row.innerHTML =
       '<input class="adv-kv-key" placeholder="name" ' + keyInputAttrs + ' value="' + (name || '') + '">' +
       '<input class="adv-kv-val" id="' + valId + '" type="' + valType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + val + '">' +

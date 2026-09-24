@@ -816,10 +816,9 @@ window._addCustomFieldInline = function(name, value, isSecret, valueExist) {
     row.style.cssText = 'display:flex;gap:8px;align-items:center';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     var _isSec = _cfComputeIsSecret(name, isSecret);
-    var _hasVal = !!valueExist || !!(value && String(value).trim());
     var _val = (value || '');
-    var _vType = (_isSec || _hasVal) ? 'password' : 'text';
-    var _vEye = (_isSec || _hasVal) ? '👁' : '🙈';
+    var _vType = _isSec ? 'password' : 'text';
+    var _vEye = _isSec ? '👁' : '🙈';
     row.innerHTML = '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">' +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
@@ -1542,10 +1541,9 @@ function _enterCreateStandardMode(data, owner, name) {
     row.style.cssText = 'display:flex;gap:8px;align-items:center';
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     var _isSec = _cfComputeIsSecret(name, isSecret);
-    var _hasVal = !!valueExist || !!(value && String(value).trim());
     var _val = (value || '');
-    var _vType = (_isSec || _hasVal) ? 'password' : 'text';
-    var _vEye = (_isSec || _hasVal) ? '👁' : '🙈';
+    var _vType = _isSec ? 'password' : 'text';
+    var _vEye = _isSec ? '👁' : '🙈';
     row.innerHTML = '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">' +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +

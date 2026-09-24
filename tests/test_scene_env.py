@@ -197,6 +197,33 @@ def test_unchecking_secret_keeps_value_and_returns_plaintext():
     assert item["value"] == "real-value"
 
 
+def test_secret_suffix_name_explicit_false_stays_plain():
+    """_KEY 后缀名显式取消密钥后保持明文（防前端自动兜底识别回退）。"""
+    from src.scene_custom_env import normalize_custom_field
+    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    _seed_issue(5, "devops-scene")
+    _seed_scene("devops-scene", '{}')
+
+    class _Body:
+        def __init__(self, work_branch="", custom_fields=None):
+            self.work_branch = work_branch
+            self.custom_fields = custom_fields or []
+
+    # 显式 false 覆盖 _KEY 后缀自动识别（前端点显示明文后保存）
+    f = normalize_custom_field({"name": "AUTH_KEY", "value": "v", "is_secret": False})
+    assert f["is_secret"] is False
+
+    save_advanced_options("devops-scene",
+                          _Body(work_branch="main", custom_fields=[
+                              {"name": "AUTH_KEY", "value": "v", "is_secret": False},
+                              {"name": "BOT_TOKEN", "value": "t"}]),
+                          user={"user_id": 0}, repo="org/sceneenv")
+    d = get_advanced_options("devops-scene", user={"user_id": 0}, repo="org/sceneenv")
+    by_name = {x["name"]: x for x in d["custom_fields"]}
+    assert by_name["AUTH_KEY"]["is_secret"] is False
+    assert by_name["BOT_TOKEN"]["is_secret"] is True
+
+
 def test_fallback_to_repo_dev_scene():
     _seed_repo("repo-scene")
     _seed_scene("repo-scene", '{"custom_fields": []}')

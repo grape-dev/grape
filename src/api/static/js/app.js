@@ -32,7 +32,9 @@ function _cfNameError(name) {
   return '';
 }
 function _cfComputeIsSecret(name, isSecret) {
-  return !!isSecret || _cfIsSecretName(name);
+  if (isSecret === true) return true;
+  if (isSecret === false) return false;
+  return _cfIsSecretName(name);
 }
 // 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret}
 // 密钥标记由 value 输入框类型承载：type=password（隐藏/👁）→ 密钥；type=text（明文/🙈）→ 非密钥
