@@ -33,11 +33,16 @@ def _bwrap_bin() -> str:
 
 
 def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
-    """构造 bwrap 包装命令前缀；返回 None 表示不包装（关 / 缺 bwrap / cwd 无效）。
+    """构造 bwrap 包装命令前缀；返回 None 表示不包装（关 / 缺 bwrap / cwd 无效 / Windows）。
 
     返回 [bwrap, ...opts, "--"] 前缀，调用方 append 原命令 argv（Popen 时用）。
     backend_name 用于选择引擎专用白名单（opencode/codearts/hermes）。
+
+    Windows 降级：bwrap 依赖 Linux namespace/cgroup，Windows 无等价物 → 永远返回 None。
     """
+    from src.runtime.os_adapter import is_windows
+    if is_windows():
+        return None
     if not sandbox_enabled():
         return None
     bwrap = _bwrap_bin()

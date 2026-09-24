@@ -520,9 +520,9 @@ window._jumpToPipeline = function(nodeId) {
   const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
   const parts = repoKey.split('/');
   if (parts.length < 2) { console.warn('jumpToPipeline: bad repo_key', t.repo_key); return; }
-  // 设置当前 repo 到 localStorage（app.currentRepo 从这里读）
+  // 设置当前 repo 到 sessionStorage（app.currentRepo 从这里读）
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
-  localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+  sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   // 导航到流水线页面
   if (typeof app !== 'undefined' && app.nav) {
     app.nav('pipe');
@@ -542,13 +542,13 @@ window._jumpToNodeEvent = function(seq) {
   window._eventFromTask = (t && t.id) ? { taskId: t.id } : null;
   // 标记本次进入事件页来自任务详情，供 app.nav('event') 路由入口识别
   window._eventNavFromTask = true;
-  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
+  // 设置当前 repo 到 sessionStorage（与 _jumpToPipePage 一致）
   if (t && t.repo_key) {
     const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
     const parts = repoKey.split('/');
     if (parts.length >= 2) {
       const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
-      localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+      sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
     }
   }
   // 直接修改 hash 跳转事件详情页（#event/seq），触发 hashchange → app.nav('event', seq)
@@ -563,7 +563,7 @@ window._jumpToPipePage = function() {
   const parts = repoKey.split('/');
   if (parts.length < 2) return;
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
-  localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+  sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   if (typeof app !== 'undefined' && app.nav) {
     // 传递 issue_number 让流水线页高亮对应任务
     var issueNum = t.issue_number || '';

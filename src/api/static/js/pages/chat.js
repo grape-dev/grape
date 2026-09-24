@@ -227,7 +227,7 @@ function _renderSkillListItems(container) {
   container.innerHTML = '<div style="padding:8px;text-align:center;color:var(--t3);font-size:11px">' + I18N.t('common.loading') + '</div>';
   let repo = '';
   try {
-    const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+    const c = app.currentRepo();
     repo = c ? (c.fullName || '') : '';
   } catch {}
   const scope = _chatSkillScope || 'official';

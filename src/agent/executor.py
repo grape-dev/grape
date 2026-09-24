@@ -63,7 +63,12 @@ def get_backend(name: str) -> AgentBackend:
 
 
 def discover_backends() -> list[dict]:
-    """动态发现本地已安装的 Agent 引擎"""
+    """动态发现本地已安装的 Agent 引擎（跨平台）。
+
+    Unix: shutil.which() 查 PATH。
+    Windows: shutil.which() 查 PATH（含 PATHEXT）+ os_adapter 额外查找常见安装目录。
+    """
+    from src.runtime.os_adapter import find_cli
     known = {
         "opencode": {"cli": "opencode", "pip": "opencode"},
         "codearts": {"cli": "codearts", "pip": "codearts-cli"},
@@ -73,11 +78,11 @@ def discover_backends() -> list[dict]:
     }
     results = []
     for name, info in known.items():
-        cli_path = shutil.which(info["cli"])
+        cli_path = find_cli(info["cli"])
         results.append({
             "name": name,
-            "installed": cli_path is not None,
-            "cli_path": cli_path or "",
+            "installed": bool(cli_path),
+            "cli_path": cli_path,
             "pip_package": info["pip"],
         })
     return results
@@ -403,6 +408,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
     agent_cmd = shutil.which(backend.binary) or shutil.which(backend.binary + ".cmd")
     if not agent_cmd:
+        from src.runtime.os_adapter import find_cli
+        agent_cmd = find_cli(backend.binary)
+    if not agent_cmd:
         log.error(f"{label}{backend.name} CLI not found in PATH")
         yield ("done", {
             "exit_code": -1, "text": "", "oc_session_id": session_id,
@@ -496,7 +504,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             _proc_env = dict(env)
             _proc_env["HERMES_HOME"] = _iso_home
             _old_pp = _proc_env.get("PYTHONPATH", "")
-            _proc_env["PYTHONPATH"] = _inject_dir + (":" + _old_pp if _old_pp else "")
+            from src.runtime.os_adapter import path_separator
+            _sep = path_separator()
+            _proc_env["PYTHONPATH"] = _inject_dir + (_sep + _old_pp if _old_pp else "")
             log.info(f"{label}hermes HERMES_HOME isolated: {_iso_home} (state.db=:memory: via .pth)")
 
         # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
@@ -554,6 +564,17 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
         _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
         _reader_thread.start()
+
+        # stderr reader 线程：持续排空 stderr 管道，防止 Windows 管道缓冲区满导致死锁
+        _stderr_chunks = []
+        def _stderr_reader():
+            try:
+                for raw_line in iter(proc.stderr.readline, b""):
+                    _stderr_chunks.append(raw_line.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+        _stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
+        _stderr_thread.start()
 
         _raw_count = 0
         _parsed_count = 0
@@ -674,10 +695,17 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     # codearts 方案E2: 超时也要杀 serve
                     if _serve_proc and _serve_proc.poll() is None:
                         try:
-                            os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
+                            if hasattr(os, "getpgid"):
+                                os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
+                            else:
+                                _serve_proc.terminate()
                             _serve_proc.wait(timeout=3)
                         except Exception:
-                            try: os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
+                            try:
+                                if hasattr(os, "getpgid"):
+                                    os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
+                                else:
+                                    _serve_proc.kill()
                             except Exception: _serve_proc.kill()
                     return
                 time.sleep(0.1)
@@ -723,7 +751,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         full_text = "\n".join(collected_text)
         stderr_output = ""
         try:
-            stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
+            stderr_output = "".join(_stderr_chunks)[:500]
         except Exception as e:
             log.warning(f"{label}{backend.name} stderr read err: {e}")
 

@@ -43,7 +43,7 @@ function switchSidebarTab(tab) {
       const hosted = repos.filter(r => r.is_hosted);
       if (hosted.length > 0) {
         let saved = null;
-        try { saved = JSON.parse(localStorage.getItem('currentRepo') || 'null'); } catch (e) { saved = null; }
+        try { saved = app.currentRepo(); } catch (e) { saved = null; }
         const matched = saved && hosted.find(r => r.full_name === saved.fullName);
         const target = matched || hosted[0];
         selectRepo(target.full_name, target.owner, target.name, target.repo_key);
@@ -228,7 +228,7 @@ function _buildProjectCard(r) {
   if (r.is_hosted) {
     actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();selectRepo(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\',\'' + (r.repo_key || '') + '\')">' + I18N.t('repos.card.enter_project') + '→</button>';
   } else if (r.can_host) {
-    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();hostAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\',\'' + (r.repo_key || '') + '\')">' + I18N.t('repos.card.join_and_host') + '→</button>';
+    actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();hostAndSelect(\'' + r.full_name + '\',\'' + r.owner + '\',\'' + r.name + '\',\'' + (r.repo_key || '') + '\',event)">' + I18N.t('repos.card.join_and_host') + '→</button>';
   } else {
     actionHtml = '<button class="project-card-btn project-card-btn-outline" onclick="event.stopPropagation();hostNoPermission()">' + I18N.t('repos.card.join_and_host') + '→</button>';
   }
@@ -318,7 +318,7 @@ function renderRepos() {
         const roleTag = r.role === 'Admin' ? `<span class="tg tg-s">${r.role}</span>` :
                         r.role === 'Member' ? `<span class="tg tg-d">${r.role}</span>` : r.role;
         const btnHtml = r.can_host
-          ? `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}')">${I18N.t('repos.available_btn.join_and_host')}</button>`
+          ? `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}','',event)">${I18N.t('repos.available_btn.join_and_host')}</button>`
           : `<button class="bt bt-o bt-s" onclick="event.stopPropagation();hostNoPermission()">${I18N.t('repos.available_btn.join_and_host')}</button>`;
         html += `<tr><td><b>${r.full_name}</b></td><td>${_repoPlatformIcon(r)} ${_repoPlatform(r)}</td><td>${roleTag}</td><td>${r.description || ''}</td><td>${btnHtml}</td></tr>`;
       });
@@ -358,16 +358,30 @@ function refreshRepos(btn) {
   });
 }
 
-function hostAndSelect(fullName, owner, name, repoKey) {
-  API.post('/repos/host', {full_name: fullName}).then(r => {
-    // GitHub 仓库托管后检查 bot collaborator 状态
-    if (r.bot_collaborator_needed) {
-      _showBotCollaboratorPrompt(r, fullName, owner, name, repoKey);
-    } else {
-      app.showToast(I18N.t('repos.sync.host_success'));
-      app.loadProfile().then(() => selectRepo(fullName, owner, name, repoKey));
-    }
-  }).catch(e => app.showToast(I18N.t('repos.sync.host_failed', {msg: e.message})));
+function hostAndSelect(fullName, owner, name, repoKey, event) {
+  var doHost = function() {
+    API.post('/repos/host', {full_name: fullName}).then(r => {
+      // GitHub 仓库托管后检查 bot collaborator 状态
+      if (r.bot_collaborator_needed) {
+        _showBotCollaboratorPrompt(r, fullName, owner, name, repoKey);
+      } else {
+        app.showToast(I18N.t('repos.sync.host_success'));
+        app.loadProfile().then(() => selectRepo(fullName, owner, name, repoKey));
+      }
+    }).catch(e => app.showToast(I18N.t('repos.sync.host_failed', {msg: e.message})));
+  };
+  if (window._grapeConfirm) {
+    _grapeConfirm({
+      title: I18N.t('repos.host.confirm_title'),
+      message: I18N.t('repos.host.confirm'),
+      confirmText: I18N.t('repos.host.confirm_btn'),
+      onConfirm: doHost
+    }, event);
+  } else {
+    app.showConfirm(I18N.t('repos.host.confirm'), doHost, {
+      confirmText: I18N.t('repos.host.confirm_btn')
+    });
+  }
 }
 
 function _showBotCollaboratorPrompt(resp, fullName, owner, name, repoKey) {
@@ -427,7 +441,7 @@ function hostNoPermission() {
 }
 
 function selectRepo(fullName, owner, name, repoKey) {
-  localStorage.setItem('currentRepo', JSON.stringify({fullName, owner, name, repoKey: repoKey || ''}));
+  sessionStorage.setItem('currentRepo', JSON.stringify({fullName, owner, name, repoKey: repoKey || ''}));
   const sidebar = document.getElementById('sidebar');
   const mainView = document.getElementById('mainView');
   const tb = document.getElementById('tb');
@@ -467,7 +481,7 @@ function _doUnhost(fullName) {
     app.loadProfile().then(() => {
       const cur = app.currentRepo();
       const wasCurrent = cur && cur.fullName === fullName;
-      if (wasCurrent) localStorage.removeItem('currentRepo');
+      if (wasCurrent) sessionStorage.removeItem('currentRepo');
       app.initSidebarRepos();
       API.get('/repos/managed').then(md => {
         const remaining = md.repos || [];
