@@ -35,7 +35,7 @@ function _cfComputeIsSecret(name, isSecret) {
   return !!isSecret || _cfIsSecretName(name);
 }
 // 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret}
-// 校验失败时返回 {error: 描述}；secret 已有值掩码(********)视为未修改 → value 置空由后端保留旧值
+// 密钥标记由 value 输入框类型承载：type=password（隐藏/👁）→ 密钥；type=text（明文/🙈）→ 非密钥
 function _cfCollectFields(prefix) {
   const rows = document.querySelectorAll(prefix + ' .adv-kv');
   const fields = [];
@@ -43,35 +43,15 @@ function _cfCollectFields(prefix) {
     const row = rows[i];
     const nEl = row.querySelector('.adv-kv-key');
     const vEl = row.querySelector('.adv-kv-val');
-    const sEl = row.querySelector('.adv-kv-sec');
     if (!nEl || !vEl) continue;
     const n = (nEl.value || '').trim();
     if (!n) continue;
     const err = _cfNameError(n);
     if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
-    const isSec = !!(sEl && sEl.checked);
-    let v = (vEl.value || '').trim();
-    // 掩码 ******** 统一视为「未修改」：后端保留旧值（与勾选状态无关）
-    const keepValue = v === '********';
-    if (keepValue) v = '';
-    const f = { name: n, value: v, is_secret: isSec };
-    if (keepValue) f.keep_value = true;
-    fields.push(f);
+    const isSec = vEl.type === 'password';
+    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec });
   }
   return { fields: fields };
-}
-
-// 密钥勾选切换联动：值仍为掩码 ******** 时提示「未修改将保留旧值」，并切换 value 输入框类型
-function _cfToggleSecret(cb) {
-    const row = cb.closest('.adv-kv');
-    if (!row) return;
-    const vEl = row.querySelector('.adv-kv-val');
-    if (!vEl) return;
-    const masked = vEl.value === '********';
-    vEl.type = (cb.checked || masked) ? 'password' : 'text';
-    if (!cb.checked && masked && window.app && app.showToast) {
-        app.showToast('已取消密钥标记，保存后 value 显示为明文（当前掩码未修改，将保留原值）');
-    }
 }
 
 const app = (() => {

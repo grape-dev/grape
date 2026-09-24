@@ -1730,11 +1730,7 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
             _nf = normalize_custom_field(f)
             if not _nf.get("name"):
                 continue
-            if _nf.get("is_secret"):
-                # secret 项不回显明文 value，仅通知前端已有值
-                _fields.append({"name": _nf["name"], "value_exist": bool(_nf.get("value")), "is_secret": True})
-            else:
-                _fields.append({"name": _nf["name"], "value": _nf.get("value", ""), "is_secret": False})
+            _fields.append({"name": _nf["name"], "value": _nf.get("value", ""), "is_secret": _nf.get("is_secret", False)})
         return {
             "work_branch": opts.get("work_branch", "main") or "main",
             "custom_fields": _fields,
