@@ -1922,13 +1922,23 @@ async def _perform_upgrade(server: str, token: str) -> bool:
         os.close(fd)
 
         if is_win:
-            # Windows: 用 PowerShell 下载
+            # Windows: 用 PowerShell 下载（Invoke-WebRequest 比 irm 更可靠）
             r = await asyncio.to_thread(
                 subprocess.run,
                 ["powershell", "-NoProfile", "-Command",
-                 f"irm {install_script_url} -OutFile '{tmp_script}'"],
+                 f"Invoke-WebRequest -Uri '{install_script_url}' -OutFile '{tmp_script}' -UseBasicParsing"],
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
             )
+            # Windows PowerShell 5.1 默认用 GBK 读 .ps1 文件，中文注释乱码导致语法错误
+            # 下载后检测并补 UTF-8 BOM
+            try:
+                with open(tmp_script, "rb") as f:
+                    raw = f.read()
+                if not raw.startswith(b"\xef\xbb\xbf"):
+                    with open(tmp_script, "wb") as f:
+                        f.write(b"\xef\xbb\xbf" + raw)
+            except Exception:
+                pass
         else:
             r = await asyncio.to_thread(
                 subprocess.run,

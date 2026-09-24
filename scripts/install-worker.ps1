@@ -103,14 +103,35 @@ try {
     $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
     if ($tarCmd) {
         # tar -xzf --strip-components=1（Windows 10+ 自带 bsdtar）
-        & tar -xzf $TmpPkg -C $Dir --strip-components=1 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            # 回退：不带 strip，手动移动
-            $tmpExtract = Join-Path $env:TEMP "grape-extract-$(Get-Random)"
-            & tar -xzf $TmpPkg -C $tmpExtract 2>$null
-            if (Test-Path (Join-Path $tmpExtract "grape-worker")) {
-                Copy-Item -Path (Join-Path $tmpExtract "grape-worker\*") -Destination $Dir -Recurse -Force
-                Remove-Item $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
+        # Windows tar 遇到符号链接会报错——$ErrorActionPreference="Stop" 会将 stderr 当作异常
+        # 临时切换为 Continue，让 tar 正常返回退出码
+        $tarErr = $null
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & tar -xzf $TmpPkg -C $Dir --strip-components=1 2>&1 | Out-Null
+        } catch {
+            $tarErr = $_
+        }
+        $ErrorActionPreference = $prevEAP
+        if ($LASTEXITCODE -ne 0 -or $tarErr) {
+            # 检查是否只是符号链接错误（关键文件已解压即可继续）
+            $hasVersion = Test-Path (Join-Path $Dir "VERSION")
+            $hasSrc = Test-Path (Join-Path $Dir "src")
+            if (-not ($hasVersion -and $hasSrc)) {
+                # 关键文件缺失——回退不带 strip 重试
+                $tmpExtract = Join-Path $env:TEMP "grape-extract-$(Get-Random)"
+                $ErrorActionPreference = "Continue"
+                try {
+                    & tar -xzf $TmpPkg -C $tmpExtract 2>&1 | Out-Null
+                } catch {}
+                $ErrorActionPreference = $prevEAP
+                if (Test-Path (Join-Path $tmpExtract "grape-worker")) {
+                    Copy-Item -Path (Join-Path $tmpExtract "grape-worker\*") -Destination $Dir -Recurse -Force
+                    Remove-Item $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            } else {
+                Log "tar 退出码非零（可能是符号链接错误），关键文件已解压，继续安装"
             }
         }
     } else {
@@ -122,6 +143,9 @@ dest = sys.argv[2]
 with tarfile.open(tmp) as t:
     members = t.getmembers()
     for m in members:
+        # 跳过符号链接（Windows 不支持）
+        if m.issym() or m.islnk():
+            continue
         parts = m.name.split('/', 1)
         if len(parts) > 1:
             m.name = parts[1]
