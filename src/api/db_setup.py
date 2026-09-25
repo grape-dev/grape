@@ -2295,6 +2295,7 @@ def _migrate_tables():
         "ALTER TABLE runtime_credentials ADD COLUMN tmp_percent DOUBLE DEFAULT 0",
         # ===== Issue #180: 带宽占用率指标 =====
         "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_percent DOUBLE DEFAULT 0",
+        "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_mbps DOUBLE DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
@@ -3020,6 +3021,7 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "spec", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "tmp_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "bandwidth_mbps", "REAL DEFAULT 0")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute("""
                     DELETE FROM runtime_credentials WHERE id NOT IN (

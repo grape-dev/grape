@@ -247,6 +247,10 @@ const API = (() => {
   // 网络错误自动重试：fetch 报 TypeError（TCP 连接过期/网络抖动）时延迟 500ms 重试一次
   // Issue #63: 合并全局 nav/tab signal，切 tab/页面时主动取消请求；区分超时 abort 和外部 abort
   const _DEFAULT_TIMEOUT = 30000;
+  // 网络错误(TypeError)重试：指数退避，最多重试 _MAX_NET_RETRIES 次；仅幂等方法重试，避免 POST/PUT/DELETE 重复提交副作用
+  const _MAX_NET_RETRIES = 2;                 // 初次请求外再多重试 2 次（共 3 次尝试）
+  const _NET_RETRY_DELAYS = [500, 1500];      // 第 1/2 次重试前的等待（ms）
+  const _IDEMPOTENT_METHODS = ['GET', 'PUT', 'DELETE'];
   function _fetchWithTimeout(url, opts, timeout, _retried, _skipNavSignal) {
     const _t0 = performance.now();
     const controller = new AbortController();
@@ -274,9 +278,16 @@ const API = (() => {
         if (controller._timedOut) throw e;  // 超时 abort，正常显示错误
         e.silent = true; throw e;            // 外部取消（nav/tab/浏览器），静默
       }
-      // 网络层错误（TypeError: Failed to fetch）——首次重试一次，避免 TCP 连接过期偶发失败
-      if (!_retried && e instanceof TypeError) {
-        return new Promise(r => setTimeout(r, 500)).then(() => _fetchWithTimeout(url, opts, timeout, true, _skipNavSignal));
+      // 网络层错误（TypeError: Failed to fetch）——仅幂等方法重试（指数退避），非幂等直接抛
+      if (e instanceof TypeError) {
+        const method = (opts.method || 'GET').toUpperCase();
+        const idempotent = _IDEMPOTENT_METHODS.indexOf(method) >= 0;
+        const attempt = (_retried || 0);
+        if (idempotent && attempt < _MAX_NET_RETRIES) {
+          const delay = _NET_RETRY_DELAYS[Math.min(attempt, _NET_RETRY_DELAYS.length - 1)];
+          return new Promise(r => setTimeout(r, delay))
+            .then(() => _fetchWithTimeout(url, opts, timeout, attempt + 1, _skipNavSignal));
+        }
       }
       throw e;
     });

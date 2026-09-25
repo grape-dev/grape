@@ -110,16 +110,24 @@ def normalize_scope(scope) -> list:
 
 
 def normalize_custom_field(f: dict) -> dict:
-    """归一化一条 custom_field：{name, value, is_secret, scope}（容忍/清理多余字段）。
+    """归一化一条 custom_field：{name, value, is_secret, scope, preset}（容忍/清理多余字段）。
 
     输入可能来自旧数据（{key,...}）或新前端（{name,...}）；name 缺失时回退 key
     （仅作读取容错，写入侧仍以 name 为准）。
     is_secret 语义：dict 中显式存在 → 尊重该值（True/False）；未显式给 → 按命名约定自动识别。
     scope 语义：数组，默认 ["all"]；旧单值字符串自动包装。
+    preset 语义：True/False，默认 False；预置参数只读（name/scope/is_secret 由场景声明锁定）。
     """
     name = ((f.get("name") or f.get("key") or "") if isinstance(f, dict) else "") or ""
     value = (f.get("value") or "") if isinstance(f, dict) else ""
     is_secret = compute_is_secret(name, f.get("is_secret") if isinstance(f, dict) else None)
     scope = normalize_scope(f.get("scope") if isinstance(f, dict) else None)
+    preset = bool(f.get("preset")) if isinstance(f, dict) else False
+    default_value = (f.get("default_value") or "") if isinstance(f, dict) else ""
+    description = (f.get("description") or "") if isinstance(f, dict) else ""
     name = name.strip()
-    return {"name": name, "value": value, "is_secret": is_secret, "scope": scope}
+    return {
+        "name": name, "value": value, "is_secret": is_secret,
+        "scope": scope, "preset": preset, "default_value": default_value,
+        "description": description,
+    }

@@ -93,6 +93,9 @@ function _switchSceneTab(tab) {
   _sceneMarketPage = 1;
   _sceneMarketQ = '';
   _sceneMarketActiveCat = 0;
+  // 切 tab 时清空旧场景数据，防止新 tab 列表加载回来前用旧数据渲染出"占位场景"
+  _sceneMarketScenes = [];
+  _sceneMarketTotal = 0;
   // Issue #63: 页面内 tab 切换——取消旧 tab 请求 + 更新标识
   if (window._tabAbortController) window._tabAbortController.abort();
   window._tabAbortController = new AbortController();
@@ -682,7 +685,7 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
   };
 
   // 添加自定义配置项
-  window._applyAddCustomField = function(name, value, readOnlyKey, isSecret, scope, valueExist) {
+  window._applyAddCustomField = function(name, value, readOnlyKey, isSecret, scope, valueExist, preset, description) {
     var container = document.getElementById('applyAdvCustomFields');
     if (!container) return;
     var row = document.createElement('div');
@@ -694,12 +697,19 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
     var val = (value || '');
     var valType = (readOnlyKey || isSec) ? 'password' : 'text';
     var eyeIcon = (readOnlyKey || isSec) ? '👁' : '🙈';
-    row.innerHTML =
-      '<input class="adv-kv-key" placeholder="name" ' + keyInputAttrs + ' value="' + (name || '') + '">' +
+    var _desc = (description || '').trim();
+    var nameEl = preset
+      ? '<span style="flex:1;display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center;padding:7px 12px">' +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:13px;line-height:1.3">' + (name || '') + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+        '</span>'
+      : '<input class="adv-kv-key" placeholder="name" ' + keyInputAttrs + ' value="' + (name || '') + '">';
+    row.innerHTML = nameEl +
       '<input class="adv-kv-val" id="' + valId + '" type="' + valType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + eyeIcon + '</button>' +
-      (readOnlyKey ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
-      '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>';
+      ((readOnlyKey || preset) ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
+      (preset ? '<input type="hidden" class="adv-kv-preset" value="1">'
+               : '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>');
     container.appendChild(row);
   };
 
@@ -813,7 +823,7 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
             }
           }
         }
-        window._applyAddCustomField(fname, f.value !== undefined ? f.value : '', false, f.is_secret, f.scope, f.value_exist);
+        window._applyAddCustomField(fname, f.value !== undefined ? f.value : '', false, f.is_secret, f.scope, f.value_exist, f.preset, f.description);
       });
     }).catch(function() {});
   }
@@ -1170,6 +1180,41 @@ function _renderSceneDetailPage(s) {
           <div class="det-suite-role" title="${(roleDesc || skLabel).replace(/"/g, '&quot;')}">${roleDesc || skLabel}</div>
         </div>
         <span class="det-suite-badge" style="background:${skDeleted ? 'var(--r)14' : bgColor+'14'};color:${skDeleted ? 'var(--r)' : bgColor}">${skLabel}</span>
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  // 场景参数（预置自定义参数：应用场景时需要的参数 + 用途说明）
+  var presetFields = [];
+  try {
+    var _rawPc = s.preset_custom_fields;
+    if (typeof _rawPc === 'string') { presetFields = JSON.parse(_rawPc || '[]') || []; }
+    else if (Array.isArray(_rawPc)) { presetFields = _rawPc; }
+  } catch (e) { presetFields = []; }
+  if (presetFields.length > 0) {
+    var _scopeLabels = {vod:'VOD', issue:'Issue', coding:'Coding', qa:'QA', sre:'SRE', all:'全部'};
+    html += `<div class="cd-h" style="margin:24px 0 12px"><h2 style="font-size:16px;font-weight:600">${I18N.t('skills.scene_params')||'场景参数'}</h2>
+      <span style="font-size:11px;color:#86868b;font-weight:400;margin-left:8px">${I18N.t('skills.scene_params_hint')||'应用场景时需配置，Agent 将通过环境变量读取'}</span></div>`;
+    html += `<div class="det-card-wrap"><div style="display:flex;flex-direction:column;gap:10px">`;
+    presetFields.forEach(function(p) {
+      var _pn = p.name || p.key || '';
+      if (!_pn) return;
+      var _desc2 = p.description || '';
+      var _sc2 = (p.scope || ['all']);
+      var _scTxt = (Array.isArray(_sc2) ? _sc2 : [_sc2]).map(function(x){ return _scopeLabels[x] || x; }).join(' / ');
+      var _isSec2 = !!(p.is_secret);
+      var _dv = p.default_value || '';
+      html += `<div style="background:rgba(255,255,255,.6);border-radius:14px;padding:12px 16px;display:flex;align-items:center;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,.04)">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <code style="background:rgba(0,113,227,.08);color:#0071e3;font-size:12px;font-weight:600;padding:2px 8px;border-radius:6px">${_pn}</code>
+            ${_isSec2 ? '<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(255,69,58,.1);color:#ff453a">🔒 密钥</span>' : ''}
+            <span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(0,0,0,.05);color:#86868b">${_scTxt}</span>
+            ${_dv ? `<span style="font-size:9px;color:#86868b">默认: ${_dv}</span>` : ''}
+          </div>
+          ${_desc2 ? `<div style="font-size:11px;color:#86868b;margin-top:4px;line-height:1.5">${_desc2}</div>` : ''}
+        </div>
       </div>`;
     });
     html += `</div></div>`;

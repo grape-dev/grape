@@ -2348,8 +2348,12 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
 
         # 分页
         if limit and limit > 0:
-            # 精选场景模式：不分页，直接 limit
-            limit_sql = f" LIMIT {int(limit)}"
+            if featured_only and featured_ordered_ids:
+                # 精选模式且有 admin 排序：查全部精选，排序后再截取前 limit 条
+                limit_sql = ""
+            else:
+                # 精选模式但无 admin 排序：直接 limit
+                limit_sql = f" LIMIT {int(limit)}"
         else:
             offset = (page - 1) * page_size
             limit_sql = f" LIMIT {int(page_size)} OFFSET {int(offset)}"

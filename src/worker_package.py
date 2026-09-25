@@ -309,7 +309,6 @@ _PACKAGE_VERSION_TTL = float(os.environ.get("PACKAGE_VERSION_TTL", "60"))
 
 def package_version() -> str:
     """当前包版本：git commit/manifest 指纹 + wheels 指纹 + 内置 python 指纹。
-    如有未提交改动，追加 -dirty 后缀强制重建包。
 
     带 TTL 缓存：心跳高频调用（默认 15s 间隔），但版本变更频率远低于此，
     缓存 60s 可避免 95%+ 的重复 git 子进程 + manifest 扫描开销。
@@ -328,13 +327,6 @@ def package_version() -> str:
             )
             if r.returncode == 0 and r.stdout.strip():
                 base = "git-" + r.stdout.strip()
-                # 检测未提交改动（working directory dirty → 版本号变化 → 强制重建包）
-                d = subprocess.run(
-                    ["git", "-C", ROOT, "status", "--porcelain", "-uno"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if d.returncode == 0 and d.stdout.strip():
-                    base += "-dirty"
     except Exception:
         pass
     if not base:
@@ -364,24 +356,9 @@ def worker_code_version() -> str:
     if _cached_code_version and (_now - _cached_code_version_ts) < _PACKAGE_VERSION_TTL:
         return _cached_code_version
     ver = ""
-    try:
-        if os.path.isdir(os.path.join(ROOT, ".git")) or os.path.isfile(os.path.join(ROOT, ".git")):
-            r = subprocess.run(
-                ["git", "-C", ROOT, "rev-parse", "--short=12", "HEAD"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                ver = "git-" + r.stdout.strip()
-                d = subprocess.run(
-                    ["git", "-C", ROOT, "status", "--porcelain", "-uno"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if d.returncode == 0 and d.stdout.strip():
-                    ver += "-dirty"
-    except Exception:
-        pass
-    if not ver:
-        ver = "h-" + _manifest_version()[:12]
+    # 不依赖 git HEAD：多 master 的 git 状态可能不一致（不同分支/dirty/commit），
+    # 用 manifest 文件内容指纹计算版本，只要文件内容一致 → 版本一致。
+    ver = "h-" + _manifest_version()[:12]
     _cached_code_version = ver
     _cached_code_version_ts = _now
     return ver

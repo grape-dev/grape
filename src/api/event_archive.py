@@ -120,7 +120,9 @@ def _load(path: str) -> dict | None:
 
 def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[str, str]:
     """按 event_seq 反查 issue_num 与 event.json 路径。
-    优先显式 hint（任务自带 issue_id），其次 events 表，最后扫描 issues 目录。
+
+    优先显式 hint（任务自带 issue_id）；其次 events 表**按 seq 精确查**（无 LIMIT，消除事件量大漏命中）；
+    最后扫描 issues 目录（多 provider 兼容）。
     """
     from src.repo_key import from_repo_key
     if issue_num_hint:
@@ -128,13 +130,21 @@ def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[s
         if num:
             return num, _resolve_event_json_path(repo_key, num)
         return "", ""
-    from src.api.event_store import get_events
-    events = get_events(repo_key, limit=200)
-    for ev in events:
-        if ev.get("seq") == seq and ev.get("issue_id"):
-            num = _extract_num(ev["issue_id"])
+    # 事件表精确查：by seq（不依赖 limit=200，避免仓库事件量大时漏命中）
+    try:
+        from src.session_manager import db, db_lock as _dl
+        with _dl:
+            c = db.cursor()
+            c.execute(
+                "SELECT issue_id FROM events WHERE repo_key=? AND seq=? LIMIT 1",
+                (repo_key, seq))
+            row = c.fetchone()
+        if row and row[0]:
+            num = _extract_num(str(row[0]))
             if num:
                 return num, _resolve_event_json_path(repo_key, num)
+    except Exception as _e:
+        log.warning(f"_locate_by_seq events lookup failed: repo={repo_key} seq={seq}: {_e}")
     # 兜底：扫描 issues 目录（新 provider 隔离 + 旧无 provider + 历史带前缀）
     from src.repo_key import workspace_repo_dir
     for base in (os.path.join(workspace_repo_dir(repo_key), "issues"),
@@ -229,9 +239,16 @@ def record_a2a_to(repo_key, issue_num, target_agent):
 
 def finalize_event_archive(repo_key, seq, status, exit_code=None, duration=None,
                            output=None, tokens=None, issue_num_hint=""):
-    """完成时写 output + 整链 status + 覆盖 summary（有 issue_summary 才覆盖）"""
+    """完成时写 output + 整链 status + 覆盖 summary（有 issue_summary 才覆盖）
+
+    - output 非空 → 写/升级结构化段（幂等）
+    - output 为空且段**已有结构化** → 保护不降级（跳过 seg.output 写，仅更新状态）
+    - output 为空且段从未结构化 → 保持 init 空模板（旧语义）
+    """
     issue_num, path = _locate_by_seq(repo_key, seq, issue_num_hint)
     if not issue_num or not path:
+        log.warning(f"Archive finalize skipped: cannot locate event archive repo={repo_key} seq={seq} "
+                    f"(hint={issue_num_hint!r})")
         return
     with _lock_for(repo_key):
         arch = _load(path)
@@ -253,6 +270,14 @@ def finalize_event_archive(repo_key, seq, status, exit_code=None, duration=None,
                     }
                     if output.get("issue_summary"):
                         arch["summary"] = output["issue_summary"]
+                else:
+                    # 非结构化收尾：已有结构化段不降级
+                    _had = seg.get("output") or {}
+                    _was_structured = bool(_had.get("actions") or _had.get("conclusion")
+                                           or _had.get("artifacts"))
+                    if _was_structured:
+                        log.info(f"Archive seg seq={seq} already structured, skip non-structured finalize "
+                                 f"(repo={repo_key})")
         arch["status"] = "completed" if status == "completed" else "failed"
         arch["updated_at"] = _now()
         try:

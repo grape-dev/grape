@@ -69,19 +69,23 @@ function _cfCollectFields(prefix) {
   const fields = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const nEl = row.querySelector('.adv-kv-key');
     const vEl = row.querySelector('.adv-kv-val');
-    if (!nEl || !vEl) continue;
-    const n = (nEl.value || '').trim();
+    if (!vEl) continue;
+    const nEl = row.querySelector('.adv-kv-key');
+    const staticEl = row.querySelector('.adv-kv-key-static');
+    const isPreset = !!row.querySelector('.adv-kv-preset');
+    const n = nEl ? (nEl.value || '').trim() : (staticEl ? (staticEl.textContent || '').trim() : '');
     if (!n) continue;
-    const err = _cfNameError(n);
-    if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
+    if (!isPreset) {
+      const err = _cfNameError(n);
+      if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
+    }
     const isSec = vEl.type === 'password';
     // scope：互斥后选中即入池；什么都不选 → ["all"]（全量）
     const checked = Array.prototype.slice.call(row.querySelectorAll('.adv-kv-scope:checked'))
       .map(cb => cb.value);
     const scope = checked.length ? checked : ['all'];
-    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope });
+    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope, preset: isPreset });
   }
   return { fields: fields };
 }

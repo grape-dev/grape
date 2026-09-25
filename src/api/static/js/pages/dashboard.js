@@ -67,17 +67,9 @@ function renderDashboard(data) {
 
   // 空状态卡片点击"创建新场景"
   window._enterCreateFromEmpty = function() {
-    const tmpData = {
-      agents: [], scene_nodes: [], repo: 'gitcode:' + owner + '/' + name,
-      _scenes: [{ id: '__tmp__', name: I18N.t('dashboard.create_custom_scene'), scope: 'user' }],
-      dev_scene: '__tmp__', agent_engines: {}, metrics: m,
-    };
-    renderDashboard(tmpData);
-    setTimeout(function() {
-      if (typeof enterCreateMode === 'function') {
-        enterCreateMode();
-      }
-    }, 50);
+    if (typeof enterCreateMode === 'function') {
+      enterCreateMode();
+    }
   };
 
   // 场景列表为空 → 渲染空状态卡片
@@ -814,7 +806,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
   };
 
-window._addCustomFieldInline = function(name, value, isSecret, scope) {
+window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
@@ -825,11 +817,20 @@ window._addCustomFieldInline = function(name, value, isSecret, scope) {
     var _val = (value || '');
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
-    row.innerHTML = '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">' +
+    var _desc = (description || '').trim();
+    // preset 项：name 只读 label（不可改名/增删），scope 组隐藏，不显示删除按钮；description 小字 hint
+    var _nameEl = preset
+      ? '<span style="display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center;min-width:140px">' +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + (name || '') + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+        '</span>'
+      : '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">';
+    row.innerHTML = _nameEl +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
-      '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>' +
-      '<button class="adv-del" onclick="this.parentElement.remove()">×</button>';
+      (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
+      (preset ? '' : '<button class="adv-del" onclick="this.parentElement.remove()">×</button>') +
+      (preset ? '<input type="hidden" class="adv-kv-preset" value="1">' : '');
     container.appendChild(row);
   };
 
@@ -1594,7 +1595,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (el2) el2.style.display = el2.style.display === 'none' ? 'block' : 'none';
   };
 
-  window._addCustomFieldInline = function(name, value, isSecret, scope) {
+  window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
@@ -1605,11 +1606,19 @@ function _enterCreateStandardMode(data, owner, name) {
     var _val = (value || '');
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
-    row.innerHTML = '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">' +
+    var _desc = (description || '').trim();
+    var _nameEl = preset
+      ? '<span style="flex:0 0 150px;display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center">' +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + (name || '') + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+        '</span>'
+      : '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">';
+    row.innerHTML = _nameEl +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
-      '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>' +
-      '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>';
+      (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
+      (preset ? '' : '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>') +
+      (preset ? '<input type="hidden" class="adv-kv-preset" value="1">' : '');
     container.appendChild(row);
   };
 
@@ -1706,7 +1715,7 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
     var container = document.getElementById('advCustomFieldsInline');
     if (container) {
       container.innerHTML = '';
-      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope); });
+      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset, f.description); });
     }
     // Issue #242: 加载关联仓库
     var linkedRepos = d.linked_repos || [];
