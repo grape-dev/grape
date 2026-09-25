@@ -342,7 +342,7 @@ function _apShowDialog(tpl, existing) {
   var skillName = existing ? (existing.skill_name || '') : '';
   var instruction = existing ? (existing.instruction || '') : (tpl ? tpl.instruction : '');
   var cron = existing ? existing.cron : (tpl ? tpl.cron : '0 9 * * *');
-  var maxRetry = existing ? (existing.max_retry || 3) : 3;
+  var maxRetry = existing ? (typeof existing.max_retry === 'number' ? existing.max_retry : 3) : 3;
   var engineIds = existing ? (existing.engine_runtime_ids || []) : [];
   var customFields = existing ? (existing.custom_fields || []) : [];
   var workBranch = existing ? (existing.work_branch || '') : '';
@@ -1352,7 +1352,8 @@ function _apSubmitForm() {
   var name = $('apFormName').value.trim();
   var skillName = _apSelectedSkill;
   var instruction = $('apFormInstruction').value.trim();
-  var retry = parseInt($('apFormRetry').value) || 3;
+  var retry = parseInt($('apFormRetry').value, 10);
+  if (isNaN(retry) || retry < 0 || retry > 10) retry = 3;
   if (!name) { if (app&&app.showToast) app.showToast('请填写任务名称'); return; }
   if (!instruction) { if (app&&app.showToast) app.showToast('请填写任务指令'); return; }
   // 收集自定义配置项
@@ -1398,7 +1399,7 @@ function _apSubmitForm() {
                 '<div><span style="color:var(--t2)">仓库:</span> ' + _esc(task.repo_key) + '</div>' +
                 '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(task.skill_name||'—') + '</div>' +
                 '<div><span style="color:var(--t2)">引擎:</span> ' + engineNames + '</div>' +
-                '<div><span style="color:var(--t2)">最大重试:</span> ' + (task.max_retry||3) + '</div>' +
+                '<div><span style="color:var(--t2)">最大重试:</span> ' + (typeof task.max_retry === 'number' ? task.max_retry : 3) + '</div>' +
                 '<div><span style="color:var(--t2)">创建时间:</span> ' + _apFormatTime(task.created_at) + '</div>' +
               '</div>' +
               '<div style="margin-top:12px"><span style="color:var(--t2);font-size:12px">任务指令:</span><pre style="white-space:pre-wrap;font-size:13px;margin-top:4px;padding:10px;background:var(--bg);border-radius:6px;font-family:inherit">' + _esc(task.instruction||'') + '</pre></div>';
@@ -1471,7 +1472,7 @@ function _apDetailHTML(t) {
         '<div><span style="color:var(--t2)">仓库:</span> ' + _esc(t.repo_key) + '</div>' +
         '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(t.skill_name||'—') + '</div>' +
         '<div><span style="color:var(--t2)">引擎:</span> ' + engineNames + '</div>' +
-        '<div><span style="color:var(--t2)">最大重试:</span> ' + (t.max_retry||3) + '</div>' +
+        '<div><span style="color:var(--t2)">最大重试:</span> ' + (typeof t.max_retry === 'number' ? t.max_retry : 3) + '</div>' +
         '<div><span style="color:var(--t2)">创建时间:</span> ' + _apFormatTime(t.created_at) + '</div>' +
       '</div>' +
       '<div style="margin-top:12px"><span style="color:var(--t2);font-size:12px">巡检指令:</span><pre style="white-space:pre-wrap;font-size:13px;margin-top:4px;padding:10px;background:var(--bg);border-radius:6px;font-family:inherit">' + _esc(t.instruction||'') + '</pre></div>' +
