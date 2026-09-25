@@ -2952,6 +2952,15 @@ def _migrate_tables():
                 log.info(f"Migrated {_migrated} pr_subscription scenes → standard + pr_subscription_enabled=1")
     except Exception as e:
         log.warning(f"Add devops_pipeline_scene.pr_subscription_enabled column failed: {e}")
+    # ===== Issue #242: devops_pipeline_scene 关联仓库列（跨仓库协同开发）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "devops_pipeline_scene", "linked_repos", "TEXT DEFAULT '[]'")
+            db.commit()
+            log.info("Added devops_pipeline_scene.linked_repos column")
+    except Exception as e:
+        log.warning(f"Add devops_pipeline_scene.linked_repos column failed: {e}")
     # ===== events 表补 scene_id 列（PR 订阅场景持久化）=====
     try:
         with db_lock:

@@ -464,7 +464,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         _iso_home = ""
         if backend.name == "hermes":
             import tempfile, shutil as _sh
-            _iso_home = tempfile.mkdtemp(prefix="hermes-iso-")
+            # 使用当前用户家目录下的缓存目录，避免 /tmp 多用户权限冲突（issue #238）
+            _hermes_iso_root = os.path.join(os.path.expanduser("~"), ".cache", "hermes-iso")
+            os.makedirs(_hermes_iso_root, exist_ok=True)
+            _iso_home = tempfile.mkdtemp(prefix="hermes-iso-", dir=_hermes_iso_root)
             # 从默认 HERMES_HOME（~/.hermes 或 env HERMES_HOME）复制配置文件
             _src_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
             for _cfg in ("config.yaml", ".env", "SOUL.md"):

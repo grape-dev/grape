@@ -1,16 +1,15 @@
-# TODO: Issue #162
+# TODO: Issue #242 跨仓库需求开发
 
-- [x] Task 1: 替换 `_OBS_PAGE_SIZE` 为 `_workerPageSize` / `_runtimePageSize` / `_timelinePage` / `_timelinePageSize`
-- [x] Task 2: 新增 `_paginationWithPageSizeHTML()` 函数
-- [x] Task 3: 更新 `_rerenderWorkerGrid()` 使用 `_workerPageSize`
-- [x] Task 4: 更新 `_rerenderRuntimeTable()` 使用 `_runtimePageSize`
-- [x] Task 5: 更新 `renderOverview()` 使用新页面尺寸 + 新分页栏
-- [x] Task 6: 更新 `updateOverview()` 使用新页面尺寸 + 新分页栏
-- [x] Task 7: `_filterTimelineIssues()` 增加分页切片 + 分页栏
-- [x] Task 8: 搜索 oninput 重置 `_timelinePage = 0`
-- [x] Task 9: `#N` 定位搜索自动跳到目标页
-- [x] Task 10: 更新 #117 测试断言（选择器可见行为变更）
-- [x] Task 11: 新增 `test_observability_page_size_162.js` 回归测试（15 条）
-- [x] Task 12: 全部 JS 测试通过
-- [ ] 自审查完成
-- [ ] PR 创建完成
+## Phase 1: 数据模型 + API
+- [x] DB: devops_pipeline_scene 新增 linked_repos TEXT DEFAULT '[]'
+- [x] pipeline_config.py: _query_scenes_from_db / _query_scene_by_id / create_custom_scene / update_custom_scene 支持 linked_repos
+- [x] scenes.py: CreateSceneRequest / UpdateSceneRequest / AdvancedOptionsRequest 增加 linked_repos；list_scenes / create_scene / update_scene 传递
+
+## Phase 2: A2A + Runtime
+- [x] event_pipeline.py: _inject_scene_env 注入 GRAPE_LINKED_REPOS 环境变量
+- [x] repogit.py: ensure_repo_base_multi 批量初始化 + 多 worktree 支持
+- [x] agent.py: coding agent 初始化时遍历 linked_repos 建 worktree
+
+## Phase 3: 前端 + 测试
+- [x] dashboard.js: 场景详情高级选项区增加关联仓库配置 UI
+- [x] tests/test_linked_repos.py: 场景 CRUD + linked_repos 解析测试
