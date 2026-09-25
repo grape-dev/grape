@@ -836,6 +836,7 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
 
   // Issue #242: 关联仓库配置
   window._linkedRepoOptions = [];
+  window._linkedRepoBranchCache = {};  // repo_key -> branches[]
   window._addLinkedRepoInline = function(repoKey, branch) {
     var container = document.getElementById('advLinkedReposInline');
     if (!container) return;
@@ -862,19 +863,87 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
       if (rk === repoKey) opt.selected = true;
       sel.appendChild(opt);
     });
-    var inp = document.createElement('input');
-    inp.className = 'adv-kv-val';
-    inp.id = brId;
-    inp.type = 'text';
-    inp.placeholder = '分支（默认 main）';
-    inp.value = branch || '';
-    inp.style.flex = '1';
+    // 分支下拉框
+    var brSel = document.createElement('select');
+    brSel.className = 'adv-kv-val';
+    brSel.id = brId;
+    brSel.style.cssText = 'flex:1;padding:8px 12px;border:none;border-radius:12px;font-size:12px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer';
+    var brDefOpt = document.createElement('option');
+    brDefOpt.value = '';
+    brDefOpt.textContent = '分支（默认 main）';
+    brSel.appendChild(brDefOpt);
+
+    // 加载分支列表
+    function _loadBranches(rk, selectedBranch) {
+      brSel.innerHTML = '';
+      var def = document.createElement('option');
+      def.value = '';
+      def.textContent = '分支（默认 main）';
+      brSel.appendChild(def);
+      if (!rk) return;
+      // 解析 owner/repo
+      var parts = rk.replace(/^gitcode:/, '').split('/');
+      if (parts.length < 2) { brDefOpt.textContent = '分支（默认 main）'; return; }
+      var owner = parts[0], repo = parts[1];
+      // 优先用缓存
+      if (window._linkedRepoBranchCache[rk]) {
+        _fillBranchOptions(window._linkedRepoBranchCache[rk], selectedBranch);
+        return;
+      }
+      // 临时 loading 状态
+      var loadOpt = document.createElement('option');
+      loadOpt.value = '';
+      loadOpt.textContent = '加载中...';
+      brSel.appendChild(loadOpt);
+      API.get('/scenes/branches/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo)).then(function(b) {
+        var branches = (b && b.branches) || [];
+        window._linkedRepoBranchCache[rk] = branches;
+        brSel.removeChild(loadOpt);
+        _fillBranchOptions(branches, selectedBranch);
+      }).catch(function() {
+        brSel.removeChild(loadOpt);
+        // 加载失败回退为手动输入提示
+        var failOpt = document.createElement('option');
+        failOpt.value = '';
+        failOpt.textContent = '加载失败，默认 main';
+        brSel.appendChild(failOpt);
+      });
+    }
+    function _fillBranchOptions(branches, selectedBranch) {
+      branches.forEach(function(br) {
+        var opt = document.createElement('option');
+        opt.value = br.name;
+        opt.textContent = br.name + (br.protected ? ' 🔒' : '');
+        if (selectedBranch && br.name === selectedBranch) opt.selected = true;
+        brSel.appendChild(opt);
+      });
+      // 如果指定分支不在列表中，追加一个自定义选项
+      if (selectedBranch && !branches.some(function(br) { return br.name === selectedBranch; })) {
+        var opt = document.createElement('option');
+        opt.value = selectedBranch;
+        opt.textContent = selectedBranch + ' (自定义)';
+        opt.selected = true;
+        brSel.appendChild(opt);
+      }
+    }
+
+    // 仓库选择变更时重新加载分支
+    sel.addEventListener('change', function() {
+      var rk = this.value;
+      _loadBranches(rk, '');
+    });
+
+    // 初始加载分支
+    if (repoKey) {
+      _loadBranches(repoKey, branch);
+    }
+
     var delBtn = document.createElement('button');
     delBtn.className = 'adv-del';
     delBtn.textContent = '×';
     delBtn.onclick = function() { this.parentElement.remove(); };
     row.appendChild(sel);
-    row.appendChild(inp);
+    row.appendChild(brSel);
     row.appendChild(delBtn);
     container.appendChild(row);
   };
@@ -905,10 +974,10 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
     // Issue #242: 收集关联仓库
     var linkedRepos = [];
     document.querySelectorAll('#advLinkedReposInline .adv-kv').forEach(function(row) {
-      var sel = row.querySelector('select');
-      var br = row.querySelector('input[type="text"]');
+      var sel = row.querySelector('select.adv-kv-key');
+      var brSel = row.querySelector('select.adv-kv-val');
       var rk = sel ? sel.value : '';
-      var bn = br ? br.value.trim() : '';
+      var bn = brSel ? brSel.value.trim() : '';
       if (rk) linkedRepos.push({ repo_key: rk, branch: bn || 'main' });
     });
     API.put('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(repoParam), { work_branch: workBranch, custom_fields: _collected.fields, linked_repos: linkedRepos })
