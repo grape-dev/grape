@@ -2659,25 +2659,25 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
 
-    # Issue #242: 关联仓库 worktree 初始化（direct 模式 coding agent 多仓库并行操作）
+    # Issue #242: 关联仓库 worktree 初始化（direct 模式 coding/sre agent 多仓库并行操作）
     # 与 worker 端 _execute_task 中的逻辑等价：遍历 GRAPE_LINKED_REPOS → ensure_linked_repo_worktrees
-    # → 注入 GRAPE_LINKED_WORKTREES（供 _submit_linked_repo_prs 消费）
+    # → 注入 GRAPE_LINKED_WORKTREES（供 _submit_linked_repo_prs 消费 / SRE 构建部署消费）
     try:
         from src.runtime import repogit
         _linked_repos_env_dr = env_extra.get("GRAPE_LINKED_REPOS", "")
-        if _linked_repos_env_dr and agent_type == "coding":
+        if _linked_repos_env_dr and agent_type in ("coding", "sre", "qa"):
             import json as _json_lr_dr
             _linked_repos_list_dr = _json_lr_dr.loads(_linked_repos_env_dr) if _linked_repos_env_dr else []
             if _linked_repos_list_dr:
                 _gnum_lr = repogit.issue_num_from(issue_id)
                 _wt_list_dr = repogit.ensure_linked_repo_worktrees(
-                    _linked_repos_list_dr, "coding", _gnum_lr,
+                    _linked_repos_list_dr, agent_type, _gnum_lr,
                     token=repo_gitcode_token)
                 if _wt_list_dr:
                     env_extra["GRAPE_LINKED_WORKTREES"] = _json_lr_dr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
                          for w in _wt_list_dr], ensure_ascii=False)
-                    log.info(f"Exec agent: linked repos: {len(_wt_list_dr)} worktrees initialized for issue={_gnum_lr}")
+                    log.info(f"Exec agent: linked repos: {len(_wt_list_dr)} worktrees initialized for issue={_gnum_lr} agent={agent_type}")
     except Exception as e:
         log.warning(f"Exec agent: linked repos worktree init failed: {e}")
 
