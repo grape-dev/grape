@@ -312,7 +312,9 @@ def _skill_files_from_zip(zip_bytes: bytes, skill_name: str) -> dict:
 def _collect_server_env(user_id, account):
     """服务端 DB 系凭据注入（user credentials / 账户 AK-SK），远端 worker 无本地 DB 也生效。
 
-    #219：huawei_cloud / codearts 的 AK-SK 不再经 env 注入（按需获取或自定义场景变量），跳过。
+    huawei_cloud AK/SK 注入为 HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK 环境变量，
+    供 SRE agent (cloud-deploy skill) 通过 hcloud CLI 认证使用。
+    codearts AK/SK 注入为 CODEARTS_CLI_AK / CODEARTS_CLI_SK。
     """
     env = {}
     if user_id and user_id > 0:
@@ -321,7 +323,18 @@ def _collect_server_env(user_id, account):
             for c in get_credentials(user_id):
                 provider = c.get("provider", "")
                 cfg = c.get("config", {})
-                if provider in ("huawei_cloud", "codearts"):
+                if provider == "huawei_cloud":
+                    # 注入为 SRE cloud-deploy skill 期望的环境变量名
+                    if cfg.get("ak"):
+                        env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"):
+                        env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
+                    continue
+                if provider == "codearts":
+                    if cfg.get("ak"):
+                        env["CODEARTS_CLI_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"):
+                        env["CODEARTS_CLI_SK"] = str(cfg["sk"])
                     continue
                 for k, v in cfg.items():
                     env[k.upper()] = str(v)
@@ -2237,6 +2250,10 @@ def _check_stale_queued_tasks():
     当任务 queued 超过 _STALE_QUEUED_THRESHOLD（默认 120 秒）且 pool_engine_ids 非空时，
     可能是因为所有候选引擎健康分过低导致无人认领。
     此时清空 pool_engine_ids，让任意在线引擎认领（包括低健康分的，至少能尝试执行）。
+
+    修复：在清空前增加物理可达性检查（_check_pool_engines_reachable），
+    避免因 uvicorn 重启期间心跳短暂中断导致健康分降低但实际在线的引擎被误判。
+    只有当引擎既不健康又物理不可达时才清空。
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_STALE_QUEUED_THRESHOLD)).isoformat()
     try:
@@ -2244,7 +2261,7 @@ def _check_stale_queued_tasks():
             c = db.cursor()
             # 查询超时的 queued 任务（带 pool_engine_ids 限定）
             c.execute(
-                "SELECT id, pool_engine_ids FROM agent_tasks "
+                "SELECT id, pool_engine_ids, pool_tag, repo_key, user_id FROM agent_tasks "
                 "WHERE status='queued' AND pool_engine_ids!='' AND pool_engine_ids IS NOT NULL "
                 "AND created_at <= ?",
                 (cutoff,))
@@ -2253,7 +2270,7 @@ def _check_stale_queued_tasks():
                 return
             import json as _json
             cleared = 0
-            for tid, peids in stale_tasks:
+            for tid, peids, task_tag, task_repo, task_uid in stale_tasks:
                 # 先检查 pool 中是否有健康引擎——有则不清空（健康引擎可能马上认领）
                 try:
                     _engine_ids = _json.loads(peids) if peids else []
@@ -2261,12 +2278,19 @@ def _check_stale_queued_tasks():
                     _engine_ids = []
                 if _engine_ids and _check_pool_has_healthy(_engine_ids):
                     continue  # 池中有健康引擎，不降级
-                # 池中全不健康 → 清空 pool_engine_ids 放行
+                # 健康分不达标 → 再检查物理可达性（在线 + 有 tag 能力 + scope 匹配 + 有并发槽）
+                # 如果引擎物理可达（只是健康分低），仍不清空——它仍能 claim 任务
+                if _engine_ids and _check_pool_engines_reachable(
+                    _engine_ids, task_tag or "", task_repo or "", task_user_id=task_uid or 0):
+                    log.info(f"_check_stale_queued_tasks: engine(s) {_engine_ids} unhealthy but reachable, "
+                             f"keeping pool_engine_ids for task {tid}")
+                    continue
+                # 既不健康又不可达 → 清空 pool_engine_ids 放行
                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (tid,))
                 cleared += 1
             if cleared:
                 db.commit()
                 log.info(f"_check_stale_queued_tasks: cleared pool_engine_ids for {cleared} tasks "
-                         f"(no healthy engine claimed within {_STALE_QUEUED_THRESHOLD}s)")
+                         f"(no healthy+reachable engine claimed within {_STALE_QUEUED_THRESHOLD}s)")
     except Exception as e:
         log.warning(f"_check_stale_queued_tasks failed: {e}")
